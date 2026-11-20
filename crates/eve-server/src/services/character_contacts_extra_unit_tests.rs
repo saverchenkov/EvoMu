@@ -173,12 +173,27 @@ fn public_and_private_info_employment_notes_and_respec_edge_branches() {
 
     let mut sess = char_session(Some(char_id), Some(60_003_760));
     let pub_info = call_contacts(&ctx, &mut sess, "charMgr", "GetPublicInfo3", &[], &kw).unwrap();
-    assert_eq!(pub_info.dict_get("allianceID"), Some(&PyRep::Integer(ally_id)));
+    let PyRep::Rowset { columns, rows } = &pub_info else {
+        panic!("GetPublicInfo3 must return PyRep::Rowset, got {pub_info:?}");
+    };
+    assert_eq!(rows.len(), 1, "GetPublicInfo3 must return a 1-row Rowset");
+    assert_eq!(rows[0].len(), columns.len());
+    let pub_cols: HashMap<&str, &PyRep> = columns
+        .iter()
+        .zip(rows[0].iter())
+        .map(|(c, v)| (c.as_str(), v))
+        .collect();
+    assert_eq!(pub_cols.get("characterID").copied(), Some(&PyRep::Integer(char_id)));
+    assert_eq!(pub_cols.get("corporationID").copied(), Some(&PyRep::Integer(corp_id)));
+    assert_eq!(pub_cols.get("allianceID").copied(), Some(&PyRep::Integer(ally_id)));
     assert_eq!(
-        pub_info.dict_get("portraitInfo"),
+        pub_cols.get("portraitInfo").copied(),
         Some(&PyRep::String("custom:portrait:1".into()))
     );
-    assert_eq!(pub_info.dict_get("warFactionID"), Some(&PyRep::Integer(500_001)));
+    assert_eq!(pub_cols.get("warFactionID").copied(), Some(&PyRep::Integer(500_001)));
+    assert_eq!(pub_cols.get("militiaFactionID").copied(), Some(&PyRep::Integer(500_001)));
+    assert_eq!(pub_cols.get("militiaRank").copied(), Some(&PyRep::Integer(6)));
+    assert_eq!(pub_cols.get("rank").copied(), Some(&PyRep::Integer(6)));
 
     let priv_info = call_contacts(&ctx, &mut sess, "charMgr", "GetPrivateInfo", &[], &kw).unwrap();
     assert!(matches!(priv_info.dict_get("jumpClones"), Some(PyRep::List(l)) if l.len() == 1));

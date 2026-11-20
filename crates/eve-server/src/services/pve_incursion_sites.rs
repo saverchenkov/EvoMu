@@ -1318,7 +1318,6 @@ fn handle_get_global_world_event_tales(
     if let Err(e) = ServerContext::require_character(session) {
         return Some(Err(e));
     }
-    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
     let list = crate::services::pve_incursion_lifecycle::collect_all_world_event_tales(ctx, None);
     Some(Ok(PyRep::List(list)))
 }
@@ -1331,7 +1330,6 @@ fn handle_get_active_tales_by_template(
     if let Err(e) = ServerContext::require_character(session) {
         return Some(Err(e));
     }
-    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
     let template_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let list = crate::services::pve_incursion_lifecycle::collect_all_world_event_tales(
         ctx,

@@ -68,7 +68,16 @@ pub(super) fn resolve_fw_or_special_warp_target(
                 return Some(DVec3::from_array(s.position));
             }
         }
-        if reg.drifter_hives.get(&sys_id).is_some_and(|h| !h.cleared) {
+        if reg.drifter_hives.get(&sys_id).is_some_and(|h| {
+            !h.cleared
+                && ((target_id > 0
+                    && (i64::from(h.dungeon_id) == target_id
+                        || i64::from(h.solar_system_id) == target_id
+                        || h.rooms.first().is_some_and(|r| {
+                            r.beacon_ball_id > 0 && r.beacon_ball_id == target_id
+                        })))
+                    || target_str_opt == Some(h.site_id.as_str()))
+        }) {
             return Some(DVec3::new(10_000.0, 0.0, 0.0));
         }
         None

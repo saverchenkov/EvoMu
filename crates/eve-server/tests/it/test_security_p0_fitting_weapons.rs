@@ -396,9 +396,22 @@ async fn test_dogma_link_all_weapons_selective_grouping() {
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
     let char_id = 90_000_001i64;
-    sess.character_id = Some(char_id);
     let ship_id = 100_000_001i64;
-    seed_item(&ctx, ship_id, 587, char_id, 60_003_760, InventoryFlag::Hangar, 1, true);
+    let sys_id = 30_000_142u32;
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+    });
+    seed_item(&ctx, ship_id, 587, char_id, i64::from(sys_id), InventoryFlag::None, 1, true);
 
     // Fit 2x 200mm AutoCannon II (2889), 2x Light Missile Launcher I (499), 1x Small Energy Neutralizer I (533)
     let ac1 = 880_001i64;

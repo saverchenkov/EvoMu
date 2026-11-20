@@ -363,6 +363,26 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
     solar_system_id: u32,
     pocket_origin: DVec3,
 ) -> usize {
+    spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+        ctx,
+        char_id,
+        solar_system_id,
+        pocket_origin,
+        None,
+    )
+}
+
+/// Mission-scoped variant of [`spawn_mission_wave_on_pocket_entry_if_needed`]: when
+/// `target_mission_id` is `Some(mid)`, only that accepted mission's wave spawns at `pocket_origin`,
+/// preventing cross-mission wave spawns when a pilot holds multiple accepted missions in the same
+/// solar system.
+pub fn spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: u32,
+    pocket_origin: DVec3,
+    target_mission_id: Option<u32>,
+) -> usize {
     let default_npc_tid =
         crate::services::agents_missions::agents_missions_helpers::resolve_mission_npc_type(ctx)
             .max(10_019);
@@ -378,11 +398,14 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
                 .contains(&(cid, aid));
             let Some((mission_id, cur_npcs)) =
                 snap.active_missions.get(&(cid, aid)).and_then(|mission| {
+                    let matches_target =
+                        target_mission_id.is_none_or(|mid| mission.mission_id == mid);
                     let needs_respawn = awaiting
                         || (mission.spawned_npc_ball_ids.is_empty() && mission.npcs_remaining > 0);
                     (cid == char_id
                         && mission.state == "Accepted"
                         && mission.solar_system_id == solar_system_id
+                        && matches_target
                         && needs_respawn)
                         .then_some((mission.mission_id, mission.npcs_remaining))
                 })
@@ -405,7 +428,7 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
             let wave_count = if initial_count > 0 {
                 initial_count
             } else {
-                cur_npcs.max(4)
+                cur_npcs
             };
             let wave_types = snap
                 .sp6_lifecycle

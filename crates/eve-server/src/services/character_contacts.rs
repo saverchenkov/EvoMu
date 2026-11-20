@@ -67,18 +67,52 @@ pub fn handle_contacts(
             }).unwrap_or((None, 0));
             let create_date_ft = unix_to_filetime(c.create_date_unix);
             let war_fac_rep = war_fac.map(PyRep::Integer).unwrap_or(PyRep::None);
-            Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(c.character_id)), ("characterName", PyRep::String(c.name)),
-                ("corporationID", PyRep::Integer(c.corporation_id)), ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("raceID", PyRep::Integer(c.race_id as i64)), ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
-                ("ancestryID", PyRep::Integer(c.ancestry_id as i64)), ("schoolID", PyRep::Integer(c.school_id as i64)),
-                ("securityStatus", PyRep::Real(c.security_status)), ("description", PyRep::String(c.description)),
-                ("title", PyRep::String(c.title)), ("gender", PyRep::Integer(c.gender as i64)),
-                ("createDateTime", PyRep::Integer(create_date_ft)), ("startDateTime", PyRep::Integer(create_date_ft)),
-                ("portraitInfo", PyRep::String(portrait_info)),
-                ("warFactionID", war_fac_rep.clone()), ("militiaFactionID", war_fac_rep),
-                ("militiaRank", PyRep::Integer(rank)), ("rank", PyRep::Integer(rank)),
-            ])))
+            // V24 callers (`characterInfoWindow`, `infoContentBase`, `charsheet/membership`,
+            // `nodegraph`) evaluate `if info:` and index `info[0].<col>` on a 1-row Rowset (#1456).
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "characterID",
+                    "characterName",
+                    "corporationID",
+                    "allianceID",
+                    "raceID",
+                    "bloodlineID",
+                    "ancestryID",
+                    "schoolID",
+                    "securityStatus",
+                    "description",
+                    "title",
+                    "gender",
+                    "createDateTime",
+                    "startDateTime",
+                    "portraitInfo",
+                    "warFactionID",
+                    "militiaFactionID",
+                    "militiaRank",
+                    "rank",
+                ],
+                vec![vec![
+                    PyRep::Integer(c.character_id),
+                    PyRep::String(c.name),
+                    PyRep::Integer(c.corporation_id),
+                    c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    PyRep::Integer(c.race_id as i64),
+                    PyRep::Integer(c.bloodline_id as i64),
+                    PyRep::Integer(c.ancestry_id as i64),
+                    PyRep::Integer(c.school_id as i64),
+                    PyRep::Real(c.security_status),
+                    PyRep::String(c.description),
+                    PyRep::String(c.title),
+                    PyRep::Integer(c.gender as i64),
+                    PyRep::Integer(create_date_ft),
+                    PyRep::Integer(create_date_ft),
+                    PyRep::String(portrait_info),
+                    war_fac_rep.clone(),
+                    war_fac_rep,
+                    PyRep::Integer(rank),
+                    PyRep::Integer(rank),
+                ]],
+            )))
         }
 
         ("charMgr", "GetPrivateInfo") => {

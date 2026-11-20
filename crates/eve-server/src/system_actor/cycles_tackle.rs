@@ -1096,11 +1096,144 @@ pub(crate) fn handle_update_module_overload(
     updated
 }
 
+/// Computes the effective Dogma `speedFactor` (attribute `20`) overload ratio for a propulsion
+/// module cycle, accounting for stacking penalties with any active Tactical Destroyer stance
+/// modifying `speedFactor` (e.g. Confessor / Svipul Propulsion Mode `modeMWDandABBoostPostDiv`)
+/// (`#1364`).
+fn overload_speed_multiplier_for_cycle(
+    mt_opt: Option<&eve_sde::InvType>,
+    sde_opt: &Option<Arc<SdeRegistry>>,
+    fit_projection: Option<&eve_dogma::FitProjection>,
+) -> f64 {
+    let ovl_pct = mt_opt
+        .and_then(|t| t.default_attributes.get(&1223).copied())
+        .unwrap_or(50.0);
+    let raw_mult = (1.0 + ovl_pct / 100.0).max(0.1);
+    let ovl_delta = ovl_pct / 100.0;
+    if ovl_delta <= 0.0 || !ovl_delta.is_finite() {
+        return raw_mult;
+    }
+    let (Some(sde), Some(mt), Some(proj)) = (sde_opt.as_ref(), mt_opt, fit_projection) else {
+        return raw_mult;
+    };
+    if !sde.attributes.get(&20).is_none_or(|a| !a.stackable) {
+        return raw_mult;
+    }
+    let Some(stance_tid) = proj.active_stance_type_id else {
+        return raw_mult;
+    };
+    let Some(stance_type) = sde.types.get(&stance_tid) else {
+        return raw_mult;
+    };
+    let stance_source = eve_dogma::DogmaItemState {
+        item_id: 0,
+        type_id: stance_tid,
+        group_id: Some(stance_type.group_id),
+        category_id: Some(stance_type.category_id),
+        base_attributes: HashMap::new(),
+        modifiers: Vec::new(),
+        skill_levels: HashMap::new(),
+    };
+    let module_source = eve_dogma::DogmaItemState {
+        item_id: 0,
+        type_id: mt.type_id,
+        group_id: Some(mt.group_id),
+        category_id: Some(mt.category_id),
+        base_attributes: HashMap::new(),
+        modifiers: Vec::new(),
+        skill_levels: HashMap::new(),
+    };
+    if eve_dogma::source_is_stacking_exempt(&stance_source, sde)
+        || eve_dogma::source_is_stacking_exempt(&module_source, sde)
+    {
+        return raw_mult;
+    }
+    let req_skills: Vec<u32> = [182u16, 183, 184, 1285, 1289, 1290]
+        .iter()
+        .filter_map(|aid| mt.default_attributes.get(aid).copied())
+        .map(|v| v.round() as u32)
+        .filter(|&sid| sid > 0)
+        .collect();
+
+    let mut other_pos_deltas: Vec<f64> = Vec::new();
+    for &eid in &stance_type.effect_ids {
+        let Some(eff) = sde.effects.get(&eid) else {
+            continue;
+        };
+        if eff.effect_category != 0 {
+            continue;
+        }
+        for m in &eff.modifiers {
+            // Attribute 20 (`speedFactor`) on propulsion modules is stacking-penalized.
+            if m.modified_attribute_id != 20 {
+                continue;
+            }
+            let targets_module = match m.func.as_str() {
+                "LocationModifier" => m.domain == "shipID",
+                "LocationGroupModifier" => m.domain == "shipID" && m.group_id == Some(mt.group_id),
+                "LocationRequiredSkillModifier" => {
+                    m.domain == "shipID"
+                        && m.skill_type_id.is_some_and(|sid| req_skills.contains(&sid))
+                }
+                _ => false,
+            };
+            if !targets_module {
+                continue;
+            }
+            let Some(&val) = stance_type.default_attributes.get(&m.modifying_attribute_id) else {
+                continue;
+            };
+            // Only post-group stacking-penalized operators (`PostMul` 4, `PostDiv` 5,
+            // `PostPercent` 6) share Dogma's `post_deltas` stacking bucket with
+            // `overloadSelfSpeedBonus` (`PostPercent` 6); `PreMul`/`PreDiv` (`0 | 1`)
+            // run in a separate pre-group pass and never stack-penalize against it (#1444).
+            let delta = match m.operator {
+                4 => val - 1.0,
+                5 if val.abs() > 1e-12 => (1.0 / val) - 1.0,
+                6 => val / 100.0,
+                _ => continue,
+            };
+            if delta > 0.0 && delta.is_finite() {
+                other_pos_deltas.push(delta);
+            }
+        }
+    }
+    if other_pos_deltas.is_empty() {
+        return raw_mult;
+    }
+    let combined = |deltas: &mut [f64]| -> f64 {
+        deltas.sort_by(|a, b| b.total_cmp(a));
+        deltas.iter().enumerate().fold(1.0, |acc, (i, &d)| {
+            acc * (1.0 + d * eve_dogma::stacking_penalty_factor(i))
+        })
+    };
+    let without_ovl = combined(&mut other_pos_deltas);
+    let mut with_ovl_deltas = other_pos_deltas;
+    with_ovl_deltas.push(ovl_delta);
+    let with_ovl = combined(&mut with_ovl_deltas);
+    if without_ovl > 1e-12 {
+        (with_ovl / without_ovl).max(0.1)
+    } else {
+        raw_mult
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn apply_overload_transition_to_cycle(
     c: &mut ActiveModuleCycle,
     is_overloaded: bool,
     ballpark: &mut Ballpark,
     sde_opt: &Option<Arc<SdeRegistry>>,
+) {
+    apply_overload_transition_to_cycle_with_projection(c, is_overloaded, ballpark, sde_opt, None);
+}
+
+pub(crate) fn apply_overload_transition_to_cycle_with_projection(
+    c: &mut ActiveModuleCycle,
+    is_overloaded: bool,
+    ballpark: &mut Ballpark,
+    sde_opt: &Option<Arc<SdeRegistry>>,
+    fit_projection: Option<&eve_dogma::FitProjection>,
 ) {
     let ship_id = c.ship_id;
     if c.is_overloaded != is_overloaded {
@@ -1123,10 +1256,7 @@ pub(crate) fn apply_overload_transition_to_cycle(
             };
 
             if c.speed_boost_factor > 0.0 {
-                let ovl_speed = mt_opt
-                    .and_then(|t| t.default_attributes.get(&1223).copied())
-                    .map(|pct| (1.0 + pct / 100.0).max(0.1))
-                    .unwrap_or(1.50);
+                let ovl_speed = overload_speed_multiplier_for_cycle(mt_opt, sde_opt, fit_projection);
                 let old_factor = (1.0 + c.speed_boost_factor).max(1e-6);
                 apply_scale(&mut c.speed_boost_factor, ovl_speed);
                 let new_factor = (1.0 + c.speed_boost_factor).max(0.0);

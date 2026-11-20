@@ -10,6 +10,26 @@ use eve_server::formulas::sp_for_skill_level;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
+/// Asserts a 1-row `PyRep::Rowset` and indexes its sole row by column name.
+fn single_rowset_map<'a>(rep: &'a PyRep, context: &str) -> HashMap<&'a str, &'a PyRep> {
+    let PyRep::Rowset { columns, rows } = rep else {
+        panic!("Expected 1-row Rowset from {context}, got {rep:?}");
+    };
+    assert_eq!(rows.len(), 1, "{context}: expected 1 row, got {}", rows.len());
+    assert_eq!(
+        rows[0].len(),
+        columns.len(),
+        "{context}: row width {} must match {} columns",
+        rows[0].len(),
+        columns.len()
+    );
+    columns
+        .iter()
+        .zip(rows[0].iter())
+        .map(|(c, v)| (c.as_str(), v))
+        .collect()
+}
+
 #[tokio::test]
 async fn test_ch3_character_creation_and_starter_assets() {
     // parity: feat:character.list-characters, feat:character.select-character, feat:character.create-character, feat:character.starter-skills, feat:character.school-corp, feat:character.random-name, feat:character.name-validation, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.GetValidRandomName, rpc:charUnboundMgr.SelectCharacterID, rpc:charUnboundMgr.ValidateNameEx, rpc:invbroker.SetLabel
@@ -490,45 +510,53 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     .expect("SelectCharacterID");
 
     // 1. Show info public (feat:character.show-info-public) via charMgr.GetPublicInfo3
-    for method in ["GetPublicInfo3"] {
+    for caller_trace in [None, Some("machoNet:26000")] {
         let pub_info = ctx
             .dispatch_rpc(
                 &mut sess,
                 "charMgr",
                 None,
-                method,
+                "GetPublicInfo3",
                 &[PyRep::Integer(char_id)],
                 &kw,
-                None,
+                caller_trace,
             )
             .await
-            .expect(method);
-        let PyRep::KeyVal(pub_kv) = pub_info else {
-            panic!("Expected KeyVal from {method}");
-        };
-        assert_eq!(pub_kv.get("characterID").unwrap().as_i64(), Some(char_id));
+            .expect("GetPublicInfo3");
+        let pub_row = single_rowset_map(&pub_info, "GetPublicInfo3");
+        assert_eq!(pub_row.len(), 19, "GetPublicInfo3 must expose all 19 columns");
+        assert_eq!(pub_row.get("characterID").and_then(|v| v.as_i64()), Some(char_id));
         assert_eq!(
-            pub_kv.get("characterName"),
+            pub_row.get("characterName").copied(),
             Some(&PyRep::String("Aura Capsuleer".into()))
         );
         assert_eq!(
-            pub_kv.get("corporationID").and_then(|v| v.as_i64()),
+            pub_row.get("corporationID").and_then(|v| v.as_i64()),
             Some(1_000_170)
         );
-        assert_eq!(pub_kv.get("allianceID"), Some(&PyRep::None));
-        assert_eq!(pub_kv.get("raceID").and_then(|v| v.as_i64()), Some(2));
-        assert_eq!(pub_kv.get("bloodlineID").and_then(|v| v.as_i64()), Some(3));
-        assert_eq!(pub_kv.get("ancestryID").and_then(|v| v.as_i64()), Some(19));
-        assert_eq!(pub_kv.get("schoolID").and_then(|v| v.as_i64()), Some(14));
-        assert_eq!(pub_kv.get("securityStatus").and_then(|v| v.as_f64()), Some(0.5));
-        assert!(
-            pub_kv.get("createDateTime").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
-            "{method} must return birthday (createDateTime)"
+        assert_eq!(pub_row.get("allianceID").copied(), Some(&PyRep::None));
+        assert_eq!(pub_row.get("raceID").and_then(|v| v.as_i64()), Some(2));
+        assert_eq!(pub_row.get("bloodlineID").and_then(|v| v.as_i64()), Some(3));
+        assert_eq!(pub_row.get("ancestryID").and_then(|v| v.as_i64()), Some(19));
+        assert_eq!(pub_row.get("schoolID").and_then(|v| v.as_i64()), Some(14));
+        assert_eq!(pub_row.get("securityStatus").and_then(|v| v.as_f64()), Some(0.5));
+        assert_eq!(pub_row.get("description").and_then(|v| v.as_str()), Some(""));
+        assert_eq!(pub_row.get("title").and_then(|v| v.as_str()), Some(""));
+        assert_eq!(pub_row.get("gender").and_then(|v| v.as_i64()), Some(0));
+        let create_dt = pub_row.get("createDateTime").and_then(|v| v.as_i64()).unwrap_or(0);
+        assert!(create_dt > 0, "GetPublicInfo3 must return birthday (createDateTime)");
+        assert_eq!(
+            pub_row.get("startDateTime").and_then(|v| v.as_i64()),
+            Some(create_dt)
         );
         assert!(
-            pub_kv.get("portraitInfo").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()),
-            "{method} must return portraitInfo"
+            pub_row.get("portraitInfo").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()),
+            "GetPublicInfo3 must return portraitInfo"
         );
+        assert_eq!(pub_row.get("warFactionID").copied(), Some(&PyRep::None));
+        assert_eq!(pub_row.get("militiaFactionID").copied(), Some(&PyRep::None));
+        assert_eq!(pub_row.get("militiaRank").and_then(|v| v.as_i64()), Some(0));
+        assert_eq!(pub_row.get("rank").and_then(|v| v.as_i64()), Some(0));
     }
 
     // Verify allianceID is populated when character belongs to an alliance
@@ -549,9 +577,8 @@ async fn test_ch4_character_sheet_biography_and_notes() {
         )
         .await
         .expect("GetPublicInfo3 with alliance");
-    if let PyRep::KeyVal(kv) = pub_with_alliance {
-        assert_eq!(kv.get("allianceID").and_then(|v| v.as_i64()), Some(99_000_001));
-    }
+    let alliance_row = single_rowset_map(&pub_with_alliance, "GetPublicInfo3 with alliance");
+    assert_eq!(alliance_row.get("allianceID").and_then(|v| v.as_i64()), Some(99_000_001));
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.alliance_id = None;

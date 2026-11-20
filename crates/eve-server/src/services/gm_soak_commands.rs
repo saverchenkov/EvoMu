@@ -567,21 +567,16 @@ async fn handle_soak_cmd(
     )
     .await;
 
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        for &npc_id in &npc_ids {
-            let _ = bp.set_mode(
+    for &npc_id in &npc_ids {
+        let _ = sys_handle
+            .set_movement_mode(
                 npc_id,
                 MovementMode::Orbit {
                     target_id: ship_id,
                     range: SOAK_LOGI_ORBIT_RANGE_M,
                 },
-            );
-        }
-        crate::system_actor::sync_ball_positions(
-            &bp,
-            &sys_handle.ball_positions,
-            &sys_handle.scrambled_balls,
-        );
+            )
+            .await;
     }
 
     let now_unix = ctx.now_unix();
@@ -713,14 +708,9 @@ async fn handle_deadwarp_cmd(
                 .unwrap_or((caller_sys, caller_ship));
             if target_sys > 0 && target_ship > 0 {
                 let sys_handle = ctx.systems.get_or_spawn(target_sys);
-                if let Ok(mut bp) = sys_handle.ballpark.write() {
-                    let _ = bp.set_mode(target_ship, MovementMode::Stop);
-                    crate::system_actor::sync_ball_positions(
-                        &bp,
-                        &sys_handle.ball_positions,
-                        &sys_handle.scrambled_balls,
-                    );
-                };
+                let _ = sys_handle
+                    .set_movement_mode(target_ship, MovementMode::Stop)
+                    .await;
                 crate::services::space_destiny::clear_warp_tracking(
                     ctx,
                     Some(&sys_handle),
@@ -899,13 +889,11 @@ async fn handle_sysjunkclear_cmd(
     });
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    if let Ok(bp) = sys_handle.ballpark.read() {
-        for (&bid, b) in &bp.balls {
-            let group_id = bp
-                .ball_slim_meta
-                .get(&bid)
-                .map(|m| m.group_id)
-                .or_else(|| bp.ball_group_ids.get(&bid).copied())
+    {
+        let view = sys_handle.view();
+        for (&bid, b) in &view.balls {
+            let group_id = view
+                .group_id(bid)
                 .or_else(|| ctx.sde.types.get(&b.type_id).map(|t| t.group_id))
                 .unwrap_or(0);
             if group_id == GROUP_WRECK {
@@ -1049,10 +1037,6 @@ fn handle_session_dump(
 ) -> PyRep {
     let sid = session.session_id;
     let now_unix = ctx.now_unix();
-    let now_millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or_else(|_| now_unix.saturating_mul(1_000));
 
     let session_dict = PyRep::keyval([
         ("sessionID", PyRep::Integer(sid as i64)),
@@ -1215,7 +1199,7 @@ fn handle_session_dump(
         .get_destiny_stamps(sid, DEFAULT_SESSION_LEDGER_LIMIT);
     let rpc_hist = ctx
         .flight_recorder
-        .get_history(sid, now_millis, DEFAULT_SESSION_LEDGER_LIMIT);
+        .get_history_relative_to_now(sid, DEFAULT_SESSION_LEDGER_LIMIT);
 
     let ledger_reps: Vec<PyRep> = ledger.iter().map(ledger_entry_to_pyrep).collect();
     let stamp_reps: Vec<PyRep> = stamps.iter().map(destiny_stamp_to_pyrep).collect();
@@ -1844,17 +1828,15 @@ fn step_deadwarps_for_system(ctx: &ServerContext, solar_system_id: u32) {
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     let now_unix = ctx.now_unix();
-    let ball_snaps: HashMap<i64, (DVec3, bool)> = if let Ok(bp) = sys_handle.ballpark.read() {
+    let ball_snaps: HashMap<i64, (DVec3, bool)> = {
+        let view = sys_handle.view();
         entries
             .iter()
             .filter_map(|st| {
-                bp.balls
-                    .get(&st.ship_id)
+                view.ball(st.ship_id)
                     .map(|b| (st.ship_id, (b.position, matches!(b.mode, MovementMode::Warp { .. }))))
             })
             .collect()
-    } else {
-        return;
     };
 
     let mut to_remove: Vec<i64> = Vec::new();
@@ -1961,30 +1943,23 @@ fn step_logi_soak_for_system(ctx: &ServerContext, solar_system_id: u32) {
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     let now_unix = ctx.now_unix();
-    let (bp_tick, target_pos_opt, target_in_warp, live_npcs) =
-        if let Ok(bp) = sys_handle.ballpark.read() {
-            let target_info = bp
-                .balls
-                .get(&soak.target_ship_id)
-                .map(|b| (b.position, matches!(b.mode, MovementMode::Warp { .. })));
-            let live: Vec<(i64, u32, DVec3)> = soak
-                .npc_ids
-                .iter()
-                .filter_map(|&nid| {
-                    bp.balls
-                        .get(&nid)
-                        .map(|b| (nid, b.type_id, b.position))
-                })
-                .collect();
-            (
-                bp.current_tick,
-                target_info.map(|(p, _)| p),
-                target_info.is_some_and(|(_, w)| w),
-                live,
-            )
-        } else {
-            return;
-        };
+    let (bp_tick, target_pos_opt, target_in_warp, live_npcs) = {
+        let view = sys_handle.view();
+        let target_info = view
+            .ball(soak.target_ship_id)
+            .map(|b| (b.position, matches!(b.mode, MovementMode::Warp { .. })));
+        let live: Vec<(i64, u32, DVec3)> = soak
+            .npc_ids
+            .iter()
+            .filter_map(|&nid| view.ball(nid).map(|b| (nid, b.type_id, b.position)))
+            .collect();
+        (
+            view.current_tick,
+            target_info.map(|(p, _)| p),
+            target_info.is_some_and(|(_, w)| w),
+            live,
+        )
+    };
 
     let live_ids: Vec<i64> = live_npcs.iter().map(|&(nid, _, _)| nid).collect();
     if live_ids.is_empty() {

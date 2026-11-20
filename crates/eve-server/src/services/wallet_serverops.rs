@@ -19,7 +19,7 @@ pub use super::serverops_cluster::*;
 use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 use eve_db::{InventoryFlag, IskCents, WorldStateSnapshot};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, ItemQtyError, PyRep};
 use std::collections::{BTreeMap, HashMap};
 use tracing::debug;
 
@@ -164,9 +164,13 @@ fn compute_starbase_consumption_factor(
         .get(&tower_id)
         .map(|s| (s.solar_system_id, s.owner_corp_id, s.type_id))
         .or_else(|| {
-            snap.items
-                .get(&tower_id)
-                .map(|i| (i.location_id as u32, i.owner_id, i.type_id))
+            snap.items.get(&tower_id).map(|i| {
+                (
+                    u32::try_from(i.location_id).unwrap_or(fallback_sys),
+                    i.owner_id,
+                    i.type_id,
+                )
+            })
         })
         .unwrap_or((fallback_sys, fallback_corp, 12_235));
     let tower_corp_id = if snap.corporations.contains_key(&owner_id) {
@@ -350,13 +354,18 @@ fn handle_run_moon_process_cycle_for_tower(
             "Cannot run moon process cycle while cloaked",
         ));
     }
-    let harvest_amount_default = ctx
+    let harvest_raw = ctx
         .sde
         .types
         .get(&16_221)
         .and_then(|t| t.default_attributes.get(&726).copied())
-        .unwrap_or(100.0)
-        .max(1.0) as i32;
+        .filter(|v| v.is_finite() && *v >= 1.0)
+        .unwrap_or(100.0);
+    let harvest_amount_default = if harvest_raw >= f64::from(i32::MAX) {
+        ItemQty::STACK_MAX
+    } else {
+        ItemQty::try_from_i64(harvest_raw as i64).unwrap_or(ItemQty::ONE)
+    };
 
     let now_unix = ctx.now_unix();
     ctx.db.try_with_mut_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
@@ -392,7 +401,7 @@ fn handle_run_moon_process_cycle_for_tower(
 
         // Deduct required resources from fuel items stored inside the tower when present.
         for &(req_type_id, req_qty) in &fuel_reqs {
-            let mut rem = req_qty as i32;
+            let mut rem = i64::from(req_qty);
             let mut empty_ids = Vec::new();
             for (&iid, item) in snap.items.iter_mut() {
                 if rem <= 0 {
@@ -400,9 +409,10 @@ fn handle_run_moon_process_cycle_for_tower(
                 }
                 if item.location_id == tower_id && item.type_id == req_type_id && item.quantity > 0
                 {
-                    let take = item.quantity.min(rem);
+                    let take_i64 = i64::from(item.quantity).min(rem);
+                    let take = i32::try_from(take_i64).unwrap_or(item.quantity);
                     item.quantity -= take;
-                    rem -= take;
+                    rem -= i64::from(take);
                     if item.quantity <= 0 {
                         empty_ids.push(iid);
                     }
@@ -449,7 +459,9 @@ fn handle_run_moon_process_cycle_for_tower(
                 .get(&silo_id)
                 .copied()
                 .or_else(|| snap.orbital_provision_types.get(&tower_id).copied())
-                .unwrap_or(16_634) as u32;
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(16_634);
             let unit_vol = ctx
                 .sde
                 .types
@@ -458,27 +470,42 @@ fn handle_run_moon_process_cycle_for_tower(
                 .filter(|&v| v > 0.0)
                 .unwrap_or(1.0);
             let silo_cap = compute_silo_capacity(ctx, snap, silo_id);
-            let max_units = (silo_cap / unit_vol).floor().max(0.0) as i32;
+            let cap_units_f = (silo_cap / unit_vol).floor();
+            let max_units: i64 = if cap_units_f.is_nan() || cap_units_f <= 0.0 {
+                0
+            } else if cap_units_f >= (i64::MAX as f64) {
+                i64::MAX
+            } else {
+                cap_units_f as i64
+            };
 
             let existing_stack_id = snap
                 .items
                 .values()
                 .find(|it| it.location_id == silo_id && it.type_id == prov_type_id)
                 .map(|it| it.item_id);
-            let current_units: i32 = snap
+            let current_units: i64 = snap
                 .items
                 .values()
                 .filter(|it| it.location_id == silo_id)
-                .map(|it| it.quantity.max(0))
+                .map(|it| i64::from(it.quantity.max(0)))
                 .sum();
-            let room_units = (max_units - current_units).max(0);
-            let added_units = harvest_amount_default.min(room_units);
+            let room_units = max_units.saturating_sub(current_units).max(0);
+            let added_qty_opt = (room_units > 0)
+                .then(|| harvest_amount_default.as_i64().min(room_units))
+                .and_then(|u| ItemQty::try_from_i64(u).ok());
 
-            let new_total_units = if added_units > 0 {
+            let (added_units, new_total_units): (i64, i64) = if let Some(added_qty) = added_qty_opt {
+                let add_i32 = added_qty
+                    .try_into_stack_i32()
+                    .map_err(|e| e.into_rpc_error("InvalidQuantity"))?;
                 if let Some(stack_id) = existing_stack_id {
                     let stack = snap.items.get_mut(&stack_id).expect("existing silo stack");
-                    stack.quantity += added_units;
-                    stack.quantity
+                    stack.quantity = stack
+                        .quantity
+                        .checked_add(add_i32)
+                        .ok_or_else(|| ItemQtyError::Overflow.into_rpc_error("InvalidQuantity"))?;
+                    (i64::from(add_i32), i64::from(stack.quantity))
                 } else {
                     let new_id = snap.alloc_entity_id();
                     snap.items.insert(
@@ -489,25 +516,26 @@ fn handle_run_moon_process_cycle_for_tower(
                             owner_id: tower_owner_id,
                             location_id: silo_id,
                             flag: InventoryFlag::Unlocked,
-                            quantity: added_units,
+                            quantity: add_i32,
                             singleton: false,
                             version: 1,
                             ..Default::default()
                         },
                     );
-                    added_units
+                    (i64::from(add_i32), i64::from(add_i32))
                 }
             } else {
-                existing_stack_id
-                    .and_then(|id| snap.items.get(&id).map(|it| it.quantity))
-                    .unwrap_or(current_units)
+                let total = existing_stack_id
+                    .and_then(|id| snap.items.get(&id).map(|it| i64::from(it.quantity)))
+                    .unwrap_or(current_units);
+                (0, total)
             };
 
             cycle_entries.push(PyRep::Tuple(vec![
                 PyRep::Integer(silo_id),
                 PyRep::Integer(i64::from(prov_type_id)),
-                PyRep::Integer(i64::from(added_units)),
-                PyRep::Integer(i64::from(new_total_units)),
+                PyRep::Integer(added_units),
+                PyRep::Integer(new_total_units),
                 PyRep::Integer(i64::from(hourly_fuel_blocks)),
                 PyRep::Integer(remaining_tower_fuel),
             ]));
@@ -564,7 +592,7 @@ pub(crate) fn create_bill_in_snapshot(
         ("debtorID", PyRep::Integer(debtor_id)),
         ("creditorID", PyRep::Integer(creditor_id)),
         ("amount", PyRep::Real(amount_isk)),
-        ("dueDateTime", PyRep::Integer(due_unix as i64)),
+        ("dueDateTime", PyRep::Integer(i64::try_from(due_unix).unwrap_or(i64::MAX))),
         ("interest", PyRep::Real(interest)),
         ("externalID", PyRep::Integer(external_id)),
         ("externalID2", PyRep::Integer(external_id2)),
@@ -652,7 +680,7 @@ pub fn process_due_automatic_bills(ctx: &ServerContext) -> usize {
                 continue;
             }
             let div_key = ap.division_id.clamp(1000, 1006);
-            let div_id = (div_key - 999) as u8;
+            let div_id = u8::try_from(div_key - 999).unwrap_or(1);
             let amt = IskCents(bill.amount_cents);
             let Some(corp) = snap.corporations.get_mut(&bill.debtor_id) else {
                 continue;
@@ -766,8 +794,8 @@ pub fn handle(
                     .map(|st| {
                         PyRep::keyval([
                             ("structureID", PyRep::Integer(st.structure_id)),
-                            ("typeID", PyRep::Integer(st.type_id as i64)),
-                            ("solarSystemID", PyRep::Integer(st.solar_system_id as i64)),
+                            ("typeID", PyRep::Integer(i64::from(st.type_id))),
+                            ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
                             ("name", PyRep::String(st.name.clone())),
                             ("state", PyRep::String(st.state.clone())),
                         ])
@@ -803,8 +831,10 @@ pub fn handle(
                             return Some(mid);
                         }
                     }
-                    if (30_000_000..=33_000_000).contains(&item.location_id) {
-                        return crate::services::mining_advanced::resolve_structure_moon_id(&ctx.sde, item.location_id as u32, [0.0, 0.0, 0.0]);
+                    if let Ok(sys_id) = u32::try_from(item.location_id) {
+                        if (30_000_000..=33_000_000).contains(&sys_id) {
+                            return crate::services::mining_advanced::resolve_structure_moon_id(&ctx.sde, sys_id, [0.0, 0.0, 0.0]);
+                        }
                     }
                 }
                 None
@@ -1280,7 +1310,7 @@ pub fn handle(
                     return Err(rpc_err("InvalidTarget", format!("Target {item_id} not found")));
                 };
                 check_starbase_auth(snap, session, char_id, target, now_unix)?;
-                snap.orbital_provision_types.insert(item_id, provision_type as i64);
+                snap.orbital_provision_types.insert(item_id, i64::from(provision_type));
                 Ok(())
             });
             Some(res.map(|()| PyRep::None))
@@ -1414,13 +1444,15 @@ pub fn handle(
             let Some(bill_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(rpc_err("InvalidArgument", "PayCorporationBill requires billID")));
             };
-            let from_account_key = args
-                .get(1)
-                .and_then(|a| a.as_i64())
-                .or_else(|| kwargs.get("fromAccountKey").and_then(|v| v.as_i64()))
-                .unwrap_or(1000)
-                .clamp(1000, 1006) as u16;
-            let div_id = (from_account_key - 999) as u8;
+            let from_account_key = u16::try_from(
+                args.get(1)
+                    .and_then(|a| a.as_i64())
+                    .or_else(|| kwargs.get("fromAccountKey").and_then(|v| v.as_i64()))
+                    .unwrap_or(1000)
+                    .clamp(1000, 1006),
+            )
+            .unwrap_or(1000);
+            let div_id = u8::try_from(from_account_key - 999).unwrap_or(1);
             let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
@@ -1479,7 +1511,7 @@ pub fn handle(
                     .into_iter()
                     .map(|(bt, enabled)| (PyRep::Integer(bt), PyRep::Bool(enabled)))
                     .collect();
-                inner.push((PyRep::String("divisionID".into()), PyRep::Integer(ap.division_id.max(1000) as i64)));
+                inner.push((PyRep::String("divisionID".into()), PyRep::Integer(i64::from(ap.division_id.max(1000)))));
                 PyRep::Dict(vec![(PyRep::Integer(corp_id), PyRep::Dict(inner))])
             });
             Some(Ok(rep))
@@ -1506,14 +1538,20 @@ pub fn handle(
                                     if let Some(ibt) = ik.as_i64() {
                                         ap.enabled_bill_types.insert(ibt, iv.as_bool().unwrap_or(false));
                                     } else if ik.as_str() == Some("divisionID") {
-                                        ap.division_id = iv.as_i64().unwrap_or(1000).clamp(1000, 1006) as u16;
+                                        ap.division_id = u16::try_from(
+                                            iv.as_i64().unwrap_or(1000).clamp(1000, 1006),
+                                        )
+                                        .unwrap_or(1000);
                                     }
                                 }
                             } else {
                                 ap.enabled_bill_types.insert(bt, v.as_bool().unwrap_or(false));
                             }
                         } else if k.as_str() == Some("divisionID") {
-                            ap.division_id = v.as_i64().unwrap_or(1000).clamp(1000, 1006) as u16;
+                            ap.division_id = u16::try_from(
+                                v.as_i64().unwrap_or(1000).clamp(1000, 1006),
+                            )
+                            .unwrap_or(1000);
                         }
                     }
                 }
@@ -1709,7 +1747,7 @@ fn handle_cluster_statistics(ctx: &ServerContext) -> PyRep {
             if !ctx.is_character_online(ch.character_id, ch.user_id) {
                 continue;
             }
-            let entry = totals.entry(ch.solar_system_id as i64).or_insert((0, 0));
+            let entry = totals.entry(i64::from(ch.solar_system_id)).or_insert((0, 0));
             entry.0 += 1;
             if ch.station_id.is_some() || ch.structure_id.is_some() {
                 entry.1 += 1;
@@ -1728,6 +1766,96 @@ mod wallet_serverops_tests;
 #[path = "wallet_serverops_cov_unit_tests.rs"]
 #[cfg(test)]
 mod wallet_serverops_cov_unit_tests;
+
+#[cfg(test)]
+mod qty_tests {
+    use super::*;
+    use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord, WorldRepository};
+    use eve_sde::SdeRegistry;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn moon_process_cycle_rejects_silo_stack_overflow_cleanly() {
+        let sde = Arc::new(SdeRegistry::with_canonical_seed());
+        let db = Arc::new(WorldRepository::with_demo_seed());
+        let ctx = ServerContext::with_sde_and_repository(sde, db);
+        let char_id = 90_000_001_i64;
+        let corp_id = 98_000_001_i64;
+        let sys_id = 30_000_142_u32;
+        let tower_id = 96_990_001_i64;
+        let silo_id = 96_990_002_i64;
+        let stack_id = 96_990_003_i64;
+        let prov_tid = 16_634_u32;
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.structures.insert(
+                tower_id,
+                UpwellStructureRecord {
+                    structure_id: tower_id,
+                    type_id: 16_213,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys_id,
+                    position: [1_000.0, 0.0, 0.0],
+                    state: "Online".into(),
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                silo_id,
+                InventoryItemRecord {
+                    item_id: silo_id,
+                    type_id: 14_343,
+                    owner_id: corp_id,
+                    location_id: tower_id,
+                    quantity: 1,
+                    singleton: true,
+                    dynamic_attributes: HashMap::from([(eve_sde::attr_ids::CAPACITY, 1e11)]),
+                    ..Default::default()
+                },
+            );
+            snap.starbase_settings
+                .entry(tower_id)
+                .or_default()
+                .linked_resources
+                .push(silo_id);
+            snap.orbital_provision_types.insert(silo_id, i64::from(prov_tid));
+            snap.items.insert(
+                stack_id,
+                InventoryItemRecord {
+                    item_id: stack_id,
+                    type_id: prov_tid,
+                    owner_id: corp_id,
+                    location_id: silo_id,
+                    flag: InventoryFlag::Unlocked,
+                    quantity: i32::MAX - 5,
+                    ..Default::default()
+                },
+            );
+        });
+
+        let mut sess = SessionState {
+            user_id: Some(1),
+            character_id: Some(char_id),
+            corporation_id: Some(corp_id),
+            corp_role: eve_db::corp_roles::ROLE_STARBASE_CONFIG,
+            solar_system_id: Some(sys_id),
+            ..Default::default()
+        };
+        let err = handle_run_moon_process_cycle_for_tower(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(tower_id)],
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "InvalidQuantity");
+        assert_eq!(
+            ctx.db.with_snapshot(|s| s.items.get(&stack_id).map(|i| i.quantity)),
+            Some(i32::MAX - 5)
+        );
+    }
+}
 
 
 

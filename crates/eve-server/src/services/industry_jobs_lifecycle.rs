@@ -103,6 +103,7 @@ struct CompletedJobCommit {
 /// Verifies caller authorization over a personal or corporate industry job (`CancelJob` / `CompleteJob`).
 #[allow(clippy::too_many_arguments)]
 fn verify_industry_job_actor_authority(
+    ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     session: &SessionState,
     char_id: i64,
@@ -122,6 +123,15 @@ fn verify_industry_job_actor_authority(
         .or(session.corporation_id)
         .unwrap_or(0);
     if use_corp && owner_id > 0 {
+        if crate::services::industry_pi::is_npc_corporation(ctx, owner_id) {
+            return Err(BridgeRpcError {
+                code: "JobOwnershipViolation".into(),
+                message: format!(
+                    "Industry job {job_id} belongs to NPC corporation {owner_id} and cannot be {action_verb} by character {char_id}"
+                ),
+                client_error: None,
+            });
+        }
         if char_corp != owner_id {
             return Err(BridgeRpcError {
                 code: "JobOwnershipViolation".into(),
@@ -131,12 +141,34 @@ fn verify_industry_job_actor_authority(
                 client_error: None,
             });
         }
+        let Some(corp) = snap.corporations.get(&char_corp) else {
+            return Err(BridgeRpcError {
+                code: "JobOwnershipViolation".into(),
+                message: format!(
+                    "Industry job {job_id} belongs to unknown corporation {owner_id} and cannot be {action_verb} by character {char_id}"
+                ),
+                client_error: None,
+            });
+        };
+        if !session.has_gm_role()
+            && corp.ceo_id != char_id
+            && !corp.members.is_empty()
+            && !corp.members.contains(&char_id)
+        {
+            return Err(BridgeRpcError {
+                code: "JobOwnershipViolation".into(),
+                message: format!(
+                    "Industry job {job_id} belongs to corporation {owner_id} and cannot be {action_verb} by non-member {char_id}"
+                ),
+                client_error: None,
+            });
+        }
         if installer_id != char_id {
             let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
                 char_corp,
                 char_id,
-                Some(facility_id),
-                session.corp_role,
+                Some(facility_id).filter(|&id| id > 0),
+                0,
                 now_unix,
             );
             let authorized = session.has_gm_role()
@@ -192,6 +224,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                 };
                 let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
                 verify_industry_job_actor_authority(
+                    ctx,
                     snap,
                     session,
                     char_id,
@@ -302,6 +335,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                     };
                     let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
                     verify_industry_job_actor_authority(
+                        ctx,
                         snap,
                         session,
                         char_id,

@@ -305,11 +305,7 @@ pub(super) fn finalize_expired_disconnected_ship(
         .get_ball_position_sync(disc.ship_id)
         .map(|v| [v.x, v.y, v.z])
         .unwrap_or(disc.last_position);
-    let final_cs = handle
-        .ballpark
-        .read()
-        .ok()
-        .and_then(|bp| bp.combat_states.get(&disc.ship_id).cloned());
+    let final_cs = handle.view().combat_state(disc.ship_id).cloned();
     let (proceed_despawn, prelogoff_session) = pre_despawn_gate(ctx, &disc);
     if !proceed_despawn {
         return;
@@ -356,10 +352,11 @@ pub(super) fn build_disconnected_ship_entry_sync(
 ) -> DisconnectedShipEntry {
     let (weap_until, npc_until, pvp_until, crim_until) =
         super::active_timers_for_char(ctx, char_id, now_unix);
-    let has_target_locks = sys_handle.is_some_and(|h| {
-        h.ballpark
-            .read()
-            .is_ok_and(|bp| bp.target_locks.get(&ship_id).is_some_and(|l| !l.is_empty()))
+    let sys_view = sys_handle.map(|h| h.view());
+    let has_target_locks = sys_view.as_ref().is_some_and(|view| {
+        view.target_locks
+            .get(&ship_id)
+            .is_some_and(|l| !l.is_empty())
     });
     let has_active_combat_engagement = sys_handle
         .is_some_and(|h| h.has_active_modules_or_cloak_sync(ship_id))
@@ -389,11 +386,10 @@ pub(super) fn build_disconnected_ship_entry_sync(
             .unwrap_or(0.5)
     });
     let in_abyssal = (32_000_000..=32_999_999).contains(&sys_id);
-    let is_ball_scrambled = sys_handle.is_some_and(|h| {
-        h.ballpark
-            .read()
-            .is_ok_and(|bp| bp.is_ball_scrambled(ship_id))
-    }) || ctx.systems.is_ball_scrambled_sync(sys_id, ship_id);
+    let is_ball_scrambled = sys_view
+        .as_ref()
+        .is_some_and(|view| view.is_ball_scrambled(ship_id))
+        || ctx.systems.is_ball_scrambled_sync(sys_id, ship_id);
     let is_scrambled =
         in_abyssal || is_ball_scrambled || (sys_sec >= 0.45 && crim_until > now_unix);
 
@@ -414,19 +410,22 @@ pub(super) fn build_disconnected_ship_entry_sync(
     {
         let raw_dest = super::compute_emergency_warp_destination(current_pos, char_id, ship_id);
         let mut dir = (raw_dest - current_pos).normalize_or_zero();
-        if let Some(h) = sys_handle {
-            if let Ok(bp) = h.ballpark.read() {
-                let ship_r = bp.balls.get(&ship_id).map(|b| b.radius).unwrap_or(50.0);
-                for (&bid, b) in &bp.balls {
-                    if bid != ship_id && bp.is_immobile_structure_or_static(bid) {
-                        let to_ship = current_pos - b.position;
-                        let dist = to_ship.length();
-                        if dist <= b.radius + ship_r + 2_500.0 && dist > 1.0 {
-                            let outward = to_ship / dist;
-                            let into_wall = dir.dot(outward);
-                            if into_wall < 0.1 {
-                                dir = (dir - outward * (2.0 * into_wall)).normalize_or_zero();
-                            }
+        if let Some(view) = sys_view.as_ref() {
+            let ship_r = view.ball(ship_id).map(|b| b.radius).unwrap_or(50.0);
+            for (&bid, b) in &view.balls {
+                let is_immobile = view.is_static_ball(bid)
+                    || match view.slim_meta(bid) {
+                        Some(m) => matches!(m.category_id, 2 | 3 | 22 | 23 | 40 | 46 | 65),
+                        None => b.max_velocity <= 0.0,
+                    };
+                if bid != ship_id && is_immobile {
+                    let to_ship = current_pos - b.position;
+                    let dist = to_ship.length();
+                    if dist <= b.radius + ship_r + 2_500.0 && dist > 1.0 {
+                        let outward = to_ship / dist;
+                        let into_wall = dir.dot(outward);
+                        if into_wall < 0.1 {
+                            dir = (dir - outward * (2.0 * into_wall)).normalize_or_zero();
                         }
                     }
                 }

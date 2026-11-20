@@ -245,6 +245,7 @@ async fn forcefield_protection_blocking_roles_structure_towers_and_ballpark_fall
         snap.items.get_mut(&tower_item_id).unwrap().dynamic_attributes.insert(2, 100.0);
     });
     let empty_bp = eve_destiny::Ballpark::new(sys_id);
+    let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         assert!(is_pos_forcefield_blocked_in_snap(
             snap,
@@ -254,6 +255,7 @@ async fn forcefield_protection_blocking_roles_structure_towers_and_ballpark_fall
             outsider_id,
             outsider_ship,
             &[DVec3::new(105_000.0, 0.0, 0.0)],
+            now_unix,
         ));
         assert!(!is_pos_forcefield_blocked_in_snap(
             snap,
@@ -263,6 +265,7 @@ async fn forcefield_protection_blocking_roles_structure_towers_and_ballpark_fall
             member_id,
             member_ship,
             &[DVec3::new(105_000.0, 0.0, 0.0)],
+            now_unix,
         ));
     });
     assert_eq!(
@@ -379,4 +382,168 @@ fn ship_configuration_error_and_flag_paths() {
         .code,
         "InvalidArgument"
     );
+}
+
+#[test]
+fn pos_forcefield_role_maturity_respects_explicit_now_without_snapshot_blob() {
+    let mut sde = (*shared_sde()).clone();
+    sde.types.insert(
+        992_011,
+        custom_inv_type(
+            &sde,
+            992_011,
+            365,
+            23,
+            "Role Maturity Control Tower",
+            &[(680, 20_000.0), (2, 100.0)],
+        ),
+    );
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    // Intentionally construct ServerContext without calling `set_clock` so `__server_now_unix` is unset.
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+
+    let sys_id = 30_000_142u32;
+    let corp_id = 98_600_050i64;
+    let ceo_id = 96_600_050i64;
+    let dir_member_id = 96_600_051i64;
+    let title_member_id = 96_600_052i64;
+    let dir_ship_id = 96_600_151i64;
+    let title_ship_id = 96_600_152i64;
+    let tower_item_id = 96_600_250i64;
+
+    let t0 = ctx.now_unix();
+    let matured_at = t0 + 3_600;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        assert!(!snap.service_state_blobs.contains_key("__server_now_unix"));
+        let base_char = snap.characters.values().next().cloned().expect("seed char");
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "MaturityCorp".into();
+        corp.ceo_id = ceo_id;
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        for cid in [ceo_id, dir_member_id, title_member_id] {
+            let mut ch = base_char.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.name = format!("Pilot{cid}");
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_id;
+            snap.characters.insert(cid, ch);
+        }
+        for (sid, oid) in [(dir_ship_id, dir_member_id), (title_ship_id, title_member_id)] {
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: oid,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            tower_item_id,
+            InventoryItemRecord {
+                item_id: tower_item_id,
+                type_id: 992_011,
+                owner_id: corp_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(tower_item_id, [0.0, 0.0, 0.0]);
+        snap.starbase_settings.insert(
+            tower_item_id,
+            StarbaseDetailSettings {
+                allow_corporation_members: false,
+                allow_alliance_members: false,
+                password: None,
+                ..Default::default()
+            },
+        );
+        let gov = snap.corp_governance.entry(corp_id).or_default();
+        gov.pending_role_grants
+            .insert(dir_member_id, (eve_db::corp_roles::ROLE_DIRECTOR, matured_at));
+        gov.titles
+            .insert(1, ("POS Admin".into(), eve_db::corp_roles::ROLE_STARBASE_CONFIG));
+        gov.member_titles.insert(title_member_id, 1);
+        gov.pending_title_role_grants
+            .insert(title_member_id, (eve_db::corp_roles::ROLE_STARBASE_CONFIG, matured_at));
+    });
+
+    assert!(!can_enter_forcefield(&ctx, dir_member_id, dir_ship_id, tower_item_id));
+    assert!(!can_enter_forcefield(&ctx, title_member_id, title_ship_id, tower_item_id));
+
+    let empty_bp = eve_destiny::Ballpark::new(sys_id);
+    let inside_pos = [DVec3::new(5_000.0, 0.0, 0.0)];
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.service_state_blobs.contains_key("__server_now_unix"));
+        assert!(is_pos_forcefield_blocked_in_snap(
+            snap,
+            &ctx.sde,
+            &empty_bp,
+            sys_id,
+            dir_member_id,
+            dir_ship_id,
+            &inside_pos,
+            t0,
+        ));
+        assert!(is_pos_forcefield_blocked_in_snap(
+            snap,
+            &ctx.sde,
+            &empty_bp,
+            sys_id,
+            title_member_id,
+            title_ship_id,
+            &inside_pos,
+            t0,
+        ));
+
+        assert!(!is_pos_forcefield_blocked_in_snap(
+            snap,
+            &ctx.sde,
+            &empty_bp,
+            sys_id,
+            dir_member_id,
+            dir_ship_id,
+            &inside_pos,
+            matured_at,
+        ));
+        assert!(!is_pos_forcefield_blocked_in_snap(
+            snap,
+            &ctx.sde,
+            &empty_bp,
+            sys_id,
+            title_member_id,
+            title_ship_id,
+            &inside_pos,
+            matured_at,
+        ));
+        assert!(can_enter_forcefield_in_snap_at(
+            snap,
+            dir_member_id,
+            dir_ship_id,
+            tower_item_id,
+            matured_at,
+        ));
+        assert!(can_enter_forcefield_in_snap_at(
+            snap,
+            title_member_id,
+            title_ship_id,
+            tower_item_id,
+            matured_at,
+        ));
+    });
 }

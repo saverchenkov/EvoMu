@@ -2516,6 +2516,29 @@ class TestHookExecutionAndInclientHelpers(unittest.TestCase):
         self.assertEqual(res.get("typed_into"), "quickFilterInputBox")
         self.assertEqual(set_values, ["1MN Afterburner I"])
 
+    def test_hotkey_alias_executes_press_key_command(self):
+        hook = _load_hook_with_py2_stubs()
+        called = []
+
+        class FakeCmd:
+            combatFunctionLoaded = None
+            def OpenJournal(self):
+                called.append("OpenJournal")
+
+        fake_uicore = types.SimpleNamespace(cmd=FakeCmd(), registry=None, layer=None, desktop=None)
+        fake_sm = mock.MagicMock()
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_settle_after_action", return_value=50):
+            res = hook._execute_action(fake_sm, {"type": "hotkey", "target": None, "command": "alt+m", "wait_ms": 500})
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("executed_cmd"), "OpenJournal")
+        self.assertEqual(called, ["OpenJournal"])
+
     def test_type_text_missing_command_does_not_type_widget_path(self):
         hook = _load_hook_with_py2_stubs()
         set_values = []
@@ -5351,6 +5374,174 @@ class TestFittingShipSwapStaleKeyErrorGuard(unittest.TestCase):
             with self.subTest(case="dogmaItems_none", target=label):
                 with self.assertRaises(KeyError):
                     fn()
+
+
+class TestStargateTargetResolution(unittest.TestCase):
+    """Regression tests for stargate matching when destination names appear inside 'Stargate' (e.g. 'Tar')."""
+
+    def _make_bp(self):
+        return types.SimpleNamespace(
+            slimItems={
+                50017729: types.SimpleNamespace(
+                    groupID=10,
+                    categoryID=2,
+                    typeID=16,
+                    name="Stargate (Kassigainen)",
+                    jumps=[types.SimpleNamespace(locationID=30002761)],
+                ),
+                50017731: types.SimpleNamespace(
+                    groupID=10,
+                    categoryID=2,
+                    typeID=16,
+                    name="Stargate (Tarta)",
+                    jumps=[types.SimpleNamespace(locationID=30005201)],
+                ),
+                50017730: types.SimpleNamespace(
+                    groupID=10,
+                    categoryID=2,
+                    typeID=16,
+                    name="Stargate (Tar)",
+                    jumps=[types.SimpleNamespace(locationID=30005199)],
+                ),
+            },
+            _dists={
+                50017729: 1459.0,
+                50017731: 1800.0,
+                50017730: 2100.0,
+            },
+            GetBall=lambda bid: types.SimpleNamespace(surfaceDist={50017729: 1459.0, 50017731: 1800.0, 50017730: 2100.0}.get(int(bid), 0.0), mode=2),
+            GetSurfaceDist=lambda _sid, bid: {50017729: 1459.0, 50017731: 1800.0, 50017730: 2100.0}.get(int(bid), 0.0),
+        )
+
+    def test_tar_does_not_match_stargate_kassigainen_and_prefers_exact_dest_over_prefix(self):
+        hook = _load_hook_with_py2_stubs()
+        bp = self._make_bp()
+        self.assertIsNone(hook._match_stargate_target_tier(bp.slimItems[50017729], "Stargate (Kassigainen)", "tar"))
+        self.assertLess(
+            hook._match_stargate_target_tier(bp.slimItems[50017730], "Stargate (Tar)", "tar"),
+            hook._match_stargate_target_tier(bp.slimItems[50017731], "Stargate (Tarta)", "tar"),
+        )
+        self.assertIsNotNone(hook._match_stargate_target_tier(bp.slimItems[50017730], "Stargate (Tar)", "tar 0.8"))
+        self.assertIsNone(hook._match_stargate_target_tier(bp.slimItems[50017731], "Stargate (Tarta)", "stargate (tar)"))
+
+        # _resolve_space_command_item_id must pick Stargate (Tar) even when Kassigainen/Tarta are closer
+        bid, err = hook._resolve_space_command_item_id(bp, 1001, "approach", "Tar")
+        self.assertIsNone(err)
+        self.assertEqual(bid, 50017730)
+
+        # Generic "stargate" still matches stargates
+        bid_generic, err_generic = hook._resolve_space_command_item_id(bp, 1001, "approach", "stargate")
+        self.assertIsNone(err_generic)
+        self.assertEqual(bid_generic, 50017729)
+
+    def test_execute_jump_gate_and_select_overview_with_tar(self):
+        hook = _load_hook_with_py2_stubs()
+        helpers = _load_helpers_with_py2_stubs()
+        bp = self._make_bp()
+        sess = types.SimpleNamespace(
+            userid=1, charid=90000001, solarsystemid=30005198, solarsystemid2=30005198,
+            stationid=None, structureid=None, shipid=1001, mutating=0, changing=None,
+        )
+        jumped_gates = []
+
+        def _fake_jump(gate_id):
+            jumped_gates.append(int(gate_id))
+            dst = 30005199 if int(gate_id) == 50017730 else 30002761
+            sess.solarsystemid = dst
+            sess.solarsystemid2 = dst
+
+        fake_beyonce = types.SimpleNamespace(
+            CmdFollowBall=lambda *_a: None,
+            CmdWarpToStuff=lambda *_a: None,
+            CmdStargateJump=_fake_jump,
+        )
+        fake_michelle = types.SimpleNamespace(GetBallpark=lambda: bp)
+        fake_state_svc = mock.MagicMock()
+        fake_svcs = {"michelle": fake_michelle, "stateSvc": fake_state_svc}
+        fake_sm = types.SimpleNamespace(
+            services=fake_svcs,
+            GetService=lambda n: fake_svcs.get(n),
+            RemoteSvc=lambda n: fake_svcs[n],
+        )
+
+        # Overview nodes put Kassigainen and Tarta BEFORE exact Tar
+        ov_nodes = [
+            types.SimpleNamespace(itemID=50017729, slimItem=bp.slimItems[50017729], label="Stargate (Kassigainen)"),
+            types.SimpleNamespace(itemID=50017731, slimItem=bp.slimItems[50017731], label="Stargate (Tarta)"),
+            types.SimpleNamespace(itemID=50017730, slimItem=bp.slimItems[50017730], label="Stargate (Tar)"),
+        ]
+        class OverviewWindow:
+            pass
+
+        ov_win = OverviewWindow()
+        ov_win.windowID = "overview"
+        ov_win.destroyed = False
+        ov_win.display = True
+        ov_win.state = 0
+        ov_win.scroll = types.SimpleNamespace(GetNodes=lambda: ov_nodes)
+        fake_uicore = types.SimpleNamespace(
+            cmd=None,
+            desktop=None,
+            layer=None,
+            registry=types.SimpleNamespace(GetWindows=lambda: [ov_win]),
+        )
+        snap_base = {"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}
+
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value=snap_base), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook, "_wait_session_settled"), \
+             mock.patch.object(hook, "_close_neocom_panels_if_outside"), \
+             mock.patch.object(hook, "_close_utilmenu_if_outside"), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside"), \
+             mock.patch.object(hook.H, "_sleep_ms", helpers._sleep_ms, create=True), \
+             mock.patch.object(hook.H, "_sleep_sim_ms", lambda _ms: None, create=True), \
+             mock.patch.object(hook.H, "_wait_view_settled", lambda _sm: None, create=True), \
+             mock.patch.object(hook.H, "_wait_session_timer_clear", lambda max_wait_sec=12.0: None, create=True), \
+             mock.patch.object(hook.H, "_get_beyonce", return_value=fake_beyonce, create=True):
+            with mock.patch.object(helpers, "_sleep_ms"), mock.patch.object(helpers, "_sleep_sim_ms"):
+                res_jump = hook._execute_action(
+                    fake_sm,
+                    {"type": "jump_gate", "target": "Tar", "wait_ms": 0, "reuse_pre_state": False, "scenario_mode": True, "time_control": False},
+                )
+                self.assertTrue(res_jump.get("ok"), res_jump)
+                self.assertEqual(res_jump.get("jump_gate_id"), 50017730)
+                self.assertEqual(res_jump.get("resolved_gate_name"), "Stargate (Tar)")
+                self.assertEqual(res_jump.get("to_system_id"), 30005199)
+                self.assertEqual(jumped_gates[-1], 50017730)
+
+                # Solar system ID target resolves via slim.jumps[0].locationID instead of failing
+                sess.solarsystemid = 30005198
+                sess.solarsystemid2 = 30005198
+                res_sys = hook._execute_action(
+                    fake_sm,
+                    {"type": "jump_gate", "target": "30005199", "wait_ms": 0, "reuse_pre_state": False, "scenario_mode": True, "time_control": False},
+                )
+                self.assertTrue(res_sys.get("ok"), res_sys)
+                self.assertEqual(res_sys.get("jump_gate_id"), 50017730)
+
+                # Non-existent gate "Tar" when only Kassigainen is present fails cleanly instead of picking "sTARgate"
+                bp.slimItems = {50017729: bp.slimItems[50017729]}
+                res_missing = hook._execute_action(
+                    fake_sm,
+                    {"type": "jump_gate", "target": "Tar", "wait_ms": 0, "reuse_pre_state": False, "scenario_mode": True, "time_control": False},
+                )
+                self.assertFalse(res_missing.get("ok"), res_missing)
+                self.assertIn("no Stargate matching", res_missing.get("error", ""))
+
+                # select_overview("Tar") skips Stargate (Kassigainen) and picks Stargate (Tar)
+                bp = self._make_bp()
+                res_ov = hook._execute_action(
+                    fake_sm,
+                    {"type": "select_overview", "target": "Tar", "wait_ms": 0, "reuse_pre_state": False},
+                )
+                self.assertTrue(res_ov.get("ok"), res_ov)
+                self.assertEqual(res_ov.get("selected_item_id"), 50017730)
 
 
 if __name__ == "__main__":

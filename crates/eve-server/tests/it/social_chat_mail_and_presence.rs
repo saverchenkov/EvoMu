@@ -214,6 +214,14 @@ async fn test_social_chat_item_fitting_hyperlinks() {
     assert_eq!(delivered_mail_text, rich_msg);
 
     // 3. Resolve all 5 hyperlinks via recipient session s2
+    // Undock s1 and s2 into Jita space so s1's ship is visible on-grid to s2 (#1352 cross-owner ItemGetInfo guard).
+    ctx.advance_secs(31);
+    rpc(&ctx, &mut s1, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock s1 for on-grid showinfo");
+    rpc(&ctx, &mut s2, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock s2 for on-grid showinfo");
     // (a) showinfo: dogmaIM.ItemGetInfo
     let item_info = rpc(&ctx, &mut s2, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(ship_item_id)])
         .await

@@ -1998,7 +1998,9 @@ pub(crate) async fn run_pre_notify_instant_module_effects(
                 )
                 .await
             } else {
-                crate::services::combat_crimewatch::activate_aoe_or_defender_module_with_cap(
+                // `fitting_module_cycles` already deducted capacitor in `add_module_cycle` and owns
+                // the single post-commit `commit_space_action_cloak_and_invuln_break` call (`#1441`).
+                crate::services::combat_crimewatch::activate_aoe_or_defender_module_with_options(
                     ctx,
                     char_id,
                     ship_id,
@@ -2011,6 +2013,7 @@ pub(crate) async fn run_pre_notify_instant_module_effects(
                     &attacker_ball,
                     target_id_opt,
                     kwargs,
+                    false,
                     false,
                 )
                 .await

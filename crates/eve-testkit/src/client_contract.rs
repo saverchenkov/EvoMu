@@ -2058,8 +2058,8 @@ pub fn validate_notification_for_event(
 }
 
 /// Ratchet ceiling on non-test `BridgeRpcError::user_error(` call sites in `crates/eve-server/src`
-/// (`C-5`, `#929`; reduced from `319` on `main` to `248`).
-pub const UNTYPED_USER_ERROR_RATCHET_CEILING: usize = 248;
+/// (`C-5`, `#929`; reduced from `319` on `main` to `242`).
+pub const UNTYPED_USER_ERROR_RATCHET_CEILING: usize = 242;
 
 /// Validates every [`eve_proto::UserErrorKey`] variant against V24.01 `res:/staticdata/dialogs.static`
 /// (`SdeRegistry::load_dialogs`) or [`eve_proto::V24_PROGRAMMATIC_USER_ERROR_KEYS`] (`C-5`, `#929`).
