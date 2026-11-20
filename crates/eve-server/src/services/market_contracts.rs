@@ -577,6 +577,27 @@ fn resolve_plex_sell_source_checked(
         .ok_or_else(|| insufficient_plex_balance_error(vault_plex, quantity))
 }
 
+pub(crate) fn pending_expired_personal_plex_sell_refund(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    now_unix: u64,
+) -> i64 {
+    if snap.corporations.contains_key(&char_id) {
+        return 0;
+    }
+    snap.market_orders
+        .values()
+        .filter(|o| {
+            !o.is_bid
+                && o.owner_id == char_id
+                && o.type_id == PLEX_TYPE_ID
+                && o.vol_remaining > 0
+                && is_order_expired(snap, o, now_unix)
+        })
+        .map(|o| o.vol_remaining as i64)
+        .sum()
+}
+
 fn validate_plex_sell_preconditions(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -589,7 +610,13 @@ fn validate_plex_sell_preconditions(
     let _ = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
         ctx, snap, station_id, char_id, now_unix, "MarketHubOffline",
     )?;
-    let _ = resolve_plex_sell_source_checked(snap, station_id, char_id, quantity, qty_i32)?;
+    if resolve_plex_sell_source_checked(snap, station_id, char_id, quantity, qty_i32).is_err() {
+        let vault_plex = snap.plex_vault_balance(char_id);
+        let pending_refund = pending_expired_personal_plex_sell_refund(snap, char_id, now_unix);
+        if vault_plex.saturating_add(pending_refund) < quantity {
+            return Err(insufficient_plex_balance_error(vault_plex, quantity));
+        }
+    }
     Ok(())
 }
 
@@ -1365,11 +1392,12 @@ pub fn handle(
 
                     // Match globally against any resting PLEX buy orders across all regions
                     let mut candidate_bids: Vec<(i64, i64)> = snap.market_orders.values().filter(|o| {
-                            let struct_ok = if o.station_id == station_id {
-                                true
-                            } else {
-                                crate::services::market_trading::is_structure_market_online(snap, o.station_id)
-                            };
+                            let struct_ok = o.station_id == station_id
+                                || !snap.structures.contains_key(&o.station_id)
+                                || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                                    ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
+                                )
+                                .is_ok();
                             o.type_id == PLEX_TYPE_ID
                                 && struct_ok
                                 && o.is_bid

@@ -2536,6 +2536,30 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
         new_rows[0].dbrow_get("historyDate")
     );
 
+    // With active region_id, out-of-u32-range 64-bit IDs (positive or negative) must NOT
+    // truncate modulo 2^32 to match PLEX_TYPE_ID or Tritanium (34).
+    let mut active_reg_sess = jita_session(buyer_id, 1_000_009);
+    for method in ["GetOldPriceHistory", "GetNewPriceHistory"] {
+        for bogus_tid in [
+            (1_i64 << 32) | (PLEX_TYPE_ID as i64),
+            (1_i64 << 32) | 34_i64,
+            (-1_i64 << 32) | 34_i64,
+        ] {
+            let res = call_escrow_kw(
+                &ctx,
+                &mut active_reg_sess,
+                method,
+                &[PyRep::Integer(bogus_tid)],
+                &kw,
+            )
+            .expect("Out-of-range typeID should return empty CRowset rather than panic/truncate");
+            assert!(
+                res.crowset_rows().expect("CRowset").is_empty(),
+                "{method} must return empty history for truncated 64-bit typeID {bogus_tid}"
+            );
+        }
+    }
+
     // With region=None, non-PLEX types still return NoRegion without mutating DB state.
     let (orders_before, next_eid_before) =
         ctx.db.with_snapshot(|s| (s.market_orders.len(), s.next_entity_id));
@@ -2830,4 +2854,382 @@ fn rejected_multi_sell_and_buy_multiple_do_not_sweep_expired_orders() {
         assert_eq!(s.next_entity_id, eid_before);
     });
     assert!(ctx.drain_notifications_for_char(other_id).is_empty());
+}
+
+#[test]
+fn place_multi_sell_unlocks_unswept_expired_sell_orders_and_enforces_upwell_plex_bid_acl() {
+    use crate::services::market_trading::{save_market_order_meta, MarketOrderMeta};
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+    };
+    use crate::services::structure_profile_services::SETTING_MARKET_TAX;
+    use eve_db::{
+        corp_roles, CorpMemberRoleAssignment, CorporationRecord, IskCents, MarketOrderRecord,
+    };
+
+    let ctx = test_ctx();
+    let seller_id = 90_000_001_i64;
+    let deliv_trader_id = 90_000_002_i64;
+    let restricted_trader_id = 90_000_003_i64;
+    let bid_buyer_id = 90_000_004_i64;
+    let corp_id = 98_950_001_i64;
+    let struct_owner_corp = 98_950_002_i64;
+    let acl_fort_id = 10_000_950_101_i64;
+    let now = ctx.now_unix();
+    let kw = HashMap::new();
+    let p_trit_exp_oid = 9_750_001_i64;
+    let p_plex_exp_oid = 9_750_002_i64;
+    let c_trit_exp_oid = 9_750_003_i64;
+    let acl_plex_bid_oid = 9_750_004_i64;
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.retain(|_, o| o.is_npc);
+        s.items.clear();
+        let template_ch = s.characters.values().next().unwrap().clone();
+        for cid in [seller_id, deliv_trader_id, restricted_trader_id, bid_buyer_id] {
+            let mut ch = template_ch.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.corporation_id = if cid == deliv_trader_id || cid == restricted_trader_id {
+                corp_id
+            } else {
+                1_000_009
+            };
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.balance = IskCents::from_isk(1_000_000_000);
+            s.characters.insert(cid, ch);
+            let cur_v = s.plex_vault_balance(cid);
+            if cur_v != 0 {
+                let _ = s.adjust_plex_vault(cid, -cur_v);
+            }
+        }
+        // Give deliv_trader_id 2 PLEX in vault for later ACL-permitted crossing test.
+        let _ = s.adjust_plex_vault(deliv_trader_id, 2);
+
+        let mut corp = CorporationRecord::new(corp_id, "ExpiredSellCorp", "ESCP", deliv_trader_id)
+            .with_master_wallet(IskCents::from_isk(1_000_000_000));
+        corp.hq_station_id = Some(JITA_STATION_ID);
+        s.corporations.insert(corp_id, corp);
+        s.corporations.insert(
+            struct_owner_corp,
+            CorporationRecord::new(struct_owner_corp, "AclStructCorp", "ASCP", deliv_trader_id),
+        );
+        // restricted_trader_id has Trader + div 1 take, but NO Deliveries take and NO Director role.
+        s.corp_role_assignments.insert(
+            (corp_id, restricted_trader_id),
+            CorpMemberRoleAssignment {
+                character_id: restricted_trader_id,
+                roles: corp_roles::ROLE_TRADER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0],
+                grantable_roles: 0,
+                roles_at_hq: 0,
+                grantable_roles_at_hq: 0,
+                roles_at_base: 0,
+                grantable_roles_at_base: 0,
+                roles_at_other: 0,
+                grantable_roles_at_other: 0,
+            },
+        );
+        // deliv_trader_id has Trader + div 1 take + Deliveries take.
+        s.corp_role_assignments.insert(
+            (corp_id, deliv_trader_id),
+            CorpMemberRoleAssignment {
+                character_id: deliv_trader_id,
+                roles: corp_roles::ROLE_TRADER
+                    | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]
+                    | corp_roles::ROLE_DELIVERIES_HANGAR_TAKE,
+                grantable_roles: 0,
+                roles_at_hq: 0,
+                grantable_roles_at_hq: 0,
+                roles_at_base: 0,
+                grantable_roles_at_base: 0,
+                roles_at_other: 0,
+                grantable_roles_at_other: 0,
+            },
+        );
+
+        for (oid, owner_id, st_id, reg_id, tid, is_bid, price_isk, qty, dur, issue_unix) in [
+            (
+                p_trit_exp_oid,
+                seller_id,
+                JITA_STATION_ID,
+                THE_FORGE_REGION_ID,
+                34_u32,
+                false,
+                20.0_f64,
+                10_i32,
+                1_i64,
+                now.saturating_sub(2 * 86_400),
+            ),
+            (
+                p_plex_exp_oid,
+                seller_id,
+                60_008_494,
+                10_000_043,
+                PLEX_TYPE_ID,
+                false,
+                5_200_000.0,
+                4,
+                1,
+                now.saturating_sub(2 * 86_400),
+            ),
+            (
+                c_trit_exp_oid,
+                corp_id,
+                JITA_STATION_ID,
+                THE_FORGE_REGION_ID,
+                34,
+                false,
+                25.0,
+                6,
+                1,
+                now.saturating_sub(2 * 86_400),
+            ),
+            (
+                acl_plex_bid_oid,
+                bid_buyer_id,
+                acl_fort_id,
+                THE_FORGE_REGION_ID,
+                PLEX_TYPE_ID,
+                true,
+                4_900_000.0,
+                10,
+                90,
+                now,
+            ),
+        ] {
+            let p = IskCents::from_f64_isk(price_isk);
+            s.market_orders.insert(
+                oid,
+                MarketOrderRecord {
+                    order_id: oid,
+                    owner_id,
+                    station_id: st_id,
+                    region_id: reg_id,
+                    type_id: tid,
+                    is_bid,
+                    price: p,
+                    vol_entered: qty,
+                    vol_remaining: qty,
+                    min_volume: 1,
+                    is_npc: false,
+                    escrow: if is_bid {
+                        IskCents(p.0 * qty as i64)
+                    } else {
+                        IskCents(0)
+                    },
+                },
+            );
+            save_market_order_meta(
+                s,
+                oid,
+                MarketOrderMeta {
+                    range: -1,
+                    duration: dur,
+                    issue_unix,
+                    order_state: None,
+                    account_key: if owner_id == corp_id { Some(1000) } else { None },
+                    final_vol_remaining: None,
+                    closed_unix: None,
+                },
+            );
+        }
+    });
+
+    seed_upwell_market_structure(&ctx, acl_fort_id, struct_owner_corp, 30_000_142, true);
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ext = load_ext_state(s);
+        ext.owner_groups.insert(
+            9201,
+            AccessGroupRecord {
+                group_id: 9201,
+                creator_id: deliv_trader_id,
+                owner_corp_id: struct_owner_corp,
+                name: "AllowedPlexCrossers".into(),
+                description: String::new(),
+                members: HashMap::from([(deliv_trader_id, 0)]),
+            },
+        );
+        let mut prof = StructureAccessProfile {
+            profile_id: 9201,
+            corp_only: false,
+            ..Default::default()
+        };
+        prof.service_acl_rules.insert(SETTING_MARKET_TAX, vec![(9201, 100)]);
+        ext.access_profiles.insert(acl_fort_id, prof);
+        save_ext_state(s, &ext);
+    });
+
+    let mut personal_sess = jita_session(seller_id, 1_000_009);
+    // Asking for 11 Tritanium (exceeds 10 in expired order) must fail pre-sweep without sweeping.
+    assert_eq!(
+        call_escrow_kw(
+            &ctx,
+            &mut personal_sess,
+            "PlaceMultiSellOrder",
+            &[PyRep::List(vec![PyRep::keyval([
+                ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                ("typeID", PyRep::Integer(34)),
+                ("itemID", PyRep::Integer(0)),
+                ("price", PyRep::Real(20.0)),
+                ("quantity", PyRep::Integer(11)),
+            ])])],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "InsufficientInventoryForSellOrder"
+    );
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&p_trit_exp_oid].vol_remaining, 10);
+        assert_eq!(s.market_orders[&p_plex_exp_oid].vol_remaining, 4);
+        assert_eq!(s.market_orders[&c_trit_exp_oid].vol_remaining, 6);
+    });
+
+    // Personal seller re-listing exact 10 Tritanium + 4 PLEX from unswept expired sell orders
+    // must succeed AND must NOT cross the ACL-denied Upwell PLEX bid (`acl_plex_bid_oid`).
+    let _ = call_escrow_kw(
+        &ctx,
+        &mut personal_sess,
+        "PlaceMultiSellOrder",
+        &[PyRep::List(vec![
+            PyRep::keyval([
+                ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                ("typeID", PyRep::Integer(34)),
+                ("itemID", PyRep::Integer(0)),
+                ("price", PyRep::Real(20.0)),
+                ("quantity", PyRep::Integer(10)),
+            ]),
+            PyRep::keyval([
+                ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                ("typeID", PyRep::Integer(PLEX_TYPE_ID as i64)),
+                ("itemID", PyRep::Integer(0)),
+                ("price", PyRep::Real(4_800_000.0)),
+                ("quantity", PyRep::Integer(4)),
+            ]),
+        ])],
+        &kw,
+    )
+    .expect("PlaceMultiSellOrder re-lists personal Tritanium and PLEX from expired sell orders");
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&p_trit_exp_oid].vol_remaining, 0);
+        assert_eq!(s.market_orders[&p_plex_exp_oid].vol_remaining, 0);
+        assert_eq!(s.market_orders[&acl_plex_bid_oid].vol_remaining, 10);
+        assert_eq!(s.plex_vault_balance(seller_id), 0);
+        assert!(s.market_orders.values().any(|o| {
+            o.owner_id == seller_id && o.type_id == 34 && !o.is_bid && o.vol_remaining == 10
+        }));
+        assert!(s.market_orders.values().any(|o| {
+            o.owner_id == seller_id && o.type_id == PLEX_TYPE_ID && !o.is_bid && o.vol_remaining == 4
+        }));
+        // Corp order had not been swept yet before personal sweep? No, global sweep ran on personal re-list,
+        // wait: verify corp re-list behavior with its own fresh expired corp order below!
+    });
+
+    // Re-seed an unswept expired corp sell order so restricted_trader_id vs deliv_trader_id are isolated.
+    let c_trit_exp_oid_2 = 9_750_005_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.retain(|_, i| !(i.owner_id == corp_id && i.type_id == 34));
+        s.market_orders.insert(
+            c_trit_exp_oid_2,
+            MarketOrderRecord {
+                order_id: c_trit_exp_oid_2,
+                owner_id: corp_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_isk(25),
+                vol_entered: 6,
+                vol_remaining: 6,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        save_market_order_meta(
+            s,
+            c_trit_exp_oid_2,
+            MarketOrderMeta {
+                range: -1,
+                duration: 1,
+                issue_unix: now.saturating_sub(2 * 86_400),
+                order_state: None,
+                account_key: Some(1000),
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+    });
+
+    let mut restricted_corp_sess = jita_session(restricted_trader_id, corp_id);
+    // Trader without ROLE_DELIVERIES_HANGAR_TAKE cannot take swept deliveries, so must fail pre-sweep.
+    assert_eq!(
+        call_escrow_kw(
+            &ctx,
+            &mut restricted_corp_sess,
+            "PlaceMultiSellOrder",
+            &[
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                    ("typeID", PyRep::Integer(34)),
+                    ("itemID", PyRep::Integer(0)),
+                    ("price", PyRep::Real(25.0)),
+                    ("quantity", PyRep::Integer(6)),
+                ])]),
+                PyRep::Bool(true),
+            ],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "InsufficientInventoryForSellOrder"
+    );
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&c_trit_exp_oid_2].vol_remaining, 6);
+    });
+
+    // Trader with ROLE_DELIVERIES_HANGAR_TAKE succeeds, AND also crosses acl_plex_bid_oid (permitted in 9201).
+    let mut deliv_sess = jita_session(deliv_trader_id, corp_id);
+    let _ = call_escrow_kw(
+        &ctx,
+        &mut deliv_sess,
+        "PlaceMultiSellOrder",
+        &[
+            PyRep::List(vec![PyRep::keyval([
+                ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                ("typeID", PyRep::Integer(34)),
+                ("itemID", PyRep::Integer(0)),
+                ("price", PyRep::Real(25.0)),
+                ("quantity", PyRep::Integer(6)),
+            ])]),
+            PyRep::Bool(true),
+        ],
+        &kw,
+    )
+    .expect("Corp trader with DELIVERIES take re-lists from unswept expired corp sell order");
+
+    let _ = call_escrow_kw(
+        &ctx,
+        &mut deliv_sess,
+        "PlaceMultiSellOrder",
+        &[PyRep::List(vec![PyRep::keyval([
+            ("stationID", PyRep::Integer(JITA_STATION_ID)),
+            ("typeID", PyRep::Integer(PLEX_TYPE_ID as i64)),
+            ("itemID", PyRep::Integer(0)),
+            ("price", PyRep::Real(4_800_000.0)),
+            ("quantity", PyRep::Integer(2)),
+        ])])],
+        &kw,
+    )
+    .expect("ACL-permitted PlaceMultiSellOrder fills remote Upwell PLEX bid");
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&c_trit_exp_oid_2].vol_remaining, 0);
+        assert!(s.market_orders.values().any(|o| {
+            o.owner_id == corp_id && o.type_id == 34 && !o.is_bid && o.vol_remaining == 6
+        }));
+        assert_eq!(s.market_orders[&acl_plex_bid_oid].vol_remaining, 8);
+    });
 }

@@ -2094,6 +2094,225 @@ fn rejected_modify_and_plex_sell_calls_do_not_sweep_expired_orders() {
     assert!(ctx.drain_notifications_for_char(attacker_id).is_empty());
 }
 
+#[test]
+fn place_plex_sell_order_unlocks_unswept_expired_sell_order_and_respects_remote_upwell_acl() {
+    use crate::services::market_trading::{save_market_order_meta, MarketOrderMeta};
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+    };
+    use crate::services::structure_profile_services::SETTING_MARKET_TAX;
+    use eve_db::{CorporationRecord, InventoryItemRecord, UpwellStructureRecord};
+
+    let ctx = test_ctx();
+    let denied_seller_id = 90_000_001_i64;
+    let permitted_seller_id = 90_000_002_i64;
+    let now = ctx.now_unix();
+    let kw = HashMap::new();
+    let struct_owner_corp = 98_940_001_i64;
+    let acl_struct_id = 10_000_940_101_i64;
+    let expired_plex_sell_oid = 9_640_001_i64;
+    let acl_bid_oid = 9_640_002_i64;
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.clear();
+        s.items.retain(|_, i| i.type_id != PLEX_TYPE_ID);
+        for cid in [denied_seller_id, permitted_seller_id] {
+            let cur = s.plex_vault_balance(cid);
+            if cur != 0 {
+                let _ = s.adjust_plex_vault(cid, -cur);
+            }
+            if let Some(ch) = s.characters.get_mut(&cid) {
+                ch.balance = IskCents::from_isk(1_000_000_000);
+            }
+        }
+        // Grant permitted_seller_id 5 PLEX in Vault so they can sell after denied_seller_id runs.
+        let _ = s.adjust_plex_vault(permitted_seller_id, 5);
+
+        s.corporations.insert(
+            struct_owner_corp,
+            CorporationRecord::new(struct_owner_corp, "PlexAclCorp", "PACL", permitted_seller_id),
+        );
+        s.structures.insert(
+            acl_struct_id,
+            UpwellStructureRecord {
+                structure_id: acl_struct_id,
+                type_id: 35_833,
+                owner_corp_id: struct_owner_corp,
+                solar_system_id: 30_000_142,
+                name: "PlexAclFort".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+        let mod_id = acl_struct_id + 1;
+        s.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 35_892,
+                owner_id: struct_owner_corp,
+                location_id: acl_struct_id,
+                flag: InventoryFlag::from_u16(164),
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        s.module_online_states.insert(mod_id, true);
+
+        let mut ext = load_ext_state(s);
+        ext.owner_groups.insert(
+            9140,
+            AccessGroupRecord {
+                group_id: 9140,
+                creator_id: permitted_seller_id,
+                owner_corp_id: struct_owner_corp,
+                name: "OnlyPermittedSeller".into(),
+                description: String::new(),
+                members: HashMap::from([(permitted_seller_id, 0)]),
+            },
+        );
+        let mut prof = StructureAccessProfile {
+            profile_id: 9140,
+            corp_only: false,
+            ..Default::default()
+        };
+        prof.service_acl_rules.insert(SETTING_MARKET_TAX, vec![(9140, 100)]);
+        ext.access_profiles.insert(acl_struct_id, prof);
+        save_ext_state(s, &ext);
+
+        // denied_seller_id has 0 vault PLEX and 0 hangar PLEX, but 5 PLEX held in an unswept expired sell order.
+        s.market_orders.insert(
+            expired_plex_sell_oid,
+            MarketOrderRecord {
+                order_id: expired_plex_sell_oid,
+                owner_id: denied_seller_id,
+                station_id: 60_008_494, // Amarr
+                region_id: 10_000_043,
+                type_id: PLEX_TYPE_ID,
+                is_bid: false,
+                price: IskCents::from_isk(5_100_000),
+                vol_entered: 5,
+                vol_remaining: 5,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        save_market_order_meta(
+            s,
+            expired_plex_sell_oid,
+            MarketOrderMeta {
+                range: -1,
+                duration: 1,
+                issue_unix: now.saturating_sub(2 * 86_400),
+                order_state: None,
+                account_key: None,
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+
+        // Active bid at ACL-restricted structure only visible/fillable by permitted_seller_id.
+        s.market_orders.insert(
+            acl_bid_oid,
+            MarketOrderRecord {
+                order_id: acl_bid_oid,
+                owner_id: 90_000_003,
+                station_id: acl_struct_id,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: PLEX_TYPE_ID,
+                is_bid: true,
+                price: IskCents::from_isk(4_900_000),
+                vol_entered: 10,
+                vol_remaining: 10,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(49_000_000),
+            },
+        );
+        save_market_order_meta(
+            s,
+            acl_bid_oid,
+            MarketOrderMeta {
+                range: -1,
+                duration: 90,
+                issue_unix: now,
+                order_state: None,
+                account_key: None,
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+    });
+
+    let mut denied_sess = jita_session(denied_seller_id, 1_000_009);
+    // Asking for 6 PLEX when only 5 is in the expired sell order must reject pre-sweep cleanly.
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut denied_sess,
+            "marketProxy",
+            "PlacePlexSellOrder",
+            &[PyRep::Real(4_800_000.0), PyRep::Integer(6), PyRep::Integer(90)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InsufficientPlexBalance"
+    );
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&expired_plex_sell_oid].vol_remaining, 5);
+    });
+
+    // Selling 5 PLEX unlocks the unswept expired sell order via sweep, lists at Jita,
+    // AND must NOT cross the ACL-denied Upwell structure PLEX bid (`acl_bid_oid`).
+    let _ = handle(
+        &ctx,
+        &mut denied_sess,
+        "marketProxy",
+        "PlacePlexSellOrder",
+        &[PyRep::Real(4_800_000.0), PyRep::Integer(5), PyRep::Integer(90)],
+        &kw,
+    )
+    .unwrap()
+    .expect("PlacePlexSellOrder re-list from unswept expired sell order");
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&expired_plex_sell_oid].vol_remaining, 0);
+        assert_eq!(s.plex_vault_balance(denied_seller_id), 0);
+        assert_eq!(s.market_orders[&acl_bid_oid].vol_remaining, 10);
+        assert!(s.market_orders.values().any(|o| {
+            o.owner_id == denied_seller_id
+                && o.type_id == PLEX_TYPE_ID
+                && !o.is_bid
+                && o.station_id == JITA_STATION_ID
+                && o.vol_remaining == 5
+        }));
+    });
+
+    // Permitted seller in ACL group 9140 DOES match and fill the Upwell PLEX bid globally.
+    let mut permitted_sess = jita_session(permitted_seller_id, 1_000_009);
+    let _ = handle(
+        &ctx,
+        &mut permitted_sess,
+        "marketProxy",
+        "PlacePlexSellOrder",
+        &[PyRep::Real(4_800_000.0), PyRep::Integer(2), PyRep::Integer(90)],
+        &kw,
+    )
+    .unwrap()
+    .expect("ACL-permitted PlacePlexSellOrder crosses remote Upwell bid");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&acl_bid_oid].vol_remaining, 8);
+        assert_eq!(s.plex_vault_balance(permitted_seller_id), 3);
+    });
+}
+
 #[cfg(test)]
 #[path = "market_contracts_extra_unit_tests.rs"]
 mod market_contracts_extra_unit_tests;

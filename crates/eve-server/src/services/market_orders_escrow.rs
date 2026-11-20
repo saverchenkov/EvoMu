@@ -52,6 +52,7 @@ fn resolve_multi_sell_entry_source(
     quantity_i32: i32,
     sim_vault_plex: &mut i64,
     sim_item_qty: &mut HashMap<i64, i32>,
+    mut sim_expired_pool: Option<&mut HashMap<(i64, TypeId), i64>>,
 ) -> Result<Option<InventoryItemRecord>, BridgeRpcError> {
     let is_sellable_item = |i: &InventoryItemRecord| {
         market_orders_corp_auth::is_item_sellable_on_market(
@@ -99,6 +100,37 @@ fn resolve_multi_sell_entry_source(
             })
             .map(|i| i.item_id);
         let Some(fid) = found_id else {
+            if let Some(pool_map) = sim_expired_pool.as_deref_mut() {
+                let target_owner = if use_corp { caller_corp_id } else { char_id };
+                let target_flag = if use_corp { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
+                let merge_stack = snap.items.values().find(|i| {
+                    i.type_id == type_id
+                        && i.owner_id == target_owner
+                        && i.location_id == station_id
+                        && i.flag == target_flag
+                        && !i.singleton
+                        && is_sellable_item(i)
+                        && !is_courier_item(i.item_id)
+                        && !snap.items.values().any(|other| {
+                            other.item_id != i.item_id && other.location_id == i.item_id && other.quantity > 0
+                        })
+                });
+                let stack_avail = merge_stack.map(effective_qty).unwrap_or(0);
+                let pool_avail = pool_map.get(&(station_id, type_id)).copied().unwrap_or(0);
+                if (stack_avail as i64).saturating_add(pool_avail) >= quantity_i32 as i64 {
+                    let from_stack = stack_avail.min(quantity_i32);
+                    let from_pool = (quantity_i32 - from_stack) as i64;
+                    if let Some(st) = merge_stack {
+                        sim_item_qty.insert(st.item_id, stack_avail - from_stack);
+                    }
+                    if from_pool > 0 {
+                        if let Some(p) = pool_map.get_mut(&(station_id, type_id)) {
+                            *p -= from_pool;
+                        }
+                    }
+                    return Ok(None);
+                }
+            }
             if snap
                 .items
                 .values()
@@ -200,6 +232,35 @@ fn resolve_multi_sell_entry_source(
     }
     let rem_qty = effective_qty(item);
     if rem_qty < quantity_i32 {
+        if let Some(pool_map) = sim_expired_pool {
+            let target_owner = if use_corp { caller_corp_id } else { char_id };
+            let target_flag = if use_corp { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
+            let sole_merge_target = item.owner_id == target_owner
+                && item.location_id == station_id
+                && item.flag == target_flag
+                && snap
+                    .items
+                    .values()
+                    .filter(|i| {
+                        i.owner_id == target_owner
+                            && i.location_id == station_id
+                            && i.flag == target_flag
+                            && i.type_id == type_id
+                            && !i.singleton
+                    })
+                    .count()
+                    == 1;
+            let need = (quantity_i32 - rem_qty) as i64;
+            if sole_merge_target {
+                if let Some(pool_rem) = pool_map.get_mut(&(station_id, type_id)) {
+                    if *pool_rem >= need {
+                        *pool_rem -= need;
+                        sim_item_qty.insert(item_id, 0);
+                        return Ok(Some(item.clone()));
+                    }
+                }
+            }
+        }
         return Err(BridgeRpcError {
             code: "InsufficientInventoryForSellOrder".into(),
             message: format!(
@@ -308,6 +369,44 @@ fn validate_multi_sell_station_and_items(
     )?;
     let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
     let mut sim_vault_plex = snap.plex_vault_balance(char_id);
+    if !use_corp {
+        sim_vault_plex = sim_vault_plex.saturating_add(
+            crate::services::market_contracts::pending_expired_personal_plex_sell_refund(
+                snap, char_id, now_unix,
+            ),
+        );
+    }
+    let can_take_corp_deliveries = !use_corp
+        || (caller_corp_id > 0
+            && snap.corporations.contains_key(&caller_corp_id)
+            && {
+                let (is_ceo, eff_roles) =
+                    market_orders_corp_auth::effective_corp_roles_at_station_in_snap(
+                        snap, caller_corp_id, char_id, docked_station_id, now_unix,
+                    );
+                is_ceo
+                    || eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_DIRECTOR)
+                    || eve_db::corp_roles::has_role(
+                        eff_roles,
+                        eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE,
+                    )
+            });
+    let mut sim_expired_pool: HashMap<(i64, TypeId), i64> = HashMap::new();
+    let expected_owner = if use_corp { caller_corp_id } else { char_id };
+    if expected_owner > 0 && can_take_corp_deliveries {
+        for o in snap.market_orders.values() {
+            if !o.is_bid
+                && o.owner_id == expected_owner
+                && o.station_id == docked_station_id
+                && o.vol_remaining > 0
+                && (use_corp || o.type_id != crate::services::market_contracts::PLEX_TYPE_ID)
+                && crate::services::market_contracts::is_order_expired(snap, o, now_unix)
+            {
+                *sim_expired_pool.entry((o.station_id, o.type_id)).or_insert(0) +=
+                    o.vol_remaining as i64;
+            }
+        }
+    }
     let mut sim_item_qty = HashMap::new();
     for &(station_id, type_id, raw_item_id, order_price, quantity_i32, _) in parsed_items {
         let _ = checked_order_total(order_price, quantity_i32)?;
@@ -326,6 +425,7 @@ fn validate_multi_sell_station_and_items(
             quantity_i32,
             &mut sim_vault_plex,
             &mut sim_item_qty,
+            Some(&mut sim_expired_pool),
         )?;
     }
     Ok(())
@@ -694,6 +794,7 @@ pub fn handle_orders_escrow(
                         quantity_i32,
                         &mut live_vault_unused,
                         &mut empty_sim,
+                        None,
                     )?;
                     if let Some(item) = resolved_item {
                         let item_id = item.item_id;
@@ -743,11 +844,12 @@ pub fn handle_orders_escrow(
                         .market_orders
                         .values()
                         .filter(|o| {
-                            let struct_ok = if o.station_id == station_id {
-                                true
-                            } else {
-                                crate::services::market_trading::is_structure_market_online(snap, o.station_id)
-                            };
+                            let struct_ok = o.station_id == station_id
+                                || !snap.structures.contains_key(&o.station_id)
+                                || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                                    ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
+                                )
+                                .is_ok();
                             let in_scope = if type_id == crate::services::market_contracts::PLEX_TYPE_ID {
                                 true
                             } else {
@@ -1881,7 +1983,9 @@ pub fn handle_orders_escrow(
                     client_error: None,
                 }));
             };
-            let type_id = raw_type_id as TypeId;
+            let Ok(type_id) = TypeId::try_from(raw_type_id) else {
+                return Some(Ok(DBRowDescriptor::market_history_header().build_crowset(Vec::new())));
+            };
 
             let now_unix = ctx.now_unix();
             let is_old = method == "GetOldPriceHistory";
