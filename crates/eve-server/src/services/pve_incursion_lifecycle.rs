@@ -956,7 +956,7 @@ pub fn collect_all_world_event_tales(
 ) -> Vec<PyRep> {
     let now_sec = ctx.now_unix();
     let now_ft = ((now_sec + 11_644_473_600) * 10_000_000) as i64;
-    let mut out = with_pve_special_reg(ctx, |reg| {
+    let mut out = crate::services::pve_special_sites::with_readonly_pve_special_reg(ctx, |reg| {
         let mut out = Vec::new();
 
         // 1. Sansha Incursion tales (templateID = 5158)
