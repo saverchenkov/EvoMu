@@ -4335,3 +4335,291 @@ async fn is_disconnected_ship_valid_queries_reconnect_hold_post_session_read() {
         "cluster_tick must prune disconnected_ships once ReconnectHoldGuard drops while S2 holds online lock"
     );
 }
+
+#[test]
+fn populate_persisted_space_objects_preserves_bonused_ship_hp_and_fitted_bonuses_after_restart() {
+    let ctx = ServerContext::new();
+    let char_a = 90_000_001_i64;
+    let char_b = 90_000_002_i64;
+    let sys_id = 30_000_142_u32;
+    let venture_type_id = 32_880_u32;
+    let now_unix = ctx.db.clock().now_unix_secs();
+
+    let ship_a = 8_814_530_001_i64;
+    let ship_b = 8_814_530_002_i64;
+    let abandoned_ship = 8_814_530_003_i64;
+    let extender_b = 8_814_530_101_i64;
+    let plate_b = 8_814_530_102_i64;
+    let extender_ab = 8_814_530_201_i64;
+    let plate_ab = 8_814_530_202_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [char_a, char_b] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.clone_grade = 2; // Omega: un-capped level 5 HP skills
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.solar_system_id = sys_id;
+            }
+            for skill_id in [3419_u32, 3394, 3392] {
+                snap.skills.entry(cid).or_default().insert(
+                    skill_id,
+                    eve_db::TrainedSkillRecord {
+                        type_id: skill_id,
+                        level: 5,
+                        skill_points: 256_000.0,
+                    },
+                );
+            }
+        }
+        snap.characters.get_mut(&char_a).unwrap().active_ship_id = ship_a;
+        snap.characters.get_mut(&char_b).unwrap().active_ship_id = ship_b;
+
+        for (item_id, owner_id, location_id, type_id, flag) in [
+            (ship_a, char_a, sys_id as i64, venture_type_id, InventoryFlag::None),
+            (ship_b, char_b, sys_id as i64, venture_type_id, InventoryFlag::None),
+            (abandoned_ship, char_a, sys_id as i64, venture_type_id, InventoryFlag::None),
+            (extender_b, char_b, ship_b, 377_u32, InventoryFlag::MedSlot0),
+            (plate_b, char_b, ship_b, 11_295_u32, InventoryFlag::LoSlot0),
+            (extender_ab, char_a, abandoned_ship, 377_u32, InventoryFlag::MedSlot0),
+            (plate_ab, char_a, abandoned_ship, 11_295_u32, InventoryFlag::LoSlot0),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id,
+                    location_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        for mod_id in [extender_b, plate_b, extender_ab, plate_ab] {
+            snap.module_online_states.insert(mod_id, true);
+        }
+        snap.item_positions.insert(abandoned_ship, [25_000.0, 0.0, 0.0]);
+
+        let st = snap.sp6_lifecycle.as_inner_mut();
+        st.disconnected_ships.insert(
+            char_a,
+            DisconnectedShipEntry {
+                char_id: char_a,
+                ship_id: ship_a,
+                ship_type_id: venture_type_id,
+                solar_system_id: sys_id,
+                disconnected_at_unix: now_unix,
+                remove_at_unix: now_unix + 60,
+                emergency_warp_dest: None,
+                last_position: [10_000.0, 0.0, 0.0],
+                last_velocity: [0.0, 0.0, 0.0],
+                removed_from_space: false,
+                pre_warp_position: None,
+            },
+        );
+        st.disconnected_ships.insert(
+            char_b,
+            DisconnectedShipEntry {
+                char_id: char_b,
+                ship_id: ship_b,
+                ship_type_id: venture_type_id,
+                solar_system_id: sys_id,
+                disconnected_at_unix: now_unix,
+                remove_at_unix: now_unix + 60,
+                emergency_warp_dest: None,
+                last_position: [15_000.0, 0.0, 0.0],
+                last_velocity: [0.0, 0.0, 0.0],
+                removed_from_space: false,
+                pre_warp_position: None,
+            },
+        );
+        // Venture base SDE: 225 / 175 / 200; level 5 skills (1.25x): 281.25 / 218.75 / 250.0.
+        st.ship_combat_hp.insert(
+            ship_a,
+            PersistedCombatHp {
+                shield_hp: 281.25,
+                armor_hp: 218.75,
+                hull_hp: 250.0,
+            },
+        );
+        st.ship_combat_hp.insert(
+            -ship_a,
+            PersistedCombatHp {
+                shield_hp: 1.0 + 180.0,
+                armor_hp: 0.0,
+                hull_hp: 0.0,
+            },
+        );
+        // Ship B has Small Shield Extender I (+400) + 200mm Steel Plates I (+450) -> 781.25 / 781.25 / 250.0.
+        st.ship_combat_hp.insert(
+            ship_b,
+            PersistedCombatHp {
+                shield_hp: 500.0,
+                armor_hp: 999_999.0, // must clamp at bonused 781.25, NOT unbonused 175.0
+                hull_hp: 240.0,
+            },
+        );
+        // Abandoned ship (unpiloted -> module bonuses only: 625.0 / 625.0 / 200.0).
+        st.ship_combat_hp.insert(
+            abandoned_ship,
+            PersistedCombatHp {
+                shield_hp: 625.0,
+                armor_hp: 500.0,
+                hull_hp: 200.0,
+            },
+        );
+    });
+
+    let mut ballpark = Ballpark::new(sys_id);
+    let _ = populate_persisted_space_objects(&mut ballpark, sys_id, &ctx.sde, &ctx.db);
+
+    let cs_a = ballpark.combat_states.get(&ship_a).expect("ship_a restored");
+    assert!((cs_a.max_shield_hp - 281.25).abs() < 1e-6, "got {}", cs_a.max_shield_hp);
+    assert!((cs_a.shield_hp - 281.25).abs() < 1e-6, "full bonused shield must not clamp to 225.0 (#1453)");
+    assert!((cs_a.max_armor_hp - 218.75).abs() < 1e-6, "got {}", cs_a.max_armor_hp);
+    assert!((cs_a.armor_hp - 218.75).abs() < 1e-6, "full bonused armor must not clamp to 175.0 (#1453)");
+    assert!((cs_a.max_structure_hp - 250.0).abs() < 1e-6, "got {}", cs_a.max_structure_hp);
+    assert!((cs_a.structure_hp - 250.0).abs() < 1e-6, "full bonused hull must not clamp to 200.0 (#1453)");
+    assert!((cs_a.capacitor - 180.0).abs() < 1e-6, "persisted capacitor metadata must restore");
+
+    let cs_b = ballpark.combat_states.get(&ship_b).expect("ship_b restored");
+    assert!((cs_b.max_shield_hp - 781.25).abs() < 1e-6, "got {}", cs_b.max_shield_hp);
+    assert!((cs_b.shield_hp - 500.0).abs() < 1e-6, "damaged bonused shield preserved");
+    assert!((cs_b.max_armor_hp - 781.25).abs() < 1e-6, "got {}", cs_b.max_armor_hp);
+    assert!((cs_b.armor_hp - 781.25).abs() < 1e-6, "overcap clamps to bonused armor max");
+    assert!((cs_b.max_structure_hp - 250.0).abs() < 1e-6);
+    assert!((cs_b.structure_hp - 240.0).abs() < 1e-6);
+
+    let cs_ab = ballpark
+        .combat_states
+        .get(&abandoned_ship)
+        .expect("abandoned ship restored");
+    assert!((cs_ab.max_shield_hp - 625.0).abs() < 1e-6, "got {}", cs_ab.max_shield_hp);
+    assert!((cs_ab.shield_hp - 625.0).abs() < 1e-6);
+    assert!((cs_ab.max_armor_hp - 625.0).abs() < 1e-6, "got {}", cs_ab.max_armor_hp);
+    assert!((cs_ab.armor_hp - 500.0).abs() < 1e-6);
+    assert!((cs_ab.max_structure_hp - 200.0).abs() < 1e-6);
+}
+
+#[test]
+fn populate_persisted_space_objects_reconstructs_mid_warp_phases_and_preserves_aligning_fixtures() {
+    let ctx = ServerContext::new();
+    let sys_id = 30_000_142_u32;
+    let venture_type_id = 32_880_u32; // warp speed = 5.0 AU/s (k_a = 5.0, k_d = 5.0/3.0), max_vel = 335.0
+    let now_unix = ctx.db.clock().now_unix_secs();
+
+    let cruise_char = 90_145_401_i64;
+    let cruise_ship = 8_814_540_001_i64;
+    let decel_char = 90_145_402_i64;
+    let decel_ship = 8_814_540_002_i64;
+    let accel_char = 90_145_403_i64;
+    let accel_ship = 8_814_540_003_i64;
+    let align_char = 90_145_404_i64;
+    let align_ship = 8_814_540_004_i64;
+
+    let origin = DVec3::new(0.0, 0.0, 0.0);
+    let dest = DVec3::new(50.0 * AU_METERS, 0.0, 0.0);
+    let dir = DVec3::X;
+
+    let v_cruise = 5.0 * AU_METERS;
+    let cruise_pos = origin + dir * (10.0 * AU_METERS);
+    // Final-second deceleration window: k_d = 5/3, rem_dist = 150.0 -> rem_plus_1 * k_d = 251.6667 m/s < max_vel (335.0)
+    let decel_pos = dest - dir * 150.0;
+    let decel_speed = 151.0 * (5.0 / 3.0);
+    // Accelerating phase: speed well above max_vel (50_000 m/s) and far from decel threshold
+    let accel_pos = origin + dir * 20_000.0;
+    let align_pos = origin + dir * 500_000.0;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
+        for (cid, sid, pos, vel, pre_warp) in [
+            (cruise_char, cruise_ship, cruise_pos, [v_cruise, 0.0, 0.0], None),
+            (decel_char, decel_ship, decel_pos, [decel_speed, 0.0, 0.0], Some(origin.to_array())),
+            (accel_char, accel_ship, accel_pos, [50_000.0, 0.0, 0.0], Some(origin.to_array())),
+            (align_char, align_ship, align_pos, [0.0, 0.0, 0.0], Some(origin.to_array())),
+        ] {
+            st.disconnected_ships.insert(
+                cid,
+                DisconnectedShipEntry {
+                    char_id: cid,
+                    ship_id: sid,
+                    ship_type_id: venture_type_id,
+                    solar_system_id: sys_id,
+                    disconnected_at_unix: now_unix,
+                    remove_at_unix: now_unix + 60,
+                    emergency_warp_dest: Some(dest.to_array()),
+                    last_position: pos.to_array(),
+                    last_velocity: vel,
+                    removed_from_space: false,
+                    pre_warp_position: pre_warp,
+                },
+            );
+        }
+    });
+
+    let mut ballpark = Ballpark::new(sys_id);
+    let _ = populate_persisted_space_objects(&mut ballpark, sys_id, &ctx.sde, &ctx.db);
+
+    let b_cruise = ballpark.balls.get(&cruise_ship).expect("cruise ship restored").clone();
+    assert!(
+        matches!(b_cruise.mode, MovementMode::Warp { phase: WarpPhase::Cruising, .. }),
+        "expected Cruising, got {:?}",
+        b_cruise.mode
+    );
+    assert!((b_cruise.velocity.x - v_cruise).abs() < 1.0);
+    assert!((b_cruise.speed_fraction - 1.0).abs() < 1e-6);
+    assert!(!ballpark.combat_states[&cruise_ship].is_emergency_warping);
+
+    let b_decel = ballpark.balls.get(&decel_ship).expect("decel ship restored").clone();
+    assert!(
+        matches!(b_decel.mode, MovementMode::Warp { phase: WarpPhase::Decelerating, .. }),
+        "expected Decelerating even when speed <= max_vel in final second, got {:?}",
+        b_decel.mode
+    );
+    assert!((b_decel.velocity.x - decel_speed).abs() < 1e-3);
+    assert!((b_decel.speed_fraction - 1.0).abs() < 1e-6);
+    assert!(ballpark.combat_states[&decel_ship].is_emergency_warping);
+
+    let b_accel = ballpark.balls.get(&accel_ship).expect("accel ship restored").clone();
+    assert!(
+        matches!(b_accel.mode, MovementMode::Warp { phase: WarpPhase::Accelerating, .. }),
+        "expected Accelerating, got {:?}",
+        b_accel.mode
+    );
+    assert!((b_accel.velocity.x - 50_000.0).abs() < 1e-3);
+    assert!((b_accel.speed_fraction - 1.0).abs() < 1e-6);
+
+    let b_align = ballpark.balls.get(&align_ship).expect("align fixture preserved").clone();
+    assert!(
+        matches!(b_align.mode, MovementMode::Warp { phase: WarpPhase::Aligning, .. }),
+        "zero last_velocity fixture must still restore Aligning, got {:?}",
+        b_align.mode
+    );
+    assert_eq!(b_align.velocity, DVec3::ZERO);
+
+    // Stepping ballpark 1s advances cruise ship smoothly without resetting to Aligning and
+    // lands the decelerating ship cleanly with zero exit velocity.
+    ballpark.step(1.0);
+    let post_cruise = &ballpark.balls[&cruise_ship];
+    assert!(matches!(post_cruise.mode, MovementMode::Warp { phase: WarpPhase::Cruising, .. }));
+    assert!(
+        post_cruise.position.x > cruise_pos.x,
+        "cruising warp must continue advancing after restart"
+    );
+
+    let mut decel_landed = false;
+    for _ in 0..5 {
+        if matches!(ballpark.balls[&decel_ship].mode, MovementMode::Stop) {
+            decel_landed = true;
+            break;
+        }
+        ballpark.step(1.0);
+    }
+    assert!(decel_landed, "decelerating restored warp must complete cleanly");
+    assert_eq!(ballpark.balls[&decel_ship].velocity, DVec3::ZERO);
+}
+
