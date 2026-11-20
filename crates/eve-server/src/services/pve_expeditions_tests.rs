@@ -536,6 +536,22 @@ async fn expired_unpruned_escalation_cannot_resurrect_or_drop_final_loot_via_ste
         .systems
         .get_handle(entry1.destination_solar_system_id)
         .expect("dest1 handle");
+    let uid = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id).unwrap_or(1));
+    let _ = ctx.db.acquire_online_lock_with_computer_hash(
+        uid,
+        char_id as u64,
+        Some(char_id),
+        None,
+        true,
+        1_775_600_000,
+    );
+    let _ = ctx.db.set_character_solar_system(
+        char_id,
+        entry1.destination_solar_system_id,
+        &ctx.sde,
+    );
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // Advance clock past expiry WITHOUT calling get_my_escalating_path_details_rowset.

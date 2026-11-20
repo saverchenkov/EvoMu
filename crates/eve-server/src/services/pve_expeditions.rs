@@ -752,12 +752,16 @@ pub async fn advance_expedition_step_core(
     );
 
     if let Some(expired_entry) = expired_pruned {
-        let expired_by_char = [(char_id, vec![expired_entry], remaining_active_targets)];
-        let despawn_batches =
-            despawn_expired_escalations_in_db(db, &expired_by_char, site_npc_batches);
-        if !despawn_batches.is_empty() {
-            despawn_escalation_balls_in_loaded_systems(systems, despawn_batches).await;
-        }
+        finalize_expired_escalation_pruning_core(
+            db,
+            systems,
+            PrunedEscalationsCleanup {
+                expired_by_char: vec![(char_id, vec![expired_entry], remaining_active_targets)],
+                site_npc_batches,
+            },
+            Vec::new(),
+        )
+        .await;
         return Ok(None);
     }
 

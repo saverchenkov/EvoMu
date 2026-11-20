@@ -308,10 +308,7 @@ pub(crate) fn expire_and_prune_site_in_reg(
 ) -> Option<ExpiredSitePruneResult> {
     let (exp_inst_id, drained_balls) = {
         let sites = reg.sites_by_system.get_mut(&solar_system_id)?;
-        let site = sites
-            .iter_mut()
-            .find(|s| !s.cleared && s.site_id == target_site_id)
-            .or_else(|| sites.iter_mut().find(|s| s.site_id == target_site_id))?;
+        let site = find_site_by_canonical_id_mut(sites, target_site_id)?;
         let exp_inst_id = site.expedition_instance_id;
         site.cleared = true;
         let balls: Vec<i64> = site.active_npc_ball_ids.drain(..).collect();
@@ -481,6 +478,18 @@ pub(crate) fn find_site_by_id_or_dungeon_mut<'a>(
     now: u64,
 ) -> Option<&'a mut PveSiteInstance> {
     find_site_index_by_id_or_dungeon(sites, site_id, now).map(|idx| &mut sites[idx])
+}
+
+/// Matches strictly by canonical `site_id`, preferring uncleared entries over cleared ones.
+fn find_site_by_canonical_id_mut<'a>(
+    sites: &'a mut [PveSiteInstance],
+    site_id: &str,
+) -> Option<&'a mut PveSiteInstance> {
+    let idx = sites
+        .iter()
+        .position(|s| !s.cleared && s.site_id == site_id)
+        .or_else(|| sites.iter().position(|s| s.site_id == site_id))?;
+    Some(&mut sites[idx])
 }
 
 pub fn next_pve_seq(reg: &mut PveExplorationRegistry) -> i64 {
@@ -1318,11 +1327,11 @@ pub async fn advance_site_wave_or_complete(
             let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
         }
         with_pve_exploration_reg(ctx, |reg| {
-            if let Some(site) = reg.sites_by_system.get_mut(&solar_system_id).and_then(|l| {
-                l.iter_mut()
-                    .find(|s| !s.cleared && s.site_id == canonical_site_id)
-                    .or_else(|| l.iter_mut().find(|s| s.site_id == canonical_site_id))
-            }) {
+            if let Some(site) = reg
+                .sites_by_system
+                .get_mut(&solar_system_id)
+                .and_then(|l| find_site_by_canonical_id_mut(l, &canonical_site_id))
+            {
                 site.active_npc_ball_ids = spawned_npc_ids.clone();
             }
         });
