@@ -4280,7 +4280,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     };
     let kw = HashMap::new();
 
-    // 1. Burst Jammer in highsec with Green safety fails upfront and preserves undock invuln + gate cloak.
+    // 1. Burst Jammer in highsec with Green safety fails upfront and preserves undock invuln + location_change_invuln + gate cloak.
     sys.set_combat_state(
         ship_id,
         CombatState {
@@ -4294,6 +4294,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     )
     .await
     .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(char_id);
     let burst_err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(burst_id)], &kw)
         .await
@@ -4304,12 +4305,13 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     assert!(cs_burst.is_cloaked);
     assert_eq!(cs_burst.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_burst.undock_invulnerable_remaining_ticks, 15);
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
     assert!((cs_burst.capacitor - 200.0).abs() < 1e-6);
     assert!(!sys.has_module_cycle(ship_id, burst_id).await);
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 
     // 2. Targeted Stasis Webifier fails read-only Crimewatch safety precheck before add_module_cycle,
-    //    preserving undock_invuln, capacitor, and gate cloak with zero notifications.
+    //    preserving undock_invuln, location_change_invuln, capacitor, and gate cloak with zero notifications.
     let web_args = [
         PyRep::Integer(web_id),
         PyRep::String("activate".into()),
@@ -4331,6 +4333,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
         )
         .await
         .unwrap();
+        crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
         let _ = ctx.drain_notifications_for_char(char_id);
         let web_err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &web_args, &kw)
             .await
@@ -4341,12 +4344,13 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
         assert_eq!(cs_after.undock_invulnerable_remaining_ticks, 15);
         assert_eq!(cs_after.gate_cloak_remaining_ticks, gate_ticks);
         assert_eq!(cs_after.is_cloaked, cloaked);
+        assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
         assert!((cs_after.capacitor - 200.0).abs() < 1e-6);
         assert!(!sys.has_module_cycle(ship_id, web_id).await);
         assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
     }
 
-    // 3. Red safety allows the Webifier to commit, deducts cap, adds cycle, and breaks gate cloak + undock invuln.
+    // 3. Red safety allows the Webifier to commit, deducts cap, adds cycle, and breaks gate cloak + undock invuln + location_change_invuln (single OnInvulnCancelled).
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
     });
@@ -4360,11 +4364,12 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     assert!(!cs_ok.is_cloaked);
     assert_eq!(cs_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_ok.undock_invulnerable_remaining_ticks, 0);
+    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
     assert!((cs_ok.capacitor - 175.0).abs() < 1e-6);
     assert!(sys.has_module_cycle(ship_id, web_id).await);
     let commit_notes = ctx.drain_notifications_for_char(char_id);
     assert!(commit_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
-    assert!(commit_notes.iter().any(|n| n.event == "OnInvulnCancelled"));
+    assert_eq!(commit_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
 }
 
 #[tokio::test]
@@ -4476,6 +4481,8 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
     let rsb_tid = 996_041_u32;
     let arsb_tid = 996_697_u32;
     let rct_tid = 996_067_u32;
+    let rtc_tid = 996_209_u32;
+    let rsb_ewar_tid = 996_290_u32;
     let tp_tid = 996_379_u32;
     let tractor_tid = 996_650_u32;
     let wreck_tid = 996_999_u32;
@@ -4532,6 +4539,32 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
         );
         rct_t.effect_ids = vec![13, 16];
         sde.types.insert(rct_tid, rct_t);
+
+        let mut rtc_t = custom_inv_type(
+            sde,
+            rtc_tid,
+            209,
+            7,
+            5.0,
+            0.0,
+            "Test Remote Tracking Computer I",
+            &[(6, 20.0), (54, 15_000.0), (73, 5_000.0)],
+        );
+        rtc_t.effect_ids = vec![13, 16];
+        sde.types.insert(rtc_tid, rtc_t);
+
+        let mut rsb_ewar_t = custom_inv_type(
+            sde,
+            rsb_ewar_tid,
+            290,
+            7,
+            5.0,
+            0.0,
+            "Test Remote Sensor Booster I",
+            &[(6, 20.0), (54, 15_000.0), (73, 5_000.0)],
+        );
+        rsb_ewar_t.effect_ids = vec![13, 16];
+        sde.types.insert(rsb_ewar_tid, rsb_ewar_t);
 
         let mut tp_t = custom_inv_type(
             sde,
@@ -4749,7 +4782,7 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
         assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
     }
 
-    // 2. Highsec Green safety blocks remote assistance (41, 1697, 67) onto a Suspect pilot
+    // 2. Highsec Green safety blocks remote assistance (41, 1697, 67, 209, 290) onto a Suspect pilot
     //    with zero target shield_hp / capacitor mutation.
     {
         let mut cw = ctx.crimewatch.write().unwrap();
@@ -4759,6 +4792,8 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
         (41_u32, rsb_tid, "Remote Shield Booster"),
         (1697_u32, arsb_tid, "Ancillary Remote Shield Booster"),
         (67_u32, rct_tid, "Remote Cap Transmitter"),
+        (209_u32, rtc_tid, "Remote Tracking Computer"),
+        (290_u32, rsb_ewar_tid, "Remote Sensor Booster"),
     ] {
         reset_states().await;
         ctx.db.with_mut_snapshot(|snap| {
@@ -5120,6 +5155,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     )
     .await
     .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(char_id);
     handle_module_cycles(
         &ctx,
@@ -5135,12 +5171,13 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     .expect("non-gate undock invuln Web commit must succeed");
     let cs_web = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(cs_web.undock_invulnerable_remaining_ticks, 0);
+    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
     let notes_web = ctx.drain_notifications_for_char(char_id);
-    assert!(notes_web.iter().any(|n| n.event == "OnInvulnCancelled"));
+    assert_eq!(notes_web.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!notes_web.iter().any(|n| n.event == "OnJumpCloakCancelled"));
 
-    // 2. Undocked without gate cloak via delegated finish_space_activation / break_gate_cloak_on_space_action
-    //    (fitting_module_cycles_guards.rs:130) clears undock_invuln and emits OnInvulnCancelled.
+    // 2. Undocked without gate cloak via delegated finish_space_activation / commit_space_action_cloak_and_invuln_break
+    //    clears undock_invuln + location_change_invuln and emits single OnInvulnCancelled.
     sys.set_combat_state(
         ship_id,
         CombatState {
@@ -5154,6 +5191,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     )
     .await
     .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(char_id);
     handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(tsb_id)], &kw)
         .await
@@ -5161,12 +5199,13 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
         .expect("delegated TSB commit with non-gate undock invuln must succeed");
     let cs_tsb = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(cs_tsb.undock_invulnerable_remaining_ticks, 0);
+    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
     let notes_tsb = ctx.drain_notifications_for_char(char_id);
-    assert!(notes_tsb.iter().any(|n| n.event == "OnInvulnCancelled"));
+    assert_eq!(notes_tsb.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!notes_tsb.iter().any(|n| n.event == "OnJumpCloakCancelled"));
 
-    // 3. light_cyno with NotEnoughFuel preserves gate cloak & undock invuln (no notifications, no cycle, no beacon);
-    //    lighting with Liquid Ozone clears undock_invuln + gate cloak and emits OnInvulnCancelled + OnJumpCloakCancelled.
+    // 3. light_cyno with NotEnoughFuel preserves gate cloak, undock invuln & location_change_invuln (no notifications, no cycle, no beacon);
+    //    lighting with Liquid Ozone clears undock_invuln + location_change_invuln + gate cloak and emits single OnInvulnCancelled + OnJumpCloakCancelled.
     sys.set_combat_state(
         ship_id,
         CombatState {
@@ -5180,6 +5219,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     )
     .await
     .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(char_id);
     let cyno_no_fuel = handle_module_cycles(
         &ctx,
@@ -5198,6 +5238,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     assert!(cs_cyno_err.is_cloaked);
     assert_eq!(cs_cyno_err.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_cyno_err.undock_invulnerable_remaining_ticks, 15);
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
     assert!(!sys.has_module_cycle(ship_id, cyno_mod_id).await);
     assert!(!crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(&ctx, ship_id));
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled" || n.event == "OnJumpCloakCancelled"));
@@ -5211,11 +5252,12 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     assert!(!cs_cyno_ok.is_cloaked);
     assert_eq!(cs_cyno_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_cyno_ok.undock_invulnerable_remaining_ticks, 0);
+    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
     let notes_cyno = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes_cyno.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(notes_cyno.iter().any(|n| n.event == "OnJumpCloakCancelled"));
 
-    // 4. Same light_cyno fuel rejection + commit for non-gate undock invuln (gate_cloak = 0, undock_invuln = 15).
+    // 4. Same light_cyno fuel rejection + commit for non-gate undock invuln (gate_cloak = 0, undock_invuln = 15) + location_change_invuln.
     sess.ship_id = Some(ship_no_cloak_id);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().active_ship_id = ship_no_cloak_id;
@@ -5233,6 +5275,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     )
     .await
     .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(char_id);
     let nc_err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(cyno_mod_nc_id)], &kw)
         .await
@@ -5240,6 +5283,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
         .expect_err("non-gate light_cyno without fuel must fail NotEnoughFuel");
     assert_eq!(nc_err.code, "NotEnoughFuel");
     assert_eq!(sys.get_combat_state(ship_no_cloak_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
 
     insert_item(&ctx, ozone_nc_id, 16_273, char_id, ship_no_cloak_id, InventoryFlag::Cargo, 1_000, false);
@@ -5248,9 +5292,171 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
         .unwrap()
         .expect("non-gate light_cyno with fuel must succeed");
     assert_eq!(sys.get_combat_state(ship_no_cloak_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 0);
+    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
     let notes_nc_ok = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes_nc_ok.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!notes_nc_ok.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+}
+
+#[tokio::test]
+async fn bf4_charge_skill_prerequisite_clears_projected_ewar_and_tp_sig_multiplier() {
+    let tp_tid = 996_479_u32;
+    let script_tid = 996_909_u32;
+    let missing_skill_tid = 999_001_u32;
+
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut tp_t = custom_inv_type(
+            sde,
+            tp_tid,
+            379,
+            7,
+            5.0,
+            5.0,
+            "Test Scripted Target Painter I",
+            &[
+                (6, 20.0),
+                (54, 20_000.0),
+                (73, 5_000.0),
+                (554, 30.0),
+                (604, 909.0),
+                (2044, 10_000.0),
+            ],
+        );
+        tp_t.effect_ids = vec![13, 16];
+        sde.types.insert(tp_tid, tp_t);
+
+        let script_t = custom_inv_type(
+            sde,
+            script_tid,
+            909,
+            8,
+            1.0,
+            0.0,
+            "Test Untrained Targeting Script",
+            &[(182, f64::from(missing_skill_tid)), (277, 1.0)],
+        );
+        sde.types.insert(script_tid, script_t);
+    });
+
+    let char_id = 97_994_201_i64;
+    let victim_char_id = 97_994_202_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 1_097_994_201_i64;
+    let victim_ship_id = 1_097_994_202_i64;
+    let tp_id = 1_097_994_203_i64;
+    let script_id = 1_097_994_204_i64;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    ensure_char(&ctx, victim_char_id, 98_000_002, sys_id, victim_ship_id);
+    let _ = ctx.db.acquire_online_lock(char_id as u64, 1, Some(char_id), true, ctx.now_unix());
+    insert_item(&ctx, ship_id, 587, char_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, victim_ship_id, 587, victim_char_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, tp_id, tp_tid, char_id, ship_id, InventoryFlag::MedSlot0, 1, true);
+    insert_item(&ctx, script_id, script_tid, char_id, ship_id, InventoryFlag::MedSlot0, 1, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(tp_id, true);
+    });
+    spawn_ship(&ctx, sys_id, ship_id, 587, char_id, 500.0).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: victim_ship_id,
+            type_id: 587,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 500.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            signature_radius: 40.0,
+            base_signature_radius: Some(40.0),
+            ..Default::default()
+        },
+        SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: victim_char_id,
+            char_id: Some(victim_char_id),
+            corp_id: 98_000_002,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sys.add_target_lock(
+        ship_id,
+        eve_destiny::TargetLock {
+            target_id: victim_ship_id,
+            lock_time_ms: 100.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: None,
+        },
+    )
+    .await
+    .unwrap();
+    sys.set_combat_state(
+        ship_id,
+        CombatState {
+            is_cloaked: true,
+            gate_cloak_remaining_ticks: 30,
+            undock_invulnerable_remaining_ticks: 15,
+            capacitor: 500.0,
+            max_capacitor: 500.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let err = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(tp_id), PyRep::String("activate".into()), PyRep::Integer(victim_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("loaded charge lacking trained skill prerequisite must reject");
+    assert_eq!(err.code, "SkillPrerequisitesNotMet");
+
+    let tgt_after = sys.get_combat_state(victim_ship_id).await.unwrap().unwrap();
+    assert!(tgt_after.tp_sig_multiplier.is_none());
+    assert!((ctx.effective_target_painter_multiplier(victim_ship_id) - 1.0).abs() < 1e-9);
+    assert!(ctx
+        .projected_ewar
+        .read()
+        .unwrap()
+        .get(&victim_ship_id)
+        .is_none_or(|v| v.is_empty()));
+    let att_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(att_after.is_cloaked);
+    assert_eq!(att_after.gate_cloak_remaining_ticks, 30);
+    assert_eq!(att_after.undock_invulnerable_remaining_ticks, 15);
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!sys.has_module_cycle(ship_id, tp_id).await);
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 }
 
 

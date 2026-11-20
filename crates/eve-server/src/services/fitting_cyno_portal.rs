@@ -818,18 +818,14 @@ async fn light_cyno(
             return Err(e);
         }
     }
-    if pre_undock_invuln_ticks > 0
-        && sys
-            .get_combat_state(ship_id)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|cs| cs.undock_invulnerable_remaining_ticks == 0)
-    {
-        crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
-            ctx, char_id, ship_id, false, true,
-        );
-    }
+    crate::services::inventory_fitting::fitting_module_cycles::commit_space_action_cloak_and_invuln_break(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        pre_undock_invuln_ticks,
+    )
+    .await;
 
     let ship_pos = sys.get_ball_position_sync(ship_id).unwrap_or(DVec3::ZERO);
     let spawn_radius = type_attr(ctx, mod_type, ATTR_CYNO_SPAWN_RADIUS);

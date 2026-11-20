@@ -132,26 +132,21 @@ pub(crate) async fn check_space_module_cloak_and_warp_readonly(
     Ok(())
 }
 
-/// Breaks any active gate cloak / undock invulnerability when a space action commits (`#494`, `#1351`).
+/// Breaks any active gate cloak, undock invulnerability, and post-jump
+/// `location_change_invuln` when a space action commits, emitting
+/// `OnInvulnCancelled` at most once (`#494`, `#1351`, `#1403`).
 pub(crate) async fn break_gate_cloak_on_space_action(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
     char_id: i64,
     ship_id: i64,
 ) {
-    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-        if cs.gate_cloak_remaining_ticks > 0 || cs.undock_invulnerable_remaining_ticks > 0 {
-            let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
-                ctx, sys, char_id, ship_id,
-            )
-            .await;
-        }
-    }
+    commit_space_action_cloak_and_invuln_break(ctx, sys, char_id, ship_id, 0).await;
 }
 
-/// Breaks remaining gate cloak or undock invulnerability on commit and ensures
-/// `OnInvulnCancelled` is emitted once even when `add_module_cycle` cleared
-/// `undock_invulnerable_remaining_ticks` prior to commit (`#1403`).
+/// Breaks remaining gate cloak, undock invulnerability, and `location_change_invuln`
+/// on commit, ensuring `OnInvulnCancelled` is emitted at most once even when
+/// `add_module_cycle` cleared `undock_invulnerable_remaining_ticks` prior to commit (`#1403`).
 pub(crate) async fn commit_space_action_cloak_and_invuln_break(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
@@ -159,14 +154,26 @@ pub(crate) async fn commit_space_action_cloak_and_invuln_break(
     ship_id: i64,
     pre_undock_invuln_ticks: u32,
 ) {
-    let post_cycle_still_invuln = sys
-        .get_combat_state(ship_id)
-        .await
-        .ok()
-        .flatten()
+    let had_location_invuln = ctx
+        .location_change_invuln
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&char_id)
+        .is_some_and(|until| ctx.now_unix() < until);
+    let cs_before = sys.get_combat_state(ship_id).await.ok().flatten();
+    let had_gate_cloak = cs_before
+        .as_ref()
+        .is_some_and(|cs| cs.gate_cloak_remaining_ticks > 0);
+    let still_had_tick_invuln = cs_before
+        .as_ref()
         .is_some_and(|cs| cs.undock_invulnerable_remaining_ticks > 0);
-    break_gate_cloak_on_space_action(ctx, sys, char_id, ship_id).await;
-    if pre_undock_invuln_ticks > 0 && !post_cycle_still_invuln {
+    if had_gate_cloak || still_had_tick_invuln {
+        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
+            ctx, sys, char_id, ship_id,
+        )
+        .await;
+    }
+    if !still_had_tick_invuln && (pre_undock_invuln_ticks > 0 || had_location_invuln) && ship_id > 0 {
         crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
             ctx, char_id, ship_id, false, true,
         );

@@ -2814,7 +2814,10 @@ fn is_targeted_aggression_cycle_group(group_id: u32) -> bool {
 }
 
 fn is_remote_assistance_cycle_group(group_id: u32) -> bool {
-    matches!(group_id, 41 | 67 | 325 | 585 | 1697 | 1698 | 2018)
+    matches!(
+        group_id,
+        41 | 67 | 209 | 290 | 325 | 585 | 1697 | 1698 | 2018
+    )
 }
 
 async fn is_target_pod(ctx: &ServerContext, sys: &SystemHandle, target_id: i64) -> bool {

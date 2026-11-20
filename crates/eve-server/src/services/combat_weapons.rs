@@ -429,7 +429,6 @@ pub async fn handle_weapons(
             })
             .await;
             if !controlling_structure && matches!(res, Some(Ok(_))) {
-                crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
                 crate::services::inventory_fitting::fitting_module_cycles::break_gate_cloak_on_space_action(
                     ctx, &sys_handle, char_id, ship_id,
                 )
