@@ -374,7 +374,7 @@ async fn test_c4_npc_spawn_groups_aggro_targeting_damage_types_loot_and_bounties
 
     // 2. Spawn group and Faction damage types (feat:npc.npc-damage-types)
     let spawned = spawn_mgr
-        .spawn_group(&ctx, sys_id, 1, spawn_pos)
+        .spawn_group(&ctx, sys_id, 56, spawn_pos)
         .await
         .expect("spawn_group");
     let npc_ball_id = spawned[0];

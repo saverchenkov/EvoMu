@@ -445,12 +445,12 @@ async fn test_c4_npc_spawns_ai_state_machine_and_dynamic_bounties() {
 
     let mut spawn_mgr = NpcSpawnManager::new();
 
-    // 1. Belt/gate spawn from SDE spawn group (e.g. spawn_group_id = 1)
+    // 1. Belt/gate spawn from SDE spawn group (e.g. mobile Asteroid Guristas Destroyer spawn_group_id = 56)
     let spawned_ids = spawn_mgr
-        .spawn_group(&ctx, sys_id, 1, belt_pos)
+        .spawn_group(&ctx, sys_id, 56, belt_pos)
         .await
         .expect("spawn_group");
-    assert!(!spawned_ids.is_empty(), "Must spawn NPC ships from SDE group 1");
+    assert!(!spawned_ids.is_empty(), "Must spawn NPC ships from SDE group 56");
 
     let npc_ball_id = spawned_ids[0];
     let npc_type_id = spawn_mgr.entities[&npc_ball_id].type_id;
@@ -541,7 +541,7 @@ async fn test_c4_npc_spawns_ai_state_machine_and_dynamic_bounties() {
     );
 
     // Verify 20-minute respawn cooldown was logged
-    assert!(spawn_mgr.respawn_timers.contains_key(&(sys_id, 1)));
+    assert!(spawn_mgr.respawn_timers.contains_key(&(sys_id, 56)));
 }
 
 

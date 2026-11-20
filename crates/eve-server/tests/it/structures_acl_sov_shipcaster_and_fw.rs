@@ -71,6 +71,14 @@ async fn relogin_with_role(ctx: &ServerContext, sess: &mut SessionState, usernam
     ctx.db.set_account_role(username, role).unwrap();
     crate::common::login_pilot(ctx, sess, username, secret_for(username)).await;
     refresh_session(ctx, sess, char_id).await;
+    // Re-authenticating via login_pilot while undocked disconnects the active character into an
+    // SP-6 emergency warp, and SelectCharacterID starts an Aligning return warp (#1454) that needs
+    // system Ballpark ticks to land because advance_secs only ticks disconnected systems.
+    if sess.station_id.is_none() && sess.structure_id.is_none() {
+        if let (Some(sys_id), Some(ship_id)) = (sess.solar_system_id, sess.ship_id) {
+            settle_warp(ctx, sys_id, ship_id).await;
+        }
+    }
 }
 
 async fn grant_skills_and_isk(ctx: &ServerContext, sess: &mut SessionState, username: &str, char_id: i64, skills: &[u32], isk: u64) {
@@ -102,12 +110,20 @@ async fn gm_tr(ctx: &ServerContext, sess: &mut SessionState, username: &str, cha
 
 async fn settle_warp(ctx: &ServerContext, sys_id: u32, ship_id: i64) {
     let sys = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..12 {
-        sys.step_manual(10.0).await.unwrap();
-        if sys.get_ball_snapshot(ship_id).await.unwrap().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) {
-            break;
+    for _ in 0..30 {
+        match sys.get_ball_snapshot(ship_id).await.unwrap() {
+            None => return,
+            Some((_, b)) if !matches!(b.mode, MovementMode::Warp { .. }) => break,
+            Some(_) => {
+                sys.step_manual(10.0).await.unwrap();
+            }
         }
     }
+    let mode = sys.get_ball_snapshot(ship_id).await.unwrap().map(|(_, b)| b.mode);
+    assert!(
+        !matches!(mode, Some(MovementMode::Warp { .. })),
+        "ship {ship_id} in system {sys_id} failed to exit warp during settle_warp: {mode:?}"
+    );
     let _ = sys.set_movement_mode(ship_id, MovementMode::Stop).await;
 }
 
