@@ -959,10 +959,17 @@ async fn probe_scanning_read_purity_and_docked_guards() {
     assert_eq!(ctx.db.state_epoch(), e0);
     assert_eq!(ctx.db.tx_commit_count(), c0);
 
-    // Undocked readout seeds once, then repeats are strictly read-pure
+    // Undocked GetAnomalies and GetFullState remain strictly read-pure on an unseeded system;
+    // GetSystemScanMgr seeds once when undocked with an active ship, then repeats are strictly read-pure.
     assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetAnomalies", &[], &kw).await.unwrap().is_ok());
+    assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetFullState", &[], &kw).await.unwrap().is_ok());
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, None, "scanMgr", "GetSystemScanMgr", &[], &kw).await.unwrap().is_ok());
     let e1 = ctx.db.state_epoch();
     let c1 = ctx.db.tx_commit_count();
+    assert!(e1 > e0 && c1 > c0, "GetSystemScanMgr undocked with active ship seeds unseeded system once");
     assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetAnomalies", &[], &kw).await.unwrap().is_ok());
     assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetFullState", &[], &kw).await.unwrap().is_ok());
     assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, None, "scanMgr", "GetSystemScanMgr", &[], &kw).await.unwrap().is_ok());
@@ -1514,4 +1521,182 @@ async fn docked_expired_signatures_and_pochven_and_scan_inhibitor_persist() {
         Some((target_dest, 2)),
         "scan-inhibited RequestScans early return must still persist moved probe state"
     );
+}
+
+#[tokio::test]
+async fn scan_mgr_negative_guards_and_read_purity_across_probes_and_getters() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let kw = HashMap::new();
+
+    // Seed an active probe owned by caller AND an overdue probe that pre-check errors must NOT expire/mutate.
+    let active_pid = 880_001_i64;
+    let overdue_pid = 880_002_i64;
+    let now_unix = ctx.now_unix();
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap();
+        map.insert(
+            active_pid,
+            ActiveScannerProbe {
+                probe_id: active_pid,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [0.0; 3],
+                destination: [0.0; 3],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 3_600.0,
+                launched_at_unix: now_unix,
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+        map.insert(
+            overdue_pid,
+            ActiveScannerProbe {
+                probe_id: overdue_pid,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [1_000.0, 0.0, 0.0],
+                destination: [1_000.0, 0.0, 0.0],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 10.0,
+                launched_at_unix: now_unix.saturating_sub(1_000),
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+    }
+
+    let foreign_bound = BoundObjectEntry {
+        bound_id: 901,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: 2_199_002,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("scanMgr:{sys_id}"),
+        ref_id: 901,
+    };
+    let own_bound = BoundObjectEntry {
+        character_id: char_id,
+        ..foreign_bound.clone()
+    };
+
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    // 1. Unseeded read getters (GetAnomalies, GetFullState) return default data transiently without mutating DB or expiring probes.
+    let PyRep::List(anom_rows) = handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&own_bound), "scanMgr", "GetAnomalies", &[], &kw)
+        .await
+        .unwrap()
+        .expect("undocked GetAnomalies")
+    else {
+        panic!("expected anomalies list");
+    };
+    assert!(!anom_rows.is_empty(), "transient anomaly readout should include system ore anomaly");
+    let PyRep::Tuple(full_parts) = handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&own_bound), "scanMgr", "GetFullState", &[], &kw)
+        .await
+        .unwrap()
+        .expect("undocked GetFullState")
+    else {
+        panic!("expected GetFullState 4-tuple");
+    };
+    assert_eq!(full_parts.len(), 4);
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 2. Foreign bound entry and invalid/foreign scalar arguments fail BEFORE mutating DB or expiring overdue probe.
+    let foreign_char_arg = PyRep::Integer(2_199_002);
+    let foreign_corp_arg = PyRep::Integer(98_099_001);
+    let foreign_station_arg = PyRep::Integer(60_003_761);
+    let neg_cases: Vec<(Option<&BoundObjectEntry>, &str, Vec<PyRep>)> = vec![
+        (Some(&foreign_bound), "GetSystemScanMgr", vec![]),
+        (Some(&foreign_bound), "GetAnomalies", vec![]),
+        (Some(&foreign_bound), "GetFullState", vec![]),
+        (Some(&foreign_bound), "RequestScans", vec![]),
+        (Some(&foreign_bound), "RecoverProbes", vec![]),
+        (Some(&foreign_bound), "ReconnectToLostProbes", vec![]),
+        (Some(&foreign_bound), "DestroyProbe", vec![]),
+        (Some(&foreign_bound), "SetActivityState", vec![PyRep::Integer(1)]),
+        (None, "GetSystemScanMgr", vec![foreign_char_arg.clone()]),
+        (None, "GetAnomalies", vec![foreign_corp_arg.clone()]),
+        (None, "GetFullState", vec![foreign_station_arg.clone()]),
+        (None, "GetAnomalies", vec![PyRep::Bool(true)]),
+        (None, "GetFullState", vec![PyRep::Integer(sys_id as i64), PyRep::Integer(1)]),
+        (None, "SetActivityState", vec![]),
+        (None, "SetActivityState", vec![PyRep::Bool(true)]),
+        (None, "SetActivityState", vec![PyRep::List(vec![PyRep::Bool(true)]), PyRep::Integer(1)]),
+        (None, "SetActivityState", vec![foreign_char_arg.clone()]),
+        (Some(&own_bound), "RequestScans", vec![foreign_station_arg.clone()]),
+        (Some(&own_bound), "RequestScans", vec![PyRep::Dict(vec![(PyRep::Integer(999_999_999), PyRep::keyval([("rangeStep", PyRep::Integer(2))]))])]),
+        (Some(&own_bound), "RecoverProbes", vec![foreign_station_arg.clone()]),
+        (Some(&own_bound), "RecoverProbes", vec![PyRep::Bool(true)]),
+        (Some(&own_bound), "ReconnectToLostProbes", vec![foreign_station_arg.clone()]),
+        (Some(&own_bound), "DestroyProbe", vec![foreign_station_arg]),
+        (Some(&own_bound), "DestroyProbe", vec![PyRep::Bool(true)]),
+    ];
+    for (bound_opt, meth, args) in neg_cases {
+        let err = handle_scan_and_wormhole_extras(&ctx, &mut sess, bound_opt, "scanMgr", meth, &args, &kw)
+            .await
+            .expect("handled")
+            .expect_err("negative scanMgr probe must fail");
+        assert!(!err.code.is_empty(), "{meth} {args:?} produced empty error code");
+    }
+    assert_eq!(ctx.db.state_epoch(), e0, "negative probes must not mutate DB");
+    assert_eq!(ctx.db.tx_commit_count(), c0, "negative probes must not commit DB tx");
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        assert!(map.contains_key(&overdue_pid), "rejected calls must not expire overdue probe early");
+        assert_eq!(map.get(&active_pid).map(|p| p.state), Some(PROBE_STATE_IDLE));
+    }
+
+    // 3. Docked SetActivityState rejects NotInSpace without mutating probe state or DB.
+    let mut docked = sess.clone();
+    docked.station_id = Some(60_003_760);
+    let docked_err = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut docked,
+        Some(&own_bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(PROBE_STATE_INACTIVE as i64)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(docked_err.code, "NotInSpace");
+    assert_eq!(
+        ctx.active_scanner_probes.read().unwrap().get(&active_pid).map(|p| p.state),
+        Some(PROBE_STATE_IDLE)
+    );
+    assert_eq!(ctx.db.state_epoch(), e0);
+
+    // 4. Legitimate targeted DestroyProbe succeeds on owned active probe.
+    let destroyed = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "DestroyProbe",
+        &[PyRep::Integer(active_pid)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("owned DestroyProbe succeeds");
+    assert_eq!(destroyed.dict_get("destroyedCount"), Some(&PyRep::Integer(1)));
+    assert!(!ctx.active_scanner_probes.read().unwrap().contains_key(&active_pid));
 }

@@ -63,6 +63,120 @@ fn require_undocked_probe_space(
     Ok((char_id, sys_id))
 }
 
+fn exact_int_arg(rep: &PyRep) -> Option<i64> {
+    match rep {
+        PyRep::Integer(v) => Some(*v),
+        _ => None,
+    }
+}
+
+fn exact_float_arg(rep: &PyRep) -> Option<f64> {
+    match rep {
+        PyRep::Real(v) => Some(*v),
+        PyRep::Integer(v) => Some(*v as f64),
+        _ => None,
+    }
+}
+
+fn verify_scan_mgr_bound(
+    session: &SessionState,
+    char_id: i64,
+    caller_sys: u32,
+    bound_entry: Option<&BoundObjectEntry>,
+    action: &str,
+    cross_system_code: &str,
+) -> Result<Option<u32>, BridgeRpcError> {
+    let Some(b) = bound_entry else {
+        return Ok(None);
+    };
+    let is_gm = session.has_gm_role();
+    if b.character_id != char_id && !is_gm {
+        return Err(probe_rpc_err(
+            "AccessDenied",
+            format!("Cannot {action}: scanMgr bound object belongs to another character"),
+        ));
+    }
+    if b.object_id < 0 {
+        return Err(probe_rpc_err(
+            "InvalidSolarSystem",
+            format!("Invalid bound solar system {} for {action}", b.object_id),
+        ));
+    }
+    if b.object_id == 0 {
+        return Ok(None);
+    }
+    let Ok(req_sys) = u32::try_from(b.object_id) else {
+        return Err(probe_rpc_err(
+            "InvalidSolarSystem",
+            format!("Invalid bound solar system {} for {action}", b.object_id),
+        ));
+    };
+    if req_sys != caller_sys && !is_gm {
+        return Err(BridgeRpcError {
+            code: cross_system_code.into(),
+            message: format!("Cannot {action} for remote solar system {req_sys}"),
+            client_error: None,
+        });
+    }
+    Ok(Some(req_sys))
+}
+
+fn parse_optional_sys_arg(
+    ctx: &ServerContext,
+    session: &SessionState,
+    caller_sys: u32,
+    args: &[PyRep],
+    action: &str,
+    cross_system_code: &str,
+) -> Result<Option<u32>, BridgeRpcError> {
+    if args.len() > 1 {
+        return Err(probe_rpc_err(
+            "InvalidArguments",
+            format!("{action} accepts at most 1 argument"),
+        ));
+    }
+    let Some(arg) = args.first() else {
+        return Ok(None);
+    };
+    if matches!(arg, PyRep::None) {
+        return Ok(None);
+    }
+    let Some(raw_sys) = exact_int_arg(arg) else {
+        return Err(probe_rpc_err(
+            "InvalidSolarSystem",
+            format!("Invalid solar system argument for {action}"),
+        ));
+    };
+    let Ok(req_sys) = u32::try_from(raw_sys) else {
+        return Err(probe_rpc_err(
+            "InvalidSolarSystem",
+            format!("Invalid solar system {raw_sys} for {action}"),
+        ));
+    };
+    if req_sys == 0 {
+        return Err(probe_rpc_err(
+            "InvalidSolarSystem",
+            format!("Invalid solar system 0 for {action}"),
+        ));
+    }
+    if req_sys != caller_sys {
+        if !session.has_gm_role() {
+            return Err(BridgeRpcError {
+                code: cross_system_code.into(),
+                message: format!("Cannot {action} for remote solar system {req_sys}"),
+                client_error: None,
+            });
+        }
+        if !ctx.sde.solar_systems.is_empty() && !ctx.sde.solar_systems.contains_key(&req_sys) {
+            return Err(probe_rpc_err(
+                "InvalidSolarSystem",
+                format!("Unknown solar system {req_sys} for {action}"),
+            ));
+        }
+    }
+    Ok(Some(req_sys))
+}
+
 fn is_signature_active(sig: &CosmicSignatureRecord, now_unix: u64) -> bool {
     !sig.collapsed
         && (sig.lifetime_seconds == 0
@@ -161,6 +275,41 @@ async fn sync_existing_wormhole_balls(
     }
 }
 
+async fn load_system_signatures_and_anomalies_readonly(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    now_unix: u64,
+) -> (Vec<CosmicSignatureRecord>, Vec<CosmicAnomalyRecord>) {
+    let (sigs, anoms) = ctx.db.with_snapshot(|snap| {
+        let mut sigs = snap.cosmic_signatures.get(&sys_id).cloned().unwrap_or_default();
+        sigs.retain(|s| is_signature_active(s, now_unix));
+        let mut anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_else(|| {
+            let wh_class = system_wormhole_profile_sde(&ctx.sde, sys_id).0;
+            if wh_class == 0 {
+                vec![CosmicAnomalyRecord {
+                    anomaly_id: format!("ANO-{}", 100 + (sys_id % 900)),
+                    solar_system_id: sys_id,
+                    name: "Dense Veldspar Deposit".into(),
+                    anomaly_type: "Ore".into(),
+                    position: [4.0 * AU_IN_METERS, 3.0 * AU_IN_METERS, -2.0 * AU_IN_METERS],
+                    signal_strength: 1.0,
+                    ore_types: vec![1230, 1228],
+                    remaining_volume: 50_000.0,
+                    created_unix: now_unix,
+                    lifetime_seconds: 86_400,
+                    cleared: false,
+                }]
+            } else {
+                Vec::new()
+            }
+        });
+        anoms.retain(|a| is_anomaly_active(a, now_unix));
+        (sigs, anoms)
+    });
+    sync_existing_wormhole_balls(ctx, sys_id, &sigs, now_unix).await;
+    (sigs, anoms)
+}
+
 async fn load_system_signatures_and_anomalies(
     ctx: &ServerContext,
     session: &SessionState,
@@ -176,34 +325,7 @@ async fn load_system_signatures_and_anomalies(
         || session.structure_id.is_some()
         || session.ship_id.is_none()
     {
-        let (sigs, anoms) = ctx.db.with_snapshot(|snap| {
-            let mut sigs = snap.cosmic_signatures.get(&sys_id).cloned().unwrap_or_default();
-            sigs.retain(|s| is_signature_active(s, now_unix));
-            let mut anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_else(|| {
-                let wh_class = system_wormhole_profile_sde(&ctx.sde, sys_id).0;
-                if wh_class == 0 {
-                    vec![CosmicAnomalyRecord {
-                        anomaly_id: format!("ANO-{}", 100 + (sys_id % 900)),
-                        solar_system_id: sys_id,
-                        name: "Dense Veldspar Deposit".into(),
-                        anomaly_type: "Ore".into(),
-                        position: [4.0 * AU_IN_METERS, 3.0 * AU_IN_METERS, -2.0 * AU_IN_METERS],
-                        signal_strength: 1.0,
-                        ore_types: vec![1230, 1228],
-                        remaining_volume: 50_000.0,
-                        created_unix: now_unix,
-                        lifetime_seconds: 86_400,
-                        cleared: false,
-                    }]
-                } else {
-                    Vec::new()
-                }
-            });
-            anoms.retain(|a| is_anomaly_active(a, now_unix));
-            (sigs, anoms)
-        });
-        sync_existing_wormhole_balls(ctx, sys_id, &sigs, now_unix).await;
-        return (sigs, anoms);
+        return load_system_signatures_and_anomalies_readonly(ctx, sys_id, now_unix).await;
     }
     ensure_system_signatures_and_anomalies(ctx, sys_id).await
 }
@@ -665,19 +787,27 @@ pub(crate) async fn handle_scan_and_wormhole_extras(
     // parity: rpc:scanMgr.GetSystemScanMgr
     let mut persist_runtime = false;
     let res = match (service, method) {
-        ("scanMgr", "GetSystemScanMgr") => handle_get_system_scan_mgr(ctx, session, service, args).await,
-        ("scanMgr", "GetAnomalies") => handle_get_anomalies(ctx, session, bound_entry).await,
-        ("scanMgr", "RequestScans") => handle_request_scans(ctx, session, bound_entry, args, kwargs).await,
+        ("scanMgr", "GetSystemScanMgr") => {
+            handle_get_system_scan_mgr(ctx, session, bound_entry, service, args).await
+        }
+        ("scanMgr", "GetAnomalies") => handle_get_anomalies(ctx, session, bound_entry, args).await,
+        ("scanMgr", "RequestScans") => {
+            handle_request_scans(ctx, session, bound_entry, args, kwargs).await
+        }
         ("scanMgr", "RecoverProbes") => handle_recover_probes(ctx, session, bound_entry, args).await,
-        ("scanMgr", "ReconnectToLostProbes") => handle_reconnect_probes(ctx, session, bound_entry).await,
+        ("scanMgr", "ReconnectToLostProbes") => {
+            handle_reconnect_probes(ctx, session, bound_entry, args).await
+        }
         ("scanMgr", "DestroyProbe") => handle_destroy_probe(ctx, session, bound_entry, args).await,
-        ("scanMgr", "GetFullState") => handle_get_full_state(ctx, session, bound_entry).await,
+        ("scanMgr", "GetFullState") => handle_get_full_state(ctx, session, bound_entry, args).await,
         ("scanMgr", "QAOverrideProbeExpiry") => handle_qa_override_probe_expiry(ctx, session, args),
         ("scanMgr", "QAScanSites") => {
             persist_runtime = true;
             handle_qa_scan_sites(ctx, session, bound_entry).await
         }
-        ("scanMgr", "SetActivityState") => handle_set_activity_state(ctx, session, bound_entry, args),
+        ("scanMgr", "SetActivityState") => {
+            handle_set_activity_state(ctx, session, bound_entry, args)
+        }
         _ => None,
     };
     if persist_runtime && matches!(res, Some(Ok(_))) {
@@ -690,6 +820,7 @@ async fn handle_get_full_state(
     ctx: &ServerContext,
     session: &SessionState,
     bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
@@ -697,27 +828,42 @@ async fn handle_get_full_state(
     };
     let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
     let is_gm = session.has_gm_role();
-    if let Some(b) = bound_entry {
-        let req_sys = b.object_id as u32;
-        if req_sys > 0 && req_sys != caller_sys && !is_gm {
-            return Some(Err(BridgeRpcError {
-                code: "CrossSystemScanDenied".into(),
-                message: format!("Cannot query GetFullState for remote solar system {req_sys}"),
-                client_error: None,
-            }));
-        }
-    }
+    let bound_sys = match verify_scan_mgr_bound(
+        session,
+        char_id,
+        caller_sys,
+        bound_entry,
+        "query GetFullState",
+        "CrossSystemScanDenied",
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let arg_sys = match parse_optional_sys_arg(
+        ctx,
+        session,
+        caller_sys,
+        args,
+        "GetFullState",
+        "CrossSystemScanDenied",
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
     let sys_id = if is_gm {
-        bound_entry
-            .map(|b| b.object_id as u32)
-            .filter(|&id| id > 0)
-            .unwrap_or(caller_sys)
+        arg_sys.or(bound_sys).unwrap_or(caller_sys)
     } else {
         caller_sys
     };
+    if sys_id == 0 {
+        return Some(Err(probe_rpc_err(
+            "NoSolarSystem",
+            "Session has no active solar system",
+        )));
+    }
     let now_unix = ctx.now_unix();
     let (sigs, mut anomalies) =
-        load_system_signatures_and_anomalies(ctx, session, sys_id, now_unix).await;
+        load_system_signatures_and_anomalies_readonly(ctx, sys_id, now_unix).await;
     anomalies.retain(|a| is_anomaly_active(a, now_unix));
     let anom_ids: std::collections::HashSet<String> =
         anomalies.iter().map(|a| a.anomaly_id.clone()).collect();
@@ -774,15 +920,36 @@ fn handle_qa_override_probe_expiry(
             client_error: None,
         }));
     }
-    let secs = args.first().and_then(|a| a.as_f64()).unwrap_or(60.0).max(1.0);
+    if args.len() > 1 {
+        return Some(Err(probe_rpc_err(
+            "InvalidArguments",
+            "scanMgr.QAOverrideProbeExpiry accepts at most 1 argument",
+        )));
+    }
+    let secs = match args.first() {
+        None | Some(PyRep::None) => 60.0,
+        Some(arg) => match exact_float_arg(arg).filter(|v| v.is_finite() && *v > 0.0) {
+            Some(v) => v.max(1.0),
+            None => {
+                return Some(Err(probe_rpc_err(
+                    "InvalidArguments",
+                    "Invalid probe expiry override duration",
+                )));
+            }
+        },
+    };
+    let mut updated_any = false;
     if let Ok(mut map) = ctx.active_scanner_probes.write() {
         for p in map.values_mut() {
             if p.owner_char_id == char_id {
                 p.max_flight_time_s = secs;
+                updated_any = true;
             }
         }
     }
-    sync_scanner_probes_to_db(ctx);
+    if updated_any {
+        sync_scanner_probes_to_db(ctx);
+    }
     Some(Ok(PyRep::None))
 }
 
@@ -858,54 +1025,95 @@ fn handle_set_activity_state(
     bound_entry: Option<&BoundObjectEntry>,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
+    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
-    let sys_id = bound_entry
-        .map(|b| b.object_id as u32)
-        .filter(|&id| id > 0)
-        .unwrap_or(caller_sys);
+    let bound_sys = match verify_scan_mgr_bound(
+        session,
+        char_id,
+        caller_sys,
+        bound_entry,
+        "set probe activity state",
+        "AccessDenied",
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let sys_id = bound_sys.unwrap_or(caller_sys);
 
     let mut per_probe_states: HashMap<i64, i32> = HashMap::new();
     let mut bulk_state: Option<i32> = None;
 
+    let invalid_state_err = |msg: String| {
+        Some(Err(BridgeRpcError {
+            code: "InvalidProbeState".into(),
+            message: msg,
+            client_error: None,
+        }))
+    };
+
     match args {
         [PyRep::Dict(entries)] => {
+            if entries.is_empty() {
+                return invalid_state_err("Empty probe state dictionary".into());
+            }
             for (k, v) in entries {
-                if let (Some(pid), Some(st)) = (k.as_i64(), v.as_i64()) {
-                    per_probe_states.insert(pid, st as i32);
+                let (Some(pid), Some(raw_st)) = (exact_int_arg(k), exact_int_arg(v)) else {
+                    return invalid_state_err("Invalid probe state dictionary entry".into());
+                };
+                if pid <= 0 {
+                    return invalid_state_err(format!("Invalid probe ID {pid}"));
                 }
+                let Ok(st) = i32::try_from(raw_st) else {
+                    return invalid_state_err(format!("Invalid scanner probe state {raw_st}"));
+                };
+                per_probe_states.insert(pid, st);
             }
         }
-        [first, second, ..] => {
-            if let Some(st) = second.as_i64() {
-                let st_i32 = st as i32;
-                match first {
-                    PyRep::List(ids) | PyRep::Tuple(ids) => {
-                        for id in ids {
-                            if let Some(pid) = id.as_i64() {
-                                per_probe_states.insert(pid, st_i32);
-                            }
-                        }
+        [first, second] => {
+            let Some(raw_st) = exact_int_arg(second) else {
+                return invalid_state_err("Invalid scanner probe state argument".into());
+            };
+            let Ok(st_i32) = i32::try_from(raw_st) else {
+                return invalid_state_err(format!("Invalid scanner probe state {raw_st}"));
+            };
+            match first {
+                PyRep::List(ids) | PyRep::Tuple(ids) => {
+                    if ids.is_empty() {
+                        return invalid_state_err("Empty probe ID list".into());
                     }
-                    _ => {
-                        if let Some(pid) = first.as_i64() {
-                            per_probe_states.insert(pid, st_i32);
-                        } else {
-                            bulk_state = Some(st_i32);
-                        }
+                    for id in ids {
+                        let Some(pid) = exact_int_arg(id).filter(|&v| v > 0) else {
+                            return invalid_state_err("Invalid probe ID in state list".into());
+                        };
+                        per_probe_states.insert(pid, st_i32);
                     }
+                }
+                _ => {
+                    let Some(pid) = exact_int_arg(first).filter(|&v| v > 0) else {
+                        return invalid_state_err("Invalid probe ID for SetActivityState".into());
+                    };
+                    per_probe_states.insert(pid, st_i32);
                 }
             }
         }
         [first] => {
-            if let Some(st) = first.as_i64() {
-                bulk_state = Some(st as i32);
-            }
+            let Some(raw_st) = exact_int_arg(first) else {
+                return invalid_state_err("Invalid scanner probe state argument".into());
+            };
+            let Ok(st_i32) = i32::try_from(raw_st) else {
+                return invalid_state_err(format!("Invalid scanner probe state {raw_st}"));
+            };
+            bulk_state = Some(st_i32);
         }
-        [] => {}
+        [] => return invalid_state_err("Missing scanner probe state argument".into()),
+        _ => {
+            return Some(Err(probe_rpc_err(
+                "InvalidArguments",
+                "SetActivityState accepts 1 or 2 arguments",
+            )));
+        }
     }
 
     let valid_state = |st: i32| {
@@ -987,6 +1195,7 @@ fn format_anomalies(anomalies: Vec<CosmicAnomalyRecord>, now_unix: u64) -> Vec<P
 async fn handle_get_system_scan_mgr(
     ctx: &ServerContext,
     session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
     service: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
@@ -995,21 +1204,48 @@ async fn handle_get_system_scan_mgr(
         Err(e) => return Some(Err(e)),
     };
     let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
-    let sys_id = if let Some(arg_sys) = args.first().and_then(|a| a.as_i64()).map(|v| v as u32) {
-        if arg_sys != caller_sys && !session.has_gm_role() {
-            return Some(Err(BridgeRpcError {
-                code: "AccessDenied".into(),
-                message: "Cannot query scan manager for a remote solar system".into(),
-                client_error: None,
-            }));
-        }
-        arg_sys
-    } else {
-        caller_sys
+    let bound_sys = match verify_scan_mgr_bound(
+        session,
+        char_id,
+        caller_sys,
+        bound_entry,
+        "query scan manager",
+        "AccessDenied",
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
     };
+    let arg_sys = match parse_optional_sys_arg(
+        ctx,
+        session,
+        caller_sys,
+        args,
+        "query scan manager",
+        "AccessDenied",
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let is_gm = session.has_gm_role();
+    let sys_id = if is_gm {
+        arg_sys.or(bound_sys).unwrap_or(caller_sys)
+    } else {
+        arg_sys.unwrap_or(caller_sys)
+    };
+    if sys_id == 0 {
+        return Some(Err(probe_rpc_err(
+            "NoSolarSystem",
+            "Session has no active solar system",
+        )));
+    }
     let now_unix = ctx.now_unix();
-    let _ = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
-    prune_stale_pending_scans_for_char(ctx, char_id, session.session_id, None);
+    let is_undocked_with_ship = session.station_id.is_none()
+        && session.structure_id.is_none()
+        && session.ship_id.is_some();
+    if is_undocked_with_ship {
+        let _ = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
+        prune_stale_pending_scans_for_char(ctx, char_id, session.session_id, None);
+    }
     let (sigs, anomalies) =
         load_system_signatures_and_anomalies(ctx, session, sys_id, ctx.now_unix()).await;
     let bound_id = match ctx.bind_object(session, service, sys_id as i64) {
@@ -1105,25 +1341,184 @@ async fn handle_get_anomalies(
     ctx: &ServerContext,
     session: &mut SessionState,
     bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
     let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
-    if let Some(b) = bound_entry {
-        if (b.object_id as u32) != caller_sys && !session.has_gm_role() {
-            return Some(Err(BridgeRpcError {
-                code: "AccessDenied".into(),
-                message: "Cannot query anomalies for a remote solar system".into(),
-                client_error: None,
-            }));
-        }
+    let bound_sys = match verify_scan_mgr_bound(
+        session,
+        char_id,
+        caller_sys,
+        bound_entry,
+        "query anomalies",
+        "AccessDenied",
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let arg_sys = match parse_optional_sys_arg(
+        ctx,
+        session,
+        caller_sys,
+        args,
+        "query anomalies",
+        "AccessDenied",
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let sys_id = if session.has_gm_role() {
+        arg_sys.or(bound_sys).unwrap_or(caller_sys)
+    } else {
+        caller_sys
+    };
+    if sys_id == 0 {
+        return Some(Err(probe_rpc_err(
+            "NoSolarSystem",
+            "Session has no active solar system",
+        )));
     }
-    let sys_id = caller_sys;
     let now_unix = ctx.now_unix();
-    let (_, anomalies) = load_system_signatures_and_anomalies(ctx, session, sys_id, now_unix).await;
+    let (_, anomalies) = load_system_signatures_and_anomalies_readonly(ctx, sys_id, now_unix).await;
     Some(Ok(PyRep::List(format_anomalies(anomalies, now_unix))))
+}
+
+type StagedProbeScanUpdate = (i64, Option<[f64; 3]>, Option<(i32, f64)>);
+
+/// Validates and stages `scanMgr.RequestScans` probe updates without mutating `probe_map`.
+fn stage_probe_scan_updates(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: SolarSystemId,
+    args: &[PyRep],
+    override_range_step: Option<i32>,
+    probe_map: &HashMap<i64, crate::router::ActiveScannerProbe>,
+) -> Option<(Vec<StagedProbeScanUpdate>, Option<i32>)> {
+    let mut staged_updates = Vec::new();
+    let mut apply_bulk_step = None;
+
+    if let Some(PyRep::Dict(entries)) = args.first() {
+        let mut matched_owned = 0usize;
+        for (k, v) in entries {
+            let pid = exact_int_arg(k)?;
+            if !matches!(v, PyRep::KeyVal(_) | PyRep::Dict(_)) {
+                return None;
+            }
+            let probe_opt = match probe_map.get(&pid) {
+                Some(probe) => {
+                    if probe.owner_char_id != char_id
+                        || probe.solar_system_id != sys_id
+                        || probe.state <= 0
+                    {
+                        return None;
+                    }
+                    matched_owned += 1;
+                    Some(probe)
+                }
+                None => None,
+            };
+            let base_au = probe_opt
+                .map(|p| probe_base_scan_range_au(&ctx.sde, p.probe_type_id))
+                .unwrap_or(0.25);
+            let find_in_v = |key: &str| -> Option<&PyRep> {
+                match v {
+                    PyRep::KeyVal(kv) => kv.iter().find(|(ek, _)| *ek == key).map(|(_, ev)| ev),
+                    PyRep::Dict(kv) => kv
+                        .iter()
+                        .find(|(ek, _)| ek.as_str() == Some(key))
+                        .map(|(_, ev)| ev),
+                    _ => None,
+                }
+            };
+            let step_from_radius = |rad: f64, denom: f64| -> Option<(i32, f64)> {
+                if !rad.is_finite() || rad <= 0.0 {
+                    return None;
+                }
+                let ratio = (rad / denom).max(1.0);
+                let step = (ratio.log2().round() as i32 + 1).clamp(1, 8);
+                Some((step, base_au * AU_IN_METERS * 2.0_f64.powi(step - 1)))
+            };
+            let mut dest_opt: Option<[f64; 3]> = None;
+            if let Some(dest_rep) = find_in_v("destination").or_else(|| find_in_v("pos")) {
+                let (PyRep::Tuple(c) | PyRep::List(c)) = dest_rep else {
+                    return None;
+                };
+                if c.len() < 3 {
+                    return None;
+                }
+                let x = exact_float_arg(&c[0]).filter(|v| v.is_finite())?;
+                let y = exact_float_arg(&c[1]).filter(|v| v.is_finite())?;
+                let z = exact_float_arg(&c[2]).filter(|v| v.is_finite())?;
+                dest_opt = Some([x, y, z]);
+            } else if let (Some(rx), Some(ry), Some(rz)) =
+                (find_in_v("x"), find_in_v("y"), find_in_v("z"))
+            {
+                let x = exact_float_arg(rx).filter(|v| v.is_finite())?;
+                let y = exact_float_arg(ry).filter(|v| v.is_finite())?;
+                let z = exact_float_arg(rz).filter(|v| v.is_finite())?;
+                dest_opt = Some([x, y, z]);
+            }
+            let mut range_opt: Option<(i32, f64)> = None;
+            if let Some(step_rep) = find_in_v("rangeStep") {
+                let step = (exact_int_arg(step_rep)? as i32).clamp(1, 8);
+                range_opt = Some((step, base_au * AU_IN_METERS * 2.0_f64.powi(step - 1)));
+            } else if let Some(rad_rep) = find_in_v("scanRangeAU") {
+                range_opt = Some(
+                    exact_float_arg(rad_rep).and_then(|rad_au| step_from_radius(rad_au, base_au))?,
+                );
+            } else if let Some(rad_rep) = find_in_v("scanRange") {
+                range_opt = Some(
+                    exact_float_arg(rad_rep)
+                        .and_then(|rad_m| step_from_radius(rad_m, base_au * AU_IN_METERS))?,
+                );
+            }
+            if let Some(probe) = probe_opt {
+                if dest_opt.is_some() || range_opt.is_some() {
+                    staged_updates.push((probe.probe_id, dest_opt, range_opt));
+                }
+            }
+        }
+        if !entries.is_empty() && matched_owned == 0 {
+            return None;
+        }
+    } else if let Some(PyRep::List(list)) = args.first() {
+        let mut owner_probe_ids: Vec<i64> = probe_map
+            .values()
+            .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+            .map(|p| p.probe_id)
+            .collect();
+        owner_probe_ids.sort_unstable();
+        for (idx, item) in list.iter().enumerate() {
+            let (PyRep::List(coords) | PyRep::Tuple(coords)) = item else {
+                return None;
+            };
+            if coords.len() < 3 {
+                return None;
+            }
+            let x = exact_float_arg(&coords[0]).filter(|v| v.is_finite())?;
+            let y = exact_float_arg(&coords[1]).filter(|v| v.is_finite())?;
+            let z = exact_float_arg(&coords[2]).filter(|v| v.is_finite())?;
+            let step_opt = match coords.get(3) {
+                None | Some(PyRep::None) => override_range_step,
+                Some(a) => Some((exact_int_arg(a)? as i32).clamp(1, 8)),
+            };
+            if let Some(&pid) = owner_probe_ids.get(idx) {
+                if let Some(probe) = probe_map.get(&pid) {
+                    let base_au = probe_base_scan_range_au(&ctx.sde, probe.probe_type_id);
+                    let range_opt =
+                        step_opt.map(|step| (step, base_au * AU_IN_METERS * 2.0_f64.powi(step - 1)));
+                    staged_updates.push((pid, Some([x, y, z]), range_opt));
+                }
+            }
+        }
+    } else {
+        apply_bulk_step = override_range_step;
+    }
+
+    Some((staged_updates, apply_bulk_step))
 }
 
 async fn handle_request_scans(
@@ -1154,15 +1549,61 @@ async fn handle_request_scans(
         return None;
     }
 
-    if let Some(b) = bound_entry {
-        if u32::try_from(b.object_id).ok() != Some(caller_sys) && !session.has_gm_role() {
+    if let Err(e) = verify_scan_mgr_bound(
+        session,
+        char_id,
+        caller_sys,
+        bound_entry,
+        "request probe scans",
+        "AccessDenied",
+    ) {
+        return Some(Err(e));
+    }
+    if args.len() > 2 {
+        return Some(Err(probe_rpc_err(
+            "InvalidArguments",
+            "RequestScans accepts at most 2 arguments",
+        )));
+    }
+    if !matches!(
+        args.first(),
+        None | Some(PyRep::None | PyRep::Dict(_) | PyRep::List(_))
+    ) {
+        return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates")));
+    }
+    let raw_range_step_arg = match args.get(1) {
+        None | Some(PyRep::None) => None,
+        Some(a) => match exact_int_arg(a) {
+            Some(v) => Some(v),
+            None => return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates"))),
+        },
+    };
+    let raw_range_step_kw = match kwargs.get("rangeStep") {
+        None | Some(PyRep::None) => None,
+        Some(a) => match exact_int_arg(a) {
+            Some(v) => Some(v),
+            None => return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates"))),
+        },
+    };
+    let override_range_step = raw_range_step_arg
+        .or(raw_range_step_kw)
+        .map(|v| (v as i32).clamp(1, 8));
+    let sys_id = caller_sys;
+    if let Ok(probe_map) = ctx.active_scanner_probes.read() {
+        let has_active_before = probe_map
+            .values()
+            .any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0);
+        if !has_active_before {
             return Some(Err(probe_rpc_err(
-                "AccessDenied",
-                "Cannot request probe scans for a remote solar system",
+                "NoActiveProbes",
+                "No active scanner probes in space",
             )));
         }
+        if stage_probe_scan_updates(ctx, char_id, sys_id, args, override_range_step, &probe_map).is_none() {
+            return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates")));
+        }
     }
-    let sys_id = caller_sys;
+
     let now_unix = ctx.now_unix();
     if has_any_tracked_probes {
         let _ = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
@@ -1178,128 +1619,14 @@ async fn handle_request_scans(
         )));
     }
 
-    let override_range_step = args
-        .get(1)
-        .and_then(|a| a.as_i64())
-        .or_else(|| kwargs.get("rangeStep").and_then(|v| v.as_i64()))
-        .map(|v| (v as i32).clamp(1, 8));
-
-    let mut invalid_coords = false;
     let mut moved_balls: Vec<(i64, DVec3)> = Vec::new();
     if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
-        let mut staged_updates: Vec<(i64, Option<[f64; 3]>, Option<(i32, f64)>)> = Vec::new();
-        if let Some(PyRep::Dict(entries)) = args.first() {
-            for (k, v) in entries {
-                let Some(pid) = k.as_i64() else { continue };
-                let Some(probe) = probe_map.get(&pid) else { continue };
-                if probe.owner_char_id != char_id || probe.state <= 0 {
-                    continue;
-                }
-                let base_au = probe_base_scan_range_au(&ctx.sde, probe.probe_type_id);
-                let find_in_v = |key: &str| -> Option<&PyRep> {
-                    match v {
-                        PyRep::KeyVal(kv) => kv.iter().find(|(ek, _)| *ek == key).map(|(_, ev)| ev),
-                        PyRep::Dict(kv) => kv.iter().find(|(ek, _)| ek.as_str() == Some(key)).map(|(_, ev)| ev),
-                        _ => None,
-                    }
-                };
-                let step_from_radius = |rad: f64, denom: f64| -> Option<(i32, f64)> {
-                    if !rad.is_finite() || rad <= 0.0 {
-                        return None;
-                    }
-                    let ratio = (rad / denom).max(1.0);
-                    let step = (ratio.log2().round() as i32 + 1).clamp(1, 8);
-                    Some((step, base_au * AU_IN_METERS * 2.0_f64.powi(step - 1)))
-                };
-                let mut dest_opt: Option<[f64; 3]> = None;
-                if let Some(PyRep::Tuple(c) | PyRep::List(c)) = find_in_v("destination").or_else(|| find_in_v("pos")) {
-                    if c.len() >= 3 {
-                        let (x, y, z) = (
-                            c[0].as_f64().unwrap_or(probe.position[0]),
-                            c[1].as_f64().unwrap_or(probe.position[1]),
-                            c[2].as_f64().unwrap_or(probe.position[2]),
-                        );
-                        if !x.is_finite() || !y.is_finite() || !z.is_finite() {
-                            invalid_coords = true;
-                            break;
-                        }
-                        dest_opt = Some([x, y, z]);
-                    }
-                } else if let (Some(x), Some(y), Some(z)) = (
-                    find_in_v("x").and_then(|a| a.as_f64()),
-                    find_in_v("y").and_then(|a| a.as_f64()),
-                    find_in_v("z").and_then(|a| a.as_f64()),
-                ) {
-                    if !x.is_finite() || !y.is_finite() || !z.is_finite() {
-                        invalid_coords = true;
-                        break;
-                    }
-                    dest_opt = Some([x, y, z]);
-                }
-                let mut range_opt: Option<(i32, f64)> = None;
-                if let Some(step) = find_in_v("rangeStep").and_then(|a| a.as_i64()) {
-                    let clamped = (step as i32).clamp(1, 8);
-                    range_opt = Some((clamped, base_au * AU_IN_METERS * 2.0_f64.powi(clamped - 1)));
-                } else if let Some(rad_au) = find_in_v("scanRangeAU").and_then(|a| a.as_f64()) {
-                    let Some(range) = step_from_radius(rad_au, base_au) else {
-                        invalid_coords = true;
-                        break;
-                    };
-                    range_opt = Some(range);
-                } else if let Some(rad_m) = find_in_v("scanRange").and_then(|a| a.as_f64()) {
-                    let Some(range) = step_from_radius(rad_m, base_au * AU_IN_METERS) else {
-                        invalid_coords = true;
-                        break;
-                    };
-                    range_opt = Some(range);
-                }
-                if dest_opt.is_some() || range_opt.is_some() {
-                    staged_updates.push((pid, dest_opt, range_opt));
-                }
-            }
-        } else if let Some(PyRep::List(list)) = args.first() {
-            let mut owner_probe_ids: Vec<i64> = probe_map
-                .values()
-                .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
-                .map(|p| p.probe_id)
-                .collect();
-            owner_probe_ids.sort_unstable();
-            for (idx, item) in list.iter().enumerate() {
-                let Some(&pid) = owner_probe_ids.get(idx) else { break };
-                let Some(probe) = probe_map.get(&pid) else { continue };
-                let base_au = probe_base_scan_range_au(&ctx.sde, probe.probe_type_id);
-                if let PyRep::List(coords) | PyRep::Tuple(coords) = item {
-                    let dest = if coords.len() >= 3 {
-                        let (Some(x), Some(y), Some(z)) = (
-                            coords[0].as_f64(),
-                            coords[1].as_f64(),
-                            coords[2].as_f64(),
-                        ) else {
-                            invalid_coords = true;
-                            break;
-                        };
-                        if !x.is_finite() || !y.is_finite() || !z.is_finite() {
-                            invalid_coords = true;
-                            break;
-                        }
-                        [x, y, z]
-                    } else {
-                        invalid_coords = true;
-                        break;
-                    };
-                    let range_opt = coords
-                        .get(3)
-                        .and_then(|a| a.as_i64())
-                        .map(|s| (s as i32).clamp(1, 8))
-                        .or(override_range_step)
-                        .map(|step| (step, base_au * AU_IN_METERS * 2.0_f64.powi(step - 1)));
-                    staged_updates.push((pid, Some(dest), range_opt));
-                } else {
-                    invalid_coords = true;
-                    break;
-                }
-            }
-        } else if let Some(step) = override_range_step {
+        let Some((staged_updates, apply_bulk_step)) =
+            stage_probe_scan_updates(ctx, char_id, sys_id, args, override_range_step, &probe_map)
+        else {
+            return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates")));
+        };
+        if let Some(step) = apply_bulk_step {
             for p in probe_map.values_mut() {
                 if p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0 {
                     let base_au = probe_base_scan_range_au(&ctx.sde, p.probe_type_id);
@@ -1308,23 +1635,18 @@ async fn handle_request_scans(
                 }
             }
         }
-        if !invalid_coords {
-            for (pid, dest_opt, range_opt) in staged_updates {
-                if let Some(probe) = probe_map.get_mut(&pid) {
-                    if let Some(dest) = dest_opt {
-                        probe.destination = dest;
-                        moved_balls.push((pid, DVec3::from_array(dest)));
-                    }
-                    if let Some((step, scan_range_m)) = range_opt {
-                        probe.range_step = step;
-                        probe.scan_range_m = scan_range_m;
-                    }
+        for (pid, dest_opt, range_opt) in staged_updates {
+            if let Some(probe) = probe_map.get_mut(&pid) {
+                if let Some(dest) = dest_opt {
+                    probe.destination = dest;
+                    moved_balls.push((pid, DVec3::from_array(dest)));
+                }
+                if let Some((step, scan_range_m)) = range_opt {
+                    probe.range_step = step;
+                    probe.scan_range_m = scan_range_m;
                 }
             }
         }
-    }
-    if invalid_coords {
-        return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates")));
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
 
@@ -1958,20 +2280,58 @@ async fn handle_recover_probes(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let sys_id = bound_entry
-        .and_then(|b| u32::try_from(b.object_id).ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(caller_sys);
+    let bound_sys = match verify_scan_mgr_bound(
+        session,
+        char_id,
+        caller_sys,
+        bound_entry,
+        "recover probes",
+        "AccessDenied",
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let sys_id = bound_sys.unwrap_or(caller_sys);
 
+    if args.len() > 1 {
+        return Some(Err(probe_rpc_err(
+            "InvalidArguments",
+            "RecoverProbes accepts at most 1 argument",
+        )));
+    }
     let mut target_probe_ids: Vec<i64> = Vec::new();
-    if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
-        for item in list {
-            if let Some(pid) = item.as_i64() {
+    match args.first() {
+        None | Some(PyRep::None) => {}
+        Some(PyRep::List(list) | PyRep::Tuple(list)) => {
+            for item in list {
+                let Some(pid) = exact_int_arg(item).filter(|&v| v > 0) else {
+                    return Some(Err(probe_rpc_err(
+                        "InvalidArguments",
+                        "Invalid probe ID in RecoverProbes list",
+                    )));
+                };
                 target_probe_ids.push(pid);
             }
         }
-    } else if let Some(pid) = args.first().and_then(|a| a.as_i64()) {
-        target_probe_ids.push(pid);
+        Some(other) => {
+            let Some(pid) = exact_int_arg(other).filter(|&v| v > 0) else {
+                return Some(Err(probe_rpc_err(
+                    "InvalidArguments",
+                    "Invalid probe ID argument for RecoverProbes",
+                )));
+            };
+            let found_owned = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
+                map.get(&pid)
+                    .is_some_and(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state >= 0)
+            });
+            if !found_owned {
+                return Some(Err(probe_rpc_err(
+                    "ProbeNotFound",
+                    format!("Scanner probe {pid} not found"),
+                )));
+            }
+            target_probe_ids.push(pid);
+        }
     }
 
     let now_unix = ctx.now_unix();
@@ -2220,13 +2580,35 @@ fn emit_probe_registered(ctx: &ServerContext, char_id: i64, probe_id: i64, probe
     );
 }
 
-async fn handle_reconnect_probes(ctx: &ServerContext, session: &mut SessionState, bound_entry: Option<&BoundObjectEntry>) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+async fn handle_reconnect_probes(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let bound_sys = match verify_scan_mgr_bound(
+        session,
+        char_id,
+        caller_sys,
+        bound_entry,
+        "reconnect lost probes",
+        "AccessDenied",
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    if !(args.is_empty() || matches!(args, [PyRep::None])) {
+        return Some(Err(probe_rpc_err(
+            "InvalidArguments",
+            "ReconnectToLostProbes does not accept arguments",
+        )));
+    }
     // Unbound or synthetic `object_id <= 0` calls fall back to the caller's active solar system.
-    let sys_id = bound_entry
-        .and_then(|b| u32::try_from(b.object_id).ok())
-        .filter(|&id| id > 0)
-        .unwrap_or(caller_sys);
+    let sys_id = bound_sys.unwrap_or(caller_sys);
     let now_unix = ctx.now_unix();
     let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
     let ship_id = session.ship_id.unwrap_or(0);
@@ -2300,13 +2682,57 @@ async fn handle_reconnect_probes(ctx: &ServerContext, session: &mut SessionState
     ])))
 }
 
-async fn handle_destroy_probe(ctx: &ServerContext, session: &mut SessionState, bound_entry: Option<&BoundObjectEntry>, args: &[PyRep]) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let sys_id = bound_entry
-        .and_then(|b| u32::try_from(b.object_id).ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(caller_sys);
-    let target_pid = args.first().and_then(|a| a.as_i64());
+async fn handle_destroy_probe(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let bound_sys = match verify_scan_mgr_bound(
+        session,
+        char_id,
+        caller_sys,
+        bound_entry,
+        "destroy scanner probe",
+        "AccessDenied",
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    if args.len() > 1 {
+        return Some(Err(probe_rpc_err(
+            "InvalidArguments",
+            "DestroyProbe accepts at most 1 argument",
+        )));
+    }
+    let target_pid = match args.first() {
+        None | Some(PyRep::None) => None,
+        Some(arg) => match exact_int_arg(arg).filter(|&v| v > 0) {
+            Some(pid) => Some(pid),
+            None => {
+                return Some(Err(probe_rpc_err(
+                    "InvalidArguments",
+                    "Invalid probe ID argument for DestroyProbe",
+                )));
+            }
+        },
+    };
+    if let Some(pid) = target_pid {
+        let owned = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
+            map.get(&pid).is_some_and(|p| p.owner_char_id == char_id)
+        });
+        if !owned {
+            return Some(Err(probe_rpc_err(
+                "ProbeNotFound",
+                format!("Scanner probe {pid} not found"),
+            )));
+        }
+    }
+    let sys_id = bound_sys.unwrap_or(caller_sys);
     let destroyed_probes: Vec<crate::router::ActiveScannerProbe> = if let Ok(mut map) = ctx.active_scanner_probes.write() {
         let ids: Vec<i64> = map.values().filter(|p| p.owner_char_id == char_id && p.state >= 0 && (target_pid.is_none() || target_pid == Some(p.probe_id))).map(|p| p.probe_id).collect();
         ids.into_iter().filter_map(|id| map.remove(&id)).collect()
