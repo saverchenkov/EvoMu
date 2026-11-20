@@ -500,8 +500,7 @@ fn deposit_plex_inner(
     if docked != Some(location_id) {
         return Err(rpc_err("NotDockedAtLocation", "PLEX can only be deposited from the hangar you are docked in"));
     }
-    let cs_state = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
-    if cs_state.alsc_locked_items.contains(&item_id) {
+    if ctx.db.with_snapshot(|snap| snap.is_item_in_alsc_lock(item_id)) {
         return Err(rpc_err("ItemLocked", "PLEX item is locked in an Audit Log Secure Container"));
     }
     if let Some(corp_id) = ctx.db.with_snapshot(|snap| {

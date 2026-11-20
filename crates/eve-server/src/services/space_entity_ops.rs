@@ -1378,50 +1378,55 @@ async fn handle_open_shipping_unit_storage(
         });
     }
 
-    if unit_owner != char_id && !session.has_gm_role() {
-        let st = fitting_containers_ships::read_container_ship_state(ctx);
-        if let Some(req_pw) = st.container_passwords.get(&unit_id).cloned() {
-            if !req_pw.is_empty() && !st.unlocked_containers.contains(&(unit_id, char_id)) {
-                let supplied_pw = kwargs
-                    .get("password")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| args.get(1).and_then(|a| a.as_str()));
-                if supplied_pw == Some(req_pw.as_str()) {
-                    fitting_containers_ships::write_container_ship_state(ctx, |st| {
-                        st.unlocked_containers.insert((unit_id, char_id));
-                    });
-                } else {
-                    return Err(BridgeRpcError {
-                        code: "ALSCPasswordRequired".into(),
-                        message: format!("Password required to open container {unit_id}"),
-                        client_error: None,
-                    });
+    let now_unix = ctx.now_unix_secs();
+    let supplied_pw = kwargs
+        .get("password")
+        .and_then(|v| v.as_str())
+        .or_else(|| args.get(1).and_then(|a| a.as_str()))
+        .map(str::to_string);
+    let is_alsc = unit_type.map(|t| t.group_id == 448).unwrap_or(false);
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        if unit_owner != char_id && !session.has_gm_role() {
+            if let Some(req_pw) =
+                fitting_containers_ships::container_password_snap(snap, unit_id, 1)
+            {
+                if !fitting_containers_ships::is_container_unlocked_snap(snap, unit_id, char_id) {
+                    if supplied_pw.as_deref() == Some(req_pw.as_str()) {
+                        fitting_containers_ships::set_container_unlocked_snap(
+                            snap, unit_id, char_id, true, now_unix,
+                        )?;
+                    } else {
+                        return Err(BridgeRpcError {
+                            code: "ALSCPasswordRequired".into(),
+                            message: format!("Password required to open container {unit_id}"),
+                            client_error: None,
+                        });
+                    }
                 }
             }
         }
-    }
-
-    let now_unix = ctx.now_unix_secs();
-    ctx.db.with_mut_snapshot(|snap| {
         if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&unit_id) {
             if meta.anchor_completed || meta.anchor_start_unix.is_some() {
                 meta.anchor_start_unix = Some(now_unix);
             }
         }
-    });
-    let is_alsc = unit_type.map(|t| t.group_id == 448).unwrap_or(false);
-    if is_alsc {
-        fitting_containers_ships::write_container_ship_state(ctx, |st| {
-            st.alsc_logs.entry(unit_id).or_default().push(fitting_containers_ships::AlscLogEntry {
-                timestamp_unix: now_unix,
-                actor_id: char_id,
-                action: "ALSCActionOpen".into(),
-                item_id: unit_id,
-                item_type_id: 0,
-                quantity: 0,
-            });
-        });
-    }
+        if is_alsc {
+            fitting_containers_ships::append_alsc_log_snap(
+                snap,
+                unit_id,
+                fitting_containers_ships::AlscLogEntry {
+                    timestamp_unix: now_unix,
+                    actor_id: char_id,
+                    action: "ALSCActionOpen".into(),
+                    item_id: unit_id,
+                    item_type_id: 0,
+                    quantity: 0,
+                },
+                now_unix,
+            )?;
+        }
+        Ok(())
+    })?;
 
     with_mut_combat_runtime(ctx, |rt| {
         rt.authorized_shipping_storage.insert((unit_id, char_id));
