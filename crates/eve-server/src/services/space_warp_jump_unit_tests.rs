@@ -4160,12 +4160,6 @@ async fn cmd_stargate_jump_zarzakh_toll_and_db_prevalidation_guards_gh_1429() {
     ];
     let empty_kw = HashMap::new();
     let missing_char_id = 99_429_999_i64;
-    // Warm up lazy crimewatch entry creation once so baseline `epoch_0` measures only RPC read-purity.
-    {
-        let mut cw = ctx.crimewatch.write().unwrap();
-        let _ = cw.get_or_create(char_id);
-        let _ = cw.get_or_create(missing_char_id);
-    }
     let epoch_0 = ctx.db.state_epoch();
     let journal_len_0 = ctx.db.with_snapshot(|s| s.wallet_journal.len());
 

@@ -467,6 +467,14 @@ fn ask_confirm_zarzakh_gate_toll_error(ship_id: i64, toll: i64, mass: f64) -> Br
     }
 }
 
+fn zarzakh_toll_rpc_error(code: &str) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.into(),
+        message: code.into(),
+        client_error: None,
+    }
+}
+
 /// Read-only pre-validation of Zarzakh entry gate toll before lazy stargate activation or ship
 /// ball removal (`#1429`).
 ///
@@ -498,7 +506,7 @@ pub fn prevalidate_zarzakh_gate_toll(
         crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
             st.zarzakh_toll_quotes.remove(&char_id);
         });
-        return Err(BridgeRpcError::user_error("ZarzakhGateTollDeclined"));
+        return Err(zarzakh_toll_rpc_error("ZarzakhGateTollDeclined"));
     }
 
     let (mass, toll, toll_cents) = compute_zarzakh_gate_toll(ctx, ship_id, current_ball);
@@ -535,13 +543,11 @@ pub fn prevalidate_zarzakh_gate_toll(
         let c = s
             .characters
             .get(&char_id)
-            .ok_or_else(|| BridgeRpcError::user_error("CharacterNotFound"))?;
+            .ok_or_else(|| zarzakh_toll_rpc_error("CharacterNotFound"))?;
         if c.balance < effective_toll_cents
             || c.balance.checked_sub(effective_toll_cents).is_none()
         {
-            return Err(BridgeRpcError::user_error(
-                "InsufficientFundsForZarzakhGateToll",
-            ));
+            return Err(zarzakh_toll_rpc_error("InsufficientFundsForZarzakhGateToll"));
         }
         Ok(())
     });

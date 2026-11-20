@@ -5173,11 +5173,6 @@ async fn zarzakh_toll_rejections_never_load_lazy_zarzakh_gh_1429() {
         PyRep::Integer(ship_id),
     ];
     let empty_kw = HashMap::new();
-    // Warm up lazy crimewatch entry creation once so baseline `epoch_0` measures only RPC read-purity.
-    {
-        let mut cw = ctx.crimewatch.write().unwrap();
-        let _ = cw.get_or_create(char_id);
-    }
     let epoch_0 = ctx.db.state_epoch();
     let journal_len_0 = ctx.db.with_snapshot(|s| s.wallet_journal.len());
 
