@@ -1024,17 +1024,19 @@ fn structure_control_role_denial_reason(
             st.structure_id, st.owner_corp_id
         ));
     };
-    let has_role_anchor = corp.ceo_id == char_id
-        || corp.member_roles.contains_key(&char_id)
+    let has_role_anchor = corp.member_roles.contains_key(&char_id)
         || snap
             .corp_role_assignments
             .contains_key(&(st.owner_corp_id, char_id));
+    let corp_member_ok = corp.ceo_id == char_id
+        || corp.members.contains(&char_id)
+        || (corp.members.is_empty() && has_role_anchor);
     let is_member = match snap.characters.get(&char_id) {
         Some(ch) => {
             ch.corporation_id == st.owner_corp_id
-                && (corp.members.is_empty() || corp.members.contains(&char_id) || has_role_anchor)
+                && (corp.members.is_empty() || corp_member_ok)
         }
-        None => corp.members.contains(&char_id) || (corp.ceo_id != 0 && has_role_anchor),
+        None => corp_member_ok,
     };
     if !is_member {
         return Some(format!(

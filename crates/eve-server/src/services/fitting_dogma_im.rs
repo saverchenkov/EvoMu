@@ -136,6 +136,54 @@ fn is_structure_combat_gunnery_flag(flag: InventoryFlag, flag_u16: u16) -> bool 
         || matches!(flag, InventoryFlag::SpecializedAmmoHold)
 }
 
+fn char_granted_by_defense_acl(
+    snap: &eve_db::WorldStateSnapshot,
+    ext: &crate::services::station_structure::structure_upwell_ops::StructureExtendedState,
+    prof_opt: Option<&crate::services::station_structure::structure_upwell_ops::StructureAccessProfile>,
+    char_id: i64,
+) -> bool {
+    let Some(p) = prof_opt else {
+        return false;
+    };
+    let caller_corp = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .unwrap_or(0);
+    let caller_ally = snap
+        .characters
+        .get(&char_id)
+        .and_then(|c| c.alliance_id)
+        .or_else(|| snap.corporations.get(&caller_corp).and_then(|c| c.alliance_id))
+        .unwrap_or(0);
+    if p.blocked_characters.contains(&char_id)
+        || p.defense_blocked_characters.contains(&char_id)
+        || (caller_corp > 0 && p.blocked_corporations.contains(&caller_corp))
+        || (caller_ally > 0 && p.blocked_alliances.contains(&caller_ally))
+    {
+        return false;
+    }
+    use crate::services::structure_acl_defense_rules::{is_acl_role_allowed, is_acl_role_excluded};
+    if p.defense_group_ids.iter().any(|gid| {
+        ext.owner_groups.get(gid).is_some_and(|grp| {
+            grp.members.get(&char_id).copied().is_some_and(is_acl_role_excluded)
+                || (caller_corp > 0 && grp.members.get(&caller_corp).copied().is_some_and(is_acl_role_excluded))
+                || (caller_ally > 0 && grp.members.get(&caller_ally).copied().is_some_and(is_acl_role_excluded))
+        })
+    }) {
+        return false;
+    }
+    p.defense_allowed_characters.contains(&char_id)
+        || p.defense_group_ids.iter().any(|gid| {
+            ext.owner_groups.get(gid).is_some_and(|g| {
+                g.members.get(&0).copied().is_some_and(is_acl_role_allowed)
+                    || g.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
+                    || (caller_corp > 0 && g.members.get(&caller_corp).copied().is_some_and(is_acl_role_allowed))
+                    || (caller_ally > 0 && g.members.get(&caller_ally).copied().is_some_and(is_acl_role_allowed))
+            })
+        })
+}
+
 fn can_gunner_access_structure_combat(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -163,32 +211,16 @@ fn can_gunner_access_structure_combat(
     {
         return false;
     }
-    // Without an active defense ACL grant source, fail closed unless the caller is
-    // an active owner-corp member holding CEO status or an explicit control role.
-    let may_use_defense_acl = prof_opt
-        .is_some_and(|p| !p.defense_group_ids.is_empty() || !p.defense_allowed_characters.is_empty());
-    if !may_use_defense_acl {
-        let is_owner_corp_member = snap
-            .characters
-            .get(&char_id)
-            .is_some_and(|ch| ch.corporation_id == st.owner_corp_id);
-        if !is_owner_corp_member {
-            return false;
-        }
+    // Fail closed unless `char_id` itself is granted by the defense ACL or is an
+    // active owner-corp member (not excluded from `corp.members`) with CEO/control role.
+    if !char_granted_by_defense_acl(snap, &ext, prof_opt, char_id) {
         const CTRL_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
             | eve_db::corp_roles::ROLE_STATION_MANAGER
             | eve_db::corp_roles::ROLE_STARBASE_OPERATOR
             | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
-        let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
-            st.owner_corp_id,
-            char_id,
-            Some(st.structure_id),
-            0,
-            now_unix,
+        return crate::services::station_structure::structure_upwell_ops::has_db_structure_corp_role(
+            ctx, snap, char_id, st, CTRL_ROLES, now_unix,
         );
-        if !is_ceo && (eff_roles & CTRL_ROLES) == 0 {
-            return false;
-        }
     }
     true
 }
@@ -658,8 +690,10 @@ fn handle_item_get_info(
                 .get(&loc_id)
                 .map(|loc| loc.owner_id)
                 .filter(|&oid| oid > 0);
-            let is_personal_hangar =
-                matches!(InventoryFlag::from_u16(flag_u16), InventoryFlag::Hangar);
+            let flag = InventoryFlag::from_u16(flag_u16);
+            let is_personal_hangar = matches!(flag, InventoryFlag::Hangar);
+            let is_struct_combat_gunnery =
+                struct_owner.is_some() && is_structure_combat_gunnery_flag(flag, flag_u16);
             snap.items
                 .values()
                 .filter(|i| {
@@ -670,10 +704,22 @@ fn handle_item_get_info(
                 })
                 .min_by_key(|i| {
                     // Shared hangars and containers can hold stacks from multiple owners at the
-                    // same `(location_id, flag, type_id)`; prefer the caller's own (or corp/location)
-                    // stack deterministically before falling back to any remaining stack so
-                    // authorization still runs and denies unauthorized foreign inspections.
-                    let owner_rank = if i.owner_id == char_id {
+                    // same `(location_id, flag, type_id)`; prefer structure-owned stacks first on
+                    // structure combat gunnery slots so an allied gunner's corp stack cannot shadow
+                    // loaded structure ammo, otherwise prefer caller/corp/location stacks cleanly.
+                    let owner_rank = if is_struct_combat_gunnery {
+                        if struct_owner == Some(i.owner_id) {
+                            0_u8
+                        } else if i.owner_id == char_id {
+                            1_u8
+                        } else if caller_corp == Some(i.owner_id)
+                            || loc_owner == Some(i.owner_id)
+                        {
+                            2_u8
+                        } else {
+                            4_u8
+                        }
+                    } else if i.owner_id == char_id {
                         0_u8
                     } else if !is_personal_hangar && caller_corp == Some(i.owner_id) {
                         1_u8

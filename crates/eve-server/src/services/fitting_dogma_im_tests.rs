@@ -4125,8 +4125,47 @@ async fn hf1476_structure_combat_access_denies_stale_active_pilot_and_invalid_ow
         .unwrap_err();
     assert_eq!(err.code, "AccessDenied");
 
-    // Empty role-registry corp fails closed on combat path even for members / active pilot.
+    // Non-CEO omitted from populated corp.members fails ItemGetInfo even with matching corp & stale role.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters
+            .get_mut(&char_role_op)
+            .expect("op")
+            .corporation_id = corp_id;
+        snap.corporations
+            .get_mut(&corp_id)
+            .expect("corp")
+            .members
+            .remove(&char_role_op);
+    });
+    let err = handle_dogma_im(&ctx, &mut op_sess, None, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(mod_valid)], &kw)
+        .await
+        .expect("handled")
+        .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+
+    // Empty role-registry corp fails closed on combat path even for members, active pilot,
+    // or when an unrelated character/group sits on the structure's defense ACL.
     let mut empty_mem_sess = mk_sess(char_empty_mem, empty_role_corp_id, sid_empty_corp);
+    let err = handle_dogma_im(&ctx, &mut empty_mem_sess, None, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(mod_empty_corp)], &kw)
+        .await
+        .expect("handled")
+        .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.access_profiles.insert(
+            sid_empty_corp,
+            StructureAccessProfile {
+                profile_id: prof_outsider_id,
+                owner_corp_id: empty_role_corp_id,
+                defense_group_ids: HashSet::from([group_outsider]),
+                defense_allowed_characters: HashSet::from([char_outsider]),
+                ..Default::default()
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
     let err = handle_dogma_im(&ctx, &mut empty_mem_sess, None, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(mod_empty_corp)], &kw)
         .await
         .expect("handled")
@@ -4306,8 +4345,12 @@ async fn hf1476_sublocation_lookup_prefers_caller_owner_on_shared_locations() {
             );
         }
 
-        // Shared structure HiSlot0 with smaller unrelated stack before structure-corp loaded charge.
-        for (item_id, owner_id) in [(96_476_321, stranger_a), (96_476_322, corp_id)] {
+        // Shared structure HiSlot0 with smaller allied-corp & unrelated stacks before structure-corp loaded charge.
+        for (item_id, owner_id) in [
+            (96_476_320, ally_corp_id),
+            (96_476_321, stranger_a),
+            (96_476_322, corp_id),
+        ] {
             snap.items.insert(
                 item_id,
                 InventoryItemRecord {
@@ -4441,19 +4484,21 @@ async fn hf1476_sublocation_lookup_prefers_caller_owner_on_shared_locations() {
     .expect("handled")
     .unwrap_err();
     assert_eq!(err.code, "AccessDenied");
+    let ally_hi_info = handle_dogma_im(
+        &ctx,
+        &mut ally_struct_sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[subloc(sid, InventoryFlag::HiSlot0, 183)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("allied gunner inspects structure combat charge");
     assert!(
-        handle_dogma_im(
-            &ctx,
-            &mut ally_struct_sess,
-            None,
-            "dogmaIM",
-            "ItemGetInfo",
-            &[subloc(sid, InventoryFlag::HiSlot0, 183)],
-            &kw,
-        )
-        .await
-        .expect("handled")
-        .is_ok()
+        format!("{ally_hi_info:?}").contains("\"ownerID\": Integer(98476201)"),
+        "structure owner_corp_id charge must win over allied gunner corp shadow stack, got {ally_hi_info:?}"
     );
 
     let mut outsider_struct_sess = mk_struct_sess(outsider_id, ally_corp_id);

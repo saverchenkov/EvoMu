@@ -1627,6 +1627,8 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
     let legacy_char_id = 9_476_007i64;
     let assign_op_id = 9_476_008i64;
     let assign_roleless_id = 9_476_009i64;
+    let excluded_role_id = 9_476_010i64;
+    let excluded_assign_id = 9_476_011i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         let base_char = snap.characters.values().next().cloned().expect("seed char");
@@ -1640,6 +1642,8 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
             (legacy_char_id, corp_legacy_empty),
             (assign_op_id, corp_assign_only),
             (assign_roleless_id, corp_assign_only),
+            (excluded_role_id, corp_id),
+            (excluded_assign_id, corp_id),
         ] {
             snap.characters.insert(
                 cid,
@@ -1661,6 +1665,8 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
             .insert(roleless_id, eve_db::corp_roles::ROLE_ACCOUNTANT);
         corp.member_roles
             .insert(ex_member_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        corp.member_roles
+            .insert(excluded_role_id, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
         snap.corporations.insert(corp_id, corp);
 
         snap.corp_role_assignments.insert(
@@ -1668,6 +1674,14 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
             eve_db::CorpMemberRoleAssignment {
                 character_id: assigned_op_id,
                 roles: eve_db::corp_roles::ROLE_STARBASE_OPERATOR,
+                ..Default::default()
+            },
+        );
+        snap.corp_role_assignments.insert(
+            (corp_id, excluded_assign_id),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: excluded_assign_id,
+                roles: eve_db::corp_roles::ROLE_DIRECTOR,
                 ..Default::default()
             },
         );
@@ -1711,9 +1725,15 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
         assert!(require_structure_control_role_at(snap, op_id, &st_ok, now).is_ok());
         assert!(require_structure_control_role_at(snap, assigned_op_id, &st_ok, now).is_ok());
 
-        for denied in [roleless_id, outsider_id, ex_member_id] {
+        for denied in [
+            roleless_id,
+            outsider_id,
+            ex_member_id,
+            excluded_role_id,
+            excluded_assign_id,
+        ] {
             let err = require_structure_control_role_at(snap, denied, &st_ok, now)
-                .expect_err("non-member or roleless member must be denied");
+                .expect_err("non-member, roleless member, or excluded member with stale roles must be denied");
             assert_eq!(err.code, "CorpRoleDenied");
         }
 
