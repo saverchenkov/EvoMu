@@ -6,9 +6,10 @@
 
 use crate::router::ServerContext;
 use crate::services::pve_special_sites::{
-    read_pve_special_reg, spec_now_sec, with_pve_special_reg, AbyssalWeatherKind,
-    PveSpecialSitesRegistry,
+    read_pve_special_reg, spec_now_sec, AbyssalWeatherKind, PveSpecialSitesRegistry,
 };
+#[cfg(test)]
+use crate::services::pve_special_sites::with_pve_special_reg;
 use eve_db::{CosmicAnomalyRecord, InventoryFlag, InventoryItemRecord};
 use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId, TypeId};
@@ -501,14 +502,17 @@ fn collect_roaming_weather_systems(reg: &PveSpecialSitesRegistry) -> Vec<PyRep> 
 }
 
 pub fn get_all_roaming_weather_systems(ctx: &ServerContext) -> Vec<PyRep> {
-    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-    if read_pve_special_reg(ctx, |reg| !reg.roaming_storms.is_empty()) {
-        return read_pve_special_reg(ctx, collect_roaming_weather_systems);
+    if let Some(list) = read_pve_special_reg(ctx, |reg| {
+        (!reg.roaming_storms.is_empty()).then(|| collect_roaming_weather_systems(reg))
+    }) {
+        return list;
     }
-    with_pve_special_reg(ctx, |reg| {
-        crate::services::pve_special_sites_ops::ensure_full_roaming_storm_set(ctx, reg);
-        collect_roaming_weather_systems(reg)
-    })
+    let mut tmp = PveSpecialSitesRegistry {
+        sim_clock_sec: ctx.now_unix(),
+        ..Default::default()
+    };
+    crate::services::pve_special_sites_ops::ensure_full_roaming_storm_set(ctx, &mut tmp);
+    collect_roaming_weather_systems(&tmp)
 }
 
 #[cfg(test)]

@@ -356,6 +356,7 @@ async fn test_incursion_tale_influence_remove_and_insurgency_security_notificati
     fit_turret_and_skills(&inc_ctx, PILOT_A, inc_ship, inc_gun, 34_288, 20_799, 2);
     let mut sess_inc = login_space_pilot(&inc_ctx, 13_001, "demo", "demo-secret", PILOT_A, inc_ship, 26_842, SYS_JITA, DVec3::ZERO).await;
     sess_inc.role |= ROLE_GM_DEFAULT;
+    eve_server::services::pve_special_sites::ensure_special_sites_initialized(&inc_ctx);
     rpc(&inc_ctx, &mut sess_inc, "taleMgr", "GetGlobalWorldEventTales", &[]).await.expect("GetGlobalWorldEventTales");
 
     let (inc_cid, tale_id, hq_sys) = eve_server::services::pve_special_sites::with_pve_special_reg(&inc_ctx, |reg| {
