@@ -202,25 +202,24 @@ pub async fn trigger_structure_auto_defense_on_grid(
     ensure_structure_ball_in_space(ctx, sys_id, structure_id).await;
     let (seed_cap, _) = read_unified_structure_capacitor(ctx, sys_handle, structure_id, st_type_id, now_unix).await;
 
-    let candidates: Vec<(i64, i64)> = if let Ok(bp) = sys_handle.ballpark.read() {
-        bp.balls
+    let candidates: Vec<(i64, i64)> = {
+        let view = sys_handle.view();
+        view.balls
             .values()
             .filter_map(|b| {
                 if b.id == structure_id || b.position.distance(st_pos) > 250_000.0 {
                     return None;
                 }
-                let cs = bp.combat_states.get(&b.id)?;
+                let cs = view.combat_state(b.id)?;
                 if cs.is_cloaked || cs.is_tethered || (cs.shield_hp + cs.armor_hp + cs.structure_hp) <= 0.0 {
                     return None;
                 }
-                let cid = bp.ball_slim_meta.get(&b.id).and_then(|m| m.char_id).or_else(|| {
+                let cid = view.slim_meta(b.id).and_then(|m| m.char_id).or_else(|| {
                     ctx.db.with_snapshot(|s| s.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id))
                 })?;
                 Some((b.id, cid))
             })
             .collect()
-    } else {
-        Vec::new()
     };
 
     let (targets, per_target_dmg, updated_cap): (
@@ -660,15 +659,10 @@ fn require_structure_locked_target(
         .filter(|&id| id > 0)
         .ok_or_else(|| err("TargetRequired", "Standup targeted module requires a targetID"))?;
     let is_locked = sys_handle
-        .ballpark
-        .read()
-        .ok()
-        .and_then(|bp| {
-            bp.target_locks
-                .get(&structure_id)
-                .map(|locks| locks.iter().any(|l| l.target_id == target_id && l.locked))
-        })
-        .unwrap_or(false);
+        .view()
+        .target_locks
+        .get(&structure_id)
+        .is_some_and(|locks| locks.iter().any(|l| l.target_id == target_id && l.locked));
     if !is_locked {
         return Err(err(
             "TargetNotLocked",

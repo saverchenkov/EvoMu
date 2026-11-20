@@ -249,8 +249,8 @@ pub async fn handle(
             };
             let ball_positions: std::collections::HashMap<i64, DVec3> = {
                 let sys_handle = ctx.systems.get_or_spawn(match_sys_id as u32);
-                let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-                bp.balls.iter().map(|(&id, b)| (id, b.position)).collect()
+                let view = sys_handle.view();
+                view.balls.iter().map(|(&id, b)| (id, b.position)).collect()
             };
             let mut removed_item_ids = Vec::new();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -391,14 +391,15 @@ pub async fn handle(
             });
             if let Ok((rep, b1, b2)) = res {
                 let sys_handle = ctx.systems.get_or_spawn(match_sys_id as u32);
-                let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
                 for (bid, x) in [(b1, -50_000.0), (b2, 50_000.0)] {
-                    bp.add_static_ball_with_meta(
-                        eve_destiny::Ball { id: bid, type_id: 2977, position: glam::DVec3::new(x, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 100.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
-                        eve_destiny::SlimItemMeta { group_id: 310, category_id: 2, owner_id: 1, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()}
-                    );
+                    let _ = sys_handle
+                        .spawn_ball_with_meta(
+                            eve_destiny::Ball { id: bid, type_id: 2977, position: glam::DVec3::new(x, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 100.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
+                            eve_destiny::CombatState::default(),
+                            eve_destiny::SlimItemMeta { group_id: 310, category_id: 2, owner_id: 1, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()},
+                        )
+                        .await;
                 }
-                drop(bp);
                 Ok(rep)
             } else {
                 Err(res.unwrap_err())

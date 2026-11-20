@@ -13,7 +13,7 @@
 use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 use eve_db::{ContractRecord, InventoryFlag, InventoryItemRecord, IskCents, TypeId};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use std::collections::HashMap;
 
 pub fn notify_contract(ctx: &ServerContext, char_id: i64, event: &str, cid: i64) {
@@ -232,10 +232,24 @@ fn parse_requested_items(raw: Option<&PyRep>, kwargs: &HashMap<String, PyRep>) -
         let (Some(tid), Some(qty)) = (tid_opt, qty_opt) else {
             return Err(rpc_err("InvalidContractParameters", "Each requested item entry must provide (typeID, quantity)"));
         };
-        if tid <= 0 || qty <= 0 || qty > i32::MAX as i64 {
-            return Err(rpc_err("InvalidContractParameters", format!("Invalid requested item (typeID={tid}, quantity={qty})")));
-        }
-        out.push((tid as TypeId, qty as i32));
+        let type_id = TypeId::try_from(tid)
+            .ok()
+            .filter(|&t| t > 0)
+            .ok_or_else(|| {
+                rpc_err(
+                    "InvalidContractParameters",
+                    format!("Invalid requested item (typeID={tid}, quantity={qty})"),
+                )
+            })?;
+        let item_qty = ItemQty::try_from_i64(qty)
+            .and_then(ItemQty::try_into_stack_i32)
+            .map_err(|_| {
+                rpc_err(
+                    "InvalidContractParameters",
+                    format!("Invalid requested item (typeID={tid}, quantity={qty})"),
+                )
+            })?;
+        out.push((type_id, item_qty));
     }
     Ok(out)
 }
@@ -332,7 +346,9 @@ fn unix_to_contract_filetime(unix_secs: i64) -> i64 {
     if unix_secs > 100_000_000_000_000 {
         unix_secs
     } else if unix_secs > 0 {
-        (unix_secs + 11_644_473_600) * 10_000_000
+        unix_secs
+            .saturating_add(11_644_473_600)
+            .saturating_mul(10_000_000)
     } else {
         133_500_000_000_000_000
     }
@@ -578,7 +594,7 @@ impl ContractReply {
             .map(|&(bidder_id, amount, ts)| ContractBidReply {
                 bidder_id,
                 amount_isk: amount.to_wire_f64(),
-                timestamp_unix: ts as i64,
+                timestamp_unix: i64::try_from(ts).unwrap_or(i64::MAX),
             })
             .collect();
         let availability_str = if c.availability.is_empty() {
@@ -594,13 +610,15 @@ impl ContractReply {
         } else {
             start_sys_id
         };
+        let raw_date_issued_unix = i64::try_from(c.date_issued_unix).unwrap_or(i64::MAX);
+        let raw_expiration_unix = i64::try_from(c.expiration_unix).unwrap_or(i64::MAX);
         let date_issued_unix = if c.date_issued_unix > 0 {
-            c.date_issued_unix as i64
+            raw_date_issued_unix
         } else {
             1_700_000_000
         };
         let expiration_unix = if c.expiration_unix > 0 {
-            c.expiration_unix as i64
+            raw_expiration_unix
         } else {
             1_700_086_400
         };
@@ -638,8 +656,8 @@ impl ContractReply {
             date_expired_ft,
             date_accepted_ft,
             date_completed_ft: date_accepted_ft,
-            expiration_unix: c.expiration_unix as i64,
-            date_issued_unix: c.date_issued_unix as i64,
+            expiration_unix: raw_expiration_unix,
+            date_issued_unix: raw_date_issued_unix,
             num_days: i64::from(c.num_days.max(1)),
             title: c.title.clone(),
             for_corp: c.for_corp,
@@ -717,7 +735,7 @@ impl ContractReply {
             ("items", self.items_pyrep()),
             ("requestedItems", req_rep),
             ("bids", self.bids_pyrep()),
-            ("numBids", PyRep::Integer(self.bids.len() as i64)),
+            ("numBids", PyRep::Integer(i64::try_from(self.bids.len()).unwrap_or(i64::MAX))),
             ("dateIssued", PyRep::Integer(self.date_issued_ft)),
             ("dateExpired", PyRep::Integer(self.date_expired_ft)),
             ("dateAccepted", PyRep::Integer(self.date_accepted_ft)),
@@ -795,7 +813,7 @@ impl ContractSearchEntry {
             ("contract", self.contract.inner_contract_pyrep()),
             ("items", self.contract.items_pyrep()),
             ("bids", self.contract.bids_pyrep()),
-            ("numBids", PyRep::Integer(self.contract.bids.len() as i64)),
+            ("numBids", PyRep::Integer(i64::try_from(self.contract.bids.len()).unwrap_or(i64::MAX))),
         ])
     }
 }
@@ -831,7 +849,7 @@ impl ContractSearchReply {
             .iter()
             .map(ContractSearchEntry::to_pyrep)
             .collect::<Vec<_>>();
-        let n = entries.len() as i64;
+        let n = i64::try_from(entries.len()).unwrap_or(i64::MAX);
         PyRep::keyval([
             ("contracts", PyRep::List(entries)),
             ("numFound", PyRep::Integer(n)),
@@ -851,7 +869,7 @@ fn check_contract_visibility(
 }
 
 fn active_corp_acct_div(session: &SessionState) -> usize {
-    (session.corp_account_key - 1000).clamp(0, 6) as usize
+    usize::try_from(session.corp_account_key.saturating_sub(1000).clamp(0, 6)).unwrap_or(0)
 }
 
 fn is_corp_contract_flag(flag: InventoryFlag) -> bool {
@@ -1069,7 +1087,11 @@ pub fn handle(
             } else {
                 availability
             };
-            let num_days = p_field_some("numDays").or_else(|| args.get(4)).and_then(|a| a.as_i64()).filter(|&d| d > 0).map(|d| d.clamp(1, 28) as u32)
+            let num_days = p_field_some("numDays")
+                .or_else(|| args.get(4))
+                .and_then(|a| a.as_i64())
+                .filter(|&d| d > 0)
+                .and_then(|d| u32::try_from(d.clamp(1, 28)).ok())
                 .unwrap_or(1);
             let duration_secs = if let Some(exp_min) = p_field_some("expireTime")
                 .or_else(|| p_field_some("minutesExpire"))
@@ -1077,7 +1099,14 @@ pub fn handle(
                 .or_else(|| args.get(3))
                 .and_then(|a| a.as_i64())
                 .filter(|&m| m > 0)
-            { ((exp_min as u64).saturating_mul(60)).clamp(60, 2_419_200) } else { 86_400 };
+            {
+                u64::try_from(exp_min)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(60)
+                    .clamp(60, 2_419_200)
+            } else {
+                86_400
+            };
             let Some(start_station_id) = p_field_some("startStationID")
                 .or_else(|| args.get(5))
                 .and_then(|a| a.as_i64())
@@ -1256,11 +1285,11 @@ pub fn handle(
                             && matches!(c.status.as_str(), "Outstanding" | "InProgress")
                     }).count();
                 let max_slots = if for_corp {
-                    let lvl = snap.skills.get(&char_id).and_then(|m| m.get(&25233)).map(|s| s.level as usize)
+                    let lvl = snap.skills.get(&char_id).and_then(|m| m.get(&25233)).map(|s| usize::from(s.level))
                         .unwrap_or(1);
                     10 + 10 * lvl
                 } else if let Some(skill) = snap.skills.get(&char_id).and_then(|m| m.get(&25235)) {
-                    1 + 4 * (skill.level as usize)
+                    1 + 4 * usize::from(skill.level)
                 } else { 5
                 };
                 if active_count >= max_slots {
@@ -1320,7 +1349,7 @@ pub fn handle(
                             ));
                         }
                         let corp = snap.corporations.get_mut(&issuer_corp_id).unwrap();
-                        let div_num = (acct_div_idx + 1) as u8;
+                        let div_num = u8::try_from(acct_div_idx + 1).unwrap_or(1);
                         corp.debit_division(div_num, total_upfront)
                             .ok_or_else(|| rpc_err("InsufficientFunds", format!("Not enough funds in corporation wallet division {div_num} to escrow contract reward")))?;
                     } else if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1626,18 +1655,23 @@ pub fn handle(
                 let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
                 let mut requested_transfers: Vec<(i64, i32)> = Vec::new();
                 if c.contract_type == "ItemExchange" && !c.requested_items.is_empty() {
-                    let mut aggregated_reqs: Vec<(u32, i32)> = Vec::new();
+                    let mut aggregated_reqs: Vec<(u32, ItemQty)> = Vec::new();
                     for &(req_tid, req_qty) in &c.requested_items {
-                        if req_qty <= 0 { continue; }
+                        let Ok(qty) = ItemQty::try_from_i32(req_qty) else {
+                            continue;
+                        };
                         if let Some(entry) = aggregated_reqs.iter_mut().find(|(t, _)| *t == req_tid) {
-                            entry.1 = entry.1.checked_add(req_qty).ok_or_else(|| rpc_err("ContractOverflow", "Requested item quantity overflow"))?;
+                            entry.1 = entry
+                                .1
+                                .checked_add(qty)
+                                .map_err(|_| rpc_err("ContractOverflow", "Requested item quantity overflow"))?;
                         } else {
-                            aggregated_reqs.push((req_tid, req_qty));
+                            aggregated_reqs.push((req_tid, qty));
                         }
                     }
                     let active_ship = caller_ship.or_else(|| snap.characters.get(&char_id).map(|ch| ch.active_ship_id).filter(|&id| id > 0));
                     for (req_tid, req_qty) in aggregated_reqs {
-                        let mut needed = req_qty;
+                        let mut needed = Some(req_qty);
                         let mut candidate_ids: Vec<(i64, i32)> = snap.items.values().filter(|it| {
                             let owner_flag_ok = if is_corp_accept {
                                 it.owner_id == effective_caller_corp
@@ -1669,13 +1703,21 @@ pub fn handle(
                         }).map(|it| (it.item_id, it.quantity)).collect();
                         candidate_ids.sort_by_key(|(id, _)| *id);
                         for (cand_id, cand_qty) in candidate_ids {
-                            if needed <= 0 { break; }
-                            let take = needed.min(cand_qty);
-                            requested_transfers.push((cand_id, take));
-                            needed -= take;
+                            let Some(rem) = needed else {
+                                break;
+                            };
+                            let Ok(cand_item_qty) = ItemQty::try_from_i32(cand_qty) else {
+                                continue;
+                            };
+                            let take_qty = rem.min(cand_item_qty);
+                            let take_i32 = take_qty
+                                .try_into_stack_i32()
+                                .map_err(|e| e.into_rpc_error("ContractOverflow"))?;
+                            requested_transfers.push((cand_id, take_i32));
+                            needed = rem.checked_sub(take_qty);
                         }
-                        if needed > 0 {
-                            return Err(rpc_err("MissingRequestedContractItems", format!("Acceptor lacks {needed} units of requested type {req_tid} in station hangar {}", c.start_station_id)));
+                        if let Some(rem) = needed {
+                            return Err(rpc_err("MissingRequestedContractItems", format!("Acceptor lacks {rem} units of requested type {req_tid} in station hangar {}", c.start_station_id)));
                         }
                     }
                 }
@@ -1703,7 +1745,7 @@ pub fn handle(
                             ),
                         ));
                     }
-                    let div_num = (acct_div_idx + 1) as u8;
+                    let div_num = u8::try_from(acct_div_idx + 1).unwrap_or(1);
                     let Some(corp) = snap.corporations.get_mut(&effective_caller_corp) else {
                         return Err(rpc_err("CorpNotFound", format!("Corporation {effective_caller_corp} not found")));
                     };
@@ -1802,7 +1844,7 @@ pub fn handle(
                         item.version += 1;
                     }
                 }
-                let courier_days = (c.num_days.max(1) as u64).min(28);
+                let courier_days = u64::from(c.num_days.max(1)).min(28);
                 let delivery_deadline = now_unix.saturating_add(courier_days.saturating_mul(86_400));
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) {
                     c_mut.acceptor_id = Some(if is_corp_accept { effective_caller_corp } else { char_id });
@@ -1828,7 +1870,7 @@ pub fn handle(
                     let mut fields = vec![
                         ("contractID", PyRep::Integer(cid)),
                         ("status", PyRep::String(new_status.into())),
-                        ("expirationUnix", PyRep::Integer(exp_unix as i64)),
+                        ("expirationUnix", PyRep::Integer(i64::try_from(exp_unix).unwrap_or(i64::MAX))),
                     ];
                     if let Some(wid) = wrap_id_opt { fields.push(("courierPackageID", PyRep::Integer(wid))); }
                     Some(Ok(PyRep::keyval(fields)))
@@ -1949,7 +1991,7 @@ pub fn handle(
                 }
 
                 let bidder_entity_id = if bid_for_corp { effective_caller_corp } else { char_id };
-                let bidder_div_num = (acct_div_idx + 1) as u8;
+                let bidder_div_num = u8::try_from(acct_div_idx + 1).unwrap_or(1);
                 let prev_self_refund = if c.current_bidder_id == Some(bidder_entity_id) { c.current_bid } else { IskCents(0) };
                 if bid_for_corp {
                     let corp = snap
@@ -2506,8 +2548,11 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let filter_type = args.first().and_then(|a| a.as_str()).or_else(|| kwargs.get("contractType").and_then(|v| v.as_str()));
             let filter_station = kwargs.get("stationID").and_then(|v| v.as_i64());
-            let filter_region = kwargs.get("regionID").and_then(|v| v.as_i64()).map(|r| r as u32);
-            let filter_item_type = kwargs.get("itemTypeID").or_else(|| kwargs.get("typeID")).and_then(|v| v.as_i64()).map(|t| t as TypeId);
+            let filter_region = kwargs.get("regionID").and_then(|v| v.as_i64());
+            let filter_item_type = kwargs
+                .get("itemTypeID")
+                .or_else(|| kwargs.get("typeID"))
+                .and_then(|v| v.as_i64());
             let min_price = kwargs.get("minPrice").and_then(|v| v.as_f64()).map(IskCents::from_f64_isk);
             let max_price = kwargs.get("maxPrice").and_then(|v| v.as_f64()).map(IskCents::from_f64_isk);
             let caller_corp = session.corporation_id.unwrap_or(0);
@@ -2519,6 +2564,9 @@ pub fn handle(
                     for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
                     let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
                             let region_ok = filter_region.map(|reg| {
+                                let Ok(reg_id) = u32::try_from(reg) else {
+                                    return false;
+                                };
                                 let loc_known = ctx.sde.stations.contains_key(&c.start_station_id)
                                     || snap.structures.contains_key(&c.start_station_id);
                                 if loc_known {
@@ -2526,17 +2574,19 @@ pub fn handle(
                                         &ctx.sde,
                                         snap,
                                         c.start_station_id,
-                                        reg,
+                                        reg_id,
                                     )
                                 } else {
                                     true
                                 }
                             }).unwrap_or(true);
                             let item_type_ok = filter_item_type.map(|tid| {
-                                    let descendants = snap.collect_item_descendants_many(&c.item_ids);
-                                    c.item_ids.iter().chain(descendants.iter())
-                                        .any(|iid| snap.items.get(iid).is_some_and(|it| it.type_id == tid))
-                                        || c.requested_items.iter().any(|&(rtid, _)| rtid == tid)
+                                    TypeId::try_from(tid).ok().is_some_and(|tid_u32| {
+                                        let descendants = snap.collect_item_descendants_many(&c.item_ids);
+                                        c.item_ids.iter().chain(descendants.iter())
+                                            .any(|iid| snap.items.get(iid).is_some_and(|it| it.type_id == tid_u32))
+                                            || c.requested_items.iter().any(|&(rtid, _)| rtid == tid_u32)
+                                    })
                                 }).unwrap_or(true);
                             c.status == "Outstanding"
                                 && check_contract_visibility(c, char_id, caller_corp, caller_alliance)
@@ -2740,7 +2790,10 @@ pub fn handle(
                     } else if c.status == "Outstanding" && (c.issuer_id == char_id || c.acceptor_id == Some(char_id)) && c.expiration_unix <= now_unix {
                         needs_attention.push(PyRep::keyval([("contractID", PyRep::Integer(c.contract_id))]));
                     } else if c.status == "InProgress" && (c.issuer_id == char_id || c.acceptor_id == Some(char_id)) {
-                        let exp_ft = ((c.expiration_unix as i64) + 11_644_473_600) * 10_000_000;
+                        let exp_ft = i64::try_from(c.expiration_unix)
+                            .unwrap_or(i64::MAX)
+                            .saturating_add(11_644_473_600)
+                            .saturating_mul(10_000_000);
                         in_progress.push(PyRep::keyval([("contractID", PyRep::Integer(c.contract_id)), ("startStationID", PyRep::Integer(c.start_station_id)), ("endStationID", PyRep::Integer(c.end_station_id)), ("expires", PyRep::Integer(exp_ft))]));
                     }
                 }
@@ -3006,4 +3059,46 @@ mod contracts_service_tests;
 #[cfg(test)]
 #[path = "contracts_service_edges_tests.rs"]
 mod contracts_service_edges_tests;
+
+#[cfg(test)]
+mod qty_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn requested_items_and_corp_div_reject_truncation_and_overflow() {
+        let kw = HashMap::new();
+        for (tid, qty) in [
+            (34_i64, 0_i64),
+            (34_i64, -1_i64),
+            (34_i64, i64::from(i32::MAX) + 1),
+            (i64::from(u32::MAX) + 35, 10_i64),
+            (0_i64, 10_i64),
+        ] {
+            let rep = PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(tid),
+                PyRep::Integer(qty),
+            ])]);
+            let err = parse_requested_items(Some(&rep), &kw).unwrap_err();
+            assert_eq!(err.code, "InvalidContractParameters");
+        }
+
+        let valid = PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(34),
+            PyRep::Integer(i64::from(i32::MAX)),
+        ])]);
+        assert_eq!(
+            parse_requested_items(Some(&valid), &kw).unwrap(),
+            vec![(34, i32::MAX)]
+        );
+
+        let mut sess = SessionState::default();
+        sess.corp_account_key = i32::MIN;
+        assert_eq!(active_corp_acct_div(&sess), 0);
+        sess.corp_account_key = 1003;
+        assert_eq!(active_corp_acct_div(&sess), 3);
+        sess.corp_account_key = i32::MAX;
+        assert_eq!(active_corp_acct_div(&sess), 6);
+    }
+}
 
