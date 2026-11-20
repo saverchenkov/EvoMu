@@ -1380,7 +1380,7 @@ fn detach_structure_view_outside_on_beyonce_release(
     ctx.clear_pending_structure_view_outside_set_state_for_session(session_id);
     ctx.prune_bound_service_without_notify(session_id, "beyonce");
     if let Some(cid) = char_id {
-        ctx.clear_space_ballpark_bootstrapped(cid);
+        ctx.clear_space_ballpark_bootstrapped_for_session(session_id, cid);
         crate::services::space_destiny::reset_update_state_rate_limit(ctx, session_id, cid);
     }
     ctx.flight_recorder.record_wire_state(wire_state);
@@ -1729,6 +1729,39 @@ async fn execute_call_req_wire_inner(
     }
 
     let owns_char_session = session_owns_char_notifications(ctx, session);
+    // Reconcile mid-RPC Upwell `Undock` races where Quasar `Activated("hangar")` cleared
+    // `space_ballpark_bootstrapped` after pre-RPC reconciliation (`1612`) and before
+    // `station_structure::undock_character` checked `was_view_outside`, so `macho_listener`
+    // matches `station_structure`'s Hangar -> Undock path instead of emitting premature `SetState`.
+    let post_rpc_stream_active = !matches!(wire.wire_state.destiny, DestinyStream::Detached)
+        || wire.subscribed_sys_id.is_some();
+    if rpc_res.is_ok()
+        && owns_char_session
+        && post_rpc_stream_active
+        && matches!(
+            (effective_service, method),
+            ("ship" | "structureDocking" | "stationSvc", "Undock")
+        )
+        && prev_session.station_id.is_none()
+        && prev_session.structure_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_none()
+        && session
+            .character_id
+            .zip(session.solar_system_id)
+            .is_some_and(|(cid, sys_id)| {
+                !ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
+            })
+    {
+        detach_structure_view_outside_on_beyonce_release(
+            ctx,
+            session.session_id,
+            session.character_id,
+            wire.wire_state,
+            &mut wire.sys_rx,
+            wire.subscribed_sys_id,
+        );
+    }
     let prev_stream_active = !matches!(wire.wire_state.destiny, DestinyStream::Detached)
         || wire.subscribed_sys_id.is_some();
     let prev_undocked_space = prev_session.character_id.is_some()

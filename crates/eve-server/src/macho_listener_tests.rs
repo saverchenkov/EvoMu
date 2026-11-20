@@ -6406,3 +6406,252 @@ async fn test_1477_f02_reenter_view_outside_getformations_then_delayed_oid_befor
     assert!(undock_states[0].1.iter().any(|b| b.id == struct_id));
     assert!(undock_states[0].1.iter().any(|b| b.id == nearby_ball_id));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1477_r2_f01_displaced_session_tick_and_rpc_preserve_replacement_view_outside() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let sys_id = 30_000_144_u32;
+    let char_id = 90_000_001_i64;
+    let struct_id = 1_040_001_477_105_i64;
+    let nearby_ball_id = 900_000_147_705_i64;
+    let (ship_id, sys_handle) =
+        setup_upwell_docked_pilot(&ctx, char_id, sys_id, struct_id, nearby_ball_id);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: nearby_ball_id,
+            type_id: 1230,
+            position: eve_destiny::DVec3::new(254_000.0, 0.0, 0.0),
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 120.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+
+    // 1. Session S1 connects, selects char, and enters structure View Outside.
+    let (mut s1, cid1, user_id) = connect_and_authenticate(addr, "demo", "demo-secret").await;
+    let (sel1_rsp, _) = test_1386_call_rpc(
+        &mut s1,
+        cid1,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    assert_eq!(sel1_rsp.packet_type, MachoPacketType::CallRsp);
+    let sid1 = ctx.db.get_online_session(user_id).expect("s1 online").session_id;
+    let (form1_rsp, _) =
+        test_1386_call_rpc(&mut s1, cid1, user_id, 2, "beyonce", "GetFormations", Vec::new())
+            .await;
+    assert_eq!(form1_rsp.packet_type, MachoPacketType::CallRsp);
+    let (bind1_rsp, _) = test_1386_call_rpc(
+        &mut s1,
+        cid1,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(i64::from(sys_id)), PyRep::None],
+    )
+    .await;
+    assert_eq!(bind1_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(ctx.is_space_ballpark_bootstrapped(sid1, char_id, sys_id));
+    assert!(ctx.has_bound_service(sid1, "beyonce"));
+    assert_eq!(sys_handle.event_tx.receiver_count(), 1);
+
+    // 2. Release S1's online lock so S1's live TCP task remains open (modeling pre-close_rx
+    //    displacement), then replacement session S2 logs in and enters structure View Outside.
+    ctx.db.release_online_lock(user_id, sid1);
+    let (mut s2, cid2, uid2) = connect_and_authenticate(addr, "demo", "demo-secret").await;
+    assert_eq!(uid2, user_id);
+    let (sel2_rsp, _) = test_1386_call_rpc(
+        &mut s2,
+        cid2,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    assert_eq!(sel2_rsp.packet_type, MachoPacketType::CallRsp);
+    let sid2 = ctx.db.get_online_session(user_id).expect("s2 online").session_id;
+    assert_ne!(sid1, sid2);
+
+    let (form2_rsp, form2_notifs) =
+        test_1386_call_rpc(&mut s2, cid2, user_id, 2, "beyonce", "GetFormations", Vec::new())
+            .await;
+    assert_eq!(form2_rsp.packet_type, MachoPacketType::CallRsp);
+    let mut form2_states = Vec::new();
+    for pkt in &form2_notifs {
+        collect_set_states_from_pyrep_tree(&pkt.payload, &mut form2_states);
+    }
+    assert_eq!(form2_states.len(), 1);
+    assert_eq!(form2_states[0].0, Some(struct_id));
+
+    let (bind2_rsp, _) = test_1386_call_rpc(
+        &mut s2,
+        cid2,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(i64::from(sys_id)), PyRep::None],
+    )
+    .await;
+    assert_eq!(bind2_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(ctx.is_space_ballpark_bootstrapped(sid2, char_id, sys_id));
+    assert!(ctx.has_bound_service(sid2, "beyonce"));
+    assert_eq!(sys_handle.event_tx.receiver_count(), 2);
+
+    // 3. First 1Hz tick wakes displaced S1's tick_res arm (macho_listener.rs:3189-3205):
+    //    must detach ONLY S1 (`receiver_count` 2 -> 1) and preserve S2's bootstrap & binding.
+    let _ = sys_handle.step_manual(1.0).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while sys_handle.event_tx.receiver_count() > 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("displaced S1 1Hz tick must detach S1 without waiting");
+    assert_eq!(sys_handle.event_tx.receiver_count(), 1);
+    assert!(!ctx.has_bound_service(sid1, "beyonce"));
+    assert!(
+        ctx.is_space_ballpark_bootstrapped(sid2, char_id, sys_id),
+        "displaced S1 tick detach must preserve S2's space_ballpark_bootstrapped"
+    );
+    assert!(
+        ctx.has_bound_service(sid2, "beyonce"),
+        "displaced S1 tick detach must preserve S2's beyonce binding"
+    );
+
+    // Emit damage + second 1Hz tick to prove S2's tick_res arm stays subscribed and delivers ticks.
+    assert!(
+        sys_handle
+            .apply_damage(
+                struct_id,
+                eve_destiny::DamageVector {
+                    em: 100.0,
+                    thermal: 0.0,
+                    kinetic: 0.0,
+                    explosive: 0.0,
+                },
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let _ = sys_handle.step_manual(1.0).await.unwrap();
+    test_1237_wait_for_notification(
+        &mut s2,
+        "DoDestinyUpdate",
+        "replacement S2 must still receive 1Hz DoDestinyUpdate after S1 detached",
+    )
+    .await;
+    assert_eq!(sys_handle.event_tx.receiver_count(), 1);
+    assert!(ctx.is_space_ballpark_bootstrapped(sid2, char_id, sys_id));
+    assert!(ctx.has_bound_service(sid2, "beyonce"));
+
+    // 4. Displaced wire session processing an in-flight RPC (macho_listener.rs:1605-1622)
+    //    must detach only itself and keep S2's View Outside intact.
+    let stale_wire_sid = 999_147_788_u64;
+    let stale_wire_bid = 999_147_789_u64;
+    {
+        let mut bound = ctx.bound_objects.write().unwrap();
+        bound.insert(
+            stale_wire_bid,
+            crate::router::BoundObjectEntry {
+                bound_id: stale_wire_bid,
+                session_id: stale_wire_sid,
+                user_id,
+                character_id: char_id,
+                service: "beyonce".into(),
+                object_id: i64::from(sys_id),
+                oid_str: format!("{stale_wire_bid}"),
+                ref_id: 0,
+            },
+        );
+    }
+    let mut stale_sess = SessionState::new(stale_wire_sid);
+    stale_sess.user_id = Some(user_id);
+    stale_sess.character_id = Some(char_id);
+    stale_sess.solar_system_id = Some(sys_id);
+    stale_sess.structure_id = Some(struct_id);
+    stale_sess.station_id = None;
+    let mut stale_sys_rx = sys_handle.subscribe();
+    let mut stale_subscribed_sys_id = Some(sys_id);
+    let mut stale_wire_state =
+        crate::outbound_sequencer::SessionWireState::new(stale_wire_sid, 9_900_002);
+    stale_wire_state.ensure_in_space(Some(sys_id));
+    let mut stale_deferred_ship_id = None;
+    let req_source = MachoAddress::Client {
+        client_id: 9_900_002,
+        call_id: 1,
+        service: None,
+    };
+    let req_dest = MachoAddress::Node {
+        node_id: MACHO_PROXY_NODE_ID,
+        service: Some("account".into()),
+        call_id: 0,
+    };
+    let kw = HashMap::new();
+    {
+        let mut refs = CallReqWireRefs {
+            client_id: 9_900_002,
+            sys_rx: &mut stale_sys_rx,
+            subscribed_sys_id: &mut stale_subscribed_sys_id,
+            wire_state: &mut stale_wire_state,
+            deferred_ship_id: &mut stale_deferred_ship_id,
+        };
+        let _ = execute_call_req_wire(
+            &ctx,
+            &mut stale_sess,
+            &mut refs,
+            &req_source,
+            &req_dest,
+            "account",
+            None,
+            "GetCashBalance",
+            &[PyRep::Integer(0)],
+            &kw,
+        )
+        .await;
+    }
+    drop(stale_sys_rx);
+    assert!(matches!(stale_wire_state.destiny, DestinyStream::Detached));
+    assert!(stale_subscribed_sys_id.is_none());
+    assert!(!ctx.has_bound_service(stale_wire_sid, "beyonce"));
+    assert!(
+        ctx.is_space_ballpark_bootstrapped(sid2, char_id, sys_id),
+        "displaced pre-RPC detach must preserve S2's space_ballpark_bootstrapped"
+    );
+    assert!(ctx.has_bound_service(sid2, "beyonce"));
+    assert_eq!(sys_handle.event_tx.receiver_count(), 1);
+
+    // 5. Replacement S2 completes View Outside -> ship.Undock cleanly with SetState(ego=ship_id).
+    ctx.advance_secs(12);
+    let (undock2_rsp, undock2_notifs) =
+        test_1386_call_rpc(&mut s2, cid2, user_id, 4, "ship", "Undock", Vec::new()).await;
+    assert_eq!(undock2_rsp.packet_type, MachoPacketType::CallRsp);
+    let mut undock2_states = Vec::new();
+    for pkt in &undock2_notifs {
+        collect_set_states_from_pyrep_tree(&pkt.payload, &mut undock2_states);
+    }
+    assert_eq!(
+        undock2_states.len(),
+        1,
+        "S2 View Outside -> ship.Undock must still emit SetState(ego=ship_id) directly"
+    );
+    assert_eq!(undock2_states[0].0, Some(ship_id));
+    assert!(undock2_states[0].1.iter().any(|b| b.id == struct_id));
+    assert!(undock2_states[0].1.iter().any(|b| b.id == nearby_ball_id));
+}
