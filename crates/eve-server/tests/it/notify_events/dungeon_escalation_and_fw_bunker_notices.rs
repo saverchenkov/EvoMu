@@ -464,6 +464,7 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
         character_id: Some(PILOT_B),
         ..Default::default()
     };
+    eve_server::services::pve_special_sites::ensure_special_sites_initialized(&inc_ctx);
     rpc(&inc_ctx, &mut sess_probe, "taleMgr", "GetGlobalWorldEventTales", &[])
         .await
         .expect("GetGlobalWorldEventTales");

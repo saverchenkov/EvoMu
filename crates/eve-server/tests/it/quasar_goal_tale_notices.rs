@@ -274,9 +274,11 @@ async fn incursion_tale_notices_follow_seeding_and_mothership_defeat() {
     let mut pilot = build_sess(53_001, 90_000_001, CORP);
     let mut rx = subscribe(&ctx, &mut pilot).await;
 
-    // The first map RPC that needs world events seeds the incursions -> one StartedNotice each.
+    // Read-only map RPCs stay read-pure (0 seeded tales, 0 notices); world initialization seeds incursions -> one StartedNotice each.
     let kw: HashMap<String, PyRep> = HashMap::new();
     ctx.dispatch_rpc(&mut pilot, "map", None, "GetEdencomFortressSystems", &[], &kw, None).await.expect("map RPC");
+    assert!(drain(&mut rx, "eve_public.tale").is_empty(), "GetEdencomFortressSystems must remain read-pure");
+    eve_server::services::pve_special_sites::ensure_special_sites_initialized(&ctx);
     let mut seeded: Vec<(u64, u64)> = with_pve_special_reg(&ctx, |reg| {
         reg.incursions.values().map(|i| (i.tale_id as u64, i.staging_solar_system_id as u64)).collect()
     });
