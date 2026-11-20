@@ -1025,10 +1025,17 @@ fn handle_set_activity_state(
     bound_entry: Option<&BoundObjectEntry>,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) {
+    let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
+    let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
+    if caller_sys == 0 {
+        return Some(Err(probe_rpc_err(
+            "NoSolarSystem",
+            "Session has no active solar system",
+        )));
+    }
     let bound_sys = match verify_scan_mgr_bound(
         session,
         char_id,
@@ -1136,6 +1143,9 @@ fn handle_set_activity_state(
                 client_error: None,
             }));
         }
+    }
+    if let Err(e) = require_undocked_probe_space(ctx, session) {
+        return Some(Err(e));
     }
 
     let mut changed: Vec<(i64, i32)> = Vec::new();
