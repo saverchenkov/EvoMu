@@ -477,6 +477,14 @@ async fn test_so7_chat_item_fitting_hyperlinks_resolution() {
     };
 
     // (a) showinfo:<typeID>//<itemID> -> recipient `s2` resolves typeID via SDE and itemID via dogmaIM.ItemGetInfo
+    // Undock s1 and s2 into Jita space so s1's ship is visible on-grid to s2 (#1352 cross-owner ItemGetInfo guard).
+    ctx.advance_secs(31);
+    rpc(&ctx, &mut s1, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock s1 for on-grid showinfo");
+    rpc(&ctx, &mut s2, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock s2 for on-grid showinfo");
     let showinfo_target = extract_between(&delivered_mail_text, "<url=showinfo:", ">Rifter</url>");
     let (type_str, item_str) = showinfo_target.split_once("//").expect("showinfo typeID//itemID");
     let parsed_type_id: u32 = type_str.parse().expect("parsed showinfo typeID");

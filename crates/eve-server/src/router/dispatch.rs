@@ -542,7 +542,7 @@ impl ServerContext {
             ("charUnboundMgr", "SelectCharacterID") => {
                 session.character_id.is_some() && initial_active_char_id != session.character_id
             }
-            ("stationSvc", "Undock") | ("structureDocking", "Undock") => {
+            ("stationSvc", "Undock") | ("structureDocking", "Undock") | ("ship", "Undock") => {
                 pre_dispatch_was_docked
                     && session.station_id.is_none()
                     && session.structure_id.is_none()
@@ -578,6 +578,7 @@ impl ServerContext {
                     | ("character", "GetCharacterSelectionInfo")
                     | ("stationSvc", "Undock")
                     | ("structureDocking", "Undock")
+                    | ("ship", "Undock")
                     | ("beyonce", "MachoBindObject")
                     | ("beyonce", "GetFormations")
                     | ("beyonce", "UpdateStateRequest")
@@ -650,7 +651,15 @@ impl ServerContext {
                         post_rpc_loc.1.or(post_rpc_loc.2),
                     );
                 }
-                if res.is_ok() && post_sync_loc.0.is_some() && post_rpc_loc != post_sync_loc {
+                let is_undock_rpc = matches!(
+                    (metric_service, method),
+                    ("stationSvc" | "structureDocking" | "ship", "Undock")
+                );
+                if res.is_ok()
+                    && !is_undock_rpc
+                    && post_sync_loc.0.is_some()
+                    && post_rpc_loc != post_sync_loc
+                {
                     if let Some(sys_id) = session.solar_system_id {
                         self.invalidate_bound_objects_for_session_transition(
                             cid,
@@ -901,7 +910,10 @@ impl ServerContext {
                     "MachoBindObject" | "GetSkills" | "GetSkillQueueAndFreePoints"
                 )
                 | ("invbroker", "MachoBindObject" | "List")
-                | ("ship", "MachoBindObject" | "GetShipConfiguration")
+                | (
+                    "ship",
+                    "Undock" | "MachoBindObject" | "GetShipConfiguration"
+                )
                 | ("publicGatewaySvc", "MachoBindObject")
         )
     }
@@ -1573,10 +1585,7 @@ impl ServerContext {
                     Some(PyRep::Tuple(call_tuple))
                         if call_tuple.first().and_then(|m| m.as_str()) == Some("UpdateStateRequest")
                 );
-                if !has_piggybacked_update_state
-                    && session.station_id.is_none()
-                    && session.structure_id.is_none()
-                {
+                if !has_piggybacked_update_state && session.station_id.is_none() {
                     if let (Some(cid), Some(sys_id)) =
                         (session.character_id, session.solar_system_id)
                     {
@@ -1885,14 +1894,13 @@ impl ServerContext {
                 && method == "GetFormations"
                 && res.is_ok()
                 && session.station_id.is_none()
-                && session.structure_id.is_none()
             {
-                if let (Some(cid), Some(sys_id), Some(ship_id)) = (
-                    session.character_id,
-                    session.solar_system_id,
-                    session.ship_id,
-                ) {
-                    if ship_id > 0
+                if let (Some(cid), Some(sys_id)) =
+                    (session.character_id, session.solar_system_id)
+                {
+                    let has_observer = session.structure_id.is_some()
+                        || session.ship_id.is_some_and(|ship_id| ship_id > 0);
+                    if has_observer
                         && !self.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
                     {
                         let _ = crate::services::space_destiny::handle_update_state_request(

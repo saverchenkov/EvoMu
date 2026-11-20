@@ -184,11 +184,13 @@ async fn destroy_fitting_guards_subsystems_structures_and_weapon_groups() {
         );
     }
 
+    session.station_id = None;
     let linked_all =
         call_char_fitting_mgr(&ctx, &mut session, "LinkAllWeapons", &[PyRep::Integer(ship_id)])
             .await
             .unwrap();
     assert!(matches!(linked_all, PyRep::Dict(ref d) if !d.is_empty()));
+    session.station_id = Some(60_003_760);
 
     for mid in [gun1_id, gun2_id, diff_mod_id, subsys_id] {
         let d_res =

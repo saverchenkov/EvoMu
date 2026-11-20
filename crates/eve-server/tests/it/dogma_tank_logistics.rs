@@ -160,6 +160,10 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
     .await
     .expect("Fit Small Trimark Armor Pump I");
 
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "LinkAllWeapons", &[PyRep::Integer(ship_id)], &kw, None)
         .await
         .expect("LinkAllWeapons");
@@ -179,10 +183,10 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
     )
     .await
     .expect("LoadAmmo Fusion S");
+    // Loading ammo in space starts the 10s reload timer on the linked autocannon bank; advance
+    // past reload completion before locking and activating the weapons.
+    ctx.advance_secs(11);
 
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock");
     let sys = ctx.systems.get_or_spawn(30_000_142);
     let (_, ship_ball) = sys.get_ball_snapshot(ship_id).await.expect("get_ball_snapshot").expect("ship ball");
 

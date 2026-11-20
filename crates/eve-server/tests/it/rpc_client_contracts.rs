@@ -1739,6 +1739,7 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
             cs.shutdown_in_progress = false;
         }
     }
+    let in_space = matches!(profile, SessionProfile::InSpace);
     let needs_db_sync = ctx.db.with_snapshot(|snap| {
         snap.characters.get(&CHAR_ID).is_some_and(|ch| {
             ch.station_id != station_id
@@ -1748,7 +1749,11 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
                 || ch.corporation_id != CORP_ID
                 || ch.alliance_id != Some(ALLIANCE_ID)
                 || ch.fleet_id != Some(FLEET_ID)
-        }) || snap.crimewatch_states.contains_key(&CHAR_ID)
+        }) || (in_space
+            && snap.items.get(&SHIP_ID).is_some_and(|ship| {
+                ship.location_id != i64::from(SYSTEM_ID) || ship.flag != InventoryFlag::None
+            }))
+            || snap.crimewatch_states.contains_key(&CHAR_ID)
             || snap.sp6_lifecycle.safe_logoffs.contains_key(&CHAR_ID)
             || snap.sp6_lifecycle.self_destructs.contains_key(&CHAR_ID)
             || snap.sp6_lifecycle.disconnected_ships.contains_key(&SHIP_ID)
@@ -1774,6 +1779,12 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
                 ch.corporation_id = CORP_ID;
                 ch.alliance_id = Some(ALLIANCE_ID);
                 ch.fleet_id = Some(FLEET_ID);
+            }
+            if in_space {
+                if let Some(ship) = snap.items.get_mut(&SHIP_ID) {
+                    ship.location_id = i64::from(SYSTEM_ID);
+                    ship.flag = InventoryFlag::None;
+                }
             }
             snap.crimewatch_states.remove(&CHAR_ID);
             snap.sp6_lifecycle.safe_logoffs.remove(&CHAR_ID);
@@ -1838,6 +1849,54 @@ fn is_destructive_rpc(service: &str, method: &str) -> bool {
         || m.starts_with("cancel")
         || m.starts_with("trash")
         || m.starts_with("extract")
+}
+
+fn prepare_contract_link_all_weapons_probe(ctx: &ServerContext) -> Option<i64> {
+    let inserted = ctx.db.with_mut_snapshot(|snap| {
+        let autocannon_count = snap
+            .items
+            .values()
+            .filter(|it| {
+                it.location_id == SHIP_ID
+                    && it.type_id == 2889
+                    && matches!(it.flag as u16, 27..=34)
+            })
+            .count();
+        if autocannon_count >= 2 {
+            return None;
+        }
+        snap.next_entity_id += 1;
+        let second_cannon_id = snap.next_entity_id;
+        snap.items.insert(
+            second_cannon_id,
+            InventoryItemRecord {
+                item_id: second_cannon_id,
+                type_id: 2889, // Second 200mm AutoCannon II for LinkAllWeapons InSpace probe
+                owner_id: CHAR_ID,
+                location_id: SHIP_ID,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        Some(second_cannon_id)
+    });
+    if inserted.is_some() {
+        ctx.invalidate_ship_fitting(SHIP_ID);
+    }
+    inserted
+}
+
+fn cleanup_contract_link_all_weapons_probe(ctx: &ServerContext, extra_weapon_id: Option<i64>) {
+    if let Some(id) = extra_weapon_id {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&id);
+            snap.weapon_banks.remove(&SHIP_ID);
+        });
+        ctx.invalidate_ship_fitting(SHIP_ID);
+    }
 }
 
 async fn reset_contract_space_drones_and_fighters(ctx: &ServerContext) {
@@ -2112,6 +2171,13 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                 {
                     reset_contract_space_drones_and_fighters(&ctx).await;
                 }
+                let temp_link_weapon_id = if matches!(profile, SessionProfile::InSpace)
+                    && sig.rpc_key == "dogmaIM.LinkAllWeapons"
+                {
+                    prepare_contract_link_all_weapons_probe(&ctx)
+                } else {
+                    None
+                };
                 let bound_id = bind_for_service(&ctx, &sess, &sig.service, &sig.method);
                 let res = ctx
                     .dispatch_rpc(
@@ -2161,12 +2227,15 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                             ctx.invalidate_ship_fitting(SHIP_ID);
                             reset_contract_space_drones_and_fighters(&ctx).await;
                         }
-                        break;
                     }
                     Err(e) if e.code == "UnimplementedRPC" => {
                         saw_unimplemented_rpcs.insert(sig.rpc_key.clone());
                     }
                     Err(_) => {}
+                }
+                cleanup_contract_link_all_weapons_probe(&ctx, temp_link_weapon_id);
+                if sig_ok {
+                    break;
                 }
             }
             if !sig_ok {
@@ -3664,6 +3733,17 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
                     reset_contract_space_drones_and_fighters(&ctx_raw).await;
                     reset_contract_space_drones_and_fighters(&ctx_wire).await;
                 }
+                let (temp_raw_weapon_id, temp_wire_weapon_id) =
+                    if matches!(profile, SessionProfile::InSpace)
+                        && sig.rpc_key == "dogmaIM.LinkAllWeapons"
+                    {
+                        (
+                            prepare_contract_link_all_weapons_probe(&ctx_raw),
+                            prepare_contract_link_all_weapons_probe(&ctx_wire),
+                        )
+                    } else {
+                        (None, None)
+                    };
                 let bound_raw =
                     bind_for_service(&ctx_raw, &sess_raw, &sig.service, &sig.method);
                 let bound_wire = bind_for_service(
@@ -3734,6 +3814,8 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
                     reset_contract_space_drones_and_fighters(&ctx_raw).await;
                     reset_contract_space_drones_and_fighters(&ctx_wire).await;
                 }
+                cleanup_contract_link_all_weapons_probe(&ctx_raw, temp_raw_weapon_id);
+                cleanup_contract_link_all_weapons_probe(&ctx_wire, temp_wire_weapon_id);
 
                 if resolved_rpcs.contains(&sig.rpc_key) {
                     break;
