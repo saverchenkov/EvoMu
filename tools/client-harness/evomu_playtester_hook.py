@@ -5485,11 +5485,11 @@ def _execute_action(sm, action):
         atype = "cleanup_utility_windows"
     elif raw_atype == "click":
         atype = "click_widget" if raw_target else "click_xy"
-    elif raw_atype == "drag":
+    elif raw_atype in ("drag", "drag_and_drop"):
         atype = "drag_widget"
     elif raw_atype in ("type", "input_text", "enter_text"):
         atype = "type_text"
-    elif raw_atype == "key_press":
+    elif raw_atype in ("key_press", "hotkey", "press_hotkey", "shortcut"):
         atype = "press_key"
 
     if atype == "wait":
@@ -7552,7 +7552,7 @@ def _execute_action(sm, action):
             result["traceback"] = tb_full[-1200:]
             if (
                 exc.__class__.__name__ == "UserError"
-                and raw_atype in ("click_widget", "click_xy", "drag_widget", "press_key", "type_text")
+                and atype in ("click_widget", "click_xy", "drag_widget", "press_key", "type_text")
             ):
                 _notify_user_error(exc, async_uthread=True)
             elif _es is not None and ("eve/client/script/" in tb_full or "packages/" in tb_full):

@@ -660,6 +660,19 @@ pub async fn handle_ship_or_npc_destruction(
             )
             .await
         } else {
+            if attacker_char_id > 0
+                && (ball_cat_id == 11 || target_item_cat_id_opt == Some(11))
+            {
+                crate::services::agents_missions::agents_standings_arcs::apply_npc_kill_faction_standing_loss(
+                    ctx,
+                    sys_id,
+                    attacker_char_id,
+                    target_ball.type_id,
+                    None,
+                    target_item_owner_opt,
+                    now_unix,
+                );
+            }
             String::new()
         };
         crate::services::sov_gameplay::on_space_entity_destroyed(

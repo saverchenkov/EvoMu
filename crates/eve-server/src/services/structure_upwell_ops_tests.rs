@@ -1388,3 +1388,220 @@ async fn move_corp_assets_to_safety_enforces_db_first_rbac_and_rejects_stale_uni
     .unwrap();
     assert_eq!(moved.dict_get("ownerID").and_then(PyRep::as_i64), Some(corp_id));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn structure_guests_get_guests_enforces_db_authz_and_is_read_pure() {
+    let ctx = test_ctx();
+    let (corp_id, rival_corp_id, npc_corp_id) = (98_780_001_i64, 98_780_002_i64, 1_000_035_i64);
+    let (sid, dead_sid, npc_sid, missing_sid) = (
+        10_000_980_001_i64,
+        10_000_980_002_i64,
+        10_000_980_003_i64,
+        10_000_980_999_i64,
+    );
+    let (
+        ceo_id,
+        station_mgr_id,
+        director_id,
+        roleless_id,
+        operator_id,
+        excluded_dir_id,
+        docked_guest_id,
+        outsider_id,
+        gm_id,
+        npc_char_id,
+    ) = (
+        78_101_i64,
+        78_102_i64,
+        78_103_i64,
+        78_104_i64,
+        78_106_i64,
+        78_110_i64,
+        78_105_i64,
+        78_107_i64,
+        78_108_i64,
+        78_109_i64,
+    );
+
+    seed_upwell_fixture(&ctx, ceo_id, corp_id, sid);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.structure_id = None;
+        }
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.extend([
+            ceo_id,
+            station_mgr_id,
+            director_id,
+            roleless_id,
+            operator_id,
+        ]);
+        corp.member_roles
+            .insert(station_mgr_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
+        corp.member_roles
+            .insert(director_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        corp.member_roles.insert(roleless_id, 0);
+        corp.member_roles
+            .insert(operator_id, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
+        corp.member_roles
+            .insert(excluded_dir_id, eve_db::corp_roles::ROLE_DIRECTOR);
+
+        let mut rival_corp = CorporationRecord::default();
+        rival_corp.corporation_id = rival_corp_id;
+        rival_corp.name = "Rival Corp".into();
+        rival_corp.ticker = "RIV".into();
+        rival_corp.ceo_id = outsider_id;
+        rival_corp.members = HashSet::from([docked_guest_id, outsider_id, gm_id]);
+        snap.corporations.insert(rival_corp_id, rival_corp);
+
+        let base_ch = snap.characters[&ceo_id].clone();
+        for (cid, c_corp, c_struct) in [
+            (station_mgr_id, corp_id, None),
+            (director_id, corp_id, None),
+            (roleless_id, corp_id, None),
+            (operator_id, corp_id, None),
+            (excluded_dir_id, corp_id, None),
+            (docked_guest_id, rival_corp_id, Some(sid)),
+            (outsider_id, rival_corp_id, None),
+            (gm_id, rival_corp_id, None),
+            (npc_char_id, npc_corp_id, None),
+        ] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.name = format!("GuestAuth {cid}");
+            ch.corporation_id = c_corp;
+            ch.structure_id = c_struct;
+            snap.characters.insert(cid, ch);
+        }
+
+        let mut dead_st = snap.structures[&sid].clone();
+        dead_st.structure_id = dead_sid;
+        dead_st.state = "Destroyed".into();
+        snap.structures.insert(dead_sid, dead_st);
+
+        let mut npc_st = snap.structures[&sid].clone();
+        npc_st.structure_id = npc_sid;
+        npc_st.owner_corp_id = npc_corp_id;
+        snap.structures.insert(npc_sid, npc_st);
+    });
+
+    let kw = HashMap::new();
+    let commits_before = ctx.db.tx_commit_count();
+    let epoch_before = ctx.db.state_epoch();
+
+    // Unauthenticated session rejected.
+    let mut unauth_sess = SessionState::new(901);
+    assert!(
+        handle(&ctx, &mut unauth_sess, "structureGuests", "GetGuests", &[PyRep::Integer(sid)], &kw)
+            .await
+            .unwrap()
+            .is_err()
+    );
+
+    // Undocked with None structureID preserves empty Dict.
+    let mut undocked_none = make_session(outsider_id, rival_corp_id, None, service_roles::ROLE_PLAYER);
+    undocked_none.corp_role = 0;
+    assert_eq!(
+        handle(&ctx, &mut undocked_none, "structureGuests", "GetGuests", &[PyRep::None], &kw)
+            .await
+            .unwrap()
+            .expect("None structure_id returns empty dict"),
+        PyRep::Dict(Vec::new())
+    );
+
+    // Authorized callers: DB-docked rival guest, undocked CEO, StationManager, Director, and GM.
+    for (cid, corp, role) in [
+        (docked_guest_id, rival_corp_id, service_roles::ROLE_PLAYER),
+        (ceo_id, corp_id, service_roles::ROLE_PLAYER),
+        (station_mgr_id, corp_id, service_roles::ROLE_PLAYER),
+        (director_id, corp_id, service_roles::ROLE_PLAYER),
+        (gm_id, rival_corp_id, service_roles::ROLE_GM_DEFAULT),
+    ] {
+        let mut s = make_session(cid, corp, None, role);
+        s.corp_role = 0; // Prove DB authority, not session.corp_role
+        let res = handle(&ctx, &mut s, "structureGuests", "GetGuests", &[PyRep::Integer(sid)], &kw)
+            .await
+            .unwrap()
+            .expect("authorized GetGuests must succeed");
+        let PyRep::Dict(entries) = res else {
+            panic!("expected Dict from GetGuests, got {res:?}");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, PyRep::Integer(docked_guest_id));
+    }
+
+    // Cross-corp outsider with spoofed session.corporation_id, corp_role, and structure_id is rejected read-purely.
+    let mut spoof_sess = make_session(outsider_id, corp_id, Some(sid), service_roles::ROLE_PLAYER);
+    spoof_sess.corp_role = u64::MAX;
+    for arg in [PyRep::Integer(sid), PyRep::None] {
+        let err = handle(&ctx, &mut spoof_sess, "structureGuests", "GetGuests", &[arg], &kw)
+            .await
+            .unwrap()
+            .expect_err("cross-corp spoofed GetGuests must fail");
+        assert_eq!(err.code, "StructureOwnershipViolation");
+        assert_eq!(
+            err.client_error.as_deref(),
+            Some(&eve_proto::ClientError::user(eve_proto::UserErrorKey::AccessDenied))
+        );
+    }
+
+    // Cross-corp outsider probing destroyed structure gets OwnershipViolation (does not leak destroyed state).
+    let mut outsider_sess = make_session(outsider_id, rival_corp_id, None, service_roles::ROLE_PLAYER);
+    outsider_sess.corp_role = 0;
+    assert_eq!(
+        handle(&ctx, &mut outsider_sess, "structureGuests", "GetGuests", &[PyRep::Integer(dead_sid)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureOwnershipViolation"
+    );
+
+    // Undocked roleless corp member, defense-only StarbaseOperator, excluded corp member, and NPC-corp member all rejected.
+    for (cid, corp, target_sid) in [
+        (roleless_id, corp_id, sid),
+        (operator_id, corp_id, sid),
+        (excluded_dir_id, corp_id, sid),
+        (npc_char_id, npc_corp_id, npc_sid),
+    ] {
+        let mut s = make_session(cid, corp, None, service_roles::ROLE_PLAYER);
+        s.corp_role = u64::MAX;
+        let err = handle(&ctx, &mut s, "structureGuests", "GetGuests", &[PyRep::Integer(target_sid)], &kw)
+            .await
+            .unwrap()
+            .expect_err("unqualified undocked caller must be rejected");
+        assert_eq!(err.code, "StructureOwnershipViolation");
+    }
+
+    // Authorized CEO sees StructureDestroyed on destroyed structure and StructureNotFound on missing/invalid IDs.
+    let mut ceo_sess = make_session(ceo_id, corp_id, None, service_roles::ROLE_PLAYER);
+    ceo_sess.corp_role = 0;
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "structureGuests", "GetGuests", &[PyRep::Integer(dead_sid)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureDestroyed"
+    );
+    for bad_id in [missing_sid, 0, -5] {
+        assert_eq!(
+            handle(&ctx, &mut ceo_sess, "structureGuests", "GetGuests", &[PyRep::Integer(bad_id)], &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "StructureNotFound"
+        );
+    }
+    assert!(
+        handle(&ctx, &mut ceo_sess, "structureGuests", "GetGuests", &[PyRep::String("bad".into())], &kw)
+            .await
+            .unwrap()
+            .is_err()
+    );
+
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
+}

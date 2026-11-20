@@ -185,7 +185,19 @@ pub(crate) fn sync_cycle_from_fit_projection_with_shield_boost_mult(
             );
         }
     }
-    if cp.prop_speed_boost > 0.0 && cp.prop_speed_boost.is_finite() {
+    let matching_prop_speed_boost = proj
+        .propulsion
+        .as_ref()
+        .filter(|prop| {
+            prop.module_id == cycle.module_id
+                && prop.is_overloaded == cycle.is_overloaded
+                && prop.speed_boost > 0.0
+                && prop.speed_boost.is_finite()
+        })
+        .map(|prop| prop.speed_boost);
+    if let Some(speed_boost) = matching_prop_speed_boost {
+        cycle.speed_boost_factor = speed_boost;
+    } else if cp.prop_speed_boost > 0.0 && cp.prop_speed_boost.is_finite() {
         cycle.speed_boost_factor = cp.prop_speed_boost;
     }
     if cp.is_cloak
