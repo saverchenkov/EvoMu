@@ -1234,7 +1234,8 @@ async fn batch10_tales_storms_and_cosmic_anomalies() {
     eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_410, false).await;
 
-    // 1. Seed world event tales via live taleMgr.GetGlobalWorldEventTales RPC
+    // 1. Seed world event tales explicitly, then query live taleMgr.GetGlobalWorldEventTales RPC
+    eve_server::services::pve_special_sites::ensure_special_sites_initialized(&ctx);
     rpc(&ctx, &mut sess, "taleMgr", "GetGlobalWorldEventTales", &[])
         .await
         .unwrap();

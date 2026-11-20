@@ -264,10 +264,14 @@ async fn test_live_esi_fw_and_incursions_lifecycle() {
     assert_eq!(c1_rolled["kills"]["last_week"], 1);
     assert_eq!(c1_rolled["kills"]["total"], 1);
 
-    // 5. Live Incursions: empty initially, spawned via `map.GetIncursionGlobalReport`, influence decays on live site completion.
+    // 5. Live Incursions: empty initially, seeded explicitly (map.GetIncursionGlobalReport stays read-pure), influence decays on live site completion.
     let empty_inc = call_esi(&router, EsiHttpRequest::new("GET", "/v1/incursions/"), 200);
     assert_eq!(empty_inc.as_array().unwrap().len(), 0);
 
+    rpc(&ctx, &mut s1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport read-pure");
+    let still_empty = call_esi(&router, EsiHttpRequest::new("GET", "/v1/incursions/"), 200);
+    assert_eq!(still_empty.as_array().unwrap().len(), 0, "GetIncursionGlobalReport must remain read-pure");
+    eve_server::services::pve_special_sites::ensure_special_sites_initialized(&ctx);
     rpc(&ctx, &mut s1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport");
     let active_inc = call_esi(&router, EsiHttpRequest::new("GET", "/v1/incursions/"), 200);
     let first_inc = &active_inc.as_array().unwrap()[0];

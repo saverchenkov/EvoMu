@@ -2277,10 +2277,66 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     // BF-HACK-MULTICHAR-01 & BF-HACK-FAILSEM-02: Exclusive active hack & quit-after-fail semantics
     let can3_id = data_cans[2];
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can3_id)], &kw, None).await.expect("p1 start can3");
+    let ship2_id = 710_002_003_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = 30_000_142;
+            ch.active_ship_id = ship2_id;
+        }
+        snap.items.insert(
+            ship2_id,
+            InventoryItemRecord {
+                item_id: ship2_id,
+                type_id: 587,
+                owner_id: 90_000_002,
+                location_id: 30_000_142,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ship2_id * 10 + 1,
+            InventoryItemRecord {
+                item_id: ship2_id * 10 + 1,
+                type_id: 22175,
+                owner_id: 90_000_002,
+                location_id: ship2_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let cs2 = ctx.build_type_combat_state(587);
+    let _ = jita_sys
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship2_id,
+                type_id: 587,
+                position: DVec3::from_array(data_pos) + DVec3::new(500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 365.0,
+                inertia: 1.0,
+                mass: 1_067_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            cs2,
+        )
+        .await;
     let mut sess2 = SessionState::new(8888);
     sess2.user_id = Some(2);
     sess2.character_id = Some(90_000_002);
     sess2.solar_system_id = Some(30_000_142);
+    sess2.station_id = None;
+    sess2.structure_id = None;
+    sess2.ship_id = Some(ship2_id);
     let multichar_err = ctx.dispatch_rpc(&mut sess2, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can3_id)], &kw, None).await.expect_err("p2 hacking same can must fail");
     assert_eq!(multichar_err.code, "HackingGameAlreadyInProgress");
     assert_eq!(multichar_err.message, "Another pilot is already hacking this container");

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
-    make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
+    make_fighter_ctx_and_session, make_fighter_item, make_fighter_sde_registry, make_fighter_type,
 };
 use eve_db::{ActiveMissionRecord, InventoryFlag};
 use eve_destiny::{Ball, CombatState, MovementMode};
@@ -586,4 +586,880 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
         let cs = sys_handle.get_combat_state(bid).await.unwrap().unwrap();
         assert_eq!(cs.shield_hp, 10.0, "Invulnerable ball {bid} must never be chained by Vorton arc");
     }
+}
+
+fn seed_standings_test_turret_sde(sde: &mut eve_sde::SdeRegistry) {
+    if let Some(ship_t) = sde.types.get_mut(&23_915) {
+        ship_t.default_attributes.insert(14, 8.0);
+        ship_t.default_attributes.insert(102, 8.0);
+        ship_t.default_attributes.insert(11, 50_000.0);
+        ship_t.default_attributes.insert(48, 50_000.0);
+    }
+    sde.groups.insert(
+        990_674,
+        eve_sde::GroupInfo {
+            group_id: 990_674,
+            category_id: 11,
+            name: "Deadspace Caldari State Battleship".into(),
+            anchorable: false,
+            anchored: false,
+            fittable_non_singleton: false,
+            use_base_price: false,
+            published: true,
+        },
+    );
+    sde.groups.insert(
+        990_675,
+        eve_sde::GroupInfo {
+            group_id: 990_675,
+            category_id: 11,
+            name: "Synthetic Runtime Faction NPC".into(),
+            anchorable: false,
+            anchored: false,
+            fittable_non_singleton: false,
+            use_base_price: false,
+            published: true,
+        },
+    );
+    let mut wep_t = make_fighter_type(
+        2_905,
+        55,
+        7,
+        5.0,
+        vec![
+            (51, 1_000.0),
+            (54, 15_000.0),
+            (64, 2.0),
+            (128, 1.0),
+            (158, 10_000.0),
+            (160, 100.0),
+            (604, 83.0),
+        ],
+    );
+    wep_t.effect_ids = vec![12];
+    sde.types.insert(2_905, wep_t);
+    sde.types.insert(
+        192,
+        make_fighter_type(
+            192,
+            83,
+            8,
+            0.01,
+            vec![
+                (128, 1.0),
+                (114, 500.0),
+                (116, 500.0),
+                (117, 500.0),
+                (118, 500.0),
+            ],
+        ),
+    );
+}
+
+fn prepare_standings_test_pilot(ctx: &ServerContext, char_id: i64, ship_id: i64) {
+    let now = ctx.now_unix();
+    ctx.db
+        .acquire_online_lock(1, 701, Some(char_id), true, now)
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.standings.clear();
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+}
+
+fn make_standings_test_ctx_and_session(
+    customize_sde: impl FnOnce(&mut eve_sde::SdeRegistry),
+) -> (ServerContext, SessionState, i64, i64, u32) {
+    let mut sde = make_fighter_sde_registry();
+    customize_sde(&mut sde);
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    // Construct ServerContext after seeding custom SDE types so `npc_death_hook`'s `Weak<SdeRegistry>` stays valid.
+    let ctx = ServerContext::with_sde_and_repository(std::sync::Arc::new(sde), db);
+    let char_id = 90_000_001i64;
+    let ship_id = 200_000_001i64;
+    let sys_id = 30_000_142u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            make_fighter_item(ship_id, 23_915, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let mut session = SessionState::default();
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.ship_id = Some(ship_id);
+    session.solar_system_id = Some(sys_id);
+    (ctx, session, char_id, ship_id, sys_id)
+}
+
+#[tokio::test]
+async fn legacy_activate_primary_npc_and_runtime_hook_apply_faction_standing_loss_without_double_apply() {
+    use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
+    use crate::services::combat_crimewatch::with_mut_combat_runtime;
+
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_standings_test_ctx_and_session(|sde| {
+        seed_standings_test_turret_sde(sde);
+        let mut npc_sde_faction = make_fighter_type(
+            90_674,
+            990_674,
+            11,
+            1_000.0,
+            vec![(eve_sde::attr_ids::ENTITY_KILL_BOUNTY, 10_000.0), (562, 0.03)],
+        );
+        npc_sde_faction.faction_id = Some(500_001);
+        npc_sde_faction.race_id = None;
+        sde.types.insert(90_674, npc_sde_faction);
+
+        let mut npc_runtime_faction = make_fighter_type(
+            90_675,
+            990_675,
+            11,
+            1_000.0,
+            vec![(eve_sde::attr_ids::ENTITY_KILL_BOUNTY, 5_000.0), (562, 0.02)],
+        );
+        npc_runtime_faction.faction_id = None;
+        npc_runtime_faction.race_id = None;
+        sde.types.insert(90_675, npc_runtime_faction);
+    });
+    let kwargs = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            801_001,
+            make_fighter_item(801_001, 2_905, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            801_002,
+            make_fighter_item(801_002, 192, char_id, ship_id, InventoryFlag::HiSlot0, 10),
+        );
+    });
+    prepare_standings_test_pilot(&ctx, char_id, ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let ballpark_npc_id = 970_674_i64;
+    let runtime_npc_id = 970_675_i64;
+    for (id, tid, pos, hp) in [
+        (ship_id, 23_915_u32, DVec3::ZERO, 1_000.0),
+        (ballpark_npc_id, 90_674_u32, DVec3::new(1_000.0, 0.0, 0.0), 10.0),
+        (runtime_npc_id, 90_675_u32, DVec3::new(1_500.0, 0.0, 0.0), 10.0),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 0.0,
+                    max_shield_hp: hp,
+                    armor_hp: 0.0,
+                    max_armor_hp: hp,
+                    structure_hp: hp,
+                    max_structure_hp: hp,
+                    signature_radius: 50.0,
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    // 1. Ballpark-only NPC (not in rt.npc_entities) killed via 1-arg dogmaIM.Activate
+    let kill_ballpark = handle_legacy_and_ess(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(ballpark_npc_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(kill_ballpark.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!(
+            (st[&500_001] - (-0.03)).abs() < 1e-9,
+            "1-arg Activate primary NPC kill must lower Caldari standing to -0.03, got {:?}",
+            st.get(&500_001)
+        );
+        assert!(
+            (st[&500_003] - (-0.015)).abs() < 1e-9,
+            "derived ally Amarr standing must drop to -0.015, got {:?}",
+            st.get(&500_003)
+        );
+        assert_eq!(st.get(&500_004).copied().unwrap_or(0.0), 0.0);
+    });
+    let notes_1 = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(notes_1.iter().filter(|n| n.event == "OnStandingSet").count(), 1);
+    assert_eq!(notes_1.iter().filter(|n| n.event == "OnStandingsModified").count(), 1);
+
+    // 2. Runtime rt.npc_entities NPC with explicit faction_id (500_002) killed via 1-arg dogmaIM.Activate:
+    //    apply_damage_with_attacker passes Some(char_id) to npc_death_hook AND inline path must NOT double-apply.
+    ctx.weapon_cycle_state.write().unwrap().clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut ent = make_test_npc_entity(runtime_npc_id, 90_675, sys_id, "Minmatar");
+        ent.faction_id = 500_002;
+        rt.npc_entities.insert(runtime_npc_id, ent);
+    });
+    let kill_runtime = handle_legacy_and_ess(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(runtime_npc_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(kill_runtime.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        let got = st
+            .get(&500_002)
+            .copied()
+            .unwrap_or_else(|| panic!("missing 500_002 in standings={st:?}"));
+        assert!(
+            (got - (-0.02)).abs() < 1e-9,
+            "runtime npc_death_hook + legacy Activate must apply -0.02 once (not double-applied), got {got:?} (standings={st:?})"
+        );
+    });
+    let notes_2 = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(notes_2.iter().filter(|n| n.event == "OnStandingSet").count(), 1);
+    assert_eq!(notes_2.iter().filter(|n| n.event == "OnStandingsModified").count(), 1);
+}
+
+#[tokio::test]
+async fn legacy_activate_vorton_secondary_arc_kill_applies_standing_loss_when_primary_survives() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_standings_test_ctx_and_session(|sde| {
+        if let Some(ship_t) = sde.types.get_mut(&23_915) {
+            ship_t.default_attributes.insert(14, 8.0);
+            ship_t.default_attributes.insert(102, 8.0);
+            ship_t.default_attributes.insert(11, 50_000.0);
+            ship_t.default_attributes.insert(48, 50_000.0);
+        }
+        sde.groups.insert(
+            990_674,
+            eve_sde::GroupInfo {
+                group_id: 990_674,
+                category_id: 11,
+                name: "Deadspace Triglavian NPC".into(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: true,
+            },
+        );
+        let mut vorton_t = make_fighter_type(
+            54_801,
+            4060,
+            7,
+            10.0,
+            vec![
+                (51, 1_000.0),
+                (54, 25_000.0),
+                (128, 1.0),
+                (604, 4061.0),
+                (2104, 5.0),
+                (1353, 0.40),
+            ],
+        );
+        vorton_t.effect_ids = vec![12];
+        sde.types.insert(54_801, vorton_t);
+        sde.types.insert(
+            54_802,
+            make_fighter_type(
+                54_802,
+                4061,
+                8,
+                0.1,
+                vec![(128, 1.0), (114, 1_000.0), (653, 200.0), (654, 40.0)],
+            ),
+        );
+        let mut primary_t = make_fighter_type(90_674, 990_674, 11, 50.0, vec![(562, 0.03)]);
+        primary_t.faction_id = Some(500_001);
+        primary_t.race_id = None;
+        sde.types.insert(90_674, primary_t);
+
+        let mut secondary_t = make_fighter_type(90_676, 990_674, 11, 50.0, vec![(562, 0.05)]);
+        secondary_t.faction_id = Some(500_026);
+        secondary_t.race_id = None;
+        sde.types.insert(90_676, secondary_t);
+    });
+    let kwargs = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            882_001,
+            make_fighter_item(882_001, 54_801, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            882_002,
+            make_fighter_item(882_002, 54_802, char_id, ship_id, InventoryFlag::HiSlot0, 10),
+        );
+    });
+    prepare_standings_test_pilot(&ctx, char_id, ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let primary_bid = 971_001_i64;
+    let secondary_bid = 971_002_i64;
+    for (bid, tid, x, hp) in [
+        (ship_id, 23_915_u32, 0.0, 5_000.0),
+        (primary_bid, 90_674_u32, 1_000.0, 5_000.0),
+        (secondary_bid, 90_676_u32, 2_500.0, 10.0),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: DVec3::new(x, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 100.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: hp,
+                    max_shield_hp: hp,
+                    armor_hp: hp,
+                    max_armor_hp: hp,
+                    structure_hp: hp,
+                    max_structure_hp: hp,
+                    signature_radius: 50.0,
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let res = handle_legacy_and_ess(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(primary_bid)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res.dict_get("weaponKind"), Some(&PyRep::String("VortonProjector".into())));
+    assert_eq!(res.dict_get("destroyed"), Some(&PyRep::Bool(false)));
+    assert_eq!(res.dict_get("secondaryTargetsHit"), Some(&PyRep::Integer(1)));
+    assert!(sys_handle.get_ball_snapshot(secondary_bid).await.unwrap().is_none());
+
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!(
+            (st[&500_026] - (-0.05)).abs() < 1e-9,
+            "destroyed Vorton secondary arc NPC must apply -0.05 standing loss even when primary survives, got {:?}",
+            st.get(&500_026)
+        );
+        assert_eq!(
+            st.get(&500_001).copied().unwrap_or(0.0),
+            0.0,
+            "surviving primary target must not incur standing loss"
+        );
+    });
+    let notes = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(notes.iter().filter(|n| n.event == "OnStandingSet").count(), 1);
+    assert_eq!(notes.iter().filter(|n| n.event == "OnStandingsModified").count(), 1);
+}
+
+#[tokio::test]
+async fn legacy_activate_convoy_kill_applies_faction_standing_loss() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_standings_test_ctx_and_session(|sde| {
+        seed_standings_test_turret_sde(sde);
+        let hauler_tid = crate::living_world::hauler_type_for_system(sde, 30_000_142);
+        let convoy_t = sde.types.entry(hauler_tid).or_insert_with(|| {
+            make_fighter_type(hauler_tid, 990_674, 11, 1_000.0, vec![])
+        });
+        convoy_t.category_id = 11;
+        convoy_t.group_id = 990_674;
+        convoy_t.faction_id = Some(500_026);
+        convoy_t.race_id = None;
+        convoy_t.default_attributes.insert(562, 0.01);
+    });
+    let kwargs = HashMap::new();
+
+    let convoy_id = ctx.living_world.ensure_system_hauler_convoy(sys_id, &ctx.sde);
+    assert_eq!(
+        ctx.living_world
+            .materialize_system_lod2(sys_id, &ctx.systems, &ctx.sde)
+            .await,
+        1
+    );
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let (_, convoy_ball) = sys_handle.get_ball_snapshot(convoy_id).await.unwrap().unwrap();
+
+    assert!(sys_handle.try_update_combat_state(convoy_id, |cs| {
+        cs.shield_hp = 0.0;
+        cs.armor_hp = 0.0;
+        cs.structure_hp = 5.0;
+    }));
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 23_915,
+                position: convoy_ball.position + DVec3::new(1_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 2_000.0,
+                max_shield_hp: 2_000.0,
+                armor_hp: 2_000.0,
+                max_armor_hp: 2_000.0,
+                structure_hp: 2_000.0,
+                max_structure_hp: 2_000.0,
+                signature_radius: 50.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            802_001,
+            make_fighter_item(802_001, 2_905, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            802_002,
+            make_fighter_item(802_002, 192, char_id, ship_id, InventoryFlag::HiSlot0, 5),
+        );
+    });
+    prepare_standings_test_pilot(&ctx, char_id, ship_id);
+
+    let convoy_kill = handle_legacy_and_ess(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(convoy_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(convoy_kill.dict_get("convoyID"), Some(&PyRep::Integer(convoy_id)));
+    assert_eq!(convoy_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!(
+            (st[&500_026] - (-0.01)).abs() < 1e-9,
+            "convoy kill via 1-arg Activate must apply -0.01 standing loss, got {:?}",
+            st.get(&500_026)
+        );
+    });
+    let notes = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(notes.iter().filter(|n| n.event == "OnStandingSet").count(), 1);
+    assert_eq!(notes.iter().filter(|n| n.event == "OnStandingsModified").count(), 1);
+}
+
+#[tokio::test]
+async fn legacy_activate_runtime_npc_with_bounty_and_nullsec_ess_credits_once_not_twice() {
+    use crate::formulas::compute_dbs_and_ess_bounty_split;
+    use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
+    use crate::services::combat_crimewatch::combat_npc_encounters::flush_npc_bounty_tick;
+    use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
+    use eve_db::IskCents;
+
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_standings_test_ctx_and_session(|sde| {
+        seed_standings_test_turret_sde(sde);
+        sde.solar_systems
+            .get_mut(&30_000_142)
+            .expect("canonical seed system 30_000_142")
+            .security_status = -0.5;
+        let mut npc_t = make_fighter_type(
+            90_675,
+            990_675,
+            11,
+            1_000.0,
+            vec![(eve_sde::attr_ids::ENTITY_KILL_BOUNTY, 100_000.0), (562, 0.02)],
+        );
+        npc_t.faction_id = None;
+        npc_t.race_id = None;
+        sde.types.insert(90_675, npc_t);
+    });
+    let kwargs = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            803_001,
+            make_fighter_item(803_001, 2_905, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            803_002,
+            make_fighter_item(803_002, 192, char_id, ship_id, InventoryFlag::HiSlot0, 5),
+        );
+        snap.characters.get_mut(&char_id).unwrap().balance = IskCents(0);
+        snap.system_states
+            .entry(sys_id)
+            .and_modify(|st| {
+                st.dbs_multiplier = 1.0;
+                st.ess_main_bank = IskCents(0);
+                st.ess_reserve_bank = IskCents(0);
+            })
+            .or_insert_with(|| eve_db::SystemDynamicState {
+                solar_system_id: sys_id,
+                dbs_multiplier: 1.0,
+                ess_main_bank: IskCents(0),
+                ess_reserve_bank: IskCents(0),
+                ..Default::default()
+            });
+    });
+    prepare_standings_test_pilot(&ctx, char_id, ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let runtime_npc_id = 970_680_i64;
+    for (bid, tid, x, hp) in [
+        (ship_id, 23_915_u32, 0.0, 2_000.0),
+        (runtime_npc_id, 90_675_u32, 1_000.0, 10.0),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: DVec3::new(x, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 0.0,
+                    max_shield_hp: hp,
+                    armor_hp: 0.0,
+                    max_armor_hp: hp,
+                    structure_hp: hp,
+                    max_structure_hp: hp,
+                    signature_radius: 50.0,
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut ent = make_test_npc_entity(runtime_npc_id, 90_675, sys_id, "Minmatar");
+        ent.faction_id = 500_002;
+        ent.bounty_isk = 100_000.0;
+        rt.npc_entities.insert(runtime_npc_id, ent);
+    });
+
+    let res = handle_legacy_and_ess(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(runtime_npc_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    assert_eq!(res.dict_get("bountyPayoutISK"), Some(&PyRep::Real(0.0)));
+
+    // Before 20m flush: npc_death_hook owns bounty queueing; inline path must NOT mint wallet or ESS ISK.
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].balance, IskCents(0));
+        let st = &snap.system_states[&sys_id];
+        assert_eq!(st.ess_main_bank, IskCents(0));
+        assert_eq!(st.ess_reserve_bank, IskCents(0));
+        assert!((snap.characters[&char_id].standings[&500_002] - (-0.02)).abs() < 1e-9);
+    });
+    with_combat_runtime(&ctx, |rt| {
+        assert!(rt.bounty_credited_balls.contains(&runtime_npc_id));
+        assert!((rt.pending_bounty_ticks[&(sys_id, char_id)] - 100_000.0).abs() < 1e-6);
+    });
+
+    // After 20m flush: total pilot wallet + ESS Main/Reserve banks equal exactly 1x bounty split.
+    let (exp_pilot, _exp_tax, exp_main, exp_reserve) =
+        compute_dbs_and_ess_bounty_split(100_000.0, 1.0, 0.10);
+    let payout = flush_npc_bounty_tick(&ctx, sys_id, char_id, 0.10);
+    assert!((payout.pilot_isk - exp_pilot).abs() < 1e-6);
+    assert!((payout.main_ess_isk - exp_main).abs() < 1e-6);
+    assert!((payout.reserve_ess_isk - exp_reserve).abs() < 1e-6);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.characters[&char_id].balance,
+            IskCents::from_f64_isk(exp_pilot)
+        );
+        let st = &snap.system_states[&sys_id];
+        assert_eq!(st.ess_main_bank, IskCents::from_f64_isk(exp_main));
+        assert_eq!(st.ess_reserve_bank, IskCents::from_f64_isk(exp_reserve));
+    });
+}
+
+#[tokio::test]
+async fn legacy_activate_pvp_kill_skips_npc_death_hook_projects_and_achievements() {
+    use crate::services::combat_crimewatch::with_combat_runtime;
+    use crate::services::social_corp_fleet::social_corp_projects::{
+        create_canonical_project, CanonicalProjectSpec,
+    };
+    use eve_db::IskCents;
+
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_standings_test_ctx_and_session(|sde| {
+        seed_standings_test_turret_sde(sde);
+        sde.solar_systems
+            .get_mut(&30_000_142)
+            .expect("canonical seed system 30_000_142")
+            .security_status = -0.5;
+        let mut npc_t = make_fighter_type(
+            90_675,
+            990_675,
+            11,
+            1_000.0,
+            vec![(eve_sde::attr_ids::ENTITY_KILL_BOUNTY, 5_000.0), (562, 0.02)],
+        );
+        npc_t.faction_id = Some(500_002);
+        npc_t.race_id = None;
+        sde.types.insert(90_675, npc_t);
+    });
+    let kwargs = HashMap::new();
+    let corp_id = 98_000_020_i64;
+    session.corporation_id = Some(corp_id);
+    session.corp_role = u64::MAX;
+    let now = ctx.now_unix();
+    let victim_char_id = 90_000_002_i64;
+    let victim_ship_id = 200_000_002_i64;
+    let control_npc_id = 970_681_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            804_001,
+            make_fighter_item(804_001, 2_905, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            804_002,
+            make_fighter_item(804_002, 192, char_id, ship_id, InventoryFlag::HiSlot0, 10),
+        );
+        snap.characters.get_mut(&char_id).unwrap().corporation_id = corp_id;
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "PvP Control Corp".into();
+        corp.ticker = "PVPC".into();
+        corp.ceo_id = char_id;
+        corp.members = vec![char_id].into_iter().collect();
+        corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+        let mut vic = snap.characters[&char_id].clone();
+        vic.character_id = victim_char_id;
+        vic.corporation_id = 2_000_002;
+        vic.active_ship_id = victim_ship_id;
+        vic.solar_system_id = sys_id;
+        snap.characters.insert(victim_char_id, vic);
+        snap.items.insert(
+            victim_ship_id,
+            make_fighter_item(
+                victim_ship_id,
+                23_915,
+                victim_char_id,
+                sys_id as i64,
+                InventoryFlag::None,
+                1,
+            ),
+        );
+    });
+    prepare_standings_test_pilot(&ctx, char_id, ship_id);
+
+    let (destroy_pid, _) = create_canonical_project(
+        &ctx.db,
+        CanonicalProjectSpec {
+            corp_id,
+            creator_id: char_id,
+            name: "Destroy NPCs".into(),
+            description: "NPC kills only".into(),
+            target_quantity: 10,
+            initial_quantity: 0,
+            escrow: IskCents::from_isk(1_000_000),
+            isk_per_unit: IskCents::from_isk(10_000),
+            wallet_division: 1,
+            matcher_type: "DestroyNPCShips".into(),
+            is_freelance: false,
+            auto_payout_on_contribution: false,
+            max_per_character: Some(10),
+            expires_unix: Some(now + 3_600),
+            filter_id: None,
+            batch_size: 1,
+            now_unix: now,
+            min_project_id: 201,
+        },
+    )
+    .unwrap();
+    let (damage_pid, _) = create_canonical_project(
+        &ctx.db,
+        CanonicalProjectSpec {
+            corp_id,
+            creator_id: char_id,
+            name: "Damage NPCs".into(),
+            description: "NPC damage only".into(),
+            target_quantity: 10,
+            initial_quantity: 0,
+            escrow: IskCents::from_isk(1_000_000),
+            isk_per_unit: IskCents::from_isk(10_000),
+            wallet_division: 1,
+            matcher_type: "DamageNPCShips".into(),
+            is_freelance: false,
+            auto_payout_on_contribution: false,
+            max_per_character: Some(10),
+            expires_unix: Some(now + 3_600),
+            filter_id: None,
+            batch_size: 1,
+            now_unix: now,
+            min_project_id: 202,
+        },
+    )
+    .unwrap();
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (bid, tid, x, hp) in [
+        (ship_id, 23_915_u32, 0.0, 2_000.0),
+        (victim_ship_id, 23_915_u32, 1_000.0, 5.0),
+        (control_npc_id, 90_675_u32, 1_500.0, 5.0),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: DVec3::new(x, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 0.0,
+                    max_shield_hp: hp,
+                    armor_hp: 0.0,
+                    max_armor_hp: hp,
+                    structure_hp: hp,
+                    max_structure_hp: hp,
+                    signature_radius: 50.0,
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let achievement_snapshot = || {
+        ctx.quasar_gateway
+            .progression
+            .achievements
+            .get_or_init_achievements(char_id as u32)
+            .into_iter()
+            .map(|a| {
+                let mut conds: Vec<(u32, u64)> = a.condition_progress.into_iter().collect();
+                conds.sort_unstable();
+                (
+                    a.def.id,
+                    a.progress,
+                    conds,
+                    a.completed,
+                    a.completed_date,
+                    a.reached_milestones,
+                    a.unclaimed_reward_count,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let ach_before = achievement_snapshot();
+    let opps_before = ctx
+        .db
+        .with_snapshot(|snap| snap.quasar_state_blobs.get("quasar_opportunities").cloned());
+
+    // 1. PvP kill via 1-arg dogmaIM.Activate must NOT pass killer char_id to npc_death_hook.
+    let pvp_res = handle_legacy_and_ess(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(victim_ship_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(pvp_res.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    assert!(pvp_res.dict_get("killID").is_some());
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.corp_projects[&destroy_pid].current_quantity, 0);
+        assert_eq!(snap.corp_projects[&damage_pid].current_quantity, 0);
+        assert_eq!(
+            snap.quasar_state_blobs.get("quasar_opportunities"),
+            opps_before.as_ref()
+        );
+        assert!(snap.characters[&char_id].standings.is_empty());
+    });
+    assert_eq!(achievement_snapshot(), ach_before);
+    with_combat_runtime(&ctx, |rt| {
+        assert!(rt.pending_bounty_ticks.is_empty());
+    });
+
+    // 2. Control check: killing a Category 11 NPC via 1-arg Activate DOES pass Some(char_id) and credits NPC projects.
+    ctx.weapon_cycle_state.write().unwrap().clear();
+    let npc_res = handle_legacy_and_ess(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(control_npc_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(npc_res.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.corp_projects[&destroy_pid].current_quantity, 1);
+        assert_eq!(snap.corp_projects[&damage_pid].current_quantity, 1);
+    });
 }
