@@ -246,6 +246,10 @@ async fn handle_npcs_drones_launch_return_engage_scoop_and_salvage_branches() {
             make_fighter_item(salv_id, 33_681, char_id, ship_id, InventoryFlag::DroneBay, 1),
         );
     });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(make_ball(ship_id, 28_352, DVec3::ZERO, DVec3::ZERO))
+        .await;
     let launched = handle_npcs_drones(
         &ctx,
         &mut session,
@@ -290,7 +294,6 @@ async fn handle_npcs_drones_launch_return_engage_scoop_and_salvage_branches() {
         "TargetNotInSpace"
     );
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let pvp_victim = 90_000_002_i64;
     let victim_ball = make_ball(pvp_victim, 587, DVec3::new(1_200.0, 0.0, 0.0), DVec3::ZERO);
     let _ = sys_handle

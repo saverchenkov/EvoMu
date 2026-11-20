@@ -399,8 +399,12 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 402, "demo", "demo-secret", 90_000_001).await;
 
+    let ind_corp_id = 98_000_402_i64;
     let (rifter_bpo_id, rifter_bpc_id, raitaru_id) = ctx.db.with_mut_snapshot(|snap| {
-        let corp_id = snap.characters[&90_000_001].corporation_id;
+        let corp_id = ind_corp_id;
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = corp_id;
+        }
         snap.corporations.insert(
             corp_id,
             { let mut __corp = eve_db::CorporationRecord::default();
@@ -408,6 +412,8 @@ async fn test_industry_blueprint_data_facilities_jobs() {
                 __corp.name = "Industry Test Corp".into();
                 __corp.ticker = "INDT".into();
                 __corp.ceo_id = 90_000_001;
+                __corp.members.insert(90_000_001);
+                __corp.member_roles.insert(90_000_001, u64::MAX);
                 __corp },
         );
         snap.next_entity_id += 1;
@@ -468,6 +474,7 @@ async fn test_industry_blueprint_data_facilities_jobs() {
         snap.skills.entry(90_000_001).or_default().remove(&24625);
         (bpo_id, bpc_id, struct_id)
     });
+    s1.corporation_id = Some(ind_corp_id);
 
     // 1. GetBlueprintData & GetBlueprintDataByOwner return BPO/BPC, ME, TE, runs remaining, and location
     let bp_data = rpc(&ctx, &mut s1, "blueprintManager", "GetBlueprintData", &[PyRep::Integer(rifter_bpo_id)])

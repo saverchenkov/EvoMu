@@ -673,7 +673,9 @@ async fn corp_medals_bulletins_votes_offices_and_hangars_errors() {
 
     ctx.db.provision_gm_account("p3_med", "p3-secret", P3, "Pilot Three");
     let mut s1 = grant_gm_and_setup(&ctx, "demo", "demo-secret", 200_000_000, true).await;
-    let mut s2 = grant_gm_and_setup(&ctx, "other", "other-secret", 50_000_000, false).await;
+    let mut s2 = SessionState::default();
+    login_char_by_name(&ctx, &mut s2, "other", "other-secret").await;
+    assert!(!s2.has_gm_role(), "s2 must remain a regular non-GM member for corp RBAC assertions");
     let mut s3 = SessionState::default();
     login_char_by_name(&ctx, &mut s3, "p3_med", "p3-secret").await;
     crate::common::slash_cmd(&ctx, &mut s3, "/giveskill 3363 5").await;
