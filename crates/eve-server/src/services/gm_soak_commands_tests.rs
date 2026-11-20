@@ -465,3 +465,45 @@ async fn test_stop_logi_soak_flushes_stop_fx_before_remove_ball() {
     assert!(!bp.balls.contains_key(&npc_id));
     assert!(bp.special_fx_meta.is_empty());
 }
+
+#[tokio::test]
+async fn test_session_dump_rpc_history_offsets_unaffected_by_virtual_clock_advance() {
+    let (ctx, cid) = make_test_ctx();
+    let mut sess = SessionState::new(777_002);
+    sess.user_id = Some(1);
+    sess.character_id = Some(cid);
+    sess.solar_system_id = Some(30_000_142);
+
+    ctx.flight_recorder.record(
+        sess.session_id,
+        "charMgr",
+        None,
+        "GetPublicInfo",
+        &[],
+        &HashMap::new(),
+        std::time::Duration::from_micros(250),
+        "ok",
+    );
+
+    // Advance the virtual server clock by 24 hours; FlightRecorder timestamps and `/session`
+    // relative `offsetMs` remain in the same host wall clock domain.
+    ctx.advance_secs(86_400);
+
+    let dump = handle_session_cmd(&ctx, &sess, cid, "/session").expect("/session dump");
+    assert_eq!(
+        dump.dict_get("rpcHistoryCount").and_then(|v| v.as_i64()),
+        Some(1)
+    );
+    let Some(PyRep::List(hist)) = dump.dict_get("rpcHistory") else {
+        panic!("expected rpcHistory list");
+    };
+    assert_eq!(hist.len(), 1);
+    let offset_ms = hist[0]
+        .dict_get("offsetMs")
+        .and_then(|v| v.as_i64())
+        .expect("offsetMs integer");
+    assert!(
+        (-60_000..=0).contains(&offset_ms),
+        "expected host-wall relative offsetMs in [-60_000, 0], got {offset_ms}"
+    );
+}

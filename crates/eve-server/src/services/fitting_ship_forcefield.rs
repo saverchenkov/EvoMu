@@ -83,19 +83,6 @@ pub fn can_enter_forcefield_in_snap_at(
     false
 }
 
-pub fn can_enter_forcefield_in_snap(
-    snap: &eve_db::WorldStateSnapshot,
-    char_id: i64,
-    ship_id: i64,
-    tower_id: i64,
-) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    can_enter_forcefield_in_snap_at(snap, char_id, ship_id, tower_id, now)
-}
-
 pub fn can_enter_forcefield(ctx: &ServerContext, char_id: i64, ship_id: i64, tower_id: i64) -> bool {
     let now = ctx.now_unix();
     ctx.db
@@ -254,6 +241,7 @@ pub fn is_pos_forcefield_blocked_in_snap(
     char_id: i64,
     ship_id: i64,
     positions: &[DVec3],
+    now_unix: u64,
 ) -> bool {
     for item in snap.items.values() {
         if item.location_id == sys_id as i64
@@ -282,7 +270,7 @@ pub fn is_pos_forcefield_blocked_in_snap(
                 .or_else(|| ballpark.balls.get(&item.item_id).map(|b| b.position));
             if let Some(tp) = tpos {
                 if positions.iter().any(|p| p.distance(tp) <= rad)
-                    && !can_enter_forcefield_in_snap(snap, char_id, ship_id, item.item_id)
+                    && !can_enter_forcefield_in_snap_at(snap, char_id, ship_id, item.item_id, now_unix)
                 {
                     return true;
                 }
@@ -307,7 +295,7 @@ pub fn is_pos_forcefield_blocked_in_snap(
                 .unwrap_or(35_000.0);
             let tp = DVec3::from_array(st.position);
             if positions.iter().any(|p| p.distance(tp) <= rad)
-                && !can_enter_forcefield_in_snap(snap, char_id, ship_id, st.structure_id)
+                && !can_enter_forcefield_in_snap_at(snap, char_id, ship_id, st.structure_id, now_unix)
             {
                 return true;
             }
