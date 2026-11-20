@@ -68,7 +68,7 @@ async fn test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_withou
     let char_id = 90_000_001i64;
     let mut ch = seed_ctx.db.get_character(char_id).expect("demo char");
     let uid = ch.user_id;
-    let corp_id = if ch.corporation_id > 0 { ch.corporation_id } else { 98_000_001 };
+    let corp_id = 98_000_874i64;
     ch.corporation_id = corp_id;
     ch.balance = eve_db::IskCents::from_isk(5_000_000);
     let mut corp = seed_ctx
