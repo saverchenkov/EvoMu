@@ -1001,7 +1001,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
         })?;
     let handle = ctx.systems.get_or_spawn(sys_id);
     ensure_not_mjd_spooling(&handle, ship_id).await?;
-    let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+    let Some((snap_tick, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
         client_error: None,
@@ -1012,9 +1012,16 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
             client_error: None,
         });
     };
-    crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
+    let warp_exit_noop = crate::services::nav_warp_interdiction::check_warp_exit_approach_or_reject(
+        &current_ball,
+        true,
+    )?;
     if fraction > 0.0 {
         ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
+    }
+    if warp_exit_noop {
+        // Pure no-op during final `<= 4.0 s` warp deceleration skew (`#1439`).
+        return Ok(PyRep::Integer(snap_tick as i64));
     }
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     if fraction > 0.0 {
@@ -1093,7 +1100,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         });
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+    let Some((snap_tick, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
         client_error: None,
@@ -1104,7 +1111,10 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
             client_error: None,
         });
     };
-    crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
+    let warp_exit_noop = crate::services::nav_warp_interdiction::check_warp_exit_approach_or_reject(
+        &current_ball,
+        method == "CmdFollowBall",
+    )?;
     let Some(_) = resolve_system_target_position(ctx, sys_id, char_id, target_id).await else {
         return Err(BridgeRpcError {
             code: "TargetNotFound".into(),
@@ -1132,6 +1142,12 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
     };
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
+    if warp_exit_noop {
+        let _ = ctx.systems.ensure_stargate_destination_loaded_for_intent(
+            sys_id, target_id, ctx.now_machonet_wallclock_ms(),
+        );
+        return Ok(PyRep::Integer(snap_tick as i64));
+    }
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     if !matches!(mode, MovementMode::Follow { .. }) && current_ball.speed_fraction <= 0.0 {

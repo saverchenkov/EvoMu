@@ -669,3 +669,198 @@ async fn venture_jita_to_maurasi_gate_cloak_break_52au_warp_and_next_jump() {
         Some(i64::from(return_gate.to_solar_system_id))
     );
 }
+
+#[tokio::test]
+async fn autopilot_approach_rpcs_during_warp_exit_deceleration_do_not_bypass_bubble_or_throw() {
+    let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    // Use null-sec system (FD-MLJ: 30_003_307) with a warp disruption bubble on the destination beacon.
+    let sys_id = 30_003_307_u32;
+    let pilot = common::gm_pilot_in_space(&ctx, 7401, 91_840_001, 587, sys_id).await;
+    let mut sess = pilot.sess.clone();
+    let ship_id = pilot.ship_id;
+    let beyonce_id = pilot.beyonce;
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    handle.set_ball_position(ship_id, DVec3::ZERO).await;
+
+    let dest_gate_id = 88_940_002_i64;
+    let bubble_id = 88_940_003_i64;
+    let gate_pos = DVec3::new(15.0 * AU_METERS, 0.0, 0.0);
+    let bubble_radius = 20_000.0;
+    spawn_beacon(&handle, dest_gate_id, gate_pos).await;
+    {
+        let mut bp = handle.ballpark.write().unwrap();
+        bp.warp_bubble_mgr
+            .add_bubble(WarpBubble::new(bubble_id, gate_pos, bubble_radius));
+    }
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(dest_gate_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdWarpToStuff toward bubbled gate");
+
+    let mut tested_early_decel = false;
+    let mut tested_tail_decel = false;
+    for _ in 0..160 {
+        handle.step_manual(0.5).await.unwrap();
+        let (_, b) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        let MovementMode::Warp { phase, .. } = b.mode else {
+            break;
+        };
+        if phase == WarpPhase::Decelerating {
+            if !eve_destiny::is_warp_finishing_within(&b, 4.0) {
+                if !tested_early_decel {
+                    tested_early_decel = true;
+                    let sf_err = ctx
+                        .dispatch_rpc(
+                            &mut sess,
+                            "beyonce",
+                            Some(beyonce_id),
+                            "CmdSetSpeedFraction",
+                            &[PyRep::Real(1.0)],
+                            &kw,
+                            None,
+                        )
+                        .await
+                        .expect_err("CmdSetSpeedFraction must still fail during early deceleration (> 4s)");
+                    assert_eq!(sf_err.code, "ShipAlreadyInWarp");
+                    let fb_err = ctx
+                        .dispatch_rpc(
+                            &mut sess,
+                            "beyonce",
+                            Some(beyonce_id),
+                            "CmdFollowBall",
+                            &[PyRep::Integer(dest_gate_id), PyRep::Real(0.0)],
+                            &kw,
+                            None,
+                        )
+                        .await
+                        .expect_err("CmdFollowBall must still fail during early deceleration (> 4s)");
+                    assert_eq!(fb_err.code, "ShipAlreadyInWarp");
+                }
+            } else if !tested_tail_decel {
+                tested_tail_decel = true;
+                let pre_pos = b.position;
+                let pre_vel = b.velocity;
+                let pre_sf = b.speed_fraction;
+
+                // Exact V24 autopilot.py:559-562 (AP_ApproachDestID) sequence during <= 4s tail (#1439)
+                ctx.dispatch_rpc(
+                    &mut sess,
+                    "beyonce",
+                    Some(beyonce_id),
+                    "CmdSetSpeedFraction",
+                    &[PyRep::Real(1.0)],
+                    &kw,
+                    None,
+                )
+                .await
+                .expect("CmdSetSpeedFraction(1.0) must succeed as no-op during <= 4s warp-exit tail");
+                ctx.dispatch_rpc(
+                    &mut sess,
+                    "beyonce",
+                    Some(beyonce_id),
+                    "CmdFollowBall",
+                    &[PyRep::Integer(dest_gate_id), PyRep::Real(0.0)],
+                    &kw,
+                    None,
+                )
+                .await
+                .expect("CmdFollowBall(dest, 0.0) must succeed as no-op during <= 4s warp-exit tail");
+
+                // Non-approach RPCs still reject with ShipAlreadyInWarp
+                let orbit_err = ctx
+                    .dispatch_rpc(
+                        &mut sess,
+                        "beyonce",
+                        Some(beyonce_id),
+                        "CmdOrbit",
+                        &[PyRep::Integer(dest_gate_id), PyRep::Real(2_500.0)],
+                        &kw,
+                        None,
+                    )
+                    .await
+                    .expect_err("CmdOrbit must still fail during warp-exit tail");
+                assert_eq!(orbit_err.code, "ShipAlreadyInWarp");
+                let stop_err = ctx
+                    .dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdStop", &[], &kw, None)
+                    .await
+                    .expect_err("CmdStop must still fail during warp-exit tail");
+                assert_eq!(stop_err.code, "ShipAlreadyInWarp");
+
+                // Ball must remain untouched in active warp deceleration (zero early exit / zero teleport)
+                let (_, after_tail) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+                assert!(matches!(
+                    after_tail.mode,
+                    MovementMode::Warp {
+                        phase: WarpPhase::Decelerating,
+                        ..
+                    }
+                ));
+                assert_eq!(after_tail.position, pre_pos);
+                assert_eq!(after_tail.velocity, pre_vel);
+                assert_eq!(after_tail.speed_fraction, pre_sf);
+            }
+        }
+    }
+    assert!(tested_early_decel, "Ship must pass through early deceleration (> 4s)");
+    assert!(tested_tail_decel, "Ship must pass through <= 4s warp-exit deceleration tail");
+
+    // Step to natural warp completion and verify the ship still lands caught at the bubble edge.
+    for _ in 0..40 {
+        let (_, b) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if b.mode == MovementMode::Stop {
+            break;
+        }
+        handle.step_manual(0.5).await.unwrap();
+    }
+    let (_, landed) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert_eq!(landed.mode, MovementMode::Stop, "Ship must finish warp naturally to Stop");
+    let expected_catch_x = gate_pos.x - bubble_radius;
+    assert!(
+        (landed.position.x - expected_catch_x).abs() < 2_500.0 && landed.position.y.abs() < 100.0,
+        "Ship must still land caught at destination bubble edge ({expected_catch_x}), got {:?}",
+        landed.position
+    );
+
+    // Next autopilot cycle after warp finishes: CmdSetSpeedFraction(1.0) + CmdFollowBall transitions to Follow.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdSetSpeedFraction",
+        &[PyRep::Real(1.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("post-warp CmdSetSpeedFraction(1.0)");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdFollowBall",
+        &[PyRep::Integer(dest_gate_id), PyRep::Real(0.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("post-warp CmdFollowBall(dest, 0.0)");
+    let (_, following) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert_eq!(following.speed_fraction, 1.0);
+    assert_eq!(
+        following.mode,
+        MovementMode::Follow {
+            target_id: dest_gate_id,
+            range: 0.0,
+        }
+    );
+}

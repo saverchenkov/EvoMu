@@ -1457,6 +1457,19 @@ async fn test_corp_alliance_war_fw_and_sov_edges() {
         .await
         .unwrap_err()
         .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut s1,
+            "corpmgr",
+            "GetAssetInventory",
+            &[PyRep::Integer(98_999_999)],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "CorporationNotFound"
     );
     assert!(rpc(&ctx, &mut s1, "corpmgr", "GetCorporationIDForCharacter", &[PyRep::Integer(PILOT1)]).await.is_ok());
