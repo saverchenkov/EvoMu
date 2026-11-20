@@ -196,30 +196,15 @@ fn check_jump_session_lease(
     Ok(())
 }
 
-async fn restore_taken_ball_if_absent(
-    old_handle: &crate::system_actor::SystemHandle,
-    ship_id: i64,
-    taken: crate::system_actor::TakenBall,
-) {
-    if old_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .is_none()
-    {
-        let _ = old_handle.restore_ball(taken).await;
-    }
-}
-
 /// RAII guard owning a [`crate::system_actor::TakenBall`] removed from a source solar system
 /// during a stargate jump or docking handoff (`#1237` / `HP-06`).
 ///
 /// While armed, dropping the guard (due to an early return, panic, or async future
-/// cancellation) automatically restores the ball into `sys_handle` without blocking the
-/// executor if the ship is not already present there. Call [`Self::restore`] on explicit
-/// error paths to await restoration before returning `Err`, or [`Self::disarm`] once the
-/// handoff has permanently committed.
+/// cancellation) automatically enqueues [`crate::system_actor::SystemCommand::RestoreBallIfAbsent`]
+/// into `sys_handle` without blocking the executor, so the actor atomically checks ball
+/// absence before restoring. Call [`Self::restore`] on explicit error paths to await
+/// restoration before returning `Err`, or [`Self::disarm`] once the handoff has permanently
+/// committed.
 pub(crate) struct TakenBallGuard {
     sys_handle: crate::system_actor::SystemHandle,
     taken: Option<crate::system_actor::TakenBall>,
@@ -248,24 +233,11 @@ impl TakenBallGuard {
             .expect("TakenBallGuard::disarm called on already-disarmed guard")
     }
 
-    /// Explicitly awaits restoration of the taken ball into the source system if still absent,
-    /// disarming the guard.
+    /// Explicitly awaits atomic restoration of the taken ball into the source system if still
+    /// absent, disarming the guard.
     pub(crate) async fn restore(mut self) {
-        if let Some(ship_id) = self.taken.as_ref().map(|t| t.ball.id) {
-            let already_present = self
-                .sys_handle
-                .get_ball_snapshot(ship_id)
-                .await
-                .ok()
-                .flatten()
-                .is_some();
-            if already_present {
-                self.taken = None;
-                return;
-            }
-            if let Some(taken) = self.taken.take() {
-                let _ = self.sys_handle.restore_ball(taken).await;
-            }
+        if let Some(taken) = self.taken.take() {
+            let _ = self.sys_handle.restore_ball_if_absent(taken).await;
         }
     }
 }
@@ -277,28 +249,25 @@ impl Drop for TakenBallGuard {
         };
         let ship_id = taken.ball.id;
         let sys_id = self.sys_handle.solar_system_id;
-        if self.sys_handle.get_ball_position_sync(ship_id).is_some() {
-            return;
-        }
         tracing::warn!(
             ship_id,
             sys_id,
-            "TakenBallGuard dropped while armed; restoring ball to source solar system"
+            "TakenBallGuard dropped while armed; restoring ball if absent to source solar system"
         );
         let (tx, _rx) = tokio::sync::oneshot::channel();
         match self
             .sys_handle
             .cmd_tx
-            .try_send(crate::system_actor::SystemCommand::RestoreBall { taken, reply: tx })
+            .try_send(crate::system_actor::SystemCommand::RestoreBallIfAbsent { taken, reply: tx })
         {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(
-                crate::system_actor::SystemCommand::RestoreBall { taken, .. },
+                crate::system_actor::SystemCommand::RestoreBallIfAbsent { taken, .. },
             )) => {
                 if let Ok(rt) = tokio::runtime::Handle::try_current() {
                     let sys_handle = self.sys_handle.clone();
                     rt.spawn(async move {
-                        restore_taken_ball_if_absent(&sys_handle, ship_id, taken).await;
+                        let _ = sys_handle.restore_ball_if_absent(taken).await;
                     });
                 } else {
                     tracing::error!(
@@ -320,6 +289,57 @@ impl Drop for TakenBallGuard {
     }
 }
 
+fn enqueue_remove_ball_nonblocking(
+    sys_handle: &crate::system_actor::SystemHandle,
+    ball_id: eve_destiny::BallId,
+) {
+    let sys_id = sys_handle.solar_system_id;
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    match sys_handle
+        .cmd_tx
+        .try_send(crate::system_actor::SystemCommand::RemoveBall { ball_id, reply: tx })
+    {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                let sys_handle = sys_handle.clone();
+                rt.spawn(async move {
+                    let _ = sys_handle.remove_ball(ball_id).await;
+                });
+            } else {
+                tracing::error!(
+                    ball_id,
+                    sys_id,
+                    "StargateRollbackGuard drop could not remove destination ball: mailbox full and no Tokio runtime"
+                );
+            }
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+    }
+}
+
+fn refund_zarzakh_gate_toll_in_snap(
+    s: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    debited_cents: Option<eve_db::IskCents>,
+) -> Option<eve_db::IskCents> {
+    let refund_cents = debited_cents.filter(|c| c.0 > 0)?;
+    let c = s.characters.get_mut(&char_id)?;
+    let new_bal = c.balance.checked_add(refund_cents)?;
+    c.balance = new_bal;
+    s.next_entity_id += 1;
+    let j_id = s.next_entity_id;
+    s.wallet_journal.push(eve_db::WalletJournalEntry {
+        entry_id: j_id,
+        character_id: char_id,
+        entry_type: "zarzakh_gate_toll_refund".into(),
+        amount: refund_cents,
+        balance_after: new_bal,
+        reason: "Refund Zarzakh stargate transit toll after aborted stargate jump".into(),
+    });
+    Some(new_bal)
+}
+
 fn refund_zarzakh_gate_toll(
     ctx: &ServerContext,
     char_id: i64,
@@ -328,24 +348,22 @@ fn refund_zarzakh_gate_toll(
     let Some(refund_cents) = debited_cents.filter(|c| c.0 > 0) else {
         return;
     };
-    let bal_after_opt = ctx.db.with_mut_snapshot(|s| {
-        let c = s.characters.get_mut(&char_id)?;
-        let new_bal = c.balance.checked_add(refund_cents)?;
-        c.balance = new_bal;
-        s.next_entity_id += 1;
-        let j_id = s.next_entity_id;
-        s.wallet_journal.push(eve_db::WalletJournalEntry {
-            entry_id: j_id,
-            character_id: char_id,
-            entry_type: "zarzakh_gate_toll_refund".into(),
-            amount: refund_cents,
-            balance_after: new_bal,
-            reason: "Refund Zarzakh stargate transit toll after aborted stargate jump".into(),
+    let bal_after_res: Result<Option<eve_db::IskCents>, String> =
+        ctx.db.try_with_mut_snapshot(|s| {
+            Ok(refund_zarzakh_gate_toll_in_snap(s, char_id, Some(refund_cents)))
         });
-        Some(new_bal)
-    });
-    if let Some(bal_after) = bal_after_opt {
-        ctx.notify_wallet_balance(false, char_id, 1, bal_after);
+    match bal_after_res {
+        Ok(Some(bal_after)) => {
+            ctx.notify_wallet_balance(false, char_id, 1, bal_after);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!(
+                char_id,
+                error = %err,
+                "refund_zarzakh_gate_toll transaction failed"
+            );
+        }
     }
 }
 
@@ -1194,91 +1212,166 @@ fn check_stargate_entry_db_state(
 struct StargateDbRollbackSnapshot {
     dest_sys_id: u32,
     prev_solar_system_id: u32,
+    prev_constellation_id: u32,
+    prev_region_id: u32,
     prev_station_id: Option<i64>,
     prev_structure_id: Option<i64>,
-    committed_version: u64,
     committed_system_epoch: u64,
     active_ship_id: i64,
+    prev_active_ship_location: Option<(i64, eve_db::InventoryFlag)>,
     extra_ship_id: Option<i64>,
     prev_extra_ship_location: Option<(i64, eve_db::InventoryFlag)>,
+}
+
+struct StargateLocationUpdate<'a> {
+    solar_system_id: u32,
+    constellation_id: u32,
+    region_id: u32,
+    station_id: Option<i64>,
+    structure_id: Option<i64>,
+    ships: &'a [(i64, Option<i64>, i64, Option<eve_db::InventoryFlag>)],
+}
+
+/// Shared atomic character + ship location update used by both `commit_stargate_db_transition`
+/// and `rollback_stargate_db_transition` so ship cargo/module `owner_id` trees stay untouched.
+fn apply_stargate_char_and_ships_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    update: StargateLocationUpdate<'_>,
+) -> Option<eve_db::CharacterRecord> {
+    let ch = snap.characters.get_mut(&char_id)?;
+    ch.solar_system_id = update.solar_system_id;
+    ch.constellation_id = update.constellation_id;
+    ch.region_id = update.region_id;
+    ch.station_id = update.station_id;
+    ch.structure_id = update.structure_id;
+    ch.version += 1;
+    ch.system_epoch += 1;
+    let res = ch.clone();
+    // Move only the ship item record itself (`flag` optional) without `set_owner_recursive`.
+    for &(target_ship_id, expected_loc, new_loc, new_flag) in update.ships {
+        if let Some(sh) = snap.items.get_mut(&target_ship_id) {
+            if expected_loc.is_none() || expected_loc == Some(sh.location_id) {
+                sh.location_id = new_loc;
+                if let Some(flag) = new_flag {
+                    sh.flag = flag;
+                }
+                sh.version += 1;
+            }
+        }
+    }
+    Some(res)
 }
 
 fn rollback_stargate_db_transition(
     ctx: &ServerContext,
     char_id: i64,
     rollback: &StargateDbRollbackSnapshot,
+    debited_toll: Option<eve_db::IskCents>,
 ) -> bool {
-    let still_our_commit = ctx.db.with_snapshot(|snap| {
-        snap.characters.get(&char_id).is_some_and(|ch| {
-            ch.solar_system_id == rollback.dest_sys_id
-                && ch.version == rollback.committed_version
-                && ch.system_epoch == rollback.committed_system_epoch
-        })
-    });
-    if !still_our_commit {
-        return false;
-    }
-    if ctx
-        .db
-        .transition_character_solar_system_if_at(
-            char_id,
-            rollback.dest_sys_id,
-            rollback.prev_solar_system_id,
-            &ctx.sde,
-        )
-        .is_err()
-    {
-        return false;
-    }
-    if let Some(st_id) = rollback.prev_station_id {
-        ctx.db
-            .rollback_undock_at(char_id, st_id, rollback.active_ship_id, false);
-    } else if let Some(sr_id) = rollback.prev_structure_id {
-        ctx.db
-            .rollback_undock_at(char_id, sr_id, rollback.active_ship_id, true);
-    }
-    if let (Some(extra_id), Some((prev_loc, prev_flag))) =
-        (rollback.extra_ship_id, rollback.prev_extra_ship_location)
-    {
-        ctx.db.with_mut_snapshot(|snap| {
-            if snap
-                .items
-                .get(&extra_id)
-                .is_some_and(|sh| sh.location_id == i64::from(rollback.dest_sys_id))
-            {
-                let _ = snap.transfer_inventory_item(
-                    extra_id,
-                    eve_db::TransferItemSpec::move_whole(
-                        Some(char_id),
-                        None,
-                        None,
-                        prev_loc,
-                        prev_flag,
-                    ),
-                );
+    let outcome: Result<(bool, Option<eve_db::IskCents>), String> =
+        ctx.db.try_with_mut_snapshot(|snap| {
+            // Check `solar_system_id`, `system_epoch`, and undocked status atomically in the
+            // same write transaction rather than `ch.version` (unrelated mutations such as wallet
+            // or standing updates must not strand the character in `dest_sys_id`).
+            let still_our_commit = snap.characters.get(&char_id).is_some_and(|ch| {
+                ch.solar_system_id == rollback.dest_sys_id
+                    && ch.system_epoch == rollback.committed_system_epoch
+                    && ch.station_id.is_none()
+                    && ch.structure_id.is_none()
+            });
+            if !still_our_commit {
+                return Ok((false, None));
             }
+            let (active_loc, active_flag) =
+                rollback.prev_active_ship_location.unwrap_or_else(|| {
+                    let loc = rollback
+                        .prev_station_id
+                        .or(rollback.prev_structure_id)
+                        .unwrap_or_else(|| i64::from(rollback.prev_solar_system_id));
+                    let flag = if rollback.prev_station_id.is_some()
+                        || rollback.prev_structure_id.is_some()
+                    {
+                        eve_db::InventoryFlag::Hangar
+                    } else {
+                        eve_db::InventoryFlag::None
+                    };
+                    (loc, flag)
+                });
+            let dest_loc = i64::from(rollback.dest_sys_id);
+            let mut ship_updates = [(
+                rollback.active_ship_id,
+                Some(dest_loc),
+                active_loc,
+                Some(active_flag),
+            ); 2];
+            let ship_count = if let (Some(extra_id), Some((extra_loc, extra_flag))) =
+                (rollback.extra_ship_id, rollback.prev_extra_ship_location)
+            {
+                ship_updates[1] = (extra_id, Some(dest_loc), extra_loc, Some(extra_flag));
+                2
+            } else {
+                1
+            };
+            apply_stargate_char_and_ships_in_snap(
+                snap,
+                char_id,
+                StargateLocationUpdate {
+                    solar_system_id: rollback.prev_solar_system_id,
+                    constellation_id: rollback.prev_constellation_id,
+                    region_id: rollback.prev_region_id,
+                    station_id: rollback.prev_station_id,
+                    structure_id: rollback.prev_structure_id,
+                    ships: &ship_updates[..ship_count],
+                },
+            );
+            let refunded_bal = refund_zarzakh_gate_toll_in_snap(snap, char_id, debited_toll);
+            Ok((true, refunded_bal))
         });
+    match outcome {
+        Ok((true, bal_after_opt)) => {
+            if let Some(bal_after) = bal_after_opt {
+                ctx.notify_wallet_balance(false, char_id, 1, bal_after);
+            }
+            true
+        }
+        Ok((false, _)) => false,
+        Err(err) => {
+            tracing::error!(
+                char_id,
+                error = %err,
+                "rollback_stargate_db_transition transaction failed"
+            );
+            false
+        }
     }
-    true
 }
 
 struct StargateRollbackGuard<'a> {
     ctx: &'a ServerContext,
     char_id: i64,
+    taken_guard: Option<TakenBallGuard>,
     zarzakh_debited_toll: Option<eve_db::IskCents>,
     db_rollback: Option<StargateDbRollbackSnapshot>,
+    dest_spawn: Option<(crate::system_actor::SystemHandle, eve_destiny::BallId)>,
     armed: bool,
 }
 
 impl<'a> StargateRollbackGuard<'a> {
-    fn new(ctx: &'a ServerContext, char_id: i64) -> Self {
+    fn new(ctx: &'a ServerContext, char_id: i64, taken_guard: TakenBallGuard) -> Self {
         Self {
             ctx,
             char_id,
+            taken_guard: Some(taken_guard),
             zarzakh_debited_toll: None,
             db_rollback: None,
+            dest_spawn: None,
             armed: true,
         }
+    }
+
+    fn taken(&self) -> Option<&crate::system_actor::TakenBall> {
+        self.taken_guard.as_ref().and_then(|g| g.taken())
     }
 
     fn record_zarzakh_toll(&mut self, debited: Option<eve_db::IskCents>) {
@@ -1289,35 +1382,87 @@ impl<'a> StargateRollbackGuard<'a> {
         self.db_rollback = Some(rollback);
     }
 
+    fn record_dest_spawn_target(
+        &mut self,
+        dest_handle: crate::system_actor::SystemHandle,
+        ship_id: eve_destiny::BallId,
+    ) {
+        self.dest_spawn = Some((dest_handle, ship_id));
+    }
+
     fn disarm(&mut self) {
         self.armed = false;
         self.zarzakh_debited_toll = None;
         self.db_rollback = None;
+        self.dest_spawn = None;
+        if let Some(tg) = self.taken_guard.take() {
+            let _ = tg.disarm();
+        }
     }
 
-    fn rollback_now(&mut self) {
+    fn prepare_rollback_cleanup(
+        &mut self,
+        allow_db_mutation: bool,
+    ) -> Option<(
+        Option<(crate::system_actor::SystemHandle, eve_destiny::BallId)>,
+        Option<TakenBallGuard>,
+    )> {
         if !self.armed {
-            return;
+            return None;
         }
         self.armed = false;
-        if let Some(db_rb) = self.db_rollback.take() {
-            rollback_stargate_db_transition(self.ctx, self.char_id, &db_rb);
+        let dest_spawn = self.dest_spawn.take();
+        if !allow_db_mutation {
+            return Some((dest_spawn, self.taken_guard.take()));
         }
-        if let Some(toll) = self.zarzakh_debited_toll.take() {
-            refund_zarzakh_gate_toll(self.ctx, self.char_id, Some(toll));
+        let toll = self.zarzakh_debited_toll.take();
+        let db_ok = match self.db_rollback.take() {
+            Some(db_rb) => {
+                rollback_stargate_db_transition(self.ctx, self.char_id, &db_rb, toll)
+            }
+            None => {
+                refund_zarzakh_gate_toll(self.ctx, self.char_id, toll);
+                true
+            }
+        };
+        if !db_ok {
+            // A superseding concurrent transition already moved/docked the character out of
+            // `dest_sys_id`; do not refund the toll, touch destination balls, or restore a ghost
+            // ball into `old_sys`.
+            if let Some(tg) = self.taken_guard.take() {
+                let _ = tg.disarm();
+            }
+            return None;
+        }
+        Some((dest_spawn, self.taken_guard.take()))
+    }
+
+    async fn rollback_and_restore(&mut self) {
+        let Some((dest_spawn, taken_guard)) = self.prepare_rollback_cleanup(true) else {
+            return;
+        };
+        if let Some((dest_handle, ship_id)) = dest_spawn {
+            let _ = dest_handle.remove_ball(ship_id).await;
+        }
+        if let Some(tg) = taken_guard {
+            tg.restore().await;
         }
     }
 }
 
 impl Drop for StargateRollbackGuard<'_> {
     fn drop(&mut self) {
-        if self.armed
-            && !eve_db::lock_rank::held_lock_ranks()
-                .iter()
-                .any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER)
-        {
-            self.rollback_now();
+        let lock_safe_for_db = !eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER);
+        let Some((dest_spawn, taken_guard)) = self.prepare_rollback_cleanup(lock_safe_for_db)
+        else {
+            return;
+        };
+        if let Some((dest_handle, ship_id)) = dest_spawn {
+            enqueue_remove_ball_nonblocking(&dest_handle, ship_id);
         }
+        drop(taken_guard);
     }
 }
 
@@ -1359,12 +1504,15 @@ fn commit_stargate_db_transition(
         }
 
         verify_stargate_character_db_state(snap.characters.get(&char_id), char_id, entry_db_state)?;
-        let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
+        let missing_char_err = || BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
             client_error: None,
-        })?;
+        };
+        let ch = snap.characters.get(&char_id).ok_or_else(missing_char_err)?;
         let prev_solar_system_id = ch.solar_system_id;
+        let prev_constellation_id = ch.constellation_id;
+        let prev_region_id = ch.region_id;
         let prev_station_id = ch.station_id;
         let prev_structure_id = ch.structure_id;
         let (const_id, reg_id) = ctx
@@ -1385,42 +1533,54 @@ fn commit_stargate_db_transition(
                 };
                 (c, r)
             });
-        ch.solar_system_id = dest_sys_id;
-        ch.constellation_id = const_id;
-        ch.region_id = reg_id;
-        ch.station_id = None;
-        ch.structure_id = None;
-        ch.version += 1;
-        ch.system_epoch += 1;
-        let committed_version = ch.version;
-        let committed_system_epoch = ch.system_epoch;
         let active_ship_id = ch.active_ship_id;
-        let res = ch.clone();
-        if let Some(sh) = snap.items.get_mut(&active_ship_id) {
-            sh.location_id = dest_sys_id as i64;
-            if entry_db_undocked {
-                sh.flag = eve_db::InventoryFlag::None;
-            }
-            sh.version += 1;
-        }
+        let prev_active_ship_location = snap
+            .items
+            .get(&active_ship_id)
+            .map(|sh| (sh.location_id, sh.flag));
         let (extra_ship_id, prev_extra_ship_location) = if ship_id != active_ship_id {
-            let prev_loc = snap.items.get(&ship_id).map(|sh| (sh.location_id, sh.flag));
-            if let Some(sh) = snap.items.get_mut(&ship_id) {
-                sh.location_id = dest_sys_id as i64;
-                sh.version += 1;
-            }
-            (Some(ship_id), prev_loc)
+            (
+                Some(ship_id),
+                snap.items.get(&ship_id).map(|sh| (sh.location_id, sh.flag)),
+            )
         } else {
             (None, None)
         };
+        let active_flag = if entry_db_undocked {
+            Some(eve_db::InventoryFlag::None)
+        } else {
+            None
+        };
+        let mut ship_updates = [(active_ship_id, None, i64::from(dest_sys_id), active_flag); 2];
+        let ship_count = if let Some(extra_id) = extra_ship_id {
+            ship_updates[1] = (extra_id, None, i64::from(dest_sys_id), None);
+            2
+        } else {
+            1
+        };
+        let res = apply_stargate_char_and_ships_in_snap(
+            snap,
+            char_id,
+            StargateLocationUpdate {
+                solar_system_id: dest_sys_id,
+                constellation_id: const_id,
+                region_id: reg_id,
+                station_id: None,
+                structure_id: None,
+                ships: &ship_updates[..ship_count],
+            },
+        )
+        .ok_or_else(missing_char_err)?;
         let rollback = StargateDbRollbackSnapshot {
             dest_sys_id,
             prev_solar_system_id,
+            prev_constellation_id,
+            prev_region_id,
             prev_station_id,
             prev_structure_id,
-            committed_version,
-            committed_system_epoch,
+            committed_system_epoch: res.system_epoch,
             active_ship_id,
+            prev_active_ship_location,
             extra_ship_id,
             prev_extra_ship_location,
         };
@@ -1729,17 +1889,19 @@ async fn handle_cmd_stargate_jump(
             client_error: None,
         });
     };
-    let taken_guard = TakenBallGuard::new(old_handle.clone(), taken);
-    let mut rollback_guard = StargateRollbackGuard::new(ctx, char_id);
-    let prev_combat_state = taken_guard
+    let mut rollback_guard = StargateRollbackGuard::new(
+        ctx,
+        char_id,
+        TakenBallGuard::new(old_handle.clone(), taken),
+    );
+    let prev_combat_state = rollback_guard
         .taken()
         .and_then(|t| t.combat_state.clone());
     #[cfg(test)]
     run_post_take_ball_hook_for_test(ctx, char_id).await;
 
     if let Err(e) = check_jump_session_lease(ctx, session, char_id, entry_had_online_lease) {
-        rollback_guard.rollback_now();
-        taken_guard.restore().await;
+        rollback_guard.rollback_and_restore().await;
         return Err(e);
     }
 
@@ -1762,16 +1924,14 @@ async fn handle_cmd_stargate_jump(
                 rollback_guard.record_zarzakh_toll(debited);
             }
             Err(e) => {
-                rollback_guard.rollback_now();
-                taken_guard.restore().await;
+                rollback_guard.rollback_and_restore().await;
                 return Err(e);
             }
         }
         #[cfg(test)]
         run_post_zarzakh_toll_hook_for_test(ctx, char_id);
         if let Err(e) = check_jump_session_lease(ctx, session, char_id, entry_had_online_lease) {
-            rollback_guard.rollback_now();
-            taken_guard.restore().await;
+            rollback_guard.rollback_and_restore().await;
             return Err(e);
         }
     }
@@ -1791,8 +1951,7 @@ async fn handle_cmd_stargate_jump(
             ch
         }
         Err(e) => {
-            rollback_guard.rollback_now();
-            taken_guard.restore().await;
+            rollback_guard.rollback_and_restore().await;
             return Err(e);
         }
     };
@@ -1800,7 +1959,7 @@ async fn handle_cmd_stargate_jump(
     let old_tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, old_sys);
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let dest_tidi = new_handle.tidi_factor();
-    let mut new_ball = taken_guard
+    let mut new_ball = rollback_guard
         .taken()
         .expect("TakenBallGuard armed before destination spawn")
         .ball
@@ -1820,13 +1979,13 @@ async fn handle_cmd_stargate_jump(
     combat_state.sync_invuln_with_undock_timer = true;
     let mut slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
     slim_meta.is_cloaked = true;
+    rollback_guard.record_dest_spawn_target(new_handle.clone(), ship_id);
     let spawn_tick = match new_handle
         .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
         .await
     {
         Ok(tick) => {
             rollback_guard.disarm();
-            let _committed_taken = taken_guard.disarm();
             tick
         }
         Err(spawn_err) => {
@@ -1838,8 +1997,7 @@ async fn handle_cmd_stargate_jump(
                 error = %spawn_err,
                 "Stargate destination spawn_ball_with_meta failed; rolling back stargate jump"
             );
-            rollback_guard.rollback_now();
-            taken_guard.restore().await;
+            rollback_guard.rollback_and_restore().await;
             let msg = format!(
                 "Failed to materialize ship {ship_id} in destination solar system {dest_sys_id}: {spawn_err}"
             );

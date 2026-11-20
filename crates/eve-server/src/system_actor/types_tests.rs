@@ -452,6 +452,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::FlushPeerObserverUpdates { .. } => "FlushPeerObserverUpdates",
             SystemCommand::TakeBall { .. } => "TakeBall",
             SystemCommand::RestoreBall { .. } => "RestoreBall",
+            SystemCommand::RestoreBallIfAbsent { .. } => "RestoreBallIfAbsent",
             SystemCommand::ModifyCombatState { .. } => "ModifyCombatState",
             SystemCommand::FlushConditionCheckpoint { .. } => "FlushConditionCheckpoint",
             SystemCommand::ApplyFitProjection { .. } => "ApplyFitProjection",
@@ -564,14 +565,25 @@ fn system_command_all_variants_construct_and_match() {
             reply: oneshot::channel().0,
         },
         SystemCommand::CurrentTick { reply: oneshot::channel().0 },
+        SystemCommand::RestoreBallIfAbsent {
+            taken: super::TakenBall {
+                tick: 0,
+                ball: ball.clone(),
+                combat_state: None,
+                slim_meta: None,
+                cycles_cleared: 0,
+            },
+            reply: oneshot::channel().0,
+        },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 73);
+    assert_eq!(tags.len(), 74);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
     assert_eq!(tags[71], "RepairCombatState");
     assert_eq!(tags[72], "CurrentTick");
+    assert_eq!(tags[73], "RestoreBallIfAbsent");
 }
 
 #[test]

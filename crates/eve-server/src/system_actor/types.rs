@@ -803,6 +803,11 @@ pub enum SystemCommand {
         taken: TakenBall,
         reply: oneshot::Sender<Result<u64, String>>,
     },
+    /// Atomically restores `taken` only when `taken.ball.id` is absent from `ballpark.balls`.
+    RestoreBallIfAbsent {
+        taken: TakenBall,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
     EmitPackagedActions {
         ball_id: BallId,
         events: Vec<DestinyEvent>,

@@ -1176,6 +1176,12 @@ impl SystemRegistry {
                                 slim_meta,
                                 reply,
                             } => {
+                                if reply.is_closed() {
+                                    // Caller dropped `spawn_ball_with_meta(...).await` while this command
+                                    // was queued; discard before mutating `ballpark` so cancelled jumps
+                                    // cannot spawn an orphaned clone (`#1237`).
+                                    return None;
+                                }
                                 let ball_id = ball.id;
                                 let was_warping = matches!(
                                     ballpark.balls.get(&ball_id).map(|b| &b.mode),
@@ -1504,8 +1510,24 @@ impl SystemRegistry {
                                     cycles_cleared,
                                 }));
                             }
-                            SystemCommand::RestoreBall { taken, reply } => {
+                            cmd @ (SystemCommand::RestoreBall { .. }
+                            | SystemCommand::RestoreBallIfAbsent { .. }) => {
+                                let (taken, only_if_absent, reply) = match cmd {
+                                    SystemCommand::RestoreBall { taken, reply } => {
+                                        (taken, false, reply)
+                                    }
+                                    SystemCommand::RestoreBallIfAbsent { taken, reply } => {
+                                        (taken, true, reply)
+                                    }
+                                    _ => unreachable!(),
+                                };
                                 let ball_id = taken.ball.id;
+                                if only_if_absent && ballpark.balls.contains_key(&ball_id) {
+                                    // A concurrent caller already respawned `ball_id`; keep the newer
+                                    // live ball rather than overwriting it with stale `TakenBall` state.
+                                    defer_reply(&mut deferred_replies, reply, Ok(ballpark.current_tick));
+                                    return None;
+                                }
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 let tick = cycles_tackle::spawn_ball_with_combat_in_actor(
                                     &mut ballpark,

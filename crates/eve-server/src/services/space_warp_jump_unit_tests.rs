@@ -5140,3 +5140,797 @@ async fn stargate_jump_spawn_ball_with_meta_failure_rolls_back_db_toll_and_resto
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cmd_stargate_jump_cancel_queued_spawn_discards_closed_reply_and_rolls_back_1237() {
+    // Subcheck A: direct SpawnBallWithMeta with dropped reply receiver must not spawn a ball.
+    {
+        let ctx = test_ctx();
+        let sys_h = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+        let direct_ship_id = 895_707_i64;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        drop(reply_rx);
+        sys_h
+            .cmd_tx
+            .send(crate::system_actor::SystemCommand::SpawnBallWithMeta {
+                ball: Ball {
+                    id: direct_ship_id,
+                    type_id: 587,
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 350.0,
+                    inertia: 2.0,
+                    mass: 1_100_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                combat_state: CombatState::default(),
+                slim_meta: eve_destiny::SlimItemMeta::default(),
+                reply: reply_tx,
+            })
+            .await
+            .expect("enqueue closed-reply SpawnBallWithMeta");
+        assert!(
+            sys_h.get_ball_snapshot(direct_ship_id).await.unwrap().is_none(),
+            "closed-reply SpawnBallWithMeta must discard spawning without mutating ballpark"
+        );
+    }
+
+    // Subcheck B: cancel CmdStargateJump while SpawnBallWithMeta sits queued behind paused actor.
+    let ctx = test_ctx();
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| {
+            j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH
+                && j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+        })
+        .min_by_key(|j| j.stargate_id)
+        .cloned()
+        .expect("SDE must include a Zarzakh-bound gate");
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_708_i64;
+    let start_isk = eve_db::IskCents::from_isk(100_000);
+    spawn_ship_in_space(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.zarzakh_gate_locks.remove(&char_id);
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.war_faction_id = None;
+        ch.balance = start_isk;
+    });
+    let old_handle = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("origin system loaded");
+    assert!(old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+
+    let dest_handle = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+    let (paused_tx, paused_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    *dest_handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        let _ = paused_tx.send(());
+        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+    }));
+    let step_task = tokio::spawn({
+        let h = dest_handle.clone();
+        async move { h.step_manual(0.0).await }
+    });
+    paused_rx
+        .await
+        .expect("destination actor must pause inside step_manual hook");
+
+    let (enqueued_tx, mut enqueued_rx) = tokio::sync::oneshot::channel::<()>();
+    crate::system_actor::set_spawn_ball_with_meta_after_send_hook_for_test(
+        SOLAR_SYSTEM_ZARZAKH,
+        ship_id,
+        Some(Box::new(move || {
+            Box::pin(async move {
+                let _ = enqueued_tx.send(());
+                std::future::pending::<()>().await;
+            })
+        })),
+    );
+
+    let mut sess = SessionState::new(70_701);
+    mark_char_online(&ctx, &mut sess, char_id);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(gate.from_solar_system_id);
+
+    let args = [
+        PyRep::Integer(gate.stargate_id),
+        PyRep::Integer(gate.destination_stargate_id),
+        PyRep::Integer(ship_id),
+    ];
+    let mut confirm_kw = HashMap::new();
+    confirm_kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+
+    {
+        let mut jump_fut = Box::pin(handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &args,
+            &confirm_kw,
+        ));
+        tokio::select! {
+            biased;
+            res = &mut enqueued_rx => {
+                res.expect("after_send_hook must signal queued SpawnBallWithMeta");
+            }
+            res = &mut jump_fut => {
+                panic!("expected cancellation while awaiting queued SpawnBallWithMeta, got {res:?}");
+            }
+        }
+        drop(jump_fut);
+    }
+
+    release_tx
+        .send(())
+        .expect("unblock paused destination actor");
+    step_task
+        .await
+        .expect("step_manual join")
+        .expect("step_manual result");
+
+    assert!(
+        dest_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+        "cancelled queued SpawnBallWithMeta must discard spawn and leave zero ball in Zarzakh"
+    );
+    assert!(
+        old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+        "origin ship ball must be restored on queued spawn cancellation"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.solar_system_id, gate.from_solar_system_id);
+        assert_eq!(ch.balance, start_isk, "Zarzakh toll must be refunded cleanly");
+        assert!(
+            !snap.zarzakh_gate_locks.contains_key(&char_id),
+            "Zarzakh gate lock must NOT be recorded on cancelled jump"
+        );
+        assert!(
+            snap.wallet_journal.iter().any(|j| {
+                j.character_id == char_id
+                    && j.entry_type == "zarzakh_gate_toll_refund"
+                    && j.amount == eve_db::IskCents::from_isk(10_000)
+            }),
+            "cancelled Zarzakh jump must record toll refund journal entry"
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cmd_stargate_jump_cancel_after_dest_spawn_removes_dest_ball_and_restores_origin_1237() {
+    let ctx = test_ctx();
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| {
+            j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH
+                && j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+        })
+        .min_by_key(|j| j.stargate_id)
+        .cloned()
+        .expect("SDE must include a Zarzakh-bound gate");
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_709_i64;
+    let start_isk = eve_db::IskCents::from_isk(100_000);
+    spawn_ship_in_space(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.zarzakh_gate_locks.remove(&char_id);
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.war_faction_id = None;
+        ch.balance = start_isk;
+    });
+    let old_handle = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("origin system loaded");
+    assert!(old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+
+    let dest_handle = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+    let dest_handle_hook = dest_handle.clone();
+    let (materialized_tx, mut materialized_rx) = tokio::sync::oneshot::channel::<bool>();
+    crate::system_actor::set_spawn_ball_with_meta_pre_reply_hook_for_test(
+        SOLAR_SYSTEM_ZARZAKH,
+        ship_id,
+        Some(Box::new(move || {
+            Box::pin(async move {
+                let present = dest_handle_hook
+                    .get_ball_snapshot(ship_id)
+                    .await
+                    .unwrap()
+                    .is_some();
+                let _ = materialized_tx.send(present);
+                std::future::pending::<()>().await;
+            })
+        })),
+    );
+
+    let mut sess = SessionState::new(70_702);
+    mark_char_online(&ctx, &mut sess, char_id);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(gate.from_solar_system_id);
+
+    let args = [
+        PyRep::Integer(gate.stargate_id),
+        PyRep::Integer(gate.destination_stargate_id),
+        PyRep::Integer(ship_id),
+    ];
+    let mut confirm_kw = HashMap::new();
+    confirm_kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+
+    {
+        let mut jump_fut = Box::pin(handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &args,
+            &confirm_kw,
+        ));
+        tokio::select! {
+            biased;
+            res = &mut materialized_rx => {
+                assert!(
+                    res.expect("pre_reply_hook signal"),
+                    "SpawnBallWithMeta must have already materialized destination ball before cancel"
+                );
+            }
+            res = &mut jump_fut => {
+                panic!("expected cancellation during pre_reply_hook suspension, got {res:?}");
+            }
+        }
+        drop(jump_fut);
+    }
+
+    assert!(
+        dest_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+        "StargateRollbackGuard::drop must remove already-spawned destination ball after post-spawn cancellation"
+    );
+    assert!(
+        old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+        "origin ship ball must be restored after post-spawn cancellation"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.solar_system_id, gate.from_solar_system_id);
+        assert_eq!(ch.balance, start_isk, "Zarzakh toll must be refunded cleanly");
+        assert!(
+            !snap.zarzakh_gate_locks.contains_key(&char_id),
+            "Zarzakh gate lock must NOT exist after post-spawn cancellation"
+        );
+        assert!(
+            snap.wallet_journal.iter().any(|j| {
+                j.character_id == char_id
+                    && j.entry_type == "zarzakh_gate_toll_refund"
+                    && j.amount == eve_db::IskCents::from_isk(10_000)
+            }),
+            "post-spawn cancellation must record Zarzakh toll refund journal entry"
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cmd_stargate_jump_concurrent_transition_suppresses_toll_refund_while_unrelated_version_bump_rolls_back_1237() {
+    // Subtest A: superseding DB transition causes DB rollback to return false -> toll refund MUST NOT fire.
+    {
+        let ctx = test_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH
+                    && j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("SDE must include a Zarzakh-bound gate");
+        let other_sys = ctx
+            .sde
+            .solar_systems
+            .keys()
+            .copied()
+            .find(|&sid| sid != gate.from_solar_system_id && sid != SOLAR_SYSTEM_ZARZAKH)
+            .expect("third solar system");
+
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_710_i64;
+        let start_isk = eve_db::IskCents::from_isk(100_000);
+        spawn_ship_in_space(
+            &ctx,
+            char_id,
+            ship_id,
+            587,
+            gate.from_solar_system_id,
+            gate.position,
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.zarzakh_gate_locks.remove(&char_id);
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.war_faction_id = None;
+            ch.balance = start_isk;
+        });
+        let old_handle = ctx
+            .systems
+            .get_handle(gate.from_solar_system_id)
+            .expect("origin system loaded");
+        assert!(old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+
+        let dest_handle = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+        let db_hook = Arc::clone(&ctx.db);
+        let sde_hook = Arc::clone(&ctx.sde);
+        let (raced_tx, mut raced_rx) = tokio::sync::oneshot::channel::<()>();
+        crate::system_actor::set_spawn_ball_with_meta_pre_reply_hook_for_test(
+            SOLAR_SYSTEM_ZARZAKH,
+            ship_id,
+            Some(Box::new(move || {
+                Box::pin(async move {
+                    db_hook
+                        .transition_character_solar_system_if_at(
+                            char_id,
+                            SOLAR_SYSTEM_ZARZAKH,
+                            other_sys,
+                            &sde_hook,
+                        )
+                        .expect("superseding DB transition during pre_reply_hook must commit");
+                    let _ = raced_tx.send(());
+                    std::future::pending::<()>().await;
+                })
+            })),
+        );
+
+        let mut sess = SessionState::new(70_703);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        let mut confirm_kw = HashMap::new();
+        confirm_kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+
+        {
+            let mut jump_fut = Box::pin(handle(
+                &ctx,
+                &mut sess,
+                None,
+                "beyonce",
+                "CmdStargateJump",
+                &args,
+                &confirm_kw,
+            ));
+            tokio::select! {
+                biased;
+                res = &mut raced_rx => res.expect("superseding transition signal"),
+                res = &mut jump_fut => panic!("expected cancellation after superseding transition, got {res:?}"),
+            }
+            drop(jump_fut);
+        }
+
+        assert!(
+            dest_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+            "refused DB rollback must NOT remove the live destination ball"
+        );
+        assert!(
+            old_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+            "refused DB rollback must NOT restore a duplicate ghost ball in origin system"
+        );
+        ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&char_id];
+            assert_eq!(ch.solar_system_id, other_sys, "superseding system must remain active");
+            assert_eq!(
+                ch.balance,
+                eve_db::IskCents::from_isk(90_000),
+                "Zarzakh toll MUST NOT be refunded when DB rollback returns false"
+            );
+            assert!(
+                !snap
+                    .wallet_journal
+                    .iter()
+                    .any(|j| j.character_id == char_id && j.entry_type == "zarzakh_gate_toll_refund"),
+                "wallet journal must NOT contain a toll refund when DB rollback refused"
+            );
+        });
+    }
+
+    // Subtest B: unrelated `ch.version` increment before actor failure MUST still allow `rollback_now`
+    // to revert the DB transition and refund the Zarzakh toll.
+    {
+        let ctx = test_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH
+                    && j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("SDE must include a Zarzakh-bound gate");
+
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_711_i64;
+        let start_isk = eve_db::IskCents::from_isk(100_000);
+        spawn_ship_in_space(
+            &ctx,
+            char_id,
+            ship_id,
+            587,
+            gate.from_solar_system_id,
+            gate.position,
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.zarzakh_gate_locks.remove(&char_id);
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.war_faction_id = None;
+            ch.balance = start_isk;
+        });
+        let old_handle = ctx
+            .systems
+            .get_handle(gate.from_solar_system_id)
+            .expect("origin system loaded");
+        assert!(old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+
+        let dest_handle = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        *dest_handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+            let _ = paused_tx.send(());
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+        }));
+        let step_task = tokio::spawn({
+            let h = dest_handle.clone();
+            async move { h.step_manual(0.0).await }
+        });
+        paused_rx
+            .await
+            .expect("destination actor must pause inside step_manual hook");
+
+        let db_hook = Arc::clone(&ctx.db);
+        let dest_hook = dest_handle.clone();
+        crate::system_actor::set_spawn_ball_with_meta_after_send_hook_for_test(
+            SOLAR_SYSTEM_ZARZAKH,
+            ship_id,
+            Some(Box::new(move || {
+                Box::pin(async move {
+                    db_hook.with_mut_snapshot(|snap| {
+                        snap.characters.get_mut(&char_id).unwrap().version += 1;
+                    });
+                    dest_hook
+                        .panic_next_command_for_test
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let _ = release_tx.send(());
+                })
+            })),
+        );
+
+        let mut sess = SessionState::new(70_704);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        let mut confirm_kw = HashMap::new();
+        confirm_kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+
+        let err = handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &args,
+            &confirm_kw,
+        )
+        .await
+        .expect("CmdStargateJump must be handled")
+        .expect_err("simulated actor panic must fail transition and invoke rollback_now");
+        assert_eq!(err.code, "SystemTransitionFailed");
+        step_task
+            .await
+            .expect("step_manual join")
+            .expect("step_manual result");
+
+        assert!(
+            old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+            "origin ball must be restored even after unrelated ch.version bump"
+        );
+        ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&char_id];
+            assert_eq!(ch.solar_system_id, gate.from_solar_system_id);
+            assert_eq!(
+                ch.balance, start_isk,
+                "Zarzakh toll MUST still be refunded when only ch.version bumped"
+            );
+            assert!(
+                snap.wallet_journal.iter().any(|j| {
+                    j.character_id == char_id
+                        && j.entry_type == "zarzakh_gate_toll_refund"
+                        && j.amount == eve_db::IskCents::from_isk(10_000)
+                }),
+                "toll refund journal must be recorded when rollback succeeds after ch.version bump"
+            );
+        });
+    }
+}
+
+#[tokio::test]
+async fn cmd_stargate_jump_rollback_restores_extra_ship_and_preserves_nested_corp_ownership_1237() {
+    let ctx = test_ctx();
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| {
+            j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+        })
+        .min_by_key(|j| j.stargate_id)
+        .cloned()
+        .expect("SDE must include a non-Zarzakh gate");
+
+    let char_id = 90_000_001_i64;
+    let active_ship_id = 895_712_i64;
+    let extra_ship_id = 895_713_i64;
+    let nested_item_id = 895_713_999_i64;
+    let corp_owner_id = 98_000_001_i64;
+
+    spawn_ship_in_space(
+        &ctx,
+        char_id,
+        extra_ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            active_ship_id,
+            InventoryItemRecord {
+                item_id: active_ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: gate.from_solar_system_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = active_ship_id;
+        snap.items.insert(
+            nested_item_id,
+            InventoryItemRecord {
+                item_id: nested_item_id,
+                type_id: 34,
+                owner_id: corp_owner_id,
+                location_id: extra_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 42,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let old_handle = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("origin system loaded");
+    assert!(old_handle.get_ball_snapshot(extra_ship_id).await.unwrap().is_some());
+
+    let dest_handle = ctx.systems.get_or_spawn(gate.to_solar_system_id);
+    dest_handle
+        .panic_next_command_for_test
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let mut sess = SessionState::new(70_705);
+    mark_char_online(&ctx, &mut sess, char_id);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(extra_ship_id);
+    sess.solar_system_id = Some(gate.from_solar_system_id);
+
+    let args = [
+        PyRep::Integer(gate.stargate_id),
+        PyRep::Integer(gate.destination_stargate_id),
+        PyRep::Integer(extra_ship_id),
+    ];
+    let empty_kw = HashMap::new();
+    let err = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdStargateJump",
+        &args,
+        &empty_kw,
+    )
+    .await
+    .expect("CmdStargateJump must be handled")
+    .expect_err("simulated actor panic must fail transition and trigger atomic rollback");
+    assert_eq!(err.code, "SystemTransitionFailed");
+
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.solar_system_id, gate.from_solar_system_id);
+        assert_eq!(ch.active_ship_id, active_ship_id);
+        let active_rec = &snap.items[&active_ship_id];
+        assert_eq!(active_rec.location_id, gate.from_solar_system_id as i64);
+        assert_eq!(active_rec.flag, InventoryFlag::None);
+        let extra_rec = &snap.items[&extra_ship_id];
+        assert_eq!(extra_rec.location_id, gate.from_solar_system_id as i64);
+        assert_eq!(extra_rec.flag, InventoryFlag::None);
+        let nested_rec = &snap.items[&nested_item_id];
+        assert_eq!(nested_rec.location_id, extra_ship_id);
+        assert_eq!(nested_rec.flag, InventoryFlag::Cargo);
+        assert_eq!(
+            nested_rec.owner_id, corp_owner_id,
+            "atomic rollback MUST preserve nested corp-owned item owner_id without recursive re-ownership"
+        );
+    });
+    assert!(
+        old_handle.get_ball_snapshot(extra_ship_id).await.unwrap().is_some(),
+        "extra_ship_id ball must be restored to origin system on failure"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_ball_if_absent_and_taken_guard_drop_do_not_overwrite_queued_spawn_1237() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    // Part A: explicit restore_ball_if_absent must not clobber a concurrently spawned live ball.
+    let direct_ship_id = 895_714_i64;
+    spawn_ship_in_space(
+        &ctx,
+        90_000_001,
+        direct_ship_id,
+        587,
+        sys_id,
+        DVec3::new(100.0, 0.0, 0.0),
+    );
+    assert!(sys_handle.get_ball_snapshot(direct_ship_id).await.unwrap().is_some());
+    let taken_a = sys_handle
+        .take_ball(direct_ship_id)
+        .await
+        .expect("ball present to take");
+    let replacement_pos = DVec3::new(9_000.0, 0.0, 0.0);
+    sys_handle
+        .spawn_ball(Ball {
+            id: direct_ship_id,
+            type_id: 587,
+            position: replacement_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .expect("respawn replacement ball");
+    sys_handle
+        .restore_ball_if_absent(taken_a)
+        .await
+        .expect("restore_ball_if_absent must succeed cleanly as a no-op when ball exists");
+    let (_, after_a) = sys_handle
+        .get_ball_snapshot(direct_ship_id)
+        .await
+        .unwrap()
+        .expect("replacement ball remains live");
+    assert_eq!(after_a.position, replacement_pos);
+
+    // Part B: queued SpawnBall ahead of TakenBallGuard::drop while actor is paused must win atomically.
+    let queued_ship_id = 895_715_i64;
+    spawn_ship_in_space(
+        &ctx,
+        90_000_001,
+        queued_ship_id,
+        587,
+        sys_id,
+        DVec3::new(200.0, 0.0, 0.0),
+    );
+    assert!(sys_handle.get_ball_snapshot(queued_ship_id).await.unwrap().is_some());
+    let taken_b = sys_handle
+        .take_ball(queued_ship_id)
+        .await
+        .expect("ball present to take");
+    assert!(sys_handle.get_ball_snapshot(queued_ship_id).await.unwrap().is_none());
+
+    let guard = TakenBallGuard::new(sys_handle.clone(), taken_b);
+    let (paused_tx, paused_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    *sys_handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        let _ = paused_tx.send(());
+        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+    }));
+    let step_task = tokio::spawn({
+        let h = sys_handle.clone();
+        async move { h.step_manual(0.0).await }
+    });
+    paused_rx
+        .await
+        .expect("system actor must pause inside step_manual hook");
+
+    let newer_pos = DVec3::new(42_000.0, 1.0, -2.0);
+    let (spawn_tx, _spawn_rx) = tokio::sync::oneshot::channel();
+    sys_handle
+        .cmd_tx
+        .send(crate::system_actor::SystemCommand::SpawnBall {
+            ball: Ball {
+                id: queued_ship_id,
+                type_id: 587,
+                position: newer_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_100_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            reply: spawn_tx,
+        })
+        .await
+        .expect("queue SpawnBall behind paused actor");
+    drop(guard);
+
+    release_tx.send(()).expect("unblock paused actor");
+    step_task
+        .await
+        .expect("step_manual join")
+        .expect("step_manual result");
+
+    let (_, final_ball) = sys_handle
+        .get_ball_snapshot(queued_ship_id)
+        .await
+        .unwrap()
+        .expect("queued SpawnBall must remain live");
+    assert_eq!(
+        final_ball.position, newer_pos,
+        "TakenBallGuard::drop RestoreBallIfAbsent queued behind SpawnBall must NOT clobber newer live ball"
+    );
+}
