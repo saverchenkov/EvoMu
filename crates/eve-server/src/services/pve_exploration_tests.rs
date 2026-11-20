@@ -2323,3 +2323,361 @@ async fn expired_unpruned_sites_reject_and_prune_on_npc_kill_and_gate_advance() 
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exploration_arg_and_movement_prechecks_prevent_unseeded_mutations() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_050_599;
+    let ship_id: i64 = 1_050_405_599;
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("exp_track_d", "pw", char_id, "ExpTrackD");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_825_000)));
+    let kw = HashMap::new();
+
+    let mut combat = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    combat.warp_scramble_strength = 5;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            combat,
+        )
+        .await;
+
+    let mut sess = SessionState::new(599);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    // 1. Invalid args on restrictions, anomaly queries, and scanSvc escalation history must fail read-purely.
+    for (svc, meth, bad_args) in [
+        ("keeper", "GetDungeonShipRestrictions", vec![]),
+        ("keeper", "GetDungeonShipRestrictions", vec![PyRep::Bool(true)]),
+        ("keeper", "GetDungeonShipRestrictions", vec![PyRep::Integer(0)]),
+        ("keeper", "GetDungeonShipRestrictions", vec![PyRep::Integer(-1)]),
+        (
+            "keeper",
+            "CanEnterDungeonInCurrentShip",
+            vec![PyRep::Integer(2), PyRep::Integer(3)],
+        ),
+        ("scanSvc", "GetCombatAnomalyInstances", vec![PyRep::Bool(true)]),
+        (
+            "scanSvc",
+            "GetCombatAnomalyInstances",
+            vec![PyRep::Integer(sys_id as i64), PyRep::Integer(1)],
+        ),
+        (
+            "scanSvc",
+            "EnterCombatAnomaly",
+            vec![PyRep::String("PVE-ANOM-30000142-1".into()), PyRep::Integer(1)],
+        ),
+        ("scanSvc", "GetEscalatingPathDungeonsEntered", vec![PyRep::Integer(90_000_002)]),
+        ("dungeonExplorationMgr", "GetEscalatingPathDungeonsEntered", vec![PyRep::Integer(0)]),
+    ] {
+        let err = handle_pve_exploration(&ctx, &mut sess, svc, meth, &bad_args, &kw)
+            .await
+            .expect("handled")
+            .expect_err("invalid argument probe must fail");
+        assert_eq!(err.code, "InvalidArguments", "{svc}.{meth}");
+    }
+
+    // 2. Warp-scrambled ship must reject natural unseeded gate/wave advancement BEFORE seeding DB.
+    let ded_gate_ball_id = 1_864_000_000 + i64::from(sys_id % 100_000) * 10 + 3;
+    let first_anom = crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(&ctx, sys_id)
+        .into_iter()
+        .next()
+        .expect("unseeded anomaly spec");
+    for (svc, meth, args) in [
+        (
+            "scanSvc",
+            "EnterCombatAnomaly",
+            vec![PyRep::String(first_anom.site_id), PyRep::Bool(true)],
+        ),
+        ("keeper", "ActivateAccelerationGate", vec![PyRep::Integer(ded_gate_ball_id)]),
+        ("keeper", "EnterNextDungeonRoom", vec![PyRep::String("DED-30000142-3".into())]),
+    ] {
+        let err = handle_pve_exploration(&ctx, &mut sess, svc, meth, &args, &kw)
+            .await
+            .expect("handled")
+            .expect_err("warp-scrambled movement precheck must reject");
+        assert!(!err.code.is_empty(), "{svc}.{meth}");
+    }
+    assert!(read_pve_exploration_reg(&ctx, |reg| {
+        !reg.seeded_systems.contains_key(&sys_id) && !reg.sites_by_system.contains_key(&sys_id)
+    }));
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // Clear warp scramble -> valid dungeonExplorationMgr escalation query and ship restrictions succeed cleanly.
+    let mut clear_combat = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    clear_combat.warp_scramble_strength = 0;
+    let _ = sys_h.set_combat_state(ship_id, clear_combat).await;
+
+    let entered = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "dungeonExplorationMgr",
+        "GetEscalatingPathDungeonsEntered",
+        &[PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("valid instance_id query succeeds");
+    assert_eq!(entered, PyRep::List(Vec::new()));
+
+    // Locked Mothership INC-* gate probe rejects with MothershipSiteLocked before spawning incursion NPC balls.
+    let (const_id, _) = crate::services::pve_incursion_lifecycle::eligible_incursion_constellations(&ctx)
+        .into_iter()
+        .next()
+        .expect("eligible incursion constellation");
+    crate::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.initialized = true;
+        crate::services::pve_incursion_sites::seed_incursion_for_constellation(&ctx, reg, const_id);
+    });
+    let (hq_sys, hq_site_id, hq_boss_ball) = crate::services::pve_special_sites::read_pve_special_reg(&ctx, |reg| {
+        let inc = reg.incursions.get(&const_id).expect("seeded incursion");
+        let hq = inc
+            .sites
+            .iter()
+            .find(|s| s.locked_until_low_influence)
+            .expect("locked Mothership site");
+        (hq.solar_system_id, hq.site_id.clone(), hq.boss_npc_ball_id)
+    });
+    sess.solar_system_id = Some(hq_sys);
+    let hq_err = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::String(hq_site_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("locked Mothership site must reject before spawning balls");
+    assert_eq!(hq_err.code, "MothershipSiteLocked");
+    assert_eq!(
+        ctx.systems.get_or_spawn(hq_sys).get_ball_snapshot(hq_boss_ball).await.unwrap(),
+        None,
+        "locked Mothership probe must not spawn incursion balls"
+    );
+}
+
+#[tokio::test]
+async fn incursion_mothership_5158_does_not_seed_and_dungeons_entered_filters_by_instance_id() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_800_000)));
+    let kw = HashMap::new();
+
+    // 1. F-03: On an uninitialized special-sites registry, INC-<const_id>-5158 returns MothershipSiteLocked read-purely.
+    let eligible = crate::services::pve_incursion_lifecycle::eligible_incursion_constellations(&ctx);
+    let (const_id, _) = eligible.first().copied().expect("eligible incursion constellation");
+    let mut sys_list: Vec<SolarSystemId> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.constellation_id == const_id)
+        .map(|s| s.solar_system_id)
+        .collect();
+    sys_list.sort_unstable();
+    let (_, _, _, hq_sys) = crate::services::pve_incursion_lifecycle::assign_constellation_system_roles(
+        &ctx.sde,
+        const_id,
+        &sys_list,
+    );
+    let char_id = 90_000_001;
+    let ship_id = 100_000_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.solar_system_id = hq_sys;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = hq_sys as i64;
+        }
+    });
+    let hq_handle = ctx.systems.get_or_spawn(hq_sys);
+    let _ = hq_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(hq_sys),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    assert!(!is_naturally_seedable_incursion_site(&ctx, hq_sys, "INC-5158"));
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+    let err_mothership = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::String(format!("INC-{const_id}-5158"))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("unseeded INC-*-5158 must return MothershipSiteLocked");
+    assert_eq!(err_mothership.code, "MothershipSiteLocked");
+    assert!(crate::services::pve_special_sites::read_pve_special_reg(&ctx, |r| !r.initialized));
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 2. F-04: GetEscalatingPathDungeonsEntered(instance_id) filters strictly by instance_id read-purely.
+    let now = with_pve_exploration_reg(&ctx, |reg| now_sec(reg));
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.escalations_by_char.insert(
+            char_id,
+            vec![
+                crate::services::pve_expeditions::EscalatingPathEntry {
+                    instance_id: 1_001,
+                    character_id: char_id,
+                    source_dungeon_id: 1420,
+                    expedition_dungeon_id: 1421,
+                    expedition_name: "Escalation Alpha".into(),
+                    destination_solar_system_id: hq_sys,
+                    step_index: 2,
+                    total_steps: 3,
+                    journal_text: "Alpha".into(),
+                    created_at_sec: now,
+                    expires_at_sec: now + 3_600,
+                    dungeons_entered: vec![1420, 1421],
+                    journal_entry_template_id: 0,
+                },
+                crate::services::pve_expeditions::EscalatingPathEntry {
+                    instance_id: 1_002,
+                    character_id: char_id,
+                    source_dungeon_id: 2420,
+                    expedition_dungeon_id: 2421,
+                    expedition_name: "Escalation Beta".into(),
+                    destination_solar_system_id: hq_sys,
+                    step_index: 1,
+                    total_steps: 2,
+                    journal_text: "Beta".into(),
+                    created_at_sec: now,
+                    expires_at_sec: now + 3_600,
+                    dungeons_entered: vec![2420],
+                    journal_entry_template_id: 0,
+                },
+            ],
+        );
+    });
+    let e_esc = ctx.db.state_epoch();
+    let c_esc = ctx.db.tx_commit_count();
+    let only_1001 = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "dungeonExplorationMgr",
+        "GetEscalatingPathDungeonsEntered",
+        &[PyRep::Integer(1_001)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(only_1001, PyRep::List(vec![PyRep::Integer(1420), PyRep::Integer(1421)]));
+
+    let only_1002 = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "dungeonExplorationMgr",
+        "GetEscalatingPathDungeonsEntered",
+        &[PyRep::Integer(1_002)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(only_1002, PyRep::List(vec![PyRep::Integer(2420)]));
+
+    let missing_inst = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "dungeonExplorationMgr",
+        "GetEscalatingPathDungeonsEntered",
+        &[PyRep::Integer(9_999)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(missing_inst, PyRep::List(Vec::new()));
+
+    let all_entered = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "dungeonExplorationMgr",
+        "GetEscalatingPathDungeonsEntered",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        all_entered,
+        PyRep::List(vec![PyRep::Integer(1420), PyRep::Integer(1421), PyRep::Integer(2420)])
+    );
+    assert_eq!(ctx.db.state_epoch(), e_esc);
+    assert_eq!(ctx.db.tx_commit_count(), c_esc);
+}

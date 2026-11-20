@@ -5374,3 +5374,350 @@ async fn zarzakh_toll_rejections_never_load_lazy_zarzakh_gh_1429() {
         "confirmed Zarzakh jump debit must emit OnAccountChange"
     );
 }
+
+#[tokio::test]
+async fn test_stargate_post_spawn_rollback_preserves_origin_modules_charges_and_cleans_dest_attacker() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let kw = HashMap::new();
+
+    let char_id = 91_467_501_i64;
+    let ship_id = 101_467_501_i64;
+    let ab_mod_id = ship_id + 10;
+    let master_gun_id = ship_id + 11;
+    let slave_gun_id = ship_id + 12;
+
+    let atk_char_id = 91_467_502_i64;
+    let atk_ship_id = 101_467_602_i64;
+    let atk_scram_id = atk_ship_id + 10;
+    let atk_gun_id = atk_ship_id + 11;
+    let atk_slave_gun_id = atk_ship_id + 12;
+
+    let ab_type_id = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| t.group_id == 46 && t.published)
+        .min_by_key(|t| t.type_id)
+        .map(|t| t.type_id)
+        .unwrap_or(12058);
+    let gun_type_id = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| t.group_id == 55 && t.published)
+        .min_by_key(|t| t.type_id)
+        .map(|t| t.type_id)
+        .unwrap_or(484);
+    let scram_type_id = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| t.group_id == 52 && t.published)
+        .min_by_key(|t| t.type_id)
+        .map(|t| t.type_id)
+        .unwrap_or(3242);
+    let ammo_tid = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| t.category_id == 8 && t.published)
+        .min_by_key(|t| t.type_id)
+        .map(|t| t.type_id)
+        .unwrap_or(200);
+
+    let origin_pos = gate.position + DVec3::new(500.0, 0.0, 0.0);
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        origin_pos,
+    )
+    .await;
+    let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+    let _atk_sess = setup_nav_pilot(
+        &ctx,
+        atk_char_id,
+        atk_ship_id,
+        587,
+        gate.to_solar_system_id,
+        DVec3::new(1_000.0, 0.0, 0.0),
+    )
+    .await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (iid, tid, owner, loc, flag) in [
+            (ab_mod_id, ab_type_id, char_id, ship_id, InventoryFlag::MedSlot0),
+            (master_gun_id, gun_type_id, char_id, ship_id, InventoryFlag::HiSlot0),
+            (slave_gun_id, gun_type_id, char_id, ship_id, InventoryFlag::HiSlot1),
+            (atk_scram_id, scram_type_id, atk_char_id, atk_ship_id, InventoryFlag::MedSlot0),
+            (atk_gun_id, gun_type_id, atk_char_id, atk_ship_id, InventoryFlag::HiSlot0),
+            (atk_slave_gun_id, gun_type_id, atk_char_id, atk_ship_id, InventoryFlag::HiSlot1),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: owner,
+                    location_id: loc,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(iid, true);
+        }
+        // Origin fit: uncharged active AB + charged master gun + charge-only linked slave gun.
+        snap.module_active_states.insert(ab_mod_id);
+        snap.module_active_states.insert(master_gun_id);
+        snap.module_active_charges.insert(master_gun_id, ammo_tid);
+        snap.module_active_charges.insert(slave_gun_id, ammo_tid);
+
+        // Destination attacker fit: active scram + active master gun + charge-only linked slave gun.
+        snap.module_active_states.insert(atk_scram_id);
+        snap.module_active_states.insert(atk_gun_id);
+        snap.module_active_charges.insert(atk_gun_id, ammo_tid);
+        snap.module_active_charges.insert(atk_slave_gun_id, ammo_tid);
+    });
+
+    let src_h = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("source system loaded");
+    src_h
+        .add_module_cycle(eve_server::system_actor::ActiveModuleCycle {
+            ship_id,
+            module_id: ab_mod_id,
+            module_type_id: ab_type_id,
+            owner_char_id: Some(char_id),
+            effect_name: "moduleBonusAfterburner".into(),
+            repeat: 100,
+            duration_s: 10.0,
+            cap_need_per_cycle: 10.0,
+            speed_boost_factor: 1.5,
+            ..Default::default()
+        })
+        .await
+        .expect("add origin AB cycle");
+    src_h
+        .add_module_cycle(eve_server::system_actor::ActiveModuleCycle {
+            ship_id,
+            module_id: master_gun_id,
+            module_type_id: gun_type_id,
+            owner_char_id: Some(char_id),
+            effect_name: "targetAttack".into(),
+            repeat: 100,
+            duration_s: 10.0,
+            cap_need_per_cycle: 1.0,
+            linked_turrets: vec![slave_gun_id],
+            ammo_type_id: Some(ammo_tid),
+            ..Default::default()
+        })
+        .await
+        .expect("add origin gun cycle");
+
+    let dest_h = ctx.systems.get_or_spawn(gate.to_solar_system_id);
+    let dest_h_hook = dest_h.clone();
+    let (post_spawn_tx, mut post_spawn_rx) = tokio::sync::oneshot::channel::<bool>();
+    let hook: eve_server::services::space_warp_jump::PreTakeBallHook = Box::new(move || {
+        Box::pin(async move {
+            let present = dest_h_hook
+                .get_ball_snapshot(ship_id)
+                .await
+                .unwrap()
+                .is_some();
+            if present {
+                dest_h_hook
+                    .add_module_cycle(eve_server::system_actor::ActiveModuleCycle {
+                        ship_id: atk_ship_id,
+                        module_id: atk_scram_id,
+                        module_type_id: scram_type_id,
+                        owner_char_id: Some(atk_char_id),
+                        effect_name: "warpScramble".into(),
+                        target_id: Some(ship_id),
+                        repeat: 100,
+                        duration_s: 10.0,
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("add attacker scram cycle");
+                dest_h_hook
+                    .add_module_cycle(eve_server::system_actor::ActiveModuleCycle {
+                        ship_id: atk_ship_id,
+                        module_id: atk_gun_id,
+                        module_type_id: gun_type_id,
+                        owner_char_id: Some(atk_char_id),
+                        effect_name: "targetAttack".into(),
+                        target_id: Some(ship_id),
+                        repeat: 100,
+                        duration_s: 10.0,
+                        linked_turrets: vec![atk_slave_gun_id],
+                        ammo_type_id: Some(ammo_tid),
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("add attacker linked gun cycle");
+            }
+            let _ = post_spawn_tx.send(present);
+            std::future::pending::<()>().await;
+        })
+    });
+    eve_server::services::space_warp_jump::set_post_dest_spawn_hook_for_test(
+        &ctx,
+        char_id,
+        Some(hook),
+    );
+
+    // Part A: Cancel `CmdStargateJump` RPC after destination ball spawn, before guard disarm.
+    let jump_args = [PyRep::Integer(gate.stargate_id)];
+    {
+        let mut jump_fut = Box::pin(ctx.dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &jump_args,
+            &kw,
+            None,
+        ));
+        tokio::select! {
+            biased;
+            res = &mut post_spawn_rx => {
+                assert!(
+                    res.expect("post_dest_spawn hook signal"),
+                    "destination ball must be materialized before cancellation"
+                );
+            }
+            res = &mut jump_fut => {
+                panic!("expected cancellation during post_dest_spawn hook suspension, got {res:?}");
+            }
+        }
+        drop(jump_fut);
+    }
+
+    let mut rolled_back = false;
+    for _ in 0..100 {
+        let dest_gone = dest_h.get_ball_snapshot(ship_id).await.unwrap().is_none();
+        let orig_back = src_h.get_ball_snapshot(ship_id).await.unwrap().is_some();
+        if dest_gone && orig_back {
+            rolled_back = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        rolled_back,
+        "post-spawn cancellation must remove destination ball and restore origin ball"
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].solar_system_id, gate.from_solar_system_id);
+        assert!(snap.module_active_states.contains(&ab_mod_id));
+        assert!(snap.module_active_states.contains(&master_gun_id));
+        assert!(!snap.module_active_states.contains(&slave_gun_id));
+        assert!(!snap.module_active_charges.contains_key(&ab_mod_id));
+        assert_eq!(snap.module_active_charges.get(&master_gun_id).copied(), Some(ammo_tid));
+        assert_eq!(snap.module_active_charges.get(&slave_gun_id).copied(), Some(ammo_tid));
+
+        assert!(!snap.module_active_states.contains(&atk_scram_id));
+        assert!(!snap.module_active_states.contains(&atk_gun_id));
+        assert!(!snap.module_active_charges.contains_key(&atk_gun_id));
+        assert!(!snap.module_active_charges.contains_key(&atk_slave_gun_id));
+    });
+
+    assert!(src_h.has_module_cycle(ship_id, ab_mod_id).await);
+    assert!(src_h.has_module_cycle(ship_id, master_gun_id).await);
+    src_h.step_manual(1.0).await.expect("origin actor step succeeds");
+    assert!(src_h.has_module_cycle(ship_id, ab_mod_id).await);
+    assert!(src_h.has_module_cycle(ship_id, master_gun_id).await);
+
+    assert!(!dest_h.has_module_cycle(atk_ship_id, atk_scram_id).await);
+    assert!(!dest_h.has_module_cycle(atk_ship_id, atk_gun_id).await);
+    assert!(
+        ctx.drain_notifications_for_char(atk_char_id)
+            .iter()
+            .any(|n| n.event == "OnGodmaShipEffect"),
+        "destination attacker must receive OnGodmaShipEffect deactivation"
+    );
+    assert!(
+        !ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnGodmaShipEffect"),
+        "origin pilot must not receive OnGodmaShipEffect deactivation during post-spawn rollback"
+    );
+
+    // Part B: Retry jump completes cleanly and clears both active states AND charge-only slave charges.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdStargateJump",
+        &[PyRep::Integer(gate.stargate_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("retry stargate jump succeeds after post-spawn rollback");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].solar_system_id, gate.to_solar_system_id);
+        assert!(!snap.module_active_states.contains(&ab_mod_id));
+        assert!(!snap.module_active_states.contains(&master_gun_id));
+        assert!(!snap.module_active_charges.contains_key(&master_gun_id));
+        assert!(
+            !snap.module_active_charges.contains_key(&slave_gun_id),
+            "confirmed stargate jump must clear linked slave turret active charges too"
+        );
+    });
+
+    // Negative control: untokenized `remove_ball` (`required_token == None`) still cleans DB states/charges.
+    let neg_char_id = 91_467_503_i64;
+    let neg_ship_id = 101_467_703_i64;
+    let neg_mod_id = neg_ship_id + 10;
+    let neg_slave_id = neg_ship_id + 11;
+    let _neg_sess = setup_nav_pilot(
+        &ctx,
+        neg_char_id,
+        neg_ship_id,
+        587,
+        gate.to_solar_system_id,
+        DVec3::new(2_000.0, 0.0, 0.0),
+    )
+    .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        for (iid, flag) in [
+            (neg_mod_id, InventoryFlag::HiSlot0),
+            (neg_slave_id, InventoryFlag::HiSlot1),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: gun_type_id,
+                    owner_id: neg_char_id,
+                    location_id: neg_ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.module_active_states.insert(neg_mod_id);
+        snap.module_active_charges.insert(neg_mod_id, ammo_tid);
+        snap.module_active_charges.insert(neg_slave_id, ammo_tid);
+    });
+    assert!(dest_h.remove_ball(neg_ship_id).await.is_some());
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.module_active_states.contains(&neg_mod_id));
+        assert!(!snap.module_active_charges.contains_key(&neg_mod_id));
+        assert!(!snap.module_active_charges.contains_key(&neg_slave_id));
+    });
+}

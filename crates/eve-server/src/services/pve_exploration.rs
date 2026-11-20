@@ -1571,22 +1571,19 @@ fn is_naturally_seedable_ded_gate_ball(
             .any(|(_, sig_id)| sig_id == &expected_sig_id)
 }
 
-fn is_naturally_seedable_incursion_site(
+fn naturally_seedable_incursion_dungeon_id(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
     site_id: &str,
-) -> bool {
-    let Some(const_id) = ctx
+) -> Option<u32> {
+    let const_id = ctx
         .sde
         .solar_systems
         .get(&sys_id)
-        .map(|s| s.constellation_id)
-    else {
-        return false;
-    };
+        .map(|s| s.constellation_id)?;
     let eligible = crate::services::pve_incursion_lifecycle::eligible_incursion_constellations(ctx);
     if !eligible.into_iter().take(3).any(|(cid, _)| cid == const_id) {
-        return false;
+        return None;
     }
     let mut sys_list: Vec<SolarSystemId> = ctx
         .sde
@@ -1617,10 +1614,20 @@ fn is_naturally_seedable_incursion_site(
         (hq, 5171),
     ]
     .into_iter()
-    .any(|(expected_sys, did)| {
-        expected_sys == sys_id
-            && (site_id == format!("INC-{const_id}-{did}") || site_id == format!("INC-{did}"))
+    .find_map(|(expected_sys, did)| {
+        (expected_sys == sys_id
+            && (site_id == format!("INC-{const_id}-{did}") || site_id == format!("INC-{did}")))
+        .then_some(did)
     })
+}
+
+#[cfg(test)]
+fn is_naturally_seedable_incursion_site(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    site_id: &str,
+) -> bool {
+    naturally_seedable_incursion_dungeon_id(ctx, sys_id, site_id).is_some_and(|did| did != 5158)
 }
 
 pub async fn handle_pve_exploration(
@@ -1673,7 +1680,7 @@ pub async fn handle_pve_exploration(
         // parity: feat:pve.escalations, feat:pve.expeditions
         ("dungeonExplorationMgr", "GetEscalatingPathDungeonsEntered")
         | ("scanSvc", "GetEscalatingPathDungeonsEntered") => {
-            Some(handle_get_escalating_path_dungeons_entered(ctx, session))
+            Some(handle_get_escalating_path_dungeons_entered(ctx, session, service, args))
         }
 
         _ => None,
@@ -1694,14 +1701,45 @@ fn handle_dungeon_ship_restrictions(
         Err(e) => return Some(Err(e)),
     };
 
-    let arg0_int = args.first().and_then(|a| a.as_i64());
-    let arg0_str = args.first().and_then(|a| a.as_str());
+    if args.len() != 1 {
+        let msg = format!("{method} requires a single dungeon or site identifier argument");
+        return Some(Err(BridgeRpcError::with_client_error(
+            "InvalidArguments",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        )));
+    }
+    let (arg0_int, arg0_str) = match args.first() {
+        Some(PyRep::Integer(did)) => (Some(*did), None),
+        Some(arg) => match arg.as_str() {
+            Some(s) if !s.trim().is_empty() => (None, Some(s)),
+            _ => {
+                let msg = format!(
+                    "{method} requires a positive integer dungeonID or non-empty siteID"
+                );
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "InvalidArguments",
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
+                )));
+            }
+        },
+        None => unreachable!(),
+    };
 
     let mut sleeper_tier_opt: Option<(SleeperCacheTier, u32, &'static str)> = None;
     let mut ded_rating_opt: Option<u8> = None;
     let mut explicit_sde_dungeon: Option<(u32, String)> = None;
 
     if let Some(did) = arg0_int {
+        if did <= 0 {
+            let msg = format!("Invalid dungeon identifier {did}");
+            return Some(Err(BridgeRpcError::with_client_error(
+                "InvalidArguments",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            )));
+        }
         if did > 10 {
             let did_u32 = u32::try_from(did).ok();
             if let Some(tier) = did_u32.and_then(sleeper_cache_tier_for_dungeon) {
@@ -1719,9 +1757,11 @@ fn handle_dungeon_ship_restrictions(
                 };
                 explicit_sde_dungeon = Some((did as u32, dname));
             } else {
-                return Some(Err(rpc_msg_err(
+                let msg = format!("Dungeon {did} not found");
+                return Some(Err(BridgeRpcError::with_client_error(
                     "DungeonNotFound",
-                    format!("Dungeon {did} not found"),
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
                 )));
             }
         } else {
@@ -1890,28 +1930,42 @@ async fn handle_get_combat_anomaly_instances(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (char_id, caller_sys) = require_undocked_exploration_space(ctx, session, true)?;
+    if args.len() > 1 {
+        let msg = "GetCombatAnomalyInstances accepts at most one solarSystemID argument";
+        return Err(BridgeRpcError::with_client_error(
+            "InvalidArguments",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        ));
+    }
     let sys_id = match args.first() {
         None | Some(PyRep::None) => caller_sys,
-        Some(arg) => {
-            let Some(raw) = arg.as_i64() else {
-                return Err(rpc_msg_err(
+        Some(PyRep::Integer(raw)) => {
+            let Ok(id) = u32::try_from(*raw) else {
+                let msg = format!("Invalid solarSystemID {raw}");
+                return Err(BridgeRpcError::with_client_error(
                     "InvalidArguments",
-                    "solarSystemID must be an integer",
-                ));
-            };
-            let Ok(id) = u32::try_from(raw) else {
-                return Err(rpc_msg_err(
-                    "InvalidArguments",
-                    format!("Invalid solarSystemID {raw}"),
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
                 ));
             };
             if !ctx.sde.solar_systems.contains_key(&id) {
-                return Err(rpc_msg_err(
+                let msg = format!("Unknown solar system {id}");
+                return Err(BridgeRpcError::with_client_error(
                     "UnknownSolarSystem",
-                    format!("Unknown solar system {id}"),
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
                 ));
             }
             id
+        }
+        Some(_) => {
+            let msg = "solarSystemID must be an integer";
+            return Err(BridgeRpcError::with_client_error(
+                "InvalidArguments",
+                msg,
+                eve_proto::ClientError::CustomInfo(msg.into()),
+            ));
         }
     };
     let is_seeded = read_pve_exploration_reg(ctx, |reg| {
@@ -1992,14 +2046,53 @@ async fn handle_enter_combat_anomaly(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (char_id, sys_id) = require_undocked_exploration_space(ctx, session, true)?;
+    if args.len() > 2 {
+        let msg = "EnterCombatAnomaly accepts at most two arguments";
+        return Err(BridgeRpcError::with_client_error(
+            "InvalidArguments",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        ));
+    }
+    let advance_wave = match args.get(1) {
+        None | Some(PyRep::None) => false,
+        Some(PyRep::Bool(v)) => *v,
+        Some(_) => {
+            let msg = "EnterCombatAnomaly second argument must be a boolean";
+            return Err(BridgeRpcError::with_client_error(
+                "InvalidArguments",
+                msg,
+                eve_proto::ClientError::CustomInfo(msg.into()),
+            ));
+        }
+    };
     let Some(site_id) = args
         .first()
         .and_then(|a| a.as_str())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
     else {
-        return Err(rpc_msg_err("AnomalyNotFound", "Combat anomaly siteID is required"));
+        let msg = "Combat anomaly siteID is required";
+        return Err(BridgeRpcError::with_client_error(
+            "AnomalyNotFound",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        ));
     };
+    if advance_wave {
+        if let Some(ship_id) = session.ship_id {
+            ctx.validate_ship_movement(
+                char_id,
+                ship_id,
+                crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                    sys_id,
+                    kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
+                },
+            )
+            .await?;
+        }
+    }
     let (site_exists, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
         (
             reg.sites_by_system
@@ -2018,13 +2111,14 @@ async fn handle_enter_combat_anomaly(
                 .is_some_and(|sites| sites.iter().any(|s| s.site_id == site_id))
         });
         if !exists_after {
-            return Err(rpc_msg_err(
+            let msg = format!("Combat anomaly {site_id} not found in system {sys_id}");
+            return Err(BridgeRpcError::with_client_error(
                 "AnomalyNotFound",
-                format!("Combat anomaly {site_id} not found in system {sys_id}"),
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
             ));
         }
     }
-    let advance_wave = args.get(1).and_then(|a| a.as_bool()).unwrap_or(false);
     if advance_wave {
         return crate::services::pve_expeditions::validate_and_advance_pve_site_room(
             ctx, session, sys_id, &site_id,
@@ -2068,13 +2162,25 @@ async fn handle_activate_acceleration_gate(
     method: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Err(e) = ServerContext::require_character(session) {
+        return Some(Err(e));
+    }
+    if args.len() > 2 {
+        let msg = format!("{method} accepts at most two arguments");
+        return Some(Err(BridgeRpcError::with_client_error(
+            "InvalidArguments",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        )));
+    }
+    let gate_ball_arg = match args.first() {
+        Some(PyRep::Integer(v)) => Some(*v),
+        _ => None,
+    };
     if method == "ActivateAccelerationGate" {
-        if let Err(e) = ServerContext::require_character(session) {
-            return Some(Err(e));
-        }
         if let (Ok(pre_sys), Some(gate_id)) = (
             resolve_session_system_id(ctx, session),
-            args.first().and_then(|a| a.as_i64()),
+            gate_ball_arg,
         ) {
             if let Some(res) = Box::pin(crate::services::pve_fob_observatory::try_activate_observatory_gate(
                 ctx, session, pre_sys, gate_id,
@@ -2085,12 +2191,15 @@ async fn handle_activate_acceleration_gate(
             }
         }
     }
-    let (_, sys_id) = match require_undocked_exploration_space(ctx, session, false) {
+    let (char_id, sys_id) = match require_undocked_exploration_space(ctx, session, false) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let gate_ball_arg = args.first().and_then(|a| a.as_i64());
-    let gate_str_arg = args.first().and_then(|a| a.as_str());
+    let gate_str_arg = args
+        .first()
+        .and_then(|a| a.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let has_runtime_gate = ctx.db.with_snapshot(|snap| {
         snap.dungeon_runtime.instances.values().any(|i| {
             !i.completed
@@ -2124,10 +2233,8 @@ async fn handle_activate_acceleration_gate(
             return Some(res);
         }
     }
-    let mut site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
-    let special_id_arg = args
-        .first()
-        .and_then(|a| a.as_i64())
+    let mut site_id = gate_str_arg.unwrap_or("").to_string();
+    let special_id_arg = gate_ball_arg
         .or_else(|| super::r6_t1_p0_helpers::resolve_special_site_string_instance_id(ctx, &site_id));
     if let Some(item_id) = special_id_arg {
         // Integer argument: a DED acceleration gate ball in the pilot's system resolves to its site;
@@ -2142,6 +2249,21 @@ async fn handle_activate_acceleration_gate(
             && session.ship_id.is_some()
             && is_naturally_seedable_ded_gate_ball(ctx, sys_id, item_id)
         {
+            if let Some(ship_id) = session.ship_id {
+                if let Err(e) = ctx
+                    .validate_ship_movement(
+                        char_id,
+                        ship_id,
+                        crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                            sys_id,
+                            kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
+                        },
+                    )
+                    .await
+                {
+                    return Some(Err(e));
+                }
+            }
             Box::pin(ensure_system_pve_sites_seeded(ctx, sys_id)).await;
             gate_site = read_pve_exploration_reg(ctx, |reg| {
                 find_site_id_by_gate_ball(reg, sys_id, item_id)
@@ -2155,8 +2277,21 @@ async fn handle_activate_acceleration_gate(
                 site_id = sid;
             }
             None if super::r6_t1_p0_helpers::is_known_special_site_instance_id(ctx, item_id) => {
-                if session.ship_id.is_none() {
+                let Some(ship_id) = session.ship_id else {
                     return Some(Err(rpc_msg_err("NoActiveShip", "Session has no active ship")));
+                };
+                if let Err(e) = ctx
+                    .validate_ship_movement(
+                        char_id,
+                        ship_id,
+                        crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                            sys_id,
+                            kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
+                        },
+                    )
+                    .await
+                {
+                    return Some(Err(e));
                 }
                 let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
                 let res = Box::pin(crate::services::pve_special_sites::complete_special_dungeon_instance(ctx, session, item_id, fleet_count)).await;
@@ -2198,59 +2333,133 @@ async fn handle_activate_acceleration_gate(
             None => return None,
         }
     }
-    if session.ship_id.is_none() {
+    let Some(ship_id) = session.ship_id else {
         return Some(Err(rpc_msg_err("NoActiveShip", "Session has no active ship")));
-    }
+    };
     if site_id.is_empty() {
         return Some(Err(rpc_msg_err("DungeonNotFound", "Dungeon siteID is required")));
     }
     if site_id.starts_with("INC-") {
-        let (mut inc_exists, special_initialized) =
+        let now_ft = ctx.now_blueos_filetime_ticks();
+        let (mut inc_exists, special_initialized, locked_reason) =
             crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
-                let exists = reg.incursions.values().any(|inc| {
-                    inc.state != "Ended"
-                        && inc.state != "Withdrawing"
-                        && inc.sites.iter().any(|s| {
-                            s.solar_system_id == sys_id
-                                && (s.site_id == site_id
-                                    || s.site_id.ends_with(&site_id)
-                                    || site_id.ends_with(&format!("-{}", s.dungeon_id)))
-                        })
-                });
-                (exists, reg.initialized)
+                let mut found = false;
+                let mut locked: Option<(String, String)> = None;
+                for inc in reg.incursions.values() {
+                    if inc.state == "Ended" || inc.state == "Withdrawing" {
+                        continue;
+                    }
+                    for s in &inc.sites {
+                        if s.solar_system_id == sys_id
+                            && (s.site_id == site_id
+                                || s.site_id.ends_with(&site_id)
+                                || site_id.ends_with(&format!("-{}", s.dungeon_id)))
+                        {
+                            found = true;
+                            if s.locked_until_low_influence {
+                                if !inc.mothership_spawned || inc.influence > 0.10 {
+                                    locked = Some((
+                                        "MothershipSiteLocked".into(),
+                                        format!(
+                                            "Mothership HQ site {} is locked while Sansha influence ({:.2}) > 0.0",
+                                            s.dungeon_name, inc.influence
+                                        ),
+                                    ));
+                                } else if inc
+                                    .lockout_until_filetime
+                                    .is_some_and(|lockout| now_ft > lockout && !inc.mothership_defeated)
+                                {
+                                    locked = Some((
+                                        "MothershipSiteLocked".into(),
+                                        "Mothership HQ site is locked: lockout window has expired"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    if found {
+                        break;
+                    }
+                }
+                (found, reg.initialized, locked)
             });
+        if let Some((code, msg)) = locked_reason {
+            return Some(Err(rpc_msg_err(&code, msg)));
+        }
         let mut spawned_for_system = false;
-        if !inc_exists {
-            if !special_initialized && is_naturally_seedable_incursion_site(ctx, sys_id, &site_id)
-            {
-                Box::pin(
-                    crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
-                        ctx, sys_id,
-                    ),
-                )
-                .await;
-                spawned_for_system = true;
-                inc_exists = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
-                    reg.incursions.values().any(|inc| {
-                        inc.state != "Ended"
-                            && inc.state != "Withdrawing"
-                            && inc.sites.iter().any(|s| {
-                                s.solar_system_id == sys_id
-                                    && (s.site_id == site_id
-                                        || s.site_id.ends_with(&site_id)
-                                        || site_id.ends_with(&format!("-{}", s.dungeon_id)))
-                            })
-                    })
-                });
-            }
-            if !inc_exists {
-                return Some(Err(rpc_msg_err(
-                    "DungeonNotFound",
-                    format!("Incursion site {site_id} not found"),
-                )));
+        if !inc_exists && !special_initialized {
+            match naturally_seedable_incursion_dungeon_id(ctx, sys_id, &site_id) {
+                Some(5158) => {
+                    let msg = format!(
+                        "Mothership HQ site {site_id} is locked while Sansha influence > 0.0"
+                    );
+                    return Some(Err(BridgeRpcError::with_client_error(
+                        "MothershipSiteLocked",
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
+                    )));
+                }
+                Some(_) => {
+                    if let Err(e) = ctx
+                        .validate_ship_movement(
+                            char_id,
+                            ship_id,
+                            crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                                sys_id,
+                                kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
+                            },
+                        )
+                        .await
+                    {
+                        return Some(Err(e));
+                    }
+                    Box::pin(
+                        crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
+                            ctx, sys_id,
+                        ),
+                    )
+                    .await;
+                    spawned_for_system = true;
+                    inc_exists = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
+                        reg.incursions.values().any(|inc| {
+                            inc.state != "Ended"
+                                && inc.state != "Withdrawing"
+                                && inc.sites.iter().any(|s| {
+                                    s.solar_system_id == sys_id
+                                        && (s.site_id == site_id
+                                            || s.site_id.ends_with(&site_id)
+                                            || site_id.ends_with(&format!("-{}", s.dungeon_id)))
+                                })
+                        })
+                    });
+                }
+                None => {}
             }
         }
+        if !inc_exists {
+            let msg = format!("Incursion site {site_id} not found");
+            return Some(Err(BridgeRpcError::with_client_error(
+                "DungeonNotFound",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            )));
+        }
         if !spawned_for_system {
+            if let Err(e) = ctx
+                .validate_ship_movement(
+                    char_id,
+                    ship_id,
+                    crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                        sys_id,
+                        kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
+                    },
+                )
+                .await
+            {
+                return Some(Err(e));
+            }
             Box::pin(
                 crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
                     ctx, sys_id,
@@ -2284,6 +2493,19 @@ async fn handle_activate_acceleration_gate(
     });
     if !site_exists {
         if !already_seeded && is_naturally_seedable_pve_site_id(ctx, sys_id, &site_id) {
+            if let Err(e) = ctx
+                .validate_ship_movement(
+                    char_id,
+                    ship_id,
+                    crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                        sys_id,
+                        kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
+                    },
+                )
+                .await
+            {
+                return Some(Err(e));
+            }
             Box::pin(ensure_system_pve_sites_seeded(ctx, sys_id)).await;
         }
         let exists_after = read_pve_exploration_reg(ctx, |reg| {
@@ -2293,9 +2515,11 @@ async fn handle_activate_acceleration_gate(
                 .is_some_and(|l| find_site_by_id_or_dungeon(l, &site_id, now).is_some())
         });
         if !exists_after {
-            return Some(Err(rpc_msg_err(
+            let msg = format!("Dungeon site {site_id} not found");
+            return Some(Err(BridgeRpcError::with_client_error(
                 "DungeonNotFound",
-                format!("Dungeon site {site_id} not found"),
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
             )));
         }
     }
@@ -2313,7 +2537,28 @@ async fn handle_get_dungeon_info(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, sys_id) = require_undocked_exploration_space(ctx, session, false)?;
-    let site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
+    if args.len() > 1 {
+        let msg = "GetDungeonInfo accepts a single siteID argument";
+        return Err(BridgeRpcError::with_client_error(
+            "InvalidArguments",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        ));
+    }
+    let Some(site_id) = args
+        .first()
+        .and_then(|a| a.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    else {
+        let msg = "Dungeon siteID is required";
+        return Err(BridgeRpcError::with_client_error(
+            "DungeonNotFound",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        ));
+    };
     read_pve_exploration_reg(ctx, |reg| {
         let now = now_sec(reg);
         let Some(site) = reg.sites_by_system.get(&sys_id).and_then(|l| {
@@ -2324,11 +2569,12 @@ async fn handle_get_dungeon_info(
                 .or_else(|| l.iter().find(|s| !s.cleared && s.site_id == site_id))
                 .or_else(|| l.iter().find(|s| s.site_id == site_id))
         }) else {
-            return Err(BridgeRpcError {
-                code: "DungeonNotFound".into(),
-                message: format!("Dungeon site {site_id} not found"),
-                client_error: None,
-            });
+            let msg = format!("Dungeon site {site_id} not found");
+            return Err(BridgeRpcError::with_client_error(
+                "DungeonNotFound",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
         };
         Ok(PyRep::keyval([
             ("siteID", PyRep::String(site.site_id.clone())),
@@ -2362,10 +2608,52 @@ fn handle_get_escalating_path_details(
 fn handle_get_escalating_path_dungeons_entered(
     ctx: &ServerContext,
     session: &SessionState,
+    service: &str,
+    args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let invalid_err = || {
+        let msg = "Invalid escalation query arguments";
+        Err(BridgeRpcError::with_client_error(
+            "InvalidArguments",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        ))
+    };
+    let instance_filter = if service == "scanSvc" {
+        if !args.is_empty() {
+            return invalid_err();
+        }
+        None
+    } else {
+        if args.len() > 1 {
+            return invalid_err();
+        }
+        match args.first() {
+            None | Some(PyRep::None) => None,
+            Some(PyRep::Integer(id)) if *id > 0 => Some(*id),
+            Some(_) => return invalid_err(),
+        }
+    };
     let entered = read_pve_exploration_reg(ctx, |reg| {
-        crate::services::pve_expeditions::get_escalating_path_dungeons_entered(reg, char_id)
+        if let Some(target_inst) = instance_filter {
+            let now = now_sec(reg);
+            let mut seen = std::collections::HashSet::new();
+            reg.escalations_by_char
+                .get(&char_id)
+                .into_iter()
+                .flatten()
+                .filter(|e| {
+                    e.instance_id == target_inst
+                        && !crate::services::pve_expeditions::is_escalation_entry_expired(e, now)
+                })
+                .flat_map(|e| e.dungeons_entered.iter().copied())
+                .filter(|d| seen.insert(*d))
+                .map(|d| PyRep::Integer(d as i64))
+                .collect()
+        } else {
+            crate::services::pve_expeditions::get_escalating_path_dungeons_entered(reg, char_id)
+        }
     });
     Ok(PyRep::List(entered))
 }

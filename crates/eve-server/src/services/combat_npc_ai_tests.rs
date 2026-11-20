@@ -66,7 +66,7 @@ fn derive_npc_archetype_covers_all_15_faction_and_group_branches() {
     };
 
     insert_custom(910_001, 959, "Sleeper Sentinel", Some(500_021), None);
-    insert_custom(910_002, 287, "Rogue Alvi Drone", Some(500_008), None);
+    insert_custom(910_002, 287, "Rogue Alvi Drone", Some(500_025), None);
     insert_custom(910_003, 4_034, "EDENCOM GunStar", Some(500_027), None);
     insert_custom(910_004, 1_051, "Outuni Meson", None, None);
     insert_custom(910_005, 1_285, "Mordu Special Unit", None, None);
@@ -729,6 +729,19 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
             },
         );
         sde.groups.insert(
+            180,
+            eve_sde::GroupInfo {
+                group_id: 180,
+                category_id: 11,
+                name: "Protective Sentry Gun".into(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: false,
+            },
+        );
+        sde.groups.insert(
             383,
             eve_sde::GroupInfo {
                 group_id: 383,
@@ -752,14 +765,31 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
         amarr_sentry.faction_id = None;
         sde.types.insert(1_194, amarr_sentry);
 
+        let mut navy_sentry = make_fighter_type(990_101, 99, 11, 1_000_000.0, vec![]);
+        navy_sentry.name = "Caldari Navy Sentry Gun".into();
+        navy_sentry.faction_id = Some(500_001);
+        sde.types.insert(990_101, navy_sentry);
+
+        let mut police_sentry = make_fighter_type(990_102, 180, 11, 1_000_000.0, vec![]);
+        police_sentry.name = "State Police Sentry Gun".into();
+        police_sentry.faction_id = None;
+        sde.types.insert(990_102, police_sentry);
+
         let mut ci_sentry = make_fighter_type(79_507, 383, 11, 1_000_000.0, vec![]);
         ci_sentry.name = "Counter-Insurgency Sentry Gun".into();
         ci_sentry.faction_id = Some(500_001);
         sde.types.insert(79_507, ci_sentry);
+
+        // Set 1.0 security so non-outlaw -2.0 security status crosses Faction Police threshold.
+        if let Some(sys) = sde.solar_systems.get_mut(&sys_id) {
+            sys.security_status = 1.0;
+        }
     }
 
     assert_eq!(derive_npc_archetype(&ctx, 3_740), "EmpireSentry");
     assert_eq!(derive_npc_archetype(&ctx, 1_194), "EmpireSentry");
+    assert_eq!(derive_npc_archetype(&ctx, 990_101), "EmpireSentry");
+    assert_eq!(derive_npc_archetype(&ctx, 990_102), "EmpireSentry");
     assert_ne!(derive_npc_archetype(&ctx, 79_507), "EmpireSentry");
 
     // Passing a poisoned "BeltRat" hint must still resolve to EmpireSentry, never Pirate/BeltRat.
@@ -772,10 +802,207 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
         DVec3::new(10_000.0, 0.0, 0.0),
     )
     .await;
+    // Also spawn 1_194 at 200 km (> 150 km normal range, within 500 km sentry range).
+    let amarr_sentry_id = spawn_specialized_npc_entity(
+        &ctx,
+        sys_id,
+        1_194,
+        "",
+        1,
+        DVec3::new(200_000.0, 0.0, 0.0),
+    )
+    .await;
     with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&sentry_id].archetype, "EmpireSentry");
+        let s1 = &rt.npc_entities[&sentry_id];
+        assert_eq!(s1.archetype, "EmpireSentry");
+        assert_eq!(s1.faction_id, 500_001);
+        assert_eq!(s1.orbit_range, 0.0);
+        assert!(s1.optimal_range >= 500_000.0);
+
+        let s2 = &rt.npc_entities[&amarr_sentry_id];
+        assert_eq!(s2.archetype, "EmpireSentry");
+        assert_eq!(s2.faction_id, 500_003);
+        assert_eq!(s2.orbit_range, 0.0);
+        assert!(s2.optimal_range >= 500_000.0);
     });
 
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    {
+        let bp = sys_handle.ballpark.read().unwrap();
+        assert_eq!(bp.balls[&sentry_id].max_velocity, 0.0);
+        assert_eq!(bp.balls[&amarr_sentry_id].max_velocity, 0.0);
+    }
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 32_880,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 250.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 5_000.0,
+                max_shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                max_armor_hp: 5_000.0,
+                structure_hp: 5_000.0,
+                max_structure_hp: 5_000.0,
+                signature_radius: 40.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Clean non-criminal Venture pilot is never targeted or damaged.
+    step_extended_npc_ai(&ctx, sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
+        assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, None);
+    });
+
+    // -10.0 empire and pirate standings alone (without active criminal or on-grid aggression) must not trigger sentries.
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.standings.insert(500_001, -10.0);
+        ch.standings.insert(500_003, -10.0);
+        ch.standings.insert(500_010, -10.0);
+    });
+    step_extended_npc_ai(&ctx, sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
+        assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, None);
+    });
+
+    // Non-outlaw -2.0 sec status in 1.0 highsec (Faction Police threshold) and -10.0 sec status without
+    // active criminal timer or on-grid illegal aggression must not be engaged by Empire Sentry Guns.
+    for sec in [-2.0, -10.0] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&char_id).unwrap().security_status = sec;
+        });
+        step_extended_npc_ai(&ctx, sys_id).await;
+        with_combat_ephemeral(&ctx, |rt| {
+            assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
+            assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, None);
+        });
+    }
+    assert_eq!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .shield_hp,
+        5_000.0
+    );
+
+    // Active criminal timer (GCC) IS engaged and damaged up to 500 km.
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.security_status = 0.0;
+        ch.standings.clear();
+    });
+    let now = ctx.now_unix();
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).criminal_flag_until_unix = now + 900;
+    }
+    step_extended_npc_ai(&ctx, sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&sentry_id].target_id, Some(ship_id));
+        assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, Some(ship_id));
+    });
+    assert!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .shield_hp
+            < 5_000.0
+    );
+}
+
+#[tokio::test]
+async fn empire_sentry_faction_resolution_on_grid_aggression_and_stage5_corruption() {
+    let (mut ctx, _session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    {
+        let sde = std::sync::Arc::make_mut(&mut ctx.sde);
+        sde.groups.insert(
+            99,
+            eve_sde::GroupInfo {
+                group_id: 99,
+                category_id: 11,
+                name: "Sentry Gun".into(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: false,
+            },
+        );
+        sde.groups.insert(
+            180,
+            eve_sde::GroupInfo {
+                group_id: 180,
+                category_id: 11,
+                name: "Protective Sentry Gun".into(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: false,
+            },
+        );
+
+        let mut amarr_sentry = make_fighter_type(1_194, 99, 11, 1_000_000.0, vec![]);
+        amarr_sentry.name = "Amarr Sentry Gun".into();
+        amarr_sentry.faction_id = None;
+        sde.types.insert(1_194, amarr_sentry);
+
+        let mut caldari_sentry = make_fighter_type(3_740, 99, 11, 1_000_000.0, vec![]);
+        caldari_sentry.name = "Caldari Sentry Gun I".into();
+        caldari_sentry.faction_id = Some(500_001);
+        sde.types.insert(3_740, caldari_sentry);
+
+        let mut generic_sentry = make_fighter_type(990_103, 180, 11, 1_000_000.0, vec![]);
+        generic_sentry.name = "Protective Sentry Gun".into();
+        generic_sentry.faction_id = None;
+        sde.types.insert(990_103, generic_sentry);
+    }
+
+    // 1. Spawn 1_194 (faction_id: None) and generic group 180 sentry against a non-criminal pilot
+    // with -10.0 regional pirate standing (500_010 Guristas): both must resolve empire factions,
+    // remain static (max_vel == 0.0, orb_range == 0.0), and never target the pilot.
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.security_status = 0.0;
+        ch.standings.insert(500_010, -10.0);
+    });
+    let amarr_sentry_id = spawn_specialized_npc_entity(
+        &ctx,
+        sys_id,
+        1_194,
+        "BeltRat",
+        1,
+        DVec3::new(15_000.0, 0.0, 0.0),
+    )
+    .await;
+    let generic_sentry_id = spawn_specialized_npc_entity(
+        &ctx,
+        sys_id,
+        990_103,
+        "",
+        1,
+        DVec3::new(20_000.0, 0.0, 0.0),
+    )
+    .await;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle
         .spawn_ball_with_combat(
@@ -805,10 +1032,260 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
         .await
         .unwrap();
 
-    // Non-criminal pilot arriving in a Venture must never be targeted or damaged by Empire Sentry Guns.
     step_extended_npc_ai(&ctx, sys_id).await;
     with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
+        let amarr_ent = &rt.npc_entities[&amarr_sentry_id];
+        assert_eq!(amarr_ent.archetype, "EmpireSentry");
+        assert_eq!(amarr_ent.faction_id, 500_003);
+        assert_eq!(amarr_ent.orbit_range, 0.0);
+        assert_eq!(amarr_ent.target_id, None);
+
+        let generic_ent = &rt.npc_entities[&generic_sentry_id];
+        assert_eq!(generic_ent.archetype, "EmpireSentry");
+        assert_eq!(generic_ent.faction_id, 500_001);
+        assert_eq!(generic_ent.orbit_range, 0.0);
+        assert_eq!(generic_ent.target_id, None);
+    });
+    {
+        let bp = sys_handle.ballpark.read().unwrap();
+        assert_eq!(bp.balls[&amarr_sentry_id].max_velocity, 0.0);
+        assert_eq!(bp.balls[&generic_sentry_id].max_velocity, 0.0);
+    }
+
+    // 2. Low-sec on-grid illegal aggression engages sentry, and Stage-5 corruption disables it.
+    let low_sys_id = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| 0.05 < s.security_status && s.security_status < 0.45)
+        .map(|s| s.solar_system_id)
+        .expect("canonical seed low-sec system");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = low_sys_id;
+    });
+    let low_sentry_id = spawn_specialized_npc_entity(
+        &ctx,
+        low_sys_id,
+        3_740,
+        "",
+        1,
+        DVec3::new(10_000.0, 0.0, 0.0),
+    )
+    .await;
+    let low_sys_handle = ctx.systems.get_or_spawn(low_sys_id);
+    low_sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 32_880,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 250.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 5_000.0,
+                max_shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                max_armor_hp: 5_000.0,
+                structure_hp: 5_000.0,
+                max_structure_hp: 5_000.0,
+                signature_radius: 40.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Peaceful pilot in lowsec is not targeted.
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&low_sentry_id].target_id, None);
+    });
+
+    // On-grid illegal aggression triggers sentry targeting and damage.
+    let now = ctx.now_unix();
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.sentry_gun_aggression.insert(
+            (low_sys_id, ship_id),
+            crate::services::combat_crimewatch::SentryAggressionState {
+                solar_system_id: low_sys_id,
+                offender_char_id: char_id,
+                offender_ship_id: ship_id,
+                sentry_origin: DVec3::new(10_000.0, 0.0, 0.0),
+                active_on_grid: true,
+                total_sentry_damage_dealt: 0.0,
+            },
+        );
+    });
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.aggression_mgr
+            .record_aggression(char_id, 90_000_002, low_sys_id, false, false, now);
+    }
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&low_sentry_id].target_id, Some(ship_id));
+    });
+    let shield_before_corruption = low_sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .shield_hp;
+    assert!(shield_before_corruption < 5_000.0);
+
+    // Stage-5 Insurgency corruption disables sentry targeting and clears active threat.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = eve_db::SystemDynamicState::default();
+        st.solar_system_id = low_sys_id;
+        st.insurgency_corruption_stage = 5;
+        snap.system_states.insert(low_sys_id, st);
+        snap.insurgency_runtime.campaigns.insert(
+            1,
+            eve_db::PersistedInsurgencyCampaign {
+                campaign_id: 1,
+                pirate_faction_id: 500_010,
+                target_faction_id: 500_001,
+                fob_solar_system_id: low_sys_id,
+                systems: vec![low_sys_id],
+                created_at_unix: now.saturating_sub(200),
+                forecasting_end_unix: now.saturating_sub(100),
+                active_end_unix: now + 1_800,
+                winddown_end_unix: now + 3_600,
+                corruption_points: [(low_sys_id, 1_000)].into_iter().collect(),
+                suppression_points: Default::default(),
+            },
+        );
+    });
+    assert!(crate::services::combat_npc_police::is_sentry_disabled_by_corruption(
+        &ctx, low_sys_id
+    ));
+    record_npc_threat_event(&ctx, low_sentry_id, ship_id, 100.0, false, false);
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&low_sentry_id].target_id, None);
+        assert!(rt.npc_entities[&low_sentry_id].aggression_threat.is_empty());
+    });
+    let shield_after_corruption = low_sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .shield_hp;
+    assert_eq!(shield_after_corruption, shield_before_corruption);
+}
+
+#[tokio::test]
+async fn empire_sentry_offgrid_belt_cross_gate_reship_and_grid_exit_scoping() {
+    let (mut ctx, _session, char_id, ship_id, _hi_sys) = make_fighter_ctx_and_session();
+    let reship_id = ship_id + 1;
+    let low_sys_id = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| 0.05 < s.security_status && s.security_status < 0.45)
+        .map(|s| s.solar_system_id)
+        .expect("canonical seed low-sec system");
+    {
+        let sde = std::sync::Arc::make_mut(&mut ctx.sde);
+        sde.groups.insert(
+            99,
+            eve_sde::GroupInfo {
+                group_id: 99,
+                category_id: 11,
+                name: "Sentry Gun".into(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: false,
+            },
+        );
+        let mut caldari_sentry = make_fighter_type(3_740, 99, 11, 1_000_000.0, vec![]);
+        caldari_sentry.name = "Caldari Sentry Gun I".into();
+        caldari_sentry.faction_id = Some(500_001);
+        sde.types.insert(3_740, caldari_sentry);
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.solar_system_id = low_sys_id;
+        ch.security_status = 0.0;
+        if let Some(sh) = snap.items.get(&ship_id).cloned() {
+            let mut sh2 = sh;
+            sh2.item_id = reship_id;
+            snap.items.insert(reship_id, sh2);
+        }
+    });
+
+    let gate_a_origin = DVec3::ZERO;
+    let gate_b_origin = DVec3::new(2_000_000.0, 0.0, 0.0);
+    let gate_a_sentry_id = spawn_specialized_npc_entity(
+        &ctx,
+        low_sys_id,
+        3_740,
+        "",
+        1,
+        gate_a_origin + DVec3::new(10_000.0, 0.0, 0.0),
+    )
+    .await;
+    let gate_b_sentry_id = spawn_specialized_npc_entity(
+        &ctx,
+        low_sys_id,
+        3_740,
+        "",
+        1,
+        gate_b_origin + DVec3::new(10_000.0, 0.0, 0.0),
+    )
+    .await;
+
+    let make_frigate = |id: i64, pos: DVec3| Ball {
+        id,
+        type_id: 32_880,
+        position: pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 250.0,
+        inertia: 1.0,
+        mass: 1_200_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let make_cs = || CombatState {
+        shield_hp: 5_000.0,
+        max_shield_hp: 5_000.0,
+        armor_hp: 5_000.0,
+        max_armor_hp: 5_000.0,
+        structure_hp: 5_000.0,
+        max_structure_hp: 5_000.0,
+        signature_radius: 40.0,
+        ..CombatState::default()
+    };
+
+    let sys_handle = ctx.systems.get_or_spawn(low_sys_id);
+    sys_handle
+        .spawn_ball_with_combat(make_frigate(ship_id, gate_a_origin), make_cs())
+        .await
+        .unwrap();
+
+    // (a) Off-grid belt illegal PvP (> 500 km from gates/stations, so NO `rt.sentry_gun_aggression`
+    // entry exists, only an unexpired `!is_legal` entry in `cw.aggression_mgr.records`) ->
+    // warping to Gate A must NOT trigger Gate A `EmpireSentry`.
+    let now = ctx.now_unix();
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.aggression_mgr
+            .record_aggression(char_id, 90_000_002, low_sys_id, false, false, now);
+    }
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&gate_a_sentry_id].target_id, None);
+        assert_eq!(rt.npc_entities[&gate_b_sentry_id].target_id, None);
     });
     assert_eq!(
         sys_handle
@@ -820,21 +1297,330 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
         5_000.0
     );
 
-    // Negative contrast: outlaw/criminal pilot (`security_status <= -5.0`) IS engaged.
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&char_id).unwrap().security_status = -10.0;
+    // (b1) Gate A illegal aggression (`sentry_origin = Gate A`) triggers ONLY Gate A sentry, NOT Gate B.
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.sentry_gun_aggression.insert(
+            (low_sys_id, ship_id),
+            crate::services::combat_crimewatch::SentryAggressionState {
+                solar_system_id: low_sys_id,
+                offender_char_id: char_id,
+                offender_ship_id: ship_id,
+                sentry_origin: gate_a_origin,
+                active_on_grid: true,
+                total_sentry_damage_dealt: 0.0,
+            },
+        );
     });
-    step_extended_npc_ai(&ctx, sys_id).await;
+    step_extended_npc_ai(&ctx, low_sys_id).await;
     with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&sentry_id].target_id, Some(ship_id));
+        assert_eq!(rt.npc_entities[&gate_a_sentry_id].target_id, Some(ship_id));
+        assert_eq!(rt.npc_entities[&gate_b_sentry_id].target_id, None);
     });
-    assert!(
+    let shield_after_gate_a_hit = sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .shield_hp;
+    assert!(shield_after_gate_a_hit < 5_000.0);
+
+    // (b2) Reshipping into `reship_id` on Gate A grid must NOT transfer `ship_id`'s sentry aggro.
+    sys_handle
+        .spawn_ball_with_combat(
+            make_frigate(reship_id, gate_a_origin + DVec3::new(2_000.0, 0.0, 0.0)),
+            make_cs(),
+        )
+        .await
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = reship_id;
+    });
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_ne!(rt.npc_entities[&gate_a_sentry_id].target_id, Some(reship_id));
+    });
+    assert_eq!(
         sys_handle
-            .get_combat_state(ship_id)
+            .get_combat_state(reship_id)
             .await
             .unwrap()
             .unwrap()
-            .shield_hp
-            < 5_000.0
+            .shield_hp,
+        5_000.0
     );
+    let _ = sys_handle.remove_ball(reship_id).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = ship_id;
+    });
+
+    // (b3) Moving directly from Gate A to Gate B (> 500 km from Gate A) must NOT trigger Gate B
+    // and must clear `active_on_grid` + Gate A target lock.
+    let _ = sys_handle.set_ball_position(ship_id, gate_b_origin).await;
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&gate_b_sentry_id].target_id, None);
+        assert_eq!(rt.npc_entities[&gate_a_sentry_id].target_id, None);
+        assert!(rt.npc_entities[&gate_a_sentry_id].aggression_threat.is_empty());
+    });
+    assert!(!crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        rt.sentry_gun_aggression[&(low_sys_id, ship_id)].active_on_grid
+    }));
+
+    // Returning to Gate A after moving > 500 km off-grid keeps Gate A sentry passive.
+    let _ = sys_handle.set_ball_position(ship_id, gate_a_origin).await;
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&gate_a_sentry_id].target_id, None);
+    });
+
+    // (b4) Entering `MovementMode::Warp` while still < 500 km clears `active_on_grid` so arriving back keeps Gate A passive.
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.sentry_gun_aggression
+            .get_mut(&(low_sys_id, ship_id))
+            .unwrap()
+            .active_on_grid = true;
+    });
+    let _ = sys_handle
+        .set_movement_mode(
+            ship_id,
+            MovementMode::Warp {
+                origin: gate_a_origin,
+                destination: gate_b_origin,
+                total_distance: 2_000_000.0,
+                warp_speed_au_s: 3.0,
+                phase: eve_destiny::WarpPhase::Cruising,
+                elapsed_warp_time: 1.0,
+            },
+        )
+        .await;
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    assert!(!crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        rt.sentry_gun_aggression[&(low_sys_id, ship_id)].active_on_grid
+    }));
+    let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&gate_a_sentry_id].target_id, None);
+    });
+
+    // (b5) Docking / removal from ballpark clears `active_on_grid` as well.
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.sentry_gun_aggression
+            .get_mut(&(low_sys_id, ship_id))
+            .unwrap()
+            .active_on_grid = true;
+    });
+    let _ = sys_handle.remove_ball(ship_id).await;
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    assert!(!crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        rt.sentry_gun_aggression[&(low_sys_id, ship_id)].active_on_grid
+    }));
+}
+
+#[tokio::test]
+async fn khanid_500008_sentry_classification_and_non_empire_group_99_exclusions() {
+    let (mut ctx, _session, char_id, ship_id, _hi_sys) = make_fighter_ctx_and_session();
+    let low_sys_id = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| 0.05 < s.security_status && s.security_status < 0.45)
+        .map(|s| s.solar_system_id)
+        .expect("canonical seed low-sec system");
+    {
+        let sde = std::sync::Arc::make_mut(&mut ctx.sde);
+        for (gid, name) in [(99_u32, "Sentry Gun"), (180_u32, "Protective Sentry Gun")] {
+            sde.groups.insert(
+                gid,
+                eve_sde::GroupInfo {
+                    group_id: gid,
+                    category_id: 11,
+                    name: name.into(),
+                    anchorable: false,
+                    anchored: false,
+                    fittable_non_singleton: false,
+                    use_base_price: false,
+                    published: false,
+                },
+            );
+        }
+
+        let mut khanid_sentry_99 = make_fighter_type(990_201, 99, 11, 1_000_000.0, vec![]);
+        khanid_sentry_99.name = "Khanid Sentry Gun".into();
+        khanid_sentry_99.faction_id = Some(500_008);
+        sde.types.insert(990_201, khanid_sentry_99);
+
+        let mut khanid_sentry_180 = make_fighter_type(990_202, 180, 11, 1_000_000.0, vec![]);
+        khanid_sentry_180.name = "Khanid Protective Sentry".into();
+        khanid_sentry_180.faction_id = Some(500_008);
+        sde.types.insert(990_202, khanid_sentry_180);
+
+        let mut drifter_sentry = make_fighter_type(990_203, 99, 11, 1_000_000.0, vec![]);
+        drifter_sentry.name = "Drifter Defense Sentry".into();
+        drifter_sentry.faction_id = Some(500_024);
+        sde.types.insert(990_203, drifter_sentry);
+
+        let mut edencom_sentry = make_fighter_type(990_204, 180, 11, 1_000_000.0, vec![]);
+        edencom_sentry.name = "EDENCOM Gun Tower".into();
+        edencom_sentry.faction_id = Some(500_027);
+        sde.types.insert(990_204, edencom_sentry);
+
+        let mut sleeper_sentry_g99 = make_fighter_type(990_205, 99, 11, 1_000_000.0, vec![]);
+        sleeper_sentry_g99.name = "Sleeper Sentry Tower".into();
+        sleeper_sentry_g99.faction_id = Some(500_021);
+        sde.types.insert(990_205, sleeper_sentry_g99);
+
+        let mut drone_sentry_g99 = make_fighter_type(990_206, 99, 11, 1_000_000.0, vec![]);
+        drone_sentry_g99.name = "Rogue Drone Alvi Sentry".into();
+        drone_sentry_g99.faction_id = Some(500_025);
+        sde.types.insert(990_206, drone_sentry_g99);
+    }
+
+    // P1-02: Khanid Kingdom (500_008) group 99/180 sentries classify as "EmpireSentry", NOT "RogueDrone",
+    // get static sentry seeding stats, and are not treated as hostile to EDENCOM.
+    assert_eq!(derive_npc_archetype(&ctx, 990_201), "EmpireSentry");
+    assert_eq!(derive_npc_archetype(&ctx, 990_202), "EmpireSentry");
+
+    let khanid_id = spawn_specialized_npc_entity(
+        &ctx,
+        low_sys_id,
+        990_201,
+        "",
+        1,
+        DVec3::new(10_000.0, 0.0, 0.0),
+    )
+    .await;
+    with_combat_ephemeral(&ctx, |rt| {
+        let ent = &rt.npc_entities[&khanid_id];
+        assert_eq!(ent.archetype, "EmpireSentry");
+        assert_eq!(ent.faction_id, 500_008);
+        assert_eq!(ent.orbit_range, 0.0);
+        assert!(ent.optimal_range >= 500_000.0);
+        assert_eq!(ent.bounty_isk, 0.0);
+        assert!(is_empire_sentry_npc(&ctx, ent));
+    });
+    assert_eq!(
+        ctx.systems.get_or_spawn(low_sys_id).ballpark.read().unwrap().balls[&khanid_id].max_velocity,
+        0.0
+    );
+
+    let (_, _, rogue_fallback) = crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+        &ctx,
+        low_sys_id,
+        990_299,
+        999_999_999,
+        "RogueDrone",
+        0,
+        DVec3::ZERO,
+    );
+    assert_eq!(rogue_fallback.faction_id, 500_025);
+
+    let edencom_observer = make_test_npc_entity(990_300, 990_204, low_sys_id, "EDENCOM");
+    assert!(!is_candidate_hostile_to_edencom(
+        &ctx,
+        &edencom_observer,
+        khanid_id,
+        ship_id
+    ));
+
+    // P1-03: Drifter / EDENCOM / Sleeper / RogueDrone entities (even in group 99/180 or with a
+    // group 99 type_id) must NOT match `is_empire_sentry_npc`.
+    assert_eq!(derive_npc_archetype(&ctx, 990_203), "Drifter");
+    assert_eq!(derive_npc_archetype(&ctx, 990_204), "EDENCOM");
+    assert_eq!(derive_npc_archetype(&ctx, 990_205), "Sleeper");
+    assert_eq!(derive_npc_archetype(&ctx, 990_206), "RogueDrone");
+
+    for (tid, arch) in [
+        (990_203_u32, "Drifter"),
+        (990_204, "EDENCOM"),
+        (990_205, "Sleeper"),
+        (990_206, "RogueDrone"),
+        (990_201, "Drifter"),
+        (990_201, "EDENCOM"),
+        (990_201, "Edencom"),
+        (990_201, "Sleeper"),
+        (990_201, "RogueDrone"),
+        (990_201, "SleeperSentry"),
+        (990_201, "ZarzakhGateGun"),
+        (990_201, "CounterInsurgencySentry"),
+    ] {
+        let ent = make_test_npc_entity(990_301, tid, low_sys_id, arch);
+        assert!(
+            !is_empire_sentry_npc(&ctx, &ent),
+            "non-Empire entity (type_id={tid}, archetype={arch}) must not match is_empire_sentry_npc"
+        );
+    }
+
+    // Spawn group 180 EDENCOM entity in a Stage-5 corrupted system; it must NOT be disabled as an
+    // Empire Sentry and must still target a -10.0 EDENCOM-standing pilot.
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.solar_system_id = low_sys_id;
+        ch.standings.insert(500_027, -10.0);
+        let mut st = eve_db::SystemDynamicState::default();
+        st.solar_system_id = low_sys_id;
+        st.insurgency_corruption_stage = 5;
+        snap.system_states.insert(low_sys_id, st);
+        snap.insurgency_runtime.campaigns.insert(
+            1,
+            eve_db::PersistedInsurgencyCampaign {
+                campaign_id: 1,
+                pirate_faction_id: 500_010,
+                target_faction_id: 500_001,
+                fob_solar_system_id: low_sys_id,
+                systems: vec![low_sys_id],
+                created_at_unix: now.saturating_sub(200),
+                forecasting_end_unix: now.saturating_sub(100),
+                active_end_unix: now + 1_800,
+                winddown_end_unix: now + 3_600,
+                corruption_points: [(low_sys_id, 1_000)].into_iter().collect(),
+                suppression_points: Default::default(),
+            },
+        );
+    });
+    let edencom_g180_id = spawn_specialized_npc_entity(
+        &ctx,
+        low_sys_id,
+        990_204,
+        "",
+        1,
+        DVec3::new(15_000.0, 0.0, 0.0),
+    )
+    .await;
+    let sys_handle = ctx.systems.get_or_spawn(low_sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 32_880,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 250.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 5_000.0,
+                max_shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                max_armor_hp: 5_000.0,
+                structure_hp: 5_000.0,
+                max_structure_hp: 5_000.0,
+                signature_radius: 40.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        let ed = &rt.npc_entities[&edencom_g180_id];
+        assert_eq!(ed.archetype, "EDENCOM");
+        assert!(!is_empire_sentry_npc(&ctx, ed));
+        assert_eq!(ed.target_id, Some(ship_id));
+    });
 }

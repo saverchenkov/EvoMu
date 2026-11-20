@@ -714,6 +714,25 @@ fn seed_comprehensive_world(ctx: &ServerContext) {
                 last_updated_sec: now,
             },
         );
+
+        let plex_oid = snap.alloc_entity_id();
+        snap.market_orders.insert(
+            plex_oid,
+            MarketOrderRecord {
+                order_id: plex_oid,
+                owner_id: 1_000_035,
+                station_id: STATION_ID,
+                region_id: 10_000_002,
+                type_id: 44_992,
+                is_bid: false,
+                price: IskCents::from_isk(5_000_000),
+                vol_entered: 100,
+                vol_remaining: 100,
+                min_volume: 1,
+                is_npc: true,
+                escrow: IskCents(0),
+            },
+        );
     });
 }
 
