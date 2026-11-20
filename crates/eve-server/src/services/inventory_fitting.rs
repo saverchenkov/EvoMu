@@ -85,6 +85,7 @@ fn check_fitting_dock(ctx: &ServerContext, session: &SessionState, char_id: i64)
     })
 }
 
+#[inline(never)]
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -104,17 +105,9 @@ pub async fn handle(
             kwargs,
         );
     }
-    if service == "dogmaIM"
-        && matches!(method, "Activate" | "Overload")
-        && session.ship_id.is_some_and(|sid| {
-            session.structure_id == Some(sid)
-                || ctx.db.with_snapshot(|s| s.structures.contains_key(&sid))
-        })
-    {
+    if service == "dogmaIM" && matches!(method, "Activate" | "Overload") {
         if let Some(res) = crate::router::box_fut(|| {
-            crate::services::combat_crimewatch::combat_weapons::handle_weapons(
-                ctx, session, service, method, args, kwargs,
-            )
+            try_handle_structure_dogma_weapons(ctx, session, service, method, args, kwargs)
         })
         .await
         {
@@ -126,6 +119,66 @@ pub async fn handle(
     } else {
         method
     };
+    if let Some(res) = try_handle_invbroker_sync(ctx, session, bound_entry, service, method, args, kwargs) {
+        return Some(res);
+    }
+    if matches!(
+        (service, method),
+        ("invbroker", "GetContainerContents" | "Add" | "Jettison" | "MultiAdd")
+            | ("ship", "Jettison" | "Drop")
+    ) {
+        return crate::router::box_fut(|| {
+            handle_invbroker_and_ship_async(
+                ctx,
+                session,
+                bound_entry,
+                service,
+                method,
+                args,
+                kwargs,
+            )
+        })
+        .await;
+    }
+    crate::router::box_fut(|| {
+        handle_fallback_dispatch(ctx, session, bound_entry, service, method, args, kwargs)
+    })
+    .await
+}
+
+#[inline(never)]
+async fn try_handle_structure_dogma_weapons(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if !session.ship_id.is_some_and(|sid| {
+        session.structure_id == Some(sid)
+            || ctx.db.with_snapshot(|s| s.structures.contains_key(&sid))
+    }) {
+        return None;
+    }
+    crate::router::box_fut(|| {
+        crate::services::combat_crimewatch::combat_weapons::handle_weapons(
+            ctx, session, service, method, args, kwargs,
+        )
+    })
+    .await
+}
+
+#[inline(never)]
+fn try_handle_invbroker_sync(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("invbroker", "GetItemDescriptor") => {
             if let Err(e) = ServerContext::require_character(session) {
@@ -133,73 +186,232 @@ pub async fn handle(
             }
             Some(Ok(DBRowDescriptor::inv_item_header().to_pyrep()))
         }
-
         ("invbroker", "List") => {
             crate::services::station_structure::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
             Some(super::inventory_stacking::handle_list(ctx, session, bound_entry, args, kwargs))
         }
-
         ("invbroker", "ListByFlags") => {
             crate::services::station_structure::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
             Some(super::inventory_stacking::handle_list_by_flags(ctx, session, bound_entry, args, kwargs))
         }
+        _ => None,
+    }
+}
 
-        ("invbroker", "GetContainerContents") => {
-            Some(
-                crate::router::box_fut(|| {
-                    super::inventory_stacking::handle_get_container_contents(
-                        ctx, session, bound_entry, args, kwargs,
-                    )
-                })
-                .await,
-            )
-        }
-
+#[inline(never)]
+async fn handle_invbroker_and_ship_async(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    match (service, method) {
+        ("invbroker", "GetContainerContents") => Some(
+            crate::router::box_fut(|| {
+                super::inventory_stacking::handle_get_container_contents(
+                    ctx,
+                    session,
+                    bound_entry,
+                    args,
+                    kwargs,
+                )
+            })
+            .await,
+        ),
         ("invbroker", "Add") => {
             crate::router::box_fut(|| {
                 handle_invbroker_add(ctx, session, bound_entry, args, kwargs)
             })
             .await
         }
-
         ("ship", "Jettison") | ("invbroker", "Jettison") => {
             Some(crate::router::box_fut(|| handle_ship_jettison(ctx, session, args, kwargs)).await)
         }
-
         ("ship", "Drop") => {
             Some(crate::router::box_fut(|| handle_ship_drop(ctx, session, args, kwargs)).await)
         }
-        ("invbroker", "MultiAdd") => {
-            Some(
-                crate::router::box_fut(|| {
-                    super::inventory_stacking::handle_multi_add(
-                        ctx, session, bound_entry, args, kwargs,
-                    )
-                })
-                .await,
-            )
-        }
-
-        _ => {
-            if let Some(res) = super::inventory_stacking::handle_stack_ops(ctx, session, bound_entry, service, method, args, kwargs) { return Some(res); }
-            if session.structure_id.is_some() && session.structure_id == session.ship_id {
-                if let Some(res) = crate::router::box_fut(|| crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs)).await { return Some(res); }
-            }
-            if let Some(res) = crate::router::box_fut(|| handle_dogma_im(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
-            if let Some(res) = crate::router::box_fut(|| handle_dogma_ops(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
-            if let Some(res) = crate::router::box_fut(|| handle_module_cycles(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
-            if let Some(res) = crate::router::box_fut(|| handle_mining_and_deactivate(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
-            if let Some(res) = crate::router::box_fut(|| handle_fitting_mgr(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
-            if let Some(res) = crate::router::box_fut(|| handle_ships_and_services(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
-            if let Some(res) = crate::router::box_fut(|| handle_containers_ships_and_fitting(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
-            if let Some(res) = crate::router::box_fut(|| handle_ships_mastery_and_fitting_ext(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
-            if let Some(res) = crate::router::box_fut(|| handle_superweapons_dbuffs_and_clones(ctx, session, bound_entry, service, method, args, kwargs)).await { return Some(res); }
-            if let Some(res) = crate::router::box_fut(|| handle_cyno_portal(ctx, session, service, method, args)).await { return Some(res); }
-            None
-        }
+        ("invbroker", "MultiAdd") => Some(
+            crate::router::box_fut(|| {
+                super::inventory_stacking::handle_multi_add(
+                    ctx,
+                    session,
+                    bound_entry,
+                    args,
+                    kwargs,
+                )
+            })
+            .await,
+        ),
+        _ => None,
     }
 }
 
+#[inline(never)]
+async fn handle_fallback_dispatch(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(res) = super::inventory_stacking::handle_stack_ops(
+        ctx,
+        session,
+        bound_entry,
+        service,
+        method,
+        args,
+        kwargs,
+    ) {
+        return Some(res);
+    }
+    if let Some(res) = crate::router::box_fut(|| {
+        handle_fallback_combat_and_cycles(ctx, session, bound_entry, service, method, args, kwargs)
+    })
+    .await
+    {
+        return Some(res);
+    }
+    if let Some(res) = crate::router::box_fut(|| {
+        handle_fallback_fitting_and_ships(ctx, session, bound_entry, service, method, args, kwargs)
+    })
+    .await
+    {
+        return Some(res);
+    }
+    crate::router::box_fut(|| {
+        handle_fallback_ext_and_portal(ctx, session, bound_entry, service, method, args, kwargs)
+    })
+    .await
+}
+
+#[inline(never)]
+async fn handle_fallback_combat_and_cycles(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if session.structure_id.is_some() && session.structure_id == session.ship_id {
+        if let Some(res) = crate::router::box_fut(|| {
+            crate::services::combat_crimewatch::combat_weapons::handle_weapons(
+                ctx, session, service, method, args, kwargs,
+            )
+        })
+        .await
+        {
+            return Some(res);
+        }
+    }
+    if let Some(res) = crate::router::box_fut(|| {
+        handle_dogma_im(ctx, session, bound_entry, service, method, args, kwargs)
+    })
+    .await
+    {
+        return Some(res);
+    }
+    if let Some(res) = crate::router::box_fut(|| {
+        handle_dogma_ops(ctx, session, bound_entry, service, method, args, kwargs)
+    })
+    .await
+    {
+        return Some(res);
+    }
+    if let Some(res) = crate::router::box_fut(|| {
+        handle_module_cycles(ctx, session, bound_entry, service, method, args, kwargs)
+    })
+    .await
+    {
+        return Some(res);
+    }
+    crate::router::box_fut(|| {
+        handle_mining_and_deactivate(ctx, session, bound_entry, service, method, args, kwargs)
+    })
+    .await
+}
+
+#[inline(never)]
+async fn handle_fallback_fitting_and_ships(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(res) = crate::router::box_fut(|| {
+        handle_fitting_mgr(ctx, session, bound_entry, service, method, args, kwargs)
+    })
+    .await
+    {
+        return Some(res);
+    }
+    if let Some(res) = crate::router::box_fut(|| {
+        handle_ships_and_services(ctx, session, bound_entry, service, method, args, kwargs)
+    })
+    .await
+    {
+        return Some(res);
+    }
+    crate::router::box_fut(|| {
+        handle_containers_ships_and_fitting(ctx, session, bound_entry, service, method, args, kwargs)
+    })
+    .await
+}
+
+#[inline(never)]
+async fn handle_fallback_ext_and_portal(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(res) = crate::router::box_fut(|| {
+        handle_ships_mastery_and_fitting_ext(
+            ctx,
+            session,
+            bound_entry,
+            service,
+            method,
+            args,
+            kwargs,
+        )
+    })
+    .await
+    {
+        return Some(res);
+    }
+    if let Some(res) = crate::router::box_fut(|| {
+        handle_superweapons_dbuffs_and_clones(
+            ctx,
+            session,
+            bound_entry,
+            service,
+            method,
+            args,
+            kwargs,
+        )
+    })
+    .await
+    {
+        return Some(res);
+    }
+    crate::router::box_fut(|| handle_cyno_portal(ctx, session, service, method, args)).await
+}
+
+#[inline(never)]
 async fn handle_invbroker_add(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -2383,6 +2595,7 @@ async fn handle_invbroker_add(
             }
 }
 
+#[inline(never)]
 async fn handle_ship_jettison(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -2392,6 +2605,7 @@ async fn handle_ship_jettison(
     fitting_ship_bays::ship_jettison(ctx, session, args, kwargs).await
 }
 
+#[inline(never)]
 async fn handle_ship_drop(
     ctx: &ServerContext,
     session: &mut SessionState,
