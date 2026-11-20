@@ -205,7 +205,7 @@ async fn test_sp7_unobserved_system_simulation_and_background_cluster_tick() {
         assert!(snap.cosmic_anomalies[&sys_id].is_empty());
         assert!(snap.cosmic_signatures[&sys_id].is_empty());
         assert_eq!(snap.skills[&90_000_001][&3_300].level, 1);
-        assert!(snap.skill_queues[&90_000_001].is_empty());
+        assert!(!snap.skill_queues.contains_key(&90_000_001));
         assert!(snap.kill_rights.values().any(|kr| kr.owner_id == 90_000_001 && kr.target_id == 90_000_002));
     });
 

@@ -1514,3 +1514,100 @@ async fn test_c_deadline_getters_and_advance_sim_ms_expiry() {
     assert_eq!(ctx.session_change_timer_until(char_id), None);
     assert_eq!(ctx.location_change_invuln_until(char_id), None);
 }
+
+#[test]
+fn advance_skill_queues_completing_last_skill_removes_key_and_passes_sqlite_pre_roundtrip() {
+    let ctx = test_ctx();
+    let base_now = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_now)));
+    let char_a = 90_000_001_i64;
+    let char_b = 90_000_002_i64;
+    let skill_tid = 3402_u32;
+
+    // Seed single-entry queues for two characters so both `advance_skill_queues` and
+    // `advance_secs` (`advance_skill_queues_for_clock`) exercise final-skill completion.
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [char_a, char_b] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.clone_grade = 2;
+                ch.skill_points = 0.0;
+            }
+            snap.paused_skill_queues.remove(&cid);
+            snap.skills.entry(cid).or_default().insert(
+                skill_tid,
+                TrainedSkillRecord {
+                    type_id: skill_tid,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
+        }
+        snap.skill_queues.insert(
+            char_a,
+            vec![eve_db::SkillQueueEntry {
+                type_id: skill_tid,
+                target_level: 1,
+                start_sp: 0.0,
+                end_sp: 250.0,
+                duration_seconds: 500.0,
+                started_at_unix: Some(base_now),
+            }],
+        );
+    });
+
+    // 1) Complete final queued skill via `advance_skill_queues`.
+    ctx.advance_skill_queues(3_600.0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.skills[&char_a][&skill_tid].level, 1);
+        assert!(
+            !snap.skill_queues.contains_key(&char_a),
+            "completing the last queued skill must remove char_a from snap.skill_queues"
+        );
+    });
+
+    let diffs_after_advance = eve_testkit::pre_check::check_persist_reload_equivalence(&ctx.db)
+        .expect("SQLite PRE check after advance_skill_queues");
+    assert!(
+        diffs_after_advance.is_empty(),
+        "expected zero SQLite PRE diffs after completing last queued skill via advance_skill_queues, got: {diffs_after_advance:?}"
+    );
+
+    // 2) Complete final queued skill via `advance_secs` (`advance_skill_queues_for_clock`).
+    let now2 = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skill_queues.insert(
+            char_b,
+            vec![eve_db::SkillQueueEntry {
+                type_id: skill_tid,
+                target_level: 1,
+                start_sp: 0.0,
+                end_sp: 250.0,
+                duration_seconds: 500.0,
+                started_at_unix: Some(now2),
+            }],
+        );
+    });
+    ctx.advance_secs(3_600);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.skills[&char_b][&skill_tid].level, 1);
+        assert!(
+            !snap.skill_queues.contains_key(&char_b),
+            "completing the last queued skill via advance_secs must remove char_b from snap.skill_queues"
+        );
+    });
+
+    let diffs_after_clock = eve_testkit::pre_check::check_persist_reload_equivalence(&ctx.db)
+        .expect("SQLite PRE check after advance_secs");
+    assert!(
+        diffs_after_clock.is_empty(),
+        "expected zero SQLite PRE diffs after completing last queued skill via advance_secs, got: {diffs_after_clock:?}"
+    );
+    let reloaded = ctx
+        .db
+        .reload_snapshot_from_sqlite()
+        .expect("reload snapshot from SQLite");
+    assert!(!reloaded.skill_queues.contains_key(&char_a));
+    assert!(!reloaded.skill_queues.contains_key(&char_b));
+    assert_eq!(reloaded.skills[&char_a][&skill_tid].level, 1);
+    assert_eq!(reloaded.skills[&char_b][&skill_tid].level, 1);
+}
