@@ -1212,18 +1212,41 @@ pub async fn handle(
         }
         ("pvpFilamentMgr", "LeavePVPQueue") => {
             let item_id_arg = args.first().and_then(|a| a.as_i64());
+            // Fail closed on read snapshot before opening a mutating DB transaction.
+            let pre_check = ctx.db.with_snapshot(|snap| {
+                let store = load_pvp_store(snap);
+                let Some(entry) = store.queue.get(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "NotInPvpQueue".into(),
+                        message: "Character is not queued for PvP".into(),
+                        client_error: None,
+                    });
+                };
+                if let Some(expected_id) = item_id_arg {
+                    if entry.item_id != expected_id {
+                        return Err(BridgeRpcError {
+                            code: "FilamentNotFound".into(),
+                            message: "Filament item does not match queued filament".into(),
+                            client_error: None,
+                        });
+                    }
+                }
+                Ok(())
+            });
+            if let Err(e) = pre_check {
+                return Some(Err(e));
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_pvp_store(snap);
-                let Some(entry) = store.queue.remove(&char_id) else {
+                let Some(entry) = store.queue.get(&char_id).cloned() else {
                     return Err(BridgeRpcError { code: "NotInPvpQueue".into(), message: "Character is not queued for PvP".into(), client_error: None });
                 };
                 if let Some(expected_id) = item_id_arg {
                     if entry.item_id != expected_id {
-                        store.queue.insert(char_id, entry);
-                        save_pvp_store(snap, &store);
                         return Err(BridgeRpcError { code: "FilamentNotFound".into(), message: "Filament item does not match queued filament".into(), client_error: None });
                     }
                 }
+                store.queue.remove(&char_id);
                 let ticket_id = store.ticket_id_for_entry(char_id, &entry);
                 store.queue_tickets.remove(&char_id);
                 if ticket_id > 0 {

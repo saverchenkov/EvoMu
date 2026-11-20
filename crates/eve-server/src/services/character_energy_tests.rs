@@ -247,3 +247,72 @@ fn consume_character_energy_emits_single_post_deduction_notif_and_is_pure_on_ins
         Some(&PyRep::Integer(100))
     );
 }
+
+#[test]
+fn get_my_energy_state_auth_guards_and_regen_reads_are_strictly_pure() {
+    let ctx = test_ctx();
+    let clock = std::sync::Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    ));
+    ctx.set_clock(clock.clone());
+    let cid = 90_000_001_i64;
+
+    // 1. Unauthenticated / missing-character sessions fail closed with zero state/DB mutations.
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+    let mut unauth = SessionState::default();
+    assert_eq!(
+        handle(&ctx, &mut unauth, "characterEnergyMgr", "GetMyEnergyState", &[])
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "Unauthorized"
+    );
+    let mut no_char = SessionState::default();
+    no_char.user_id = Some(1);
+    assert_eq!(
+        handle(&ctx, &mut no_char, "characterEnergyMgr", "GetMyEnergyState", &[])
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CharacterNotSelected"
+    );
+    assert!(ctx
+        .cluster_misc_state
+        .lock()
+        .unwrap()
+        .char_energy
+        .is_empty());
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+
+    // 2. Regenerated CEQ on read preserves exact values without mutating DB or cached energy.
+    let _ = set_character_energy(&ctx, cid, 50);
+    let _ = ctx.drain_notifications_for_char(cid);
+    clock.advance_secs_and_read_offset(3_600);
+
+    let mut sess = auth_session(1, cid, 98_000_001, 30_000_142);
+    let epoch_before = ctx.db.state_epoch();
+    let commits_before = ctx.db.tx_commit_count();
+    let first = handle(&ctx, &mut sess, "characterEnergyMgr", "GetMyEnergyState", &[])
+        .unwrap()
+        .unwrap();
+    let second = handle(&ctx, &mut sess, "characterEnergyMgr", "GetMyEnergyState", &[])
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.dict_get("currentEnergy"), Some(&PyRep::Integer(54)));
+    assert_eq!(first.dict_get("maxEnergy"), Some(&PyRep::Integer(100)));
+    assert_eq!(
+        ctx.cluster_misc_state
+            .lock()
+            .unwrap()
+            .char_energy
+            .get(&cid)
+            .map(|s| s.current_energy),
+        Some(50)
+    );
+    assert!(ctx.drain_notifications_for_char(cid).is_empty());
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+}
