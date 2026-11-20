@@ -4097,7 +4097,7 @@ def _canonicalize_action_type(act_type: str, has_target: bool) -> str:
         return "click_widget" if has_target else "click_xy"
     if norm in ("drag", "drag_and_drop"):
         return "drag_widget"
-    if norm == "type":
+    if norm in ("type", "input_text", "enter_text"):
         return "type_text"
     return norm
 

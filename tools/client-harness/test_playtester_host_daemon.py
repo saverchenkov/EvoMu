@@ -1933,6 +1933,8 @@ class TestSpeedupOptimizations(unittest.TestCase):
         )
         self.assertEqual(playtester._normalize_action_defaults({"type": "drag"})["type"], "drag_widget")
         self.assertEqual(playtester._normalize_action_defaults({"type": "type"})["type"], "type_text")
+        self.assertEqual(playtester._normalize_action_defaults({"type": "input_text"})["type"], "type_text")
+        self.assertEqual(playtester._normalize_action_defaults({"type": "enter_text"})["type"], "type_text")
 
 
     def test_benign_user_error_markers_for_boarding_lance_cooldown(self):
