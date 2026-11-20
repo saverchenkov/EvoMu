@@ -1389,6 +1389,297 @@ fn industry_monitor_connect_and_disconnect_enforce_db_authoritative_corp_roles()
     }
 }
 
+#[test]
+fn cancel_and_complete_job_enforce_db_authoritative_corp_roles_and_membership() {
+    let ctx = make_test_context();
+    let station_hq = 60_003_760_i64;
+    let station_other = 60_003_761_i64;
+
+    let corp_a = 98_210_101_i64;
+    let corp_b = 98_210_102_i64;
+    let npc_corp = 1_000_170_i64;
+    let uninserted_corp = 98_210_888_i64;
+
+    let char_ceo = 91_210_001_i64;
+    let char_fm = 91_210_002_i64;
+    let char_dir = 91_210_003_i64;
+    let char_omitted = 91_210_004_i64;
+    let char_excluded = 91_210_005_i64;
+    let char_ex_member = 91_210_006_i64;
+    let char_npc = 91_210_007_i64;
+    let char_uninserted = 91_210_008_i64;
+    let char_hq_fm = 91_210_009_i64;
+    let char_installer = 91_210_010_i64;
+
+    let job_neg_corp = 9601_i64;
+    let job_neg_npc = 9602_i64;
+    let job_neg_uninserted = 9603_i64;
+    let job_neg_other_station = 9604_i64;
+    let job_neg_excluded_self = 9605_i64;
+    let job_cancel_fm = 9611_i64;
+    let job_complete_fm = 9612_i64;
+    let job_cancel_dir = 9613_i64;
+    let job_complete_dir = 9614_i64;
+    let job_cancel_ceo = 9615_i64;
+    let job_complete_ceo = 9616_i64;
+    let job_cancel_hq_fm = 9617_i64;
+    let job_complete_hq_fm = 9618_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp_a_rec = eve_db::CorporationRecord::new(corp_a, "Lifecycle Corp", "LCYC", char_ceo);
+        corp_a_rec.hq_station_id = Some(station_hq);
+        corp_a_rec.members = std::collections::HashSet::from([
+            char_ceo,
+            char_fm,
+            char_dir,
+            char_omitted,
+            char_hq_fm,
+            char_installer,
+        ]);
+        corp_a_rec.member_roles = HashMap::from([
+            (char_fm, eve_db::corp_roles::ROLE_FACTORY_MANAGER),
+            (char_dir, eve_db::corp_roles::ROLE_DIRECTOR),
+            // Leftover DB role for excluded member must still be denied.
+            (char_excluded, eve_db::corp_roles::ROLE_DIRECTOR),
+        ]);
+        snap.corporations.insert(corp_a, corp_a_rec);
+
+        let mut corp_b_rec = eve_db::CorporationRecord::new(corp_b, "Moved Corp", "MVDC", char_ex_member);
+        corp_b_rec.members = std::collections::HashSet::from([char_ex_member]);
+        corp_b_rec.member_roles = HashMap::from([(char_ex_member, eve_db::corp_roles::ROLE_DIRECTOR)]);
+        snap.corporations.insert(corp_b, corp_b_rec);
+
+        // Even if an NPC corp record exists in snapshot with CEO/Director, NPC corps must be rejected.
+        let mut npc_corp_rec = eve_db::CorporationRecord::new(npc_corp, "NPC Corp", "NPCC", char_npc);
+        npc_corp_rec.members = std::collections::HashSet::from([char_npc]);
+        npc_corp_rec.member_roles = HashMap::from([(char_npc, eve_db::corp_roles::ROLE_DIRECTOR)]);
+        snap.corporations.insert(npc_corp, npc_corp_rec);
+
+        // Uninserted corp has a stale corp_role_assignments entry, but no snap.corporations entry.
+        snap.corp_role_assignments.insert(
+            (uninserted_corp, char_uninserted),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: char_uninserted,
+                roles: eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER,
+                ..Default::default()
+            },
+        );
+
+        // Location-scoped Factory Manager at HQ only for char_hq_fm.
+        snap.corp_role_assignments.insert(
+            (corp_a, char_hq_fm),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: char_hq_fm,
+                roles_at_hq: eve_db::corp_roles::ROLE_FACTORY_MANAGER,
+                ..Default::default()
+            },
+        );
+
+        for (cid, corpid, name) in [
+            (char_ceo, corp_a, "LcycCEO"),
+            (char_fm, corp_a, "LcycFM"),
+            (char_dir, corp_a, "LcycDir"),
+            (char_omitted, corp_a, "LcycOmitted"),
+            (char_excluded, corp_a, "LcycExcluded"),
+            (char_ex_member, corp_b, "LcycExMember"),
+            (char_npc, npc_corp, "LcycNpc"),
+            (char_uninserted, uninserted_corp, "LcycUninserted"),
+            (char_hq_fm, corp_a, "LcycHqFM"),
+            (char_installer, corp_a, "LcycInstaller"),
+        ] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: corpid,
+                    station_id: Some(station_hq),
+                    home_station_id: station_hq,
+                    name: name.into(),
+                    ..Default::default()
+                },
+            );
+        }
+
+        let seed_ready_corp_job = |snap: &mut eve_db::WorldStateSnapshot,
+                                   job_id: i64,
+                                   installer_id: i64,
+                                   owner_corp_id: i64,
+                                   facility_id: i64| {
+            let bp_item_id = 960_000 + job_id;
+            snap.items.insert(
+                bp_item_id,
+                InventoryItemRecord {
+                    item_id: bp_item_id,
+                    type_id: 688,
+                    owner_id: owner_corp_id,
+                    location_id: facility_id,
+                    flag: InventoryFlag::Locked,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.industry_jobs.insert(
+                job_id,
+                IndustryJobRecord {
+                    job_id,
+                    installer_id,
+                    facility_id,
+                    blueprint_item_id: bp_item_id,
+                    blueprint_type_id: 688,
+                    activity_id: 1,
+                    runs: 1,
+                    product_type_id: 587,
+                    status: "Active".into(),
+                    duration_seconds: 60,
+                    start_unix: 1,
+                    blueprint_location_id: facility_id,
+                    output_location_id: facility_id,
+                    ..Default::default()
+                },
+            );
+            save_job_cost_meta(
+                snap,
+                job_id,
+                &IndustryJobCostMeta {
+                    use_corp: true,
+                    owner_id: owner_corp_id,
+                    blueprint_location_id: facility_id,
+                    blueprint_original_flag: Some(InventoryFlag::CorpSAG1),
+                    ..Default::default()
+                },
+            );
+        };
+
+        seed_ready_corp_job(snap, job_neg_corp, char_installer, corp_a, station_hq);
+        seed_ready_corp_job(snap, job_neg_npc, char_installer, npc_corp, station_hq);
+        seed_ready_corp_job(snap, job_neg_uninserted, char_installer, uninserted_corp, station_hq);
+        seed_ready_corp_job(snap, job_neg_other_station, char_installer, corp_a, station_other);
+        seed_ready_corp_job(snap, job_neg_excluded_self, char_excluded, corp_a, station_hq);
+
+        for jid in [
+            job_cancel_fm,
+            job_complete_fm,
+            job_cancel_dir,
+            job_complete_dir,
+            job_cancel_ceo,
+            job_complete_ceo,
+            job_cancel_hq_fm,
+            job_complete_hq_fm,
+        ] {
+            seed_ready_corp_job(snap, jid, char_installer, corp_a, station_hq);
+        }
+    });
+
+    let kw = HashMap::new();
+    let denied_code = "JobOwnershipViolation";
+    let assert_job_denied = |sess: &mut SessionState, method: &str, arg: PyRep| {
+        let err = handle(&ctx, sess, "industryManager", method, &[arg], &kw, None)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, denied_code);
+    };
+    let snap_before_negatives = ctx.db.with_snapshot(|snap| {
+        let corp = snap.corporations.get(&corp_a).expect("corp_a seeded");
+        assert!(corp.members.contains(&char_omitted));
+        assert!(!corp.member_roles.contains_key(&char_omitted));
+        assert!(!snap.corp_role_assignments.contains_key(&(corp_a, char_omitted)));
+        snap.clone()
+    });
+
+    // 1. Stale session.corp_role on active member omitted from DB roles must be rejected.
+    let mut s_omitted = char_session(char_omitted, corp_a);
+    s_omitted.corp_role =
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER;
+    for (method, arg) in [
+        ("CancelJob", PyRep::Integer(job_neg_corp)),
+        ("CompleteJob", PyRep::Integer(job_neg_corp)),
+        ("CompleteManyJobs", PyRep::List(vec![PyRep::Integer(job_neg_corp)])),
+    ] {
+        assert_job_denied(&mut s_omitted, method, arg);
+    }
+
+    // 2. Ex-member with stale session.corporation_id = corp_a and stale session.corp_role.
+    let mut s_ex = char_session(char_ex_member, corp_a);
+    s_ex.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    for method in ["CancelJob", "CompleteJob"] {
+        assert_job_denied(&mut s_ex, method, PyRep::Integer(job_neg_corp));
+    }
+
+    // 3. Excluded member omitted from non-empty corp.members (both non-installer and self-installed job).
+    let mut s_excluded = char_session(char_excluded, corp_a);
+    s_excluded.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    for (method, jid) in [
+        ("CancelJob", job_neg_corp),
+        ("CompleteJob", job_neg_corp),
+        ("CancelJob", job_neg_excluded_self),
+        ("CompleteJob", job_neg_excluded_self),
+    ] {
+        assert_job_denied(&mut s_excluded, method, PyRep::Integer(jid));
+    }
+
+    // 4. NPC corporation is always rejected even when present in snap.corporations with CEO/Director.
+    let mut s_npc = char_session(char_npc, npc_corp);
+    s_npc.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    for method in ["CancelJob", "CompleteJob"] {
+        assert_job_denied(&mut s_npc, method, PyRep::Integer(job_neg_npc));
+    }
+
+    // 5. Uninserted corporation (absent from snap.corporations) is rejected despite corp_role_assignments + session.corp_role.
+    let mut s_uninserted = char_session(char_uninserted, uninserted_corp);
+    s_uninserted.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    for method in ["CancelJob", "CompleteJob"] {
+        assert_job_denied(&mut s_uninserted, method, PyRep::Integer(job_neg_uninserted));
+    }
+
+    // 6. Location-scoped HQ Factory Manager is rejected at another station.
+    let mut s_hq_fm = char_session(char_hq_fm, corp_a);
+    assert_eq!(s_hq_fm.corp_role, 0);
+    for method in ["CancelJob", "CompleteJob"] {
+        assert_job_denied(&mut s_hq_fm, method, PyRep::Integer(job_neg_other_station));
+    }
+
+    // Verify none of the denied requests mutated DB state.
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.clone()), snap_before_negatives);
+
+    // 7. DB-authorized Factory Manager, Director, CEO, and HQ-scoped Factory Manager succeed with session.corp_role = 0.
+    for (cid, cancel_jid, complete_jid) in [
+        (char_fm, job_cancel_fm, job_complete_fm),
+        (char_dir, job_cancel_dir, job_complete_dir),
+        (char_ceo, job_cancel_ceo, job_complete_ceo),
+        (char_hq_fm, job_cancel_hq_fm, job_complete_hq_fm),
+    ] {
+        let mut sess = char_session(cid, corp_a);
+        assert_eq!(sess.corp_role, 0);
+        let cancel_rep = handle(
+            &ctx,
+            &mut sess,
+            "industryManager",
+            "CancelJob",
+            &[PyRep::Integer(cancel_jid)],
+            &kw,
+            None,
+        )
+        .unwrap()
+        .expect("DB-authorized corp role holder must succeed on CancelJob with session.corp_role=0");
+        assert_eq!(cancel_rep.dict_get("status").and_then(PyRep::as_str), Some("Cancelled"));
+
+        let complete_rep = handle(
+            &ctx,
+            &mut sess,
+            "industryManager",
+            "CompleteJob",
+            &[PyRep::Integer(complete_jid)],
+            &kw,
+            None,
+        )
+        .unwrap()
+        .expect("DB-authorized corp role holder must succeed on CompleteJob with session.corp_role=0");
+        assert_eq!(complete_rep.dict_get("jobID").and_then(PyRep::as_i64), Some(complete_jid));
+    }
+}
+
 #[cfg(test)]
 #[path = "industry_pi_extra_unit_tests.rs"]
 mod industry_pi_extra_unit_tests;

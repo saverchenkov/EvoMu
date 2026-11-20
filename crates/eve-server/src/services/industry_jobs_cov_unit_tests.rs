@@ -573,6 +573,15 @@ fn corp_roles_funds_containers_cancel_refund_and_complete_guards() {
     s_other.corporation_id = Some(corp_id);
     assert_eq!(handle_industry_jobs(&ctx, &mut s_other, "industryManager", "CancelJob", &[PyRep::Integer(cj_id)], &kw).unwrap().unwrap_err().code, "JobOwnershipViolation");
     s_other.corp_role = corp_roles::ROLE_DIRECTOR;
+    assert_eq!(handle_industry_jobs(&ctx, &mut s_other, "industryManager", "CancelJob", &[PyRep::Integer(cj_id)], &kw).unwrap().unwrap_err().code, "JobOwnershipViolation");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(other_char, corp_roles::ROLE_DIRECTOR);
+    });
+    s_other.corp_role = 0;
     handle_industry_jobs(&ctx, &mut s_other, "industryManager", "CancelJob", &[PyRep::Integer(cj_id)], &kw).unwrap().unwrap();
 
     // CompleteJob error guards: empty args -> JobNotFound, Paused -> FacilityServiceOffline, Cancelled -> InvalidJobState, unlocked BP -> BlueprintMissingOrUnlocked, stranger -> JobOwnershipViolation
