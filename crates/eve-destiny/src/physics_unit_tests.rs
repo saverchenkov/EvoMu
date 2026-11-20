@@ -864,7 +864,7 @@ fn gate_cloak_expiry_and_proximity_decloak_emit_single_add_balls2_to_observers_8
 }
 
 #[test]
-fn warp_exit_zeros_velocity_and_emits_zero_set_ball_velocity_with_zero_drift() {
+fn warp_exit_coasts_with_ccp_subwarp_decay_and_emits_expected_stop_sequence() {
     let mut park = Ballpark::new(30_000_142);
     let start = DVec3::ZERO;
     let dest = DVec3::new(500_000.0, 0.0, 0.0);
@@ -895,35 +895,34 @@ fn warp_exit_zeros_velocity_and_emits_zero_set_ball_velocity_with_zero_drift() {
 
     let (pending_evs, obs_evs) = landed_events.expect("ship warp must reach MovementMode::Stop");
     let landed_ball = &park.balls[&2];
-    assert_eq!(
-        landed_ball.velocity,
-        DVec3::ZERO,
-        "warp exit must zero velocity instead of clamping to subwarp max_velocity (#1454)"
+    let landing_speed = landed_ball.velocity.length();
+    assert!(
+        landing_speed > 0.0 && landing_speed <= landed_ball.max_velocity + 1e-6,
+        "CCP warp exit must retain clamped subwarp coast velocity, got {landing_speed}"
     );
     assert_eq!(landed_ball.speed_fraction, 0.0);
-    let landing_pos = landed_ball.position;
 
     for ev_stream in [&pending_evs, &obs_evs] {
-        let stop_idx = ev_stream
-            .iter()
-            .position(|e| matches!(e, DestinyEvent::Stop { ball_id: 2 }))
-            .expect("Stop event emitted on warp exit");
         let pos_idx = ev_stream
             .iter()
             .position(|e| matches!(e, DestinyEvent::SetBallPosition { ball_id: 2, .. }))
             .expect("SetBallPosition event emitted on warp exit");
-        let vel_idx = ev_stream
+        let stop_idx = ev_stream
+            .iter()
+            .position(|e| matches!(e, DestinyEvent::Stop { ball_id: 2 }))
+            .expect("Stop event emitted on warp exit");
+        let massive_idx = ev_stream
             .iter()
             .position(|e| {
                 matches!(
                     e,
-                    DestinyEvent::SetBallVelocity {
+                    DestinyEvent::SetBallMassive {
                         ball_id: 2,
-                        velocity
-                    } if *velocity == [0.0, 0.0, 0.0]
+                        is_massive: true
+                    }
                 )
             })
-            .expect("zero SetBallVelocity event emitted on warp exit (#1454)");
+            .expect("SetBallMassive(true) emitted on warp exit");
         let sfx_idx = ev_stream
             .iter()
             .position(|e| {
@@ -938,19 +937,31 @@ fn warp_exit_zeros_velocity_and_emits_zero_set_ball_velocity_with_zero_drift() {
                 )
             })
             .expect("warping stop FX emitted on warp exit");
+        assert!(
+            !ev_stream
+                .iter()
+                .any(|e| matches!(e, DestinyEvent::SetBallVelocity { ball_id: 2, .. })),
+            "natural CCP warp exit must not emit SetBallVelocity([0,0,0])"
+        );
         assert!(pos_idx < stop_idx);
-        assert!(stop_idx < vel_idx);
-        assert!(vel_idx < sfx_idx);
+        assert!(stop_idx < massive_idx);
+        assert!(massive_idx < sfx_idx);
     }
 
-    for _ in 0..20 {
+    // Subwarp coast decays monotonically to rest.
+    for _ in 0..120 {
         park.step(1.0);
     }
-    assert_eq!(
-        park.balls[&2].position, landing_pos,
-        "landed ship must have zero post-warp drift over 20 ticks (#1454)"
+    let settled_speed = park.balls[&2].velocity.length();
+    assert!(
+        settled_speed < 1e-3,
+        "post-warp coast must decay smoothly to rest, got {settled_speed}"
     );
-    assert_eq!(park.balls[&2].velocity, DVec3::ZERO);
-    assert_eq!(park.balls[&2].speed_fraction, 0.0);
+    let pos_after_settle = park.balls[&2].position;
+    park.step(1.0);
+    assert!(
+        park.balls[&2].position.distance(pos_after_settle) < 1e-3,
+        "settled post-warp ship must have negligible residual drift"
+    );
 }
 
