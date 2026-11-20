@@ -3379,6 +3379,24 @@ async fn test_1237_ping_sync(s: &mut TcpStream, client_id: u64, user_id: u64, ca
     }
 }
 
+async fn test_1237_wait_for_notification(s: &mut TcpStream, needle: &str, context: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(remaining, read_framed_pyrep(s))
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {needle} ({context})"))
+            .expect("read error waiting for notification")
+            .expect("socket closed before notification");
+        let pkt = MachoPacket::from_pyrep(&rep).expect("decode packet waiting for notification");
+        if pkt.packet_type == MachoPacketType::Notification
+            && test_1386_packet_contains_ascii(&rep, needle)
+        {
+            return;
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_1237_preauth_and_charsel_connections_do_not_load_or_subscribe_jita() {
     let ctx = Arc::new(ServerContext::new());
@@ -3521,7 +3539,12 @@ async fn test_1237_selecting_docked_character_keeps_zero_subscribers_and_hiberna
             PyRep::Real(1234.0),
         ],
     );
-    let _ = test_1237_ping_sync(&mut s, client_id, user_id, 3).await;
+    test_1237_wait_for_notification(
+        &mut s,
+        "OnAccountChange",
+        "HP-10: docked session must receive OnAccountChange notification without attaching ticks",
+    )
+    .await;
     assert_eq!(
         jita.event_tx.receiver_count(),
         0,
@@ -3658,13 +3681,12 @@ async fn test_1237_undock_attaches_delivers_ticks_and_dock_immediately_detaches_
         .await
         .unwrap();
     let _ = jita.step_manual(1.0).await.unwrap();
-    let tick_packets = test_1237_ping_sync(&mut s, client_id, user_id, 4).await;
-    assert!(
-        tick_packets
-            .iter()
-            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "DoDestinyUpdate")),
-        "HP-10: attached in-space session must receive live DoDestinyUpdate tick broadcasts"
-    );
+    test_1237_wait_for_notification(
+        &mut s,
+        "DoDestinyUpdate",
+        "HP-10: attached in-space session must receive live DoDestinyUpdate tick broadcasts",
+    )
+    .await;
 
     // Advance past undock session-change timer and dock back at Jita 4-4.
     let (adv_rsp, _) = test_1386_call_rpc(

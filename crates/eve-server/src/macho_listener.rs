@@ -3040,7 +3040,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             && prev_session.station_id.is_none()
                             && prev_session.structure_id.is_none()
                             && prev_session.solar_system_id.is_some();
-                        let is_in_space = session.character_id.is_some()
+                        let charsel_transition =
+                            session_owns_charsel_transition(&ctx, &session);
+                        let is_in_space = !charsel_transition
+                            && session.character_id.is_some()
                             && session.station_id.is_none()
                             && session.structure_id.is_none()
                             && session.solar_system_id.is_some();
@@ -3063,12 +3066,14 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         {
                             sys_rx = None;
                             subscribed_sys_id = None;
-                            if !matches!(
-                                wire_state.destiny,
-                                crate::outbound_sequencer::DestinyStream::Detached
-                            ) && (docking_transition
-                                || (was_in_space
-                                    && session.solar_system_id != prev_session.solar_system_id))
+                            if !charsel_transition
+                                && !matches!(
+                                    wire_state.destiny,
+                                    crate::outbound_sequencer::DestinyStream::Detached
+                                )
+                                && (docking_transition
+                                    || (was_in_space
+                                        && session.solar_system_id != prev_session.solar_system_id))
                             {
                                 if let Some(old_sys_id) = prev_session.solar_system_id {
                                     let old_sys = ctx.systems.get_or_spawn(old_sys_id);
@@ -4361,6 +4366,7 @@ fn flush_deferred_ship_id_slot(
         .map(|frame| crate::outbound_sequencer::OutFrame::SessionChange { frame })
 }
 
+#[cfg(any(test, feature = "testkit"))]
 pub(crate) fn flush_deferred_ship_id_if_due(
     ctx: &ServerContext,
     session: &SessionState,
