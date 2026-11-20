@@ -1348,6 +1348,20 @@ impl TickRxSlot<'_> {
     }
 }
 
+/// Returns `true` when `session` is docked in an Upwell structure (`station_id.is_none()`,
+/// `structure_id.is_some()`) and `space_ballpark_bootstrapped` is still marked active for this
+/// `(session_id, char_id, solar_system_id)`.
+fn is_structure_view_outside_bootstrapped(ctx: &ServerContext, session: &SessionState) -> bool {
+    session.station_id.is_none()
+        && session.structure_id.is_some()
+        && session
+            .character_id
+            .zip(session.solar_system_id)
+            .is_some_and(|(cid, sys_id)| {
+                ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
+            })
+}
+
 /// Clears View Outside wire/stream/guard state when a pilot releases their last `beyonce`
 /// binding while still structure-docked (`Enter Hangar`, `#1448` / `#1461`).
 fn detach_structure_view_outside_on_beyonce_release(
@@ -1559,7 +1573,6 @@ async fn execute_call_req_wire_inner(
     call_kwargs: &HashMap<String, PyRep>,
 ) -> CallReqWireOutcome {
     let call_started_at = std::time::Instant::now();
-    let was_live_before_rpc = wire.wire_state.destiny.is_live();
     let call_id = match (req_dest, req_source) {
         (
             MachoAddress::Node { call_id, .. }
@@ -1585,6 +1598,28 @@ async fn execute_call_req_wire_inner(
             }
         }
     }
+    // Reconcile stale structure View Outside stream state cleared asynchronously (e.g. Quasar
+    // `generic_ui.view.Activated("hangar")` arriving before CCP's 30s-delayed `OID-`, #1477)
+    // BEFORE evaluating `was_live_before_rpc`, dispatching `ship.Undock`, or computing `is_upwell_undock`.
+    let stream_active_pre_rpc = !matches!(wire.wire_state.destiny, DestinyStream::Detached)
+        || wire.subscribed_sys_id.is_some();
+    if stream_active_pre_rpc
+        && session.character_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_some()
+        && session.solar_system_id.is_some()
+        && !is_structure_view_outside_bootstrapped(ctx, session)
+    {
+        detach_structure_view_outside_on_beyonce_release(
+            ctx,
+            session.session_id,
+            session.character_id,
+            wire.wire_state,
+            &mut wire.sys_rx,
+            wire.subscribed_sys_id,
+        );
+    }
+    let was_live_before_rpc = wire.wire_state.destiny.is_live();
     let prev_session = session.clone();
     let owned_bound_service =
         bound_id.and_then(|bid| ctx.owned_bound_service_for_metrics(session, bid));
@@ -3147,6 +3182,26 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     wire_state.destiny,
                     crate::outbound_sequencer::DestinyStream::Detached
                 ) => {
+                // If structure View Outside was cleared asynchronously (e.g. Quasar
+                // `generic_ui.view.Activated("hangar")` before 30s-delayed `OID-`, #1477),
+                // detach the stale live stream immediately instead of emitting structure ticks.
+                if session.character_id.is_some()
+                    && session.station_id.is_none()
+                    && session.structure_id.is_some()
+                    && session.solar_system_id.is_some()
+                    && !is_structure_view_outside_bootstrapped(&ctx, &session)
+                {
+                    let mut sys_rx_slot = TickRxSlot::Optional(&mut sys_rx);
+                    detach_structure_view_outside_on_beyonce_release(
+                        &ctx,
+                        session_id,
+                        session.character_id,
+                        &mut wire_state,
+                        &mut sys_rx_slot,
+                        &mut subscribed_sys_id,
+                    );
+                    continue;
+                }
                 // Guard against emitting stale space ticks (or pod TerminalExplosion/RemoveBall)
                 // after an out-of-band DeathRespawn has already transitioned the session in DB
                 // (#1010) or after SafeLogoff cleared online_lock.character_id (#1360), before
@@ -3345,7 +3400,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             && session.structure_id.is_some()
                             && prev_session.station_id.is_none()
                             && prev_session.structure_id == session.structure_id
-                            && prev_session.solar_system_id == session.solar_system_id;
+                            && prev_session.solar_system_id == session.solar_system_id
+                            && is_structure_view_outside_bootstrapped(&ctx, &session);
                         let is_in_space = !charsel_transition
                             && session.character_id.is_some()
                             && session.station_id.is_none()
@@ -4760,7 +4816,8 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
         && session.structure_id.is_some()
         && prev_session.station_id.is_none()
         && prev_session.structure_id == session.structure_id
-        && prev_session.solar_system_id == session.solar_system_id;
+        && prev_session.solar_system_id == session.solar_system_id
+        && is_structure_view_outside_bootstrapped(ctx, session);
     let is_in_space = session.character_id.is_some()
         && session.station_id.is_none()
         && session.solar_system_id.is_some()
