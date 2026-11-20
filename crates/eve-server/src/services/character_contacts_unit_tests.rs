@@ -24,6 +24,26 @@ fn rowset_len(rep: &PyRep) -> usize {
     }
 }
 
+/// Asserts a 1-row `PyRep::Rowset` and indexes its sole row by column name.
+fn single_rowset_cols<'a>(rep: &'a PyRep, context: &str) -> HashMap<&'a str, &'a PyRep> {
+    let PyRep::Rowset { columns, rows } = rep else {
+        panic!("{context}: expected PyRep::Rowset, got {rep:?}");
+    };
+    assert_eq!(rows.len(), 1, "{context}: expected 1 row, got {}", rows.len());
+    assert_eq!(
+        rows[0].len(),
+        columns.len(),
+        "{context}: row width {} must match {} columns",
+        rows[0].len(),
+        columns.len()
+    );
+    columns
+        .iter()
+        .zip(rows[0].iter())
+        .map(|(col, val)| (col.as_str(), val))
+        .collect()
+}
+
 fn test_ctx() -> ServerContext {
     if let Some(sde) = SHARED_SDE.get() {
         ServerContext::with_sde_and_repository(
@@ -68,9 +88,19 @@ fn public_private_info_description_notes_and_respec_cover_branches() {
     let pub_info = handle_contacts(&ctx, &mut sess, "charMgr", "GetPublicInfo3", &[], &kw)
         .unwrap()
         .unwrap();
-    assert_eq!(pub_info.dict_get("characterID"), Some(&PyRep::Integer(char_id)));
-    let create_dt = pub_info
-        .dict_get("createDateTime")
+    let pub_cols = single_rowset_cols(&pub_info, "GetPublicInfo3");
+    assert_eq!(pub_cols.len(), 19, "GetPublicInfo3 must expose all 19 columns");
+    for col in [
+        "characterID", "characterName", "corporationID", "allianceID", "raceID",
+        "bloodlineID", "ancestryID", "schoolID", "securityStatus", "description",
+        "title", "gender", "createDateTime", "startDateTime", "portraitInfo",
+        "warFactionID", "militiaFactionID", "militiaRank", "rank",
+    ] {
+        assert!(pub_cols.contains_key(col), "GetPublicInfo3 missing column {col}");
+    }
+    assert_eq!(pub_cols.get("characterID").copied(), Some(&PyRep::Integer(char_id)));
+    let create_dt = pub_cols
+        .get("createDateTime")
         .and_then(|v| v.as_i64())
         .expect("GetPublicInfo3 createDateTime integer");
     assert!(
@@ -78,12 +108,30 @@ fn public_private_info_description_notes_and_respec_cover_branches() {
         "GetPublicInfo3 createDateTime must be Win32 FILETIME ticks, got {create_dt}"
     );
     assert_eq!(
-        pub_info.dict_get("startDateTime"),
+        pub_cols.get("startDateTime").copied(),
         Some(&PyRep::Integer(create_dt))
     );
     assert_eq!(
-        pub_info.dict_get("militiaFactionID"),
-        pub_info.dict_get("warFactionID")
+        pub_cols.get("militiaFactionID").copied(),
+        pub_cols.get("warFactionID").copied()
+    );
+    let wire_bytes = eve_proto::marshal::encode(&pub_info);
+    assert!(
+        wire_bytes
+            .windows(eve_proto::marshal::V24_ROWSET_CLASS.len())
+            .any(|w| w == eve_proto::marshal::V24_ROWSET_CLASS.as_bytes()),
+        "GetPublicInfo3 wire payload must encode V24 Rowset class"
+    );
+    assert!(
+        wire_bytes
+            .windows(eve_proto::marshal::V24_ROW_CLASS.len())
+            .any(|w| w == eve_proto::marshal::V24_ROW_CLASS.as_bytes()),
+        "GetPublicInfo3 wire payload must encode V24 Row class"
+    );
+    assert_eq!(
+        eve_proto::marshal::decode(&wire_bytes).expect("decode GetPublicInfo3 rowset"),
+        pub_info,
+        "GetPublicInfo3 1-row Rowset must round-trip cleanly via V24 wire marshal"
     );
     let prev_wf = ctx.db.with_snapshot(|snap| {
         snap.characters.get(&char_id).and_then(|c| c.war_faction_id)
@@ -96,8 +144,13 @@ fn public_private_info_description_notes_and_respec_cover_branches() {
     let pub_fw = handle_contacts(&ctx, &mut sess, "charMgr", "GetPublicInfo3", &[], &kw)
         .unwrap()
         .unwrap();
+    let fw_cols = single_rowset_cols(&pub_fw, "GetPublicInfo3 with war_faction_id");
     assert_eq!(
-        pub_fw.dict_get("militiaFactionID"),
+        fw_cols.get("militiaFactionID").copied(),
+        Some(&PyRep::Integer(500_001))
+    );
+    assert_eq!(
+        fw_cols.get("warFactionID").copied(),
         Some(&PyRep::Integer(500_001))
     );
     ctx.db.with_mut_snapshot(|snap| {
