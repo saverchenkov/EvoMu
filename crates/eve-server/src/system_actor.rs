@@ -1630,56 +1630,18 @@ impl SystemRegistry {
                                         cs.cloak_velocity_multiplier = flags.cloak_velocity_multiplier;
                                     }
                                 }
-                                if !removed_own_cycles.is_empty() {
-                                    let mut restored_any = false;
-                                    let mut broken_lock_cycles = Vec::new();
-                                    for cycle in removed_own_cycles {
-                                        if cycle.target_id.is_none_or(|tid| tid == ball_id) {
-                                            if !active_module_cycles
-                                                .iter()
-                                                .any(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
-                                            {
-                                                active_module_cycles.push(cycle);
-                                                restored_any = true;
-                                            }
-                                        } else {
-                                            broken_lock_cycles.push(cycle);
-                                        }
-                                    }
-                                    let reentrant_db = db_opt
-                                        .as_ref()
-                                        .is_some_and(|db| db.is_write_locked_by_current_thread());
-                                    let effective_db = if reentrant_db { &None } else { &db_opt };
-                                    for cycle in &broken_lock_cycles {
-                                        cleanup_removed_module_cycle(&mut ballpark, cycle, effective_db);
-                                    }
-                                    if restored_any {
-                                        let hook = if reentrant_db { None } else { deact_guard.as_ref() };
-                                        reconcile_tackle_and_bubbles(
-                                            &mut ballpark,
-                                            active_module_cycles,
-                                            base_scramble_strengths,
-                                            base_core_strengths,
-                                            effective_db,
-                                            hook,
-                                        );
-                                        ballpark.recompute_ball_attributes(ball_id);
-                                    } else if pre_cleanup_combat_flags.is_some() {
-                                        ballpark.recompute_ball_attributes(ball_id);
-                                    }
-                                    if !reentrant_db {
-                                        for cycle in &broken_lock_cycles {
-                                            emit_cycle_deactivation(
-                                                cycle,
-                                                &ballpark,
-                                                effective_db,
-                                                deact_guard.as_ref(),
-                                            );
-                                        }
-                                    }
-                                } else if pre_cleanup_combat_flags.is_some() {
-                                    ballpark.recompute_ball_attributes(ball_id);
-                                }
+                                let force_recompute = pre_cleanup_combat_flags.is_some();
+                                restore_taken_own_cycles_in_actor(
+                                    &mut ballpark,
+                                    active_module_cycles,
+                                    base_scramble_strengths,
+                                    base_core_strengths,
+                                    &db_opt,
+                                    ball_id,
+                                    deact_guard.as_ref(),
+                                    removed_own_cycles,
+                                    force_recompute,
+                                );
                                 {
                                     let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());
                                     mod_guard.clear();

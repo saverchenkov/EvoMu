@@ -2246,6 +2246,12 @@ pub(crate) fn remove_non_warp_ship_module_cycles(
 /// `module_deactivation_hook` so attackers/fleetmates clear DB active state, receive
 /// deactivation notifications, and flush `projected_ewar` / `remote_assistance` before
 /// destination `build_ship_combat_state` runs (`#1237`).
+fn is_db_write_reentrant(db_opt: &Option<Arc<eve_db::WorldRepository>>) -> bool {
+    db_opt
+        .as_ref()
+        .is_some_and(|db| db.is_write_locked_by_current_thread())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn remove_all_ship_module_cycles_preserving_own_db(
     ballpark: &mut Ballpark,
@@ -2257,9 +2263,7 @@ pub(crate) fn remove_all_ship_module_cycles_preserving_own_db(
     deactivation_hook: Option<&ModuleDeactivationHook>,
     preserve_own_db_active_states: bool,
 ) -> Vec<(ActiveModuleCycle, Option<i64>)> {
-    let reentrant_db = db_opt
-        .as_ref()
-        .is_some_and(|db| db.is_write_locked_by_current_thread());
+    let reentrant_db = is_db_write_reentrant(db_opt);
     let effective_db = if reentrant_db { &None } else { db_opt };
     let no_db = None;
     let mut removed_cycles = Vec::new();
@@ -2331,6 +2335,67 @@ pub(crate) fn remove_all_ship_module_cycles(
         deactivation_hook,
         false,
     )
+}
+
+/// Restores preserved own ship module cycles after a failed DB-preserving `TakeBall`
+/// rollback, cleaning DB/hook state for any targeted cycles whose target locks were lost (`#1237`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn restore_taken_own_cycles_in_actor(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<i64, i32>,
+    base_core_strengths: &HashMap<i64, i32>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_id: i64,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+    removed_own_cycles: Vec<ActiveModuleCycle>,
+    force_recompute: bool,
+) {
+    if removed_own_cycles.is_empty() {
+        if force_recompute {
+            ballpark.recompute_ball_attributes(ball_id);
+        }
+        return;
+    }
+    let mut restored_any = false;
+    let mut broken_lock_cycles = Vec::new();
+    for cycle in removed_own_cycles {
+        if cycle.target_id.is_none_or(|tid| tid == ball_id) {
+            if !active_module_cycles
+                .iter()
+                .any(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
+            {
+                active_module_cycles.push(cycle);
+                restored_any = true;
+            }
+        } else {
+            broken_lock_cycles.push(cycle);
+        }
+    }
+    let reentrant_db = is_db_write_reentrant(db_opt);
+    let effective_db = if reentrant_db { &None } else { db_opt };
+    for cycle in &broken_lock_cycles {
+        cleanup_removed_module_cycle(ballpark, cycle, effective_db);
+    }
+    if restored_any {
+        let hook = if reentrant_db { None } else { deactivation_hook };
+        reconcile_tackle_and_bubbles(
+            ballpark,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+            effective_db,
+            hook,
+        );
+        ballpark.recompute_ball_attributes(ball_id);
+    } else if force_recompute {
+        ballpark.recompute_ball_attributes(ball_id);
+    }
+    if !reentrant_db {
+        for cycle in &broken_lock_cycles {
+            emit_cycle_deactivation(cycle, ballpark, effective_db, deactivation_hook);
+        }
+    }
 }
 
 /// Emits Destiny `OnSpecialFX { is_active: false }` stop events for every active propulsion
