@@ -118,6 +118,36 @@ fn drain_observer_updates_in_actor(
     (ballpark.current_tick, events, pyrep, broadcast_seq)
 }
 
+/// Builds a `SetState` payload + `DoDestinyUpdate` list for `observer_ball_id` and snapshots the
+/// actor's current `TickBroadcast.broadcast_seq` watermark (`#1461`).
+fn get_set_state_in_actor(
+    ballpark: &Ballpark,
+    solar_system_id: SolarSystemId,
+    observer_ball_id: BallId,
+    last_visible_stamp_actor: &std::sync::atomic::AtomicU64,
+    broadcast_seq_gate: &std::sync::Mutex<u64>,
+) -> Result<(u64, PyRep, PyRep, u64), String> {
+    if ballpark.balls.contains_key(&observer_ball_id) {
+        last_visible_stamp_actor.fetch_max(
+            ballpark.current_tick,
+            std::sync::atomic::Ordering::AcqRel,
+        );
+        let payload = encode_set_state_payload(ballpark, observer_ball_id);
+        let update_list = PyRep::List(vec![encode_set_state_update(
+            ballpark,
+            observer_ball_id,
+        )]);
+        let broadcast_seq = *broadcast_seq_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Ok((ballpark.current_tick, payload, update_list, broadcast_seq))
+    } else {
+        Err(format!(
+            "Observer ball {observer_ball_id} not in system {solar_system_id}"
+        ))
+    }
+}
+
 /// DERIVED default maintenance/downtime belt respawn period in seconds (86,400s = 1 day),
 /// configurable via `ServerConfig::belt_respawn_interval_secs` (`D-5`, `MN-03`).
 /// Per EVE wiki `Asteroids_and_ore.md:69`, belts respawn after downtime only if there are no asteroids left in the belt.
@@ -1900,22 +1930,30 @@ impl SystemRegistry {
                                 observer_ball_id,
                                 reply,
                             } => {
-                                if ballpark.balls.contains_key(&observer_ball_id) {
-                                    last_visible_stamp_actor.fetch_max(
-                                        ballpark.current_tick,
-                                        std::sync::atomic::Ordering::AcqRel,
-                                    );
-                                    let payload = encode_set_state_payload(&ballpark, observer_ball_id);
-                                    let update_list = PyRep::List(vec![encode_set_state_update(
-                                        &ballpark,
-                                        observer_ball_id,
-                                    )]);
-                                    defer_reply(&mut deferred_replies, reply, Ok((ballpark.current_tick, payload, update_list)));
-                                } else {
-                                    defer_reply(&mut deferred_replies, reply, Err(format!(
-                                        "Observer ball {observer_ball_id} not in system {solar_system_id}"
-                                    )));
-                                }
+                                let res = get_set_state_in_actor(
+                                    &ballpark,
+                                    solar_system_id,
+                                    observer_ball_id,
+                                    &last_visible_stamp_actor,
+                                    &broadcast_seq_gate_actor,
+                                )
+                                .map(|(tick, payload, update_list, _seq)| {
+                                    (tick, payload, update_list)
+                                });
+                                defer_reply(&mut deferred_replies, reply, res);
+                            }
+                            SystemCommand::GetSetStateWithSeq {
+                                observer_ball_id,
+                                reply,
+                            } => {
+                                let res = get_set_state_in_actor(
+                                    &ballpark,
+                                    solar_system_id,
+                                    observer_ball_id,
+                                    &last_visible_stamp_actor,
+                                    &broadcast_seq_gate_actor,
+                                );
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             SystemCommand::CurrentTick { reply } => {
                                 defer_reply(&mut deferred_replies, reply, ballpark.current_tick);
