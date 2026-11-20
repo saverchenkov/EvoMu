@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::test_ctx_and_clock;
-use eve_db::{CosmicAnomalyRecord, UpwellStructureRecord};
+use eve_db::{CosmicAnomalyRecord, ServerClock, UpwellStructureRecord};
 
 fn make_session(char_id: i64, sys_id: u32) -> SessionState {
     SessionState {
@@ -1076,4 +1076,200 @@ async fn scan_mgr_launch_probes_request_scans_and_dispatch_cone_scan_guards() {
 
     assert_eq!(ctx.db.state_epoch(), e2);
     assert_eq!(ctx.db.tx_commit_count(), c2);
+}
+
+#[tokio::test]
+async fn scan_mgr_get_signatures_expired_wormhole_runs_lifecycle_cleanup_in_seeded_system() {
+    let base_ts = 1_700_000_000_u64;
+    let (ctx, clock) = test_ctx_and_clock(base_ts);
+    let char_id = 100_000_143_i64;
+    let dest_char_id = 100_000_144_i64;
+    let sys_id = 31_000_005_u32; // Thera: always seeds static THS-*/TLS-*/TNS-*/TWS-* + site signatures
+    let mut sess = make_session(char_id, sys_id);
+    let kw = HashMap::new();
+
+    // 1. Seed system signatures and wormhole balls via GetSignatures.
+    let seeded_rep = handle_scanning_and_wormholes(&ctx, &mut sess, "scanMgr", "GetSignatures", &[], &kw)
+        .await
+        .expect("handled")
+        .expect("initial GetSignatures succeeds");
+    assert!(matches!(seeded_rep, PyRep::Rowset { .. }));
+
+    let orig_wh = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_signatures
+            .get(&sys_id)
+            .and_then(|sigs| {
+                sigs.iter()
+                    .find(|s| s.sig_group == "Wormhole" && s.signature_id.starts_with("THS-") && !s.collapsed)
+                    .cloned()
+            })
+            .expect("Thera static THS-* wormhole seeded")
+    });
+    let orig_sig_id = orig_wh.signature_id.clone();
+    let dest_sys = orig_wh.destination_system_id.expect("THS-* has destination system");
+    assert_ne!(dest_sys, sys_id);
+
+    let ent_ball_id = crate::services::space_destiny::wormhole_item_id_for_signature(sys_id, &orig_sig_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(
+        sys_handle.get_ball_snapshot(ent_ball_id).await.ok().flatten().is_some(),
+        "seeded wormhole entrance ball must exist prior to expiry"
+    );
+
+    // 2. Materialize reciprocal K162-* mirror & exit ball in destination system.
+    let exit_ball_id = ctx.db.with_mut_snapshot(|snap| {
+        crate::services::wormhole_lifecycle_ops::materialize_k162_exit_in_snap(
+            &ctx, snap, &orig_wh, dest_sys,
+        )
+        .expect("materialize K162 exit mirror")
+        .0
+    });
+    assert_eq!(
+        exit_ball_id,
+        crate::services::wormhole_lifecycle_ops::wormhole_exit_item_id_for_signature(dest_sys, &orig_sig_id)
+    );
+    let _ = ensure_system_signatures(&ctx, sys_id).await;
+    let dest_handle = ctx.systems.get_or_spawn(dest_sys);
+    assert!(
+        dest_handle.get_ball_snapshot(exit_ball_id).await.ok().flatten().is_some(),
+        "materialized K162 exit ball must exist prior to expiry"
+    );
+
+    // Shorten only orig_wh lifetime so it expires while all other native signatures stay active
+    // (confirming the system is already seeded when GetSignatures runs).
+    ctx.db.provision_gm_account("wh_origin_1430", "pw", char_id, "WhOrigin");
+    ctx.db.provision_gm_account("wh_dest_1430", "pw", dest_char_id, "WhDest");
+    let (origin_uid, dest_uid) = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sig) = snap
+            .cosmic_signatures
+            .get_mut(&sys_id)
+            .and_then(|l| l.iter_mut().find(|s| s.signature_id == orig_sig_id))
+        {
+            sig.lifetime_seconds = 3_600;
+        }
+        let o_uid = {
+            let ch = snap.characters.get_mut(&char_id).expect("origin char provisioned");
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.user_id
+        };
+        let d_uid = {
+            let ch = snap.characters.get_mut(&dest_char_id).expect("dest char provisioned");
+            ch.solar_system_id = dest_sys;
+            ch.station_id = None;
+            ch.user_id
+        };
+        (o_uid, d_uid)
+    });
+    ctx.db
+        .acquire_online_lock(origin_uid, 14301, Some(char_id), true, base_ts)
+        .expect("origin online lock");
+    ctx.db
+        .acquire_online_lock(dest_uid, 14302, Some(dest_char_id), true, base_ts)
+        .expect("dest online lock");
+    sess.user_id = Some(origin_uid);
+
+    register_signal_tracker_subscriber(&ctx, sys_id, char_id);
+    register_signal_tracker_subscriber(&ctx, dest_sys, dest_char_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(dest_char_id);
+
+    // 3. Advance only the virtual clock so GetSignatures itself must run expiry lifecycle cleanup.
+    clock.advance_secs(3_600);
+    let rowset = handle_scanning_and_wormholes(&ctx, &mut sess, "scanMgr", "GetSignatures", &[], &kw)
+        .await
+        .expect("handled")
+        .expect("post-expiry GetSignatures succeeds");
+    let PyRep::Rowset { rows, .. } = rowset else {
+        panic!("expected Rowset from GetSignatures, got {rowset:?}");
+    };
+    let returned_ids: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    assert!(
+        !returned_ids.contains(&orig_sig_id),
+        "expired wormhole {orig_sig_id} must not be returned"
+    );
+    let rep_sig_id = returned_ids
+        .iter()
+        .find(|id| id.starts_with("THS-") && **id != orig_sig_id)
+        .cloned()
+        .expect("static replacement THS-* wormhole must be spawned and returned");
+
+    // 4. Verify entrance & exit balls despawned, K162 mirror collapsed, and replacement ball spawned.
+    assert!(
+        sys_handle.get_ball_snapshot(ent_ball_id).await.ok().flatten().is_none(),
+        "expired wormhole entrance ball must be despawned"
+    );
+    assert!(
+        dest_handle.get_ball_snapshot(exit_ball_id).await.ok().flatten().is_none(),
+        "expired wormhole exit ball must be despawned"
+    );
+    let k162_id = format!("K162-{orig_sig_id}");
+    ctx.db.with_snapshot(|snap| {
+        let mirror = snap
+            .cosmic_signatures
+            .get(&dest_sys)
+            .and_then(|l| l.iter().find(|s| s.signature_id == k162_id))
+            .expect("K162 mirror record present in dest_sys");
+        assert!(mirror.collapsed, "reciprocal {k162_id} mirror must be collapsed");
+        let rep = snap
+            .cosmic_signatures
+            .get(&sys_id)
+            .and_then(|l| l.iter().find(|s| s.signature_id == rep_sig_id))
+            .expect("replacement static wormhole persisted");
+        assert!(!rep.collapsed && rep.sig_group == "Wormhole");
+    });
+    let rep_ball_id = crate::services::space_destiny::wormhole_item_id_for_signature(sys_id, &rep_sig_id);
+    assert!(
+        sys_handle.get_ball_snapshot(rep_ball_id).await.ok().flatten().is_some(),
+        "replacement static wormhole entrance ball must be spawned"
+    );
+
+    // 5. Verify signal-tracker deltas emitted for origin expiry/replacement and destination K162 collapse.
+    let origin_notifs = ctx.drain_notifications_for_char(char_id);
+    let origin_upd = origin_notifs
+        .iter()
+        .find(|n| n.event == "OnSignalTrackerSignatureUpdate")
+        .expect("origin OnSignalTrackerSignatureUpdate emitted");
+    let PyRep::Dict(ref added_entries) = origin_upd.args[1] else {
+        panic!("expected added Dict, got {:?}", origin_upd.args[1]);
+    };
+    let PyRep::List(ref removed_entries) = origin_upd.args[2] else {
+        panic!("expected removed List, got {:?}", origin_upd.args[2]);
+    };
+    assert!(
+        added_entries.iter().any(|(k, _)| k.as_str() == Some(rep_sig_id.as_str())),
+        "origin delta must add replacement {rep_sig_id}"
+    );
+    assert!(
+        removed_entries.iter().any(|v| v.as_str() == Some(orig_sig_id.as_str())),
+        "origin delta must remove expired {orig_sig_id}"
+    );
+
+    let dest_notifs = ctx.drain_notifications_for_char(dest_char_id);
+    let dest_upd = dest_notifs
+        .iter()
+        .find(|n| n.event == "OnSignalTrackerSignatureUpdate")
+        .expect("destination OnSignalTrackerSignatureUpdate emitted for K162 collapse");
+    let PyRep::List(ref dest_removed) = dest_upd.args[2] else {
+        panic!("expected removed List, got {:?}", dest_upd.args[2]);
+    };
+    assert!(
+        dest_removed.iter().any(|v| v.as_str() == Some(k162_id.as_str())),
+        "destination delta must remove collapsed mirror {k162_id}"
+    );
+
+    // 6. Immediate follow-up GetSignatures stays read-pure (0 DB mutations).
+    let e_post = ctx.db.state_epoch();
+    let c_post = ctx.db.tx_commit_count();
+    assert!(
+        handle_scanning_and_wormholes(&ctx, &mut sess, "scanMgr", "GetSignatures", &[], &kw)
+            .await
+            .expect("handled")
+            .is_ok()
+    );
+    assert_eq!(ctx.db.state_epoch(), e_post);
+    assert_eq!(ctx.db.tx_commit_count(), c_post);
 }
