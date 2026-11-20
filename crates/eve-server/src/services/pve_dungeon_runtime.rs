@@ -10,7 +10,7 @@ use crate::router::ServerContext;
 use crate::services::notify_emitters_space_dungeons::{
     emit_dungeon_progression_notifications, emit_exiting_dungeon_on_warp_if_present,
 };
-use crate::services::pve_exploration::with_pve_exploration_reg;
+use crate::services::pve_exploration::{read_pve_exploration_reg, with_pve_exploration_reg};
 use crate::services::pve_exploration_seeding::build_type_combat_state_from_sde;
 use crate::services::pve_special_sites::make_site_npc_ball;
 use eve_db::lock_rank::AnyRwLock;
@@ -151,23 +151,29 @@ pub fn check_deadspace_mwd_allowed(
         return Err(BridgeRpcError::user_error("ModuleNotAllowedInDeadspace"));
     }
 
-    let site_disallowed = with_pve_exploration_reg(ctx, |reg| {
-        reg.sites_by_system.get(&sys_id).is_some_and(|sites| {
-            sites.iter().any(|s| {
-                !s.cleared
-                    && dist3(ship_pos, s.position) <= POCKET_RADIUS_M
-                    && crate::services::pve_dungeon_editor::get_dungeon_or_room_mwd_override(
-                        ctx,
-                        s.dungeon_id as i64,
-                        None,
-                    )
-                    .unwrap_or_else(|| {
-                        ctx.sde
-                            .dungeons
-                            .get(&s.dungeon_id)
-                            .is_some_and(|d| d.archetype_id == Some(51))
-                    })
+    let nearby_site_dungeon_ids: Vec<u32> = read_pve_exploration_reg(ctx, |reg| {
+        reg.sites_by_system
+            .get(&sys_id)
+            .map(|sites| {
+                sites
+                    .iter()
+                    .filter(|s| !s.cleared && dist3(ship_pos, s.position) <= POCKET_RADIUS_M)
+                    .map(|s| s.dungeon_id)
+                    .collect()
             })
+            .unwrap_or_default()
+    });
+    let site_disallowed = nearby_site_dungeon_ids.into_iter().any(|did| {
+        crate::services::pve_dungeon_editor::get_dungeon_or_room_mwd_override(
+            ctx,
+            did as i64,
+            None,
+        )
+        .unwrap_or_else(|| {
+            ctx.sde
+                .dungeons
+                .get(&did)
+                .is_some_and(|d| d.archetype_id == Some(51))
         })
     });
     if site_disallowed {
@@ -224,7 +230,7 @@ pub fn check_deadspace_warp_allowed(
         return Err(BridgeRpcError::user_error("NaturalPhenomenaDisruptingWarp"));
     }
 
-    let blocked_site = with_pve_exploration_reg(ctx, |reg| {
+    let blocked_site = read_pve_exploration_reg(ctx, |reg| {
         reg.sites_by_system.get(&sys_id).is_some_and(|sites| {
             sites.iter().any(|s| {
                 !s.cleared
@@ -568,7 +574,7 @@ fn resolve_site_entry_at_pos(
     sys_id: SolarSystemId,
     landed_pos: [f64; 3],
 ) -> Option<(String, Option<u32>, Option<String>, String)> {
-    if let Some(site) = with_pve_exploration_reg(ctx, |reg| {
+    if let Some(site) = read_pve_exploration_reg(ctx, |reg| {
         reg.sites_by_system.get(&sys_id).and_then(|sites| {
             sites
                 .iter()
