@@ -4620,3 +4620,3164 @@ fn zarzakh_toll_prevalidate_and_process_emit_typed_client_errors_gh_1442() {
         assert_eq!(s.wallet_journal.len(), journal_len_0);
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taken_ball_guard_drop_on_cancellation_restores_ball_and_combat_state() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_701_i64;
+    let sys_id = 30_000_142_u32;
+    let orig_pos = DVec3::new(12_345.0, -6_789.0, 42_000.0);
+
+    spawn_ship_in_space(&ctx, char_id, ship_id, 606, sys_id, orig_pos);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.shield_hp = 123.5;
+            cs.armor_hp = 234.5;
+            cs.capacitor = 77.25;
+        })
+        .await
+        .expect("modify_combat_state succeeds")
+        .expect("combat state present");
+
+    let taken = sys_handle
+        .take_ball(ship_id)
+        .await
+        .expect("take_ball must remove live ship ball");
+    assert!(
+        sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+        "ball must be absent immediately after take_ball"
+    );
+
+    // Simulate async RPC cancellation mid-handoff via `tokio::select!`.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_tx = Arc::clone(&entered);
+    let guard_handle = sys_handle.clone();
+    let handoff_fut = async move {
+        let _guard = TakenBallGuard::new(guard_handle, taken);
+        entered_tx.notify_one();
+        std::future::pending::<()>().await;
+    };
+    tokio::select! {
+        _ = handoff_fut => unreachable!("pending future cannot complete"),
+        _ = entered.notified() => {}
+    }
+
+    let (_, restored_ball) = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("dropping armed TakenBallGuard on cancellation must restore ball to source system");
+    assert!(
+        restored_ball.position.distance(orig_pos) < 1e-6,
+        "restored ball must keep original position"
+    );
+    let restored_cs = sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .expect("restored ball must preserve combat state");
+    assert!((restored_cs.shield_hp - 123.5).abs() < 1e-6);
+    assert!((restored_cs.armor_hp - 234.5).abs() < 1e-6);
+    assert!((restored_cs.capacitor - 77.25).abs() < 1e-6);
+
+    // Dropping an armed guard after a concurrent caller re-spawned the ball must NOT clobber the newer ball.
+    let taken_again = sys_handle
+        .take_ball(ship_id)
+        .await
+        .expect("second take_ball succeeds");
+    let guard_stale = TakenBallGuard::new(sys_handle.clone(), taken_again);
+    let newer_pos = DVec3::new(999_000.0, 111.0, -222.0);
+    sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 606,
+            position: newer_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .expect("concurrent respawn succeeds");
+    drop(guard_stale);
+
+    let (_, live_ball) = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("concurrently respawned ball must remain present");
+    assert!(
+        live_ball.position.distance(newer_pos) < 1e-6,
+        "stale TakenBallGuard::drop must not overwrite concurrently respawned ball"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taken_ball_guard_disarm_on_commit_does_not_reinsert_ball() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_702_i64;
+    let sys_id = 30_000_142_u32;
+    let pos = DVec3::new(5_000.0, 1_000.0, -2_000.0);
+
+    spawn_ship_in_space(&ctx, char_id, ship_id, 606, sys_id, pos);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    let taken = sys_handle
+        .take_ball(ship_id)
+        .await
+        .expect("take_ball removes ship");
+    let guard = TakenBallGuard::new(sys_handle.clone(), taken);
+    let committed = guard.disarm();
+    assert_eq!(committed.ball.id, ship_id);
+    drop(committed);
+
+    assert!(
+        sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+        "dropping a disarmed TakenBallGuard must NOT re-insert the ball into the source system"
+    );
+
+    // Explicit `restore().await` restores synchronously and disarms cleanly.
+    sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 606,
+            position: pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .expect("respawn ship for restore test");
+    let taken_for_restore = sys_handle
+        .take_ball(ship_id)
+        .await
+        .expect("take_ball for explicit restore");
+    let guard_restore = TakenBallGuard::new(sys_handle.clone(), taken_for_restore);
+    guard_restore.restore().await;
+    let (_, restored) = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("explicit TakenBallGuard::restore must re-insert the ball");
+    assert!(restored.position.distance(pos) < 1e-6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stargate_jump_cancelled_mid_handoff_restores_ball_via_taken_ball_guard() {
+    let ctx = Arc::new(test_ctx());
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_703_i64;
+    let old_sys = 30_000_142_u32;
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id == old_sys && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH)
+        .cloned()
+        .expect("Jita must have a non-Zarzakh stargate");
+    let ship_pos = gate.position + DVec3::new(500.0, 0.0, 0.0);
+
+    spawn_ship_in_space(&ctx, char_id, ship_id, 606, old_sys, ship_pos);
+    let old_handle = ctx.systems.get_or_spawn(old_sys);
+    old_handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.shield_hp = 210.0;
+            cs.capacitor = 140.0;
+        })
+        .await
+        .unwrap()
+        .expect("ship combat state present");
+
+    let mut sess = SessionState {
+        session_id: 70_301,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(old_sys),
+        station_id: None,
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    mark_char_online(&ctx, &mut sess, char_id);
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_tx = Arc::clone(&entered);
+    let old_handle_check = old_handle.clone();
+    set_post_take_ball_hook_for_test(
+        &ctx,
+        char_id,
+        Some(Box::new(move || {
+            Box::pin(async move {
+                assert!(
+                    old_handle_check
+                        .get_ball_snapshot(ship_id)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "ball must already be taken when post-take-ball hook fires"
+                );
+                entered_tx.notify_one();
+                std::future::pending::<()>().await;
+            })
+        })),
+    );
+
+    let kw = HashMap::new();
+    let jump_args = [PyRep::Integer(gate.stargate_id)];
+    tokio::select! {
+        _ = handle(&ctx, &mut sess, None, "beyonce", "CmdStargateJump", &jump_args, &kw) => {
+            unreachable!("cancelled stargate jump future must not finish")
+        }
+        _ = entered.notified() => {}
+    }
+
+    let (_, restored) = old_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("cancelling CmdStargateJump mid-handoff must restore ship ball via TakenBallGuard");
+    assert!(restored.position.distance(ship_pos) < 1e-6);
+    let restored_cs = old_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .expect("restored combat state present");
+    assert!((restored_cs.shield_hp - 210.0).abs() < 1e-6);
+    assert!((restored_cs.capacitor - 140.0).abs() < 1e-6);
+    assert_eq!(sess.solar_system_id, Some(old_sys));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].solar_system_id, old_sys);
+        assert_eq!(snap.items[&ship_id].location_id, i64::from(old_sys));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dock_cancelled_mid_handoff_restores_ball_via_taken_ball_guard() {
+    let ctx = Arc::new(test_ctx());
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_704_i64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let st_pos = ctx.sde.stations[&st_id].position;
+    let ship_pos = st_pos + DVec3::new(500.0, 0.0, 0.0);
+
+    spawn_ship_in_space(&ctx, char_id, ship_id, 606, sys_id, ship_pos);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.shield_hp = 315.0;
+            cs.capacitor = 188.0;
+        })
+        .await
+        .unwrap()
+        .expect("ship combat state present");
+
+    let mut sess = SessionState {
+        session_id: 70_401,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_tx = Arc::clone(&entered);
+    let sys_handle_check = sys_handle.clone();
+    set_post_take_ball_hook_for_test(
+        &ctx,
+        char_id,
+        Some(Box::new(move || {
+            Box::pin(async move {
+                assert!(
+                    sys_handle_check
+                        .get_ball_snapshot(ship_id)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "ball must already be taken for docking when hook fires"
+                );
+                entered_tx.notify_one();
+                std::future::pending::<()>().await;
+            })
+        })),
+    );
+
+    let kw = HashMap::new();
+    let dock_args = [PyRep::Integer(st_id)];
+    tokio::select! {
+        _ = handle(&ctx, &mut sess, None, "beyonce", "CmdDock", &dock_args, &kw) => {
+            unreachable!("cancelled CmdDock future must not finish")
+        }
+        _ = entered.notified() => {}
+    }
+
+    let (_, restored) = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("cancelling CmdDock mid-handoff must restore ship ball via TakenBallGuard");
+    assert!(restored.position.distance(ship_pos) < 1e-6);
+    let restored_cs = sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .expect("restored combat state present");
+    assert!((restored_cs.shield_hp - 315.0).abs() < 1e-6);
+    assert!((restored_cs.capacitor - 188.0).abs() < 1e-6);
+    assert_eq!(sess.station_id, None);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].station_id, None);
+        assert_eq!(snap.characters[&char_id].solar_system_id, sys_id);
+        assert_eq!(snap.items[&ship_id].location_id, i64::from(sys_id));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stargate_jump_spawn_ball_with_meta_failure_rolls_back_db_toll_and_restores_ball() {
+    // --- Case 1: Standard stargate jump when destination spawn_ball_with_meta fails ---
+    {
+        let ctx = test_ctx();
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_705_i64;
+        let old_sys = 30_000_142_u32;
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .find(|j| {
+                j.from_solar_system_id == old_sys && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+            })
+            .cloned()
+            .expect("Jita must have a non-Zarzakh stargate");
+        let dest_sys = gate.to_solar_system_id;
+        let ship_pos = gate.position + DVec3::new(500.0, 0.0, 0.0);
+
+        spawn_ship_in_space(&ctx, char_id, ship_id, 606, old_sys, ship_pos);
+        let (orig_constellation, orig_region) = ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&char_id];
+            (ch.constellation_id, ch.region_id)
+        });
+        let old_handle = ctx.systems.get_or_spawn(old_sys);
+        old_handle
+            .modify_combat_state(ship_id, |cs| {
+                cs.shield_hp = 175.0;
+                cs.capacitor = 99.5;
+            })
+            .await
+            .unwrap()
+            .expect("combat state present");
+
+        // Pre-spawn destination actor and inject failure on its next command (`SpawnBallWithMeta`).
+        let dest_handle = ctx.systems.get_or_spawn(dest_sys);
+        dest_handle
+            .panic_next_command_for_test
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut sess = SessionState {
+            session_id: 70_501,
+            user_id: Some(1),
+            character_id: Some(char_id),
+            solar_system_id: Some(old_sys),
+            station_id: None,
+            ship_id: Some(ship_id),
+            ..Default::default()
+        };
+        mark_char_online(&ctx, &mut sess, char_id);
+
+        let kw = HashMap::new();
+        let err = handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+        )
+        .await
+        .expect("CmdStargateJump handled")
+        .expect_err("spawn_ball_with_meta failure must return Err instead of silently succeeding");
+        assert_eq!(err.code, "SystemTransitionFailed");
+        assert!(
+            matches!(
+                err.client_error.as_deref(),
+                Some(eve_proto::ClientError::CustomInfo(_))
+            ),
+            "expected typed ClientError::CustomInfo, got {:?}",
+            err.client_error
+        );
+        assert!(err.message.contains(&dest_sys.to_string()));
+
+        // Session, DB, and ballparks must all be rolled back cleanly to `old_sys`.
+        assert_eq!(sess.solar_system_id, Some(old_sys));
+        ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&char_id];
+            assert_eq!(ch.solar_system_id, old_sys);
+            assert_eq!(ch.constellation_id, orig_constellation);
+            assert_eq!(ch.region_id, orig_region);
+            assert_eq!(ch.station_id, None);
+            assert_eq!(ch.structure_id, None);
+            assert_eq!(snap.items[&ship_id].location_id, i64::from(old_sys));
+        });
+        let (_, restored) = old_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .unwrap()
+            .expect("ship ball must be restored into source system on destination spawn error");
+        assert!(restored.position.distance(ship_pos) < 1e-6);
+        let restored_cs = old_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .expect("restored combat state present");
+        assert!((restored_cs.shield_hp - 175.0).abs() < 1e-6);
+        assert!((restored_cs.capacitor - 99.5).abs() < 1e-6);
+        assert!(
+            dest_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+            "ship ball must NOT exist in destination system after failed spawn"
+        );
+    }
+
+    // --- Case 2: Zarzakh stargate jump with toll when destination spawn_ball_with_meta fails ---
+    {
+        let ctx = test_ctx();
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_706_i64;
+        let zarzakh_gate = ctx
+            .sde
+            .jumps
+            .values()
+            .find(|j| j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH)
+            .cloned()
+            .expect("SDE must include a stargate leading to Zarzakh");
+        let old_sys = zarzakh_gate.from_solar_system_id;
+        let ship_pos = zarzakh_gate.position + DVec3::new(500.0, 0.0, 0.0);
+        let start_isk = eve_db::IskCents::from_isk(500_000_000);
+
+        spawn_ship_in_space(&ctx, char_id, ship_id, 587, old_sys, ship_pos);
+        ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.balance = start_isk;
+            snap.zarzakh_gate_locks.remove(&char_id);
+        });
+        let old_handle = ctx.systems.get_or_spawn(old_sys);
+        let dest_handle = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+        dest_handle
+            .panic_next_command_for_test
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut sess = SessionState {
+            session_id: 70_601,
+            user_id: Some(1),
+            character_id: Some(char_id),
+            solar_system_id: Some(old_sys),
+            station_id: None,
+            ship_id: Some(ship_id),
+            ..Default::default()
+        };
+        mark_char_online(&ctx, &mut sess, char_id);
+
+        let mut kw = HashMap::new();
+        kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+        let err = handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &[PyRep::Integer(zarzakh_gate.stargate_id)],
+            &kw,
+        )
+        .await
+        .expect("CmdStargateJump handled")
+        .expect_err("Zarzakh spawn_ball_with_meta failure must return Err");
+        assert_eq!(err.code, "SystemTransitionFailed");
+        assert!(matches!(
+            err.client_error.as_deref(),
+            Some(eve_proto::ClientError::CustomInfo(_))
+        ));
+
+        assert_eq!(sess.solar_system_id, Some(old_sys));
+        ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&char_id];
+            assert_eq!(ch.solar_system_id, old_sys);
+            assert_eq!(
+                ch.balance, start_isk,
+                "Zarzakh toll must be refunded in full when destination spawn fails"
+            );
+            assert!(
+                !snap.zarzakh_gate_locks.contains_key(&char_id),
+                "Zarzakh 6-hour gate lock must NOT be recorded when destination spawn fails"
+            );
+            assert_eq!(snap.items[&ship_id].location_id, i64::from(old_sys));
+            assert!(
+                snap.wallet_journal.iter().any(|j| {
+                    j.character_id == char_id
+                        && j.entry_type == "zarzakh_gate_toll_refund"
+                        && j.amount == eve_db::IskCents::from_isk(10_000)
+                }),
+                "Zarzakh toll refund journal entry must be recorded"
+            );
+        });
+        assert!(
+            old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+            "ship ball must be restored into origin system after failed Zarzakh spawn"
+        );
+        assert!(
+            dest_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+            "ship ball must NOT exist in Zarzakh after failed spawn"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cmd_stargate_jump_cancel_queued_spawn_discards_closed_reply_and_rolls_back_1237() {
+    // Subcheck A: direct SpawnBallWithMeta with dropped reply receiver must not spawn a ball.
+    {
+        let ctx = test_ctx();
+        let sys_h = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+        let direct_ship_id = 895_707_i64;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        drop(reply_rx);
+        sys_h
+            .cmd_tx
+            .send(crate::system_actor::SystemCommand::SpawnBallWithMeta {
+                ball: Ball {
+                    id: direct_ship_id,
+                    type_id: 587,
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 350.0,
+                    inertia: 2.0,
+                    mass: 1_100_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                combat_state: CombatState::default(),
+                slim_meta: eve_destiny::SlimItemMeta::default(),
+                reply: reply_tx,
+            })
+            .await
+            .expect("enqueue closed-reply SpawnBallWithMeta");
+        assert!(
+            sys_h.get_ball_snapshot(direct_ship_id).await.unwrap().is_none(),
+            "closed-reply SpawnBallWithMeta must discard spawning without mutating ballpark"
+        );
+    }
+
+    // Subcheck B: cancel CmdStargateJump while SpawnBallWithMeta sits queued behind paused actor.
+    let ctx = test_ctx();
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| {
+            j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH
+                && j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+        })
+        .min_by_key(|j| j.stargate_id)
+        .cloned()
+        .expect("SDE must include a Zarzakh-bound gate");
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_708_i64;
+    let start_isk = eve_db::IskCents::from_isk(100_000);
+    spawn_ship_in_space(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.zarzakh_gate_locks.remove(&char_id);
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.war_faction_id = None;
+        ch.balance = start_isk;
+    });
+    let old_handle = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("origin system loaded");
+    assert!(old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+
+    let dest_handle = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+    let (paused_tx, paused_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    *dest_handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        let _ = paused_tx.send(());
+        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+    }));
+    let step_task = tokio::spawn({
+        let h = dest_handle.clone();
+        async move { h.step_manual(0.0).await }
+    });
+    paused_rx
+        .await
+        .expect("destination actor must pause inside step_manual hook");
+
+    let (enqueued_tx, mut enqueued_rx) = tokio::sync::oneshot::channel::<()>();
+    crate::system_actor::set_spawn_ball_with_meta_after_send_hook_for_test(
+        SOLAR_SYSTEM_ZARZAKH,
+        ship_id,
+        Some(Box::new(move || {
+            Box::pin(async move {
+                let _ = enqueued_tx.send(());
+                std::future::pending::<()>().await;
+            })
+        })),
+    );
+
+    let mut sess = SessionState::new(70_701);
+    mark_char_online(&ctx, &mut sess, char_id);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(gate.from_solar_system_id);
+
+    let args = [
+        PyRep::Integer(gate.stargate_id),
+        PyRep::Integer(gate.destination_stargate_id),
+        PyRep::Integer(ship_id),
+    ];
+    let mut confirm_kw = HashMap::new();
+    confirm_kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+
+    {
+        let mut jump_fut = Box::pin(handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &args,
+            &confirm_kw,
+        ));
+        tokio::select! {
+            biased;
+            res = &mut enqueued_rx => {
+                res.expect("after_send_hook must signal queued SpawnBallWithMeta");
+            }
+            res = &mut jump_fut => {
+                panic!("expected cancellation while awaiting queued SpawnBallWithMeta, got {res:?}");
+            }
+        }
+        drop(jump_fut);
+    }
+
+    release_tx
+        .send(())
+        .expect("unblock paused destination actor");
+    step_task
+        .await
+        .expect("step_manual join")
+        .expect("step_manual result");
+
+    assert!(
+        dest_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+        "cancelled queued SpawnBallWithMeta must discard spawn and leave zero ball in Zarzakh"
+    );
+    assert!(
+        old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+        "origin ship ball must be restored on queued spawn cancellation"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.solar_system_id, gate.from_solar_system_id);
+        assert_eq!(ch.balance, start_isk, "Zarzakh toll must be refunded cleanly");
+        assert!(
+            !snap.zarzakh_gate_locks.contains_key(&char_id),
+            "Zarzakh gate lock must NOT be recorded on cancelled jump"
+        );
+        assert!(
+            snap.wallet_journal.iter().any(|j| {
+                j.character_id == char_id
+                    && j.entry_type == "zarzakh_gate_toll_refund"
+                    && j.amount == eve_db::IskCents::from_isk(10_000)
+            }),
+            "cancelled Zarzakh jump must record toll refund journal entry"
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cmd_stargate_jump_cancel_after_dest_spawn_removes_dest_ball_and_restores_origin_1237() {
+    let ctx = test_ctx();
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| {
+            j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH
+                && j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+        })
+        .min_by_key(|j| j.stargate_id)
+        .cloned()
+        .expect("SDE must include a Zarzakh-bound gate");
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_709_i64;
+    let start_isk = eve_db::IskCents::from_isk(100_000);
+    spawn_ship_in_space(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.zarzakh_gate_locks.remove(&char_id);
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.war_faction_id = None;
+        ch.balance = start_isk;
+    });
+    let old_handle = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("origin system loaded");
+    assert!(old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+
+    let dest_handle = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+    let dest_handle_hook = dest_handle.clone();
+    let (materialized_tx, mut materialized_rx) = tokio::sync::oneshot::channel::<bool>();
+    crate::system_actor::set_spawn_ball_with_meta_pre_reply_hook_for_test(
+        SOLAR_SYSTEM_ZARZAKH,
+        ship_id,
+        Some(Box::new(move || {
+            Box::pin(async move {
+                let present = dest_handle_hook
+                    .get_ball_snapshot(ship_id)
+                    .await
+                    .unwrap()
+                    .is_some();
+                let _ = materialized_tx.send(present);
+                std::future::pending::<()>().await;
+            })
+        })),
+    );
+
+    let mut sess = SessionState::new(70_702);
+    mark_char_online(&ctx, &mut sess, char_id);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(gate.from_solar_system_id);
+
+    let args = [
+        PyRep::Integer(gate.stargate_id),
+        PyRep::Integer(gate.destination_stargate_id),
+        PyRep::Integer(ship_id),
+    ];
+    let mut confirm_kw = HashMap::new();
+    confirm_kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+
+    {
+        let mut jump_fut = Box::pin(handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &args,
+            &confirm_kw,
+        ));
+        tokio::select! {
+            biased;
+            res = &mut materialized_rx => {
+                assert!(
+                    res.expect("pre_reply_hook signal"),
+                    "SpawnBallWithMeta must have already materialized destination ball before cancel"
+                );
+            }
+            res = &mut jump_fut => {
+                panic!("expected cancellation during pre_reply_hook suspension, got {res:?}");
+            }
+        }
+        drop(jump_fut);
+    }
+
+    assert!(
+        dest_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+        "StargateRollbackGuard::drop must remove already-spawned destination ball after post-spawn cancellation"
+    );
+    assert!(
+        old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+        "origin ship ball must be restored after post-spawn cancellation"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.solar_system_id, gate.from_solar_system_id);
+        assert_eq!(ch.balance, start_isk, "Zarzakh toll must be refunded cleanly");
+        assert!(
+            !snap.zarzakh_gate_locks.contains_key(&char_id),
+            "Zarzakh gate lock must NOT exist after post-spawn cancellation"
+        );
+        assert!(
+            snap.wallet_journal.iter().any(|j| {
+                j.character_id == char_id
+                    && j.entry_type == "zarzakh_gate_toll_refund"
+                    && j.amount == eve_db::IskCents::from_isk(10_000)
+            }),
+            "post-spawn cancellation must record Zarzakh toll refund journal entry"
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cmd_stargate_jump_concurrent_transition_suppresses_toll_refund_while_unrelated_version_bump_rolls_back_1237() {
+    // Subtest A: superseding DB transition causes DB rollback to return false -> toll refund MUST NOT fire.
+    {
+        let ctx = test_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH
+                    && j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("SDE must include a Zarzakh-bound gate");
+        let other_sys = ctx
+            .sde
+            .solar_systems
+            .keys()
+            .copied()
+            .find(|&sid| sid != gate.from_solar_system_id && sid != SOLAR_SYSTEM_ZARZAKH)
+            .expect("third solar system");
+
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_710_i64;
+        let start_isk = eve_db::IskCents::from_isk(100_000);
+        spawn_ship_in_space(
+            &ctx,
+            char_id,
+            ship_id,
+            587,
+            gate.from_solar_system_id,
+            gate.position,
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.zarzakh_gate_locks.remove(&char_id);
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.war_faction_id = None;
+            ch.balance = start_isk;
+        });
+        let old_handle = ctx
+            .systems
+            .get_handle(gate.from_solar_system_id)
+            .expect("origin system loaded");
+        assert!(old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+
+        let dest_handle = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+        let db_hook = Arc::clone(&ctx.db);
+        let sde_hook = Arc::clone(&ctx.sde);
+        let (raced_tx, mut raced_rx) = tokio::sync::oneshot::channel::<()>();
+        crate::system_actor::set_spawn_ball_with_meta_pre_reply_hook_for_test(
+            SOLAR_SYSTEM_ZARZAKH,
+            ship_id,
+            Some(Box::new(move || {
+                Box::pin(async move {
+                    db_hook
+                        .transition_character_solar_system_if_at(
+                            char_id,
+                            SOLAR_SYSTEM_ZARZAKH,
+                            other_sys,
+                            &sde_hook,
+                        )
+                        .expect("superseding DB transition during pre_reply_hook must commit");
+                    let _ = raced_tx.send(());
+                    std::future::pending::<()>().await;
+                })
+            })),
+        );
+
+        let mut sess = SessionState::new(70_703);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        let mut confirm_kw = HashMap::new();
+        confirm_kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+
+        {
+            let mut jump_fut = Box::pin(handle(
+                &ctx,
+                &mut sess,
+                None,
+                "beyonce",
+                "CmdStargateJump",
+                &args,
+                &confirm_kw,
+            ));
+            tokio::select! {
+                biased;
+                res = &mut raced_rx => res.expect("superseding transition signal"),
+                res = &mut jump_fut => panic!("expected cancellation after superseding transition, got {res:?}"),
+            }
+            drop(jump_fut);
+        }
+
+        assert!(
+            dest_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+            "refused DB rollback must NOT remove the live destination ball"
+        );
+        assert!(
+            old_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+            "refused DB rollback must NOT restore a duplicate ghost ball in origin system"
+        );
+        ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&char_id];
+            assert_eq!(ch.solar_system_id, other_sys, "superseding system must remain active");
+            assert_eq!(
+                ch.balance,
+                eve_db::IskCents::from_isk(90_000),
+                "Zarzakh toll MUST NOT be refunded when DB rollback returns false"
+            );
+            assert!(
+                !snap
+                    .wallet_journal
+                    .iter()
+                    .any(|j| j.character_id == char_id && j.entry_type == "zarzakh_gate_toll_refund"),
+                "wallet journal must NOT contain a toll refund when DB rollback refused"
+            );
+        });
+    }
+
+    // Subtest B: unrelated `ch.version` increment before actor failure MUST still allow `rollback_now`
+    // to revert the DB transition and refund the Zarzakh toll.
+    {
+        let ctx = test_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH
+                    && j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("SDE must include a Zarzakh-bound gate");
+
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_711_i64;
+        let start_isk = eve_db::IskCents::from_isk(100_000);
+        spawn_ship_in_space(
+            &ctx,
+            char_id,
+            ship_id,
+            587,
+            gate.from_solar_system_id,
+            gate.position,
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.zarzakh_gate_locks.remove(&char_id);
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.war_faction_id = None;
+            ch.balance = start_isk;
+        });
+        let old_handle = ctx
+            .systems
+            .get_handle(gate.from_solar_system_id)
+            .expect("origin system loaded");
+        assert!(old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+
+        let dest_handle = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        *dest_handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+            let _ = paused_tx.send(());
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+        }));
+        let step_task = tokio::spawn({
+            let h = dest_handle.clone();
+            async move { h.step_manual(0.0).await }
+        });
+        paused_rx
+            .await
+            .expect("destination actor must pause inside step_manual hook");
+
+        let db_hook = Arc::clone(&ctx.db);
+        let dest_hook = dest_handle.clone();
+        crate::system_actor::set_spawn_ball_with_meta_after_send_hook_for_test(
+            SOLAR_SYSTEM_ZARZAKH,
+            ship_id,
+            Some(Box::new(move || {
+                Box::pin(async move {
+                    db_hook.with_mut_snapshot(|snap| {
+                        snap.characters.get_mut(&char_id).unwrap().version += 1;
+                    });
+                    dest_hook
+                        .panic_next_command_for_test
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let _ = release_tx.send(());
+                })
+            })),
+        );
+
+        let mut sess = SessionState::new(70_704);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        let mut confirm_kw = HashMap::new();
+        confirm_kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+
+        let err = handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &args,
+            &confirm_kw,
+        )
+        .await
+        .expect("CmdStargateJump must be handled")
+        .expect_err("simulated actor panic must fail transition and invoke rollback_now");
+        assert_eq!(err.code, "SystemTransitionFailed");
+        step_task
+            .await
+            .expect("step_manual join")
+            .expect("step_manual result");
+
+        assert!(
+            old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+            "origin ball must be restored even after unrelated ch.version bump"
+        );
+        ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&char_id];
+            assert_eq!(ch.solar_system_id, gate.from_solar_system_id);
+            assert_eq!(
+                ch.balance, start_isk,
+                "Zarzakh toll MUST still be refunded when only ch.version bumped"
+            );
+            assert!(
+                snap.wallet_journal.iter().any(|j| {
+                    j.character_id == char_id
+                        && j.entry_type == "zarzakh_gate_toll_refund"
+                        && j.amount == eve_db::IskCents::from_isk(10_000)
+                }),
+                "toll refund journal must be recorded when rollback succeeds after ch.version bump"
+            );
+        });
+    }
+}
+
+#[tokio::test]
+async fn cmd_stargate_jump_rollback_restores_extra_ship_and_preserves_nested_corp_ownership_1237() {
+    let ctx = test_ctx();
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| {
+            j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+        })
+        .min_by_key(|j| j.stargate_id)
+        .cloned()
+        .expect("SDE must include a non-Zarzakh gate");
+
+    let char_id = 90_000_001_i64;
+    let active_ship_id = 895_712_i64;
+    let extra_ship_id = 895_713_i64;
+    let nested_item_id = 895_713_999_i64;
+    let corp_owner_id = 98_000_001_i64;
+
+    spawn_ship_in_space(
+        &ctx,
+        char_id,
+        extra_ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            active_ship_id,
+            InventoryItemRecord {
+                item_id: active_ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: gate.from_solar_system_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = active_ship_id;
+        snap.items.insert(
+            nested_item_id,
+            InventoryItemRecord {
+                item_id: nested_item_id,
+                type_id: 34,
+                owner_id: corp_owner_id,
+                location_id: extra_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 42,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let old_handle = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("origin system loaded");
+    assert!(old_handle.get_ball_snapshot(extra_ship_id).await.unwrap().is_some());
+
+    let dest_handle = ctx.systems.get_or_spawn(gate.to_solar_system_id);
+    dest_handle
+        .panic_next_command_for_test
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let mut sess = SessionState::new(70_705);
+    mark_char_online(&ctx, &mut sess, char_id);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(extra_ship_id);
+    sess.solar_system_id = Some(gate.from_solar_system_id);
+
+    let args = [
+        PyRep::Integer(gate.stargate_id),
+        PyRep::Integer(gate.destination_stargate_id),
+        PyRep::Integer(extra_ship_id),
+    ];
+    let empty_kw = HashMap::new();
+    let err = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdStargateJump",
+        &args,
+        &empty_kw,
+    )
+    .await
+    .expect("CmdStargateJump must be handled")
+    .expect_err("simulated actor panic must fail transition and trigger atomic rollback");
+    assert_eq!(err.code, "SystemTransitionFailed");
+
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.solar_system_id, gate.from_solar_system_id);
+        assert_eq!(ch.active_ship_id, active_ship_id);
+        let active_rec = &snap.items[&active_ship_id];
+        assert_eq!(active_rec.location_id, gate.from_solar_system_id as i64);
+        assert_eq!(active_rec.flag, InventoryFlag::None);
+        let extra_rec = &snap.items[&extra_ship_id];
+        assert_eq!(extra_rec.location_id, gate.from_solar_system_id as i64);
+        assert_eq!(extra_rec.flag, InventoryFlag::None);
+        let nested_rec = &snap.items[&nested_item_id];
+        assert_eq!(nested_rec.location_id, extra_ship_id);
+        assert_eq!(nested_rec.flag, InventoryFlag::Cargo);
+        assert_eq!(
+            nested_rec.owner_id, corp_owner_id,
+            "atomic rollback MUST preserve nested corp-owned item owner_id without recursive re-ownership"
+        );
+    });
+    assert!(
+        old_handle.get_ball_snapshot(extra_ship_id).await.unwrap().is_some(),
+        "extra_ship_id ball must be restored to origin system on failure"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_ball_if_absent_and_taken_guard_drop_do_not_overwrite_queued_spawn_1237() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    // Part A: explicit restore_ball_if_absent must not clobber a concurrently spawned live ball.
+    let direct_ship_id = 895_714_i64;
+    spawn_ship_in_space(
+        &ctx,
+        90_000_001,
+        direct_ship_id,
+        587,
+        sys_id,
+        DVec3::new(100.0, 0.0, 0.0),
+    );
+    assert!(sys_handle.get_ball_snapshot(direct_ship_id).await.unwrap().is_some());
+    let taken_a = sys_handle
+        .take_ball(direct_ship_id)
+        .await
+        .expect("ball present to take");
+    let replacement_pos = DVec3::new(9_000.0, 0.0, 0.0);
+    sys_handle
+        .spawn_ball(Ball {
+            id: direct_ship_id,
+            type_id: 587,
+            position: replacement_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .expect("respawn replacement ball");
+    sys_handle
+        .restore_ball_if_absent(taken_a)
+        .await
+        .expect("restore_ball_if_absent must succeed cleanly as a no-op when ball exists");
+    let (_, after_a) = sys_handle
+        .get_ball_snapshot(direct_ship_id)
+        .await
+        .unwrap()
+        .expect("replacement ball remains live");
+    assert_eq!(after_a.position, replacement_pos);
+
+    // Part B: queued SpawnBall ahead of TakenBallGuard::drop while actor is paused must win atomically.
+    let queued_ship_id = 895_715_i64;
+    spawn_ship_in_space(
+        &ctx,
+        90_000_001,
+        queued_ship_id,
+        587,
+        sys_id,
+        DVec3::new(200.0, 0.0, 0.0),
+    );
+    assert!(sys_handle.get_ball_snapshot(queued_ship_id).await.unwrap().is_some());
+    let taken_b = sys_handle
+        .take_ball(queued_ship_id)
+        .await
+        .expect("ball present to take");
+    assert!(sys_handle.get_ball_snapshot(queued_ship_id).await.unwrap().is_none());
+
+    let guard = TakenBallGuard::new(sys_handle.clone(), taken_b);
+    let (paused_tx, paused_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    *sys_handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        let _ = paused_tx.send(());
+        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+    }));
+    let step_task = tokio::spawn({
+        let h = sys_handle.clone();
+        async move { h.step_manual(0.0).await }
+    });
+    paused_rx
+        .await
+        .expect("system actor must pause inside step_manual hook");
+
+    let newer_pos = DVec3::new(42_000.0, 1.0, -2.0);
+    let (spawn_tx, _spawn_rx) = tokio::sync::oneshot::channel();
+    sys_handle
+        .cmd_tx
+        .send(crate::system_actor::SystemCommand::SpawnBall {
+            ball: Ball {
+                id: queued_ship_id,
+                type_id: 587,
+                position: newer_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_100_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            reply: spawn_tx,
+        })
+        .await
+        .expect("queue SpawnBall behind paused actor");
+    drop(guard);
+
+    release_tx.send(()).expect("unblock paused actor");
+    step_task
+        .await
+        .expect("step_manual join")
+        .expect("step_manual result");
+
+    let (_, final_ball) = sys_handle
+        .get_ball_snapshot(queued_ship_id)
+        .await
+        .unwrap()
+        .expect("queued SpawnBall must remain live");
+    assert_eq!(
+        final_ball.position, newer_pos,
+        "TakenBallGuard::drop RestoreBallIfAbsent queued behind SpawnBall must NOT clobber newer live ball"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cmd_stargate_jump_preserves_matching_space_entry_epoch_for_post_jump_persistence_and_rollback_1237() {
+    // Part A (BF-1237C-01 forward): `dest_handle` caches the post-increment `space_entry_epoch`
+    // so post-jump `flush_condition_checkpoint` / `apply_condition_checkpoint_for_system_in_db`,
+    // `item_positions`, and warp-landing persistence all succeed in `dest_sys_id`.
+    {
+        let ctx = test_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("SDE must include a non-Zarzakh stargate pair");
+
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_720_i64;
+        let pre_epoch = 4_u64;
+        spawn_ship_in_space(
+            &ctx,
+            char_id,
+            ship_id,
+            587,
+            gate.from_solar_system_id,
+            gate.position,
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sp6_lifecycle.ship_combat_hp.insert(
+                -ship_id,
+                eve_db::PersistedCombatHp {
+                    shield_hp: 0.0,
+                    armor_hp: gate.from_solar_system_id as f64,
+                    hull_hp: pre_epoch as f64,
+                },
+            );
+            snap.item_positions
+                .insert(ship_id, gate.position.to_array());
+        });
+
+        let mut sess = SessionState::new(70_720);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &args,
+            &HashMap::new(),
+        )
+        .await
+        .expect("handled")
+        .expect("CmdStargateJump succeeds");
+
+        let dest_sys_id = gate.to_solar_system_id;
+        let dest_handle = ctx
+            .systems
+            .get_handle(dest_sys_id)
+            .expect("destination system loaded");
+        let expected_epoch = pre_epoch + 1;
+        assert_eq!(
+            crate::sp6_lifecycle::current_ship_space_entry_epoch(&ctx.db, ship_id),
+            expected_epoch,
+            "CmdStargateJump must advance DB space_entry_epoch by 1"
+        );
+
+        let (_, dest_ball) = dest_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .unwrap()
+            .expect("ship spawned in destination system");
+        let moved_pos = dest_ball.position + DVec3::new(12_345.0, -500.0, 250.0);
+        assert!(dest_handle.set_ball_position(ship_id, moved_pos).await);
+        dest_handle
+            .apply_true_damage(ship_id, 15.0)
+            .await
+            .expect("apply_true_damage");
+
+        let written = dest_handle
+            .flush_condition_checkpoint()
+            .await
+            .expect("flush_condition_checkpoint");
+        assert_eq!(
+            written, 1,
+            "destination condition checkpoint MUST commit with matching space_entry_epoch == E + 1"
+        );
+        ctx.db.with_snapshot(|snap| {
+            let persisted_pos = snap
+                .item_positions
+                .get(&ship_id)
+                .copied()
+                .expect("item_positions persisted by condition checkpoint");
+            assert!(
+                (DVec3::from_array(persisted_pos) - moved_pos).length() < 1e-3,
+                "post-jump item_positions must persist via condition checkpoint"
+            );
+        });
+
+        let warp_dest = moved_pos + DVec3::new(300_000.0, 0.0, 0.0);
+        dest_handle
+            .set_ball_position(ship_id, warp_dest - DVec3::new(100.0, 0.0, 0.0))
+            .await;
+        dest_handle
+            .set_warp_movement_mode(
+                ship_id,
+                MovementMode::Warp {
+                    origin: moved_pos,
+                    destination: warp_dest,
+                    warp_speed_au_s: 15.0,
+                    total_distance: moved_pos.distance(warp_dest),
+                    phase: eve_destiny::WarpPhase::Decelerating,
+                    elapsed_warp_time: 100.0,
+                },
+                crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+            )
+            .await
+            .expect("enter warp in destination system");
+        for _ in 0..40 {
+            dest_handle.step_manual(1.0).await.expect("step_manual");
+            let (_, cur) = dest_handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .unwrap()
+                .expect("ship still in space");
+            if !matches!(cur.mode, MovementMode::Warp { .. }) {
+                break;
+            }
+        }
+        let (_, landed_ball) = dest_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .unwrap()
+            .expect("ship present after warp");
+        assert!(
+            !matches!(landed_ball.mode, MovementMode::Warp { .. }),
+            "ship must land from warp"
+        );
+        ctx.db.with_snapshot(|snap| {
+            let persisted_pos = snap
+                .item_positions
+                .get(&ship_id)
+                .copied()
+                .expect("warp landing must persist item_positions");
+            assert!(
+                (DVec3::from_array(persisted_pos) - landed_ball.position).length() < 1.0,
+                "post-jump warp landing must persist landed position cleanly: db={persisted_pos:?} ball={:?}",
+                landed_ball.position
+            );
+        });
+    }
+
+    // Part B (BF-1237C-01 rollback): spawn failure reverts `ship_combat_hp[ship_id]`,
+    // `ship_combat_hp[-ship_id]`, `item_positions[ship_id]`, and `DAMAGE`/`ARMOR_DAMAGE`.
+    {
+        let ctx = test_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("SDE must include a non-Zarzakh stargate pair");
+
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_721_i64;
+        let pre_epoch = 7_u64;
+        let pre_pos = [1234.5, -678.0, 910.25];
+        let pre_hp = eve_db::PersistedCombatHp {
+            shield_hp: 111.0,
+            armor_hp: 222.0,
+            hull_hp: 333.0,
+        };
+        let pre_meta = eve_db::PersistedCombatHp {
+            shield_hp: 42.0,
+            armor_hp: gate.from_solar_system_id as f64,
+            hull_hp: pre_epoch as f64,
+        };
+        let pre_armor_dmg = 17.5_f64;
+        spawn_ship_in_space(
+            &ctx,
+            char_id,
+            ship_id,
+            587,
+            gate.from_solar_system_id,
+            gate.position,
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sp6_lifecycle.ship_combat_hp.insert(ship_id, pre_hp);
+            snap.sp6_lifecycle
+                .ship_combat_hp
+                .insert(-ship_id, pre_meta);
+            snap.item_positions.insert(ship_id, pre_pos);
+            let sh = snap.items.get_mut(&ship_id).expect("ship item exists");
+            sh.dynamic_attributes
+                .insert(attr_ids::ARMOR_DAMAGE, pre_armor_dmg);
+            sh.dynamic_attributes.remove(&attr_ids::DAMAGE);
+        });
+        let old_handle = ctx
+            .systems
+            .get_handle(gate.from_solar_system_id)
+            .expect("origin handle");
+        let dest_handle = ctx.systems.get_or_spawn(gate.to_solar_system_id);
+        dest_handle
+            .panic_next_command_for_test
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let mut sess = SessionState::new(70_721);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        let err = handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &args,
+            &HashMap::new(),
+        )
+        .await
+        .expect("handled")
+        .expect_err("spawn panic must unwind transition");
+        assert_eq!(err.code, "SystemTransitionFailed");
+
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                snap.sp6_lifecycle.ship_combat_hp.get(&ship_id).copied(),
+                Some(pre_hp),
+                "ship_combat_hp[ship_id] must be rolled back atomically"
+            );
+            assert_eq!(
+                snap.sp6_lifecycle.ship_combat_hp.get(&(-ship_id)).copied(),
+                Some(pre_meta),
+                "ship_combat_hp[-ship_id] epoch must be rolled back atomically"
+            );
+            assert_eq!(
+                snap.item_positions.get(&ship_id).copied(),
+                Some(pre_pos),
+                "item_positions[ship_id] must be rolled back atomically"
+            );
+            let sh = &snap.items[&ship_id];
+            assert_eq!(
+                sh.dynamic_attributes.get(&attr_ids::ARMOR_DAMAGE).copied(),
+                Some(pre_armor_dmg),
+                "ARMOR_DAMAGE dynamic attribute must be rolled back atomically"
+            );
+            assert_eq!(
+                sh.dynamic_attributes.get(&attr_ids::DAMAGE).copied(),
+                None,
+                "absent DAMAGE dynamic attribute must remain absent on rollback"
+            );
+        });
+        assert!(old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cmd_stargate_jump_deactivates_hardeners_and_phenomena_before_dest_combat_state_and_rolls_back_1237() {
+    let make_jumpable_phen_ctx = || {
+        let mut ctx = test_ctx();
+        let base_phen = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| t.group_id == 1815 && t.published)
+            .min_by_key(|t| t.type_id)
+            .cloned()
+            .expect("SDE must include a Phenomena Generator (group 1815)");
+        let jumpable_phen_tid = 999_815_u32;
+        let mut jumpable_phen = base_phen;
+        jumpable_phen.type_id = jumpable_phen_tid;
+        for aid in [852_u16, 2354_u16, 2453_u16, 1302_u16, 1303_u16] {
+            jumpable_phen.default_attributes.remove(&aid);
+        }
+        jumpable_phen.default_attributes.insert(30_u16, 1.0);
+        jumpable_phen.default_attributes.insert(50_u16, 1.0);
+        Arc::make_mut(&mut ctx.sde)
+            .types
+            .insert(jumpable_phen_tid, jumpable_phen);
+        (ctx, jumpable_phen_tid)
+    };
+    let setup_fit = |ctx: &ServerContext,
+                     phen_type_id: u32,
+                     char_id: i64,
+                     ship_id: i64,
+                     fleetmate_id: i64,
+                     from_sys: u32,
+                     gate_pos: DVec3| {
+        let hull_type_id = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| t.group_id == 27 && t.published)
+            .min_by_key(|t| t.type_id)
+            .map(|t| t.type_id)
+            .expect("SDE must include a Battleship hull (group 27)");
+        let (hp_dbuff_id, buffs_shield) = ctx
+            .sde
+            .dbuff_collections
+            .iter()
+            .filter(|(_, c)| {
+                c.item_modifiers.contains(&attr_ids::SHIELD_CAPACITY)
+                    || c.location_modifiers.contains(&attr_ids::SHIELD_CAPACITY)
+                    || c.item_modifiers.contains(&attr_ids::ARMOR_HP)
+                    || c.location_modifiers.contains(&attr_ids::ARMOR_HP)
+            })
+            .min_by_key(|(&id, _)| id)
+            .map(|(&id, c)| {
+                let s = c.item_modifiers.contains(&attr_ids::SHIELD_CAPACITY)
+                    || c.location_modifiers.contains(&attr_ids::SHIELD_CAPACITY);
+                (id, s)
+            })
+            .expect("SDE must include a Shield Capacity or Armor HP dbuff collection");
+        let hardener_mod_id = ship_id + 101;
+        let phen_mod_id = ship_id + 102;
+
+        spawn_ship_in_space(ctx, char_id, ship_id, hull_type_id, from_sys, gate_pos);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                hardener_mod_id,
+                InventoryItemRecord {
+                    item_id: hardener_mod_id,
+                    type_id: 2281, // Multispectrum Shield Hardener II
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::MedSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                phen_mod_id,
+                InventoryItemRecord {
+                    item_id: phen_mod_id,
+                    type_id: phen_type_id,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(hardener_mod_id, true);
+            snap.module_online_states.insert(phen_mod_id, true);
+        });
+        ctx.invalidate_ship_fitting_cache_only(ship_id);
+        let clean_cs = ctx.build_ship_combat_state(char_id, ship_id, hull_type_id);
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.module_active_states.insert(hardener_mod_id);
+            snap.module_active_states.insert(phen_mod_id);
+            snap.ship_fit_inputs
+                .entry(ship_id)
+                .or_default()
+                .overloaded_modules
+                .insert(hardener_mod_id);
+        });
+        let dbuff_val = 25.0;
+        let expiry = ctx.now_unix_secs() + 600;
+        {
+            let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            st.ship_dbuffs.insert(
+                (ctx.instance_id, ship_id),
+                vec![crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
+                    dbuff_id: hp_dbuff_id,
+                    value: dbuff_val,
+                    expires_at_unix: expiry,
+                    source_module_id: phen_mod_id,
+                }],
+            );
+            st.ship_dbuffs.insert(
+                (ctx.instance_id, fleetmate_id),
+                vec![crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
+                    dbuff_id: hp_dbuff_id,
+                    value: dbuff_val,
+                    expires_at_unix: expiry,
+                    source_module_id: phen_mod_id,
+                }],
+            );
+        }
+        ctx.invalidate_ship_fitting_cache_only(ship_id);
+        let inflated_cs = ctx.build_ship_combat_state(char_id, ship_id, hull_type_id);
+        assert!(
+            inflated_cs.shield_resonance[0] < clean_cs.shield_resonance[0] - 1e-4,
+            "active overloaded hardener must lower pre-jump EM resonance: inflated={:?} clean={:?}",
+            inflated_cs.shield_resonance,
+            clean_cs.shield_resonance
+        );
+        if buffs_shield {
+            assert!(
+                (inflated_cs.max_shield_hp - clean_cs.max_shield_hp).abs() > 1.0,
+                "phenomena dbuff must change pre-jump max_shield_hp"
+            );
+        } else {
+            assert!(
+                (inflated_cs.max_armor_hp - clean_cs.max_armor_hp).abs() > 1.0,
+                "phenomena dbuff must change pre-jump max_armor_hp"
+            );
+        }
+        (hardener_mod_id, phen_mod_id, clean_cs, inflated_cs)
+    };
+
+    // Part A (BF-1237C-02 forward): destination CombatState and FitProjection match deactivated baseline.
+    {
+        let (ctx, jumpable_phen_tid) = make_jumpable_phen_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("SDE must include a non-Zarzakh stargate pair");
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_730_i64;
+        let fleetmate_id = 895_739_i64;
+        let (hardener_mod_id, phen_mod_id, clean_cs, inflated_cs) =
+            setup_fit(&ctx, jumpable_phen_tid, char_id, ship_id, fleetmate_id, gate.from_solar_system_id, gate.position);
+
+        let old_handle = ctx
+            .systems
+            .get_handle(gate.from_solar_system_id)
+            .expect("origin handle");
+        old_handle
+            .set_combat_state(ship_id, inflated_cs)
+            .await
+            .expect("seed inflated origin CombatState");
+
+        let mut sess = SessionState::new(70_730);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &args,
+            &HashMap::new(),
+        )
+        .await
+        .expect("handled")
+        .expect("CmdStargateJump succeeds");
+
+        let dest_handle = ctx
+            .systems
+            .get_handle(gate.to_solar_system_id)
+            .expect("dest handle");
+        let dest_cs = dest_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .expect("dest combat state present");
+        for i in 0..4 {
+            assert!(
+                (dest_cs.shield_resonance[i] - clean_cs.shield_resonance[i]).abs() < 1e-6,
+                "dest shield_resonance[{i}] must match deactivated baseline: got {} want {}",
+                dest_cs.shield_resonance[i],
+                clean_cs.shield_resonance[i]
+            );
+        }
+        assert!(
+            (dest_cs.max_shield_hp - clean_cs.max_shield_hp).abs() < 1e-2,
+            "dest max_shield_hp must reflect deactivated/unbuffed stats: got {} want {}",
+            dest_cs.max_shield_hp,
+            clean_cs.max_shield_hp
+        );
+        assert!(
+            dest_cs
+                .base_max_shield_hp
+                .is_some_and(|v| (v - clean_cs.max_shield_hp).abs() < 1e-2),
+            "dest base_max_shield_hp must not pin inflated value: got {:?}",
+            dest_cs.base_max_shield_hp
+        );
+        assert!(
+            (dest_cs.max_armor_hp - clean_cs.max_armor_hp).abs() < 1e-2,
+            "dest max_armor_hp must reflect deactivated/unbuffed stats: got {} want {}",
+            dest_cs.max_armor_hp,
+            clean_cs.max_armor_hp
+        );
+        assert!(
+            dest_cs
+                .base_max_armor_hp
+                .is_some_and(|v| (v - clean_cs.max_armor_hp).abs() < 1e-2),
+            "dest base_max_armor_hp must not pin inflated value: got {:?}",
+            dest_cs.base_max_armor_hp
+        );
+
+        // Step once in destination system to ensure `apply_fit_projection` holds clean baseline.
+        dest_handle.step_manual(1.0).await.expect("dest step");
+        let after_step_cs = dest_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .expect("dest combat state after step");
+        assert!(
+            (after_step_cs.max_shield_hp - clean_cs.max_shield_hp).abs() < 1e-2
+                && (after_step_cs.max_armor_hp - clean_cs.max_armor_hp).abs() < 1e-2,
+            "post-jump system ticks must keep clean deactivated baseline"
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert!(!snap.module_active_states.contains(&hardener_mod_id));
+            assert!(!snap.module_active_states.contains(&phen_mod_id));
+            assert!(
+                snap.ship_fit_inputs
+                    .get(&ship_id)
+                    .is_none_or(|r| !r.overloaded_modules.contains(&hardener_mod_id)),
+                "hardener overload must be cleared after successful jump"
+            );
+        });
+        let st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(!st.ship_dbuffs.contains_key(&(ctx.instance_id, ship_id)));
+        assert!(!st.ship_dbuffs.contains_key(&(ctx.instance_id, fleetmate_id)));
+    }
+
+    // Part B (BF-1237C-02 rollback): failed spawn restores active modules, overloads, and self/fleetmate dbuffs.
+    {
+        let (ctx, jumpable_phen_tid) = make_jumpable_phen_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("SDE must include a non-Zarzakh stargate pair");
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_731_i64;
+        let fleetmate_id = 895_740_i64;
+        let (hardener_mod_id, phen_mod_id, _clean_cs, _inflated_cs) =
+            setup_fit(&ctx, jumpable_phen_tid, char_id, ship_id, fleetmate_id, gate.from_solar_system_id, gate.position);
+
+        let dest_handle = ctx.systems.get_or_spawn(gate.to_solar_system_id);
+        dest_handle
+            .panic_next_command_for_test
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let mut sess = SessionState::new(70_731);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        let err = handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &args,
+            &HashMap::new(),
+        )
+        .await
+        .expect("handled")
+        .expect_err("spawn panic must trigger rollback");
+        assert_eq!(err.code, "SystemTransitionFailed");
+
+        ctx.db.with_snapshot(|snap| {
+            assert!(
+                snap.module_active_states.contains(&hardener_mod_id),
+                "hardener active state must be restored on rollback"
+            );
+            assert!(
+                snap.module_active_states.contains(&phen_mod_id),
+                "phenomena active state must be restored on rollback"
+            );
+            assert!(
+                snap.ship_fit_inputs
+                    .get(&ship_id)
+                    .is_some_and(|r| r.overloaded_modules.contains(&hardener_mod_id)),
+                "hardener overload must be restored on rollback"
+            );
+        });
+        let st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            st.ship_dbuffs
+                .get(&(ctx.instance_id, ship_id))
+                .map(|v| v.len()),
+            Some(1),
+            "ship's own phenomena dbuffs must be restored on rollback"
+        );
+        assert_eq!(
+            st.ship_dbuffs
+                .get(&(ctx.instance_id, fleetmate_id))
+                .map(|v| v.len()),
+            Some(1),
+            "fleetmate phenomena dbuffs must remain untouched on failed jump"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stargate_rollback_guard_drop_under_world_lock_defers_atomic_rollback_without_split_brain_1237() {
+    let ctx = test_ctx();
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| {
+            j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH
+                && j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+        })
+        .min_by_key(|j| j.stargate_id)
+        .cloned()
+        .expect("SDE must include a Zarzakh gate");
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_741_i64;
+    let start_isk = eve_db::IskCents::from_isk(100_000);
+    let toll = eve_db::IskCents::from_isk(10_000);
+    spawn_ship_in_space(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.zarzakh_gate_locks.remove(&char_id);
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.war_faction_id = None;
+        ch.balance = start_isk;
+    });
+    let old_handle = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("origin handle");
+    let dest_handle = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+    let taken = old_handle
+        .take_ball(ship_id)
+        .await
+        .expect("take origin ball");
+
+    let mut sess = SessionState::new(70_741);
+    mark_char_online(&ctx, &mut sess, char_id);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(gate.from_solar_system_id);
+
+    let mut guard = StargateRollbackGuard::new(
+        &ctx,
+        char_id,
+        ship_id,
+        TakenBallGuard::new(old_handle.clone(), taken.clone()),
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().balance.0 -= toll.0;
+    });
+    guard.record_zarzakh_toll(Some(toll));
+
+    let (_ch, db_rb) = commit_stargate_db_transition(
+        &ctx,
+        &sess,
+        char_id,
+        ship_id,
+        SOLAR_SYSTEM_ZARZAKH,
+        Some((None, None, gate.from_solar_system_id)),
+        true,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        taken.combat_state.as_ref(),
+    )
+    .expect("commit_stargate_db_transition succeeds");
+    guard.record_db_commit(db_rb);
+
+    let spawn_token = next_stargate_spawn_token();
+    let mut dest_ball = taken.ball.clone();
+    dest_ball.position = DVec3::new(1_000.0, 0.0, 0.0);
+    guard.record_dest_spawn_target(dest_handle.clone(), ship_id, spawn_token);
+    dest_handle
+        .spawn_ball_with_meta_tagged(
+            dest_ball,
+            taken.combat_state.clone().unwrap_or_default(),
+            ctx.build_ship_slim_meta(char_id, 587),
+            spawn_token,
+        )
+        .await
+        .expect("materialize tagged destination ball");
+
+    // Drop `StargateRollbackGuard` while holding `ctx.db`'s `RANK_WORLD_INNER` write lock
+    // (`!lock_safe_for_db`). It must defer the full atomic rollback+restore without split-brain.
+    ctx.db.with_mut_snapshot(|_| {
+        drop(guard);
+    });
+
+    let mut rolled_back = false;
+    for _ in 0..100 {
+        let done_db = ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&char_id];
+            ch.solar_system_id == gate.from_solar_system_id && ch.balance == start_isk
+        });
+        let dest_gone = dest_handle.get_ball_snapshot(ship_id).await.unwrap().is_none();
+        let orig_back = old_handle.get_ball_snapshot(ship_id).await.unwrap().is_some();
+        if done_db && dest_gone && orig_back {
+            rolled_back = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        rolled_back,
+        "deferred Drop while RANK_WORLD_INNER held must atomically roll back DB, toll, dest ball, and origin ball without split-brain"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_remove_ball_if_token_does_not_clobber_subsequent_retry_jump_ball_1237() {
+    let ctx = test_ctx();
+    let dest_sys_id = 30_000_144_u32;
+    let dest_handle = ctx.systems.get_or_spawn(dest_sys_id);
+    let ship_id = 895_742_i64;
+    let pos_v1 = DVec3::new(1_000.0, 2_000.0, 3_000.0);
+    let pos_v2 = DVec3::new(50_000.0, -4_000.0, 5_000.0);
+    let make_ball = |pos: DVec3| Ball {
+        id: ship_id,
+        type_id: 587,
+        position: pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.0,
+        mass: 1_100_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+
+    let tok_1 = next_stargate_spawn_token();
+    dest_handle
+        .spawn_ball_with_meta_tagged(
+            make_ball(pos_v1),
+            CombatState::default(),
+            eve_destiny::SlimItemMeta::default(),
+            tok_1,
+        )
+        .await
+        .expect("spawn ball v1");
+    let tok_2 = next_stargate_spawn_token();
+    dest_handle
+        .spawn_ball_with_meta_tagged(
+            make_ball(pos_v2),
+            CombatState::default(),
+            eve_destiny::SlimItemMeta::default(),
+            tok_2,
+        )
+        .await
+        .expect("spawn ball v2");
+
+    // Stale token removal (from a delayed rollback / mailbox-full drop task) must be a no-op
+    // and must keep both the newer ball AND `ball_positions[ship_id]` intact.
+    enqueue_remove_ball_nonblocking(&dest_handle, ship_id, tok_1);
+    assert!(
+        dest_handle.remove_ball_if_token(ship_id, tok_1).await.is_none(),
+        "stale token RemoveBallIfToken must return None without removing v2"
+    );
+    let (_, live_ball) = dest_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("subsequent retry jump ball must remain live");
+    assert_eq!(live_ball.position, pos_v2);
+    assert_eq!(
+        dest_handle.get_ball_position_sync(ship_id),
+        Some(pos_v2),
+        "stale RemoveBallIfToken must not clear ball_positions cache for newer jump"
+    );
+
+    // Matching token removes cleanly.
+    let removed = dest_handle.remove_ball_if_token(ship_id, tok_2).await;
+    assert!(removed.is_some());
+    assert!(dest_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cmd_stargate_jump_cleans_attacker_cycles_ewar_remote_assist_and_notices_before_dest_combat_state_1237() {
+    let ctx = test_ctx();
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| {
+            j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+                && ctx
+                    .sde
+                    .solar_systems
+                    .get(&j.from_solar_system_id)
+                    .is_some_and(|s| s.security_status <= 0.0)
+        })
+        .min_by_key(|j| j.stargate_id)
+        .cloned()
+        .expect("SDE must include a non-Zarzakh nullsec stargate pair");
+
+    let hull_type_id = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| t.group_id == 25 && t.published) // Frigate
+        .min_by_key(|t| t.type_id)
+        .map(|t| t.type_id)
+        .expect("SDE must include a published Frigate hull");
+    let tp_type_id = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| t.group_id == 379 && t.published) // Target Painter
+        .min_by_key(|t| t.type_id)
+        .map(|t| t.type_id)
+        .expect("SDE must include a Target Painter");
+    let scram_type_id = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| t.group_id == 52 && t.published) // Warp Scrambler
+        .min_by_key(|t| t.type_id)
+        .map(|t| t.type_id)
+        .expect("SDE must include a Warp Scrambler");
+    let rsb_type_id = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| t.group_id == 290 && t.published) // Remote Sensor Booster
+        .min_by_key(|t| t.type_id)
+        .map(|t| t.type_id)
+        .expect("SDE must include a Remote Sensor Booster");
+
+    let char_a = 90_000_001_i64;
+    let ship_a = 895_750_i64;
+    let char_b = 90_000_751_i64;
+    let user_b = 77_751_u64;
+    let ship_b = 895_751_i64;
+
+    let tp_mod_id = 895_801_i64;
+    let scram_mod_id = 895_802_i64;
+    let rsb_mod_id = 895_803_i64;
+    let charge_tid = 29_005_u32;
+
+    spawn_ship_in_space(&ctx, char_a, ship_a, hull_type_id, gate.from_solar_system_id, gate.position);
+    let clean_cs = ctx.build_ship_combat_state(char_a, ship_a, hull_type_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut acc_b = snap.accounts.values().next().cloned().expect("seed account");
+        acc_b.user_id = user_b;
+        acc_b.username = "attacker_b_1237".to_string();
+        snap.accounts.insert(acc_b.username.clone(), acc_b);
+
+        let mut ch_b = snap.characters.get(&char_a).cloned().expect("seed char");
+        ch_b.character_id = char_b;
+        ch_b.user_id = user_b;
+        ch_b.name = "Attacker B".to_string();
+        ch_b.active_ship_id = ship_b;
+        ch_b.solar_system_id = gate.from_solar_system_id;
+        ch_b.station_id = None;
+        ch_b.structure_id = None;
+        snap.characters.insert(char_b, ch_b);
+
+        for (item_id, type_id, flag) in [
+            (tp_mod_id, tp_type_id, InventoryFlag::MedSlot0),
+            (scram_mod_id, scram_type_id, InventoryFlag::MedSlot1),
+            (rsb_mod_id, rsb_type_id, InventoryFlag::MedSlot2),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: char_b,
+                    location_id: ship_b,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(item_id, true);
+            snap.module_active_states.insert(item_id);
+        }
+        snap.module_active_charges.insert(rsb_mod_id, charge_tid);
+    });
+    spawn_ship_in_space(
+        &ctx,
+        char_b,
+        ship_b,
+        hull_type_id,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(1_000.0, 0.0, 0.0),
+    );
+
+    let mut sess_a = SessionState::new(70_750);
+    mark_char_online(&ctx, &mut sess_a, char_a);
+    sess_a.character_id = Some(char_a);
+    sess_a.ship_id = Some(ship_a);
+    sess_a.solar_system_id = Some(gate.from_solar_system_id);
+
+    let mut sess_b = SessionState::new(70_751);
+    mark_char_online(&ctx, &mut sess_b, char_b);
+    sess_b.character_id = Some(char_b);
+    sess_b.ship_id = Some(ship_b);
+    sess_b.solar_system_id = Some(gate.from_solar_system_id);
+
+    let old_handle = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("origin handle");
+    old_handle
+        .add_target_lock(
+            ship_b,
+            eve_destiny::TargetLock {
+                target_id: ship_a,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(50_000.0),
+            },
+        )
+        .await
+        .expect("lock target ship_a");
+
+    // Seed Target Painter projected_ewar + active_ewar_starts + Remote Sensor Booster tactical state.
+    let mut tp_eff = eve_dogma::DogmaItemState::from_sde(tp_mod_id, tp_type_id, &ctx.sde);
+    tp_eff.base_attributes.insert(54, 50_000.0);
+    tp_eff.base_attributes.insert(554, 30.0);
+    ctx.projected_ewar_sources
+        .write()
+        .unwrap()
+        .insert(tp_mod_id, ship_b);
+    ctx.projected_ewar.write().unwrap().insert(
+        ship_a,
+        vec![eve_dogma::ProjectedEwarEffect {
+            source_module_id: tp_mod_id,
+            source_module_type_id: tp_type_id,
+            charge_type_id: None,
+            distance: 1_000.0,
+            overloaded: false,
+            effective_module: tp_eff,
+        }],
+    );
+    ctx.active_ewar_starts
+        .write()
+        .unwrap()
+        .insert((ship_b, tp_mod_id), vec![(ship_a, "targetPainter")]);
+
+    let rsb_type = ctx.sde.types.get(&rsb_type_id).expect("rsb type");
+    let mut rsb_state = eve_dogma::DogmaItemState::from_sde(rsb_mod_id, rsb_type_id, &ctx.sde);
+    rsb_state.base_attributes.insert(54, 50_000.0);
+    crate::services::tactical_modules::apply_projected_remote_assistance(
+        &ctx,
+        char_b,
+        ship_b,
+        rsb_mod_id,
+        rsb_type,
+        &rsb_state,
+        Some(ship_a),
+        1_000.0,
+    )
+    .expect("apply_projected_remote_assistance");
+
+    for (module_id, module_type_id, effect_name, ammo_type_id) in [
+        (tp_mod_id, tp_type_id, "targetPaint", None),
+        (scram_mod_id, scram_type_id, "warpScramble", None),
+        (rsb_mod_id, rsb_type_id, "remoteSensorBoost", Some(charge_tid)),
+    ] {
+        old_handle
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id: ship_b,
+                module_id,
+                module_type_id,
+                owner_char_id: Some(char_b),
+                effect_name: effect_name.into(),
+                target_id: Some(ship_a),
+                repeat: 100,
+                duration_s: 5.0,
+                ammo_type_id,
+                ..Default::default()
+            })
+            .await
+            .expect("add attacker cycle");
+    }
+
+    // Confirm pre-jump TP & Remote Assistance are active against ship_a.
+    let pre_jump_cs = ctx.build_ship_combat_state(char_a, ship_a, hull_type_id);
+    assert!(
+        pre_jump_cs.tp_sig_multiplier.is_some_and(|m| m > 1.0 + 1e-4),
+        "pre-jump TP must inflate ship_a tp_sig_multiplier: {pre_jump_cs:?}"
+    );
+    assert!(
+        pre_jump_cs.signature_radius > clean_cs.signature_radius + 1e-2,
+        "pre-jump signature_radius must be painted"
+    );
+
+    let _ = ctx.drain_notifications_for_char(char_b);
+
+    let args = [
+        PyRep::Integer(gate.stargate_id),
+        PyRep::Integer(gate.destination_stargate_id),
+        PyRep::Integer(ship_a),
+    ];
+    handle(
+        &ctx,
+        &mut sess_a,
+        None,
+        "beyonce",
+        "CmdStargateJump",
+        &args,
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("CmdStargateJump succeeds when scrambler cycle is cleared before jump");
+
+    // Attacker DB active states / charges and projected_ewar / remote_assistance must be cleared.
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.module_active_states.contains(&tp_mod_id));
+        assert!(!snap.module_active_states.contains(&scram_mod_id));
+        assert!(!snap.module_active_states.contains(&rsb_mod_id));
+        assert!(!snap.module_active_charges.contains_key(&rsb_mod_id));
+    });
+    assert!(
+        ctx.projected_ewar
+            .read()
+            .unwrap()
+            .get(&ship_a)
+            .is_none_or(|v| v.is_empty()),
+        "projected_ewar on ship_a must be flushed on jump"
+    );
+    assert!(
+        !ctx.tactical_state
+            .read()
+            .unwrap()
+            .remote_assistance
+            .values()
+            .flatten()
+            .any(|e| e.source_ship_id == ship_b),
+        "remote_assistance from ship_b must be flushed on jump"
+    );
+
+    // Attacker must receive deactivation notices (OnGodmaShipEffect, OnSpecialFX, OnEwarEnd).
+    let notifs_b = ctx.drain_notifications_for_char(char_b);
+    for mod_id in [tp_mod_id, scram_mod_id, rsb_mod_id] {
+        assert!(
+            notifs_b.iter().any(|n| {
+                n.event == "OnGodmaShipEffect"
+                    && n.args.first().and_then(|r| r.as_i64()) == Some(mod_id)
+                    && n.args.get(4).and_then(|r| r.as_i64()) == Some(0)
+            }),
+            "attacker char_b must receive OnGodmaShipEffect(active=0) for module {mod_id}"
+        );
+        assert!(
+            notifs_b.iter().any(|n| {
+                n.event == "OnSpecialFX"
+                    && n.args.get(1).and_then(|r| r.as_i64()) == Some(mod_id)
+                    && n.args.get(8).and_then(|r| r.as_i64()) == Some(0)
+            }),
+            "attacker char_b must receive OnSpecialFX(active=0) for module {mod_id}"
+        );
+    }
+    assert!(
+        notifs_b.iter().any(|n| n.event == "OnEwarEnd"),
+        "attacker char_b must receive OnEwarEnd when TP stops on target jump"
+    );
+
+    // Destination ship CombatState must have clean un-painted signature radius and tp_sig_multiplier == None.
+    let dest_handle = ctx
+        .systems
+        .get_handle(gate.to_solar_system_id)
+        .expect("dest handle");
+    let dest_cs = dest_handle
+        .get_combat_state(ship_a)
+        .await
+        .unwrap()
+        .expect("dest combat state");
+    assert_eq!(dest_cs.tp_sig_multiplier, None);
+    assert!(
+        (dest_cs.signature_radius - clean_cs.signature_radius).abs() < 1e-4,
+        "dest signature_radius {} must match clean baseline {}",
+        dest_cs.signature_radius,
+        clean_cs.signature_radius
+    );
+    assert!(
+        old_handle
+            .actor_state
+            .read()
+            .unwrap()
+            .active_module_cycles
+            .is_empty(),
+        "origin actor must retain none of the attacker cycles targeting jumped ship"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cmd_stargate_jump_clears_and_rolls_back_cycle_transient_item_attrs_preserving_rack_heat_1237() {
+    let setup_transient_ship = |ctx: &ServerContext,
+                                char_id: i64,
+                                ship_id: i64,
+                                from_sys: u32,
+                                gate_pos: DVec3| {
+        let hull_type_id = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| t.group_id == 27 && t.published)
+            .min_by_key(|t| t.type_id)
+            .map(|t| t.type_id)
+            .expect("Battleship hull");
+        let adc_type_id = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| t.group_id == 60 && t.published)
+            .min_by_key(|t| t.type_id)
+            .map(|t| t.type_id)
+            .expect("Damage Control module");
+        let rah_type_id = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| t.group_id == 1150 && t.published)
+            .min_by_key(|t| t.type_id)
+            .map(|t| t.type_id)
+            .unwrap_or(adc_type_id);
+        let muta_type_id = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| t.group_id == 1986 && t.published)
+            .min_by_key(|t| t.type_id)
+            .map(|t| t.type_id)
+            .unwrap_or(adc_type_id);
+
+        let adc_mod_id = ship_id + 101;
+        let rah_mod_id = ship_id + 102;
+        let muta_mod_id = ship_id + 103;
+        spawn_ship_in_space(ctx, char_id, ship_id, hull_type_id, from_sys, gate_pos);
+        ctx.db.with_mut_snapshot(|snap| {
+            for (item_id, type_id, flag) in [
+                (adc_mod_id, adc_type_id, InventoryFlag::LoSlot0),
+                (rah_mod_id, rah_type_id, InventoryFlag::LoSlot1),
+                (muta_mod_id, muta_type_id, InventoryFlag::HiSlot0),
+            ] {
+                snap.items.insert(
+                    item_id,
+                    InventoryItemRecord {
+                        item_id,
+                        type_id,
+                        owner_id: char_id,
+                        location_id: ship_id,
+                        flag,
+                        quantity: 1,
+                        singleton: true,
+                        ..Default::default()
+                    },
+                );
+                snap.module_online_states.insert(item_id, true);
+                snap.module_active_states.insert(item_id);
+            }
+            let ship_tr = snap.transient_item_attributes.entry(ship_id).or_default();
+            for aid in [109_u16, 110, 111, 112, 113, 267, 268, 269, 270, 271, 272, 273, 274] {
+                ship_tr.insert(aid, 0.25);
+            }
+            // Persisted rack heat must survive stargate transitions untouched.
+            ship_tr.insert(1175, 0.42);
+            ship_tr.insert(1176, 0.25);
+            ship_tr.insert(1177, 0.10);
+
+            let rah_tr = snap.transient_item_attributes.entry(rah_mod_id).or_default();
+            for aid in 267_u16..=270 {
+                rah_tr.insert(aid, 0.72);
+            }
+            snap.transient_item_attributes
+                .entry(muta_mod_id)
+                .or_default()
+                .insert(84, 115.0);
+        });
+        (adc_mod_id, rah_mod_id, muta_mod_id, adc_type_id, rah_type_id)
+    };
+
+    // Part A: Successful jump clears ADC/EHE/RAH & mutadaptive transient attrs while preserving rack heat.
+    {
+        let ctx = test_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("non-Zarzakh gate");
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_760_i64;
+        let (adc_mod_id, rah_mod_id, muta_mod_id, adc_type_id, rah_type_id) =
+            setup_transient_ship(&ctx, char_id, ship_id, gate.from_solar_system_id, gate.position);
+
+        let old_handle = ctx.systems.get_handle(gate.from_solar_system_id).unwrap();
+        old_handle
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id,
+                module_id: adc_mod_id,
+                module_type_id: adc_type_id,
+                owner_char_id: Some(char_id),
+                effect_name: "assaultDamageControl".into(),
+                repeat: 1,
+                duration_s: 12.0,
+                is_adc: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        old_handle
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id,
+                module_id: rah_mod_id,
+                module_type_id: rah_type_id,
+                owner_char_id: Some(char_id),
+                effect_name: "reactiveArmorHardener".into(),
+                repeat: 100,
+                duration_s: 6.0,
+                is_rah: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let mut sess = SessionState::new(70_760);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        handle(&ctx, &mut sess, None, "beyonce", "CmdStargateJump", &args, &HashMap::new())
+            .await
+            .expect("handled")
+            .expect("jump succeeds");
+
+        ctx.db.with_snapshot(|snap| {
+            let ship_tr = snap
+                .transient_item_attributes
+                .get(&ship_id)
+                .expect("rack heat keeps ship entry");
+            for aid in [109_u16, 110, 111, 112, 113, 267, 268, 269, 270, 271, 272, 273, 274] {
+                assert!(!ship_tr.contains_key(&aid), "ship transient attr {aid} must clear on jump");
+            }
+            assert!((ship_tr[&1175] - 0.42).abs() < 1e-6);
+            assert!((ship_tr[&1176] - 0.25).abs() < 1e-6);
+            assert!((ship_tr[&1177] - 0.10).abs() < 1e-6);
+            assert!(!snap.transient_item_attributes.contains_key(&rah_mod_id));
+            assert!(!snap.transient_item_attributes.contains_key(&muta_mod_id));
+        });
+
+        let ship_info = crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "ItemGetInfo",
+            &[PyRep::Integer(ship_id)],
+            &HashMap::new(),
+        )
+        .await
+        .expect("handled")
+        .expect("ItemGetInfo succeeds");
+        let ship_attrs = ship_info
+            .dict_get("attributes")
+            .and_then(|r| match r {
+                PyRep::Dict(d) => Some(d),
+                _ => None,
+            })
+            .expect("ItemGetInfo attributes dict");
+        assert!(ship_attrs.iter().any(|(k, v)| {
+            k.as_i64() == Some(1175) && matches!(v, PyRep::Real(x) if (*x - 0.42).abs() < 1e-6)
+        }));
+        let muta_info = crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "ItemGetInfo",
+            &[PyRep::Integer(muta_mod_id)],
+            &HashMap::new(),
+        )
+        .await
+        .expect("handled")
+        .expect("ItemGetInfo succeeds");
+        let muta_attrs = muta_info
+            .dict_get("attributes")
+            .and_then(|r| match r {
+                PyRep::Dict(d) => Some(d),
+                _ => None,
+            })
+            .expect("muta attributes dict");
+        assert!(
+            !muta_attrs.iter().any(|(k, v)| {
+                k.as_i64() == Some(84) && matches!(v, PyRep::Real(x) if (*x - 115.0).abs() < 1e-6)
+            }),
+            "mutadaptive spool transient attr 84 must clear on jump"
+        );
+    }
+
+    // Part B: Failed jump rolls back ADC/EHE/RAH/mutadaptive transient attrs AND rack heat.
+    {
+        let ctx = test_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("non-Zarzakh gate");
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_761_i64;
+        let (adc_mod_id, rah_mod_id, muta_mod_id, adc_type_id, rah_type_id) =
+            setup_transient_ship(&ctx, char_id, ship_id, gate.from_solar_system_id, gate.position);
+
+        let old_handle = ctx.systems.get_handle(gate.from_solar_system_id).unwrap();
+        old_handle
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id,
+                module_id: adc_mod_id,
+                module_type_id: adc_type_id,
+                owner_char_id: Some(char_id),
+                effect_name: "assaultDamageControl".into(),
+                repeat: 1,
+                duration_s: 12.0,
+                is_adc: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        old_handle
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id,
+                module_id: rah_mod_id,
+                module_type_id: rah_type_id,
+                owner_char_id: Some(char_id),
+                effect_name: "reactiveArmorHardener".into(),
+                repeat: 100,
+                duration_s: 6.0,
+                is_rah: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut pre_cs = old_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        pre_cs.rah_armor_resonance = Some([0.2, 0.3, 0.7, 0.8]);
+        old_handle.set_combat_state(ship_id, pre_cs).await.unwrap();
+        let (pre_ship_tr, pre_rah_tr, pre_muta_tr) = ctx.db.with_snapshot(|snap| {
+            (
+                snap.transient_item_attributes[&ship_id].clone(),
+                snap.transient_item_attributes[&rah_mod_id].clone(),
+                snap.transient_item_attributes[&muta_mod_id].clone(),
+            )
+        });
+
+        let dest_handle = ctx.systems.get_or_spawn(gate.to_solar_system_id);
+        dest_handle
+            .panic_next_command_for_test
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let mut sess = SessionState::new(70_761);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        let err = handle(&ctx, &mut sess, None, "beyonce", "CmdStargateJump", &args, &HashMap::new())
+            .await
+            .expect("handled")
+            .expect_err("spawn panic must roll back");
+        assert_eq!(err.code, "SystemTransitionFailed");
+
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.transient_item_attributes[&ship_id], pre_ship_tr);
+            assert_eq!(snap.transient_item_attributes[&rah_mod_id], pre_rah_tr);
+            assert_eq!(snap.transient_item_attributes[&muta_mod_id], pre_muta_tr);
+        });
+        let restored_cs = old_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(restored_cs.adc_active);
+        assert_eq!(restored_cs.rah_armor_resonance, Some([0.2, 0.3, 0.7, 0.8]));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cmd_stargate_jump_rollback_keeps_db_and_origin_actor_cycles_in_sync_1237() {
+    let setup_cycled_ship = |ctx: &ServerContext,
+                             char_id: i64,
+                             ship_id: i64,
+                             from_sys: u32,
+                             gate_pos: DVec3| {
+        let hull_type_id = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| t.group_id == 27 && t.published)
+            .min_by_key(|t| t.type_id)
+            .map(|t| t.type_id)
+            .expect("Battleship hull");
+        let ab_mod_id = ship_id + 201;
+        let hardener_mod_id = ship_id + 202;
+        let wcs_mod_id = ship_id + 203;
+        let ab_type_id = 12058_u32; // 10MN Afterburner II or fallback group 46
+        let ab_type_id = if ctx.sde.types.contains_key(&ab_type_id) {
+            ab_type_id
+        } else {
+            ctx.sde
+                .types
+                .values()
+                .filter(|t| t.group_id == 46 && t.published)
+                .min_by_key(|t| t.type_id)
+                .map(|t| t.type_id)
+                .expect("propulsion module")
+        };
+        let hardener_type_id = 2281_u32;
+        let wcs_type_id = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| t.group_id == 315 && t.published)
+            .min_by_key(|t| t.type_id)
+            .map(|t| t.type_id)
+            .unwrap_or(2281);
+
+        spawn_ship_in_space(ctx, char_id, ship_id, hull_type_id, from_sys, gate_pos);
+        ctx.db.with_mut_snapshot(|snap| {
+            for (item_id, type_id, flag) in [
+                (ab_mod_id, ab_type_id, InventoryFlag::MedSlot0),
+                (hardener_mod_id, hardener_type_id, InventoryFlag::MedSlot1),
+                (wcs_mod_id, wcs_type_id, InventoryFlag::LoSlot0),
+            ] {
+                snap.items.insert(
+                    item_id,
+                    InventoryItemRecord {
+                        item_id,
+                        type_id,
+                        owner_id: char_id,
+                        location_id: ship_id,
+                        flag,
+                        quantity: 1,
+                        singleton: true,
+                        ..Default::default()
+                    },
+                );
+                snap.module_online_states.insert(item_id, true);
+                snap.module_active_states.insert(item_id);
+            }
+            snap.ship_fit_inputs
+                .entry(ship_id)
+                .or_default()
+                .overloaded_modules
+                .insert(hardener_mod_id);
+        });
+        (ab_mod_id, hardener_mod_id, wcs_mod_id, ab_type_id, hardener_type_id, wcs_type_id)
+    };
+
+    // Part A: Post-commit destination spawn failure restores both DB state AND origin-actor cycles.
+    {
+        let ctx = test_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("non-Zarzakh gate");
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_770_i64;
+        let (ab_mod_id, hardener_mod_id, wcs_mod_id, ab_tid, hard_tid, wcs_tid) =
+            setup_cycled_ship(&ctx, char_id, ship_id, gate.from_solar_system_id, gate.position);
+
+        let old_handle = ctx.systems.get_handle(gate.from_solar_system_id).unwrap();
+        let pre_cs = old_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        let pre_core = pre_cs.warp_core_strength;
+        let pre_ball = old_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+
+        old_handle
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id,
+                module_id: ab_mod_id,
+                module_type_id: ab_tid,
+                owner_char_id: Some(char_id),
+                effect_name: "moduleBonusAfterburner".into(),
+                repeat: 100,
+                duration_s: 10.0,
+                cap_need_per_cycle: 10.0,
+                speed_boost_factor: 1.5,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        old_handle
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id,
+                module_id: hardener_mod_id,
+                module_type_id: hard_tid,
+                owner_char_id: Some(char_id),
+                effect_name: "shieldHardener".into(),
+                repeat: 100,
+                duration_s: 12.0,
+                cap_need_per_cycle: 8.0,
+                is_overloaded: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        old_handle
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id,
+                module_id: wcs_mod_id,
+                module_type_id: wcs_tid,
+                owner_char_id: Some(char_id),
+                effect_name: "warpCoreStabilizer".into(),
+                repeat: 100,
+                duration_s: 10.0,
+                warp_core_stab_bonus: 2,
+                grants_interdiction_nullification: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let dest_handle = ctx.systems.get_or_spawn(gate.to_solar_system_id);
+        dest_handle
+            .panic_next_command_for_test
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let mut sess = SessionState::new(70_770);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        let err = handle(&ctx, &mut sess, None, "beyonce", "CmdStargateJump", &args, &HashMap::new())
+            .await
+            .expect("handled")
+            .expect_err("dest spawn panic rolls back");
+        assert_eq!(err.code, "SystemTransitionFailed");
+
+        ctx.db.with_snapshot(|snap| {
+            assert!(snap.module_active_states.contains(&ab_mod_id));
+            assert!(snap.module_active_states.contains(&hardener_mod_id));
+            assert!(snap.module_active_states.contains(&wcs_mod_id));
+            assert!(snap
+                .ship_fit_inputs
+                .get(&ship_id)
+                .is_some_and(|r| r.overloaded_modules.contains(&hardener_mod_id)));
+        });
+
+        let restored_ids: Vec<i64> = {
+            let st = old_handle.actor_state.read().unwrap();
+            st.active_module_cycles
+                .iter()
+                .filter(|c| c.ship_id == ship_id)
+                .map(|c| c.module_id)
+                .collect()
+        };
+        assert_eq!(restored_ids.len(), 3, "all 3 own cycles must be restored in origin actor: {restored_ids:?}");
+        assert!(restored_ids.contains(&ab_mod_id));
+        assert!(restored_ids.contains(&hardener_mod_id));
+        assert!(restored_ids.contains(&wcs_mod_id));
+        assert!(old_handle.view().active_module_ships.contains(&ship_id));
+
+        let post_cs = old_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!((post_cs.prop_velocity_multiplier - 2.5).abs() < 1e-6);
+        assert_eq!(post_cs.warp_core_strength, pre_core + 2, "must not double-count warp_core_stab_bonus on rollback");
+        assert!(post_cs.is_interdiction_nullified);
+        let post_ball = old_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+        assert!(
+            (post_ball.max_velocity - pre_ball.max_velocity * 2.5).abs() < 1e-3,
+            "restored AB must restore max_velocity: got {} want {}",
+            post_ball.max_velocity,
+            pre_ball.max_velocity * 2.5
+        );
+
+        // Origin actor must keep advancing restored cycles when stepped.
+        old_handle.step_manual(1.0).await.expect("origin step succeeds");
+        let elapsed_after_step = {
+            let st = old_handle.actor_state.read().unwrap();
+            st.active_module_cycles
+                .iter()
+                .find(|c| c.module_id == ab_mod_id)
+                .map(|c| c.elapsed_s)
+        };
+        assert!(
+            elapsed_after_step.is_some_and(|e| e >= 0.99),
+            "restored actor cycle must keep advancing on origin steps: {elapsed_after_step:?}"
+        );
+    }
+
+    // Part B: Pre-commit lease failure rollback keeps DB active states & origin-actor cycles in sync.
+    {
+        let ctx = test_ctx();
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                    && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+            })
+            .min_by_key(|j| j.stargate_id)
+            .cloned()
+            .expect("non-Zarzakh gate");
+        let char_id = 90_000_001_i64;
+        let ship_id = 895_771_i64;
+        let other_id = 895_779_i64;
+        let (ab_mod_id, hardener_mod_id, wcs_mod_id, ab_tid, hard_tid, wcs_tid) =
+            setup_cycled_ship(&ctx, char_id, ship_id, gate.from_solar_system_id, gate.position);
+        let cloak_mod_id = ship_id + 204;
+        let target_mod_id = ship_id + 205;
+        let tp_type_id = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| t.group_id == 379 && t.published)
+            .min_by_key(|t| t.type_id)
+            .map(|t| t.type_id)
+            .unwrap_or(hard_tid);
+        ctx.db.with_mut_snapshot(|snap| {
+            for (item_id, type_id, flag) in [
+                (cloak_mod_id, hard_tid, InventoryFlag::HiSlot0),
+                (target_mod_id, tp_type_id, InventoryFlag::MedSlot2),
+            ] {
+                snap.items.insert(
+                    item_id,
+                    InventoryItemRecord {
+                        item_id,
+                        type_id,
+                        owner_id: char_id,
+                        location_id: ship_id,
+                        flag,
+                        quantity: 1,
+                        singleton: true,
+                        ..Default::default()
+                    },
+                );
+                snap.module_online_states.insert(item_id, true);
+                snap.module_active_states.insert(item_id);
+            }
+        });
+
+        let old_handle = ctx.systems.get_handle(gate.from_solar_system_id).unwrap();
+        old_handle
+            .try_spawn_ball_with_combat(
+                Ball {
+                    id: other_id,
+                    type_id: 587,
+                    position: gate.position + DVec3::new(5_000.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 350.0,
+                    inertia: 2.0,
+                    mass: 1_100_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+            );
+        old_handle
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: other_id,
+                    lock_time_ms: 1_000.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(50_000.0),
+                },
+            )
+            .await
+            .unwrap();
+
+        for (module_id, module_type_id, effect_name, speed_boost, target_id) in [
+            (ab_mod_id, ab_tid, "moduleBonusAfterburner", 1.25, None),
+            (hardener_mod_id, hard_tid, "shieldHardener", 0.0, None),
+            (wcs_mod_id, wcs_tid, "warpCoreStabilizer", 0.0, None),
+            (cloak_mod_id, hard_tid, "cloakingWarpSafe", -0.75, None),
+            (target_mod_id, tp_type_id, "targetPaint", 0.0, Some(other_id)),
+        ] {
+            old_handle
+                .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                    ship_id,
+                    module_id,
+                    module_type_id,
+                    owner_char_id: Some(char_id),
+                    effect_name: effect_name.into(),
+                    target_id,
+                    repeat: 100,
+                    duration_s: 10.0,
+                    speed_boost_factor: speed_boost,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+        let mut cloak_cs = old_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        cloak_cs.is_covert_cloak = true;
+        cloak_cs.cloak_stabilization_remaining_s = 420.0;
+        cloak_cs.cloak_velocity_multiplier = Some(0.25);
+        old_handle.set_combat_state(ship_id, cloak_cs).await.unwrap();
+
+        let mut sess = SessionState::new(70_771);
+        mark_char_online(&ctx, &mut sess, char_id);
+        sess.character_id = Some(char_id);
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(gate.from_solar_system_id);
+        let _ = ctx.drain_notifications_for_char(char_id);
+
+        let uid = sess.user_id.expect("online uid");
+        let db_hook = Arc::clone(&ctx.db);
+        set_post_take_ball_hook_for_test(
+            &ctx,
+            char_id,
+            Some(Box::new(move || {
+                let db = Arc::clone(&db_hook);
+                Box::pin(async move {
+                    // Supersede session lease right after TakeBall so pre-commit lease check fails cleanly.
+                    let _ = db.acquire_online_lock(uid, 999_999, Some(char_id), true, db.clock().now_unix_secs());
+                })
+            })),
+        );
+
+        let args = [
+            PyRep::Integer(gate.stargate_id),
+            PyRep::Integer(gate.destination_stargate_id),
+            PyRep::Integer(ship_id),
+        ];
+        let err = handle(&ctx, &mut sess, None, "beyonce", "CmdStargateJump", &args, &HashMap::new())
+            .await
+            .expect("handled")
+            .expect_err("lease displacement after take_ball must roll back");
+        assert!(!err.code.is_empty());
+
+        ctx.db.with_snapshot(|snap| {
+            assert!(snap.module_active_states.contains(&ab_mod_id));
+            assert!(snap.module_active_states.contains(&hardener_mod_id));
+            assert!(snap.module_active_states.contains(&wcs_mod_id));
+            assert!(snap.module_active_states.contains(&cloak_mod_id));
+            assert!(
+                !snap.module_active_states.contains(&target_mod_id),
+                "targeted cycle whose lock cleared on TakeBall must also clear DB active state on rollback"
+            );
+        });
+        let restored_ids: Vec<i64> = {
+            let st = old_handle.actor_state.read().unwrap();
+            st.active_module_cycles
+                .iter()
+                .filter(|c| c.ship_id == ship_id)
+                .map(|c| c.module_id)
+                .collect()
+        };
+        assert_eq!(restored_ids.len(), 4, "pre-commit rollback must restore untargeted origin actor cycles in sync with DB: {restored_ids:?}");
+        assert!(!restored_ids.contains(&target_mod_id));
+        let restored_cloak_cs = old_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(restored_cloak_cs.is_covert_cloak);
+        assert!((restored_cloak_cs.cloak_stabilization_remaining_s - 420.0).abs() < 1e-6);
+        assert_eq!(restored_cloak_cs.cloak_velocity_multiplier, Some(0.25));
+        let notifs = ctx.drain_notifications_for_char(char_id);
+        assert!(
+            notifs.iter().any(|n| {
+                n.event == "OnGodmaShipEffect"
+                    && n.args.first().and_then(|r| r.as_i64()) == Some(target_mod_id)
+                    && n.args.get(4).and_then(|r| r.as_i64()) == Some(0)
+            }),
+            "lock-broken targeted own cycle must emit OnGodmaShipEffect(active=0) on rollback"
+        );
+    }
+}

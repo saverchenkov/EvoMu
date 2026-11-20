@@ -20,6 +20,84 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+#[cfg(test)]
+pub(crate) type SpawnBallWithMetaTestHook = Box<
+    dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + 'static,
+>;
+
+#[cfg(test)]
+type SpawnBallWithMetaHookMap = std::sync::OnceLock<
+    std::sync::Mutex<HashMap<(SolarSystemId, BallId), SpawnBallWithMetaTestHook>>,
+>;
+
+#[cfg(test)]
+static SPAWN_BALL_WITH_META_AFTER_SEND_HOOKS: SpawnBallWithMetaHookMap =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+static SPAWN_BALL_WITH_META_PRE_REPLY_HOOKS: SpawnBallWithMetaHookMap =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn set_spawn_ball_with_meta_hook_in(
+    slot: &SpawnBallWithMetaHookMap,
+    solar_system_id: SolarSystemId,
+    ball_id: BallId,
+    hook: Option<SpawnBallWithMetaTestHook>,
+) {
+    let map = slot.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    match hook {
+        Some(h) => {
+            guard.insert((solar_system_id, ball_id), h);
+        }
+        None => {
+            guard.remove(&(solar_system_id, ball_id));
+        }
+    }
+}
+
+#[cfg(test)]
+fn take_spawn_ball_with_meta_hook_for_test(
+    slot: &SpawnBallWithMetaHookMap,
+    solar_system_id: SolarSystemId,
+    ball_id: BallId,
+) -> Option<SpawnBallWithMetaTestHook> {
+    let map = slot.get()?;
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    guard.remove(&(solar_system_id, ball_id))
+}
+
+#[cfg(test)]
+pub(crate) fn set_spawn_ball_with_meta_after_send_hook_for_test(
+    solar_system_id: SolarSystemId,
+    ball_id: BallId,
+    hook: Option<SpawnBallWithMetaTestHook>,
+) {
+    set_spawn_ball_with_meta_hook_in(
+        &SPAWN_BALL_WITH_META_AFTER_SEND_HOOKS,
+        solar_system_id,
+        ball_id,
+        hook,
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn set_spawn_ball_with_meta_pre_reply_hook_for_test(
+    solar_system_id: SolarSystemId,
+    ball_id: BallId,
+    hook: Option<SpawnBallWithMetaTestHook>,
+) {
+    set_spawn_ball_with_meta_hook_in(
+        &SPAWN_BALL_WITH_META_PRE_REPLY_HOOKS,
+        solar_system_id,
+        ball_id,
+        hook,
+    );
+}
+
 enum InnerBallparkWriteGuard<'a> {
     Ranked(eve_db::lock_rank::RankedRwLockWriteGuard<'a, Ballpark, RANK_BALLPARK>),
     Unranked(std::sync::RwLockWriteGuard<'a, Ballpark>),
@@ -659,18 +737,75 @@ impl SystemHandle {
         combat_state: CombatState,
         slim_meta: SlimItemMeta,
     ) -> Result<u64, String> {
+        self.spawn_ball_with_meta_impl(ball, combat_state, slim_meta, None)
+            .await
+    }
+
+    pub async fn spawn_ball_with_meta_tagged(
+        &self,
+        ball: Ball,
+        combat_state: CombatState,
+        slim_meta: SlimItemMeta,
+        spawn_token: u64,
+    ) -> Result<u64, String> {
+        self.spawn_ball_with_meta_impl(ball, combat_state, slim_meta, Some(spawn_token))
+            .await
+    }
+
+    async fn spawn_ball_with_meta_impl(
+        &self,
+        ball: Ball,
+        combat_state: CombatState,
+        slim_meta: SlimItemMeta,
+        spawn_token: Option<u64>,
+    ) -> Result<u64, String> {
+        #[cfg(test)]
+        let ball_id = ball.id;
+        #[cfg(test)]
+        let (after_send_hook, pre_reply_hook) = (
+            take_spawn_ball_with_meta_hook_for_test(
+                &SPAWN_BALL_WITH_META_AFTER_SEND_HOOKS,
+                self.solar_system_id,
+                ball_id,
+            ),
+            take_spawn_ball_with_meta_hook_for_test(
+                &SPAWN_BALL_WITH_META_PRE_REPLY_HOOKS,
+                self.solar_system_id,
+                ball_id,
+            ),
+        );
         let (tx, rx) = oneshot::channel();
-        self.cmd_sender()
-            .send(SystemCommand::SpawnBallWithMeta {
+        let cmd = match spawn_token {
+            Some(tok) => SystemCommand::SpawnBallWithMetaTagged {
+                ball,
+                combat_state,
+                slim_meta,
+                spawn_token: tok,
+                reply: tx,
+            },
+            None => SystemCommand::SpawnBallWithMeta {
                 ball,
                 combat_state,
                 slim_meta,
                 reply: tx,
-            })
+            },
+        };
+        self.cmd_sender()
+            .send(cmd)
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
-        rx.await
-            .map_err(|_| "Solar system reply dropped".to_string())?
+        #[cfg(test)]
+        if let Some(hook) = after_send_hook {
+            hook().await;
+        }
+        let res = rx
+            .await
+            .map_err(|_| "Solar system reply dropped".to_string())?;
+        #[cfg(test)]
+        if let Some(hook) = pre_reply_hook {
+            hook().await;
+        }
+        res
     }
 
     /// Updates the slim item metadata of an in-space ball and emits `DestinyEvent::OnSlimItemChange`
@@ -832,6 +967,29 @@ impl SystemHandle {
         rx.await.ok().flatten()
     }
 
+    /// Removes `ball_id` only if its active actor spawn token still equals `spawn_token`.
+    /// Never pre-clears `ball_positions` or nanite repairs if a newer spawn owns `ball_id`.
+    pub async fn remove_ball_if_token(
+        &self,
+        ball_id: BallId,
+        spawn_token: u64,
+    ) -> Option<Ball> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .cmd_sender()
+            .send(SystemCommand::RemoveBallIfToken {
+                ball_id,
+                spawn_token,
+                reply: tx,
+            })
+            .await;
+        let removed = rx.await.ok().flatten();
+        if removed.is_some() {
+            self.cancel_ship_nanite_repairs_sync(ball_id, true);
+        }
+        removed
+    }
+
     pub async fn accept_docking(
         &self,
         ship_id: BallId,
@@ -860,7 +1018,12 @@ impl SystemHandle {
     /// clearing its active module cycles and target locks and returning its final
     /// `Ball`, `CombatState`, and `SlimItemMeta`. Returns `None` if `ball_id` is
     /// not present in space.
-    pub async fn take_ball(&self, ball_id: BallId) -> Option<super::TakenBall> {
+    async fn take_ball_impl(
+        &self,
+        ball_id: BallId,
+        accept_docking_target: Option<(BallId, DVec3)>,
+        preserve_db_active_states: bool,
+    ) -> Option<super::TakenBall> {
         self.cancel_ship_nanite_repairs_sync(ball_id, true);
         self.ball_positions
             .write()
@@ -871,11 +1034,24 @@ impl SystemHandle {
             .cmd_sender()
             .send(SystemCommand::TakeBall {
                 ball_id,
-                accept_docking_target: None,
+                accept_docking_target,
+                preserve_db_active_states,
                 reply: tx,
             })
             .await;
         rx.await.ok().flatten()
+    }
+
+    /// Atomically removes `ball_id` from space and returns its `TakenBall` snapshot, or `None` if
+    /// not present in space.
+    pub async fn take_ball(&self, ball_id: BallId) -> Option<super::TakenBall> {
+        self.take_ball_impl(ball_id, None, false).await
+    }
+
+    /// Atomically removes `ball_id` for a stargate transition while keeping DB active module
+    /// states intact until `commit_stargate_db_transition` deactivates them (`#1237` `BF-1237C-02`).
+    pub async fn take_ball_preserving_db(&self, ball_id: BallId) -> Option<super::TakenBall> {
+        self.take_ball_impl(ball_id, None, true).await
     }
 
     /// Atomically removes `ship_id` for docking at `station_id` (`#842`, `#917` E-2, `#1188`),
@@ -887,33 +1063,39 @@ impl SystemHandle {
         station_id: BallId,
         station_pos: DVec3,
     ) -> Option<super::TakenBall> {
-        self.cancel_ship_nanite_repairs_sync(ship_id, true);
-        self.ball_positions
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id);
+        self.take_ball_impl(ship_id, Some((station_id, station_pos)), false)
+            .await
+    }
+
+    async fn restore_ball_impl(
+        &self,
+        taken: super::TakenBall,
+        only_if_absent: bool,
+    ) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .cmd_sender()
-            .send(SystemCommand::TakeBall {
-                ball_id: ship_id,
-                accept_docking_target: Some((station_id, station_pos)),
-                reply: tx,
-            })
-            .await;
-        rx.await.ok().flatten()
+        let cmd = if only_if_absent {
+            SystemCommand::RestoreBallIfAbsent { taken, reply: tx }
+        } else {
+            SystemCommand::RestoreBall { taken, reply: tx }
+        };
+        self.cmd_sender()
+            .send(cmd)
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
     }
 
     /// Re-inserts a previously [`Self::take_ball`] snapshot into this solar system
     /// when a handoff's subsequent DB transaction fails (`#842`, `#917` E-2).
     pub async fn restore_ball(&self, taken: super::TakenBall) -> Result<u64, String> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_sender()
-            .send(SystemCommand::RestoreBall { taken, reply: tx })
-            .await
-            .map_err(|_| "Solar system actor stopped".to_string())?;
-        rx.await
-            .map_err(|_| "Solar system reply dropped".to_string())?
+        self.restore_ball_impl(taken, false).await
+    }
+
+    /// Atomically re-inserts `taken` into this solar system only if `taken.ball.id`
+    /// is not currently present in `ballpark.balls` (`#1237`).
+    pub async fn restore_ball_if_absent(&self, taken: super::TakenBall) -> Result<u64, String> {
+        self.restore_ball_impl(taken, true).await
     }
 
     pub async fn emit_packaged_actions(
