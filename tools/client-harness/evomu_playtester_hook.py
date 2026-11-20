@@ -2788,6 +2788,36 @@ def _stale_module_button_reason(node, sm=None):
     return ""
 
 
+def _module_button_display_name(node):
+    """Resolve a HUD ModuleButton's display name via evetypes or widget metadata."""
+    if node is None:
+        return ""
+    minfo = getattr(node, "moduleinfo", None)
+    if minfo is not None:
+        t_name = _safe_str(getattr(minfo, "typeName", None), 128).strip()
+        if t_name:
+            return t_name
+        type_id = _coerce_optional_int(getattr(minfo, "typeID", None))
+        if type_id is not None and type_id > 0:
+            try:
+                import evetypes as _evetypes
+                if hasattr(_evetypes, "GetName"):
+                    resolved = _safe_str(_evetypes.GetName(type_id), 128).strip()
+                    if resolved:
+                        return resolved
+            except Exception:
+                pass
+    for attr in ("hint", "label", "caption", "text"):
+        val = getattr(node, attr, None)
+        if val and not callable(val):
+            raw_txt = _strip_tags(_safe_str(val, 160)).strip()
+            if raw_txt:
+                first_line = raw_txt.splitlines()[0].strip()
+                if first_line and not first_line.startswith("ModuleButton_"):
+                    return first_line
+    return ""
+
+
 def _coerce_optional_int(val):
     if val is None or isinstance(val, bool):
         return None
@@ -5803,13 +5833,25 @@ def _execute_action(sm, action):
                     pass
                 explicit_tid = None
                 if raw_target and ":" in raw_target:
-                    _rhs = raw_target.split(":", 1)[1].strip().split()[0]
-                    if _rhs.isdigit():
-                        explicit_tid = int(_rhs)
-                mod_target = raw_target.split(":")[0].split()[0].strip() if raw_target else ""
+                    _rhs_parts = raw_target.split(":", 1)[1].strip().split()
+                    if _rhs_parts and _rhs_parts[0].isdigit():
+                        explicit_tid = int(_rhs_parts[0])
+                mod_name_raw = raw_target.split(":", 1)[0].strip() if raw_target else ""
+                _mod_parts = mod_name_raw.split() if mod_name_raw else []
+                if (
+                    len(_mod_parts) > 1
+                    and _mod_parts[-1].isdigit()
+                    and int(_mod_parts[-1]) >= 50000000
+                    and explicit_tid is None
+                ):
+                    explicit_tid = int(_mod_parts[-1])
+                    mod_name_raw = " ".join(_mod_parts[:-1]).strip()
+                    _mod_parts = mod_name_raw.split() if mod_name_raw else []
+                mod_target = mod_name_raw if len(_mod_parts) <= 1 else ""
                 if mod_target.isdigit() and int(mod_target) >= 50000000:
                     explicit_tid = int(mod_target)
                     mod_target = ""
+                    mod_name_raw = ""
                 try:
                     from eve.client.script.parklife import states as _park_states
                     st_svc = sm.GetService("stateSvc") if hasattr(sm, "GetService") else None
@@ -5838,9 +5880,9 @@ def _execute_action(sm, action):
                                 st_svc.SetState(best_tid, _park_states.activeTarget, 1)
                 except Exception:
                     pass
-                slot_name = mod_target or "inFlightHighSlot1"
-                candidates = [slot_name]
+                slot_name = mod_target or mod_name_raw or "inFlightHighSlot1"
                 if mod_target:
+                    candidates = [mod_target]
                     if mod_target.isdigit():
                         mb_cand = "ModuleButton_%s" % mod_target
                         if mb_cand not in candidates:
@@ -5861,7 +5903,13 @@ def _execute_action(sm, action):
                                 _short_cand = "%s%d" % (_short_p, _idx - 1)
                                 if _short_cand not in candidates:
                                     candidates.append(_short_cand)
+                elif mod_name_raw:
+                    # Multi-word module display names (e.g. "5MN Microwarpdrive I") are resolved
+                    # via hud_slot_buttons display-name matching rather than truncating to word 1
+                    # or falling back to default mining/slot candidates.
+                    candidates = []
                 else:
+                    candidates = ["inFlightHighSlot1"]
                     for extra_cand in (
                         "ModuleButton_483",
                         "ModuleButton_3651",
@@ -5879,6 +5927,7 @@ def _execute_action(sm, action):
                             candidates.append(extra_cand)
                 node = None
                 fallback_offline_node = None
+                fallback_slot_name = slot_name
                 hud_slot_buttons = []
                 for slot_idx in range(1, 9):
                     for prefix in ("inFlightHighSlot", "inFlightMediumSlot", "inFlightLowSlot"):
@@ -5919,11 +5968,37 @@ def _execute_action(sm, action):
                             break
                         elif fallback_offline_node is None:
                             fallback_offline_node = mb
+                            fallback_slot_name = _safe_str(getattr(mb, "name", "") or cand_name, 64)
                     if node is not None:
                         break
+                if node is None and fallback_offline_node is None and mod_name_raw:
+                    query_norm = " ".join(mod_name_raw.lower().split())
+                    tiered = {0: [], 1: [], 2: []}
+                    for s_key, ch in hud_slot_buttons:
+                        ch_name = _safe_str(getattr(ch, "name", ""), 64)
+                        disp_norm = " ".join(_module_button_display_name(ch).lower().split())
+                        if disp_norm == query_norm or ch_name.lower() == query_norm:
+                            tiered[0].append((s_key, ch))
+                        elif len(query_norm) >= 3 and disp_norm.startswith(query_norm):
+                            tiered[1].append((s_key, ch))
+                        elif len(query_norm) >= 4 and query_norm in disp_norm:
+                            tiered[2].append((s_key, ch))
+                    for tier_idx in (0, 1, 2):
+                        for s_key, ch in tiered[tier_idx]:
+                            if _stale_module_button_reason(ch, sm):
+                                continue
+                            if bool(getattr(ch, "online", False)):
+                                node = ch
+                                slot_name = _safe_str(getattr(ch, "name", "") or s_key, 64)
+                                break
+                            elif fallback_offline_node is None:
+                                fallback_offline_node = ch
+                                fallback_slot_name = _safe_str(getattr(ch, "name", "") or s_key, 64)
+                        if node is not None:
+                            break
                 if node is None and fallback_offline_node is not None:
                     node = fallback_offline_node
-                    slot_name = _safe_str(getattr(node, "name", "") or slot_name, 64)
+                    slot_name = _safe_str(getattr(node, "name", "") or fallback_slot_name, 64)
                     try:
                         minfo = getattr(node, "moduleinfo", None)
                         mod_item_id = getattr(minfo, "itemID", None) if minfo is not None else None

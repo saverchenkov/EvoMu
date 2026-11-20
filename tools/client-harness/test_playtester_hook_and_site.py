@@ -2537,6 +2537,108 @@ class TestHookExecutionAndInclientHelpers(unittest.TestCase):
 
         self.assertEqual(clicked, [])
 
+    def test_activate_module_resolves_display_names_and_rejects_unfitted(self):
+        hook = _load_hook_with_py2_stubs()
+        clicked = []
+
+        class FakeModuleButton:
+            def __init__(self, name, item_id, type_id, online=True, hint=""):
+                self.name = name
+                self.moduleinfo = types.SimpleNamespace(itemID=item_id, typeID=type_id)
+                self.online = online
+                self.hint = hint
+
+            def OnClick(self):
+                clicked.append(self.name)
+
+        class FakeSlot:
+            def __init__(self, name, children):
+                self.name = name
+                self.children = children
+
+        btn_blaster = FakeModuleButton("ModuleButton_562", 5001, 562, online=True)
+        btn_mwd = FakeModuleButton("ModuleButton_434", 5002, 434, online=True)
+        btn_stale = FakeModuleButton("ModuleButton_483", 9999, 483, online=True)
+        btn_hint = FakeModuleButton("ModuleButton_439", 5003, 0, online=True, hint="1MN Afterburner I\n10.0 GJ")
+
+        slot_map = {
+            "inFlightHighSlot1": FakeSlot("inFlightHighSlot1", [btn_blaster]),
+            "inFlightHighSlot2": FakeSlot("inFlightHighSlot2", [btn_stale]),
+            "inFlightMediumSlot1": FakeSlot("inFlightMediumSlot1", [btn_mwd]),
+            "inFlightMediumSlot2": FakeSlot("inFlightMediumSlot2", [btn_hint]),
+        }
+
+        evetypes_mod = types.ModuleType("evetypes")
+        evetypes_mod.GetName = lambda tid: {562: "Light Electron Blaster I", 434: "5MN Microwarpdrive I", 483: "Miner I"}.get(tid)
+
+        park_states = types.SimpleNamespace(selected=1, activeTarget=2)
+        parklife_pkg = types.ModuleType("eve.client.script.parklife")
+        parklife_pkg.states = park_states
+
+        st_svc = mock.MagicMock()
+        inv_items = {
+            9001: types.SimpleNamespace(typeID=649),
+            5001: types.SimpleNamespace(typeID=562),
+            5002: types.SimpleNamespace(typeID=434),
+            5003: types.SimpleNamespace(typeID=439),
+        }
+        godma_svc = types.SimpleNamespace(stateManager=types.SimpleNamespace(invItems=inv_items))
+        sm_obj = mock.MagicMock()
+        sm_obj.GetService.side_effect = lambda name: {"godma": godma_svc, "stateSvc": st_svc}.get(name)
+        fake_sess = types.SimpleNamespace(shipid=9001)
+        fake_uicore = types.SimpleNamespace(cmd=None, registry=None, layer=object(), desktop=None)
+
+        def run_activate(target, extra_mods=None):
+            mods = {
+                "uthread": None,
+                "evetypes": evetypes_mod,
+                "eve": types.ModuleType("eve"),
+                "eve.client": types.ModuleType("eve.client"),
+                "eve.client.script": types.ModuleType("eve.client.script"),
+                "eve.client.script.parklife": parklife_pkg,
+                "eve.client.script.parklife.states": park_states,
+            }
+            if extra_mods:
+                mods.update(extra_mods)
+            with mock.patch.dict(sys.modules, mods), \
+                 mock.patch.object(hook.__builtin__, "session", fake_sess, create=True), \
+                 mock.patch.object(hook.__builtin__, "sm", sm_obj, create=True), \
+                 mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+                 mock.patch.object(hook, "_install_warp_telemetry"), \
+                 mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}), \
+                 mock.patch.object(hook.H, "_sleep_ms", create=True), \
+                 mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+                 mock.patch.object(hook, "_find_widget", side_effect=lambda tgt, layers=None: slot_map.get(tgt)), \
+                 mock.patch.object(hook, "_close_neocom_panels_if_outside"), \
+                 mock.patch.object(hook, "_close_utilmenu_if_outside"), \
+                 mock.patch.object(hook, "_close_context_menus_if_outside"), \
+                 mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside", return_value=False):
+                return hook._execute_action(sm_obj, {"type": "activate_module", "target": target, "wait_ms": 0})
+
+        res_mwd = run_activate("5MN Microwarpdrive I")
+        self.assertTrue(res_mwd.get("ok"), res_mwd)
+        self.assertEqual(res_mwd.get("activated_slot"), "ModuleButton_434")
+        self.assertEqual(clicked, ["ModuleButton_434"])
+
+        st_svc.SetState.reset_mock()
+        res_tgt = run_activate("5MN Microwarpdrive I: 750000301")
+        self.assertTrue(res_tgt.get("ok"), res_tgt)
+        self.assertEqual(res_tgt.get("activated_slot"), "ModuleButton_434")
+        st_svc.SetState.assert_any_call(750000301, 1, 1)
+        st_svc.SetState.assert_any_call(750000301, 2, 1)
+
+        res_hint = run_activate("1MN Afterburner I", extra_mods={"evetypes": None})
+        self.assertTrue(res_hint.get("ok"), res_hint)
+        self.assertEqual(res_hint.get("activated_slot"), "ModuleButton_439")
+
+        # Stale Miner I (itemID=9999 absent from godma invItems) must be skipped and fail closed.
+        clicked_before = list(clicked)
+        res_missing = run_activate("Miner I")
+        self.assertFalse(res_missing.get("ok"), res_missing)
+        self.assertEqual(res_missing.get("activated_slot"), "none_fitted")
+        self.assertIn("not found on ship HUD rack", res_missing.get("error", ""))
+        self.assertEqual(clicked, clicked_before)
+
     def test_type_text_on_quick_filter_waits_for_debounce_settle(self):
         hook = _load_hook_with_py2_stubs()
         captured_settle = []
