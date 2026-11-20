@@ -491,3 +491,43 @@ async fn npc_mining_op_caps_clock_jump_and_preserves_belt_reserve() {
         .any(|a| a.remaining_units < a.initial_units);
     assert!(belt2_mined_any, "NPC miner should rotate to Belt 2");
 }
+
+#[tokio::test]
+async fn npc_mining_op_clamps_extraction_to_remaining_hold_capacity() {
+    let (sde, db, systems) = build_living_world_fixture();
+    let director = LivingWorldDirector::new();
+    let sys_id = 30_000_144_u32;
+    let cid = 800_999_148_i64;
+
+    let handle = systems.get_or_spawn(sys_id);
+    handle.populate_asteroid_belt_entities().await.unwrap();
+
+    // Fixture Venture has a 500 m3 hold (5,000 units of 0.1 m3 Veldspar).
+    // Pre-seeding 4,500 units leaves exact room for 500 units even when a 60s tick could yield 4,800.
+    director.register_convoy(LivingWorldConvoy {
+        convoy_id: cid,
+        archetype: NpcArchetype::MiningOp,
+        ship_type_id: 32880,
+        origin_system_id: sys_id,
+        current_system_id: sys_id,
+        destination_system_id: sys_id,
+        destination_station_id: 60_003_766,
+        cargo_type_id: 1230,
+        cargo_quantity: 4_500,
+        lod_level: 1,
+        destroyed: false,
+    });
+
+    let _ = director
+        .step_npc_mining_op(cid, &systems, &db, &sde)
+        .await
+        .unwrap();
+    db.clock().advance_secs(60);
+    let step = director
+        .step_npc_mining_op(cid, &systems, &db, &sde)
+        .await
+        .unwrap();
+    assert_eq!(step.mined_units, 500);
+    assert_eq!(step.convoy_cargo_units, 0);
+    assert_eq!(director.hauler_cargo_units(&db, cid), 5_000);
+}

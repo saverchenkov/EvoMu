@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "owning_issue": 1195,
+  "description": "Supervisor-enforced companion falling ratchet closing stringly_bridge_rpc_error_code bypasses (TT-11 / #1195): const ERR_*: &str declarations, non-literal code: <ident>.into()/to_string()/String::from(<ident>) in BridgeRpcError files, and local string-code BridgeRpcError helper wrappers and their call sites.",
+  "rules": {
+    "const_err_str_defs": {
+      "max_occurrences": 21,
+      "max_files": 7,
+      "description": "const *ERR*: &str / &'static str error-code string constants bypassing literal code checks (#1195)."
+    },
+    "bridge_rpc_error_nonlit_code": {
+      "max_occurrences": 111,
+      "max_files": 77,
+      "description": "Non-literal code: <ident>.into()/.to_string()/String::from(<ident>) in files constructing BridgeRpcError (#1195)."
+    },
+    "bridge_rpc_error_helper_defs": {
+      "max_occurrences": 66,
+      "max_files": 65,
+      "description": "Local helper functions taking stringly code (&str/String/Into<String>) and returning BridgeRpcError (#1195)."
+    },
+    "bridge_rpc_error_helper_calls": {
+      "max_occurrences": 1699,
+      "max_files": 63,
+      "description": "Same-file call sites of local string-code BridgeRpcError helper wrappers (#1195)."
+    }
+  }
+}
