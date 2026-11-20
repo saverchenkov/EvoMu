@@ -218,6 +218,23 @@ pub fn subscription_expiry_for_user(snap: &eve_db::WorldStateSnapshot, uid: u64)
     subscription_expiry_parts(snap, uid).1
 }
 
+/// Reads the account's effective Omega subscription status `(grade, expiry_unix)` strictly
+/// read-only from DB snapshots without mutating character rows or emitting notifications.
+pub fn read_subscription_state(ctx: &ServerContext, uid: u64) -> (u32, u64) {
+    let now = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        let (_, exp) = subscription_expiry_parts(snap, uid);
+        let target = exp.map(|until| if until > now { 2u32 } else { 1u32 });
+        let first_grade = snap
+            .characters
+            .values()
+            .filter(|c| c.user_id == uid)
+            .map(|c| c.clone_grade)
+            .max();
+        (target.or(first_grade).unwrap_or(1), exp.unwrap_or(0))
+    })
+}
+
 /// Applies the stored Omega expiry to every character on the account: Omega (2) while the
 /// expiry is in the future, Alpha (1) once it has passed. Accounts with no recorded expiry keep
 /// their characters' current clone grade. Returns `(grade, expiry_unix)`.
@@ -547,7 +564,7 @@ fn handle_inner(
         ("subscriptionMgr", "GetSubscriptionTime") => {
             // Read-only: arguments are ignored; the client cannot change its own subscription.
             let uid = ServerContext::require_auth(session)?;
-            let (grade, exp) = sync_subscription(ctx, uid);
+            let (grade, exp) = read_subscription_state(ctx, uid);
             if grade < 2 {
                 Ok(Some(PyRep::None))
             } else {
@@ -893,6 +910,19 @@ fn handle_inner(
                 }
             } else if let Some(id) = args.first().and_then(|a| a.as_i64()) {
                 token_ids.push(id);
+            }
+            if token_ids.is_empty() {
+                return Ok(Some(PyRep::Bool(false)));
+            }
+            // Read-only pre-check prevents spurious store commits when no matching token exists.
+            let has_match = ctx.db.with_snapshot(|snap| {
+                load_store(snap)
+                    .redeem_tokens
+                    .get(&uid)
+                    .is_some_and(|list| list.iter().any(|t| token_ids.contains(&t.token_id)))
+            });
+            if !has_match {
+                return Ok(Some(PyRep::Bool(false)));
             }
             let removed = with_store(ctx, |_, store| {
                 let list = store.redeem_tokens.entry(uid).or_default();
