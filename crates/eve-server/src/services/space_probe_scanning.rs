@@ -1191,23 +1191,52 @@ fn handle_set_activity_state(
     }
 
     let mut changed: Vec<(i64, i32)> = Vec::new();
+    let mut rejected_pid: Option<i64> = None;
     if let Ok(mut map) = ctx.active_scanner_probes.write() {
-        for p in map.values_mut() {
-            if p.owner_char_id != char_id || (sys_id > 0 && p.solar_system_id != sys_id) {
-                continue;
+        if !per_probe_states.is_empty() {
+            for &pid in per_probe_states.keys() {
+                let valid_active = map.get(&pid).is_some_and(|p| {
+                    p.owner_char_id == char_id
+                        && (sys_id == 0 || p.solar_system_id == sys_id)
+                        && p.state >= 0
+                });
+                if !valid_active {
+                    rejected_pid = Some(pid);
+                    break;
+                }
             }
-            let target_state = if !per_probe_states.is_empty() {
-                per_probe_states.get(&p.probe_id).copied()
-            } else {
-                bulk_state
-            };
-            if let Some(st) = target_state {
+            if rejected_pid.is_none() {
+                for (&pid, &st) in &per_probe_states {
+                    if let Some(p) = map.get_mut(&pid) {
+                        if p.state != st {
+                            p.state = st;
+                            changed.push((pid, st));
+                        }
+                    }
+                }
+            }
+        } else if let Some(st) = bulk_state {
+            for p in map.values_mut() {
+                if p.owner_char_id != char_id
+                    || (sys_id > 0 && p.solar_system_id != sys_id)
+                    || p.state < 0
+                {
+                    continue;
+                }
                 if p.state != st {
                     p.state = st;
                     changed.push((p.probe_id, st));
                 }
             }
         }
+    }
+    if let Some(pid) = rejected_pid {
+        let msg = format!("Scanner probe {pid} not found");
+        return Some(Err(BridgeRpcError::with_client_error(
+            "ProbeNotFound",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        )));
     }
     if !changed.is_empty() {
         sync_scanner_probes_to_db(ctx);
@@ -1490,11 +1519,15 @@ fn stage_probe_scan_updates(
                 }
             };
             let step_from_radius = |rad: f64, denom: f64| -> Option<(i32, f64)> {
-                if !rad.is_finite() || rad <= 0.0 {
+                if !rad.is_finite() || rad <= 0.0 || !denom.is_finite() || denom <= 0.0 {
                     return None;
                 }
                 let ratio = (rad / denom).max(1.0);
-                let step = (ratio.log2().round() as i32 + 1).clamp(1, 8);
+                let step = if !ratio.is_finite() {
+                    8
+                } else {
+                    (ratio.log2().round().clamp(0.0, 7.0) as i32) + 1
+                };
                 Some((step, base_au * AU_IN_METERS * 2.0_f64.powi(step - 1)))
             };
             let mut dest_opt: Option<[f64; 3]> = None;

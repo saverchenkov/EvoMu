@@ -912,6 +912,180 @@ async fn request_scans_evaluates_probe_strength_and_deviation_via_dogma_and_expe
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_activity_state_blocks_sentinel_resurrection_and_foreign_probes() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let kw = HashMap::new();
+    let bound = BoundObjectEntry {
+        bound_id: 950,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("scanMgr:{sys_id}"),
+        ref_id: 950,
+    };
+
+    let active_pid = 890_700_001_i64;
+    let cargo_sentinel_pid = 890_700_002_i64;
+    let lost_sentinel_pid = 890_700_003_i64;
+    let foreign_pid = 890_700_004_i64;
+    let other_sys_pid = 890_700_005_i64;
+    let nonexistent_pid = 890_700_999_i64;
+
+    let now_unix = ctx.now_unix();
+    let make_probe = |probe_id: i64, owner_char_id: i64, probe_sys: u32, state: i32| ActiveScannerProbe {
+        probe_id,
+        probe_type_id: 30_013,
+        owner_char_id,
+        ship_id: if owner_char_id == char_id { ship_id } else { 100_000_099 },
+        launcher_module_id: 0,
+        solar_system_id: probe_sys,
+        position: [1_000.0, 0.0, 0.0],
+        destination: [1_000.0, 0.0, 0.0],
+        range_step: 4,
+        scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+        base_sensor_strength: 40.0,
+        max_flight_time_s: 60.0,
+        launched_at_unix: if state < 0 { 1 } else { now_unix },
+        state,
+        warp_end_ft: None,
+    };
+
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap();
+        map.insert(active_pid, make_probe(active_pid, char_id, sys_id, PROBE_STATE_IDLE));
+        map.insert(cargo_sentinel_pid, make_probe(cargo_sentinel_pid, char_id, sys_id, -1));
+        map.insert(lost_sentinel_pid, make_probe(lost_sentinel_pid, char_id, sys_id, -2));
+        map.insert(foreign_pid, make_probe(foreign_pid, 2_199_002, sys_id, PROBE_STATE_IDLE));
+        map.insert(other_sys_pid, make_probe(other_sys_pid, char_id, 30_000_144, PROBE_STATE_IDLE));
+    }
+
+    let cargo_probe_qty = || -> i64 {
+        ctx.db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .filter(|it| {
+                    it.owner_id == char_id
+                        && it.location_id == ship_id
+                        && it.flag == InventoryFlag::Cargo
+                        && it.type_id == 30_013
+                })
+                .map(|it| i64::from(it.quantity))
+                .sum()
+        })
+    };
+    let baseline_qty = cargo_probe_qty();
+
+    // 1. Bulk SetActivityState updates active probe only and leaves -1/-2 sentinels untouched.
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(PROBE_STATE_SCANNING as i64)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("bulk SetActivityState");
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        assert_eq!(map.get(&active_pid).map(|p| p.state), Some(PROBE_STATE_SCANNING));
+        assert_eq!(map.get(&cargo_sentinel_pid).map(|p| p.state), Some(-1));
+        assert_eq!(map.get(&lost_sentinel_pid).map(|p| p.state), Some(-2));
+        assert_eq!(map.get(&foreign_pid).map(|p| p.state), Some(PROBE_STATE_IDLE));
+        assert_eq!(map.get(&other_sys_pid).map(|p| p.state), Some(PROBE_STATE_IDLE));
+    }
+
+    // 2. Explicit 2-arg, list, and dict forms targeting sentinel, foreign, wrong-system, or unknown probes fail atomically with ProbeNotFound.
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+    for bad_args in [
+        vec![PyRep::Integer(cargo_sentinel_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        vec![PyRep::Integer(lost_sentinel_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        vec![PyRep::Integer(foreign_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        vec![PyRep::Integer(other_sys_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        vec![PyRep::Integer(nonexistent_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        vec![
+            PyRep::List(vec![PyRep::Integer(active_pid), PyRep::Integer(cargo_sentinel_pid)]),
+            PyRep::Integer(PROBE_STATE_IDLE as i64),
+        ],
+        vec![
+            PyRep::List(vec![PyRep::Integer(active_pid), PyRep::Integer(foreign_pid)]),
+            PyRep::Integer(PROBE_STATE_IDLE as i64),
+        ],
+        vec![PyRep::Dict(vec![(
+            PyRep::Integer(cargo_sentinel_pid),
+            PyRep::Integer(PROBE_STATE_IDLE as i64),
+        )])],
+        vec![PyRep::Dict(vec![(
+            PyRep::Integer(foreign_pid),
+            PyRep::Integer(PROBE_STATE_IDLE as i64),
+        )])],
+        vec![PyRep::Dict(vec![
+            (PyRep::Integer(active_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)),
+            (PyRep::Integer(other_sys_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)),
+        ])],
+    ] {
+        let err = handle_scan_and_wormhole_extras(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "scanMgr",
+            "SetActivityState",
+            &bad_args,
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect_err("invalid SetActivityState probe target must fail");
+        assert_eq!(err.code, "ProbeNotFound", "args={bad_args:?}");
+    }
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+    assert_eq!(
+        ctx.active_scanner_probes.read().unwrap().get(&active_pid).map(|p| p.state),
+        Some(PROBE_STATE_SCANNING),
+        "failed multi-probe SetActivityState must not partially mutate valid probe"
+    );
+
+    // 3. Subsequent RecoverProbes / GetSystemScanMgr expiry returns active_pid (+1) once, never minting from sentinels;
+    //    re-running SetActivityState(1) + RecoverProbes() afterward cannot mint another probe.
+    handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "RecoverProbes", &[], &kw)
+        .await
+        .unwrap()
+        .expect("bulk RecoverProbes");
+    assert_eq!(cargo_probe_qty(), baseline_qty + 1);
+
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("bulk SetActivityState after recovery");
+    handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetSystemScanMgr", &[], &kw)
+        .await
+        .unwrap()
+        .expect("GetSystemScanMgr after recovery");
+    assert_eq!(
+        cargo_probe_qty(),
+        baseline_qty + 1,
+        "repeated SetActivityState(1) + expiry/recovery must never resurrect sentinels or mint extra probes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_scanning_read_purity_and_docked_guards() {
     let (ctx, mut sess) = make_scan_ctx_and_session();
     let kw = HashMap::new();
@@ -1857,6 +2031,29 @@ async fn recover_and_destroy_probe_guards_and_range_step_clamping() {
     .unwrap()
     .expect("RequestScans clamps i64::MIN rangeStep to 1");
     assert_eq!(ctx.active_scanner_probes.read().unwrap().get(&active_pid).map(|p| p.range_step), Some(1));
+
+    for (key, val) in [("scanRangeAU", f64::MAX), ("scanRange", f64::MAX)] {
+        let huge_dict = PyRep::Dict(vec![(
+            PyRep::Integer(active_pid),
+            PyRep::keyval([(key, PyRep::Real(val))]),
+        )]);
+        let _ = handle_scan_and_wormhole_extras(
+            &ctx,
+            &mut sess,
+            Some(&own_bound),
+            "scanMgr",
+            "RequestScans",
+            &[huge_dict],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("RequestScans clamps finite f64::MAX radius to step 8 without overflowing");
+        assert_eq!(
+            ctx.active_scanner_probes.read().unwrap().get(&active_pid).map(|p| p.range_step),
+            Some(8)
+        );
+    }
 
     // 4. DestroyProbe rejects wrong-system probe, leaves cargo sentinel (-1) as no-op, and spares other-system probes on bulk destroy.
     let sentinel_pid = 890_601_006_i64;
