@@ -208,6 +208,9 @@ pub async fn create_escalation_expedition_core(
             },
         );
         snap.item_positions.insert(bm_id, dest_pos);
+        if entry.expires_at_sec > 0 {
+            snap.bookmark_expiries.insert(bm_id, entry.expires_at_sec);
+        }
     });
 
     spawn_expedition_site_instance_core(sde, systems, db, &entry).await;
@@ -369,6 +372,73 @@ pub async fn spawn_expedition_site_instance(
     spawn_expedition_site_instance_core(&ctx.sde, &ctx.systems, &ctx.db, entry).await;
 }
 
+fn remove_escalation_bookmarks_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: CharacterId,
+    instance_ids: &[i64],
+) {
+    let mut removed_bm_ids = Vec::new();
+    snap.bookmarks.retain(|bm_id, b| {
+        let remove = b.owner_id == char_id
+            && b.item_id.is_some_and(|iid| instance_ids.contains(&iid));
+        if remove {
+            removed_bm_ids.push(*bm_id);
+        }
+        !remove
+    });
+    for bm_id in removed_bm_ids {
+        snap.bookmark_expiries.remove(&bm_id);
+        snap.item_positions.remove(&bm_id);
+    }
+}
+
+fn collect_and_despawn_escalation_runtime_instances(
+    db: &eve_db::WorldRepository,
+    char_id: CharacterId,
+    targets: &[(SolarSystemId, u32)],
+) -> Vec<(SolarSystemId, Vec<i64>)> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    db.with_mut_snapshot(|snap| {
+        let mut removed_by_sys: std::collections::HashMap<SolarSystemId, Vec<i64>> =
+            std::collections::HashMap::new();
+        for inst in snap.dungeon_runtime.instances.values_mut() {
+            if inst.despawned
+                || inst.owner_char_id != char_id
+                || !matches!(inst.category.as_str(), "Expedition" | "Escalation")
+                || !targets
+                    .iter()
+                    .any(|&(sys_id, did)| inst.solar_system_id == sys_id && inst.dungeon_id == did)
+            {
+                continue;
+            }
+            let entry = removed_by_sys.entry(inst.solar_system_id).or_default();
+            if let Some(eg) = inst.entry_gate_ball_id.take() {
+                entry.push(eg);
+            }
+            for room in &mut inst.rooms {
+                if let Some(g) = room.gate_ball_id.take() {
+                    entry.push(g);
+                }
+                for obj in &mut room.objects {
+                    if obj.spawned && obj.ball_id > 0 {
+                        entry.push(obj.ball_id);
+                        obj.spawned = false;
+                    }
+                }
+                for grp in &mut room.npc_groups {
+                    entry.extend(grp.npc_ball_ids.drain(..));
+                    grp.cleared = true;
+                }
+                room.cleared = true;
+            }
+            inst.despawned = true;
+        }
+        removed_by_sys.into_iter().collect()
+    })
+}
+
 pub async fn advance_expedition_step_core(
     db: &std::sync::Arc<eve_db::WorldRepository>,
     sde: &std::sync::Arc<eve_sde::SdeRegistry>,
@@ -378,6 +448,8 @@ pub async fn advance_expedition_step_core(
 ) -> Result<Option<EscalatingPathEntry>, BridgeRpcError> {
     let mut updated_entry = None;
     let mut completed = false;
+    let mut prev_runtime_target: Option<(SolarSystemId, u32)> = None;
+    let mut remaining_active_targets: Vec<(SolarSystemId, u32)> = Vec::new();
 
     crate::services::pve_exploration::with_pve_exploration_reg_db(db, db.clock().now_unix_secs(), |reg| {
         let ts = now_sec(reg);
@@ -388,6 +460,7 @@ pub async fn advance_expedition_step_core(
             return;
         };
 
+        prev_runtime_target = Some((entry.destination_solar_system_id, entry.expedition_dungeon_id));
         entry.dungeons_entered.push(entry.expedition_dungeon_id);
 
         if entry.step_index < entry.total_steps {
@@ -419,7 +492,25 @@ pub async fn advance_expedition_step_core(
             list.retain(|e| e.instance_id != instance_id);
             updated_entry = Some(done_entry);
         }
+        remaining_active_targets = list
+            .iter()
+            .filter(|e| e.expires_at_sec == 0 || e.expires_at_sec > ts)
+            .map(|e| (e.destination_solar_system_id, e.expedition_dungeon_id))
+            .collect();
     });
+
+    if let Some((prev_sys, prev_did)) = prev_runtime_target {
+        if !remaining_active_targets.contains(&(prev_sys, prev_did)) {
+            for (sys_id, balls) in
+                collect_and_despawn_escalation_runtime_instances(db, char_id, &[(prev_sys, prev_did)])
+            {
+                let sys_handle = systems.get_or_spawn(sys_id);
+                for bid in balls {
+                    let _ = sys_handle.remove_ball(bid).await;
+                }
+            }
+        }
+    }
 
     if let Some(ref entry) = updated_entry {
         if !completed {
@@ -447,6 +538,11 @@ pub async fn advance_expedition_step_core(
                     );
                     bm.memo = entry.journal_text.clone();
                     snap.item_positions.insert(bm_id, dest_pos);
+                    if entry.expires_at_sec > 0 {
+                        snap.bookmark_expiries.insert(bm_id, entry.expires_at_sec);
+                    } else {
+                        snap.bookmark_expiries.remove(&bm_id);
+                    }
                 }
             });
         } else {
@@ -459,7 +555,7 @@ pub async fn advance_expedition_step_core(
             crate::services::pve_exploration::drop_site_loot_into_space_core(db, systems, dest_sys, char_id, pos, 19419, 1).await;
 
             db.with_mut_snapshot(|snap| {
-                snap.bookmarks.retain(|_, b| !(b.owner_id == char_id && b.item_id == Some(instance_id)));
+                remove_escalation_bookmarks_in_snap(snap, char_id, &[instance_id]);
             });
         }
     }
@@ -674,6 +770,16 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
             } else {
                 Vec::new()
             };
+            for e in &expired {
+                let site_id = format!("EXP-{}-{}", e.instance_id, e.step_index);
+                if let Some(sites) = reg.sites_by_system.get_mut(&e.destination_solar_system_id) {
+                    for s in sites.iter_mut() {
+                        if s.site_id == site_id || s.expedition_instance_id == Some(e.instance_id) {
+                            s.cleared = true;
+                        }
+                    }
+                }
+            }
             (active, expired)
         })
     } else {
@@ -682,12 +788,33 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
 
     if !expired_entries.is_empty() {
         let expired_instance_ids: Vec<i64> = expired_entries.iter().map(|e| e.instance_id).collect();
+        let despawn_targets: Vec<(SolarSystemId, u32)> = expired_entries
+            .iter()
+            .filter(|e| {
+                !active_entries.iter().any(|a| {
+                    a.destination_solar_system_id == e.destination_solar_system_id
+                        && a.expedition_dungeon_id == e.expedition_dungeon_id
+                })
+            })
+            .map(|e| (e.destination_solar_system_id, e.expedition_dungeon_id))
+            .collect();
+        let removed_balls =
+            collect_and_despawn_escalation_runtime_instances(&ctx.db, char_id, &despawn_targets);
+        if !removed_balls.is_empty() {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                let systems = std::sync::Arc::clone(&ctx.systems);
+                rt.spawn(async move {
+                    for (sys_id, balls) in removed_balls {
+                        let sys_handle = systems.get_or_spawn(sys_id);
+                        for bid in balls {
+                            let _ = sys_handle.remove_ball(bid).await;
+                        }
+                    }
+                });
+            }
+        }
         ctx.db.with_mut_snapshot(|snap| {
-            snap.bookmarks.retain(|_, b| {
-                !(b.owner_id == char_id
-                    && b.item_id
-                        .is_some_and(|iid| expired_instance_ids.contains(&iid)))
-            });
+            remove_escalation_bookmarks_in_snap(snap, char_id, &expired_instance_ids);
             for e in &expired_entries {
                 let sig_id = expedition_sig_id(e.instance_id, e.step_index);
                 if let Some(sigs) = snap.cosmic_signatures.get_mut(&e.destination_solar_system_id) {

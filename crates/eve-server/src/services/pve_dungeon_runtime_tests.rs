@@ -5,7 +5,7 @@ use crate::router::ServerContext;
 use crate::services::pve_dungeon_editor::{with_dungeon_editor_store, GmActiveEditorState};
 use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
 use eve_db::clock::VirtualServerClock;
-use eve_db::{BookmarkRecord, CosmicSignatureRecord, WorldRepository};
+use eve_db::{BookmarkRecord, CosmicSignatureRecord, ServerClock, WorldRepository};
 use eve_sde::{SdeRegistry, SolarSystemId};
 use std::sync::{Arc, OnceLock};
 
@@ -64,7 +64,7 @@ fn sample_instance(inst_id: i64, did: u32, sys_id: SolarSystemId, char_id: i64, 
         instance_id: inst_id,
         dungeon_id: did,
         dungeon_name: "Test Complex".into(),
-        category: "Expedition".into(),
+        category: "Deadspace".into(),
         archetype: "Deadspace".into(),
         solar_system_id: sys_id,
         owner_char_id: char_id,
@@ -1151,5 +1151,149 @@ fn resolve_dsg_probe_gate_by_inst_dungeon_or_site_id_and_filters_expired_escalat
         )
         .unwrap(),
         Some(DVec3::new(6_500_000.0, 0.0, 0.0))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_escalation_epinstance_bookmark_and_runtime_instance_are_unwarpable() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_029_901;
+    let ctx = make_ctx(sys_id, char_id);
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_775_100_000));
+    ctx.set_clock(clock.clone());
+
+    let entry = crate::services::pve_expeditions::create_escalation_expedition(
+        &ctx,
+        char_id,
+        sys_id,
+        1420,
+        "Guristas Scout Outpost",
+        [0.0; 3],
+    )
+    .await
+    .expect("create_escalation_expedition must seed escalation");
+
+    let runtime_inst_id = with_dungeon_runtime_store(&ctx, |store| {
+        store
+            .instances
+            .values()
+            .find(|inst| {
+                inst.owner_char_id == char_id
+                    && inst.solar_system_id == entry.destination_solar_system_id
+                    && inst.dungeon_id == entry.expedition_dungeon_id
+                    && inst.category == "Expedition"
+            })
+            .map(|inst| inst.instance_id)
+    })
+    .expect("create_escalation_expedition must spawn owned Expedition DungeonRuntimeInstance");
+
+    // 1. Before expiry, epinstance, dungeon_id, and owned runtime instance all resolve.
+    assert!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            char_id,
+            entry.destination_solar_system_id,
+            "epinstance",
+            entry.instance_id,
+            None,
+        )
+        .unwrap()
+        .is_some()
+    );
+    assert!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            char_id,
+            entry.destination_solar_system_id,
+            "dungeon",
+            i64::from(entry.expedition_dungeon_id),
+            None,
+        )
+        .unwrap()
+        .is_some()
+    );
+    assert!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            char_id,
+            entry.destination_solar_system_id,
+            "dungeon",
+            runtime_inst_id,
+            None,
+        )
+        .unwrap()
+        .is_some()
+    );
+
+    // 2. Advance past expiry WITHOUT calling journal pruning; neither epinstance (even with
+    //    bookmark still present in snap.bookmarks) nor the owned runtime instance may resolve.
+    clock.advance_secs(86_405);
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            char_id,
+            entry.destination_solar_system_id,
+            "epinstance",
+            entry.instance_id,
+            None,
+        )
+        .unwrap(),
+        None,
+        "expired escalation must not fall back to bookmark"
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            char_id,
+            entry.destination_solar_system_id,
+            "dungeon",
+            i64::from(entry.expedition_dungeon_id),
+            None,
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            char_id,
+            entry.destination_solar_system_id,
+            "dungeon",
+            runtime_inst_id,
+            None,
+        )
+        .unwrap(),
+        None
+    );
+    let inst_str = format!("DNG-INST-{runtime_inst_id}");
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            char_id,
+            entry.destination_solar_system_id,
+            "location",
+            0,
+            Some(inst_str.as_str()),
+        )
+        .unwrap(),
+        None
+    );
+
+    // 3. Even if the EscalatingPathEntry was removed, an orphaned escalation bookmark or an
+    //    expired bookmark_expiries entry cannot be warped via epinstance.
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.escalations_by_char.remove(&char_id);
+    });
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            char_id,
+            entry.destination_solar_system_id,
+            "epinstance",
+            entry.instance_id,
+            None,
+        )
+        .unwrap(),
+        None
     );
 }

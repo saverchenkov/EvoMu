@@ -7,7 +7,7 @@ mod pve_expeditions_ops_cov_tests;
 use super::*;
 use crate::router::ServerContext;
 use eve_db::clock::VirtualServerClock;
-use eve_db::WorldRepository;
+use eve_db::{ServerClock, WorldRepository};
 use eve_machonet::SessionState;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use std::sync::{Arc, OnceLock};
@@ -178,4 +178,80 @@ async fn escalation_creation_step_advancement_and_room_gating() {
         .await
         .expect("advance room once cleared");
     assert!(!matches!(advanced, PyRep::None));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn escalation_expiry_pruning_despawns_runtime_instance_and_clears_bookmark_expiry() {
+    let origin_sys: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_039_901;
+    let ship_id: i64 = 1_039_901;
+    let (ctx, _session) = setup_expedition_ctx(origin_sys, char_id, ship_id);
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_775_400_000));
+    ctx.set_clock(clock.clone());
+
+    let entry = create_escalation_expedition(
+        &ctx,
+        char_id,
+        origin_sys,
+        1420,
+        "Guristas Scout Outpost",
+        [0.0; 3],
+    )
+    .await
+    .expect("create_escalation_expedition");
+
+    let (bm_id, runtime_inst_id) = ctx.db.with_snapshot(|snap| {
+        let bm = snap
+            .bookmarks
+            .values()
+            .find(|b| b.owner_id == char_id && b.item_id == Some(entry.instance_id))
+            .expect("escalation bookmark must exist");
+        assert_eq!(snap.bookmark_expiries.get(&bm.bookmark_id).copied(), Some(entry.expires_at_sec));
+        let inst = snap
+            .dungeon_runtime
+            .instances
+            .values()
+            .find(|inst| {
+                inst.owner_char_id == char_id
+                    && inst.solar_system_id == entry.destination_solar_system_id
+                    && inst.dungeon_id == entry.expedition_dungeon_id
+                    && inst.category == "Expedition"
+            })
+            .expect("owned Expedition DungeonRuntimeInstance must exist");
+        assert!(!inst.despawned);
+        (bm.bookmark_id, inst.instance_id)
+    });
+
+    clock.advance_secs(86_405);
+    let _ = get_my_escalating_path_details_rowset(&ctx, char_id);
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.bookmarks.contains_key(&bm_id));
+        assert!(!snap.bookmark_expiries.contains_key(&bm_id));
+        assert!(snap.dungeon_runtime.instances[&runtime_inst_id].despawned);
+    });
+    assert_eq!(
+        crate::services::pve_dungeon_runtime::resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            char_id,
+            entry.destination_solar_system_id,
+            "epinstance",
+            entry.instance_id,
+            None,
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        crate::services::pve_dungeon_runtime::resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            char_id,
+            entry.destination_solar_system_id,
+            "dungeon",
+            runtime_inst_id,
+            None,
+        )
+        .unwrap(),
+        None
+    );
 }
