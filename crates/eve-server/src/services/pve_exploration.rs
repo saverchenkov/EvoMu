@@ -12,18 +12,17 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SolarSystemId, TypeId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub type CharacterId = i64;
 pub type ItemId = i64;
 
 mod tuple_map_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::HashMap;
-    use std::hash::Hash;
+    use std::collections::BTreeMap;
 
     pub fn serialize<S, K1, K2, V>(
-        map: &HashMap<(K1, K2), V>,
+        map: &BTreeMap<(K1, K2), V>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
@@ -36,11 +35,11 @@ mod tuple_map_serde {
         entries.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D, K1, K2, V>(deserializer: D) -> Result<HashMap<(K1, K2), V>, D::Error>
+    pub fn deserialize<'de, D, K1, K2, V>(deserializer: D) -> Result<BTreeMap<(K1, K2), V>, D::Error>
     where
         D: Deserializer<'de>,
-        K1: Deserialize<'de> + Eq + Hash,
-        K2: Deserialize<'de> + Eq + Hash,
+        K1: Deserialize<'de> + Ord,
+        K2: Deserialize<'de> + Ord,
         V: Deserialize<'de>,
     {
         let entries: Vec<((K1, K2), V)> = Vec::deserialize(deserializer)?;
@@ -175,36 +174,40 @@ pub struct PveExplorationRegistry {
     pub db_weak: std::sync::Weak<eve_db::WorldRepository>,
     #[serde(skip)]
     pub current_now_sec: u64,
-    pub seeded_systems: HashMap<SolarSystemId, bool>,
-    pub sites_by_system: HashMap<SolarSystemId, Vec<PveSiteInstance>>,
-    pub escalations_by_char: HashMap<CharacterId, Vec<EscalatingPathEntry>>,
+    pub seeded_systems: BTreeMap<SolarSystemId, bool>,
+    pub sites_by_system: BTreeMap<SolarSystemId, Vec<PveSiteInstance>>,
+    pub escalations_by_char: BTreeMap<CharacterId, Vec<EscalatingPathEntry>>,
     #[serde(default, with = "tuple_map_serde")]
-    pub hacking_games: HashMap<(CharacterId, ItemId), HackingGameSession>,
-    pub spewed_cans: HashMap<ItemId, SpewedLootCan>,
+    pub hacking_games: BTreeMap<(CharacterId, ItemId), HackingGameSession>,
+    pub spewed_cans: BTreeMap<ItemId, SpewedLootCan>,
     #[serde(default)]
-    pub hacked_containers: std::collections::HashSet<(SolarSystemId, ItemId)>,
+    pub hacked_containers: BTreeSet<(SolarSystemId, ItemId)>,
     #[serde(default, with = "tuple_map_serde")]
-    pub failure_counts: HashMap<(SolarSystemId, ItemId), u8>,
+    pub failure_counts: BTreeMap<(SolarSystemId, ItemId), u8>,
     #[serde(default, with = "tuple_map_serde")]
-    pub self_repair_turns: HashMap<(CharacterId, ItemId), u8>,
+    pub self_repair_turns: BTreeMap<(CharacterId, ItemId), u8>,
     #[serde(default, with = "tuple_map_serde")]
-    pub structure_char_failures: HashMap<(CharacterId, ItemId), u8>,
+    pub structure_char_failures: BTreeMap<(CharacterId, ItemId), u8>,
     pub sim_clock_sec: u64,
     pub next_id_seq: i64,
     #[serde(default)]
     pub downtime_counter: u64,
     #[serde(default)]
-    pub active_relays: HashMap<i64, crate::services::wormhole_pve_escalations::DecloakedRelayInfo>,
+    pub active_relays: BTreeMap<i64, crate::services::wormhole_pve_escalations::DecloakedRelayInfo>,
     #[serde(default)]
-    pub sentry_last_fire_unix: HashMap<i64, f64>,
+    pub sentry_last_fire_unix: BTreeMap<i64, f64>,
     #[serde(default)]
-    pub sentry_last_fire_sim_s: HashMap<i64, f64>,
+    pub sentry_last_fire_sim_s: BTreeMap<i64, f64>,
 }
 pub type HackingSiteRegistry = PveExplorationRegistry;
 pub const PVE_EXPLORATION_NOTE_ID: i64 = -8_200_000_000_000;
 
+pub fn db_pve_key(db: &std::sync::Arc<eve_db::WorldRepository>) -> usize {
+    std::sync::Arc::as_ptr(db) as usize
+}
+
 pub fn ctx_pve_key(ctx: &ServerContext) -> usize {
-    std::sync::Arc::as_ptr(&ctx.db) as usize
+    db_pve_key(&ctx.db)
 }
 
 fn parse_pve_exploration_reg_from_note(

@@ -454,8 +454,61 @@ async fn activate_acceleration_gate_read_pure_on_invalid_calls_in_seeded_system(
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_820_100)));
     let kw = HashMap::new();
 
-    // Seed the system so it contains an active DSG-{sys_id} DungeonRuntimeInstance.
+    // Seed two k-space systems + multi-entry collections so `BTreeMap`/`BTreeSet` round-trips cleanly.
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
+    let sys_id_2 = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&id| id != sys_id && id < 31_000_000)
+        .expect("second k-space system for BF-1480-02 multi-system read-purity check");
+    ensure_system_pve_sites_seeded(&ctx, sys_id_2).await;
+    let guarded_site_id = "ANOM-R6-GUARDED-1";
+    let guarded_npc_bid = 9_146_999_i64;
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.hacked_containers.insert((sys_id, 9_146_001));
+        reg.hacked_containers.insert((sys_id_2, 9_146_002));
+        reg.failure_counts.insert((sys_id, 9_146_001), 1);
+        reg.failure_counts.insert((sys_id_2, 9_146_002), 1);
+        reg.sites_by_system.entry(sys_id).or_default().push(PveSiteInstance {
+            site_id: guarded_site_id.into(),
+            dungeon_id: 9_146_999,
+            dungeon_name: "Guarded Anomaly".into(),
+            solar_system_id: sys_id,
+            site_category: "CombatAnomaly".into(),
+            position: [25_000_000.0, 0.0, 0.0],
+            signal_strength: 1.0,
+            current_room: 1,
+            total_rooms: 2,
+            current_wave: 1,
+            total_waves: 2,
+            active_npc_ball_ids: vec![guarded_npc_bid],
+            cleared: false,
+            created_unix: 1_775_820_100,
+            lifetime_seconds: 86_400,
+            ..Default::default()
+        });
+    });
+    let _ = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .spawn_ball_with_combat(
+            Ball {
+                id: guarded_npc_bid,
+                type_id: 587,
+                position: DVec3::new(25_000_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, guarded_npc_bid, 587),
+        )
+        .await;
     let (dsg_inst_id, dsg_entry_gate_ball_id, dsg_r0_gate_ball_id) = ctx.db.with_snapshot(|snap| {
         snap.dungeon_runtime
             .instances
@@ -619,6 +672,14 @@ async fn activate_acceleration_gate_read_pure_on_invalid_calls_in_seeded_system(
         .expect_err("out-of-range runtime gate ball must reject");
         assert_eq!(gate_err.code, "OutsideGateActivationRange");
     }
+
+    // 6b. No-op write closure across multi-system registry and rejected `WaveNpcsRemaining`
+    //     precheck must both stay commit-free (BF-1480-02).
+    with_pve_exploration_reg(&ctx, |_reg| {});
+    let wave_rem_err = advance_site_wave_or_complete(&ctx, &mut sess, sys_id, guarded_site_id)
+        .await
+        .expect_err("site with living wave NPC must reject");
+    assert_eq!(wave_rem_err.code, "WaveNpcsRemaining");
 
     assert_eq!(ctx.db.state_epoch(), e_seeded);
     assert_eq!(ctx.db.tx_commit_count(), c_seeded);
@@ -1987,4 +2048,160 @@ async fn advance_site_wave_or_complete_rejects_with_site_wave_changed_on_mid_awa
         assert_eq!(site.current_wave, 2);
         assert!(!site.cleared);
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_npc_destruction_and_gate_advance_preserve_wave_next_balls() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_064_480;
+    let ship_id: i64 = 1_064_480_001;
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("bf1480_01", "pw", char_id, "Bf1480_01");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    let base_now = 1_776_230_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_now)));
+
+    let site_pos = [50_000_000.0, 0.0, 0.0];
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::from_array(site_pos),
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await;
+
+    let mut base_sess = SessionState::new(64480);
+    base_sess.user_id = Some(1);
+    base_sess.character_id = Some(char_id);
+    base_sess.solar_system_id = Some(sys_id);
+    base_sess.ship_id = Some(ship_id);
+
+    // Run multiple barrier-synchronized iterations racing last-NPC destruction against
+    // `advance_site_wave_or_complete` so both winner orderings are exercised.
+    for iter in 0..6_i64 {
+        let site_id = format!("ANOM-BF1480-01-{iter}");
+        let last_npc_id = 9_640_000 + iter;
+        let iter_pos = [site_pos[0] + (iter as f64) * 50_000.0, 0.0, 0.0];
+        with_pve_exploration_reg(&ctx, |reg| {
+            reg.seeded_systems.insert(sys_id, true);
+            reg.sites_by_system.entry(sys_id).or_default().push(PveSiteInstance {
+                site_id: site_id.clone(),
+                dungeon_id: 1420 + iter as u32,
+                dungeon_name: format!("BF-1480-01 Race Site {iter}"),
+                solar_system_id: sys_id,
+                site_category: "CombatAnomaly".into(),
+                position: iter_pos,
+                signal_strength: 1.0,
+                current_room: 1,
+                total_rooms: 2,
+                current_wave: 1,
+                total_waves: 2,
+                // Last Wave-1 NPC already left ballpark right before kill hook + gate call race.
+                active_npc_ball_ids: vec![last_npc_id],
+                cleared: false,
+                created_unix: base_now,
+                lifetime_seconds: 86_400,
+                ..Default::default()
+            });
+        });
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let (ctx_kill, b_kill) = (Arc::clone(&ctx), Arc::clone(&barrier));
+        let h_kill = tokio::spawn(async move {
+            b_kill.wait().await;
+            handle_pve_site_npc_destruction_core(
+                &ctx_kill.systems,
+                &ctx_kill.db,
+                &ctx_kill.sde,
+                &ctx_kill.mechanic_rng,
+                &*ctx_kill.combat_ephemeral,
+                sys_id,
+                last_npc_id,
+                char_id,
+                false,
+            )
+            .await
+        });
+
+        let (ctx_gate, b_gate, sid_gate, mut sess_gate) = (
+            Arc::clone(&ctx),
+            Arc::clone(&barrier),
+            site_id.clone(),
+            base_sess.clone(),
+        );
+        let h_gate = tokio::spawn(async move {
+            b_gate.wait().await;
+            advance_site_wave_or_complete(&ctx_gate, &mut sess_gate, sys_id, &sid_gate).await
+        });
+
+        let _kill_res = h_kill.await.unwrap();
+        let gate_res = h_gate.await.unwrap();
+        if let Ok(rep) = &gate_res {
+            assert_eq!(rep.dict_get("currentWave"), Some(&PyRep::Integer(2)));
+            assert_eq!(rep.dict_get("completed"), Some(&PyRep::Bool(false)));
+        }
+
+        let wave2_balls = read_pve_exploration_reg(&ctx, |reg| {
+            let site = reg.sites_by_system[&sys_id]
+                .iter()
+                .find(|s| s.site_id == site_id)
+                .unwrap();
+            assert_eq!(site.current_wave, 2, "iteration {iter} must land on wave 2");
+            assert!(!site.cleared, "iteration {iter} must not clear before wave 2");
+            assert!(
+                !site.active_npc_ball_ids.is_empty(),
+                "iteration {iter} must retain wave 2 NPC ball IDs"
+            );
+            site.active_npc_ball_ids.clone()
+        });
+
+        for bid in wave2_balls {
+            assert!(
+                sys_handle.get_ball_snapshot(bid).await.unwrap().is_some(),
+                "iteration {iter} live wave 2 NPC ball {bid} must not be removed by losing cleanup"
+            );
+        }
+
+        let mut follow_sess = base_sess.clone();
+        let skip_err = advance_site_wave_or_complete(&ctx, &mut follow_sess, sys_id, &site_id)
+            .await
+            .expect_err("wave 2 live NPCs must prevent advancing/clearing site");
+        assert_eq!(skip_err.code, "WaveNpcsRemaining");
+    }
 }

@@ -15,12 +15,13 @@ use eve_sde::{InvType, SdeRegistry};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{with_mut_combat_runtime_with_locks, CombatRuntimeState, ExtendedNpcEntity};
 use crate::services::pve_exploration::{
-    ctx_pve_key, drop_site_loot_into_space, drop_site_loot_into_space_core,
+    ctx_pve_key, db_pve_key, drop_site_loot_into_space, drop_site_loot_into_space_core,
     expire_and_prune_site_in_reg, finalize_expired_site_prune_core, find_site_by_canonical_id,
     find_site_by_canonical_id_mut, find_site_by_id_or_dungeon, is_site_expired_in_reg, now_sec,
-    reject_expired_site_prune, try_with_pve_exploration_reg, with_pve_exploration_reg_db,
-    EscalatingPathEntry, ExpiredSitePruneResult, PveExplorationRegistry, PveSiteInstance,
-    SpewedLootCan, PVE_EXPLORATION_NOTE_ID,
+    read_pve_exploration_reg, reject_expired_site_prune, try_with_pve_exploration_reg,
+    with_pve_exploration_reg, with_pve_exploration_reg_db, EscalatingPathEntry,
+    ExpiredSitePruneResult, PveExplorationRegistry, PveSiteInstance, SpewedLootCan,
+    PVE_EXPLORATION_NOTE_ID,
 };
 use crate::services::pve_exploration_seeding::{
     build_type_combat_state_from_sde, build_wave_npc_balls, ensure_system_pve_sites_seeded,
@@ -588,9 +589,11 @@ fn site_has_unhacked_cans(
 }
 
 fn site_wave_changed_err(message: impl Into<String>) -> BridgeRpcError {
-    let mut err = BridgeRpcError::user_error("SiteWaveChanged");
-    err.message = message.into();
-    err
+    BridgeRpcError {
+        code: "SiteWaveChanged".into(),
+        message: message.into(),
+        client_error: None,
+    }
 }
 
 fn claim_wave_transition_in_reg(
@@ -721,8 +724,11 @@ async fn handle_pve_site_npc_destruction_core_inner(
             wave_cleared: bool,
             was_wave_trigger: bool,
             expedition_instance_id: Option<i64>,
+            normal_wave_balls: Vec<Ball>,
+            spawn_guard: Option<WaveSpawnGuard>,
         },
     }
+    let pve_key = db_pve_key(db);
     let lookup = with_pve_exploration_reg_db(db, now_unix, |reg| {
         let now = now_sec(reg);
         let matched = reg.sites_by_system.get(&solar_system_id).and_then(|sites| {
@@ -754,6 +760,37 @@ async fn handle_pve_site_npc_destruction_core_inner(
         };
         site.active_npc_ball_ids.remove(pos);
         let wave_cleared = site.active_npc_ball_ids.is_empty();
+        let prev_wave = site.current_wave;
+        let is_sleeper = site.site_category == "WormholeCombat" && site.wormhole_class.is_some();
+        let mut normal_wave_balls = Vec::new();
+        let mut spawn_guard = None;
+        if wave_cleared && site.ded_rating.is_none() && site.current_wave < site.total_waves {
+            if is_sleeper {
+                spawn_guard = Some(register_wave_spawn_guard((
+                    pve_key,
+                    solar_system_id,
+                    site.site_id.clone(),
+                )));
+            } else {
+                site.current_wave += 1;
+                normal_wave_balls = build_wave_npc_balls(
+                    sde,
+                    solar_system_id,
+                    site.dungeon_id,
+                    site.current_wave,
+                    site.position,
+                    site.wormhole_class,
+                );
+                site.active_npc_ball_ids = normal_wave_balls.iter().map(|b| b.id).collect();
+                if !normal_wave_balls.is_empty() {
+                    spawn_guard = Some(register_wave_spawn_guard((
+                        pve_key,
+                        solar_system_id,
+                        site.site_id.clone(),
+                    )));
+                }
+            }
+        }
         NpcKillLookupOutcome::ActiveHit {
             site_id: site.site_id.clone(),
             dungeon_id: site.dungeon_id,
@@ -762,11 +799,13 @@ async fn handle_pve_site_npc_destruction_core_inner(
             ded_rating: site.ded_rating,
             wormhole_class: site.wormhole_class,
             position: site.position,
-            current_wave: site.current_wave,
+            current_wave: prev_wave,
             total_waves: site.total_waves,
             wave_cleared,
             was_wave_trigger: pos == 0,
             expedition_instance_id: site.expedition_instance_id,
+            normal_wave_balls,
+            spawn_guard,
         }
     });
 
@@ -782,6 +821,8 @@ async fn handle_pve_site_npc_destruction_core_inner(
         wave_cleared,
         was_wave_trigger,
         expedition_instance_id,
+        normal_wave_balls,
+        spawn_guard,
     ) = match lookup {
         NpcKillLookupOutcome::NotFound => return (None, None, None),
         NpcKillLookupOutcome::ExpiredSite(pruned) => {
@@ -801,6 +842,8 @@ async fn handle_pve_site_npc_destruction_core_inner(
             wave_cleared,
             was_wave_trigger,
             expedition_instance_id,
+            normal_wave_balls,
+            spawn_guard,
         } => (
             site_id,
             dungeon_id,
@@ -813,6 +856,8 @@ async fn handle_pve_site_npc_destruction_core_inner(
             wave_cleared,
             was_wave_trigger,
             expedition_instance_id,
+            normal_wave_balls,
+            spawn_guard,
         ),
     };
 
@@ -843,51 +888,54 @@ async fn handle_pve_site_npc_destruction_core_inner(
                     systems, db, combat_ephemeral, solar_system_id, &new_ids, true,
                 )).await;
             }
+            drop(spawn_guard);
             return (None, None, None);
         }
     }
 
     if !wave_cleared {
+        drop(spawn_guard);
         return (None, None, None);
     }
     // DED rooms advance through `keeper.ActivateAccelerationGate`; clearing a room only unlocks its gate.
     if ded_rating.is_some() && current_wave < total_waves {
+        drop(spawn_guard);
         return (None, None, None);
     }
 
     let sys_handle = systems.get_or_spawn(solar_system_id);
 
     if current_wave < total_waves {
-        let next_wave = current_wave + 1;
-        let spawned_ids = if let Some(wh) = sleeper_class {
-            Box::pin(spawn_sleeper_wave_core(
+        if let Some(wh) = sleeper_class {
+            let next_wave = current_wave + 1;
+            let spawned_ids = Box::pin(spawn_sleeper_wave_core(
                 systems, db, sde, combat_ephemeral, solar_system_id, wh, next_wave, DVec3::from_array(pos),
-            )).await
+            )).await;
+            let claimed = claim_wave_transition_in_reg(
+                db,
+                solar_system_id,
+                &site_id,
+                current_wave,
+                next_wave,
+                &spawned_ids,
+                false,
+            );
+            if !claimed {
+                Box::pin(cleanup_unclaimed_wave_balls(
+                    systems, db, combat_ephemeral, solar_system_id, &spawned_ids, true,
+                )).await;
+            }
+            drop(spawn_guard);
         } else {
-            let mut ids = Vec::new();
-            for b in build_wave_npc_balls(sde, solar_system_id, dungeon_id, next_wave, pos, wh_class) {
-                ids.push(b.id);
+            for b in normal_wave_balls {
                 let cs = build_type_combat_state_from_sde(sde, b.type_id);
                 let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
             }
-            ids
-        };
-        let claimed = claim_wave_transition_in_reg(
-            db,
-            solar_system_id,
-            &site_id,
-            current_wave,
-            next_wave,
-            &spawned_ids,
-            false,
-        );
-        if !claimed {
-            Box::pin(cleanup_unclaimed_wave_balls(
-                systems, db, combat_ephemeral, solar_system_id, &spawned_ids, sleeper_class.is_some(),
-            )).await;
+            drop(spawn_guard);
         }
         (None, None, None)
     } else {
+        drop(spawn_guard);
         enum FinalClearClaim {
             Claimed,
             NotClaimed,
@@ -1269,81 +1317,56 @@ where
             current_balls: Vec<i64>,
             is_sleeper_cache_stabilized: bool,
         },
-        Expired(ExpiredSitePruneResult),
+        NeedsExpiryPrune(String),
     }
 
     let pve_key = ctx_pve_key(ctx);
     let (canonical_site_id, checked_wave, current_balls, is_sleeper_cache_stabilized) = loop {
-        let precheck = try_with_pve_exploration_reg(ctx, |reg| {
+        let precheck = read_pve_exploration_reg(ctx, |reg| -> Result<AdvancePrecheck, BridgeRpcError> {
             let now = now_sec(reg);
-            let matched = {
-                let Some(sites) = reg.sites_by_system.get(&solar_system_id) else {
-                    return Err(BridgeRpcError {
-                        code: "SiteNotFound".into(),
-                        message: format!("PvE site {site_id} not found in system {solar_system_id}"),
-                        client_error: None,
-                    });
-                };
-                let Some(site) = find_site_by_id_or_dungeon(sites, site_id, now) else {
-                    return Err(BridgeRpcError {
-                        code: "SiteNotFound".into(),
-                        message: format!("PvE site {site_id} not found in system {solar_system_id}"),
-                        client_error: None,
-                    });
-                };
-                if let Some(rx) = current_wave_spawn_rx(&(pve_key, solar_system_id, site.site_id.clone())) {
-                    return Ok(AdvancePrecheck::WaitingForSpawn(rx));
-                }
-                if site.cleared {
-                    return Err(BridgeRpcError {
-                        code: "SiteAlreadyCleared".into(),
-                        message: format!("PvE site {} is already cleared", site.site_id),
-                        client_error: None,
-                    });
-                }
-                (
-                    site.site_id.clone(),
-                    is_site_expired_in_reg(reg, site, now),
-                    site_has_unhacked_cans(reg, solar_system_id, site, true),
-                    site.current_wave,
-                    site.active_npc_ball_ids.clone(),
-                    site.site_category == "SleeperCache" && site.sleeper_rift_stabilized,
-                )
-            };
-            let (
-                canonical_site_id,
-                expired,
-                has_unhacked_cans,
-                checked_wave,
-                current_balls,
-                is_sleeper_cache_stabilized,
-            ) = matched;
-            if expired {
-                if let Some(pruned) =
-                    expire_and_prune_site_in_reg(reg, solar_system_id, &canonical_site_id, now)
-                {
-                    return Ok(AdvancePrecheck::Expired(pruned));
-                }
+            let Some(sites) = reg.sites_by_system.get(&solar_system_id) else {
                 return Err(BridgeRpcError {
                     code: "SiteNotFound".into(),
                     message: format!("PvE site {site_id} not found in system {solar_system_id}"),
                     client_error: None,
                 });
+            };
+            let Some(site) = find_site_by_id_or_dungeon(sites, site_id, now) else {
+                return Err(BridgeRpcError {
+                    code: "SiteNotFound".into(),
+                    message: format!("PvE site {site_id} not found in system {solar_system_id}"),
+                    client_error: None,
+                });
+            };
+            if let Some(rx) = current_wave_spawn_rx(&(pve_key, solar_system_id, site.site_id.clone())) {
+                return Ok(AdvancePrecheck::WaitingForSpawn(rx));
             }
-            if has_unhacked_cans {
+            if site.cleared {
+                return Err(BridgeRpcError {
+                    code: "SiteAlreadyCleared".into(),
+                    message: format!("PvE site {} is already cleared", site.site_id),
+                    client_error: None,
+                });
+            }
+            if is_site_expired_in_reg(reg, site, now) {
+                return Ok(AdvancePrecheck::NeedsExpiryPrune(site.site_id.clone()));
+            }
+            if site_has_unhacked_cans(reg, solar_system_id, site, true) {
                 return Err(BridgeRpcError {
                     code: "SiteContainersUnhacked".into(),
                     message: format!(
-                        "Cannot complete exploration site {canonical_site_id} while hackable containers remain unhacked"
+                        "Cannot complete exploration site {} while hackable containers remain unhacked",
+                        site.site_id
                     ),
                     client_error: None,
                 });
             }
             Ok(AdvancePrecheck::Ready {
-                canonical_site_id,
-                checked_wave,
-                current_balls,
-                is_sleeper_cache_stabilized,
+                canonical_site_id: site.site_id.clone(),
+                checked_wave: site.current_wave,
+                current_balls: site.active_npc_ball_ids.clone(),
+                is_sleeper_cache_stabilized: site.site_category == "SleeperCache"
+                    && site.sleeper_rift_stabilized,
             })
         })?;
 
@@ -1351,8 +1374,19 @@ where
             AdvancePrecheck::WaitingForSpawn(mut rx) => {
                 let _ = rx.wait_for(|&done| done).await;
             }
-            AdvancePrecheck::Expired(pruned) => {
-                return Err(reject_expired_site_prune(ctx, pruned).await);
+            AdvancePrecheck::NeedsExpiryPrune(expired_sid) => {
+                let pruned_opt = with_pve_exploration_reg(ctx, |reg| {
+                    let now = now_sec(reg);
+                    expire_and_prune_site_in_reg(reg, solar_system_id, &expired_sid, now)
+                });
+                if let Some(pruned) = pruned_opt {
+                    return Err(reject_expired_site_prune(ctx, pruned).await);
+                }
+                return Err(BridgeRpcError {
+                    code: "SiteNotFound".into(),
+                    message: format!("PvE site {site_id} not found in system {solar_system_id}"),
+                    client_error: None,
+                });
             }
             AdvancePrecheck::Ready {
                 canonical_site_id,
