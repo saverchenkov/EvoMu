@@ -340,11 +340,16 @@ async fn handle_dogma_create_newbie_ship(
         let target_new_type_id = if existing_corvette.is_some() {
             None
         } else {
-            Some(racial_corvette_type_id.ok_or_else(|| BridgeRpcError {
+            let corvette_type_id = racial_corvette_type_id.ok_or_else(|| BridgeRpcError {
                 code: "NoRacialCorvette".into(),
                 message: format!("No published SDE corvette for race {race_id}"),
                 client_error: None,
-            })?)
+            })?;
+            // Match `find_boardable_corvette_in_hangar` and `ship.Board` (#1433 / HF1417-P1-01):
+            // verify the pilot meets the racial corvette's SDE skill prerequisites before leaving
+            // their active ship or spawning a duplicate corvette in Hangar.
+            ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, corvette_type_id)?;
+            Some(corvette_type_id)
         };
 
         let mut old_ship_left: Option<(eve_db::InventoryItemRecord, i64)> = None;
