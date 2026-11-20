@@ -2516,6 +2516,29 @@ class TestHookExecutionAndInclientHelpers(unittest.TestCase):
         self.assertEqual(res.get("typed_into"), "quickFilterInputBox")
         self.assertEqual(set_values, ["1MN Afterburner I"])
 
+    def test_hotkey_alias_executes_press_key_command(self):
+        hook = _load_hook_with_py2_stubs()
+        called = []
+
+        class FakeCmd:
+            combatFunctionLoaded = None
+            def OpenJournal(self):
+                called.append("OpenJournal")
+
+        fake_uicore = types.SimpleNamespace(cmd=FakeCmd(), registry=None, layer=None, desktop=None)
+        fake_sm = mock.MagicMock()
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_settle_after_action", return_value=50):
+            res = hook._execute_action(fake_sm, {"type": "hotkey", "target": None, "command": "alt+m", "wait_ms": 500})
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("executed_cmd"), "OpenJournal")
+        self.assertEqual(called, ["OpenJournal"])
+
     def test_type_text_missing_command_does_not_type_widget_path(self):
         hook = _load_hook_with_py2_stubs()
         set_values = []

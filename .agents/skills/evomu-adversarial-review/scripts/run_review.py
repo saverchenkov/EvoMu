@@ -256,13 +256,13 @@ def _count_active_cargo_processes():
 
 
 def _acquire_cargo_test_slot(root):
-    """Acquire one of EVOMU_MAX_CARGO_TEST_SLOTS (default 3) kernel flock slots AND verify total live
+    """Acquire one of EVOMU_MAX_CARGO_TEST_SLOTS (default 4) kernel flock slots AND verify total live
     host `cargo` processes (`pgrep -x cargo`) stay below `max_slots` across reviews + coder subagents."""
     try:
         import fcntl
     except ImportError:
         return None
-    max_slots = max(1, int(os.environ.get("EVOMU_MAX_CARGO_TEST_SLOTS", "3")))
+    max_slots = max(1, int(os.environ.get("EVOMU_MAX_CARGO_TEST_SLOTS", "4")))
     mdir = rl.main_state_dir(root)
     waited_slot = False
     waited_cargo = False
