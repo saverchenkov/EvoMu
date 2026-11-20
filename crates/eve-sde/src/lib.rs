@@ -1195,6 +1195,8 @@ pub struct SdeRegistry {
     pub skin_materials: HashMap<u32, SkinMaterialInfo>,
     #[serde(default)]
     pub skins: HashMap<u32, SkinInfo>,
+    #[serde(default)]
+    pub graphics: HashMap<u32, GraphicIdInfo>,
 }
 
 /// Per-(path, size) slot. The outer map lock is held only to find/insert the slot; the slot's

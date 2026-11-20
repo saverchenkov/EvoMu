@@ -4602,7 +4602,7 @@ fn populate_persisted_space_objects_reconstructs_mid_warp_phases_and_preserves_a
     assert_eq!(b_align.velocity, DVec3::ZERO);
 
     // Stepping ballpark 1s advances cruise ship smoothly without resetting to Aligning and
-    // lands the decelerating ship cleanly with zero exit velocity.
+    // lands the decelerating ship cleanly with CCP subwarp coast decaying below 0.5 m/s.
     ballpark.step(1.0);
     let post_cruise = &ballpark.balls[&cruise_ship];
     assert!(matches!(post_cruise.mode, MovementMode::Warp { phase: WarpPhase::Cruising, .. }));
@@ -4620,6 +4620,31 @@ fn populate_persisted_space_objects_reconstructs_mid_warp_phases_and_preserves_a
         ballpark.step(1.0);
     }
     assert!(decel_landed, "decelerating restored warp must complete cleanly");
-    assert_eq!(ballpark.balls[&decel_ship].velocity, DVec3::ZERO);
+    let exit_ball = &ballpark.balls[&decel_ship];
+    let mut prev_speed = exit_ball.velocity.length();
+    assert!(
+        prev_speed <= exit_ball.max_velocity + 1e-6,
+        "warp exit must clamp coast speed to max_velocity, got {prev_speed}"
+    );
+    assert_eq!(exit_ball.speed_fraction, 0.0);
+
+    for _ in 0..120 {
+        ballpark.step(1.0);
+        let speed = ballpark.balls[&decel_ship].velocity.length();
+        if prev_speed > 1e-6 {
+            assert!(
+                speed < prev_speed,
+                "post-warp coast velocity must decay monotonically: prev={prev_speed}, cur={speed}"
+            );
+        }
+        prev_speed = speed;
+        if prev_speed < 0.5 {
+            break;
+        }
+    }
+    assert!(
+        prev_speed < 0.5,
+        "post-warp coast must decay below 0.5 m/s, got {prev_speed}"
+    );
 }
 

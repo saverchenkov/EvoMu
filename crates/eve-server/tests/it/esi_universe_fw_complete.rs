@@ -214,26 +214,85 @@ async fn test_esi_meta_changelog_and_universe_races_factions_graphics() {
         200,
     );
     let gfx_arr = graphics.as_array().expect("graphics array");
-    let expected_graphics: std::collections::BTreeSet<i64> = ctx
+    let type_graphics: std::collections::BTreeSet<i64> = ctx
         .sde
         .types
         .values()
         .filter_map(|t| t.graphic_id.map(|g| g as i64))
         .collect();
-    assert_eq!(gfx_arr.len(), expected_graphics.len());
-    let sample_gid = *expected_graphics.iter().next().expect("at least one graphic");
-    assert_eq!(gfx_arr[0], json!(sample_gid));
+    let expected_graphics: Vec<i64> = {
+        let mut ids: Vec<i64> = ctx.sde.graphics.keys().map(|&g| i64::from(g)).collect();
+        ids.sort_unstable();
+        ids
+    };
+    assert!(expected_graphics.len() >= 6_200);
+    assert!(expected_graphics.len() > type_graphics.len());
+    assert_eq!(
+        gfx_arr
+            .iter()
+            .map(|v| v.as_i64().expect("integer graphic_id"))
+            .collect::<Vec<_>>(),
+        expected_graphics
+    );
+    assert!(!type_graphics.contains(&1011));
+    assert!(expected_graphics.contains(&1011));
 
-    let gfx_detail = call(
+    let rifter_gfx = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/universe/graphics/{sample_gid}/")),
+        EsiHttpRequest::new("GET", "/v1/universe/graphics/46/"),
         200,
     );
-    assert_eq!(gfx_detail["graphic_id"], json!(sample_gid));
+    assert_eq!(rifter_gfx["graphic_id"], json!(46));
+    assert_eq!(rifter_gfx["sof_hull_name"], json!("mf4_t1"));
+    assert_eq!(rifter_gfx["sof_fation_name"], json!("minmatarbase"));
+    assert_eq!(rifter_gfx["sof_race_name"], json!("minmatar"));
+    assert_eq!(rifter_gfx["sof_dna"], json!("mf4_t1:minmatarbase:minmatar"));
+    assert_eq!(
+        rifter_gfx["icon_folder"],
+        json!("res:/dx9/model/ship/minmatar/frigate/mf4/icons")
+    );
+    assert!(rifter_gfx.get("graphic_file").is_none());
+    assert!(rifter_gfx.get("sof_faction_name").is_none());
+
+    let lensflare_gfx = call(
+        &router,
+        EsiHttpRequest::new("GET", "/v1/universe/graphics/1011/"),
+        200,
+    );
+    assert_eq!(lensflare_gfx["graphic_id"], json!(1011));
+    assert_eq!(
+        lensflare_gfx["graphic_file"],
+        json!("res:/fisfx/lensflare/blue.red")
+    );
+    assert_eq!(
+        lensflare_gfx["icon_folder"],
+        json!("res:/fisfx/lensflare/icons")
+    );
+    assert!(lensflare_gfx.get("sof_dna").is_none());
+    assert!(lensflare_gfx.get("sof_hull_name").is_none());
+
+    let partial_sof_gfx = call(
+        &router,
+        EsiHttpRequest::new("GET", "/v1/universe/graphics/24891/"),
+        200,
+    );
+    assert_eq!(partial_sof_gfx["graphic_id"], json!(24891));
+    assert_eq!(
+        partial_sof_gfx["graphic_file"],
+        json!("res:/dx9/model/turret/clonebay/xl/clonebay_xl01_t1.red")
+    );
+    assert_eq!(partial_sof_gfx["sof_race_name"], json!("generic"));
+    assert!(partial_sof_gfx.get("sof_dna").is_none());
+
     call(
         &router,
         EsiHttpRequest::new("GET", "/v1/universe/graphics/999999999/"),
         404,
+    );
+    call(
+        &router,
+        EsiHttpRequest::new("GET", "/v1/universe/graphics/bad/"),
+        400,
     );
 }
 
