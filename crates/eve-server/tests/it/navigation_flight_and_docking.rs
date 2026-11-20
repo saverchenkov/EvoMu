@@ -3380,8 +3380,9 @@ async fn test_custom_agency_provider_content_nearby_sites() {
 
     let content0 = rpc(&ctx, &mut sess, "custom_agency_provider", "get_content_data", &[])
         .await
-        .expect("get_content_data seed");
+        .expect("get_content_data read-pure baseline");
     let _ = content0;
+    eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, sys_id).await;
     let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
     let sig_pos = ctx.db.with_snapshot(|s| {
         eve_destiny::DVec3::from_array(

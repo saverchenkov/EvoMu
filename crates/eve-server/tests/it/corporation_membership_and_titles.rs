@@ -785,6 +785,11 @@ async fn get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_u
     let ceo_id = 90_000_030;
     setup_pilot(&ctx, ceo_id, "Title CEO", NPC_CORP_CALDARI, 10_000_000, 5);
     setup_test_corp(&ctx, corp_id, "Title Shape Corp", "TSHP", ceo_id, &[ceo_id]);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&ceo_id) {
+            c.corporation_id = corp_id;
+        }
+    });
     let mut sess = make_session(62_020, 30, ceo_id, corp_id, u64::MAX);
 
     // Player corp always seeds all 16 power-of-two title slots (1..=32768) under live client trace
