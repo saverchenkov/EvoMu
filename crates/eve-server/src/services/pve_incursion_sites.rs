@@ -1265,21 +1265,55 @@ fn handle_update_incursion_lp_log(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let (site_filter, cid_filter) = match args {
-        [first, ..] => (
-            first.as_str().map(str::to_string),
-            first.as_i64().and_then(|v| u32::try_from(v).ok()),
-        ),
-        [] => (None, None),
+    if args.len() > 1 {
+        let msg = "UpdateIncursionLPLog accepts at most one filter argument";
+        return Some(Err(BridgeRpcError::with_client_error(
+            "InvalidArgument",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        )));
+    }
+    let (site_filter, cid_filter) = match args.first() {
+        None | Some(PyRep::None) => (None, None),
+        Some(PyRep::Integer(raw)) => {
+            let Some(cid) = u32::try_from(*raw)
+                .ok()
+                .filter(|id| ctx.sde.constellations.contains_key(id))
+            else {
+                let msg = format!("Unknown incursion constellation {raw}");
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "InvalidConstellation",
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
+                )));
+            };
+            (None, Some(cid))
+        }
+        Some(first) => {
+            let Some(site) = first.as_str() else {
+                let msg = "Invalid incursion LP log filter argument";
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "InvalidArgument",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
+                )));
+            };
+            if site.trim().is_empty() || site.len() > 128 {
+                let msg = "Invalid incursion site identifier";
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "InvalidArgument",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
+                )));
+            }
+            (Some(site.to_string()), None)
+        }
     };
     let (needs_ts_backfill, readonly_rows) = read_pve_special_reg(ctx, |reg| {
         let Some(entries) = reg.incursion_lp_logs.get(&char_id) else {
             return (false, Vec::new());
         };
-        if entries.iter().any(|e| e.timestamp_filetime <= 0) {
-            return (true, Vec::new());
-        }
-        let rows = entries
+        let matching = entries
             .iter()
             .filter(|e| {
                 if let Some(ref sf) = site_filter {
@@ -1290,6 +1324,12 @@ fn handle_update_incursion_lp_log(
                     true
                 }
             })
+            .collect::<Vec<_>>();
+        if matching.iter().any(|e| e.timestamp_filetime <= 0) {
+            return (true, Vec::new());
+        }
+        let rows = matching
+            .into_iter()
             .map(crate::services::pve_incursion_sites_ops::encode_incursion_lp_log_row)
             .collect::<Vec<_>>();
         (false, rows)

@@ -514,6 +514,166 @@ async fn incursion_lp_log_reads_and_noop_updates_do_not_mutate_db() {
     assert_eq!(ctx.db.tx_commit_count(), commits0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incursion_update_lp_log_validates_args_and_avoids_spurious_writes() {
+    let ctx = build_test_ctx();
+    let cid = 92_000_199_i64;
+    let kw = HashMap::new();
+
+    with_pve_special_reg(&ctx, |reg| {
+        reg.incursion_lp_logs.insert(
+            cid,
+            vec![
+                IncursionLPLogEntry {
+                    log_id: 1,
+                    character_id: cid,
+                    site_id: "INC-20000001-5165".into(),
+                    tier: "Vanguard".into(),
+                    constellation_id: 20_000_001,
+                    solar_system_id: 30_000_142,
+                    isk_earned: 10_395_000,
+                    concord_lp_earned: 1_400,
+                    fleet_size: 10,
+                    fleet_scale_factor: 1.0,
+                    timestamp_filetime: 0,
+                },
+                IncursionLPLogEntry {
+                    log_id: 2,
+                    character_id: cid,
+                    site_id: "INC-20000002-5168".into(),
+                    tier: "Assault".into(),
+                    constellation_id: 20_000_002,
+                    solar_system_id: 30_000_144,
+                    isk_earned: 18_200_000,
+                    concord_lp_earned: 3_500,
+                    fleet_size: 15,
+                    fleet_scale_factor: 1.0,
+                    timestamp_filetime: 133_000_000_000_000_000,
+                },
+            ],
+        );
+    });
+
+    let mut unauth = eve_machonet::SessionState::new(10);
+    let mut sess = eve_machonet::SessionState::new(11);
+    sess.user_id = Some(199);
+    sess.character_id = Some(cid);
+
+    let epoch_before = ctx.db.state_epoch();
+    let commits_before = ctx.db.tx_commit_count();
+
+    for (svc, method) in [
+        ("incursion", "GetIncursionLPLog"),
+        ("incursion", "UpdateIncursionLPLog"),
+        ("taleMgr", "GetGlobalWorldEventTales"),
+        ("taleMgr", "get_active_tales_by_template"),
+    ] {
+        assert!(
+            handle_incursion_rpc(&ctx, &mut unauth, svc, method, &[], &kw)
+                .await
+                .unwrap()
+                .is_err(),
+            "{svc}.{method} must reject unauthenticated callers"
+        );
+    }
+
+    // Invalid constellation IDs, wrong types, empty site IDs, and extra args must fail cleanly
+    for bad_args in [
+        vec![PyRep::Integer(90_000_002)],
+        vec![PyRep::Integer(60_003_760)],
+        vec![PyRep::Integer(50_001_248)],
+        vec![PyRep::Bool(true)],
+        vec![PyRep::String(String::new())],
+        vec![PyRep::String("   ".into())],
+        vec![PyRep::Integer(20_000_002), PyRep::Integer(1)],
+    ] {
+        let err = handle_incursion_rpc(
+            &ctx,
+            &mut sess,
+            "incursion",
+            "UpdateIncursionLPLog",
+            &bad_args,
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect_err("invalid UpdateIncursionLPLog filter must fail");
+        assert!(
+            err.code == "InvalidConstellation" || err.code == "InvalidArgument",
+            "unexpected error code {:?}",
+            err.code
+        );
+    }
+
+    // Filter miss and already-timestamped match must NOT trigger DB backfill write
+    assert_eq!(
+        handle_incursion_rpc(
+            &ctx,
+            &mut sess,
+            "incursion",
+            "UpdateIncursionLPLog",
+            &[PyRep::String("INC-MISSING".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    let PyRep::List(already_stamped) = handle_incursion_rpc(
+        &ctx,
+        &mut sess,
+        "incursion",
+        "UpdateIncursionLPLog",
+        &[PyRep::Integer(20_000_002)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap() else {
+        panic!("expected list for already-timestamped constellation");
+    };
+    assert_eq!(already_stamped.len(), 1);
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+
+    // Matching entry with timestamp_filetime == 0 backfills once, then subsequent calls stay pure
+    let PyRep::List(backfilled) = handle_incursion_rpc(
+        &ctx,
+        &mut sess,
+        "incursion",
+        "UpdateIncursionLPLog",
+        &[PyRep::Integer(20_000_001)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap() else {
+        panic!("expected list for constellation needing backfill");
+    };
+    assert_eq!(backfilled.len(), 1);
+    assert!(ctx.db.tx_commit_count() > commits_before);
+
+    let epoch_after = ctx.db.state_epoch();
+    let commits_after = ctx.db.tx_commit_count();
+    let PyRep::List(all_rows) = handle_incursion_rpc(
+        &ctx,
+        &mut sess,
+        "incursion",
+        "UpdateIncursionLPLog",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap() else {
+        panic!("expected full list after backfill");
+    };
+    assert_eq!(all_rows.len(), 2);
+    assert_eq!(ctx.db.state_epoch(), epoch_after);
+    assert_eq!(ctx.db.tx_commit_count(), commits_after);
+}
+
 #[cfg(test)]
 #[path = "pve_incursion_sites_extra_unit_tests.rs"]
 mod pve_incursion_sites_extra_unit_tests;
