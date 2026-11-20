@@ -911,3 +911,198 @@ async fn sync_ship_cloak_abyssal_force_decloak_pushes_updated_fit_projection_to_
         "subsequent sync without active cloak strip must not churn FitRev"
     );
 }
+
+#[tokio::test]
+async fn autopilot_warp_exit_speed_fraction_and_follow_noop_without_breaking_warp_or_validations() {
+    let ctx = test_ctx();
+    let sys_id = 30000142;
+    let char_id = 96_520;
+    let corp_id = 98_000_001;
+    let ship_id = 78_520;
+    let target_id = 78_521;
+
+    let origin = DVec3::ZERO;
+    let dest = DVec3::new(10_000_000.0, 0.0, 0.0);
+    let target_pos = dest + DVec3::new(10_000.0, 0.0, 0.0);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball(make_ship_ball(target_id, 588, corp_id, target_pos))
+        .await
+        .expect("spawn target");
+
+    let sess = make_session(char_id, corp_id, Some(sys_id), Some(ship_id));
+    let mut bound = bound_sys(sys_id);
+    bound.character_id = char_id;
+
+    // 1. Early WarpPhase::Decelerating (> 4.0 s remaining) still rejects both RPCs with ShipAlreadyInWarp.
+    let mut early_ball = make_ship_ball(ship_id, 588, corp_id, dest - DVec3::new(1_000_000.0, 0.0, 0.0));
+    early_ball.velocity = DVec3::new(1_000_000.0, 0.0, 0.0);
+    early_ball.speed_fraction = 0.0;
+    early_ball.mode = MovementMode::Warp {
+        origin,
+        destination: dest,
+        warp_speed_au_s: 3.0,
+        total_distance: dest.x,
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 10.0,
+    };
+    sys_h.spawn_ball(early_ball).await.expect("spawn early decel ship");
+
+    assert_eq!(
+        handle_cmd_set_speed_fraction(&ctx, &sess, Some(&bound), &[PyRep::Real(1.0)])
+            .await
+            .unwrap_err()
+            .code,
+        "ShipAlreadyInWarp"
+    );
+    assert_eq!(
+        handle_cmd_orbit_or_follow(
+            &ctx,
+            &sess,
+            Some(&bound),
+            "CmdFollowBall",
+            &[PyRep::Integer(target_id), PyRep::Real(0.0)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ShipAlreadyInWarp"
+    );
+
+    // 2. Final <= 4.0 s WarpPhase::Decelerating tail (client-vs-server warp-exit skew, #1439):
+    //    V24 autopilot.py:559-562 calls CmdSetSpeedFraction(1.0) + CmdFollowBall(dest, 0.0).
+    //    Both must succeed as pure no-ops without mutating active warp state, while bad args,
+    //    CmdOrbit, and CmdStop remain strictly rejected.
+    let tail_pos = dest - DVec3::new(300.0, 0.0, 0.0);
+    let tail_vel = DVec3::new(300.0, 0.0, 0.0);
+    let mut tail_ball = make_ship_ball(ship_id, 588, corp_id, tail_pos);
+    tail_ball.velocity = tail_vel;
+    tail_ball.speed_fraction = 0.0;
+    tail_ball.mode = MovementMode::Warp {
+        origin,
+        destination: dest,
+        warp_speed_au_s: 3.0,
+        total_distance: dest.x,
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 18.0,
+    };
+    sys_h.spawn_ball(tail_ball).await.expect("spawn tail decel ship");
+
+    let sf_rep = handle_cmd_set_speed_fraction(&ctx, &sess, Some(&bound), &[PyRep::Real(1.0)])
+        .await
+        .expect("CmdSetSpeedFraction(1.0) must not throw ShipAlreadyInWarp during <= 4s warp-exit tail");
+    assert!(matches!(sf_rep, PyRep::Integer(_)));
+
+    let fb_rep = handle_cmd_orbit_or_follow(
+        &ctx,
+        &sess,
+        Some(&bound),
+        "CmdFollowBall",
+        &[PyRep::Integer(target_id), PyRep::Real(0.0)],
+    )
+    .await
+    .expect("CmdFollowBall must not throw ShipAlreadyInWarp during <= 4s warp-exit tail");
+    assert!(matches!(fb_rep, PyRep::Integer(_)));
+
+    // Warp state, position, velocity, and speed_fraction must remain completely untouched.
+    let (_, after_noop) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(
+        after_noop.mode,
+        MovementMode::Warp {
+            phase: eve_destiny::WarpPhase::Decelerating,
+            ..
+        }
+    ));
+    assert_eq!(after_noop.position, tail_pos);
+    assert_eq!(after_noop.velocity, tail_vel);
+    assert_eq!(after_noop.speed_fraction, 0.0);
+
+    // Invalid inputs and non-approach RPCs remain rejected during the warp-exit tail.
+    assert_eq!(
+        handle_cmd_set_speed_fraction(&ctx, &sess, Some(&bound), &[PyRep::Real(-0.5)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidSpeedFraction"
+    );
+    assert_eq!(
+        handle_cmd_orbit_or_follow(
+            &ctx,
+            &sess,
+            Some(&bound),
+            "CmdFollowBall",
+            &[PyRep::Integer(999_999_999), PyRep::Real(0.0)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "TargetNotFound"
+    );
+    assert_eq!(
+        handle_cmd_orbit_or_follow(
+            &ctx,
+            &sess,
+            Some(&bound),
+            "CmdFollowBall",
+            &[PyRep::Integer(target_id), PyRep::Real(-10.0)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidRange"
+    );
+    assert_eq!(
+        handle_cmd_orbit_or_follow(
+            &ctx,
+            &sess,
+            Some(&bound),
+            "CmdOrbit",
+            &[PyRep::Integer(target_id), PyRep::Real(2_500.0)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ShipAlreadyInWarp"
+    );
+    assert_eq!(
+        handle_cmd_stop(&ctx, &sess, Some(&bound))
+            .await
+            .unwrap_err()
+            .code,
+        "ShipAlreadyInWarp"
+    );
+
+    // 3. Once the server naturally completes WarpPhase::Decelerating -> Stop, the next
+    //    autopilot cycle executes CmdSetSpeedFraction(1.0) + CmdFollowBall normally.
+    for _ in 0..8 {
+        sys_h.step_manual(1.0).await.unwrap();
+        let (_, b) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if b.mode == MovementMode::Stop {
+            break;
+        }
+    }
+    let (_, landed) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert_eq!(landed.mode, MovementMode::Stop, "warp must finish naturally to Stop");
+
+    handle_cmd_set_speed_fraction(&ctx, &sess, Some(&bound), &[PyRep::Real(1.0)])
+        .await
+        .expect("post-warp CmdSetSpeedFraction ok");
+    handle_cmd_orbit_or_follow(
+        &ctx,
+        &sess,
+        Some(&bound),
+        "CmdFollowBall",
+        &[PyRep::Integer(target_id), PyRep::Real(0.0)],
+    )
+    .await
+    .expect("post-warp CmdFollowBall ok");
+    let (_, following) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert_eq!(following.speed_fraction, 1.0);
+    assert_eq!(
+        following.mode,
+        MovementMode::Follow {
+            target_id,
+            range: 0.0,
+        }
+    );
+}
