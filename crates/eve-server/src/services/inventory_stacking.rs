@@ -1390,6 +1390,48 @@ pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
     Ok((true, true))
 }
 
+fn check_container_password_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    container_id: i64,
+    char_id: i64,
+    supplied_pw: Option<&str>,
+    verb: &str,
+) -> Result<bool, BridgeRpcError> {
+    if let Some(req_pw) = fitting_containers_ships::container_password_snap(snap, container_id, 1) {
+        if !fitting_containers_ships::is_container_unlocked_snap(snap, container_id, char_id) {
+            if supplied_pw != Some(req_pw.as_str()) {
+                return Err(BridgeRpcError {
+                    code: "ALSCPasswordRequired".into(),
+                    message: format!("Password required to {verb} container {container_id}"),
+                    client_error: None,
+                });
+            }
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn unlock_container_if_password_valid_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    container_id: i64,
+    char_id: i64,
+    supplied_pw: Option<&str>,
+    verb: &str,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    if check_container_password_snap(snap, container_id, char_id, supplied_pw, verb)? {
+        fitting_containers_ships::set_container_unlocked_snap(
+            snap,
+            container_id,
+            char_id,
+            true,
+            now_unix,
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) async fn handle_get_container_contents(
     ctx: &ServerContext,
     session: &SessionState,
@@ -1432,26 +1474,11 @@ pub(super) async fn handle_get_container_contents(
                     .map(|t| t.group_id)
                     .unwrap_or(0);
                 let is_alsc = grp == 448;
-                let pw_opt =
-                    fitting_containers_ships::container_password_snap(snap, container_id, 1);
-                let is_secure_or_pw = matches!(grp, 340 | 448) || pw_opt.is_some();
-                if let Some(req_pw) = pw_opt {
-                    if !fitting_containers_ships::is_container_unlocked_snap(
-                        snap,
-                        container_id,
-                        char_id,
-                    ) && supplied_pw != Some(req_pw.as_str())
-                    {
-                        return Err(BridgeRpcError {
-                            code: "ALSCPasswordRequired".into(),
-                            message: format!(
-                                "Password required to open container {container_id}"
-                            ),
-                            client_error: None,
-                        });
-                    }
-                }
-                Ok((is_secure_or_pw, is_alsc))
+                let has_pw =
+                    fitting_containers_ships::container_password_snap(snap, container_id, 1)
+                        .is_some();
+                check_container_password_snap(snap, container_id, char_id, supplied_pw, "open")?;
+                Ok((matches!(grp, 340 | 448) || has_pw, is_alsc))
             })?;
     let out = ctx
         .get_container_contents(session, bound_entry, char_id, container_id)
@@ -1460,32 +1487,14 @@ pub(super) async fn handle_get_container_contents(
         let now_unix = ctx.now_unix_secs();
         ctx.db
             .try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                if let Some(req_pw) =
-                    fitting_containers_ships::container_password_snap(snap, container_id, 1)
-                {
-                    if !fitting_containers_ships::is_container_unlocked_snap(
-                        snap,
-                        container_id,
-                        char_id,
-                    ) {
-                        if supplied_pw != Some(req_pw.as_str()) {
-                            return Err(BridgeRpcError {
-                                code: "ALSCPasswordRequired".into(),
-                                message: format!(
-                                    "Password required to open container {container_id}"
-                                ),
-                                client_error: None,
-                            });
-                        }
-                        fitting_containers_ships::set_container_unlocked_snap(
-                            snap,
-                            container_id,
-                            char_id,
-                            true,
-                            now_unix,
-                        )?;
-                    }
-                }
+                unlock_container_if_password_valid_snap(
+                    snap,
+                    container_id,
+                    char_id,
+                    supplied_pw,
+                    "open",
+                    now_unix,
+                )?;
                 if is_alsc {
                     fitting_containers_ships::append_alsc_log_snap(
                         snap,
@@ -1613,34 +1622,15 @@ fn handle_list_impl(
             .and_then(|v| v.as_str())
             .or_else(|| args.iter().find_map(|a| a.as_str()));
         let now_unix = ctx.now_unix_secs();
-        ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-            if let Some(req_pw) =
-                fitting_containers_ships::container_password_snap(snap, bound_loc_id, 1)
-            {
-                if !fitting_containers_ships::is_container_unlocked_snap(
-                    snap,
-                    bound_loc_id,
-                    char_id,
-                ) {
-                    if supplied_pw != Some(req_pw.as_str()) {
-                        return Err(BridgeRpcError {
-                            code: "ALSCPasswordRequired".into(),
-                            message: format!(
-                                "Password required to list contents of container {bound_loc_id}"
-                            ),
-                            client_error: None,
-                        });
-                    }
-                    fitting_containers_ships::set_container_unlocked_snap(
-                        snap,
-                        bound_loc_id,
-                        char_id,
-                        true,
-                        now_unix,
-                    )?;
-                }
-            }
-            Ok(())
+        ctx.db.try_with_mut_snapshot(|snap| {
+            unlock_container_if_password_valid_snap(
+                snap,
+                bound_loc_id,
+                char_id,
+                supplied_pw,
+                "list contents of",
+                now_unix,
+            )
         })?;
     }
     crate::services::pve_crab_beacons::check_crab_loot_access(
