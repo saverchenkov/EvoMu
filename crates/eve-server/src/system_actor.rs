@@ -1474,6 +1474,7 @@ impl SystemRegistry {
                             SystemCommand::TakeBall {
                                 ball_id,
                                 accept_docking_target,
+                                preserve_db_active_states,
                                 reply,
                             } => {
                                 ball_spawn_tokens.remove(&ball_id);
@@ -1506,14 +1507,20 @@ impl SystemRegistry {
                                         ball_id,
                                     );
                                 }
+                                let cycles_db_none = None;
+                                let (cycles_db_opt, cycles_deact_guard) = if preserve_db_active_states {
+                                    (&cycles_db_none, None)
+                                } else {
+                                    (&*db_opt, deact_guard.as_ref())
+                                };
                                 remove_all_ship_module_cycles(
                                     &mut ballpark,
                                     active_module_cycles,
                                     &base_scramble_strengths,
                                     &base_core_strengths,
-                                    &db_opt,
+                                    cycles_db_opt,
                                     ball_id,
-                                    deact_guard.as_ref(),
+                                    cycles_deact_guard,
                                 );
                                 let cycles_cleared = before_cycles.saturating_sub(active_module_cycles.len());
                                 let lock_count = ballpark.clear_target_locks(ball_id);

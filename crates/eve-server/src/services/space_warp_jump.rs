@@ -2206,7 +2206,7 @@ async fn handle_cmd_stargate_jump(
     #[cfg(any(test, feature = "testkit"))]
     run_pre_take_ball_hook_for_test(ctx, char_id).await;
     check_jump_session_lease(ctx, session, char_id, entry_had_online_lease)?;
-    let Some(taken) = old_handle.take_ball(ship_id).await else {
+    let Some(taken) = old_handle.take_ball_preserving_db(ship_id).await else {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: format!("Ship {ship_id} is no longer in solar system {old_sys}"),

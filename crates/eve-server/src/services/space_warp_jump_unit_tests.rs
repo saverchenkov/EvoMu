@@ -6231,9 +6231,11 @@ async fn cmd_stargate_jump_deactivates_hardeners_and_phenomena_before_dest_comba
         let jumpable_phen_tid = 999_815_u32;
         let mut jumpable_phen = base_phen;
         jumpable_phen.type_id = jumpable_phen_tid;
-        for aid in [852_u16, 2354_u16, 2453_u16] {
+        for aid in [852_u16, 2354_u16, 2453_u16, 1302_u16, 1303_u16] {
             jumpable_phen.default_attributes.remove(&aid);
         }
+        jumpable_phen.default_attributes.insert(30_u16, 1.0);
+        jumpable_phen.default_attributes.insert(50_u16, 1.0);
         Arc::make_mut(&mut ctx.sde)
             .types
             .insert(jumpable_phen_tid, jumpable_phen);
@@ -6246,14 +6248,14 @@ async fn cmd_stargate_jump_deactivates_hardeners_and_phenomena_before_dest_comba
                      fleetmate_id: i64,
                      from_sys: u32,
                      gate_pos: DVec3| {
-        let titan_type_id = ctx
+        let hull_type_id = ctx
             .sde
             .types
             .values()
-            .filter(|t| t.group_id == 30 && t.published)
+            .filter(|t| t.group_id == 27 && t.published)
             .min_by_key(|t| t.type_id)
             .map(|t| t.type_id)
-            .expect("SDE must include a Titan hull (group 30)");
+            .expect("SDE must include a Battleship hull (group 27)");
         let (hp_dbuff_id, buffs_shield) = ctx
             .sde
             .dbuff_collections
@@ -6274,7 +6276,7 @@ async fn cmd_stargate_jump_deactivates_hardeners_and_phenomena_before_dest_comba
         let hardener_mod_id = ship_id + 101;
         let phen_mod_id = ship_id + 102;
 
-        spawn_ship_in_space(ctx, char_id, ship_id, titan_type_id, from_sys, gate_pos);
+        spawn_ship_in_space(ctx, char_id, ship_id, hull_type_id, from_sys, gate_pos);
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.insert(
                 hardener_mod_id,
@@ -6306,7 +6308,7 @@ async fn cmd_stargate_jump_deactivates_hardeners_and_phenomena_before_dest_comba
             snap.module_online_states.insert(phen_mod_id, true);
         });
         ctx.invalidate_ship_fitting_cache_only(ship_id);
-        let clean_cs = ctx.build_ship_combat_state(char_id, ship_id, titan_type_id);
+        let clean_cs = ctx.build_ship_combat_state(char_id, ship_id, hull_type_id);
 
         ctx.db.with_mut_snapshot(|snap| {
             snap.module_active_states.insert(hardener_mod_id);
@@ -6343,7 +6345,7 @@ async fn cmd_stargate_jump_deactivates_hardeners_and_phenomena_before_dest_comba
             );
         }
         ctx.invalidate_ship_fitting_cache_only(ship_id);
-        let inflated_cs = ctx.build_ship_combat_state(char_id, ship_id, titan_type_id);
+        let inflated_cs = ctx.build_ship_combat_state(char_id, ship_id, hull_type_id);
         assert!(
             inflated_cs.shield_resonance[0] < clean_cs.shield_resonance[0] - 1e-4,
             "active overloaded hardener must lower pre-jump EM resonance: inflated={:?} clean={:?}",

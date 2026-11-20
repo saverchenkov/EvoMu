@@ -810,6 +810,7 @@ pub enum SystemCommand {
     TakeBall {
         ball_id: BallId,
         accept_docking_target: Option<(BallId, DVec3)>,
+        preserve_db_active_states: bool,
         reply: oneshot::Sender<Option<TakenBall>>,
     },
     RestoreBall {

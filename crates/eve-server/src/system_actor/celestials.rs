@@ -1018,7 +1018,12 @@ impl SystemHandle {
     /// clearing its active module cycles and target locks and returning its final
     /// `Ball`, `CombatState`, and `SlimItemMeta`. Returns `None` if `ball_id` is
     /// not present in space.
-    pub async fn take_ball(&self, ball_id: BallId) -> Option<super::TakenBall> {
+    async fn take_ball_impl(
+        &self,
+        ball_id: BallId,
+        accept_docking_target: Option<(BallId, DVec3)>,
+        preserve_db_active_states: bool,
+    ) -> Option<super::TakenBall> {
         self.cancel_ship_nanite_repairs_sync(ball_id, true);
         self.ball_positions
             .write()
@@ -1029,11 +1034,24 @@ impl SystemHandle {
             .cmd_sender()
             .send(SystemCommand::TakeBall {
                 ball_id,
-                accept_docking_target: None,
+                accept_docking_target,
+                preserve_db_active_states,
                 reply: tx,
             })
             .await;
         rx.await.ok().flatten()
+    }
+
+    /// Atomically removes `ball_id` from space and returns its `TakenBall` snapshot, or `None` if
+    /// not present in space.
+    pub async fn take_ball(&self, ball_id: BallId) -> Option<super::TakenBall> {
+        self.take_ball_impl(ball_id, None, false).await
+    }
+
+    /// Atomically removes `ball_id` for a stargate transition while keeping DB active module
+    /// states intact until `commit_stargate_db_transition` deactivates them (`#1237` `BF-1237C-02`).
+    pub async fn take_ball_preserving_db(&self, ball_id: BallId) -> Option<super::TakenBall> {
+        self.take_ball_impl(ball_id, None, true).await
     }
 
     /// Atomically removes `ship_id` for docking at `station_id` (`#842`, `#917` E-2, `#1188`),
@@ -1045,21 +1063,8 @@ impl SystemHandle {
         station_id: BallId,
         station_pos: DVec3,
     ) -> Option<super::TakenBall> {
-        self.cancel_ship_nanite_repairs_sync(ship_id, true);
-        self.ball_positions
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id);
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .cmd_sender()
-            .send(SystemCommand::TakeBall {
-                ball_id: ship_id,
-                accept_docking_target: Some((station_id, station_pos)),
-                reply: tx,
-            })
-            .await;
-        rx.await.ok().flatten()
+        self.take_ball_impl(ship_id, Some((station_id, station_pos)), false)
+            .await
     }
 
     async fn restore_ball_impl(
