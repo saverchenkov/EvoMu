@@ -120,20 +120,128 @@ fn is_on_grid_visible_ball(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ItemInfoAccess {
+    Full,
+    OnGridPublicOnly,
+}
+
+fn is_gm_session(session: &SessionState) -> bool {
+    session.has_gm_role() || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authorize_corp_flag_access(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    owner_corp_id: i64,
+    root_loc: i64,
+    root_flag: InventoryFlag,
+    root_flag_u16: u16,
+) -> bool {
+    let caller_corp = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .or(session.corporation_id)
+        .unwrap_or(0);
+    if caller_corp <= 0
+        || owner_corp_id != caller_corp
+        || is_npc_corporation_id(ctx, caller_corp)
+    {
+        return false;
+    }
+    let is_valid_member = snap.corporations.get(&caller_corp).is_some_and(|corp| {
+        corp.ceo_id == char_id
+            || corp.members.contains(&char_id)
+            || (corp.members.is_empty()
+                && (corp.member_roles.contains_key(&char_id)
+                    || snap.corp_role_assignments.contains_key(&(caller_corp, char_id))))
+    });
+    if !is_valid_member {
+        return false;
+    }
+    let (is_ceo, role_mask) = snap.effective_corp_roles_at(
+        caller_corp,
+        char_id,
+        Some(root_loc),
+        0,
+        ctx.now_unix(),
+    );
+    if is_ceo
+        || eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_DIRECTOR)
+    {
+        return true;
+    }
+    let flag_num = i64::from(root_flag_u16);
+    if (116..=122).contains(&flag_num) {
+        let div_idx = (flag_num - 116) as usize;
+        let div_roles = eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[div_idx]
+            | eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[div_idx]
+            | eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx];
+        return (role_mask & div_roles) != 0;
+    }
+    if matches!(
+        root_flag,
+        InventoryFlag::Deliveries
+            | InventoryFlag::CorpDeliveries
+            | InventoryFlag::CapsuleerDeliveries
+    ) {
+        let deliveries_roles = eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY
+            | eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE
+            | eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE
+            | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+            | eve_db::corp_roles::ROLE_TRADER;
+        return (role_mask & deliveries_roles) != 0;
+    }
+    if snap
+        .structures
+        .get(&root_loc)
+        .is_some_and(|st| st.owner_corp_id == caller_corp)
+    {
+        let is_structure_equipment_flag =
+            matches!(flag_num, 11..=34 | 92..=94 | 158..=171 | 180)
+                || matches!(
+                    root_flag,
+                    InventoryFlag::SpecializedAmmoHold | InventoryFlag::QuantumCoreRoom
+                );
+        if is_structure_equipment_flag {
+            let equip_roles = eve_db::corp_roles::ROLE_STATION_MANAGER
+                | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
+            if (role_mask & equip_roles) != 0 {
+                return true;
+            }
+        }
+        if matches!(
+            root_flag,
+            InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay
+        ) {
+            let fuel_roles = eve_db::corp_roles::ROLE_STATION_MANAGER
+                | eve_db::corp_roles::ROLE_STARBASE_CARETAKER
+                | eve_db::corp_roles::ROLE_STARBASE_OPERATOR
+                | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
+            if (role_mask & fuel_roles) != 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn authorize_item_info_access(
     ctx: &ServerContext,
     session: &SessionState,
     char_id: i64,
     item: &eve_db::InventoryItemRecord,
     allow_on_grid: bool,
-) -> Result<(), BridgeRpcError> {
-    if session.has_gm_role()
-        || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
-    {
-        return Ok(());
+) -> Result<ItemInfoAccess, BridgeRpcError> {
+    if is_gm_session(session) {
+        return Ok(ItemInfoAccess::Full);
     }
     if item.owner_id == char_id {
-        return Ok(());
+        return Ok(ItemInfoAccess::Full);
     }
     let authorized_in_db = ctx.db.with_snapshot(|snap| {
         // 1. Item nested inside caller's own ship, container, or hangar asset.
@@ -168,125 +276,57 @@ fn authorize_item_info_access(
             && item.owner_id == caller_corp
             && !is_npc_corporation_id(ctx, caller_corp)
         {
-            let is_valid_member = snap.corporations.get(&caller_corp).is_some_and(|corp| {
-                corp.ceo_id == char_id
-                    || corp.members.contains(&char_id)
-                    || (corp.members.is_empty()
-                        && (corp.member_roles.contains_key(&char_id)
-                            || snap.corp_role_assignments.contains_key(&(caller_corp, char_id))))
-            });
-            if is_valid_member {
-                let (mut root_loc, mut root_flag) = (item.location_id, item.flag);
-                for _ in 0..8 {
-                    if (60_000_000..=69_999_999).contains(&root_loc)
-                        || root_loc >= 1_000_000_000_000
-                    {
-                        break;
-                    }
-                    let Some(parent) = snap.items.get(&root_loc) else {
-                        break;
-                    };
-                    if parent.owner_id != caller_corp {
-                        break;
-                    }
-                    if parent.type_id == 27 {
-                        root_loc = parent.location_id;
-                        break;
-                    }
-                    if parent.location_id == root_loc {
-                        break;
-                    }
+            let (mut root_loc, mut root_flag) = (item.location_id, item.flag);
+            for _ in 0..8 {
+                if (60_000_000..=69_999_999).contains(&root_loc)
+                    || root_loc >= 1_000_000_000_000
+                    || snap.structures.contains_key(&root_loc)
+                {
+                    break;
+                }
+                let Some(parent) = snap.items.get(&root_loc) else {
+                    break;
+                };
+                if parent.owner_id != caller_corp {
+                    break;
+                }
+                if parent.type_id == 27 {
                     root_loc = parent.location_id;
-                    root_flag = parent.flag;
+                    break;
                 }
-                if let Some(gov) = snap.corp_governance.get(&caller_corp) {
-                    if let Some((&st_id, _)) =
-                        gov.offices.iter().find(|(_, &oid)| oid == root_loc)
-                    {
-                        root_loc = st_id;
-                    }
+                if parent.location_id == root_loc {
+                    break;
                 }
-                let (is_ceo, role_mask) = snap.effective_corp_roles_at(
-                    caller_corp,
-                    char_id,
-                    Some(root_loc),
-                    0,
-                    ctx.now_unix(),
-                );
-                if is_ceo
-                    || eve_db::corp_roles::has_role(
-                        role_mask,
-                        eve_db::corp_roles::ROLE_DIRECTOR,
-                    )
-                {
-                    return true;
-                }
-                let flag_num = root_flag as i64;
-                if (116..=122).contains(&flag_num) {
-                    let div_idx = (flag_num - 116) as usize;
-                    let div_roles = eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[div_idx]
-                        | eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[div_idx]
-                        | eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx];
-                    return (role_mask & div_roles) != 0;
-                }
-                if matches!(
-                    root_flag,
-                    InventoryFlag::Deliveries
-                        | InventoryFlag::CorpDeliveries
-                        | InventoryFlag::CapsuleerDeliveries
-                ) {
-                    let deliveries_roles = eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY
-                        | eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE
-                        | eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE
-                        | eve_db::corp_roles::ROLE_FACTORY_MANAGER
-                        | eve_db::corp_roles::ROLE_TRADER;
-                    return (role_mask & deliveries_roles) != 0;
-                }
-                if snap
-                    .structures
-                    .get(&root_loc)
-                    .is_some_and(|st| st.owner_corp_id == caller_corp)
-                {
-                    let is_structure_equipment_flag =
-                        matches!(flag_num, 11..=34 | 92..=94 | 158..=171 | 180)
-                            || matches!(
-                                root_flag,
-                                InventoryFlag::SpecializedAmmoHold
-                                    | InventoryFlag::QuantumCoreRoom
-                            );
-                    if is_structure_equipment_flag {
-                        let equip_roles = eve_db::corp_roles::ROLE_STATION_MANAGER
-                            | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
-                        if (role_mask & equip_roles) != 0 {
-                            return true;
-                        }
-                    }
-                    if matches!(
-                        root_flag,
-                        InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay
-                    ) {
-                        let fuel_roles = eve_db::corp_roles::ROLE_STATION_MANAGER
-                            | eve_db::corp_roles::ROLE_STARBASE_CARETAKER
-                            | eve_db::corp_roles::ROLE_STARBASE_OPERATOR
-                            | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
-                        if (role_mask & fuel_roles) != 0 {
-                            return true;
-                        }
-                    }
+                root_loc = parent.location_id;
+                root_flag = parent.flag;
+            }
+            if let Some(gov) = snap.corp_governance.get(&caller_corp) {
+                if let Some((&st_id, _)) = gov.offices.iter().find(|(_, &oid)| oid == root_loc) {
+                    root_loc = st_id;
                 }
             }
+            return authorize_corp_flag_access(
+                ctx,
+                snap,
+                session,
+                char_id,
+                item.owner_id,
+                root_loc,
+                root_flag,
+                root_flag as u16,
+            );
         }
         false
     });
     if authorized_in_db {
-        return Ok(());
+        return Ok(ItemInfoAccess::Full);
     }
 
     // 3. Undocked caller in the same solar system inspecting a visible, uncloaked on-grid ball.
     if allow_on_grid {
         if let Ok(item_sys_id) = u32::try_from(item.location_id) {
             if is_on_grid_visible_ball(ctx, session, item.item_id, item_sys_id) {
-                return Ok(());
+                return Ok(ItemInfoAccess::OnGridPublicOnly);
             }
         }
     }
@@ -298,108 +338,127 @@ fn authorize_item_info_access(
     })
 }
 
-fn validate_link_all_weapons_preconditions(
+fn validate_linkable_weapon_pair(
     ctx: &ServerContext,
-    session: &SessionState,
-    char_id: i64,
+    snap: &eve_db::WorldStateSnapshot,
     ship_id: i64,
+    first_id: i64,
+    second_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    if ship_id <= 0 {
+    if first_id == second_id {
         return Err(BridgeRpcError {
-            code: "ShipOwnershipViolation".into(),
-            message: format!("Ship {ship_id} is not owned by {char_id}"),
+            code: "InvalidWeaponGroup".into(),
+            message: "Two distinct identical high-slot weapons are required to form a group".into(),
             client_error: None,
         });
     }
-    let ship_check = ctx.db.with_snapshot(|snap| {
-        let Some(ship) = snap.items.get(&ship_id) else {
-            return Err(BridgeRpcError {
-                code: "ShipOwnershipViolation".into(),
-                message: format!("Ship {ship_id} is not owned by {char_id}"),
-                client_error: None,
-            });
-        };
-        if ship.owner_id != char_id {
-            return Err(BridgeRpcError {
-                code: "ShipOwnershipViolation".into(),
-                message: format!("Ship {ship_id} is not owned by {char_id}"),
-                client_error: None,
-            });
-        }
-        let db_docked = snap
-            .characters
-            .get(&char_id)
-            .is_some_and(|ch| ch.station_id.is_some() || ch.structure_id.is_some());
-        let db_active_ship_id = snap
-            .characters
-            .get(&char_id)
-            .map(|ch| ch.active_ship_id)
-            .filter(|&id| id > 0);
-        let mut counts_by_type: HashMap<u32, usize> = HashMap::new();
-        for item in snap.items.values() {
-            if item.location_id == ship_id && matches!(item.flag as u16, 27..=34) {
-                if let Some(ty) = ctx.sde.types.get(&item.type_id) {
-                    if ty.effect_ids.contains(&42)
-                        || ty.effect_ids.contains(&40)
-                        || ty.default_attributes.contains_key(&604)
-                    {
-                        *counts_by_type.entry(item.type_id).or_insert(0) += 1;
-                    }
-                }
-            }
-        }
-        let has_linkable_pair = counts_by_type.values().any(|&n| n >= 2);
-        Ok((ship.location_id, db_docked, db_active_ship_id, has_linkable_pair))
-    })?;
-    let (ship_loc_id, db_docked, db_active_ship_id, has_linkable_pair) = ship_check;
-
-    if session.station_id.is_some() || session.structure_id.is_some() || db_docked {
+    let Some(first_it) = snap.items.get(&first_id) else {
         return Err(BridgeRpcError {
-            code: "CannotLinkWeaponsWhileDocked".into(),
-            message: "Weapons can only be linked while undocked in space".into(),
-            client_error: None,
-        });
-    }
-    let Some(sys_id) = session.solar_system_id else {
-        return Err(BridgeRpcError {
-            code: "NotInSpace".into(),
-            message: "Weapons can only be linked while undocked in space".into(),
+            code: "InvalidWeaponGroup".into(),
+            message: format!("Module {first_id} not found"),
             client_error: None,
         });
     };
-    if ship_loc_id != i64::from(sys_id) {
-        return Err(BridgeRpcError {
-            code: "CannotLinkWeaponsWhileDocked".into(),
-            message: format!("Ship {ship_id} must be in space in solar system {sys_id}"),
-            client_error: None,
-        });
-    }
-    if session.ship_id != Some(ship_id) || db_active_ship_id != Some(ship_id) {
-        return Err(BridgeRpcError {
-            code: "ShipNotActive".into(),
-            message: format!("Ship {ship_id} is not the caller's active ship"),
-            client_error: None,
-        });
-    }
-    if let Some(sys) = ctx.systems.get_handle(sys_id) {
-        let view = sys.view();
-        if view.is_ball_cloaked(ship_id) || view.is_gate_cloaked(ship_id) {
-            return Err(BridgeRpcError {
-                code: "CannotLinkWeaponsWhileCloaked".into(),
-                message: "Cannot link weapons while cloaked".into(),
-                client_error: None,
-            });
-        }
-    }
-    if !has_linkable_pair {
+    let Some(second_it) = snap.items.get(&second_id) else {
         return Err(BridgeRpcError {
             code: "InvalidWeaponGroup".into(),
-            message: "At least two identical fitted weapons are required to form a weapon group"
-                .into(),
+            message: format!("Module {second_id} not found"),
+            client_error: None,
+        });
+    };
+    let first_linkable = ctx
+        .sde
+        .types
+        .get(&first_it.type_id)
+        .is_some_and(crate::services::combat_crimewatch::combat_weapons_spool::is_linkable_weapon_type);
+    let second_linkable = ctx
+        .sde
+        .types
+        .get(&second_it.type_id)
+        .is_some_and(crate::services::combat_crimewatch::combat_weapons_spool::is_linkable_weapon_type);
+    if first_it.location_id != ship_id
+        || second_it.location_id != ship_id
+        || !matches!(first_it.flag as u16, 27..=34)
+        || !matches!(second_it.flag as u16, 27..=34)
+        || first_it.type_id != second_it.type_id
+        || !first_linkable
+        || !second_linkable
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidWeaponGroup".into(),
+            message: "Only identical high-slot weapons fitted to the ship can be grouped".into(),
             client_error: None,
         });
     }
     Ok(())
+}
+
+fn run_weapon_pair_mutation<F>(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    first_name: &str,
+    second_name: &str,
+    return_info: bool,
+    mutate: F,
+) -> Option<Result<PyRep, BridgeRpcError>>
+where
+    F: FnOnce(&mut std::collections::HashMap<i64, Vec<i64>>, i64, i64) -> Vec<i64>,
+{
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let rpc = crate::router::RpcArgs::positional(args);
+    let ship_id = match rpc.opt_positive_i64(0, "shipID") {
+        Ok(v) => v.or(session.ship_id).unwrap_or(0),
+        Err(e) => return Some(Err(e)),
+    };
+    if !ctx
+        .db
+        .with_snapshot(|s| s.items.get(&ship_id).is_some_and(|it| it.owner_id == char_id))
+    {
+        return Some(Err(BridgeRpcError {
+            code: "ShipOwnershipViolation".into(),
+            message: format!("Ship {ship_id} is not owned by {char_id}"),
+            client_error: None,
+        }));
+    }
+    let first_id = match rpc.req_positive_i64(1, first_name) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let second_id = match rpc.req_positive_i64(2, second_name) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
+        crate::services::combat_crimewatch::combat_weapons_spool::validate_weapon_link_context_in_snapshot(
+            ctx,
+            snap,
+            Some(session),
+            char_id,
+            ship_id,
+        )?;
+        validate_linkable_weapon_pair(ctx, snap, ship_id, first_id, second_id)?;
+        let banks = snap.weapon_banks.entry(ship_id).or_default();
+        let destroyed = mutate(banks, first_id, second_id);
+        let info =
+            crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(
+                snap, ship_id,
+            );
+        Ok((destroyed, info))
+    });
+    Some(res.map(|(destroyed, info)| {
+        crate::services::combat_crimewatch::combat_weapons_spool::notify_weapon_banks_updated(
+            ctx, char_id, ship_id, &destroyed, &info,
+        );
+        if return_info {
+            info
+        } else {
+            PyRep::None
+        }
+    }))
 }
 
 fn handle_item_get_info(
@@ -460,40 +519,67 @@ fn handle_item_get_info(
     };
 
     // Enforce item ownership / player-corp hangar role / on-grid visibility / GM role before disclosure.
-    if let Some((_, loc_id, _, _)) = subloc_key_opt.as_ref() {
-        let loc_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(loc_id).cloned());
-        if let Some(ref loc_item) = loc_item_opt {
-            authorize_item_info_access(ctx, session, char_id, loc_item, false)?;
-        } else if !(session.has_gm_role()
-            || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0)
-        {
-            return Err(BridgeRpcError {
-                code: "AccessDenied".into(),
-                message: format!("Not authorized to inspect sublocation {loc_id}"),
-                client_error: None,
-            });
+    let mut info_access = ItemInfoAccess::Full;
+    if let Some((_, loc_id, flag_u16, _)) = subloc_key_opt.as_ref() {
+        let is_gm = is_gm_session(session);
+        let struct_authorized = ctx.db.with_snapshot(|snap| {
+            snap.structures.get(loc_id).map(|st| {
+                is_gm
+                    || authorize_corp_flag_access(
+                        ctx,
+                        snap,
+                        session,
+                        char_id,
+                        st.owner_corp_id,
+                        *loc_id,
+                        InventoryFlag::from_u16(*flag_u16),
+                        *flag_u16,
+                    )
+            })
+        });
+        if let Some(allowed) = struct_authorized {
+            if !allowed {
+                return Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: format!("Not authorized to inspect structure sublocation {loc_id}"),
+                    client_error: None,
+                });
+            }
+        } else {
+            let loc_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(loc_id).cloned());
+            if let Some(ref loc_item) = loc_item_opt {
+                authorize_item_info_access(ctx, session, char_id, loc_item, false)?;
+            } else if !is_gm {
+                return Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: format!("Not authorized to inspect sublocation {loc_id}"),
+                    client_error: None,
+                });
+            }
         }
         if let Some(ref charge_item) = item_opt {
             authorize_item_info_access(ctx, session, char_id, charge_item, false)?;
         }
     } else if let Some(ref item) = item_opt {
-        authorize_item_info_access(ctx, session, char_id, item, true)?;
+        info_access = authorize_item_info_access(ctx, session, char_id, item, true)?;
     } else if let Some(ref sd) = space_drone_opt {
-        let is_gm = session.has_gm_role()
-            || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
-        if !is_gm
-            && sd.owner_char_id != char_id
-            && !is_on_grid_visible_ball(ctx, session, sd.ball_id, sd.solar_system_id)
-        {
-            return Err(BridgeRpcError {
-                code: "AccessDenied".into(),
-                message: format!("Not authorized to inspect drone {}", sd.ball_id),
-                client_error: None,
-            });
+        let is_gm = is_gm_session(session);
+        if !is_gm && sd.owner_char_id != char_id {
+            if is_on_grid_visible_ball(ctx, session, sd.ball_id, sd.solar_system_id) {
+                info_access = ItemInfoAccess::OnGridPublicOnly;
+            } else {
+                return Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: format!("Not authorized to inspect drone {}", sd.ball_id),
+                    client_error: None,
+                });
+            }
         }
     }
 
-    let (type_id, owner_id, dyn_attrs, location_id, qty, singleton) = if let Some(ref item) = item_opt {
+    let is_public_only = info_access == ItemInfoAccess::OnGridPublicOnly;
+
+    let (type_id, owner_id, mut dyn_attrs, location_id, qty, singleton) = if let Some(ref item) = item_opt {
         (
             item.type_id,
             PyRep::Integer(item.owner_id),
@@ -505,7 +591,12 @@ fn handle_item_get_info(
     } else if let Some((_, loc_id, _, sub_tid)) = subloc_key_opt.as_ref() {
         let loc_id = *loc_id;
         let sub_tid = *sub_tid;
-        let ship_owner = ctx.db.with_snapshot(|s| s.items.get(&loc_id).map(|i| i.owner_id));
+        let ship_owner = ctx.db.with_snapshot(|s| {
+            s.items
+                .get(&loc_id)
+                .map(|i| i.owner_id)
+                .or_else(|| s.structures.get(&loc_id).map(|st| st.owner_corp_id))
+        });
         (
             sub_tid,
             ship_owner.map(PyRep::Integer).unwrap_or(PyRep::None),
@@ -549,6 +640,10 @@ fn handle_item_get_info(
         (tid, PyRep::None, HashMap::new(), None, 1, false)
     };
 
+    if is_public_only {
+        dyn_attrs.clear();
+    }
+
     let Some(show_info) = ctx.sde.show_info_for_type(type_id) else {
         return Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type {type_id} not found in SDE"), client_error: None });
     };
@@ -560,144 +655,146 @@ fn handle_item_get_info(
     }
     let mut fitted_online_ship: Option<(i64, i64)> = None;
     let item_cat = ctx.sde.types.get(&type_id).map(|t| t.category_id).unwrap_or(0);
-    if item_cat == 18 {
-        let parent_opt = space_drone_opt
-            .as_ref()
-            .map(|sd| (sd.owner_char_id, sd.parent_ship_id))
-            .or_else(|| item_opt.as_ref().map(|it| (it.owner_id, it.location_id)));
-        if let Some((p_owner, p_ship)) = parent_opt {
-            if let Ok(fit) = ctx.fit(p_owner, p_ship) {
-                let drone_state_opt = fit.drone_state(raw_id, &ctx.sde).or_else(|| {
-                    fit.evaluated_drones
-                        .values()
-                        .find(|d| d.type_id == type_id)
-                        .cloned()
-                });
-                if let Some(d_state) = drone_state_opt {
-                    let all_aids: std::collections::BTreeSet<u16> = d_state
-                        .base_attributes
-                        .keys()
-                        .copied()
-                        .chain(d_state.modifiers.iter().map(|m| m.target_attribute_id))
-                        .collect();
-                    for aid in all_aids {
-                        merged_attrs.insert(aid, d_state.get_attribute(aid, &ctx.sde));
-                    }
-                }
-                let has_active_triage = fit.modules.values().any(|fm| {
-                    matches!(fm.type_id, 27951 | 4294)
-                        && matches!(
-                            fm.state,
-                            eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-                        )
-                });
-                if has_active_triage {
-                    merged_attrs.insert(64, 0.0);
-                }
-            }
-        }
-    } else if let Some(ref item) = item_opt {
-        if item_cat == 6 {
-            if let Ok(fit) = ctx.fit(item.owner_id, item.item_id) {
-                let all_aids: std::collections::BTreeSet<u16> = fit
-                    .ship
-                    .base_attributes
-                    .keys()
-                    .copied()
-                    .chain(fit.ship.modifiers.iter().map(|m| m.target_attribute_id))
-                    .collect();
-                for aid in all_aids {
-                    merged_attrs.insert(aid, fit.ship.get_attribute(aid, &ctx.sde));
-                }
-                for (&attr_id, &val) in &dyn_attrs {
-                    if matches!(attr_id, 3 | 18 | 264 | 265 | 266)
-                        || !fit
-                            .ship
-                            .modifiers
-                            .iter()
-                            .any(|m| m.target_attribute_id == attr_id)
-                    {
-                        merged_attrs.insert(attr_id, val);
-                    }
-                }
-                let already_applied_dbuffs: Vec<u32> =
-                    fit.gang_bursts.iter().filter_map(|b| b.dbuff_id).collect();
-                crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(
-                    ctx,
-                    item.item_id,
-                    &already_applied_dbuffs,
-                    &mut merged_attrs,
-                );
-            }
-        } else if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132) {
-            if let Ok(fit) = ctx.fit(item.owner_id, item.location_id) {
-                if item_cat == 8 {
-                    let slot_flag = item.flag as u16;
-                    let launcher_id_opt = fit
-                        .modules
-                        .values()
-                        .find(|m| m.flag_id == slot_flag)
-                        .map(|m| m.item_id);
-                    let charge_state_opt = launcher_id_opt
-                        .and_then(|lid| fit.charge_state(lid, &ctx.sde))
-                        .or_else(|| {
-                            fit.evaluated_charges
-                                .values()
-                                .find(|c| c.type_id == item.type_id)
-                                .cloned()
-                        });
-                    if let Some(c_state) = charge_state_opt {
-                        let all_aids: std::collections::BTreeSet<u16> = c_state
+    if !is_public_only {
+        if item_cat == 18 {
+            let parent_opt = space_drone_opt
+                .as_ref()
+                .map(|sd| (sd.owner_char_id, sd.parent_ship_id))
+                .or_else(|| item_opt.as_ref().map(|it| (it.owner_id, it.location_id)));
+            if let Some((p_owner, p_ship)) = parent_opt {
+                if let Ok(fit) = ctx.fit(p_owner, p_ship) {
+                    let drone_state_opt = fit.drone_state(raw_id, &ctx.sde).or_else(|| {
+                        fit.evaluated_drones
+                            .values()
+                            .find(|d| d.type_id == type_id)
+                            .cloned()
+                    });
+                    if let Some(d_state) = drone_state_opt {
+                        let all_aids: std::collections::BTreeSet<u16> = d_state
                             .base_attributes
                             .keys()
                             .copied()
-                            .chain(c_state.modifiers.iter().map(|m| m.target_attribute_id))
+                            .chain(d_state.modifiers.iter().map(|m| m.target_attribute_id))
                             .collect();
                         for aid in all_aids {
-                            merged_attrs.insert(aid, c_state.get_attribute(aid, &ctx.sde));
+                            merged_attrs.insert(aid, d_state.get_attribute(aid, &ctx.sde));
                         }
                     }
-                } else if let Some(m_state) = fit.module_state(item.item_id, &ctx.sde) {
-                    let all_aids: std::collections::BTreeSet<u16> = m_state
+                    let has_active_triage = fit.modules.values().any(|fm| {
+                        matches!(fm.type_id, 27951 | 4294)
+                            && matches!(
+                                fm.state,
+                                eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+                            )
+                    });
+                    if has_active_triage {
+                        merged_attrs.insert(64, 0.0);
+                    }
+                }
+            }
+        } else if let Some(ref item) = item_opt {
+            if item_cat == 6 {
+                if let Ok(fit) = ctx.fit(item.owner_id, item.item_id) {
+                    let all_aids: std::collections::BTreeSet<u16> = fit
+                        .ship
                         .base_attributes
                         .keys()
                         .copied()
-                        .chain(m_state.modifiers.iter().map(|m| m.target_attribute_id))
+                        .chain(fit.ship.modifiers.iter().map(|m| m.target_attribute_id))
                         .collect();
                     for aid in all_aids {
-                        merged_attrs.insert(aid, m_state.get_attribute(aid, &ctx.sde));
+                        merged_attrs.insert(aid, fit.ship.get_attribute(aid, &ctx.sde));
                     }
-                    crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
+                    for (&attr_id, &val) in &dyn_attrs {
+                        if matches!(attr_id, 3 | 18 | 264 | 265 | 266)
+                            || !fit
+                                .ship
+                                .modifiers
+                                .iter()
+                                .any(|m| m.target_attribute_id == attr_id)
+                        {
+                            merged_attrs.insert(attr_id, val);
+                        }
+                    }
+                    let already_applied_dbuffs: Vec<u32> =
+                        fit.gang_bursts.iter().filter_map(|b| b.dbuff_id).collect();
+                    crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(
                         ctx,
-                        item.location_id,
+                        item.item_id,
+                        &already_applied_dbuffs,
                         &mut merged_attrs,
                     );
                 }
-                if item_cat != 8 {
-                    let is_mod_online = fit
-                        .modules
-                        .get(&item.item_id)
-                        .map(|m| m.state != eve_dogma::ModuleState::Offline)
-                        .unwrap_or_else(|| {
-                            ctx.db.with_snapshot(|s| {
-                                s.module_online_states.get(&item.item_id).copied().unwrap_or(true)
-                            })
-                        });
-                    merged_attrs.insert(2, if is_mod_online { 1.0 } else { 0.0 });
-                    if is_mod_online {
-                        fitted_online_ship = Some((item.owner_id, item.location_id));
+            } else if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132) {
+                if let Ok(fit) = ctx.fit(item.owner_id, item.location_id) {
+                    if item_cat == 8 {
+                        let slot_flag = item.flag as u16;
+                        let launcher_id_opt = fit
+                            .modules
+                            .values()
+                            .find(|m| m.flag_id == slot_flag)
+                            .map(|m| m.item_id);
+                        let charge_state_opt = launcher_id_opt
+                            .and_then(|lid| fit.charge_state(lid, &ctx.sde))
+                            .or_else(|| {
+                                fit.evaluated_charges
+                                    .values()
+                                    .find(|c| c.type_id == item.type_id)
+                                    .cloned()
+                            });
+                        if let Some(c_state) = charge_state_opt {
+                            let all_aids: std::collections::BTreeSet<u16> = c_state
+                                .base_attributes
+                                .keys()
+                                .copied()
+                                .chain(c_state.modifiers.iter().map(|m| m.target_attribute_id))
+                                .collect();
+                            for aid in all_aids {
+                                merged_attrs.insert(aid, c_state.get_attribute(aid, &ctx.sde));
+                            }
+                        }
+                    } else if let Some(m_state) = fit.module_state(item.item_id, &ctx.sde) {
+                        let all_aids: std::collections::BTreeSet<u16> = m_state
+                            .base_attributes
+                            .keys()
+                            .copied()
+                            .chain(m_state.modifiers.iter().map(|m| m.target_attribute_id))
+                            .collect();
+                        for aid in all_aids {
+                            merged_attrs.insert(aid, m_state.get_attribute(aid, &ctx.sde));
+                        }
+                        crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
+                            ctx,
+                            item.location_id,
+                            &mut merged_attrs,
+                        );
                     }
-                }
-                for &aid in &[3u16, 9, 84, 267, 268, 269, 270] {
-                    if let Some(&v) = dyn_attrs.get(&aid) {
-                        merged_attrs.insert(aid, v);
+                    if item_cat != 8 {
+                        let is_mod_online = fit
+                            .modules
+                            .get(&item.item_id)
+                            .map(|m| m.state != eve_dogma::ModuleState::Offline)
+                            .unwrap_or_else(|| {
+                                ctx.db.with_snapshot(|s| {
+                                    s.module_online_states.get(&item.item_id).copied().unwrap_or(true)
+                                })
+                            });
+                        merged_attrs.insert(2, if is_mod_online { 1.0 } else { 0.0 });
+                        if is_mod_online {
+                            fitted_online_ship = Some((item.owner_id, item.location_id));
+                        }
+                    }
+                    for &aid in &[3u16, 9, 84, 267, 268, 269, 270] {
+                        if let Some(&v) = dyn_attrs.get(&aid) {
+                            merged_attrs.insert(aid, v);
+                        }
                     }
                 }
             }
         }
     }
 
-    if raw_id > 0 {
+    if raw_id > 0 && !is_public_only {
         crate::services::tactical_modules::apply_transient_item_attrs(ctx, raw_id, &mut merged_attrs);
     }
     if subloc_key_opt.is_some() {
@@ -729,7 +826,7 @@ fn handle_item_get_info(
         String::new()
     };
     let now_ft = ctx.now_client_sim_filetime_ticks();
-    let inv_item = if subloc_key_opt.is_some() {
+    let inv_item = if subloc_key_opt.is_some() || is_public_only {
         PyRep::None
     } else {
         ctx.db
@@ -1766,172 +1863,76 @@ pub(crate) async fn handle_dogma_im(
         }
 
         ("dogmaIM", "LinkWeapons") | ("charFittingMgr", "LinkWeapons") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let rpc = crate::router::RpcArgs::positional(args);
-            let ship_id = match rpc.opt_positive_i64(0, "shipID") {
-                Ok(v) => v.or(session.ship_id).unwrap_or(0),
-                Err(e) => return Some(Err(e)),
-            };
-            if !ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|it| it.owner_id == char_id)) {
-                return Some(Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}"), client_error: None }));
-            }
-            let master_id = match rpc.req_positive_i64(1, "masterID") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let slave_id = match rpc.req_positive_i64(2, "slaveID") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
-                    return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}"), client_error: None });
-                }
-                let Some(master_it) = snap.items.get(&master_id) else {
-                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Master module {master_id} not found"), client_error: None });
-                };
-                let Some(slave_it) = snap.items.get(&slave_id) else {
-                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Slave module {slave_id} not found"), client_error: None });
-                };
-                if master_it.location_id != ship_id
-                    || slave_it.location_id != ship_id
-                    || !matches!(master_it.flag as u16, 27..=34)
-                    || !matches!(slave_it.flag as u16, 27..=34)
-                    || master_it.type_id != slave_it.type_id
-                {
-                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: "Only identical high-slot weapons fitted to the ship can be grouped".into(), client_error: None });
-                }
-                let banks = snap.weapon_banks.entry(ship_id).or_default();
-                let bank = banks.entry(master_id).or_insert_with(|| vec![master_id]);
-                if !bank.contains(&slave_id) {
-                    bank.push(slave_id);
-                }
-                Ok(crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(snap, ship_id))
-            });
-            if let Ok(ref info) = res {
-                crate::services::combat_crimewatch::combat_weapons_spool::notify_weapon_banks_updated(ctx, char_id, ship_id, &[], info);
-            }
-            Some(res)
+            run_weapon_pair_mutation(
+                ctx,
+                session,
+                args,
+                "masterID",
+                "slaveID",
+                true,
+                |banks, master_id, slave_id| {
+                    let bank = banks.entry(master_id).or_insert_with(|| vec![master_id]);
+                    if !bank.contains(&slave_id) {
+                        bank.push(slave_id);
+                    }
+                    Vec::new()
+                },
+            )
         }
 
         ("dogmaIM", "PeelAndLink") | ("charFittingMgr", "PeelAndLink") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let rpc = crate::router::RpcArgs::positional(args);
-            let ship_id = match rpc.opt_positive_i64(0, "shipID") {
-                Ok(v) => v.or(session.ship_id).unwrap_or(0),
-                Err(e) => return Some(Err(e)),
-            };
-            if !ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|it| it.owner_id == char_id)) {
-                return Some(Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}"), client_error: None }));
-            }
-            let new_mod_id = match rpc.req_positive_i64(1, "newModID") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let target_bank_mod_id = match rpc.req_positive_i64(2, "targetBankModID") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
-                    return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}"), client_error: None });
-                }
-                let Some(new_it) = snap.items.get(&new_mod_id) else {
-                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Module {new_mod_id} not found"), client_error: None });
-                };
-                let Some(target_it) = snap.items.get(&target_bank_mod_id) else {
-                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Target bank module {target_bank_mod_id} not found"), client_error: None });
-                };
-                if new_it.location_id != ship_id
-                    || target_it.location_id != ship_id
-                    || !matches!(new_it.flag as u16, 27..=34)
-                    || !matches!(target_it.flag as u16, 27..=34)
-                    || new_it.type_id != target_it.type_id
-                {
-                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: "Only identical high-slot weapons fitted to the ship can be grouped".into(), client_error: None });
-                }
-                let banks = snap.weapon_banks.entry(ship_id).or_default();
-                let mut found_master = None;
-                for (&m, list) in banks.iter() {
-                    if m == target_bank_mod_id || list.contains(&target_bank_mod_id) {
-                        found_master = Some(m);
-                        break;
+            run_weapon_pair_mutation(
+                ctx,
+                session,
+                args,
+                "newModID",
+                "targetBankModID",
+                false,
+                |banks, new_mod_id, target_bank_mod_id| {
+                    let mut found_master = None;
+                    for (&m, list) in banks.iter() {
+                        if m == target_bank_mod_id || list.contains(&target_bank_mod_id) {
+                            found_master = Some(m);
+                            break;
+                        }
                     }
-                }
-                let master = found_master.unwrap_or(target_bank_mod_id);
-                let list = banks.entry(master).or_insert_with(|| vec![master]);
-                if !list.contains(&new_mod_id) {
-                    list.push(new_mod_id);
-                }
-                Ok(crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(snap, ship_id))
-            });
-            Some(res.map(|info| {
-                crate::services::combat_crimewatch::combat_weapons_spool::notify_weapon_banks_updated(ctx, char_id, ship_id, &[], &info);
-                PyRep::None
-            }))
+                    let master = found_master.unwrap_or(target_bank_mod_id);
+                    let list = banks.entry(master).or_insert_with(|| vec![master]);
+                    if !list.contains(&new_mod_id) {
+                        list.push(new_mod_id);
+                    }
+                    Vec::new()
+                },
+            )
         }
 
         ("dogmaIM", "MergeModuleGroups") | ("charFittingMgr", "MergeModuleGroups") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let rpc = crate::router::RpcArgs::positional(args);
-            let ship_id = match rpc.opt_positive_i64(0, "shipID") {
-                Ok(v) => v.or(session.ship_id).unwrap_or(0),
-                Err(e) => return Some(Err(e)),
-            };
-            if !ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|it| it.owner_id == char_id)) {
-                return Some(Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}"), client_error: None }));
-            }
-            let master_id = match rpc.req_positive_i64(1, "masterID") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let other_master_id = match rpc.req_positive_i64(2, "otherMasterID") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
-                    return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}"), client_error: None });
-                }
-                let Some(m1) = snap.items.get(&master_id) else {
-                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Master module {master_id} not found"), client_error: None });
-                };
-                let Some(m2) = snap.items.get(&other_master_id) else {
-                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: format!("Module {other_master_id} not found"), client_error: None });
-                };
-                if m1.location_id != ship_id
-                    || m2.location_id != ship_id
-                    || !matches!(m1.flag as u16, 27..=34)
-                    || !matches!(m2.flag as u16, 27..=34)
-                    || m1.type_id != m2.type_id
-                {
-                    return Err(BridgeRpcError { code: "InvalidWeaponGroup".into(), message: "Only identical high-slot weapons fitted to the ship can be merged".into(), client_error: None });
-                }
-                let banks = snap.weapon_banks.entry(ship_id).or_default();
-                let had_other = banks.contains_key(&other_master_id) && other_master_id != master_id;
-                let other_modules = banks.remove(&other_master_id).unwrap_or_else(|| vec![other_master_id]);
-                let master_list = banks.entry(master_id).or_insert_with(|| vec![master_id]);
-                for id in other_modules {
-                    if !master_list.contains(&id) {
-                        master_list.push(id);
+            run_weapon_pair_mutation(
+                ctx,
+                session,
+                args,
+                "masterID",
+                "otherMasterID",
+                false,
+                |banks, master_id, other_master_id| {
+                    let had_other =
+                        banks.contains_key(&other_master_id) && other_master_id != master_id;
+                    let other_modules = banks
+                        .remove(&other_master_id)
+                        .unwrap_or_else(|| vec![other_master_id]);
+                    let master_list = banks.entry(master_id).or_insert_with(|| vec![master_id]);
+                    for id in other_modules {
+                        if !master_list.contains(&id) {
+                            master_list.push(id);
+                        }
                     }
-                }
-                let destroyed = if had_other { vec![other_master_id] } else { Vec::new() };
-                Ok((destroyed, crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(snap, ship_id)))
-            });
-            Some(res.map(|(destroyed, info)| {
-                crate::services::combat_crimewatch::combat_weapons_spool::notify_weapon_banks_updated(ctx, char_id, ship_id, &destroyed, &info);
-                PyRep::None
-            }))
+                    if had_other {
+                        vec![other_master_id]
+                    } else {
+                        Vec::new()
+                    }
+                },
+            )
         }
 
         ("dogmaIM", "UnlinkModule") | ("charFittingMgr", "UnlinkModule") => {
@@ -2006,10 +2007,13 @@ pub(crate) async fn handle_dogma_im(
                 Ok(v) => v.or(session.ship_id).unwrap_or(0),
                 Err(e) => return Some(Err(e)),
             };
-            if let Err(e) = validate_link_all_weapons_preconditions(ctx, session, char_id, ship_id) {
-                return Some(Err(e));
-            }
-            let res = crate::services::combat_crimewatch::combat_weapons::handle_link_all_weapons(ctx, char_id, ship_id);
+            let res = crate::services::combat_crimewatch::combat_weapons_spool::handle_link_all_weapons_atomic(
+                ctx,
+                Some(session),
+                char_id,
+                ship_id,
+                true,
+            );
             Some(res)
         }
 

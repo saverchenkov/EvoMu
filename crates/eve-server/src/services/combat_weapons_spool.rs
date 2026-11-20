@@ -1278,30 +1278,127 @@ pub fn notify_weapon_banks_updated(
     );
 }
 
-/// Links all compatible weapon modules into banks (`charFittingMgr.LinkAllWeapons` / `dogmaIM.LinkAllWeapons`).
-pub fn handle_link_all_weapons(
+/// Returns `true` if `ty` is a linkable high-slot turret or missile launcher.
+pub(crate) fn is_linkable_weapon_type(ty: &InvType) -> bool {
+    ty.effect_ids.contains(&42)
+        || ty.effect_ids.contains(&40)
+        || ty.default_attributes.contains_key(&604)
+}
+
+/// Validates inside an active `WorldStateSnapshot` that the caller owns `ship_id`,
+/// is undocked in space with `ship_id` as their active ship, and is not cloaked.
+pub(crate) fn validate_weapon_link_context_in_snapshot(
     ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session_opt: Option<&eve_machonet::SessionState>,
     char_id: i64,
     ship_id: i64,
-) -> Result<PyRep, BridgeRpcError> {
-    let info = ctx.db.try_with_mut_snapshot(|snap| {
-        if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
+) -> Result<(), BridgeRpcError> {
+    if ship_id <= 0
+        || !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id)
+    {
+        return Err(BridgeRpcError {
+            code: "ShipOwnershipViolation".into(),
+            message: format!("Ship {ship_id} is not owned by {char_id}"),
+            client_error: None,
+        });
+    }
+    let ship = &snap.items[&ship_id];
+    let char_rec = snap.characters.get(&char_id);
+    let db_docked = char_rec.is_some_and(|ch| ch.station_id.is_some() || ch.structure_id.is_some());
+    let sess_docked = session_opt.is_some_and(|s| s.station_id.is_some() || s.structure_id.is_some());
+    if sess_docked || db_docked {
+        return Err(BridgeRpcError {
+            code: "CannotLinkWeaponsWhileDocked".into(),
+            message: "Weapons can only be linked while undocked in space".into(),
+            client_error: None,
+        });
+    }
+    let sys_id = if let Some(sess) = session_opt {
+        let Some(sys_id) = sess.solar_system_id else {
             return Err(BridgeRpcError {
-                code: "ShipOwnershipViolation".into(),
-                message: format!("Ship {ship_id} is not owned by {char_id}"),
+                code: "NotInSpace".into(),
+                message: "Weapons can only be linked while undocked in space".into(),
+                client_error: None,
+            });
+        };
+        sys_id
+    } else if let Some(ch) = char_rec {
+        ch.solar_system_id
+    } else {
+        return Err(BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Weapons can only be linked while undocked in space".into(),
+            client_error: None,
+        });
+    };
+    if ship.location_id != i64::from(sys_id) {
+        return Err(BridgeRpcError {
+            code: "CannotLinkWeaponsWhileDocked".into(),
+            message: format!("Ship {ship_id} must be in space in solar system {sys_id}"),
+            client_error: None,
+        });
+    }
+    let db_active_ship_id = char_rec.map(|ch| ch.active_ship_id).filter(|&id| id > 0);
+    if session_opt.is_some_and(|s| s.ship_id != Some(ship_id))
+        || db_active_ship_id != Some(ship_id)
+    {
+        return Err(BridgeRpcError {
+            code: "ShipNotActive".into(),
+            message: format!("Ship {ship_id} is not the caller's active ship"),
+            client_error: None,
+        });
+    }
+    if let Some(sys) = ctx.systems.get_handle(sys_id) {
+        let view = sys.view();
+        if view.is_ball_cloaked(ship_id) || view.is_gate_cloaked(ship_id) {
+            return Err(BridgeRpcError {
+                code: "CannotLinkWeaponsWhileCloaked".into(),
+                message: "Cannot link weapons while cloaked".into(),
                 client_error: None,
             });
         }
-        let is_linkable_weapon = |ty: &eve_sde::InvType| -> bool {
-            ty.effect_ids.contains(&42) || ty.effect_ids.contains(&40) || ty.default_attributes.contains_key(&604)
-        };
+    }
+    Ok(())
+}
+
+/// Atomically validates weapon-linking preconditions and links compatible weapon modules
+/// inside a single `try_with_mut_snapshot` transaction.
+pub(crate) fn handle_link_all_weapons_atomic(
+    ctx: &ServerContext,
+    session_opt: Option<&eve_machonet::SessionState>,
+    char_id: i64,
+    ship_id: i64,
+    require_linkable_pair: bool,
+) -> Result<PyRep, BridgeRpcError> {
+    let info = ctx.db.try_with_mut_snapshot(|snap| {
+        validate_weapon_link_context_in_snapshot(ctx, snap, session_opt, char_id, ship_id)?;
         let mut by_type: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         for item in snap.items.values() {
             if item.location_id == ship_id && matches!(item.flag as u16, 27..=34) {
                 if let Some(ty) = ctx.sde.types.get(&item.type_id) {
-                    if is_linkable_weapon(ty) { by_type.entry(item.type_id).or_default().push(item.item_id); }
+                    if is_linkable_weapon_type(ty) {
+                        by_type.entry(item.type_id).or_default().push(item.item_id);
+                    }
                 }
             }
+        }
+        let has_linkable_pair = by_type.values().any(|mods| mods.len() >= 2);
+        if require_linkable_pair && !has_linkable_pair {
+            return Err(BridgeRpcError {
+                code: "InvalidWeaponGroup".into(),
+                message: "At least two identical fitted weapons are required to form a weapon group"
+                    .into(),
+                client_error: None,
+            });
+        }
+        if !has_linkable_pair {
+            if let Some(banks) = snap.weapon_banks.get_mut(&ship_id) {
+                if !banks.is_empty() {
+                    banks.clear();
+                }
+            }
+            return Ok(build_weapon_banks_dict(snap, ship_id));
         }
         let banks = snap.weapon_banks.entry(ship_id).or_default();
         banks.clear();
@@ -1316,6 +1413,15 @@ pub fn handle_link_all_weapons(
     })?;
     notify_weapon_banks_updated(ctx, char_id, ship_id, &[], &info);
     Ok(info)
+}
+
+/// Links all compatible weapon modules into banks (`charFittingMgr.LinkAllWeapons` / `dogmaIM.LinkAllWeapons`).
+pub fn handle_link_all_weapons(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+) -> Result<PyRep, BridgeRpcError> {
+    handle_link_all_weapons_atomic(ctx, None, char_id, ship_id, false)
 }
 
 #[cfg(test)]
