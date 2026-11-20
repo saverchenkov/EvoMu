@@ -4462,6 +4462,7 @@ def _cleanup_utility_windows(sm, keep_chat=True):
         cur_vname = _safe_str(getattr(cur_vi, "name", ""), 48)
         if cur_vname in (
             "paint_tool",
+            "ship_skinr",
             "virtual_goods_store",
             "aurumstore",
             "starmap_new",
@@ -4582,6 +4583,7 @@ cmd_map = {
     "insurgency": "OpenInsurgencyDashboard",
     "skinr": "OpenShipSKINRWindow",
     "shipskinr": "OpenShipSKINRWindow",
+    "painttool": "OpenShipSKINRWindow",
     "structurebrowser": "OpenStructureBrowser",
     "shiptree": "CmdToggleShipTree",
     "isis": "CmdToggleShipTree",
@@ -4691,6 +4693,7 @@ _WINDOW_TARGET_ALIASES = {
     "insurgency": ("insurgency", "pirateinsurgency"),
     "skinr": ("skinr", "shipskinr", "ship_skinr", "paint_tool", "painttool"),
     "shipskinr": ("skinr", "shipskinr", "ship_skinr", "paint_tool", "painttool"),
+    "painttool": ("skinr", "shipskinr", "ship_skinr", "paint_tool", "painttool"),
     "structurebrowser": ("structurebrowser",),
     "shiptree": ("shiptree", "isis"),
     "isis": ("shiptree", "isis"),
