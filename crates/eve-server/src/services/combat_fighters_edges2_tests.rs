@@ -644,6 +644,12 @@ async fn fighters_movement_abandon_and_scoop_edges() {
     );
 
     // Outsider cannot scoop
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
     let mut thief_sess = session.clone();
     thief_sess.character_id = Some(90_000_002);
     thief_sess.corporation_id = Some(1_000_010);
@@ -1142,6 +1148,12 @@ async fn w4_mutant_killers_fighters_slots_launch_movement_scoop_and_persistence(
     assert_eq!(aband_res, PyRep::List(vec![PyRep::Integer(aband_sq)]));
 
     // Move ship within scoop distance (< 2500m, already 150m away) and have a DIFFERENT corp pilot scoop it
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&other_char) {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
     let mut foreign_sess = SessionState {
         user_id: Some(other_char as u64),
         character_id: Some(other_char),

@@ -654,6 +654,300 @@ fn plan_v24_launch_budget(
     (counts, errors, first_error)
 }
 
+fn drone_rpc_err(code: &'static str, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
+enum EntityDroneFilter {
+    All,
+    Ids(Vec<i64>),
+    Invalid,
+}
+
+fn extract_entity_drone_filter_ids(
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> EntityDroneFilter {
+    let raw = match args.first() {
+        Some(PyRep::None) | None => kwargs.get("droneIDs"),
+        other => other,
+    };
+    match raw {
+        None | Some(PyRep::None) => EntityDroneFilter::All,
+        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+            if items.is_empty() {
+                return EntityDroneFilter::All;
+            }
+            let ids: Vec<i64> = items
+                .iter()
+                .filter_map(PyRep::as_i64)
+                .filter(|&id| id > 0)
+                .collect();
+            if ids.is_empty() {
+                EntityDroneFilter::Invalid
+            } else {
+                EntityDroneFilter::Ids(ids)
+            }
+        }
+        Some(PyRep::Integer(id)) => {
+            if *id > 0 {
+                EntityDroneFilter::Ids(vec![*id])
+            } else {
+                EntityDroneFilter::Invalid
+            }
+        }
+        Some(_) => EntityDroneFilter::Invalid,
+    }
+}
+
+/// Validates that the caller is an undocked pilot with an active ship ball in space and is not actively cloaked.
+async fn require_undocked_uncloaked_drone_ship(
+    ctx: &ServerContext,
+    session: &SessionState,
+    action_label: &str,
+) -> Result<(i64, i64, u32, crate::system_actor::SystemHandle), BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let db_char = ctx.db.with_snapshot(|s| {
+        s.characters
+            .get(&char_id)
+            .map(|c| (c.active_ship_id, c.station_id, c.structure_id))
+    });
+    if session.station_id.is_some()
+        || session.structure_id.is_some()
+        || matches!(db_char, Some((_, Some(_), _)) | Some((_, _, Some(_))))
+    {
+        return Err(drone_rpc_err(
+            "ShipNotInSpace",
+            format!("Cannot {action_label} while docked"),
+        ));
+    }
+    let Some(ship_id) = session
+        .ship_id
+        .or_else(|| db_char.map(|(sid, _, _)| sid))
+        .filter(|&id| id > 0)
+    else {
+        return Err(drone_rpc_err(
+            "NoActiveShip",
+            "Session has no active ship",
+        ));
+    };
+    let Some(sys_id) = session.solar_system_id else {
+        return Err(drone_rpc_err(
+            "NoSolarSystem",
+            "Session has no active solar system",
+        ));
+    };
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    match sys_handle.get_ball_snapshot(ship_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let has_active_ship_drones = with_combat_runtime(ctx, |rt| {
+                rt.active_drones_in_space.values().any(|d| {
+                    d.solar_system_id == sys_id
+                        && !d.is_abandoned
+                        && (d.parent_ship_id == ship_id || d.owner_char_id == char_id)
+                })
+            });
+            if !has_active_ship_drones {
+                return Err(drone_rpc_err(
+                    "ShipNotInSpace",
+                    "Active ship is not spawned in space",
+                ));
+            }
+        }
+        Err(e) => {
+            return Err(drone_rpc_err("DestinyCommandFailed", e));
+        }
+    }
+    if crate::services::inventory_fitting::fitting_module_cycles::is_ship_actively_cloaked(
+        ctx,
+        &sys_handle,
+        ship_id,
+    )
+    .await
+    {
+        return Err(drone_rpc_err(
+            "CannotActivateCloaked",
+            format!("Cannot {action_label} while cloaked"),
+        ));
+    }
+    Ok((char_id, ship_id, sys_id, sys_handle))
+}
+
+fn drone_matches_owner_or_ship(d: &DroneSpaceState, char_id: i64, ship_id: i64, include_original_owner: bool) -> bool {
+    d.owner_char_id == char_id
+        || d.parent_ship_id == ship_id
+        || (include_original_owner && d.original_owner_char_id == char_id)
+}
+
+#[derive(Clone, Copy)]
+enum EmptyFilterMode {
+    ControlledInSystem,
+    AbandonedInSystem,
+}
+
+fn validate_entity_drone_presence(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    filter: &EntityDroneFilter,
+    require_same_system: bool,
+    require_controlled_filter: bool,
+    allow_foreign_in_system_filter: bool,
+    empty_mode: EmptyFilterMode,
+) -> Result<(), BridgeRpcError> {
+    match filter {
+        EntityDroneFilter::Invalid => Err(drone_rpc_err(
+            "DroneNotFound",
+            "No matching drone found in space",
+        )),
+        EntityDroneFilter::Ids(ids) => {
+            let found = with_combat_runtime(ctx, |rt| {
+                rt.active_drones_in_space.values().any(|d| {
+                    let id_match = ids.contains(&d.ball_id) || ids.contains(&d.drone_item_id);
+                    if !id_match {
+                        return false;
+                    }
+                    if require_same_system && d.solar_system_id != sys_id {
+                        return false;
+                    }
+                    if require_controlled_filter {
+                        return !d.is_abandoned
+                            && drone_matches_owner_or_ship(d, char_id, ship_id, false);
+                    }
+                    allow_foreign_in_system_filter
+                        || drone_matches_owner_or_ship(d, char_id, ship_id, true)
+                })
+            });
+            if found {
+                Ok(())
+            } else {
+                Err(drone_rpc_err(
+                    "DroneNotFound",
+                    "No matching drone found in space",
+                ))
+            }
+        }
+        EntityDroneFilter::All => {
+            let found = with_combat_runtime(ctx, |rt| {
+                rt.active_drones_in_space.values().any(|d| {
+                    if d.solar_system_id != sys_id {
+                        return false;
+                    }
+                    match empty_mode {
+                        EmptyFilterMode::ControlledInSystem => {
+                            !d.is_abandoned
+                                && drone_matches_owner_or_ship(d, char_id, ship_id, false)
+                        }
+                        EmptyFilterMode::AbandonedInSystem => {
+                            (d.is_abandoned && d.original_owner_char_id == char_id)
+                                || (d.owner_char_id == char_id && d.parent_ship_id == 0)
+                        }
+                    }
+                })
+            });
+            if found {
+                Ok(())
+            } else {
+                Err(drone_rpc_err(
+                    "NoDronesInSpace",
+                    "No matching drones in space",
+                ))
+            }
+        }
+    }
+}
+
+fn is_static_world_object(ctx: &ServerContext, sys_id: u32, id: i64) -> bool {
+    ctx.sde.stations.contains_key(&id)
+        || ctx.sde.stargates().contains_key(&id)
+        || ctx
+            .sde
+            .celestials_in_system_slice(sys_id)
+            .iter()
+            .any(|c| c.celestial_id == id)
+}
+
+async fn validate_return_bay_filter(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    sys_handle: &crate::system_actor::SystemHandle,
+    filter: &EntityDroneFilter,
+) -> Result<(), BridgeRpcError> {
+    match filter {
+        EntityDroneFilter::Invalid | EntityDroneFilter::All => validate_entity_drone_presence(
+            ctx,
+            char_id,
+            ship_id,
+            sys_id,
+            filter,
+            false,
+            false,
+            false,
+            EmptyFilterMode::ControlledInSystem,
+        ),
+        EntityDroneFilter::Ids(ids) => {
+            let (matched_own, matched_foreign) = with_combat_runtime(ctx, |rt| {
+                let mut own = false;
+                let mut foreign = false;
+                for &id in ids {
+                    for d in rt.active_drones_in_space.values() {
+                        if d.ball_id == id || d.drone_item_id == id {
+                            if drone_matches_owner_or_ship(d, char_id, ship_id, true) {
+                                own = true;
+                            } else {
+                                foreign = true;
+                            }
+                        }
+                    }
+                }
+                (own, foreign)
+            });
+            if matched_own {
+                return Ok(());
+            }
+            if matched_foreign {
+                return Err(drone_rpc_err(
+                    "DroneNotFound",
+                    "No matching drone found in space",
+                ));
+            }
+            let known_non_drone = ctx.db.with_snapshot(|snap| {
+                ids.iter().any(|&id| {
+                    is_static_world_object(ctx, sys_id, id)
+                        || snap.structures.contains_key(&id)
+                        || snap.characters.contains_key(&id)
+                        || snap.corporations.contains_key(&id)
+                        || snap.items.contains_key(&id)
+                })
+            });
+            if known_non_drone {
+                return Err(drone_rpc_err(
+                    "DroneNotFound",
+                    "No matching drone found in space",
+                ));
+            }
+            for &id in ids {
+                if matches!(sys_handle.get_ball_snapshot(id).await, Ok(Some(_))) {
+                    return Err(drone_rpc_err(
+                        "DroneNotFound",
+                        "No matching drone found in space",
+                    ));
+                }
+            }
+            // Destroyed drones already removed from space/DB are allowed to no-op cleanly in CmdReturnBay.
+            Ok(())
+        }
+    }
+}
+
 /// Handles all V24 client Drone RPCs (`ship.LaunchDrones`, `ship.ScoopToDroneBay`, `entity.CmdReturnBay`,
 /// `entity.CmdReturnHome`, `entity.CmdReturnAndOrbit`, `entity.CmdEngage`, `entity.CmdAssist`, `entity.CmdGuard`,
 /// `entity.ChangeDroneSettings`, `entity.SetAggressive`, `entity.CmdAbandonDrone`, `entity.CmdReconnectToDrones`, `entity.CmdSalvage`).
@@ -1240,38 +1534,65 @@ pub async fn handle_npcs_drones(
         }
 
         ("entity", "CmdReturnBay") => {
+            let (char_id, ship_id, sys_id, sys_handle) = match require_undocked_uncloaked_drone_ship(
+                ctx,
+                session,
+                "recall drones",
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let filter = extract_entity_drone_filter_ids(args, kwargs);
+            if let Err(e) = validate_return_bay_filter(
+                ctx,
+                char_id,
+                ship_id,
+                sys_id,
+                &sys_handle,
+                &filter,
+            )
+            .await
+            {
+                return Some(Err(e));
+            }
             Some(crate::sp6_lifecycle::handle_cmd_return_bay(ctx, session, args, kwargs).await)
         }
 
         ("entity", "CmdReturnHome") | ("entity", "CmdReturnAndOrbit") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (char_id, ship_id, sys_id, sys_handle) = match require_undocked_uncloaked_drone_ship(
+                ctx,
+                session,
+                "command drones",
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
-            };
-            let Some(ship_id) = session.ship_id.or_else(|| {
-                ctx.db
-                    .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))
-            }) else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                    client_error: None,
-                }));
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
             }
-            let filter_drone_ids: Option<Vec<i64>> = match args.first() {
-                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
-                    Some(items.iter().filter_map(|it| it.as_i64()).collect())
-                }
-                Some(PyRep::Integer(id)) => Some(vec![*id]),
-                _ => None,
+            let filter = extract_entity_drone_filter_ids(args, kwargs);
+            if let Err(e) = validate_entity_drone_presence(
+                ctx,
+                char_id,
+                ship_id,
+                sys_id,
+                &filter,
+                true,
+                true,
+                false,
+                EmptyFilterMode::ControlledInSystem,
+            ) {
+                return Some(Err(e));
+            }
+            let filter_drone_ids: Option<&[i64]> = match &filter {
+                EntityDroneFilter::Ids(ids) => Some(ids.as_slice()),
+                EntityDroneFilter::All => None,
+                EntityDroneFilter::Invalid => unreachable!("validated by validate_entity_drone_presence"),
             };
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let ship_pos = sys_handle
                 .get_ball_snapshot(ship_id)
                 .await
@@ -1288,7 +1609,6 @@ pub async fn handle_npcs_drones(
                             && d.parent_ship_id == ship_id
                             && !d.is_abandoned
                             && filter_drone_ids
-                                .as_ref()
                                 .map(|f| f.contains(&d.ball_id) || f.contains(&d.drone_item_id))
                                 .unwrap_or(true)
                     })
@@ -1688,21 +2008,40 @@ pub async fn handle_npcs_drones(
         }
 
         ("entity", "CmdAssist") | ("entity", "CmdGuard") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let _ = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.character_id));
+            let (char_id, ship_id, sys_id, sys_handle) =
+                match require_undocked_uncloaked_drone_ship(ctx, session, "command drones").await {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             let target_char_id = match RpcArgs::new(args, kwargs).req_positive_i64(0, "targetCharID") {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
+            };
+            if target_char_id == char_id || is_static_world_object(ctx, sys_id, target_char_id) {
+                return Some(Err(drone_rpc_err(
+                    "InvalidTarget",
+                    "Invalid drone assist/guard target",
+                )));
+            }
+            let drone_filter: Option<Vec<i64>> = match args.get(1) {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    Some(items.iter().filter_map(PyRep::as_i64).collect())
+                }
+                _ => None,
             };
             let is_assist = method == "CmdAssist";
             let mut updated = 0;
             let mut drone_events = Vec::new();
             with_mut_combat_runtime(ctx, |rt| {
                 for d in rt.active_drones_in_space.values_mut() {
-                    if d.owner_char_id == char_id && !d.is_abandoned {
+                    if d.solar_system_id == sys_id
+                        && !d.is_abandoned
+                        && (d.parent_ship_id == ship_id || d.owner_char_id == char_id)
+                        && drone_filter
+                            .as_ref()
+                            .map(|ids| ids.contains(&d.ball_id) || ids.contains(&d.drone_item_id))
+                            .unwrap_or(true)
+                    {
                         d.assist_char_id = is_assist.then_some(target_char_id);
                         d.guard_char_id = (!is_assist).then_some(target_char_id);
                         d.activity_state = if is_assist { 6 } else { 7 };
@@ -1711,23 +2050,19 @@ pub async fn handle_npcs_drones(
                     }
                 }
             });
-            if let Some(sys_id) = session.solar_system_id {
-                let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                let st = if is_assist { 6 } else { 7 };
-                let ship_id = session.ship_id.unwrap_or(0);
-                for (bid, tid) in drone_events {
-                    let _ = sys_handle.emit_destiny_event(bid, eve_destiny::DestinyEvent::OnDroneStateChange {
-                        drone_id: bid, owner_id: char_id, controller_id: ship_id, activity_state: st,
-                        type_id: tid, controller_owner_id: char_id, target_id: Some(target_char_id),
-                    }).await;
-                    crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
-                        ctx,
-                        char_id,
-                        bid,
-                        st,
-                        Some(if is_assist { "assist" } else { "guard" }),
-                    );
-                }
+            let st = if is_assist { 6 } else { 7 };
+            for (bid, tid) in drone_events {
+                let _ = sys_handle.emit_destiny_event(bid, eve_destiny::DestinyEvent::OnDroneStateChange {
+                    drone_id: bid, owner_id: char_id, controller_id: ship_id, activity_state: st,
+                    type_id: tid, controller_owner_id: char_id, target_id: Some(target_char_id),
+                }).await;
+                crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
+                    ctx,
+                    char_id,
+                    bid,
+                    st,
+                    Some(if is_assist { "assist" } else { "guard" }),
+                );
             }
             Some(Ok(PyRep::keyval([
                 ("mode", PyRep::String(method.into())),
@@ -1797,23 +2132,43 @@ pub async fn handle_npcs_drones(
         }
 
         ("entity", "CmdAbandonDrone") => {
+            let (char_id, ship_id, sys_id, _) = match require_undocked_uncloaked_drone_ship(
+                ctx,
+                session,
+                "abandon drones",
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let filter = extract_entity_drone_filter_ids(args, kwargs);
+            if let Err(e) = validate_entity_drone_presence(
+                ctx,
+                char_id,
+                ship_id,
+                sys_id,
+                &filter,
+                true,
+                true,
+                false,
+                EmptyFilterMode::ControlledInSystem,
+            ) {
+                return Some(Err(e));
+            }
             Some(crate::sp6_lifecycle::handle_cmd_abandon_drone(ctx, session, args, kwargs).await)
         }
 
         ("ship", "ScoopToDroneBay") | ("ship", "ScoopDrone") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (char_id, ship_id, sys_id, sys_handle) = match require_undocked_uncloaked_drone_ship(
+                ctx,
+                session,
+                "scoop drones",
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
-            };
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                    client_error: None,
-                }));
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
@@ -1822,7 +2177,6 @@ pub async fn handle_npcs_drones(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let ship_pos = sys_handle
                 .get_ball_snapshot(ship_id)
                 .await
@@ -2009,25 +2363,52 @@ pub async fn handle_npcs_drones(
         }
 
         ("entity", "CmdReconnectToDrones") => {
+            let (char_id, ship_id, sys_id, _) = match require_undocked_uncloaked_drone_ship(
+                ctx,
+                session,
+                "reconnect to drones",
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let filter = extract_entity_drone_filter_ids(args, kwargs);
+            if let Err(e) = validate_entity_drone_presence(
+                ctx,
+                char_id,
+                ship_id,
+                sys_id,
+                &filter,
+                true,
+                false,
+                true,
+                EmptyFilterMode::AbandonedInSystem,
+            ) {
+                return Some(Err(e));
+            }
             Some(crate::sp6_lifecycle::handle_cmd_reconnect_to_drones(ctx, session, args, kwargs).await)
         }
 
         ("entity", "CmdSalvage") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (char_id, ship_id, sys_id, _) = match require_undocked_uncloaked_drone_ship(
+                ctx,
+                session,
+                "command salvage drones",
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into(), client_error: None }));
-            };
             let has_salvage_drone = with_combat_runtime(ctx, |rt| {
                 rt.active_drones_in_space.values().any(|d| {
-                    d.parent_ship_id == ship_id && !d.is_abandoned && (d.group_id == 1159 || d.type_id == 32787)
+                    d.solar_system_id == sys_id
+                        && d.parent_ship_id == ship_id
+                        && !d.is_abandoned
+                        && (d.group_id == 1159 || d.type_id == 32787)
                 })
             });
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
-            };
             if !has_salvage_drone {
                 return Some(Err(BridgeRpcError { code: "NoActiveSalvageDrones".into(), message: "No active Salvage Drones in space".into(), client_error: None }));
             }

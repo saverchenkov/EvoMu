@@ -229,10 +229,21 @@ async fn test_plan_c7_drones_stargate_jump_reconnect_dock_logoff_death() {
         let st = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&bid].clone());
         assert!(st.is_abandoned && st.owner_char_id == 0 && st.parent_ship_id == 0);
     }
-    let cross_sys_home = dispatch_combat_rpc(
+    let cross_sys_err = dispatch_combat_rpc(
         &ctx, &mut sess, "entity", "CmdReturnHome", &[PyRep::List(jita_balls.iter().map(|&b| PyRep::Integer(b)).collect())], &kw,
-    ).await.expect("CmdReturnHome from another system");
-    assert_eq!(cross_sys_home, PyRep::Integer(0));
+    ).await.expect_err("CmdReturnHome from another system must reject with DroneNotFound");
+    assert_eq!(cross_sys_err.code, "DroneNotFound");
+    for (&bid, &did) in jita_balls.iter().zip(drone_ids[0..2].iter()) {
+        let st = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&bid].clone());
+        assert!(
+            st.is_abandoned
+                && st.owner_char_id == 0
+                && st.parent_ship_id == 0
+                && st.solar_system_id == jita_sys,
+            "Cross-system CmdReturnHome rejection must leave Jita drones abandoned in place"
+        );
+        assert_eq!(ctx.db.get_item(did).unwrap().location_id, jita_sys as i64);
+    }
     let cross_sys_bay = dispatch_combat_rpc(
         &ctx, &mut sess, "entity", "CmdReturnBay", &[PyRep::List(jita_balls.iter().map(|&b| PyRep::Integer(b)).collect())], &kw,
     ).await.expect("CmdReturnBay from another system");

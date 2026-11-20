@@ -661,7 +661,12 @@ async fn handle_agent_warp_to_location(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    if session.station_id.is_some() || session.structure_id.is_some() {
+    let db_docked = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some())
+    });
+    if session.station_id.is_some() || session.structure_id.is_some() || db_docked {
         return Err(agent_warp_err(
             ERR_SHIP_DOCKED,
             "Cannot initiate agent warp while docked",
@@ -750,6 +755,38 @@ async fn handle_agent_warp_to_location(
     }
     let is_subwarp_goto = parsed.is_goto && warp_dist_m < MIN_AGENT_WARP_DISTANCE_M;
     if is_subwarp_goto {
+        crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, char_id)?;
+        if matches!(current_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+            return Err(agent_warp_err(
+                "ShipAlreadyInWarp",
+                "Ship is already in warp",
+            ));
+        }
+        if crate::services::tactical_modules::has_lance_caster_lock(ctx, ship_id) {
+            return Err(agent_warp_err(
+                "CantMoveWhileModuleActive",
+                "Ship is immobilized while superweapon warmup or 5-minute Lance caster lock is active",
+            ));
+        }
+        if current_ball.max_velocity <= 1e-9
+            && (crate::services::space_navigation_advanced::check_immobilizing_module_active(
+                ctx, ship_id, "maneuver",
+            )
+            .is_err()
+                || crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(
+                    ctx, ship_id,
+                ))
+        {
+            return Err(agent_warp_err(
+                "CantMoveWhileModuleActive",
+                "Ship is immobilized while superweapon warmup, siege/bastion, or cynosural field is active",
+            ));
+        }
+        crate::services::space_destiny::space_nav_travel::ensure_not_mjd_spooling(
+            &sys_handle,
+            ship_id,
+        )
+        .await?;
         crate::services::nav_warp_interdiction::execute_subwarp_goto_point(
             ctx,
             &sys_handle,
@@ -766,6 +803,42 @@ async fn handle_agent_warp_to_location(
                 "Warp vector distance {warp_dist_m:.1} m is below minimum {MIN_AGENT_WARP_DISTANCE_M:.0} m"
             )));
         }
+        crate::services::nav_warp_interdiction::validate_pre_warp_common(
+            ctx,
+            char_id,
+            ship_id,
+            sys_id,
+            &sys_handle,
+        )
+        .await?;
+        let cs_opt = sys_handle.get_combat_state(ship_id).await.ok().flatten();
+        let cs_non_covert_cloak = cs_opt.as_ref().is_some_and(|cs| {
+            !cs.is_covert_cloak
+                && ((cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
+                    || cs.cloak_velocity_multiplier.is_some())
+        });
+        let db_non_covert_cloak = ctx.db.with_snapshot(|s| {
+            s.items.values().any(|it| {
+                it.location_id == ship_id
+                    && s.module_active_states.contains(&it.item_id)
+                    && ctx.sde.types.get(&it.type_id).is_some_and(|t| {
+                        t.group_id == 330
+                            && !crate::services::inventory_fitting::fitting_module_cycles::is_warp_safe_cloak_module(ctx, t)
+                    })
+            })
+        });
+        if cs_non_covert_cloak || db_non_covert_cloak {
+            return Err(agent_warp_err(
+                "CloakedCannotWarp",
+                "Cannot initiate agent warp while actively cloaked",
+            ));
+        }
+        ctx.validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::AgencyWarp { sys_id },
+        )
+        .await?;
 
         crate::services::nav_warp_interdiction::execute_agency_content_warp(
             ctx,
