@@ -17,6 +17,385 @@ use std::collections::HashMap;
 #[path = "market_orders_corp_auth.rs"]
 pub(crate) mod market_orders_corp_auth;
 
+fn is_container_item(ctx: &ServerContext, snap: &eve_db::WorldStateSnapshot, item: &InventoryItemRecord) -> bool {
+    snap.items.get(&item.location_id).is_some_and(|p| {
+        crate::services::inventory_fitting::fitting_containers_ships::is_container_group(
+            ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0),
+            p.type_id,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_multi_sell_entry_source(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    ext: &crate::services::station_structure::structure_upwell_ops::StructureExtendedState,
+    char_id: i64,
+    caller_corp_id: i64,
+    use_corp: bool,
+    session_ship_id: Option<i64>,
+    now_unix: u64,
+    station_id: i64,
+    type_id: TypeId,
+    raw_item_id: i64,
+    quantity_i32: i32,
+    sim_vault_plex: &mut i64,
+    sim_item_qty: &mut HashMap<i64, i32>,
+) -> Result<Option<i64>, BridgeRpcError> {
+    let is_sellable_item = |i: &InventoryItemRecord| {
+        market_orders_corp_auth::is_item_sellable_on_market(
+            snap, ext, i, char_id, caller_corp_id, use_corp, station_id, session_ship_id, now_unix,
+        )
+    };
+    let is_sellable_ignoring_contents = |i: &InventoryItemRecord| {
+        market_orders_corp_auth::is_item_sellable_on_market_ignoring_contents(
+            snap, ext, i, char_id, caller_corp_id, use_corp, station_id, session_ship_id, now_unix,
+        )
+    };
+    let is_courier_item = |iid: i64| {
+        snap.item_custom_names
+            .get(&iid)
+            .is_some_and(|s| s.starts_with("courier_cargo:"))
+    };
+    let effective_qty = |i: &InventoryItemRecord| {
+        sim_item_qty.get(&i.item_id).copied().unwrap_or(i.quantity)
+    };
+
+    if raw_item_id == 0
+        && !use_corp
+        && type_id == crate::services::market_contracts::PLEX_TYPE_ID
+        && *sim_vault_plex >= quantity_i32 as i64
+    {
+        *sim_vault_plex -= quantity_i32 as i64;
+        return Ok(None);
+    }
+
+    let item_id = if raw_item_id > 0 {
+        raw_item_id
+    } else {
+        let found_id = snap
+            .items
+            .values()
+            .find(|i| {
+                i.type_id == type_id
+                    && effective_qty(i) >= quantity_i32
+                    && !i.singleton
+                    && is_sellable_item(i)
+                    && !is_courier_item(i.item_id)
+                    && !snap.items.values().any(|other| {
+                        other.item_id != i.item_id && other.location_id == i.item_id && other.quantity > 0
+                    })
+            })
+            .map(|i| i.item_id);
+        let Some(fid) = found_id else {
+            if snap
+                .items
+                .values()
+                .any(|i| i.type_id == type_id && is_sellable_item(i) && is_courier_item(i.item_id))
+            {
+                return Err(BridgeRpcError {
+                    code: "ItemCannotBeSold".into(),
+                    message: "Courier mission items cannot be sold on the market".into(),
+                    client_error: None,
+                });
+            }
+            if snap.items.values().any(|i| {
+                i.type_id == type_id
+                    && is_sellable_ignoring_contents(i)
+                    && snap.items.values().any(|other| {
+                        other.item_id != i.item_id && other.location_id == i.item_id && other.quantity > 0
+                    })
+            }) {
+                return Err(BridgeRpcError {
+                    code: "CannotSellItemWithContents".into(),
+                    message: format!("Cannot sell ship or container of type {type_id} while it contains fitted modules, rigs, or cargo"),
+                    client_error: None,
+                });
+            }
+            if snap
+                .items
+                .values()
+                .any(|i| i.type_id == type_id && i.singleton && is_sellable_item(i))
+            {
+                return Err(BridgeRpcError {
+                    code: "CannotSellAssembledItem".into(),
+                    message: format!("Item of type {type_id} in station {station_id} hangar must be repackaged before selling on the market"),
+                    client_error: None,
+                });
+            }
+            if let Some(cand) = snap
+                .items
+                .values()
+                .find(|i| i.type_id == type_id && i.owner_id == char_id && is_container_item(ctx, snap, i))
+            {
+                return Err(BridgeRpcError {
+                    code: "ItemInsideContainer".into(),
+                    message: format!("Item {} is inside a container and must be moved to item hangar before selling", cand.item_id),
+                    client_error: None,
+                });
+            }
+            return Err(BridgeRpcError {
+                code: "InsufficientInventoryForSellOrder".into(),
+                message: format!("Seller does not have {quantity_i32}x repackaged consumable type {type_id} in station {station_id} hangar"),
+                client_error: None,
+            });
+        };
+        fid
+    };
+
+    let Some(item) = snap.items.get(&item_id) else {
+        return Err(BridgeRpcError {
+            code: "InsufficientInventoryForSellOrder".into(),
+            message: format!("Item {item_id} not found in seller inventory"),
+            client_error: None,
+        });
+    };
+    if is_container_item(ctx, snap, item) {
+        return Err(BridgeRpcError {
+            code: "ItemInsideContainer".into(),
+            message: format!("Item {item_id} is inside a container and must be moved to item hangar before selling"),
+            client_error: None,
+        });
+    }
+    if is_courier_item(item_id) {
+        return Err(BridgeRpcError {
+            code: "ItemCannotBeSold".into(),
+            message: "Courier mission items cannot be sold on the market".into(),
+            client_error: None,
+        });
+    }
+    if item.type_id != type_id || !is_sellable_ignoring_contents(item) {
+        return Err(BridgeRpcError {
+            code: "InsufficientInventoryForSellOrder".into(),
+            message: format!("Item {item_id} (type {type_id}) is not reachable in station {station_id} hangar"),
+            client_error: None,
+        });
+    }
+    if snap.items.values().any(|other| {
+        other.item_id != item_id && other.location_id == item_id && other.quantity > 0
+    }) {
+        return Err(BridgeRpcError {
+            code: "CannotSellItemWithContents".into(),
+            message: format!("Cannot sell container/ship {item_id} while it contains items"),
+            client_error: None,
+        });
+    }
+    if item.singleton {
+        return Err(BridgeRpcError {
+            code: "CannotSellAssembledItem".into(),
+            message: format!("Item {item_id} of type {type_id} must be repackaged before selling"),
+            client_error: None,
+        });
+    }
+    let rem_qty = effective_qty(item);
+    if rem_qty < quantity_i32 {
+        return Err(BridgeRpcError {
+            code: "InsufficientInventoryForSellOrder".into(),
+            message: format!(
+                "Item {item_id} has quantity {rem_qty}, less than requested {quantity_i32}"
+            ),
+            client_error: None,
+        });
+    }
+    sim_item_qty.insert(item_id, rem_qty - quantity_i32);
+    Ok(Some(item_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_multi_sell_station_and_items(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    docked_station_id: i64,
+    region_id: u32,
+    char_id: i64,
+    session_ship_id: Option<i64>,
+    is_structure: bool,
+    use_corp: bool,
+    account_key: u16,
+    now_unix: u64,
+    damaged_fitted_ships: &std::collections::HashSet<i64>,
+    parsed_items: &[(i64, TypeId, i64, IskCents, i32, i64)],
+) -> Result<(), BridgeRpcError> {
+    let upwell_opt = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+        ctx, snap, docked_station_id, char_id, now_unix, "MarketHubOffline",
+    )?;
+    if is_structure {
+        let Some(_) = upwell_opt else {
+            return Err(BridgeRpcError {
+                code: "InvalidMarketStation".into(),
+                message: format!("Station {docked_station_id} is not in region {region_id}"),
+                client_error: None,
+            });
+        };
+        if !snap
+            .structures
+            .get(&docked_station_id)
+            .and_then(|st| ctx.sde.solar_systems.get(&st.solar_system_id))
+            .is_some_and(|sys| sys.region_id == region_id)
+        {
+            return Err(BridgeRpcError {
+                code: "InvalidMarketStation".into(),
+                message: format!("Structure {docked_station_id} is not in region {region_id}"),
+                client_error: None,
+            });
+        }
+    }
+    let caller_corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+    if use_corp {
+        market_orders_corp_auth::require_corp_market_order_role(
+            snap,
+            caller_corp_id,
+            char_id,
+            account_key,
+            now_unix,
+        )?;
+    }
+    let damaged_count = crate::services::notify_emitters_skills_trade_godma::count_damaged_sell_items(
+        snap,
+        damaged_fitted_ships,
+        char_id,
+        caller_corp_id,
+        use_corp,
+        parsed_items,
+    );
+    if damaged_count > 0 {
+        return Err(BridgeRpcError {
+            code: "CantRepackageDamagedItem".into(),
+            message: damaged_count.to_string(),
+            client_error: None,
+        });
+    }
+    let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+    let mut sim_vault_plex = snap.plex_vault_balance(char_id);
+    let mut sim_item_qty = HashMap::new();
+    for &(station_id, type_id, raw_item_id, order_price, quantity_i32, _) in parsed_items {
+        let _ = order_price
+            .checked_mul_qty(quantity_i32 as i64)
+            .ok_or_else(|| BridgeRpcError {
+                code: "MarketOrderOverflow".into(),
+                message: "Order total cost overflows 64-bit ISK cents".into(),
+                client_error: None,
+            })?;
+        let _ = resolve_multi_sell_entry_source(
+            ctx,
+            snap,
+            &ext,
+            char_id,
+            caller_corp_id,
+            use_corp,
+            session_ship_id,
+            now_unix,
+            station_id,
+            type_id,
+            raw_item_id,
+            quantity_i32,
+            &mut sim_vault_plex,
+            &mut sim_item_qty,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_buy_multiple_preconditions(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    docked_station_id: Option<i64>,
+    session_region_id: Option<u32>,
+    session_solar_system_id: Option<u32>,
+    station_id: i64,
+    now_unix: u64,
+    parsed_requests: &[(TypeId, i32, Option<IskCents>, i64, i64)],
+) -> Result<(u32, IskCents), BridgeRpcError> {
+    let _ = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+        ctx, snap, station_id, char_id, now_unix, "MarketServiceOffline",
+    )?;
+    let st_sys = super::resolve_station_solar_system(ctx, snap, station_id);
+    let st_reg = st_sys.and_then(|s| ctx.sde.solar_systems.get(&s).map(|sys| sys.region_id));
+    let region_id = match session_region_id {
+        Some(reg) => {
+            if st_reg != Some(reg) {
+                return Err(BridgeRpcError {
+                    code: "InvalidMarketStation".into(),
+                    message: format!("Station {station_id} is not in region {reg}"),
+                    client_error: None,
+                });
+            }
+            reg
+        }
+        None => st_reg.ok_or_else(|| BridgeRpcError {
+            code: "InvalidMarketStation".into(),
+            message: format!("Could not resolve region for station {station_id}"),
+            client_error: None,
+        })?,
+    };
+    let sk = snap.skills.get(&char_id);
+    let vis_lvl = sk.and_then(|m| m.get(&3447)).map(|s| s.level).unwrap_or(0);
+    let max_vis_jumps = crate::services::market_contracts::max_remote_jumps_for_skill_level(vis_lvl);
+    let proc_lvl = sk.and_then(|m| m.get(&16594)).map(|s| s.level).unwrap_or(0);
+    let max_proc_jumps = crate::services::market_contracts::max_remote_jumps_for_skill_level(proc_lvl);
+    let caller_sys = if docked_station_id.is_some() {
+        st_sys
+    } else {
+        session_solar_system_id.or(st_sys)
+    };
+    for (req_tid, _, _, ent_st, ord_rng) in parsed_requests {
+        if !matches!(*ord_rng, -1 | 0 | 1..=40 | 32767) {
+            return Err(BridgeRpcError {
+                code: "InvalidBuyMultipleItems".into(),
+                message: format!("Invalid orderRange {ord_rng} in BuyMultipleItems"),
+                client_error: None,
+            });
+        }
+        if *ent_st != station_id {
+            let _ = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                ctx, snap, *ent_st, char_id, now_unix, "MarketServiceOffline",
+            )?;
+            let ent_sys = super::resolve_station_solar_system(ctx, snap, *ent_st);
+            let ent_reg = ent_sys.and_then(|s| ctx.sde.solar_systems.get(&s).map(|sys| sys.region_id));
+            if ent_reg != Some(region_id) {
+                return Err(BridgeRpcError {
+                    code: "InvalidMarketStation".into(),
+                    message: format!("Station {ent_st} is not in region {region_id}"),
+                    client_error: None,
+                });
+            }
+            let proc_ok = proc_lvl > 0
+                && (max_proc_jumps >= 32_767
+                    || match (caller_sys, ent_sys) {
+                        (Some(a), Some(b)) if a == b => true,
+                        (Some(a), Some(b)) if max_proc_jumps > 0 => {
+                            super::solar_system_jump_distance(ctx, a, b)
+                                .is_some_and(|d| (d as i64) <= max_proc_jumps)
+                        }
+                        _ => false,
+                    });
+            if !proc_ok {
+                return Err(BridgeRpcError {
+                    code: "InsufficientProcurementSkill".into(),
+                    message: format!("Procurement skill level {proc_lvl} is insufficient for remote station {ent_st}"),
+                    client_error: None,
+                });
+            }
+        }
+        if *req_tid != super::PLEX_TYPE_ID && *ord_rng > max_vis_jumps {
+            return Err(BridgeRpcError {
+                code: "InsufficientVisibilitySkill".into(),
+                message: format!("Order range {ord_rng} exceeds Visibility skill limit {max_vis_jumps}"),
+                client_error: None,
+            });
+        }
+    }
+    let avail_isk = snap.characters.get(&char_id).map(|c| c.balance).ok_or_else(|| BridgeRpcError {
+        code: "CharacterNotFound".into(),
+        message: format!("Character {char_id} not found"),
+        client_error: None,
+    })?;
+    Ok((region_id, avail_isk))
+}
+
 pub fn handle_orders_escrow(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -160,8 +539,6 @@ pub fn handle_orders_escrow(
             }
 
             let now_unix = ctx.now_unix();
-            super::sweep_and_notify_expired(ctx);
-            let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
             let damaged_fitted_ships: std::collections::HashSet<i64> = ctx
                 .ship_fittings
                 .read()
@@ -173,6 +550,26 @@ pub fn handle_orders_escrow(
                 })
                 .map(|(&ship_id, _)| ship_id)
                 .collect();
+            if let Err(e) = ctx.db.with_snapshot(|snap| {
+                validate_multi_sell_station_and_items(
+                    ctx,
+                    snap,
+                    docked_station_id,
+                    region_id,
+                    char_id,
+                    session.ship_id,
+                    is_structure,
+                    use_corp,
+                    account_key,
+                    now_unix,
+                    &damaged_fitted_ships,
+                    &parsed_items,
+                )
+            }) {
+                return Some(Err(e));
+            }
+            super::sweep_and_notify_expired(ctx);
+            let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
             // Execute the entire multi-sell batch atomically inside a single snapshot transaction
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let upwell_opt = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
@@ -251,6 +648,8 @@ pub fn handle_orders_escrow(
                 let mut seller_acct_final: Option<(bool, i64, u8, IskCents)> = None;
                 let mut career_fills: Vec<(i64, i64, u32, IskCents)> = Vec::new();
 
+                let mut live_vault_unused = snap.plex_vault_balance(char_id);
+                let mut empty_sim = HashMap::new();
                 for (station_id, type_id, raw_item_id, order_price, quantity_i32, item_dur) in parsed_items {
                     let _ = order_price
                         .checked_mul_qty(quantity_i32 as i64)
@@ -259,98 +658,23 @@ pub fn handle_orders_escrow(
                             message: "Order total cost overflows 64-bit ISK cents".into(),
                             client_error: None,
                         })?;
-                    let is_sellable_item = |snap_ref: &eve_db::WorldStateSnapshot, i: &InventoryItemRecord| {
-                        market_orders_corp_auth::is_item_sellable_on_market(
-                            snap_ref,
-                            &ext,
-                            i,
-                            char_id,
-                            caller_corp_id,
-                            use_corp,
-                            station_id,
-                            session.ship_id,
-                            now_unix,
-                        )
-                    };
-                    let is_sellable_ignoring_contents = |snap_ref: &eve_db::WorldStateSnapshot, i: &InventoryItemRecord| {
-                        market_orders_corp_auth::is_item_sellable_on_market_ignoring_contents(
-                            snap_ref,
-                            &ext,
-                            i,
-                            char_id,
-                            caller_corp_id,
-                            use_corp,
-                            station_id,
-                            session.ship_id,
-                            now_unix,
-                        )
-                    };
-                    let is_courier_item = |iid: i64| snap.item_custom_names.get(&iid).map_or(false, |s| s.starts_with("courier_cargo:"));
-
-                    // Resolve itemID (PLEX Vault for personal PLEX when itemID == 0, or explicit / hangar stack)
-                    let used_plex_vault = raw_item_id == 0
-                        && !use_corp
-                        && type_id == crate::services::market_contracts::PLEX_TYPE_ID
-                        && snap.plex_vault_balance(char_id) >= quantity_i32 as i64;
-                    if used_plex_vault {
-                        let _ = snap.adjust_plex_vault(char_id, -(quantity_i32 as i64));
-                    } else {
-                        let item_id = if raw_item_id > 0 {
-                            raw_item_id
-                        } else {
-                            let found_id = snap.items.values().find(|i| {
-                                i.type_id == type_id
-                                    && i.quantity >= quantity_i32
-                                    && !i.singleton
-                                    && is_sellable_item(snap, i)
-                                    && !is_courier_item(i.item_id)
-                                    && !snap.items.values().any(|other| other.item_id != i.item_id && other.location_id == i.item_id && other.quantity > 0)
-                            }).map(|i| i.item_id);
-                            let Some(fid) = found_id else {
-                                if snap.items.values().any(|i| i.type_id == type_id && is_sellable_item(snap, i) && is_courier_item(i.item_id)) {
-                                    return Err(BridgeRpcError {
-                                        code: "ItemCannotBeSold".into(),
-                                        message: "Courier mission items cannot be sold on the market".into(),
-                                        client_error: None,
-                                    });
-                                }
-                                let has_non_empty_candidate = snap.items.values().any(|i| {
-                                    i.type_id == type_id
-                                        && is_sellable_ignoring_contents(snap, i)
-                                        && snap.items.values().any(|other| other.item_id != i.item_id && other.location_id == i.item_id && other.quantity > 0)
-                                });
-                                if has_non_empty_candidate {
-                                    return Err(BridgeRpcError {
-                                        code: "CannotSellItemWithContents".into(),
-                                        message: format!("Cannot sell ship or container of type {type_id} while it contains fitted modules, rigs, or cargo"),
-                                        client_error: None,
-                                    });
-                                }
-                                let has_assembled_candidate = snap.items.values().any(|i| i.type_id == type_id && i.singleton && is_sellable_item(snap, i));
-                                if has_assembled_candidate {
-                                    return Err(BridgeRpcError {
-                                        code: "CannotSellAssembledItem".into(),
-                                        message: format!("Item of type {type_id} in station {station_id} hangar must be repackaged before selling on the market"),
-                                        client_error: None,
-                                    });
-                                }
-                                if let Some(cand) = snap.items.values().find(|i| i.type_id == type_id && i.owner_id == char_id && snap.items.get(&i.location_id).is_some_and(|p| crate::services::inventory_fitting::fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id))) {
-                                    return Err(BridgeRpcError {
-                                        code: "ItemInsideContainer".into(),
-                                        message: format!("Item {} is inside a container and must be moved to item hangar before selling", cand.item_id),
-                                        client_error: None,
-                                    });
-                                }
-                                return Err(BridgeRpcError {
-                                    code: "InsufficientInventoryForSellOrder".into(),
-                                    message: format!("Seller does not have {quantity_i32}x repackaged consumable type {type_id} in station {station_id} hangar"),
-                                    client_error: None,
-                                });
-                            };
-                            fid
-                        };
-
-                        // Validate and consume exact itemID from seller's hangar at station_id
+                    let resolved_item_id = resolve_multi_sell_entry_source(
+                        ctx,
+                        snap,
+                        &ext,
+                        char_id,
+                        caller_corp_id,
+                        use_corp,
+                        session.ship_id,
+                        now_unix,
+                        station_id,
+                        type_id,
+                        raw_item_id,
+                        quantity_i32,
+                        &mut live_vault_unused,
+                        &mut empty_sim,
+                    )?;
+                    if let Some(item_id) = resolved_item_id {
                         let Some(item) = snap.items.get(&item_id).cloned() else {
                             return Err(BridgeRpcError {
                                 code: "InsufficientInventoryForSellOrder".into(),
@@ -358,61 +682,6 @@ pub fn handle_orders_escrow(
                                 client_error: None,
                             });
                         };
-                        if snap.items.get(&item.location_id).is_some_and(|p| crate::services::inventory_fitting::fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id)) {
-                            return Err(BridgeRpcError {
-                                code: "ItemInsideContainer".into(),
-                                message: format!("Item {item_id} is inside a container and must be moved to item hangar before selling"),
-                                client_error: None,
-                            });
-                        }
-                        if is_courier_item(item_id) {
-                            return Err(BridgeRpcError {
-                                code: "ItemCannotBeSold".into(),
-                                message: "Courier mission items cannot be sold on the market".into(),
-                                client_error: None,
-                            });
-                        }
-                        if item.type_id != type_id || !is_sellable_ignoring_contents(snap, &item) {
-                            return Err(BridgeRpcError {
-                                code: "InsufficientInventoryForSellOrder".into(),
-                                message: format!(
-                                    "Item {item_id} (type {type_id}) is not reachable in station {station_id} hangar"
-                                ),
-                                client_error: None,
-                            });
-                        }
-                        if snap.items.values().any(|other| {
-                            other.item_id != item_id
-                                && other.location_id == item_id
-                                && other.quantity > 0
-                        }) {
-                            return Err(BridgeRpcError {
-                                code: "CannotSellItemWithContents".into(),
-                                message: format!(
-                                    "Cannot sell container/ship {item_id} while it contains items"
-                                ),
-                                client_error: None,
-                            });
-                        }
-                        if item.singleton {
-                            return Err(BridgeRpcError {
-                                code: "CannotSellAssembledItem".into(),
-                                message: format!(
-                                    "Item {item_id} of type {type_id} must be repackaged before selling"
-                                ),
-                                client_error: None,
-                            });
-                        }
-                        if item.quantity < quantity_i32 {
-                            return Err(BridgeRpcError {
-                                code: "InsufficientInventoryForSellOrder".into(),
-                                message: format!(
-                                    "Item {item_id} has quantity {}, less than requested {quantity_i32}",
-                                    item.quantity
-                                ),
-                                client_error: None,
-                            });
-                        }
                         let old_qty = item.quantity;
                         let old_loc = item.location_id;
                         let old_flag = item.flag;
@@ -449,6 +718,8 @@ pub fn handle_orders_escrow(
                                 });
                             }
                         }
+                    } else {
+                        let _ = snap.adjust_plex_vault(char_id, -(quantity_i32 as i64));
                     }
 
                     // Match against resting bid orders in region whose range reaches station_id
@@ -1269,67 +1540,38 @@ pub fn handle_orders_escrow(
             }
 
             let now_unix = ctx.now_unix();
+            if let Err(e) = ctx.db.with_snapshot(|snap| {
+                validate_buy_multiple_preconditions(
+                    ctx,
+                    snap,
+                    char_id,
+                    docked_station_id,
+                    session.region_id,
+                    session.solar_system_id,
+                    station_id,
+                    now_unix,
+                    &parsed_requests,
+                )
+                .map(|_| ())
+            }) {
+                return Some(Err(e));
+            }
             super::sweep_and_notify_expired(ctx);
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
+            let res: Result<_, BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
                 let _ = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
                     ctx, snap, station_id, char_id, now_unix, "MarketServiceOffline",
                 )?;
-                let st_sys = super::resolve_station_solar_system(ctx, snap, station_id);
-                let st_reg = st_sys.and_then(|s| ctx.sde.solar_systems.get(&s).map(|sys| sys.region_id));
-                let region_id = match session.region_id {
-                    Some(reg) => {
-                        if st_reg != Some(reg) {
-                            return Err(BridgeRpcError {
-                                code: "InvalidMarketStation".into(),
-                                message: format!("Station {station_id} is not in region {reg}"),
-                                client_error: None,
-                            });
-                        }
-                        reg
-                    }
-                    None => st_reg.ok_or_else(|| BridgeRpcError {
-                        code: "InvalidMarketStation".into(),
-                        message: format!("Could not resolve region for station {station_id}"),
-                        client_error: None,
-                    })?,
-                };
-                let sk = snap.skills.get(&char_id);
-                let vis_lvl = sk.and_then(|m| m.get(&3447)).map(|s| s.level).unwrap_or(0);
-                let max_vis_jumps = crate::services::market_contracts::max_remote_jumps_for_skill_level(vis_lvl);
-                let proc_lvl = sk.and_then(|m| m.get(&16594)).map(|s| s.level).unwrap_or(0);
-                let max_proc_jumps = crate::services::market_contracts::max_remote_jumps_for_skill_level(proc_lvl);
-                let caller_sys = if docked_station_id.is_some() {
-                    st_sys
-                } else {
-                    session.solar_system_id.or(st_sys)
-                };
-                for (req_tid, _, _, ent_st, ord_rng) in &parsed_requests {
-                    if !matches!(*ord_rng, -1 | 0 | 1..=40 | 32767) {
-                        return Err(BridgeRpcError { code: "InvalidBuyMultipleItems".into(), message: format!("Invalid orderRange {ord_rng} in BuyMultipleItems"), client_error: None });
-                    }
-                    if *ent_st != station_id {
-                        let _ = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
-                            ctx, snap, *ent_st, char_id, now_unix, "MarketServiceOffline",
-                        )?;
-                        let ent_sys = super::resolve_station_solar_system(ctx, snap, *ent_st);
-                        let ent_reg = ent_sys.and_then(|s| ctx.sde.solar_systems.get(&s).map(|sys| sys.region_id));
-                        if ent_reg != Some(region_id) {
-                            return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {ent_st} is not in region {region_id}"), client_error: None });
-                        }
-                        let proc_ok = proc_lvl > 0 && (max_proc_jumps >= 32_767 || match (caller_sys, ent_sys) {
-                            (Some(a), Some(b)) if a == b => true,
-                            (Some(a), Some(b)) if max_proc_jumps > 0 => super::solar_system_jump_distance(ctx, a, b).is_some_and(|d| (d as i64) <= max_proc_jumps),
-                            _ => false,
-                        });
-                        if !proc_ok {
-                            return Err(BridgeRpcError { code: "InsufficientProcurementSkill".into(), message: format!("Procurement skill level {proc_lvl} is insufficient for remote station {ent_st}"), client_error: None });
-                        }
-                    }
-                    if *req_tid != super::PLEX_TYPE_ID && *ord_rng > max_vis_jumps {
-                        return Err(BridgeRpcError { code: "InsufficientVisibilitySkill".into(), message: format!("Order range {ord_rng} exceeds Visibility skill limit {max_vis_jumps}"), client_error: None });
-                    }
-                }
-                let mut avail_isk = snap.characters.get(&char_id).map(|c| c.balance).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found"), client_error: None })?;
+                let (region_id, mut avail_isk) = validate_buy_multiple_preconditions(
+                    ctx,
+                    snap,
+                    char_id,
+                    docked_station_id,
+                    session.region_id,
+                    session.solar_system_id,
+                    station_id,
+                    now_unix,
+                    &parsed_requests,
+                )?;
                 let mut virtual_rem: HashMap<i64, i32> = snap
                     .market_orders
                     .values()
@@ -1338,6 +1580,7 @@ pub fn handle_orders_escrow(
                             && (o.region_id == region_id
                                 || o.type_id == crate::services::market_contracts::PLEX_TYPE_ID)
                             && o.vol_remaining > 0
+                            && !crate::services::market_contracts::is_order_expired(snap, o, now_unix)
                     })
                     .map(|o| (o.order_id, o.vol_remaining))
                     .collect();

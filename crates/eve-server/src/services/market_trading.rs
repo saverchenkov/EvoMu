@@ -463,6 +463,45 @@ pub(crate) fn sweep_and_notify_expired(ctx: &ServerContext) {
     super::market_contracts::sweep_expired_orders_and_notify(ctx, ctx.now_unix());
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_place_buy_order_station_and_corp_access(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    station_id: i64,
+    region_id: u32,
+    char_id: i64,
+    station_known_in_sde: bool,
+    use_corp: bool,
+    account_key: u16,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    let upwell_opt = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+        ctx, snap, station_id, char_id, now_unix, "MarketHubOffline",
+    )?;
+    if !station_known_in_sde && upwell_opt.is_none() {
+        return Err(BridgeRpcError {
+            code: "InvalidMarketStation".into(),
+            message: format!("Station {station_id} is not in region {region_id}"),
+            client_error: None,
+        });
+    }
+    if use_corp {
+        let caller_corp_id = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .unwrap_or(0);
+        market_orders_corp_auth::require_corp_market_order_role(
+            snap,
+            caller_corp_id,
+            char_id,
+            account_key,
+            now_unix,
+        )?;
+    }
+    Ok(())
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1063,6 +1102,21 @@ pub fn handle(
                 }));
             }
             let now_unix = ctx.now_unix();
+            if let Err(e) = ctx.db.with_snapshot(|snap| {
+                validate_place_buy_order_station_and_corp_access(
+                    ctx,
+                    snap,
+                    station_id,
+                    region_id,
+                    char_id,
+                    station_info.is_some(),
+                    use_corp,
+                    account_key,
+                    now_unix,
+                )
+            }) {
+                return Some(Err(e));
+            }
             sweep_and_notify_expired(ctx);
             let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
 
@@ -1154,6 +1208,7 @@ pub fn handle(
                             && reach_ok
                             && o.is_bid != is_bid
                             && o.vol_remaining > 0
+                            && !super::market_contracts::is_order_expired(snap, o, now_unix)
                             && ((is_bid && o.price.0 <= order_price.0)
                                 || (!is_bid && o.price.0 >= order_price.0))
                     })

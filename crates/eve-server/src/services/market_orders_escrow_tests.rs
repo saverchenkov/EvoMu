@@ -2651,3 +2651,183 @@ fn cancel_char_order_rejects_unowned_order_before_sweeping_expired_orders() {
         assert_eq!(s.next_entity_id, eid_before);
     });
 }
+
+#[test]
+fn rejected_multi_sell_and_buy_multiple_do_not_sweep_expired_orders() {
+    use crate::services::market_trading::{save_market_order_meta, MarketOrderMeta};
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+    };
+    use crate::services::structure_profile_services::SETTING_MARKET_TAX;
+    use eve_db::{CorporationRecord, IskCents, MarketOrderRecord};
+
+    let ctx = test_ctx();
+    let caller_id = 90_000_001_i64;
+    let other_id = 90_000_002_i64;
+    let now = ctx.now_unix();
+    let kw = HashMap::new();
+    let (caller_corp_id, expired_oid) = (98_930_001_i64, 9_710_001_i64);
+    let struct_owner_corp = 98_930_002_i64;
+    let offline_fort_id = 10_000_930_001_i64;
+    let acl_denied_fort_id = 10_000_930_002_i64;
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.retain(|_, o| o.is_npc);
+        s.items.retain(|_, i| i.owner_id != caller_id);
+        s.corporations.insert(
+            caller_corp_id,
+            CorporationRecord::new(caller_corp_id, "CallerCorp", "CLRC", other_id),
+        );
+        s.corporations.insert(
+            struct_owner_corp,
+            CorporationRecord::new(struct_owner_corp, "StructOwnerCorp", "SOCP", other_id),
+        );
+        if let Some(ch) = s.characters.get_mut(&caller_id) {
+            ch.corporation_id = caller_corp_id;
+        }
+        s.corp_role_assignments.remove(&(caller_corp_id, caller_id));
+        s.market_orders.insert(
+            expired_oid,
+            MarketOrderRecord {
+                order_id: expired_oid,
+                owner_id: other_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: true,
+                price: IskCents::from_isk(10),
+                vol_entered: 5,
+                vol_remaining: 5,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(50),
+            },
+        );
+        save_market_order_meta(
+            s,
+            expired_oid,
+            MarketOrderMeta {
+                range: -1,
+                duration: 1,
+                issue_unix: now.saturating_sub(2 * 86_400),
+                order_state: None,
+                account_key: None,
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+    });
+    seed_upwell_market_structure(&ctx, offline_fort_id, struct_owner_corp, 30_000_142, false);
+    seed_upwell_market_structure(&ctx, acl_denied_fort_id, struct_owner_corp, 30_000_142, true);
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ext = load_ext_state(s);
+        ext.owner_groups.insert(
+            9301,
+            AccessGroupRecord {
+                group_id: 9301,
+                creator_id: other_id,
+                owner_corp_id: struct_owner_corp,
+                name: "AllowedOnlyOther".into(),
+                description: String::new(),
+                members: HashMap::from([(other_id, 0)]),
+            },
+        );
+        let mut prof = StructureAccessProfile {
+            profile_id: 9301,
+            corp_only: false,
+            ..Default::default()
+        };
+        prof.service_acl_rules.insert(SETTING_MARKET_TAX, vec![(9301, 100)]);
+        ext.access_profiles.insert(acl_denied_fort_id, prof);
+        save_ext_state(s, &ext);
+    });
+
+    let _ = ctx.drain_notifications_for_char(other_id);
+    let eid_before = ctx.db.with_snapshot(|s| s.next_entity_id);
+    let mut sess = jita_session(caller_id, caller_corp_id);
+
+    let sell_entry = |st_id: i64| {
+        PyRep::List(vec![PyRep::keyval([
+            ("stationID", PyRep::Integer(st_id)),
+            ("typeID", PyRep::Integer(34)),
+            ("itemID", PyRep::Integer(0)),
+            ("price", PyRep::Real(10.0)),
+            ("quantity", PyRep::Integer(5)),
+        ])])
+    };
+    assert_eq!(
+        call_escrow_kw(&ctx, &mut sess, "PlaceMultiSellOrder", &[sell_entry(JITA_STATION_ID)], &kw)
+            .unwrap_err()
+            .code,
+        "InsufficientInventoryForSellOrder"
+    );
+    assert_eq!(
+        call_escrow_kw(
+            &ctx,
+            &mut sess,
+            "PlaceMultiSellOrder",
+            &[sell_entry(JITA_STATION_ID), PyRep::Bool(true)],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "CorpRoleRequired"
+    );
+    sess.station_id = Some(offline_fort_id);
+    assert_eq!(
+        call_escrow_kw(&ctx, &mut sess, "PlaceMultiSellOrder", &[sell_entry(offline_fort_id)], &kw)
+            .unwrap_err()
+            .code,
+        "MarketHubOffline"
+    );
+    sess.station_id = Some(acl_denied_fort_id);
+    assert_eq!(
+        call_escrow_kw(&ctx, &mut sess, "PlaceMultiSellOrder", &[sell_entry(acl_denied_fort_id)], &kw)
+            .unwrap_err()
+            .code,
+        "StructureServiceAccessDenied"
+    );
+
+    let buy_entry = |st_id: i64, range: i64| {
+        PyRep::List(vec![PyRep::keyval([
+            ("typeID", PyRep::Integer(34)),
+            ("quantity", PyRep::Integer(5)),
+            ("price", PyRep::Real(10.0)),
+            ("stationID", PyRep::Integer(st_id)),
+            ("range", PyRep::Integer(range)),
+        ])])
+    };
+    sess.station_id = Some(JITA_STATION_ID);
+    assert_eq!(
+        call_escrow_kw(&ctx, &mut sess, "BuyMultipleItems", &[buy_entry(JITA_STATION_ID, 32767)], &kw)
+            .unwrap_err()
+            .code,
+        "InsufficientVisibilitySkill"
+    );
+    assert_eq!(
+        call_escrow_kw(&ctx, &mut sess, "BuyMultipleItems", &[buy_entry(JITA_STATION_ID, 99)], &kw)
+            .unwrap_err()
+            .code,
+        "InvalidBuyMultipleItems"
+    );
+    sess.station_id = Some(offline_fort_id);
+    assert_eq!(
+        call_escrow_kw(&ctx, &mut sess, "BuyMultipleItems", &[buy_entry(offline_fort_id, -1)], &kw)
+            .unwrap_err()
+            .code,
+        "MarketServiceOffline"
+    );
+    sess.station_id = Some(acl_denied_fort_id);
+    assert_eq!(
+        call_escrow_kw(&ctx, &mut sess, "BuyMultipleItems", &[buy_entry(acl_denied_fort_id, -1)], &kw)
+            .unwrap_err()
+            .code,
+        "StructureServiceAccessDenied"
+    );
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&expired_oid].vol_remaining, 5);
+        assert_eq!(s.next_entity_id, eid_before);
+    });
+    assert!(ctx.drain_notifications_for_char(other_id).is_empty());
+}

@@ -1586,6 +1586,39 @@ async fn dispatch_rpc_market_read_getters_stay_pure_and_omit_expired_orders() {
             .unwrap_or_else(|e| panic!("{method} dispatch_rpc failed: {e:?}"));
     }
 
+    // GetMarketOrderHistory must stay strictly read-only even when unswept expired orders exist,
+    // projecting expired orders as orderState=4 with their remaining volume.
+    let order_hist_pre = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetMarketOrderHistory", &[PyRep::Bool(false)], &kw, None)
+        .await
+        .expect("GetMarketOrderHistory(false)");
+    let PyRep::Rowset { rows: hist_rows_pre, .. } = order_hist_pre else {
+        panic!("Expected Rowset from GetMarketOrderHistory");
+    };
+    assert_eq!(hist_rows_pre.len(), 2);
+    for (oid, expected_vol) in [(expired_trit_bid, 40_i64), (expired_plex_bid, 3_i64)] {
+        let r = hist_rows_pre
+            .iter()
+            .find(|r| r.first().and_then(PyRep::as_i64) == Some(oid))
+            .expect("unswept expired personal order must appear in history");
+        assert_eq!(r[9].as_i64(), Some(expected_vol));
+        assert_eq!(r[11].as_i64(), Some(4));
+    }
+
+    let order_hist_corp_pre = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetMarketOrderHistory", &[PyRep::Bool(true)], &kw, None)
+        .await
+        .expect("GetMarketOrderHistory(true)");
+    let PyRep::Rowset { rows: hist_corp_rows_pre, .. } = order_hist_corp_pre else {
+        panic!("Expected Rowset from GetMarketOrderHistory(true)");
+    };
+    assert_eq!(hist_corp_rows_pre.len(), 3);
+    assert!(hist_corp_rows_pre.iter().any(|r| {
+        r.first().and_then(PyRep::as_i64) == Some(expired_corp_bid)
+            && r[9].as_i64() == Some(30)
+            && r[11].as_i64() == Some(4)
+    }));
+
     // Confirm ZERO world-state mutation occurred across any read getter!
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.market_orders.len(), 5);
@@ -1606,7 +1639,7 @@ async fn dispatch_rpc_market_read_getters_stay_pure_and_omit_expired_orders() {
     assert!(sess.notifications.is_empty());
 
     // After sweeping expired orders, GetMarketOrderHistory with zero expired orders stays snapshot-read-pure
-    // (does not emit notifications or bump next_entity_id).
+    // and continues returning the swept orders.
     assert_eq!(
         crate::services::market_contracts::sweep_expired_orders_and_notify(&ctx, ctx.now_unix()),
         3
@@ -1618,9 +1651,447 @@ async fn dispatch_rpc_market_read_getters_stay_pure_and_omit_expired_orders() {
         .dispatch_rpc(&mut sess, "marketProxy", None, "GetMarketOrderHistory", &[PyRep::Bool(false)], &kw, None)
         .await
         .expect("GetMarketOrderHistory");
-    assert!(matches!(order_hist, PyRep::Rowset { .. }));
+    let PyRep::Rowset { rows: hist_rows_post, .. } = order_hist else {
+        panic!("Expected Rowset from GetMarketOrderHistory");
+    };
+    assert_eq!(hist_rows_post.len(), 2);
     assert_eq!(ctx.db.with_snapshot(|s| s.next_entity_id), eid_clean);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+}
+
+#[test]
+fn plex_best_orders_filter_offline_and_acl_denied_upwell_structures_and_history_rejects_u32_truncation() {
+    use crate::services::market_trading::{save_market_order_meta, MarketOrderMeta};
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+    };
+    use crate::services::structure_profile_services::SETTING_MARKET_TAX;
+    use eve_db::{
+        CorporationRecord, InventoryItemRecord, MarketHistoryDayRecord, UpwellStructureRecord,
+    };
+
+    let ctx = test_ctx();
+    let caller_id = 90_000_001_i64;
+    let caller_corp_id = ctx.db.with_snapshot(|s| s.characters[&caller_id].corporation_id);
+    let mut sess = jita_session(caller_id, caller_corp_id);
+    let kw = HashMap::new();
+    let now = ctx.now_unix();
+
+    let struct_owner_corp = 98_910_001_i64;
+    let offline_struct_id = 10_000_910_101_i64;
+    let acl_denied_struct_id = 10_000_910_102_i64;
+    let offline_ask_oid = 9_620_001_i64;
+    let acl_denied_ask_oid = 9_620_002_i64;
+    let accessible_ask_oid = 9_620_003_i64;
+    let acl_denied_bid_oid = 9_620_004_i64;
+    let accessible_bid_oid = 9_620_005_i64;
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.clear();
+        s.corporations.insert(
+            struct_owner_corp,
+            CorporationRecord::new(struct_owner_corp, "StructOwner", "STOW", 90_000_002),
+        );
+        for (sid, online) in [(offline_struct_id, false), (acl_denied_struct_id, true)] {
+            s.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35_833,
+                    owner_corp_id: struct_owner_corp,
+                    solar_system_id: 30_000_142,
+                    name: format!("PlexStruct-{sid}"),
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: if online { 500 } else { 0 },
+                    ..Default::default()
+                },
+            );
+            let mod_id = sid + 1;
+            s.items.insert(
+                mod_id,
+                InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: 35_892,
+                    owner_id: struct_owner_corp,
+                    location_id: sid,
+                    flag: InventoryFlag::from_u16(164),
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            s.module_online_states.insert(mod_id, online);
+        }
+
+        let mut ext = load_ext_state(s);
+        ext.owner_groups.insert(
+            9101,
+            AccessGroupRecord {
+                group_id: 9101,
+                creator_id: 90_000_002,
+                owner_corp_id: struct_owner_corp,
+                name: "AllowedOnly90000002".into(),
+                description: String::new(),
+                members: HashMap::from([(90_000_002, 0)]),
+            },
+        );
+        let mut acl_prof = StructureAccessProfile {
+            profile_id: 9101,
+            corp_only: false,
+            ..Default::default()
+        };
+        acl_prof
+            .service_acl_rules
+            .insert(SETTING_MARKET_TAX, vec![(9101, 100)]);
+        ext.access_profiles.insert(acl_denied_struct_id, acl_prof);
+        save_ext_state(s, &ext);
+
+        let rows = [
+            (offline_ask_oid, offline_struct_id, false, 4_500_000_i64),
+            (acl_denied_ask_oid, acl_denied_struct_id, false, 4_200_000_i64),
+            (accessible_ask_oid, JITA_STATION_ID, false, 5_000_000_i64),
+            (acl_denied_bid_oid, acl_denied_struct_id, true, 4_900_000_i64),
+            (accessible_bid_oid, JITA_STATION_ID, true, 4_700_000_i64),
+        ];
+        for (oid, st_id, is_bid, price_isk) in rows {
+            s.market_orders.insert(
+                oid,
+                MarketOrderRecord {
+                    order_id: oid,
+                    owner_id: 90_000_002,
+                    station_id: st_id,
+                    region_id: THE_FORGE_REGION_ID,
+                    type_id: PLEX_TYPE_ID,
+                    is_bid,
+                    price: IskCents::from_isk(price_isk),
+                    vol_entered: 10,
+                    vol_remaining: 10,
+                    min_volume: 1,
+                    is_npc: false,
+                    escrow: if is_bid { IskCents::from_isk(price_isk * 10) } else { IskCents(0) },
+                },
+            );
+            save_market_order_meta(
+                s,
+                oid,
+                MarketOrderMeta {
+                    range: -1,
+                    duration: 90,
+                    issue_unix: now,
+                    order_state: None,
+                    account_key: None,
+                    final_vol_remaining: None,
+                    closed_unix: None,
+                },
+            );
+        }
+
+        s.market_history.insert(
+            (THE_FORGE_REGION_ID, PLEX_TYPE_ID),
+            vec![MarketHistoryDayRecord {
+                date: "2026-11-19".into(),
+                lowest: 4_900_000.0,
+                highest: 5_100_000.0,
+                average: 5_000_000.0,
+                volume: 5,
+                order_count: 1,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+    });
+
+    // GetPlexBest must omit offline and ACL-denied structures, returning the 5.0M Jita ask.
+    let best = handle(&ctx, &mut sess, "marketProxy", "GetPlexBest", &[], &kw)
+        .unwrap()
+        .expect("GetPlexBest");
+    let entries = best.cindexed_rowset_entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1.dbrow_get("price").and_then(PyRep::as_f64), Some(5_000_000.0));
+    assert_eq!(
+        entries[0].1.dbrow_get("stationID"),
+        Some(&PyRep::Integer(JITA_STATION_ID))
+    );
+
+    // GetPlexOrders must omit both sells and buys inside offline / ACL-denied structures.
+    let plex_orders = handle(&ctx, &mut sess, "marketProxy", "GetPlexOrders", &[], &kw)
+        .unwrap()
+        .expect("GetPlexOrders");
+    let PyRep::Tuple(parts) = plex_orders else {
+        panic!("Expected Tuple");
+    };
+    let sells = parts[0].crowset_rows().unwrap();
+    let buys = parts[1].crowset_rows().unwrap();
+    assert_eq!(sells.len(), 1);
+    assert_eq!(
+        sells[0].dbrow_get("orderID").and_then(PyRep::as_i64),
+        Some(accessible_ask_oid)
+    );
+    assert_eq!(buys.len(), 1);
+    assert_eq!(
+        buys[0].dbrow_get("orderID").and_then(PyRep::as_i64),
+        Some(accessible_bid_oid)
+    );
+
+    // GetHistoryForManyTypeIDs must not truncate 64-bit IDs modulo 2^32 to match PLEX_TYPE_ID.
+    let truncated_collision = (1_i64 << 32) | (PLEX_TYPE_ID as i64);
+    let hist = handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "GetHistoryForManyTypeIDs",
+        &[PyRep::List(vec![
+            PyRep::Integer(PLEX_TYPE_ID as i64),
+            PyRep::Integer(truncated_collision),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .expect("GetHistoryForManyTypeIDs");
+    let PyRep::Dict(dict_entries) = hist else {
+        panic!("Expected Dict");
+    };
+    let plex_hist_rows = dict_entries
+        .iter()
+        .find(|(k, _)| k == &PyRep::Integer(PLEX_TYPE_ID as i64))
+        .and_then(|(_, v)| v.crowset_rows())
+        .unwrap();
+    assert_eq!(plex_hist_rows.len(), 1);
+    let bogus_hist_rows = dict_entries
+        .iter()
+        .find(|(k, _)| k == &PyRep::Integer(truncated_collision))
+        .and_then(|(_, v)| v.crowset_rows())
+        .unwrap();
+    assert!(bogus_hist_rows.is_empty());
+}
+
+#[test]
+fn rejected_modify_and_plex_sell_calls_do_not_sweep_expired_orders() {
+    use crate::services::market_trading::{save_market_order_meta, MarketOrderMeta};
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+    };
+    use crate::services::structure_profile_services::SETTING_MARKET_TAX;
+    use eve_db::{CorporationRecord, InventoryItemRecord, UpwellStructureRecord};
+
+    let ctx = test_ctx();
+    let owner_id = 90_000_001_i64;
+    let attacker_id = 90_000_002_i64;
+    let now = ctx.now_unix();
+    let kw = HashMap::new();
+
+    let (owner_corp, attacker_corp) = ctx.db.with_snapshot(|s| {
+        (
+            s.characters[&owner_id].corporation_id,
+            s.characters[&attacker_id].corporation_id,
+        )
+    });
+    let active_trit_oid = 9_630_001_i64;
+    let cooldown_oid = 9_630_002_i64;
+    let expired_oid = 9_630_003_i64;
+    let acl_struct_id = 10_000_910_201_i64;
+    let struct_owner_corp = 98_910_201_i64;
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.retain(|_, o| o.is_npc);
+        let cur_vault = s.plex_vault_balance(owner_id);
+        if cur_vault > 0 {
+            let _ = s.adjust_plex_vault(owner_id, -cur_vault);
+        }
+        if let Some(ch) = s.characters.get_mut(&owner_id) {
+            ch.plex_balance = 0;
+        }
+        s.items.retain(|_, i| !(i.owner_id == owner_id && i.type_id == PLEX_TYPE_ID));
+        s.corporations.insert(
+            struct_owner_corp,
+            CorporationRecord::new(struct_owner_corp, "PlexGateCorp", "PXGC", attacker_id),
+        );
+        s.structures.insert(
+            acl_struct_id,
+            UpwellStructureRecord {
+                structure_id: acl_struct_id,
+                type_id: 35_833,
+                owner_corp_id: struct_owner_corp,
+                solar_system_id: 30_000_142,
+                name: "PlexGateFort".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            acl_struct_id + 1,
+            InventoryItemRecord {
+                item_id: acl_struct_id + 1,
+                type_id: 35_892,
+                owner_id: struct_owner_corp,
+                location_id: acl_struct_id,
+                flag: InventoryFlag::from_u16(164),
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        s.module_online_states.insert(acl_struct_id + 1, true);
+        let mut ext = load_ext_state(s);
+        ext.owner_groups.insert(
+            9102,
+            AccessGroupRecord {
+                group_id: 9102,
+                creator_id: attacker_id,
+                owner_corp_id: struct_owner_corp,
+                name: "OnlyAttacker".into(),
+                description: String::new(),
+                members: HashMap::from([(attacker_id, 0)]),
+            },
+        );
+        let mut prof = StructureAccessProfile {
+            profile_id: 9102,
+            corp_only: false,
+            ..Default::default()
+        };
+        prof.service_acl_rules.insert(SETTING_MARKET_TAX, vec![(9102, 100)]);
+        ext.access_profiles.insert(acl_struct_id, prof);
+        save_ext_state(s, &ext);
+
+        for (oid, oid_owner, tid, issue_unix, duration, escrow_isk) in [
+            (active_trit_oid, owner_id, 34_u32, now.saturating_sub(600), 90_i64, 100_i64),
+            (cooldown_oid, owner_id, 34_u32, now, 90_i64, 100_i64),
+            (expired_oid, attacker_id, 34_u32, now.saturating_sub(2 * 86_400), 1_i64, 50_i64),
+        ] {
+            s.market_orders.insert(
+                oid,
+                MarketOrderRecord {
+                    order_id: oid,
+                    owner_id: oid_owner,
+                    station_id: JITA_STATION_ID,
+                    region_id: THE_FORGE_REGION_ID,
+                    type_id: tid,
+                    is_bid: true,
+                    price: IskCents::from_isk(10),
+                    vol_entered: 5,
+                    vol_remaining: 5,
+                    min_volume: 1,
+                    is_npc: false,
+                    escrow: IskCents::from_isk(escrow_isk),
+                },
+            );
+            save_market_order_meta(
+                s,
+                oid,
+                MarketOrderMeta {
+                    range: -1,
+                    duration,
+                    issue_unix,
+                    order_state: None,
+                    account_key: None,
+                    final_vol_remaining: None,
+                    closed_unix: None,
+                },
+            );
+        }
+    });
+
+    let _ = ctx.drain_notifications_for_char(attacker_id);
+    let eid_before = ctx.db.with_snapshot(|s| s.next_entity_id);
+    let mut owner_sess = jita_session(owner_id, owner_corp);
+    let mut attacker_sess = jita_session(attacker_id, attacker_corp);
+
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut owner_sess,
+            "marketProxy",
+            "ModifyCharOrder",
+            &[PyRep::Integer(99_999_999), PyRep::Real(12.0)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OrderNotFound"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut attacker_sess,
+            "marketProxy",
+            "ModifyCharOrder",
+            &[PyRep::Integer(active_trit_oid), PyRep::Real(12.0)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OrderOwnershipViolation"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut owner_sess,
+            "marketProxy",
+            "ModifyPlexCharOrder",
+            &[PyRep::Integer(active_trit_oid), PyRep::Real(12.0)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidPlexOrder"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut owner_sess,
+            "marketProxy",
+            "ModifyCharOrder",
+            &[PyRep::Integer(cooldown_oid), PyRep::Real(12.0)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OrderModificationCooldown"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut owner_sess,
+            "marketProxy",
+            "PlacePlexSellOrder",
+            &[PyRep::Real(5_000_000.0), PyRep::Integer(1), PyRep::Integer(90)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InsufficientPlexBalance"
+    );
+    owner_sess.station_id = Some(acl_struct_id);
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut owner_sess,
+            "marketProxy",
+            "PlacePlexSellOrder",
+            &[PyRep::Real(5_000_000.0), PyRep::Integer(1), PyRep::Integer(90)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "StructureServiceAccessDenied"
+    );
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&expired_oid].vol_remaining, 5);
+        assert_eq!(s.next_entity_id, eid_before);
+    });
+    assert!(ctx.drain_notifications_for_char(attacker_id).is_empty());
 }
 
 #[cfg(test)]
