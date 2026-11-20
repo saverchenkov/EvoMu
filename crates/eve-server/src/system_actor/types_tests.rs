@@ -411,6 +411,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::ListBalls { .. } => "ListBalls",
             SystemCommand::ListBallsInBubble { .. } => "ListBallsInBubble",
             SystemCommand::GetSetState { .. } => "GetSetState",
+            SystemCommand::GetSetStateWithSeq { .. } => "GetSetStateWithSeq",
             SystemCommand::GetBubbleIdForBall { .. } => "GetBubbleIdForBall",
             SystemCommand::DrainObserverUpdates { .. } => "DrainObserverUpdates",
             SystemCommand::DrainObserverUpdatesWithSeq { .. } => "DrainObserverUpdatesWithSeq",
@@ -591,9 +592,13 @@ fn system_command_all_variants_construct_and_match() {
             spawn_token: 1,
             reply: oneshot::channel().0,
         },
+        SystemCommand::GetSetStateWithSeq {
+            observer_ball_id: 1,
+            reply: oneshot::channel().0,
+        },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 76);
+    assert_eq!(tags.len(), 77);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -602,6 +607,7 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[73], "RestoreBallIfAbsent");
     assert_eq!(tags[74], "SpawnBallWithMetaTagged");
     assert_eq!(tags[75], "RemoveBallIfToken");
+    assert_eq!(tags[76], "GetSetStateWithSeq");
 }
 
 #[test]
@@ -996,4 +1002,89 @@ fn system_view_from_ballpark_captures_kinematics_flags_damage_modules_and_grids(
     assert!(preserved.has_active_industrial_core(ship_f));
     assert!(preserved.has_active_microjump(ship_d));
     assert!((preserved.sim_elapsed_secs - 27.5).abs() < 1e-12);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_set_state_with_seq_returns_snapshot_and_watermark_without_draining_1461() {
+    use eve_destiny::{Ball, CombatState, DestinyEvent, MovementMode, SlimItemMeta};
+
+    let ctx = crate::router::ServerContext::new();
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    let _rx = sys.subscribe();
+
+    let obs_id = 704_901_i64;
+    let peer_id = 704_902_i64;
+    let mk_ball = |id: i64, x: f64| Ball {
+        id,
+        type_id: 606,
+        position: DVec3::new(x, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let meta = SlimItemMeta {
+        group_id: 25,
+        category_id: 6,
+        owner_id: 90_000_001,
+        ..Default::default()
+    };
+    sys.spawn_ball_with_meta(mk_ball(obs_id, 50_000.0), CombatState::default(), meta.clone())
+        .await
+        .expect("spawn observer");
+    sys.spawn_ball_with_meta(mk_ball(peer_id, 55_000.0), CombatState::default(), meta)
+        .await
+        .expect("spawn peer");
+
+    assert!(
+        sys.get_set_state_with_seq(999_999_999)
+            .await
+            .expect_err("absent observer ball must error")
+            .contains("not in system")
+    );
+
+    let bcast1 = sys.step_manual(1.0).await.expect("step 1");
+    assert!(bcast1.broadcast_seq >= 1);
+
+    assert!(
+        sys.emit_observer_destiny_event(obs_id, DestinyEvent::OnSlimItemChange { ball_id: peer_id })
+            .await
+    );
+
+    let (tick1, payload1, updates1, seq1) = sys
+        .get_set_state_with_seq(obs_id)
+        .await
+        .expect("get_set_state_with_seq 1");
+    let (plain_tick, plain_payload, plain_updates) =
+        sys.get_set_state(obs_id).await.expect("get_set_state");
+
+    assert_eq!(tick1, bcast1.tick);
+    assert_eq!(seq1, bcast1.broadcast_seq);
+    assert_eq!(tick1, plain_tick);
+    assert_eq!(payload1, plain_payload);
+    assert_eq!(updates1, plain_updates);
+
+    // Must not drain pending observer events queued for `obs_id`.
+    let (drain_tick, drained_events, _drain_pyrep, drain_seq) = sys
+        .drain_observer_updates_with_seq(obs_id)
+        .await
+        .expect("drain after get_set_state_with_seq");
+    assert_eq!(drain_tick, tick1);
+    assert_eq!(drain_seq, seq1);
+    assert!(drained_events.iter().any(|ev| matches!(
+        ev,
+        DestinyEvent::OnSlimItemChange { ball_id } if *ball_id == peer_id
+    )));
+
+    let bcast2 = sys.step_manual(1.0).await.expect("step 2");
+    assert!(bcast2.broadcast_seq > seq1);
+    let (tick2, _payload2, _updates2, seq2) = sys
+        .get_set_state_with_seq(obs_id)
+        .await
+        .expect("get_set_state_with_seq 2");
+    assert_eq!(tick2, bcast2.tick);
+    assert_eq!(seq2, bcast2.broadcast_seq);
 }
