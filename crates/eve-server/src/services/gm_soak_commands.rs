@@ -1037,10 +1037,6 @@ fn handle_session_dump(
 ) -> PyRep {
     let sid = session.session_id;
     let now_unix = ctx.now_unix();
-    let now_millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or_else(|_| now_unix.saturating_mul(1_000));
 
     let session_dict = PyRep::keyval([
         ("sessionID", PyRep::Integer(sid as i64)),
@@ -1203,7 +1199,7 @@ fn handle_session_dump(
         .get_destiny_stamps(sid, DEFAULT_SESSION_LEDGER_LIMIT);
     let rpc_hist = ctx
         .flight_recorder
-        .get_history(sid, now_millis, DEFAULT_SESSION_LEDGER_LIMIT);
+        .get_history_relative_to_now(sid, DEFAULT_SESSION_LEDGER_LIMIT);
 
     let ledger_reps: Vec<PyRep> = ledger.iter().map(ledger_entry_to_pyrep).collect();
     let stamp_reps: Vec<PyRep> = stamps.iter().map(destiny_stamp_to_pyrep).collect();

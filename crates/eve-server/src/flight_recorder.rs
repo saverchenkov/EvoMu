@@ -517,6 +517,16 @@ impl FlightRecorder {
             .collect()
     }
 
+    /// Retrieves recent RPC history for `session_id` with `offset_ms` anchored to the same
+    /// host wall clock used when [`FlightRecorder::record`] stamped entries.
+    pub fn get_history_relative_to_now(
+        &self,
+        session_id: u64,
+        limit: usize,
+    ) -> Vec<FlightRecorderEntry> {
+        self.get_history(session_id, now_unix_millis(), limit)
+    }
+
     /// Records a bounded per-session outbound packet event (`sent | dropped | coalesced`) (`#1077 §A`).
     #[allow(clippy::too_many_arguments)]
     pub fn record_outbound(

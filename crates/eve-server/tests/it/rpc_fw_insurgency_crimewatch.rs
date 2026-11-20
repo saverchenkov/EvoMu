@@ -478,9 +478,32 @@ async fn test_killrights_hacking_and_interference() {
         .unwrap_err();
     assert_eq!(re_quit_err.code, "NoActiveHackingGame");
 
-    // 3. solarsystemInterferenceMgr.GetAllInterferenceBands returns {solarSystemID: interferenceBand}
+    // 3. solarsystemInterferenceMgr.GetAllInterferenceBands returns {solarSystemID: interferenceBand} for tracked systems only
     let sys_id = 30_000_142u32;
     sess1.solar_system_id = Some(sys_id);
+    let cold_bands_rep = ctx
+        .dispatch_rpc(&mut sess1, "solarsystemInterferenceMgr", None, "GetAllInterferenceBands", &[], &kw, None)
+        .await
+        .expect("GetAllInterferenceBands cold");
+    let PyRep::Dict(cold_band_entries) = &cold_bands_rep else {
+        panic!("expected Dict from GetAllInterferenceBands, got {cold_bands_rep:?}");
+    };
+    assert!(
+        !cold_band_entries.iter().any(|(k, _)| k.as_i64() == Some(sys_id as i64)),
+        "cold GetAllInterferenceBands must not fabricate untracked system {sys_id}: {cold_band_entries:?}"
+    );
+    let now_u = ctx.now_unix();
+    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.interference_by_system.insert(
+            sys_id,
+            eve_db::SystemInterferenceRecord {
+                solar_system_id: sys_id,
+                interference_level: 0.10,
+                band: 1,
+                last_updated_sec: now_u,
+            },
+        );
+    });
     let bands_rep = ctx
         .dispatch_rpc(&mut sess1, "solarsystemInterferenceMgr", None, "GetAllInterferenceBands", &[], &kw, None)
         .await

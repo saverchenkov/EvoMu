@@ -142,8 +142,8 @@
       "description": "Hand-written account-change emitters instead of unified typed notification path (#931)."
     },
     "system_time_now_in_gameplay": {
-      "max_occurrences": 13,
-      "max_files": 11,
+      "max_occurrences": 10,
+      "max_files": 8,
       "exact": false,
       "owning_issue": 1196,
       "regex": "\\bSystemTime\\s*::\\s*now\\s*\\(",

@@ -236,6 +236,10 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
     )
     .await
     .expect("DestroyWeaponBank");
+    ctx.advance_secs(31);
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock before LinkAllWeapons");
     ctx.dispatch_rpc(
         &mut sess,
         "dogmaIM",
@@ -368,6 +372,18 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
     );
 
     // 4. Scripted module script loading & swapping (feat:modules.scripts-swap)
+    ctx.advance_secs(31);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        None,
+        "CmdDock",
+        &[PyRep::Integer(station_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdDock before fitting Tracking Computer II");
     let tc_id = 100_000_834i64;
     let opt_script_id = 100_000_835i64;
     let trk_script_id = 100_000_836i64;
