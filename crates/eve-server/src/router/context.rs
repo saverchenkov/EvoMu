@@ -122,6 +122,11 @@ pub struct ServerContext {
     /// Tracks `(session_id, char_id) -> solar_system_id` whose initial space ballpark `SetState`
     /// bootstrap has been emitted for the current space stay (`#1083`).
     pub space_ballpark_bootstrapped: Arc<RankedRwLock<HashMap<(u64, i64), u32>, RANK_LEAF>>,
+    /// Tracks one-shot non-destructive View Outside `SetState` requests per `(session_id, char_id)`
+    /// storing `(structure_id, recorded_at)` so `macho_listener` snapshots `get_set_state(structure_id)`
+    /// without mutating shared `Ballpark::observer_events[structure_id]` (`#1461`).
+    pub pending_structure_view_outside_set_state:
+        Arc<RankedRwLock<HashMap<(u64, i64), (i64, std::time::Instant)>, RANK_LEAF>>,
     /// Tracks `(session_id, char_id)` pairs that already emitted their initial `OnServerBrainUpdated`
     /// on first `dogmaIM.GetAllInfo` (`#1083`).
     pub brain_primed_sessions: Arc<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
@@ -279,6 +284,8 @@ pub(crate) struct ServerContextWeak {
     unrebased_clock_offset_secs: std::sync::Weak<AtomicU64>,
     fw_idle_last_step_unix: std::sync::Weak<RankedRwLock<HashMap<i64, u64>, RANK_LEAF>>,
     space_ballpark_bootstrapped: std::sync::Weak<RankedRwLock<HashMap<(u64, i64), u32>, RANK_LEAF>>,
+    pending_structure_view_outside_set_state:
+        std::sync::Weak<RankedRwLock<HashMap<(u64, i64), (i64, std::time::Instant)>, RANK_LEAF>>,
     brain_primed_sessions: std::sync::Weak<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
     rpc_rate_buckets: std::sync::Weak<RankedMutex<HashMap<u64, SessionRpcRateBucket>, RANK_LEAF>>,
     #[cfg(any(test, feature = "testkit"))]
@@ -358,6 +365,9 @@ impl ServerContextWeak {
             unrebased_clock_offset_secs: self.unrebased_clock_offset_secs.upgrade()?,
             fw_idle_last_step_unix: self.fw_idle_last_step_unix.upgrade()?,
             space_ballpark_bootstrapped: self.space_ballpark_bootstrapped.upgrade()?,
+            pending_structure_view_outside_set_state: self
+                .pending_structure_view_outside_set_state
+                .upgrade()?,
             brain_primed_sessions: self.brain_primed_sessions.upgrade()?,
             rpc_rate_buckets: self.rpc_rate_buckets.upgrade()?,
             #[cfg(any(test, feature = "testkit"))]
@@ -712,6 +722,9 @@ impl ServerContext {
             unrebased_clock_offset_secs: Arc::downgrade(&self.unrebased_clock_offset_secs),
             fw_idle_last_step_unix: Arc::downgrade(&self.fw_idle_last_step_unix),
             space_ballpark_bootstrapped: Arc::downgrade(&self.space_ballpark_bootstrapped),
+            pending_structure_view_outside_set_state: Arc::downgrade(
+                &self.pending_structure_view_outside_set_state,
+            ),
             brain_primed_sessions: Arc::downgrade(&self.brain_primed_sessions),
             rpc_rate_buckets: Arc::downgrade(&self.rpc_rate_buckets),
             #[cfg(any(test, feature = "testkit"))]
@@ -882,6 +895,7 @@ impl ServerContext {
             unrebased_clock_offset_secs,
             fw_idle_last_step_unix: Arc::new(RankedRwLock::new(HashMap::new())),
             space_ballpark_bootstrapped: Arc::new(RankedRwLock::new(HashMap::new())),
+            pending_structure_view_outside_set_state: Arc::new(RankedRwLock::new(HashMap::new())),
             brain_primed_sessions: Arc::new(RankedRwLock::new(HashSet::new())),
             rpc_rate_buckets: Arc::new(RankedMutex::new(HashMap::new())),
             #[cfg(any(test, feature = "testkit"))]
@@ -1522,8 +1536,67 @@ impl ServerContext {
     }
 
     pub fn clear_space_ballpark_bootstrapped(&self, char_id: i64) {
+        {
+            let mut m = self
+                .space_ballpark_bootstrapped
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            m.retain(|&(_, cid), _| cid != char_id);
+        }
+        self.clear_pending_structure_view_outside_set_state_for_char(char_id);
+    }
+
+    pub(crate) fn set_pending_structure_view_outside_set_state(
+        &self,
+        session_id: u64,
+        char_id: i64,
+        structure_id: i64,
+    ) {
+        let now = std::time::Instant::now();
         let mut m = self
-            .space_ballpark_bootstrapped
+            .pending_structure_view_outside_set_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if m.len() > 4_096 {
+            // Prune only stale non-listener entries; never drop active live sessions.
+            m.retain(|_, (_, recorded_at)| {
+                now.duration_since(*recorded_at) < std::time::Duration::from_secs(600)
+            });
+        }
+        m.insert((session_id, char_id), (structure_id, now));
+    }
+
+    pub(crate) fn take_pending_structure_view_outside_set_state(
+        &self,
+        session_id: u64,
+        char_id: i64,
+    ) -> Option<i64> {
+        let mut m = self
+            .pending_structure_view_outside_set_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        m.remove(&(session_id, char_id)).map(|(sid, _)| sid)
+    }
+
+    pub fn clear_pending_structure_view_outside_set_state(&self, session_id: u64, char_id: i64) {
+        let mut m = self
+            .pending_structure_view_outside_set_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        m.remove(&(session_id, char_id));
+    }
+
+    pub fn clear_pending_structure_view_outside_set_state_for_session(&self, session_id: u64) {
+        let mut m = self
+            .pending_structure_view_outside_set_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        m.retain(|&(sid, _), _| sid != session_id);
+    }
+
+    pub fn clear_pending_structure_view_outside_set_state_for_char(&self, char_id: i64) {
+        let mut m = self
+            .pending_structure_view_outside_set_state
             .write()
             .unwrap_or_else(|e| e.into_inner());
         m.retain(|&(_, cid), _| cid != char_id);

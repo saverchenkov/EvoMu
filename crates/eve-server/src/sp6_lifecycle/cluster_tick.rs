@@ -8,26 +8,34 @@
 
 use super::{
     load_sp6_state_from_snap, safe_logoff_blocking_space_conditions,
-    sde_mobile_warp_disruptor_decay_secs, sde_ship_physics, with_mut_sp6_state,
+    sde_mobile_warp_disruptor_decay_secs, sde_ship_physics, unix_to_filetime, with_mut_sp6_state,
     AbyssalPersistedSession, DisconnectedShipEntry, DueSelfDestructEntry, SafeLogoffEntry,
-    JETCAN_DECAY_LIFETIME_SECS, WRECK_DECAY_LIFETIME_SECS,
+    Sp6PersistedState, JETCAN_DECAY_LIFETIME_SECS, WRECK_DECAY_LIFETIME_SECS,
 };
 
 pub const PLANETARY_LAUNCH_DECAY_SECS: u64 = 5 * 86_400; // 5d (432,000s)
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use crate::system_actor::PendingAnchoringDisruptor;
-use eve_db::WorldRepository;
-use eve_destiny::{Ball, Ballpark, CombatState, MovementMode, SlimItemMeta};
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository, WorldStateSnapshot};
+use eve_destiny::{Ball, Ballpark, CombatState, MovementMode, SlimItemMeta, WarpPhase, AU_METERS};
+use eve_dogma::{FitRev, PersistedFitInputs, ShipFittingEngine};
 use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 fn default_combat_state_for_type(sde: &SdeRegistry, type_id: u32) -> CombatState {
     let a = sde.types.get(&type_id).map(|t| &t.default_attributes);
-    let shield = a.and_then(|m| m.get(&eve_sde::attr_ids::SHIELD_CAPACITY).copied()).unwrap_or(100.0);
-    let armor = a.and_then(|m| m.get(&eve_sde::attr_ids::ARMOR_HP).copied()).unwrap_or(100.0);
-    let hull = a.and_then(|m| m.get(&eve_sde::attr_ids::HP_STRUCT).copied()).unwrap_or(500.0);
+    let shield = a
+        .and_then(|m| m.get(&eve_sde::attr_ids::SHIELD_CAPACITY).copied())
+        .unwrap_or(100.0);
+    let armor = a
+        .and_then(|m| m.get(&eve_sde::attr_ids::ARMOR_HP).copied())
+        .unwrap_or(100.0);
+    let hull = a
+        .and_then(|m| m.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+        .unwrap_or(500.0);
     CombatState {
         shield_hp: shield,
         max_shield_hp: shield,
@@ -37,6 +45,426 @@ fn default_combat_state_for_type(sde: &SdeRegistry, type_id: u32) -> CombatState
         max_structure_hp: hull,
         ..CombatState::default()
     }
+}
+
+/// Evaluates Dogma-bonused ship HP, resonances, capacitor, and flight physics directly from
+/// a persisted [`WorldStateSnapshot`] so restart hydration preserves skill/implant/module
+/// maximums instead of clamping down to raw SDE defaults (`#1453`).
+#[allow(clippy::too_many_arguments)]
+fn build_bonused_ship_state_from_snap(
+    snap: &WorldStateSnapshot,
+    sp6: &Sp6PersistedState,
+    sde: &SdeRegistry,
+    now_unix: u64,
+    char_id: Option<i64>,
+    ship_id: i64,
+    ship_type_id: u32,
+    fallback_mass: f64,
+    fallback_max_vel: f64,
+    fallback_inertia: f64,
+    fallback_warp_au_s: f64,
+) -> (CombatState, f64, f64, f64, f64) {
+    let fallback_cs = default_combat_state_for_type(sde, ship_type_id);
+    let mut cs = if let Some(ship_type) = sde.types.get(&ship_type_id) {
+        let mut skills: HashMap<u32, u8> = HashMap::new();
+        let mut implants: Vec<u32> = Vec::new();
+        let mut boosters: Vec<u32> = Vec::new();
+        if let Some(cid) = char_id {
+            let (is_alpha, race_id) = snap
+                .characters
+                .get(&cid)
+                .map(|c| (c.clone_grade <= 1, c.race_id))
+                .unwrap_or((false, 1));
+            if let Some(char_skills) = snap.skills.get(&cid) {
+                for (&tid, rec) in char_skills {
+                    let lvl = if is_alpha {
+                        rec.level.min(
+                            crate::services::jump_clone_names::alpha_skill_cap_for_character(
+                                sde, race_id, tid,
+                            ),
+                        )
+                    } else {
+                        rec.level
+                    };
+                    skills.insert(tid, lvl);
+                }
+            }
+            let now_ft = unix_to_filetime(now_unix);
+            for (tid, lvl) in
+                crate::services::character_expert_systems::get_active_expert_system_skills(
+                    snap, cid, now_ft,
+                )
+            {
+                let entry = skills.entry(tid).or_insert(0);
+                if lvl > *entry {
+                    *entry = lvl;
+                }
+            }
+            if let Some(imp) = snap.active_implants.get(&cid) {
+                implants = imp.clone();
+            }
+            for it in snap.items.values() {
+                if it.location_id == cid && it.flag == InventoryFlag::Booster {
+                    let not_expired = it
+                        .dynamic_attributes
+                        .get(&crate::services::implant_plugging::DYN_ATTR_BOOSTER_EXPIRY_UNIX)
+                        .is_none_or(|&exp| exp > 0.0 && (exp as u64) > now_unix);
+                    if not_expired {
+                        boosters.push(it.type_id);
+                    }
+                }
+            }
+        }
+
+        let mut fit = ShipFittingEngine::from_sde(ship_id, ship_type_id, sde)
+            .with_character_skills(skills)
+            .with_implants(implants)
+            .with_boosters(boosters);
+
+        let mut slot_charges: HashMap<u16, (u32, u32)> = HashMap::new();
+        let mut fittable_items: Vec<&InventoryItemRecord> = Vec::new();
+        for item in snap.items.values() {
+            if item.location_id != ship_id {
+                continue;
+            }
+            let flag_u16 = item.flag as u16;
+            if !matches!(flag_u16, 11..=34 | 92..=94 | 125..=129) {
+                continue;
+            }
+            if sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 8) {
+                slot_charges.insert(flag_u16, (item.type_id, item.quantity.max(1) as u32));
+            } else {
+                fittable_items.push(item);
+            }
+        }
+        fittable_items.sort_by_key(|item| {
+            let f = item.flag as u16;
+            let tier = match f {
+                125..=129 => 0u8,
+                92..=94 => 1u8,
+                _ => 2u8,
+            };
+            (tier, f, item.item_id)
+        });
+
+        let mut want_online_ids: Vec<i64> = Vec::new();
+        for item in fittable_items {
+            let flag_u16 = item.flag as u16;
+            let fit_res = if item.dynamic_attributes.is_empty() {
+                fit.fit_module_with_state(item.item_id, item.type_id, flag_u16, false, sde)
+            } else {
+                fit.fit_module_with_dynamic_attributes(
+                    item.item_id,
+                    item.type_id,
+                    flag_u16,
+                    false,
+                    item.dynamic_attributes.clone(),
+                    sde,
+                )
+            };
+            if fit_res.is_err() {
+                continue;
+            }
+            if let Some(m) = fit.modules.get_mut(&item.item_id) {
+                if let Some(&dmg) = item.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE) {
+                    m.damage_hp = dmg;
+                }
+            }
+            if let Some(&(ctid, cqty)) = slot_charges.get(&flag_u16) {
+                let _ = fit.load_charge(item.item_id, ctid, cqty.max(1), sde);
+            } else if let Some(&act_tid) = snap.module_active_charges.get(&item.item_id) {
+                let _ = fit.load_charge(item.item_id, act_tid, 1, sde);
+            }
+            if snap.module_online_states.get(&item.item_id).copied().unwrap_or(true) {
+                want_online_ids.push(item.item_id);
+            }
+        }
+
+        for item_id in want_online_ids {
+            let onlined = if char_id.is_some() {
+                fit.set_module_online(item_id, sde)
+                    .or_else(|_| fit.set_module_online_skip_skills(item_id, sde))
+                    .is_ok()
+            } else {
+                fit.set_module_online_skip_skills(item_id, sde).is_ok()
+            };
+            if onlined && snap.module_active_states.contains(&item_id) {
+                let _ = fit.activate_module(item_id, false, sde);
+            }
+        }
+
+        if let Some(pfi) = snap.ship_fit_inputs.get(&ship_id) {
+            fit.apply_persisted_inputs(
+                &PersistedFitInputs {
+                    active_stance_type_id: pfi.active_stance_type_id,
+                    last_stance_switch_ms: pfi.last_stance_switch_ms,
+                    overloaded_modules: pfi.overloaded_modules.clone(),
+                },
+                sde,
+            );
+        }
+
+        fit.recalculate_stats(sde);
+        let b = fit.to_projection(FitRev(0), sde).baseline;
+
+        let max_shield_hp = if b.max_shield_hp > 0.0
+            || ship_type
+                .default_attributes
+                .contains_key(&eve_sde::attr_ids::SHIELD_CAPACITY)
+        {
+            b.max_shield_hp.max(0.0)
+        } else {
+            fallback_cs.max_shield_hp
+        };
+        let max_armor_hp = if b.max_armor_hp > 0.0
+            || ship_type
+                .default_attributes
+                .contains_key(&eve_sde::attr_ids::ARMOR_HP)
+        {
+            b.max_armor_hp.max(0.0)
+        } else {
+            fallback_cs.max_armor_hp
+        };
+        let max_structure_hp = if b.max_structure_hp > 0.0
+            || ship_type
+                .default_attributes
+                .contains_key(&eve_sde::attr_ids::HP_STRUCT)
+        {
+            b.max_structure_hp.max(0.0)
+        } else {
+            fallback_cs.max_structure_hp
+        };
+        let max_capacitor = if b.max_capacitor > 0.0 {
+            b.max_capacitor
+        } else {
+            250.0
+        };
+        let max_vel = if b.max_velocity > 0.0 {
+            b.max_velocity
+        } else {
+            fallback_max_vel
+        };
+        let inertia = if b.agility > 0.0 {
+            b.agility.max(0.001)
+        } else {
+            fallback_inertia
+        };
+        let mass = if b.mass > 0.0 { b.mass } else { fallback_mass };
+        let warp_speed_au_s = if b.warp_speed_au_s > 0.0 {
+            b.warp_speed_au_s.clamp(1.5, 12.0)
+        } else {
+            fallback_warp_au_s
+        };
+
+        let mut built = CombatState {
+            shield_hp: max_shield_hp,
+            max_shield_hp,
+            armor_hp: max_armor_hp,
+            max_armor_hp,
+            structure_hp: max_structure_hp,
+            max_structure_hp,
+            capacitor: max_capacitor,
+            max_capacitor,
+            signature_radius: b.signature_radius.max(0.0),
+            base_signature_radius: Some(b.signature_radius.max(0.0)),
+            shield_recharge_time_ms: b.shield_recharge_time_ms.max(1.0),
+            capacitor_recharge_time_ms: b.capacitor_recharge_time_ms.max(1.0),
+            shield_resonance: b.shield_resonance,
+            armor_resonance: b.armor_resonance,
+            structure_resonance: b.structure_resonance,
+            base_max_velocity: (max_vel > 0.0).then_some(max_vel),
+            base_mass: (mass > 0.0).then_some(mass),
+            base_inertia: (inertia > 0.0).then_some(inertia),
+            base_shield_resonance: Some(b.shield_resonance),
+            base_armor_resonance: Some(b.armor_resonance),
+            base_structure_resonance: Some(b.structure_resonance),
+            base_max_shield_hp: Some(max_shield_hp),
+            base_max_armor_hp: Some(max_armor_hp),
+            base_max_structure_hp: Some(max_structure_hp),
+            base_max_capacitor: Some(max_capacitor),
+            base_capacitor_recharge_time_ms: Some(b.capacitor_recharge_time_ms.max(1.0)),
+            rng_state: CombatState::seed_rng_from_u64(
+                (ship_id as u64)
+                    ^ (char_id.unwrap_or(0) as u64).rotate_left(17)
+                    ^ (u64::from(ship_type_id) << 32),
+            ),
+            ..CombatState::default()
+        };
+
+        if let Some(hp) = sp6.ship_combat_hp.get(&ship_id) {
+            built.shield_hp = hp.shield_hp.clamp(0.0, built.max_shield_hp);
+            built.armor_hp = hp.armor_hp.clamp(0.0, built.max_armor_hp);
+            if hp.hull_hp > 0.0 {
+                built.structure_hp = hp.hull_hp.clamp(0.0, built.max_structure_hp);
+            }
+        } else if let Some(it) = snap.items.get(&ship_id) {
+            if let Some(&ad) = it.dynamic_attributes.get(&eve_sde::attr_ids::ARMOR_DAMAGE) {
+                if ad > 0.0 {
+                    built.armor_hp = (built.max_armor_hp - ad).clamp(0.0, built.max_armor_hp);
+                }
+            }
+            if let Some(&hd) = it.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE) {
+                if hd > 0.0 {
+                    built.structure_hp =
+                        (built.max_structure_hp - hd).clamp(0.0, built.max_structure_hp);
+                }
+            }
+        }
+        if let Some(cap_meta) = sp6.ship_combat_hp.get(&(-ship_id)) {
+            if cap_meta.shield_hp >= 1.0 {
+                built.capacitor = (cap_meta.shield_hp - 1.0).clamp(0.0, built.max_capacitor);
+            }
+        }
+        return (built, max_vel, inertia, mass, warp_speed_au_s);
+    } else {
+        fallback_cs
+    };
+
+    if let Some(hp) = sp6.ship_combat_hp.get(&ship_id) {
+        cs.shield_hp = hp.shield_hp.clamp(0.0, cs.max_shield_hp);
+        cs.armor_hp = hp.armor_hp.clamp(0.0, cs.max_armor_hp);
+        if hp.hull_hp > 0.0 {
+            cs.structure_hp = hp.hull_hp.clamp(0.0, cs.max_structure_hp);
+        }
+    }
+    (
+        cs,
+        fallback_max_vel,
+        fallback_inertia,
+        fallback_mass,
+        fallback_warp_au_s,
+    )
+}
+
+/// Computes the `MovementMode::Warp` phase label matching `eve_destiny::physics::step_warp_ball`
+/// at post-tick `elapsed_warp_time`.
+fn warp_phase_for_elapsed(elapsed: f64, t_accel_end: f64, t_cruise_dur: f64) -> WarpPhase {
+    if elapsed <= t_accel_end {
+        WarpPhase::Accelerating
+    } else if elapsed - t_accel_end < t_cruise_dur {
+        WarpPhase::Cruising
+    } else {
+        WarpPhase::Decelerating
+    }
+}
+
+/// Reconstructs in-flight warp phase, synthetic origin, elapsed time, and velocity from persisted
+/// `(position, emergency_warp_dest, last_velocity)` so server restarts mid-warp do not reset an
+/// active warp back to `WarpPhase::Aligning` (`#1454`).
+pub(super) fn reconstruct_persisted_warp_kinematics(
+    pos: DVec3,
+    dest: DVec3,
+    warp_speed_au_s: f64,
+    max_vel: f64,
+    last_velocity: [f64; 3],
+) -> (MovementMode, DVec3, f64) {
+    let saved_vel = DVec3::from_array(last_velocity);
+    let delta = dest - pos;
+    let rem_dist = delta.length();
+    if rem_dist <= 1.0 || !saved_vel.is_finite() || !pos.is_finite() || !dest.is_finite() {
+        return (
+            MovementMode::new_warp(pos, dest, warp_speed_au_s),
+            DVec3::ZERO,
+            0.0,
+        );
+    }
+
+    let dir = delta / rem_dist;
+    let saved_dir_speed = saved_vel.dot(dir).max(0.0);
+    let k_a = warp_speed_au_s.max(1e-4);
+    let k_d = (k_a / 3.0).min(2.0);
+    let v_cruise = warp_speed_au_s * AU_METERS;
+    let rem_plus_1 = rem_dist + 1.0;
+    let stop_thresh = (0.5 * max_vel.max(0.0)).min(100.0).max(1.0);
+    let in_final_decel = rem_plus_1 * k_d <= max_vel.max(0.0)
+        && rem_plus_1 * k_d >= stop_thresh
+        && saved_dir_speed >= (rem_plus_1 * k_d) * 0.85;
+
+    if !in_final_decel && saved_dir_speed < (max_vel * 0.75).max(1.0) {
+        return (
+            MovementMode::new_warp(pos, dest, warp_speed_au_s),
+            DVec3::ZERO,
+            0.0,
+        );
+    }
+
+    if rem_plus_1 * k_d <= v_cruise && saved_dir_speed >= (rem_plus_1 * k_d) * 0.85 {
+        let eff_total = (rem_plus_1 * (k_a + k_d) / k_a * 1.05).max(rem_plus_1 + 10.0);
+        let raw_dist = eff_total - 1.0;
+        let origin = dest - dir * raw_dist;
+        let v_peak = v_cruise.min(eff_total * k_a * k_d / (k_a + k_d));
+        let s_decel_start = v_peak / k_d;
+        let t_accel_end = if v_peak > k_a {
+            (v_peak / k_a).ln() / k_a
+        } else {
+            0.0
+        };
+        let t_cruise_dur = (eff_total / v_peak - 1.0 / k_a - 1.0 / k_d).max(0.0);
+        let t_decel = (s_decel_start / rem_plus_1).max(1.0).ln() / k_d;
+        // `step_warp_ball` evaluates at `elapsed_warp_time` before adding `dt`, so restored warps
+        // advance by `+1.0` s on the next tick instead of dwelling at the saved position for one tick.
+        let elapsed_warp_time = t_accel_end + t_cruise_dur + t_decel + 1.0;
+        let speed = rem_plus_1 * k_d;
+        return (
+            MovementMode::Warp {
+                origin,
+                destination: dest,
+                warp_speed_au_s,
+                total_distance: raw_dist,
+                phase: WarpPhase::Decelerating,
+                elapsed_warp_time,
+            },
+            dir * speed,
+            1.0,
+        );
+    }
+
+    if rem_plus_1 > v_cruise / k_d && saved_dir_speed >= v_cruise * 0.99 {
+        let raw_dist = rem_dist + v_cruise / k_a;
+        let eff_total = raw_dist + 1.0;
+        let origin = dest - dir * raw_dist;
+        let t_accel_end = (v_cruise / k_a).ln() / k_a;
+        let t_cruise_dur = (eff_total / v_cruise - 1.0 / k_a - 1.0 / k_d).max(0.0);
+        let elapsed_warp_time = t_accel_end + 1.0;
+        return (
+            MovementMode::Warp {
+                origin,
+                destination: dest,
+                warp_speed_au_s,
+                total_distance: raw_dist,
+                phase: warp_phase_for_elapsed(elapsed_warp_time, t_accel_end, t_cruise_dur),
+                elapsed_warp_time,
+            },
+            dir * v_cruise,
+            1.0,
+        );
+    }
+
+    let traveled = (saved_dir_speed / k_a).clamp(1.0, v_cruise / k_a);
+    let raw_dist = rem_dist + traveled;
+    let eff_total = raw_dist + 1.0;
+    let origin = dest - dir * raw_dist;
+    let v_peak = v_cruise.min(eff_total * k_a * k_d / (k_a + k_d));
+    let t_accel_end = if v_peak > k_a {
+        (v_peak / k_a).ln() / k_a
+    } else {
+        0.0
+    };
+    let t_cruise_dur = (eff_total / v_peak - 1.0 / k_a - 1.0 / k_d).max(0.0);
+    let elapsed_warp_time = traveled.ln() / k_a + 1.0;
+    let speed = k_a * traveled;
+    (
+        MovementMode::Warp {
+            origin,
+            destination: dest,
+            warp_speed_au_s,
+            total_distance: raw_dist,
+            phase: warp_phase_for_elapsed(elapsed_warp_time, t_accel_end, t_cruise_dur),
+            elapsed_warp_time,
+        },
+        dir * speed,
+        1.0,
+    )
 }
 
 /// Re-materializes persisted in-space objects into `ballpark` when `SystemRegistry::get_or_spawn(solar_system_id)`
@@ -349,8 +777,24 @@ pub fn populate_persisted_space_objects(
                 continue;
             }
             let pos = DVec3::from_array(disc.last_position);
-            let (group_id, category_id, mass, radius, max_vel, inertia, warp_speed_au_s) =
+            let (group_id, category_id, base_mass, radius, base_max_vel, base_inertia, base_warp_speed_au_s) =
                 sde_ship_physics(sde, disc.ship_type_id);
+            let (mut cs, max_vel, inertia, mass, warp_speed_au_s) =
+                build_bonused_ship_state_from_snap(
+                    snap,
+                    &sp6,
+                    sde,
+                    now_unix,
+                    Some(disc.char_id),
+                    disc.ship_id,
+                    disc.ship_type_id,
+                    base_mass,
+                    base_max_vel,
+                    base_inertia,
+                    base_warp_speed_au_s,
+                );
+            cs.is_emergency_warping =
+                disc.emergency_warp_dest.is_some() && disc.pre_warp_position.is_some();
             let (corp_id, alliance_id, sec_status) = snap
                 .characters
                 .get(&disc.char_id)
@@ -362,10 +806,17 @@ pub fn populate_persisted_space_objects(
                     )
                 })
                 .unwrap_or((1_000_009, -1, 0.0));
-            let mode = if let Some(dest_arr) = disc.emergency_warp_dest {
-                MovementMode::new_warp(pos, DVec3::from_array(dest_arr), warp_speed_au_s)
+            let (mode, velocity, speed_fraction) = if let Some(dest_arr) = disc.emergency_warp_dest
+            {
+                reconstruct_persisted_warp_kinematics(
+                    pos,
+                    DVec3::from_array(dest_arr),
+                    warp_speed_au_s,
+                    max_vel,
+                    disc.last_velocity,
+                )
             } else {
-                MovementMode::Stop
+                (MovementMode::Stop, DVec3::ZERO, 0.0)
             };
             ballpark.set_ball_slim_meta(
                 disc.ship_id,
@@ -384,22 +835,14 @@ pub fn populate_persisted_space_objects(
                 id: disc.ship_id,
                 type_id: disc.ship_type_id,
                 position: pos,
-                velocity: DVec3::ZERO,
+                velocity,
                 max_velocity: max_vel,
                 inertia,
                 mass,
                 radius,
-                speed_fraction: 0.0,
+                speed_fraction,
                 mode,
             });
-            let mut cs = default_combat_state_for_type(sde, disc.ship_type_id);
-            if let Some(hp) = sp6.ship_combat_hp.get(&disc.ship_id) {
-                cs.shield_hp = hp.shield_hp.clamp(0.0, cs.max_shield_hp);
-                cs.armor_hp = hp.armor_hp.clamp(0.0, cs.max_armor_hp);
-                if hp.hull_hp > 0.0 {
-                    cs.structure_hp = hp.hull_hp.clamp(0.0, cs.max_structure_hp);
-                }
-            }
             ballpark.combat_states.insert(disc.ship_id, cs);
         }
 
@@ -427,8 +870,29 @@ pub fn populate_persisted_space_objects(
                 continue;
             };
             let pos = DVec3::from_array(pos_arr);
-            let (group_id, category_id, mass, radius, max_vel, inertia, _warp_speed_au_s) =
-                sde_ship_physics(sde, item.type_id);
+            let (
+                group_id,
+                category_id,
+                base_mass,
+                radius,
+                base_max_vel,
+                base_inertia,
+                base_warp_speed_au_s,
+            ) = sde_ship_physics(sde, item.type_id);
+            let (cs, max_vel, inertia, mass, _warp_speed_au_s) =
+                build_bonused_ship_state_from_snap(
+                    snap,
+                    &sp6,
+                    sde,
+                    now_unix,
+                    None,
+                    item.item_id,
+                    item.type_id,
+                    base_mass,
+                    base_max_vel,
+                    base_inertia,
+                    base_warp_speed_au_s,
+                );
             let (corp_id, alliance_id, sec_status) = snap
                 .characters
                 .get(&item.owner_id)
@@ -466,14 +930,6 @@ pub fn populate_persisted_space_objects(
                 speed_fraction: 0.0,
                 mode: MovementMode::Stop,
             });
-            let mut cs = default_combat_state_for_type(sde, item.type_id);
-            if let Some(hp) = sp6.ship_combat_hp.get(&item.item_id) {
-                cs.shield_hp = hp.shield_hp.clamp(0.0, cs.max_shield_hp);
-                cs.armor_hp = hp.armor_hp.clamp(0.0, cs.max_armor_hp);
-                if hp.hull_hp > 0.0 {
-                    cs.structure_hp = hp.hull_hp.clamp(0.0, cs.max_structure_hp);
-                }
-            }
             ballpark.combat_states.insert(item.item_id, cs);
         }
 

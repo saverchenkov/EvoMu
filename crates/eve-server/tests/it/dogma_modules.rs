@@ -1447,9 +1447,32 @@ async fn test_r2_track2_dogma_fitting_overload_targeters_and_weapons() {
         .expect_err("Destroying subsystem with fitted module must fail");
     assert_eq!(sub_destroy_err.code, "SubsystemHasFittedModules");
 
-    // 2. #95: LinkWeapons rejects mismatched weapon types or non-high-slot modules
+    // 2. #95 & #1460: LinkWeapons rejects docked calls (CannotLinkWeaponsWhileDocked) and, once undocked,
+    // rejects mismatched weapon types or non-high-slot modules (InvalidWeaponGroup).
     seed_item(&ctx, 100_990_010, 2889, char_id, ship_id, InventoryFlag::HiSlot0, 1, true); // 200mm AutoCannon II
     seed_item(&ctx, 100_990_011, 439, char_id, ship_id, InventoryFlag::MedSlot0, 1, true); // 1MN Afterburner I
+    let docked_link = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "LinkWeapons",
+            &[
+                PyRep::Integer(ship_id),
+                PyRep::Integer(100_990_010),
+                PyRep::Integer(100_990_011),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Linking weapons while docked must fail");
+    assert_eq!(docked_link.code, "CannotLinkWeaponsWhileDocked");
+
+    // 3. Undock into space, validate InvalidWeaponGroup, and verify GetTargeters returns locking balls.
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
     let bad_link = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1467,11 +1490,6 @@ async fn test_r2_track2_dogma_fitting_overload_targeters_and_weapons() {
         .await
         .expect_err("Linking high-slot weapon with med-slot module must fail");
     assert_eq!(bad_link.code, "InvalidWeaponGroup");
-
-    // 3. #95: GetTargeters returns balls locking the active ship in space
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock");
     let sys = ctx.systems.get_or_spawn(30_000_142);
     let attacker_ball_id = 990_990_001i64;
     sys.spawn_ball_with_combat(

@@ -229,7 +229,7 @@ fn drain_sys_rx_discarding_up_to_seq(
     watermark_seq: u64,
     post_batches: &mut Vec<crate::outbound_sequencer::DestinyBatch>,
 ) -> bool {
-    let mut saw_post_watermark = false;
+    let mut saw_post_cutoff = false;
     let mut pending_lag = false;
     let mut post_loss = false;
     loop {
@@ -250,7 +250,7 @@ fn drain_sys_rx_discarding_up_to_seq(
                     pending_lag = false;
                 }
                 if tick_out.broadcast_seq > watermark_seq {
-                    saw_post_watermark = true;
+                    saw_post_cutoff = true;
                     if tick_out.solar_system_id == sys_id {
                         if let Some(batch) =
                             tick_broadcast_batch_for_observer(ctx, &tick_out, epoch, observer_ids)
@@ -262,7 +262,7 @@ fn drain_sys_rx_discarding_up_to_seq(
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
                 post_batches.clear();
-                if saw_post_watermark {
+                if saw_post_cutoff {
                     post_loss = true;
                     pending_lag = false;
                 } else {
@@ -293,29 +293,43 @@ struct ResyncedSetState {
     post_batches: Vec<crate::outbound_sequencer::DestinyBatch>,
 }
 
-/// Pushes a fresh `SetState` snapshot for `ship_id`, drains it with its `watermark_seq`,
-/// and catches up `sys_rx` while checking `drain_sys_rx_discarding_up_to_seq` continuity.
-/// Retries boundedly if `sys_rx` suffers post-watermark lag during the resync; leaves `wire_state`
-/// in `AwaitingSetState` (`on_broadcast_lagged()`) and returns `None` if retries exhaust.
-async fn resync_set_state_with_sys_rx(
+async fn resync_set_state_with_sys_rx_with_mode(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
     sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
     sys_id: u32,
-    ship_id: i64,
+    observer_ball_id: i64,
     observer_ids: &[i64],
     wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    shared_structure_observer: bool,
 ) -> Option<ResyncedSetState> {
     let ep = wire_state.current_epoch();
     for _ in 0..MAX_SET_STATE_RESYNC_ATTEMPTS {
-        let _ = sys_handle.push_set_state(ship_id).await;
-        let Ok((tick, events, updates_pyrep, watermark_seq)) =
-            sys_handle.drain_observer_updates_with_seq(ship_id).await
-        else {
-            wire_state.on_broadcast_lagged();
-            return None;
+        let (tick, events, updates_pyrep, watermark_seq) = if shared_structure_observer {
+            let Ok((tick, _state_kv, updates_pyrep, watermark_seq)) =
+                sys_handle.get_set_state_with_seq(observer_ball_id).await
+            else {
+                wire_state.on_broadcast_lagged();
+                return None;
+            };
+            (
+                tick,
+                vec![eve_destiny::DestinyEvent::SetState { observer_ball_id }],
+                updates_pyrep,
+                watermark_seq,
+            )
+        } else {
+            let _ = sys_handle.push_set_state(observer_ball_id).await;
+            let Ok(snapshot) = sys_handle
+                .drain_observer_updates_with_seq(observer_ball_id)
+                .await
+            else {
+                wire_state.on_broadcast_lagged();
+                return None;
+            };
+            sys_handle.record_warp_stops_from_events(&snapshot.1);
+            snapshot
         };
-        sys_handle.record_warp_stops_from_events(&events);
         let mut post_batches = Vec::new();
         if !drain_sys_rx_discarding_up_to_seq(
             ctx,
@@ -336,6 +350,58 @@ async fn resync_set_state_with_sys_rx(
     }
     wire_state.on_broadcast_lagged();
     None
+}
+
+/// Pushes a fresh `SetState` snapshot for `ship_id`, drains it with its `watermark_seq`,
+/// and catches up `sys_rx` while checking `drain_sys_rx_discarding_up_to_seq` continuity.
+/// Retries boundedly if `sys_rx` suffers post-watermark lag during the resync; leaves `wire_state`
+/// in `AwaitingSetState` (`on_broadcast_lagged()`) and returns `None` if retries exhaust.
+async fn resync_set_state_with_sys_rx(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
+    sys_id: u32,
+    ship_id: i64,
+    observer_ids: &[i64],
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+) -> Option<ResyncedSetState> {
+    resync_set_state_with_sys_rx_with_mode(
+        ctx,
+        sys_handle,
+        sys_rx,
+        sys_id,
+        ship_id,
+        observer_ids,
+        wire_state,
+        false,
+    )
+    .await
+}
+
+/// Non-destructively snapshots `SetState` and `broadcast_seq` for shared static structure
+/// observer `structure_id` (`#1461` F-2, F-1461-04) without enqueueing into or draining
+/// `observer_events[structure_id]`, so concurrent pilots viewing the same structure never steal
+/// each other's events or drop/replay same-tick broadcasts.
+async fn resync_structure_set_state_with_sys_rx(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
+    sys_id: u32,
+    structure_id: i64,
+    observer_ids: &[i64],
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+) -> Option<ResyncedSetState> {
+    resync_set_state_with_sys_rx_with_mode(
+        ctx,
+        sys_handle,
+        sys_rx,
+        sys_id,
+        structure_id,
+        observer_ids,
+        wire_state,
+        true,
+    )
+    .await
 }
 
 struct ShipSwapDestinySync {
@@ -803,6 +869,10 @@ fn ballpark_observer_id_for_session(session: &SessionState) -> Option<i64> {
         return None;
     }
     session.structure_id.or(session.ship_id).filter(|&id| id > 0)
+}
+
+fn is_shared_structure_observer(session: &SessionState, observer_id: i64) -> bool {
+    session.structure_id == Some(observer_id)
 }
 
 fn is_bootstrap_rpc(service: &str, method: &str, was_live: bool, in_space: bool) -> bool {
@@ -1278,6 +1348,29 @@ impl TickRxSlot<'_> {
     }
 }
 
+/// Clears View Outside wire/stream/guard state when a pilot releases their last `beyonce`
+/// binding while still structure-docked (`Enter Hangar`, `#1448` / `#1461`).
+fn detach_structure_view_outside_on_beyonce_release(
+    ctx: &ServerContext,
+    session_id: u64,
+    char_id: Option<i64>,
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    sys_rx: &mut TickRxSlot<'_>,
+    subscribed_sys_id: &mut Option<u32>,
+) {
+    sys_rx.detach();
+    *subscribed_sys_id = None;
+    wire_state.leave_space();
+    ctx.systems
+        .clear_explicit_update_state_guards_for_session(session_id);
+    ctx.clear_pending_structure_view_outside_set_state_for_session(session_id);
+    if let Some(cid) = char_id {
+        ctx.clear_space_ballpark_bootstrapped(cid);
+        crate::services::space_destiny::reset_update_state_rate_limit(ctx, session_id, cid);
+    }
+    ctx.flight_recorder.record_wire_state(wire_state);
+}
+
 struct InternalCallReqWireRefs<'a> {
     client_id: u64,
     sys_rx: TickRxSlot<'a>,
@@ -1493,6 +1586,9 @@ async fn execute_call_req_wire_inner(
         }
     }
     let prev_session = session.clone();
+    let owned_bound_service =
+        bound_id.and_then(|bid| ctx.owned_bound_service_for_metrics(session, bid));
+    let effective_service: &str = owned_bound_service.as_deref().unwrap_or(service);
     let pre_rpc_db_loc = session.character_id.and_then(|cid| {
         ctx.db.with_snapshot(|s| {
             s.characters.get(&cid).map(|c| {
@@ -1505,7 +1601,7 @@ async fn execute_call_req_wire_inner(
             })
         })
     });
-    if service == "beyonce" && method == "UpdateStateRequest" {
+    if effective_service == "beyonce" && method == "UpdateStateRequest" {
         let stream_live = !wire.wire_state.needs_initial_set_state();
         if !stream_live {
             if let Some(cid) = session.character_id {
@@ -1517,6 +1613,7 @@ async fn execute_call_req_wire_inner(
             }
         }
     }
+    let had_beyonce_before_rpc = ctx.has_bound_service(session.session_id, "beyonce");
     let rpc_res = crate::router::dispatch::with_active_rpc_call_id(
         call_id,
         ctx.dispatch_rpc(
@@ -1530,6 +1627,13 @@ async fn execute_call_req_wire_inner(
         ),
     )
     .await;
+    let pending_structure_set_state = session.character_id.and_then(|cid| {
+        crate::services::space_destiny::take_pending_structure_set_state(
+            ctx,
+            session.session_id,
+            cid,
+        )
+    });
     if session_owns_char_notifications(ctx, session) {
         if let Some(cid) = session.character_id {
             for notif in ctx.drain_notifications_for_char(cid) {
@@ -1556,7 +1660,7 @@ async fn execute_call_req_wire_inner(
             })
         })
     });
-    if service == "timeControl"
+    if effective_service == "timeControl"
         || post_rpc_db_loc != pre_rpc_db_loc
         || pre_rpc_notifs.iter().any(|n| n.event == "OnSessionChanged")
         || session
@@ -1565,6 +1669,27 @@ async fn execute_call_req_wire_inner(
             .any(|(ev, _)| ev == "OnSessionChanged")
     {
         ctx.sync_session(session);
+    }
+    // Only detach View Outside on post-RPC beyonce release when already docked in
+    // this structure; Space -> Structure Dock releases beyonce via "dock" transition
+    // and must keep destiny attached until the pre-dock DoDestinyUpdate drain runs.
+    if rpc_res.is_ok()
+        && had_beyonce_before_rpc
+        && !ctx.has_bound_service(session.session_id, "beyonce")
+        && session.character_id.is_some()
+        && prev_session.station_id.is_none()
+        && prev_session.structure_id == session.structure_id
+        && session.station_id.is_none()
+        && session.structure_id.is_some()
+    {
+        detach_structure_view_outside_on_beyonce_release(
+            ctx,
+            session.session_id,
+            session.character_id,
+            wire.wire_state,
+            &mut wire.sys_rx,
+            wire.subscribed_sys_id,
+        );
     }
 
     let owns_char_session = session_owns_char_notifications(ctx, session);
@@ -1589,7 +1714,8 @@ async fn execute_call_req_wire_inner(
         && session.structure_id.is_some()
         && session.solar_system_id.is_some();
     let is_beyonce_ballpark_rpc = method == "UpdateStateRequest"
-        || (service == "beyonce" && (method == "MachoBindObject" || method == "GetFormations"));
+        || (effective_service == "beyonce"
+            && (method == "MachoBindObject" || method == "GetFormations"));
     let is_structure_view_outside = is_structure_docked
         && ((prev_structure_view_outside
             && prev_session.station_id.is_none()
@@ -1598,8 +1724,13 @@ async fn execute_call_req_wire_inner(
             || (is_beyonce_ballpark_rpc && rpc_res.is_ok()));
     let is_in_space = is_undocked_space || is_structure_view_outside;
     let is_upwell_undock = rpc_res.is_ok()
-        && prev_session.structure_id.is_some()
-        && is_undocked_space;
+        && matches!(
+            (effective_service, method),
+            ("ship" | "structureDocking" | "stationSvc", "Undock")
+        )
+        && prev_structure_view_outside
+        && is_undocked_space
+        && session.solar_system_id == prev_session.solar_system_id;
     let target_sys_id = is_in_space.then_some(session.solar_system_id).flatten();
     let mut cross_sys_pre_ticks = Vec::new();
     let mut cross_sys_pre_destiny = None;
@@ -1624,42 +1755,48 @@ async fn execute_call_req_wire_inner(
                 ballpark_observer_id_for_session(&prev_session)
                     .or_else(|| ballpark_observer_id_for_session(session)),
             ) {
-                let old_handle = ctx.systems.get_or_spawn(old_sys_id);
-                if let Ok((tick, obs_evs, updates_pyrep, watermark_seq)) =
-                    old_handle.drain_observer_updates_with_seq(old_obs_id).await
-                {
-                    old_handle.record_warp_stops_from_events(&obs_evs);
-                    let mut ignored_post = Vec::new();
-                    let (ep, live_ok) = if let Some(sys_rx) = wire.sys_rx.as_mut() {
-                        drain_pending_tick_batches_for_sys_with_watermark(
-                            ctx,
-                            sys_rx,
-                            old_sys_id,
-                            &[old_obs_id],
-                            wire.wire_state,
-                            Some(watermark_seq),
-                            &mut cross_sys_pre_ticks,
-                            &mut ignored_post,
-                            session.session_id,
-                        )
-                    } else {
-                        (wire.wire_state.current_epoch(), true)
-                    };
-                    if live_ok {
-                        cross_sys_pre_destiny = build_destiny_batch(
-                            ctx,
-                            ep,
-                            tick,
-                            &obs_evs,
-                            updates_pyrep,
-                            &[old_obs_id],
-                            SelfDestinyWireContext::NonDock,
-                        );
-                    } else {
-                        cross_sys_pre_ticks.clear();
+                if is_shared_structure_observer(&prev_session, old_obs_id) {
+                    if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                        let _ = drain_sys_rx_discarding_lag(sys_rx);
                     }
-                } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
-                    let _ = drain_sys_rx_discarding_lag(sys_rx);
+                } else {
+                    let old_handle = ctx.systems.get_or_spawn(old_sys_id);
+                    if let Ok((tick, obs_evs, updates_pyrep, watermark_seq)) =
+                        old_handle.drain_observer_updates_with_seq(old_obs_id).await
+                    {
+                        old_handle.record_warp_stops_from_events(&obs_evs);
+                        let mut ignored_post = Vec::new();
+                        let (ep, live_ok) = if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                            drain_pending_tick_batches_for_sys_with_watermark(
+                                ctx,
+                                sys_rx,
+                                old_sys_id,
+                                &[old_obs_id],
+                                wire.wire_state,
+                                Some(watermark_seq),
+                                &mut cross_sys_pre_ticks,
+                                &mut ignored_post,
+                                session.session_id,
+                            )
+                        } else {
+                            (wire.wire_state.current_epoch(), true)
+                        };
+                        if live_ok {
+                            cross_sys_pre_destiny = build_destiny_batch(
+                                ctx,
+                                ep,
+                                tick,
+                                &obs_evs,
+                                updates_pyrep,
+                                &[old_obs_id],
+                                SelfDestinyWireContext::NonDock,
+                            );
+                        } else {
+                            cross_sys_pre_ticks.clear();
+                        }
+                    } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                        let _ = drain_sys_rx_discarding_lag(sys_rx);
+                    }
                 }
             }
         }
@@ -1672,6 +1809,7 @@ async fn execute_call_req_wire_inner(
         {
             ctx.systems
                 .clear_explicit_update_state_guards_for_session(session.session_id);
+            ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
         }
         if let Some(new_sys) = target_sys_id {
             wire.sys_rx.attach(ctx, new_sys);
@@ -1692,6 +1830,7 @@ async fn execute_call_req_wire_inner(
         if is_upwell_undock {
             ctx.systems
                 .clear_explicit_update_state_guards_for_session(session.session_id);
+            ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
         }
         // Drain any pre-bind 1Hz ticks buffered in `sys_rx` between `SelectCharacterID` /
         // `View Outside` and `beyonce.MachoBindObject` / `UpdateStateRequest` / Upwell `Undock`
@@ -1707,12 +1846,12 @@ async fn execute_call_req_wire_inner(
         }
     }
 
-    let bootstrap_phase = crate::ops_telemetry::classify_bootstrap_phase(service, method);
+    let bootstrap_phase = crate::ops_telemetry::classify_bootstrap_phase(effective_service, method);
     let bootstrap_elapsed_ms = bootstrap_phase.map(|phase| {
         let elapsed_ms = call_started_at.elapsed().as_millis() as u64;
         crate::ops_telemetry::record_bootstrap_timing(crate::ops_telemetry::BootstrapPacketTiming {
             phase: phase.to_string(),
-            service: service.to_string(),
+            service: effective_service.to_string(),
             method: method.to_string(),
             session_id: session.session_id,
             character_id: session.character_id,
@@ -1727,7 +1866,7 @@ async fn execute_call_req_wire_inner(
         req_dest,
         session.user_id,
         session.character_id,
-        service,
+        effective_service,
         method,
         rpc_res,
     );
@@ -1755,7 +1894,9 @@ async fn execute_call_req_wire_inner(
             if let Some(old_sys_id) = prev_session.solar_system_id.or(session.solar_system_id) {
                 let sys_handle = ctx.systems.get_or_spawn(old_sys_id);
                 if let Some(old_obs_id) = ballpark_observer_id_for_session(&prev_session) {
-                    let _ = sys_handle.drain_observer_updates(old_obs_id).await;
+                    if !is_shared_structure_observer(&prev_session, old_obs_id) {
+                        let _ = sys_handle.drain_observer_updates(old_obs_id).await;
+                    }
                 }
             }
         } else if let (Some(sys_id), Some(obs_id)) = (
@@ -1763,46 +1904,70 @@ async fn execute_call_req_wire_inner(
             ballpark_observer_id_for_session(&prev_session)
                 .or_else(|| ballpark_observer_id_for_session(session)),
         ) {
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            if let Ok((tick, obs_evs, updates_pyrep, watermark_seq)) =
-                sys_handle.drain_observer_updates_with_seq(obs_id).await
-            {
-                let mut ignored_post = Vec::new();
-                let (ep, live_ok) = if matches!(wire.wire_state.destiny, DestinyStream::Live { .. })
-                {
+            if is_shared_structure_observer(&prev_session, obs_id) {
+                if matches!(wire.wire_state.destiny, DestinyStream::Live { .. }) {
                     if let Some(sys_rx) = wire.sys_rx.as_mut() {
-                        drain_pending_tick_batches_for_sys_with_watermark(
+                        let mut ignored_post = Vec::new();
+                        let (_ep, live_ok) = drain_pending_tick_batches_for_sys_with_watermark(
                             ctx,
                             sys_rx,
                             sys_id,
                             &[obs_id],
                             wire.wire_state,
-                            Some(watermark_seq),
+                            None,
                             &mut pre_dock_ticks,
                             &mut ignored_post,
                             session.session_id,
-                        )
+                        );
+                        if !live_ok {
+                            pre_dock_ticks.clear();
+                        }
+                    }
+                } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                    let _ = drain_sys_rx_discarding_lag(sys_rx);
+                }
+            } else {
+                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                if let Ok((tick, obs_evs, updates_pyrep, watermark_seq)) =
+                    sys_handle.drain_observer_updates_with_seq(obs_id).await
+                {
+                    let mut ignored_post = Vec::new();
+                    let (ep, live_ok) =
+                        if matches!(wire.wire_state.destiny, DestinyStream::Live { .. }) {
+                            if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                                drain_pending_tick_batches_for_sys_with_watermark(
+                                    ctx,
+                                    sys_rx,
+                                    sys_id,
+                                    &[obs_id],
+                                    wire.wire_state,
+                                    Some(watermark_seq),
+                                    &mut pre_dock_ticks,
+                                    &mut ignored_post,
+                                    session.session_id,
+                                )
+                            } else {
+                                (wire.wire_state.current_epoch(), true)
+                            }
+                        } else {
+                            if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                                let _ = drain_sys_rx_discarding_lag(sys_rx);
+                            }
+                            (wire.wire_state.current_epoch(), true)
+                        };
+                    if live_ok {
+                        pre_dock_destiny = build_destiny_batch(
+                            ctx,
+                            ep,
+                            tick,
+                            &obs_evs,
+                            updates_pyrep,
+                            &[obs_id],
+                            SelfDestinyWireContext::DockSettle,
+                        );
                     } else {
-                        (wire.wire_state.current_epoch(), true)
+                        pre_dock_ticks.clear();
                     }
-                } else {
-                    if let Some(sys_rx) = wire.sys_rx.as_mut() {
-                        let _ = drain_sys_rx_discarding_lag(sys_rx);
-                    }
-                    (wire.wire_state.current_epoch(), true)
-                };
-                if live_ok {
-                    pre_dock_destiny = build_destiny_batch(
-                        ctx,
-                        ep,
-                        tick,
-                        &obs_evs,
-                        updates_pyrep,
-                        &[obs_id],
-                        SelfDestinyWireContext::DockSettle,
-                    );
-                } else {
-                    pre_dock_ticks.clear();
                 }
             }
         }
@@ -1879,10 +2044,70 @@ async fn execute_call_req_wire_inner(
                 .or_else(|| ballpark_observer_id_for_session(&prev_session)),
         ) {
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            // Drain observer events atomically with the system's broadcast sequence watermark
-            // FIRST, then drain `sys_rx` splitting `broadcast_seq <= watermark_seq` before the
-            // direct drain and `broadcast_seq > watermark_seq` after it (`GH #1172`).
-            if let Ok((mut tick, mut obs_evs, mut updates_pyrep, watermark_seq)) =
+            if is_shared_structure_observer(session, observer_id)
+                || is_shared_structure_observer(&prev_session, observer_id)
+            {
+                let lookup_ids = std::slice::from_ref(&observer_id);
+                let force_structure_refresh = pending_structure_set_state == Some(observer_id);
+                if effective_was_live && !force_structure_refresh {
+                    if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                        let (_ep, next_live) = drain_pending_tick_batches_for_sys_with_watermark(
+                            ctx,
+                            sys_rx,
+                            sys_id,
+                            lookup_ids,
+                            wire.wire_state,
+                            None,
+                            &mut pending_tick_batches,
+                            &mut post_drain_tick_batches,
+                            session.session_id,
+                        );
+                        effective_was_live = next_live;
+                    }
+                }
+                if !effective_was_live || force_structure_refresh {
+                    if force_structure_refresh {
+                        pending_tick_batches.clear();
+                    }
+                    let allow_structure_resync = !is_structure_docked
+                        || session.character_id.is_some_and(|cid| {
+                            ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
+                        });
+                    post_drain_tick_batches.clear();
+                    if !allow_structure_resync {
+                        wire.wire_state.leave_space();
+                        wire.sys_rx.detach();
+                        *wire.subscribed_sys_id = None;
+                    } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                        let ep = wire.wire_state.current_epoch();
+                        if let Some(resynced) = resync_structure_set_state_with_sys_rx(
+                            ctx,
+                            &sys_handle,
+                            sys_rx,
+                            sys_id,
+                            observer_id,
+                            lookup_ids,
+                            wire.wire_state,
+                        )
+                        .await
+                        {
+                            post_drain_tick_batches = resynced.post_batches;
+                            post_rpc_direct_batch = build_destiny_batch(
+                                ctx,
+                                ep,
+                                resynced.tick,
+                                &resynced.events,
+                                resynced.updates_pyrep,
+                                lookup_ids,
+                                SelfDestinyWireContext::NonDock,
+                            );
+                        }
+                    }
+                }
+            } else if let Ok((mut tick, mut obs_evs, mut updates_pyrep, watermark_seq)) =
+                // Drain observer events atomically with the system's broadcast sequence watermark
+                // FIRST, then drain `sys_rx` splitting `broadcast_seq <= watermark_seq` before the
+                // direct drain and `broadcast_seq > watermark_seq` after it (`GH #1172`).
                 sys_handle.drain_observer_updates_with_seq(observer_id).await
             {
                 sys_handle.record_warp_stops_from_events(&obs_evs);
@@ -2032,6 +2257,7 @@ async fn execute_call_req_wire_inner(
     if !is_in_space {
         ctx.systems
             .clear_explicit_update_state_guards_for_session(session.session_id);
+        ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
     }
     if (!is_in_space || post_rpc_charsel_pending)
         && wire.sys_rx.needs_detach(*wire.subscribed_sys_id)
@@ -2103,7 +2329,7 @@ async fn execute_call_req_wire_inner(
     let is_docked = session.station_id.or(session.structure_id).is_some();
     let item_change_before_session_change = was_docked
         && is_docked
-        && service == "ship"
+        && effective_service == "ship"
         && matches!(
             method,
             "Board" | "BoardStoredShip" | "LeaveShip" | "Eject" | "AssembleShip"
@@ -2142,12 +2368,12 @@ async fn execute_call_req_wire_inner(
     }
     let req_elapsed_micros = call_started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
     let bootstrap = is_bootstrap_rpc(
-        service,
+        effective_service,
         method,
         was_live_before_rpc,
         session.solar_system_id.is_some() && session.station_id.is_none() && session.structure_id.is_none(),
     );
-    let reason_tag = format!("{service}.{method}");
+    let reason_tag = format!("{effective_service}.{method}");
     record_sequencer_events(
         ctx,
         session.session_id,
@@ -2173,7 +2399,7 @@ async fn execute_call_req_wire_inner(
         tracing::debug!(
             target: "packet_perf",
             session_id = session.session_id,
-            service = %service,
+            service = %effective_service,
             method = %method,
             elapsed_micros = req_elapsed_micros,
             out_frame_count = out_frames.len(),
@@ -2585,6 +2811,7 @@ async fn handle_safe_logoff_to_charsel<W: AsyncWriteExt + Unpin>(
     wire.wire_state.leave_space();
     ctx.systems
         .clear_explicit_update_state_guards_for_session(session.session_id);
+    ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
     // Drop the solar-system tick broadcast receiver immediately so `event_tx.receiver_count()`
     // decrements to 0 and LOD-0 solar-system hibernation is not blocked (`#1237` / `HP-10`).
     *wire.sys_rx = None;
@@ -2699,6 +2926,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
             self.0
                 .systems
                 .clear_explicit_update_state_guards_for_session(self.1);
+            self.0
+                .clear_pending_structure_view_outside_set_state_for_session(self.1);
         }
     }
     let _explicit_update_state_cleanup =
@@ -2952,17 +3181,30 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 (session.solar_system_id, session_obs_id, sys_rx.as_mut())
                             {
                                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                                if let Some(resynced) = resync_set_state_with_sys_rx(
-                                    &ctx,
-                                    &sys_handle,
-                                    rx,
-                                    sys_id,
-                                    observer_id,
-                                    &[observer_id],
-                                    &mut wire_state,
-                                )
-                                .await
-                                {
+                                let resynced_opt = if is_shared_structure_observer(&session, observer_id) {
+                                    resync_structure_set_state_with_sys_rx(
+                                        &ctx,
+                                        &sys_handle,
+                                        rx,
+                                        sys_id,
+                                        observer_id,
+                                        &[observer_id],
+                                        &mut wire_state,
+                                    )
+                                    .await
+                                } else {
+                                    resync_set_state_with_sys_rx(
+                                        &ctx,
+                                        &sys_handle,
+                                        rx,
+                                        sys_id,
+                                        observer_id,
+                                        &[observer_id],
+                                        &mut wire_state,
+                                    )
+                                    .await
+                                };
+                                if let Some(resynced) = resynced_opt {
                                     if session_owns_char_notifications(&ctx, &session) {
                                         let ep = wire_state.current_epoch();
                                         let write_failed = if let Some(batch) = build_destiny_batch(
@@ -3145,11 +3387,16 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     let old_sys = ctx.systems.get_or_spawn(old_sys_id);
                                     if session_owns_char_notifications(&ctx, &session) {
                                         if let Some(old_obs_id) = prev_obs_id {
-                                            // Discard stale old-system observer updates (e.g. pod
-                                            // TerminalExplosion / RemoveBall / SetState) on async
-                                            // DeathRespawn (#1010) before SessionChangeNotification
-                                            // tears down the client ballpark via OnPrimaryViewChanged.
-                                            let _ = old_sys.drain_observer_updates(old_obs_id).await;
+                                            if !is_shared_structure_observer(&prev_session, old_obs_id)
+                                            {
+                                                // Discard stale old-system observer updates (e.g. pod
+                                                // TerminalExplosion / RemoveBall / SetState) on async
+                                                // DeathRespawn (#1010) before SessionChangeNotification
+                                                // tears down the client ballpark via OnPrimaryViewChanged.
+                                                let _ = old_sys
+                                                    .drain_observer_updates(old_obs_id)
+                                                    .await;
+                                            }
                                         }
                                         if session_owns_char_notifications(&ctx, &session) {
                                             let _ = old_sys
@@ -3165,9 +3412,12 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             wire_state.leave_space();
                             ctx.systems
                                 .clear_explicit_update_state_guards_for_session(session_id);
+                            ctx.clear_pending_structure_view_outside_set_state_for_session(
+                                session_id,
+                            );
                             ctx.flight_recorder.record_wire_state(&wire_state);
                             if let Some(new_sys) = target_sys_id {
-                                if sys_changed {
+                                if sys_changed || structure_mode_changed {
                                     sys_rx = Some(ctx.systems.get_or_spawn(new_sys).subscribe());
                                     subscribed_sys_id = Some(new_sys);
                                 }
@@ -3702,8 +3952,26 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     }
                 }
 
-                let (_released_cnt, is_dedicated_release_notif) =
+                let had_beyonce_before_release = ctx.has_bound_service(session_id, "beyonce");
+                let (released_cnt, is_dedicated_release_notif) =
                     ctx.process_client_bound_object_releases(session_id, &pkt);
+                if released_cnt > 0
+                    && had_beyonce_before_release
+                    && !ctx.has_bound_service(session_id, "beyonce")
+                    && session.character_id.is_some()
+                    && session.station_id.is_none()
+                    && session.structure_id.is_some()
+                {
+                    let mut sys_rx_slot = TickRxSlot::Optional(&mut sys_rx);
+                    detach_structure_view_outside_on_beyonce_release(
+                        &ctx,
+                        session_id,
+                        session.character_id,
+                        &mut wire_state,
+                        &mut sys_rx_slot,
+                        &mut subscribed_sys_id,
+                    );
+                }
                 if is_dedicated_release_notif {
                     continue;
                 }
@@ -3774,10 +4042,12 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         let (bound_id, method, call_args, call_kwargs) =
                             extract_macho_call_req(&pkt.payload);
                         let dock_plan = if session_owns_char_notifications(&ctx, &session) {
+                            let effective_dock_service = bound_id
+                                .and_then(|bid| ctx.owned_bound_service_for_metrics(&session, bid));
                             crate::services::space_warp_jump::prepare_dock_warp_settle(
                                 &ctx,
                                 &session,
-                                &service,
+                                effective_dock_service.as_deref().unwrap_or(&service),
                                 &method,
                                 &call_args,
                             )
@@ -4072,6 +4342,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     ctx.flight_recorder.remove_session_telemetry(session_id);
     ctx.systems
         .clear_explicit_update_state_guards_for_session(session_id);
+    ctx.clear_pending_structure_view_outside_set_state_for_session(session_id);
     ctx.cleanup_disconnected_client_session(&mut session).await;
     crate::lifecycle::set_open_sessions(ctx.db.online_session_count() as usize);
 
@@ -4502,6 +4773,7 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
         wire.wire_state.leave_space();
         ctx.systems
             .clear_explicit_update_state_guards_for_session(session.session_id);
+        ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
     }
     if !is_in_space {
         if wire.subscribed_sys_id.is_some() {

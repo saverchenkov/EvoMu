@@ -1049,6 +1049,13 @@ pub(super) fn restore_asteroid_from_template(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReconcileBeltAction {
+    RespawnNow,
+    WaitUntil(u64),
+    ScheduleNew(u64),
+}
+
 pub(super) fn reconcile_spawned_belt_asteroids(
     ballpark: &mut Ballpark,
     solar_system_id: SolarSystemId,
@@ -1059,31 +1066,106 @@ pub(super) fn reconcile_spawned_belt_asteroids(
     belt_interval_secs: u64,
     downtime_utc_secs: u64,
 ) -> Vec<AsteroidState> {
-    let existing_qtys: HashMap<i64, i64> = if let Some(db) = db_opt {
-        db.with_snapshot(|snap| {
-            spawned
+    let (existing_qtys, persisted_due, now_unix): (
+        HashMap<i64, i64>,
+        HashMap<i64, u64>,
+        u64,
+    ) = if let Some(db) = db_opt {
+        let now_unix = db.clock().now_unix_secs();
+        let (qtys, due) = db.with_snapshot(|snap| {
+            let qtys = spawned
                 .iter()
                 .filter_map(|ast| {
                     snap.asteroids
                         .get(&ast.asteroid_id)
                         .map(|rec| (ast.asteroid_id, rec.quantity))
                 })
-                .collect()
-        })
+                .collect();
+            let due = snap.mining_and_ess_state.belt_respawn_due_unix.clone();
+            (qtys, due)
+        });
+        (qtys, due, now_unix)
     } else {
-        HashMap::new()
+        (HashMap::new(), HashMap::new(), 0)
     };
+
+    let mut belt_ids: Vec<BallId> = spawned
+        .iter()
+        .filter(|ast| ast.belt_id > 0)
+        .map(|ast| ast.belt_id)
+        .collect();
+    belt_ids.sort_unstable();
+    belt_ids.dedup();
+
+    let mut belt_actions: HashMap<BallId, ReconcileBeltAction> = HashMap::new();
+    let mut persist_due_belts: Vec<(BallId, u64)> = Vec::new();
+    let mut clear_due_belts: Vec<BallId> = Vec::new();
+    if db_opt.is_some() {
+        for belt_id in belt_ids {
+            let belt_empty_in_db = spawned
+                .iter()
+                .filter(|a| a.belt_id == belt_id)
+                .all(|a| existing_qtys.get(&a.asteroid_id).is_some_and(|&qty| qty <= 0));
+            if belt_empty_in_db {
+                match persisted_due.get(&belt_id).copied() {
+                    Some(due_unix) if now_unix >= due_unix => {
+                        belt_actions.insert(belt_id, ReconcileBeltAction::RespawnNow);
+                        clear_due_belts.push(belt_id);
+                    }
+                    Some(due_unix) => {
+                        belt_actions.insert(belt_id, ReconcileBeltAction::WaitUntil(due_unix));
+                    }
+                    None => {
+                        let due_unix = next_downtime_unix_secs(
+                            now_unix,
+                            belt_interval_secs,
+                            downtime_utc_secs,
+                        );
+                        belt_actions.insert(belt_id, ReconcileBeltAction::ScheduleNew(due_unix));
+                        persist_due_belts.push((belt_id, due_unix));
+                    }
+                }
+            } else if persisted_due.contains_key(&belt_id) {
+                clear_due_belts.push(belt_id);
+            }
+        }
+    }
+
     let mut to_spawn: Vec<eve_db::AsteroidRecord> = Vec::new();
+    let mut to_respawn: Vec<eve_db::AsteroidRecord> = Vec::new();
     let mut populated = Vec::new();
     for mut ast in spawned {
         if let Some(ball) = ballpark.balls.get(&ast.asteroid_id).cloned() {
             asteroid_templates.insert(ast.asteroid_id, (ast.clone(), ball.clone()));
             if db_opt.is_some() {
-                if let Some(&existing_qty) = existing_qtys.get(&ast.asteroid_id) {
+                let belt_action = belt_actions.get(&ast.belt_id).copied();
+                if matches!(belt_action, Some(ReconcileBeltAction::RespawnNow)) {
+                    let init_qty = i64::try_from(ast.initial_units).unwrap_or(i64::MAX);
+                    ast.remaining_units = ast.initial_units;
+                    ast.depleted = false;
+                    ast.respawn_at_tick = None;
+                    to_respawn.push(eve_db::AsteroidRecord {
+                        asteroid_id: ast.asteroid_id,
+                        belt_id: ast.belt_id,
+                        type_id: ast.type_id,
+                        solar_system_id,
+                        position: (ball.position.x, ball.position.y, ball.position.z),
+                        quantity: init_qty,
+                        initial_quantity: init_qty,
+                        radius: ball.radius,
+                    });
+                } else if let Some(&existing_qty) = existing_qtys.get(&ast.asteroid_id) {
                     if existing_qty <= 0 {
                         ast.remaining_units = 0;
                         ast.depleted = true;
                         let _ = ballpark.remove_ball(ast.asteroid_id);
+                        if let Some(
+                            ReconcileBeltAction::WaitUntil(due_unix)
+                            | ReconcileBeltAction::ScheduleNew(due_unix),
+                        ) = belt_action
+                        {
+                            ast.respawn_at_tick = Some(due_unix);
+                        }
                     } else {
                         ast.remaining_units = existing_qty as u64;
                     }
@@ -1106,40 +1188,29 @@ pub(super) fn reconcile_spawned_belt_asteroids(
         }
     }
     if let Some(db) = db_opt {
-        if !to_spawn.is_empty() {
+        if !to_spawn.is_empty()
+            || !to_respawn.is_empty()
+            || !persist_due_belts.is_empty()
+            || !clear_due_belts.is_empty()
+        {
             db.with_mut_snapshot(|snap| {
                 for record in to_spawn {
                     snap.asteroids.entry(record.asteroid_id).or_insert(record);
                 }
+                for record in to_respawn {
+                    snap.asteroids.insert(record.asteroid_id, record);
+                }
+                for (belt_id, due_unix) in persist_due_belts {
+                    snap.mining_and_ess_state
+                        .belt_respawn_due_unix
+                        .insert(belt_id, due_unix);
+                }
+                for belt_id in clear_due_belts {
+                    snap.mining_and_ess_state
+                        .belt_respawn_due_unix
+                        .remove(&belt_id);
+                }
             });
-        }
-    }
-    if let Some(db) = db_opt {
-        let due_unix = next_downtime_unix_secs(
-            db.clock().now_unix_secs(),
-            belt_interval_secs,
-            downtime_utc_secs,
-        );
-        let mut belt_ids: Vec<BallId> = asteroid_templates
-            .values()
-            .filter(|(a, _)| a.belt_id > 0)
-            .map(|(a, _)| a.belt_id)
-            .collect();
-        belt_ids.sort_unstable();
-        belt_ids.dedup();
-        for belt_id in belt_ids {
-            let belt_empty = asteroids
-                .values()
-                .filter(|a| a.belt_id == belt_id)
-                .all(|a| a.remaining_units == 0);
-            if belt_empty {
-                for a in asteroids.values_mut().filter(|a| a.belt_id == belt_id) {
-                    a.respawn_at_tick = Some(due_unix);
-                }
-                for a in populated.iter_mut().filter(|a| a.belt_id == belt_id) {
-                    a.respawn_at_tick = Some(due_unix);
-                }
-            }
         }
     }
     populated
@@ -1176,6 +1247,7 @@ pub(super) fn respawn_due_asteroids(
                 })
             });
         if belt_empty_and_due {
+            let mut restored_records = Vec::new();
             for (&id, (orig_ast, orig_ball)) in asteroid_templates {
                 if orig_ast.belt_id == belt_id {
                     restore_asteroid_from_template(
@@ -1187,24 +1259,30 @@ pub(super) fn respawn_due_asteroids(
                         sde_opt,
                     );
                     let init_qty = i64::try_from(orig_ast.initial_units).unwrap_or(i64::MAX);
-                    db.with_mut_snapshot(|snap| {
-                        snap.asteroids.insert(
-                            id,
-                            eve_db::AsteroidRecord {
-                                asteroid_id: id,
-                                belt_id: orig_ast.belt_id,
-                                type_id: orig_ast.type_id,
-                                solar_system_id: ballpark.solar_system_id,
-                                position: (orig_ball.position.x, orig_ball.position.y, orig_ball.position.z),
-                                quantity: init_qty,
-                                initial_quantity: init_qty,
-                                radius: orig_ball.radius,
-                            },
-                        );
-                    });
+                    restored_records.push((
+                        id,
+                        eve_db::AsteroidRecord {
+                            asteroid_id: id,
+                            belt_id: orig_ast.belt_id,
+                            type_id: orig_ast.type_id,
+                            solar_system_id: ballpark.solar_system_id,
+                            position: (orig_ball.position.x, orig_ball.position.y, orig_ball.position.z),
+                            quantity: init_qty,
+                            initial_quantity: init_qty,
+                            radius: orig_ball.radius,
+                        },
+                    ));
                     respawned.push(id);
                 }
             }
+            db.with_mut_snapshot(|snap| {
+                for (id, record) in restored_records {
+                    snap.asteroids.insert(id, record);
+                }
+                snap.mining_and_ess_state
+                    .belt_respawn_due_unix
+                    .remove(&belt_id);
+            });
         }
     }
     respawned
@@ -1229,6 +1307,7 @@ pub(crate) fn respawn_depleted_belts_on_downtime_inner(
     belt_ids.dedup();
 
     let mut to_restore: Vec<BallId> = Vec::new();
+    let mut restored_belts: Vec<BallId> = Vec::new();
     for belt_id in belt_ids {
         let belt_fully_depleted = asteroid_templates
             .iter()
@@ -1239,6 +1318,7 @@ pub(crate) fn respawn_depleted_belts_on_downtime_inner(
                     .is_some_and(|a| a.remaining_units == 0 || a.depleted)
             });
         if belt_fully_depleted {
+            restored_belts.push(belt_id);
             for (&id, (orig_ast, _)) in asteroid_templates {
                 if orig_ast.belt_id == belt_id {
                     to_restore.push(id);
@@ -1289,6 +1369,17 @@ pub(crate) fn respawn_depleted_belts_on_downtime_inner(
             }
         }
     }
+    if let Some(db) = db_opt {
+        if !restored_belts.is_empty() {
+            db.with_mut_snapshot(|snap| {
+                for belt_id in restored_belts {
+                    snap.mining_and_ess_state
+                        .belt_respawn_due_unix
+                        .remove(&belt_id);
+                }
+            });
+        }
+    }
     count
 }
 
@@ -1329,35 +1420,46 @@ pub(super) fn handle_mine_asteroid(
             let remaining_units = ast.remaining_units;
             let ore_type_id = ast.type_id;
             let belt_id = ast.belt_id;
-            if persist_db || depleted {
+            let belt_fully_depleted = depleted
+                && belt_id > 0
+                && asteroids
+                    .values()
+                    .filter(|a| a.belt_id == belt_id)
+                    .all(|a| a.remaining_units == 0);
+            let belt_due_unix = if belt_fully_depleted {
+                db_opt.as_ref().map(|db| {
+                    let interval_secs =
+                        belt_interval_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                    let downtime_secs =
+                        downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                    next_downtime_unix_secs(
+                        db.clock().now_unix_secs(),
+                        interval_secs,
+                        downtime_secs,
+                    )
+                })
+            } else {
+                None
+            };
+            if persist_db || depleted || belt_due_unix.is_some() {
                 if let Some(db) = db_opt {
                     db.with_mut_snapshot(|snap| {
                         if let Some(a) = snap.asteroids.get_mut(&asteroid_id) {
                             a.quantity = i64::try_from(remaining_units).unwrap_or(0);
+                        }
+                        if let Some(due_unix) = belt_due_unix {
+                            snap.mining_and_ess_state
+                                .belt_respawn_due_unix
+                                .insert(belt_id, due_unix);
                         }
                     });
                 }
             }
             if depleted {
                 let _ = ballpark.remove_ball(asteroid_id);
-                let belt_fully_depleted = asteroids
-                    .values()
-                    .filter(|a| a.belt_id == belt_id)
-                    .all(|a| a.remaining_units == 0);
-                if belt_fully_depleted {
-                    if let Some(db) = db_opt {
-                        let interval_secs =
-                            belt_interval_atomic.load(std::sync::atomic::Ordering::Relaxed);
-                        let downtime_secs =
-                            downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed);
-                        let due_unix = next_downtime_unix_secs(
-                            db.clock().now_unix_secs(),
-                            interval_secs,
-                            downtime_secs,
-                        );
-                        for belt_ast in asteroids.values_mut().filter(|a| a.belt_id == belt_id) {
-                            belt_ast.respawn_at_tick = Some(due_unix);
-                        }
+                if let Some(due_unix) = belt_due_unix {
+                    for belt_ast in asteroids.values_mut().filter(|a| a.belt_id == belt_id) {
+                        belt_ast.respawn_at_tick = Some(due_unix);
                     }
                 }
             }

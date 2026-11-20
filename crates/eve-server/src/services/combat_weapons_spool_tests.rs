@@ -1017,3 +1017,203 @@ async fn handle_ship_or_npc_destruction_npc_wreck_populates_sde_type_name() {
         Some(&eve_proto::PyRep::String("Frigate Wreck".into()))
     );
 }
+
+#[tokio::test]
+async fn handle_link_all_weapons_atomic_guards_state_and_preserves_existing_banks() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_spool_test_ctx();
+    let other_ship_id = 749_100i64;
+    let mod1 = 749_201i64;
+    let mod2 = 749_202i64;
+    let mod_cargo = 749_203i64;
+    let other_mod1 = 749_204i64;
+    let other_mod2 = 749_205i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            other_ship_id,
+            make_fighter_item(other_ship_id, 587, char_id, i64::from(sys_id), InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            mod1,
+            make_fighter_item(mod1, 47_240, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            mod2,
+            make_fighter_item(mod2, 47_240, char_id, ship_id, InventoryFlag::HiSlot1, 1),
+        );
+        snap.items.insert(
+            mod_cargo,
+            make_fighter_item(mod_cargo, 47_240, char_id, ship_id, InventoryFlag::Cargo, 1),
+        );
+        snap.items.insert(
+            other_mod1,
+            make_fighter_item(other_mod1, 47_240, char_id, other_ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            other_mod2,
+            make_fighter_item(other_mod2, 47_240, char_id, other_ship_id, InventoryFlag::HiSlot1, 1),
+        );
+        snap.weapon_banks
+            .insert(ship_id, std::collections::HashMap::from([(mod1, vec![mod1, mod2])]));
+    });
+
+    let expected_banks = std::collections::HashMap::from([(mod1, vec![mod1, mod2])]);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = spawn_spool_ball(&ctx, sys_id, ship_id, 47_271, DVec3::ZERO, 1_000.0, 1_000.0, 1_000.0, 1_000.0).await;
+
+    // 1. TOCTOU DB docked (session still appears in space, DB character is docked in station).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = Some(60_003_760);
+    });
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    let err = handle_link_all_weapons_atomic(&ctx, Some(&session), char_id, ship_id, true)
+        .unwrap_err();
+    assert_eq!(err.code, "CannotLinkWeaponsWhileDocked");
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.weapon_banks.get(&ship_id), Some(&expected_banks));
+    });
+
+    // 2. TOCTOU ship stored in station while DB character appears undocked.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = None;
+        snap.items.get_mut(&ship_id).unwrap().location_id = 60_003_760;
+    });
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    assert_eq!(
+        handle_link_all_weapons(&ctx, char_id, ship_id).unwrap_err().code,
+        "CannotLinkWeaponsWhileDocked"
+    );
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+
+    // 3. Session docked even when DB ship/character are in space.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().location_id = i64::from(sys_id);
+    });
+    session.structure_id = Some(1_000_000_000_001);
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    assert_eq!(
+        handle_link_all_weapons_atomic(&ctx, Some(&session), char_id, ship_id, true)
+            .unwrap_err()
+            .code,
+        "CannotLinkWeaponsWhileDocked"
+    );
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+    session.structure_id = None;
+
+    // 4. Non-active owned ship is rejected atomically.
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    assert_eq!(
+        handle_link_all_weapons(&ctx, char_id, other_ship_id).unwrap_err().code,
+        "ShipNotActive"
+    );
+    assert_eq!(
+        handle_link_all_weapons_atomic(&ctx, Some(&session), char_id, other_ship_id, true)
+            .unwrap_err()
+            .code,
+        "ShipNotActive"
+    );
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+
+    // 5. Cloaked and gate-cloaked states fail without mutating banks.
+    sys.modify_combat_state(ship_id, |cs| cs.is_cloaked = true).await.unwrap();
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    assert_eq!(
+        handle_link_all_weapons_atomic(&ctx, Some(&session), char_id, ship_id, true)
+            .unwrap_err()
+            .code,
+        "CannotLinkWeaponsWhileCloaked"
+    );
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+
+    sys.modify_combat_state(ship_id, |cs| {
+        cs.is_cloaked = false;
+        cs.gate_cloak_remaining_ticks = 10;
+    })
+    .await
+    .unwrap();
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    assert_eq!(
+        handle_link_all_weapons(&ctx, char_id, ship_id).unwrap_err().code,
+        "CannotLinkWeaponsWhileCloaked"
+    );
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+    sys.modify_combat_state(ship_id, |cs| cs.gate_cloak_remaining_ticks = 0)
+        .await
+        .unwrap();
+
+    // 6. With < 2 fitted weapons: require_linkable_pair=true rejects & preserves weapon_banks;
+    // require_linkable_pair=false clears stale banks cleanly.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod2).unwrap().flag = InventoryFlag::Cargo;
+    });
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    assert_eq!(
+        handle_link_all_weapons_atomic(&ctx, Some(&session), char_id, ship_id, true)
+            .unwrap_err()
+            .code,
+        "InvalidWeaponGroup"
+    );
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.weapon_banks.get(&ship_id), Some(&expected_banks));
+    });
+
+    let empty = handle_link_all_weapons(&ctx, char_id, ship_id).expect("require_linkable_pair=false clears stale bank");
+    assert_eq!(empty, eve_proto::PyRep::Dict(Vec::new()));
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.weapon_banks.get(&ship_id).is_none_or(std::collections::HashMap::is_empty));
+    });
+}
+
+#[tokio::test]
+async fn handle_link_all_weapons_atomic_excludes_offline_weapons() {
+    let (ctx, session, char_id, ship_id, sys_id) = make_spool_test_ctx();
+    let mod1 = 749_301i64;
+    let mod2 = 749_302i64;
+    let mod3 = 749_303i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod1,
+            make_fighter_item(mod1, 47_240, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            mod2,
+            make_fighter_item(mod2, 47_240, char_id, ship_id, InventoryFlag::HiSlot1, 1),
+        );
+        snap.items.insert(
+            mod3,
+            make_fighter_item(mod3, 47_240, char_id, ship_id, InventoryFlag::HiSlot2, 1),
+        );
+        snap.module_online_states.insert(mod1, true);
+        snap.module_online_states.insert(mod2, false);
+        snap.module_online_states.insert(mod3, false);
+    });
+    let _ = spawn_spool_ball(&ctx, sys_id, ship_id, 47_271, DVec3::ZERO, 1_000.0, 1_000.0, 1_000.0, 1_000.0).await;
+
+    // Only 1 online weapon -> require_linkable_pair=true rejects; require_linkable_pair=false stays empty.
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    assert_eq!(
+        handle_link_all_weapons_atomic(&ctx, Some(&session), char_id, ship_id, true)
+            .unwrap_err()
+            .code,
+        "InvalidWeaponGroup"
+    );
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+    let empty = handle_link_all_weapons(&ctx, char_id, ship_id).unwrap();
+    assert_eq!(empty, eve_proto::PyRep::Dict(Vec::new()));
+
+    // Bringing mod2 online links only [mod1, mod2] and excludes offline mod3.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(mod2, true);
+    });
+    handle_link_all_weapons_atomic(&ctx, Some(&session), char_id, ship_id, true)
+        .expect("two online identical weapons link");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.weapon_banks.get(&ship_id),
+            Some(&std::collections::HashMap::from([(mod1, vec![mod1, mod2])]))
+        );
+    });
+}

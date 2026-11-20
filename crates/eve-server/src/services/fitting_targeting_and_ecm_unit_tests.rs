@@ -180,11 +180,30 @@ async fn destroy_fitting_guards_subsystems_structures_and_weapon_groups() {
             .await
             .unwrap_err()
             .code,
-            "InvalidWeaponGroup"
+            "CannotLinkWeaponsWhileDocked"
         );
     }
 
     session.station_id = None;
+    for method in ["LinkWeapons", "PeelAndLink", "MergeModuleGroups"] {
+        assert_eq!(
+            call_char_fitting_mgr(
+                &ctx,
+                &mut session,
+                method,
+                &[
+                    PyRep::Integer(ship_id),
+                    PyRep::Integer(gun1_id),
+                    PyRep::Integer(diff_mod_id),
+                ],
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "InvalidWeaponGroup"
+        );
+    }
+
     let linked_all =
         call_char_fitting_mgr(&ctx, &mut session, "LinkAllWeapons", &[PyRep::Integer(ship_id)])
             .await
