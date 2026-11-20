@@ -5966,18 +5966,25 @@ def _execute_action(sm, action):
                                 except Exception:
                                     pass
                             if not getattr(w, "destroyed", False) and _is_visible(w):
+                                close_delegated_to_modal = False
                                 try:
                                     if hasattr(w, "CloseByUser"):
                                         w.CloseByUser()
+                                        if result.get("blocked_by_modal"):
+                                            close_delegated_to_modal = True
                                     elif hasattr(w, "Close"):
                                         w.Close()
                                 except Exception as close_exc:
                                     result["close_warning"] = _safe_str(repr(close_exc), 160)
+                                if close_delegated_to_modal or result.get("blocked_by_modal"):
+                                    continue
                             if not getattr(w, "destroyed", False):
                                 for _ in range(15):
-                                    if getattr(w, "destroyed", False):
+                                    if getattr(w, "destroyed", False) or result.get("blocked_by_modal"):
                                         break
                                     H._sleep_ms(10)
+                            if result.get("blocked_by_modal"):
+                                continue
                             if not getattr(w, "destroyed", False):
                                 try:
                                     if hasattr(w, "Close"):

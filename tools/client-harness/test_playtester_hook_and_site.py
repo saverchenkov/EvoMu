@@ -1584,6 +1584,90 @@ class TestHookModalReplacementDetection(unittest.TestCase):
         self.assertTrue(res.get("blocked_by_modal"), res)
         self.assertIsNone(res.get("error"), res)
 
+    def test_close_window_blocked_by_confirm_modal_does_not_force_close_when_user_clicks_no(self):
+        hook = _load_hook_with_py2_stubs()
+
+        class DiscardModal:
+            windowID = "message"
+            name = "modal"
+            isModal = True
+            destroyed = False
+            display = True
+
+        class DraftMailWnd:
+            windowID = "NewMessageWindow"
+            name = "newmessage"
+            caption = "New Message"
+            destroyed = False
+            display = True
+            close_calls = 0
+
+            def CloseByUser(self):
+                # Pop confirmation modal and block until user dismisses with No
+                active_windows.append(modal_wnd)
+                while not modal_wnd.destroyed:
+                    clock["t"] += 0.1
+                # User chose No: DraftMailWnd stays alive
+                return
+
+            def Close(self):
+                self.close_calls += 1
+                self.destroyed = True
+
+        draft_wnd = DraftMailWnd()
+        modal_wnd = DiscardModal()
+        active_windows = [draft_wnd]
+        deferred_workers = []
+
+        fake_registry = types.SimpleNamespace(GetWindows=lambda: list(active_windows))
+        fake_uicore = types.SimpleNamespace(registry=fake_registry, layer=None, cmd=None)
+        fake_sm = mock.MagicMock()
+
+        def fake_uthread_new(fn):
+            deferred_workers.append(fn)
+
+        clock = {"t": 1000.0}
+
+        def fake_time():
+            return clock["t"]
+
+        def fake_sleep_ms(ms):
+            clock["t"] += float(ms) / 1000.0
+
+        with mock.patch.dict(sys.modules, {"uthread": types.SimpleNamespace(new=fake_uthread_new)}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}), \
+             mock.patch.object(hook, "_is_visible", side_effect=lambda w: bool(getattr(w, "display", True))), \
+             mock.patch.object(hook.H, "_sleep_ms", side_effect=fake_sleep_ms, create=True), \
+             mock.patch.object(hook.time, "time", side_effect=fake_time), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_close_neocom_panels_if_outside"), \
+             mock.patch.object(hook, "_close_utilmenu_if_outside"), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside"):
+            # Simulated interactive pump: first call advances past 0.8s modal block;
+            # on first sleep after worker starts, spawn CloseByUser up to modal pop!
+            def drive_worker_sleep(ms):
+                fake_sleep_ms(ms)
+                if modal_wnd not in active_windows:
+                    active_windows.append(modal_wnd)
+
+            with mock.patch.object(hook.H, "_sleep_ms", side_effect=drive_worker_sleep, create=True):
+                res = hook._execute_action(fake_sm, {"type": "close_window", "target": "newmessage", "wait_ms": 250})
+
+            self.assertTrue(res.get("ok"), res)
+            self.assertTrue(res.get("blocked_by_modal"), res)
+            self.assertEqual(len(deferred_workers), 1)
+
+            # Now user clicks No: modal is dismissed BEFORE worker unwinds CloseByUser()
+            modal_wnd.destroyed = True
+            active_windows.remove(modal_wnd)
+            deferred_workers[0]()
+
+        self.assertEqual(draft_wnd.close_calls, 0, "blocked CloseByUser must not fall back to force Close() after user clicked No")
+        self.assertFalse(draft_wnd.destroyed)
+
 
 class TestHookClippedWidgetsAndTypeSubmit(unittest.TestCase):
     def test_find_widget_at_xy_and_inspect_skip_clipped_scroll_descendants(self):
