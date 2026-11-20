@@ -2160,3 +2160,165 @@ async fn npc_ai_killing_blow_on_special_fx_retains_wire_meta_across_next_tick_en
         }
     }
 }
+
+#[tokio::test]
+async fn belt_rat_sec_tiers_clone_soldier_exclusion_and_decoupled_slot_cooldowns() {
+    use std::collections::HashSet;
+
+    let ctx = test_ctx();
+    let find_sys = |pred: &dyn Fn(&eve_sde::SolarSystem) -> bool| -> u32 {
+        let mut ids: Vec<u32> = ctx
+            .sde
+            .solar_systems
+            .values()
+            .filter(|s| {
+                s.solar_system_id < 31_000_000
+                    && pred(s)
+                    && ctx.sde.celestials_in_system(s.solar_system_id).iter().filter(|c| c.group_id == 9).count() >= 3
+                    && ctx.sde.celestials_in_system(s.solar_system_id).iter().any(|c| c.group_id == 10)
+            })
+            .map(|s| s.solar_system_id)
+            .collect();
+        ids.sort_unstable();
+        ids[0]
+    };
+    let hs_sys = find_sys(&|s| {
+        s.security_status >= 0.45 && regional_pirate_faction_id(&ctx, s.solar_system_id) == 500_010
+    });
+    let ls_sys = find_sys(&|s| {
+        (0.05..0.45).contains(&s.security_status)
+            && regional_pirate_faction_id(&ctx, s.solar_system_id) == 500_010
+    });
+    let ns_sys = find_sys(&|s| {
+        s.security_status < 0.0 && regional_pirate_faction_id(&ctx, s.solar_system_id) == 500_010
+    });
+
+    let no_cs = |sg: &eve_sde::NpcSpawnGroupInfo| {
+        sg.npc_type_ids
+            .iter()
+            .all(|tid| !ctx.sde.types[tid].name.contains("Clone Soldier"))
+    };
+
+    // 1. High-sec: Frigate-only capped to 1 ship per belt and free of Clone Soldiers.
+    let mut mgr = NpcSpawnManager::new();
+    let (hs_plan, _) = mgr.plan_belt_rats_for_system(&ctx, hs_sys, false, None, true, true, true);
+    assert_eq!(hs_plan.len(), 3);
+    for (gid, sg, _) in &hs_plan {
+        assert!(ctx.sde.npc_spawn_groups[gid].group_name.contains("Frigate"));
+        assert_eq!(sg.npc_type_ids.len(), 1);
+        assert!(no_cs(sg));
+    }
+
+    // 2. Synthetic Clone Soldier exclusion even when npc_type_ids.len() <= squad_limit, plus high-sec Frigate lock.
+    let cs_tid = ctx
+        .sde
+        .types
+        .iter()
+        .find(|(_, t)| t.name.contains("Clone Soldier"))
+        .map(|(&tid, _)| tid)
+        .expect("SDE Clone Soldier type");
+    let normal_tid = 2_382u32; // Guristas Arrogator (Frigate)
+    let cruiser_tid = 2_387u32; // Guristas Silencer (Cruiser)
+    let mut syn_sde = (*ctx.sde).clone();
+    syn_sde.npc_spawn_groups.clear();
+    syn_sde.npc_spawn_groups.insert(
+        900_001,
+        eve_sde::NpcSpawnGroupInfo {
+            spawn_group_id: 900_001,
+            faction_id: 500_010,
+            ship_class: 1,
+            group_id: 562,
+            group_name: "Asteroid Guristas Frigate".to_string(),
+            npc_type_ids: vec![normal_tid],
+        },
+    );
+    syn_sde.npc_spawn_groups.insert(
+        900_002,
+        eve_sde::NpcSpawnGroupInfo {
+            spawn_group_id: 900_002,
+            faction_id: 500_010,
+            ship_class: 1,
+            group_id: 579,
+            group_name: "Asteroid Guristas Destroyer".to_string(),
+            npc_type_ids: vec![cruiser_tid, cs_tid], // len == 2 <= low-sec squad_limit (2)
+        },
+    );
+    let syn_ctx = ServerContext::with_sde_and_repository(
+        Arc::new(syn_sde),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    );
+    let mut syn_mgr = NpcSpawnManager::new();
+    let (syn_hs, _) = syn_mgr.plan_belt_rats_for_system(&syn_ctx, hs_sys, false, None, true, true, true);
+    assert_eq!(syn_hs.len(), 3);
+    assert!(syn_hs.iter().all(|(gid, sg, _)| *gid == 900_001 && sg.npc_type_ids == vec![normal_tid]));
+    let (syn_ls, _) = syn_mgr.plan_belt_rats_for_system(&syn_ctx, ls_sys, false, None, true, true, true);
+    let dest_spawn = syn_ls.iter().find(|(gid, _, _)| *gid == 900_002).expect("Destroyer slot in low-sec");
+    assert_eq!(dest_spawn.1.npc_type_ids, vec![cruiser_tid], "Clone Soldier must be retained out before truncation even when len <= limit");
+
+    // 3. Low-sec & Null-sec: distinct groups across belts + <0.45 stargate reaching Cruiser / Battlecruiser / Battleship.
+    let (ls_plan, _) = mgr.plan_belt_rats_for_system(&ctx, ls_sys, false, None, true, true, true);
+    assert_eq!(ls_plan.len(), 4);
+    let ls_gids: HashSet<u32> = ls_plan.iter().map(|(gid, _, _)| *gid).collect();
+    assert_eq!(ls_gids.len(), 4, "low-sec belts and stargate must use distinct spawn groups");
+    assert!(ls_plan.iter().any(|(gid, _, _)| {
+        let n = &ctx.sde.npc_spawn_groups[gid].group_name;
+        n.contains("Cruiser") && !n.contains("BattleCruiser")
+    }));
+    assert!(ls_plan.iter().any(|(gid, _, _)| ctx.sde.npc_spawn_groups[gid].group_name.contains("BattleCruiser")));
+    assert_eq!(ls_plan[3].1.npc_type_ids.len(), 1);
+    assert!(ls_plan.iter().all(|(_, sg, _)| no_cs(sg)));
+
+    let (ns_plan, _) = mgr.plan_belt_rats_for_system(&ctx, ns_sys, false, None, true, true, true);
+    assert_eq!(ns_plan.len(), 4);
+    let ns_gids: HashSet<u32> = ns_plan.iter().map(|(gid, _, _)| *gid).collect();
+    assert_eq!(ns_gids.len(), 4, "null-sec belts and stargate must use distinct spawn groups");
+    assert!(ns_plan.iter().any(|(gid, _, _)| {
+        let n = &ctx.sde.npc_spawn_groups[gid].group_name;
+        n.contains("Cruiser") && !n.contains("BattleCruiser")
+    }));
+    assert!(ns_plan.iter().any(|(gid, _, _)| ctx.sde.npc_spawn_groups[gid].group_name.contains("BattleCruiser")));
+    assert!(ns_plan.iter().any(|(gid, _, _)| ctx.sde.npc_spawn_groups[gid].group_name.contains("Battleship")));
+    assert_eq!(ns_plan[3].1.npc_type_ids.len(), 1);
+    assert!(ns_plan.iter().all(|(_, sg, _)| no_cs(sg)));
+
+    // 4. Clearing Belt 1 must NOT put Belt 2, Belt 3, or the Stargate on a 20m cooldown (both shared-gid high-sec & multi-gid low-sec).
+    let belt_pos_for = |sys_id: u32, idx: usize| {
+        ctx.sde.celestials_in_system(sys_id).into_iter().filter(|c| c.group_id == 9).nth(idx).unwrap().position
+    };
+    let now = ctx.now_unix();
+    let mut hs_mgr = NpcSpawnManager::new();
+    let _ = hs_mgr.spawn_belt_rats_for_system(&ctx, hs_sys).await.unwrap();
+    let hs_b0 = belt_pos_for(hs_sys, 0);
+    let hs_b0_ids: Vec<i64> = hs_mgr
+        .entities
+        .values()
+        .filter(|e| e.spawn_pos.distance(hs_b0) < 25_000.0)
+        .map(|e| e.ball_id)
+        .collect();
+    assert!(!hs_b0_ids.is_empty());
+    hs_mgr.entities.retain(|id, _| hs_b0_ids.contains(id));
+    for id in hs_b0_ids {
+        hs_mgr.remove_npc_and_record_cooldown(&ctx, hs_sys, id, now);
+    }
+    let (hs_after, _) = hs_mgr.plan_belt_rats_for_system(&ctx, hs_sys, false, None, true, true, true);
+    assert_eq!(hs_after.len(), 2, "only Belt 1 should be on cooldown in high-sec");
+    assert!(hs_after.iter().all(|(_, _, pos)| pos.distance(hs_b0) >= 25_000.0));
+
+    let mut ls_mgr = NpcSpawnManager::new();
+    let _ = ls_mgr.spawn_belt_rats_for_system(&ctx, ls_sys).await.unwrap();
+    let ls_b0 = belt_pos_for(ls_sys, 0);
+    let ls_b0_ids: Vec<i64> = ls_mgr
+        .entities
+        .values()
+        .filter(|e| e.spawn_pos.distance(ls_b0) < 25_000.0)
+        .map(|e| e.ball_id)
+        .collect();
+    assert!(!ls_b0_ids.is_empty());
+    ls_mgr.entities.retain(|id, _| ls_b0_ids.contains(id));
+    for id in ls_b0_ids {
+        ls_mgr.remove_npc_and_record_cooldown(&ctx, ls_sys, id, now);
+    }
+    let (ls_after, _) = ls_mgr.plan_belt_rats_for_system(&ctx, ls_sys, false, None, true, true, true);
+    assert_eq!(ls_after.len(), 3, "only Belt 1 should be on cooldown in low-sec; Belts 2, 3, and gate stay eligible");
+    assert!(ls_after.iter().all(|(_, _, pos)| pos.distance(ls_b0) >= 25_000.0));
+}
