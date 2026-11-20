@@ -661,6 +661,24 @@ fn t() {
                     finally:
                         run_review._release_cargo_test_slot(fh2)
 
+            # Verify default EVOMU_MAX_CARGO_TEST_SLOTS is 4 when env var is unset: 4 waits, 3 acquires.
+            default_sleeps = []
+            default_counts = iter([4, 3, 3])
+            clean_env = {k: v for k, v in os.environ.items() if k != "EVOMU_MAX_CARGO_TEST_SLOTS"}
+            with mock.patch.dict(os.environ, clean_env, clear=True), mock.patch.object(
+                run_review.rl, "main_state_dir", return_value=tmp
+            ), mock.patch.object(
+                run_review, "_count_active_cargo_processes", side_effect=lambda: next(default_counts)
+            ), mock.patch.object(
+                run_review.time, "sleep", side_effect=lambda s: default_sleeps.append(s)
+            ):
+                fh3 = run_review._acquire_cargo_test_slot(REPO_ROOT)
+                try:
+                    self.assertIsNotNone(fh3)
+                    self.assertEqual(default_sleeps, [5.0])
+                finally:
+                    run_review._release_cargo_test_slot(fh3)
+
     def test_ten_of_ten_historical_p0_regressions_caught_by_gates(self):
         """Replay all 10 historical `[P0][Hourly CI]` regressions (#1125..#1162) and verify 10/10
         are caught by `ratchet_checks` + `derive_affected_test_commands` within <= 12 `it` filters."""

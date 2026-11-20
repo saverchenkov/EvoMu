@@ -18,12 +18,12 @@ use crate::services::pve_exploration_seeding::build_type_combat_state_from_sde;
 pub use crate::services::wormhole_pve_seeding::*;
 use crate::system_actor::SystemRegistry;
 use eve_db::WorldRepository;
-use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, SlimItemMeta};
+use eve_destiny::{Ball, DamageVector, MovementMode, SlimItemMeta};
 use eve_sde::{SdeRegistry, SolarSystemId, TypeId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use eve_db::lock_rank::AnyRwLock;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -211,8 +211,8 @@ pub async fn spawn_decloaked_transmission_relay_core(
     let sys_handle = systems.get_or_spawn(solar_system_id);
     let site_vec = DVec3::from_array(pos);
     let on_grid_ship_types: Vec<u32> = {
-        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        bp.balls
+        let view = sys_handle.view();
+        view.balls
             .values()
             .filter(|b| {
                 !matches!(b.mode, MovementMode::Warp { .. })
@@ -461,20 +461,7 @@ pub async fn step_wormhole_pve_system(
         return;
     }
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    let (ball_map, combat_states, scrambled_drifters): (
-        BTreeMap<i64, Ball>,
-        BTreeMap<i64, CombatState>,
-        std::collections::HashSet<i64>,
-    ) = {
-        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        let scrambled = bp
-            .balls
-            .keys()
-            .copied()
-            .filter(|&id| bp.is_ball_scrambled(id))
-            .collect();
-        (bp.balls.clone(), bp.combat_states.clone(), scrambled)
-    };
+    let view = sys_handle.view();
     let active_ships: HashMap<i64, (i64, u32)> = ctx.db.with_snapshot(|snap| {
         snap.characters
             .values()
@@ -522,7 +509,7 @@ pub async fn step_wormhole_pve_system(
                 // Despawn escalation Avengers if triggering capital left grid/system or moved > 100 km
                 site.active_escalation_capitals.retain(|entry| {
                     let still_on_grid = active_ships.contains_key(&entry.ship_id)
-                        && ball_map.get(&entry.ship_id).is_some_and(|b| {
+                        && view.ball(entry.ship_id).is_some_and(|b| {
                             !matches!(b.mode, MovementMode::Warp { .. })
                                 && b.position.distance(site_vec) <= 100_000.0
                                 && b.position.distance(DVec3::from_array(entry.warp_in_pos))
@@ -566,7 +553,7 @@ pub async fn step_wormhole_pve_system(
                 // Check ships currently on grid (within 100 km and not warping)
                 let mut on_grid_ships: Vec<(i64, i64, u32, [f64; 3])> = Vec::new();
                 for (&ship_id, &(char_id, gid)) in &active_ships {
-                    if let Some(sb) = ball_map.get(&ship_id) {
+                    if let Some(sb) = view.ball(ship_id) {
                         if !matches!(sb.mode, MovementMode::Warp { .. })
                             && sb.position.distance(site_vec) <= 100_000.0
                         {
@@ -657,13 +644,13 @@ pub async fn step_wormhole_pve_system(
         let mut damaged_relays: Vec<i64> = Vec::new();
         for relay in reg.active_relays.values() {
             if relay.solar_system_id == solar_system_id && !relay.triggered {
-                let was_attacked = match combat_states.get(&relay.relay_ball_id) {
+                let was_attacked = match view.combat_state(relay.relay_ball_id) {
                     Some(rcs) => {
                         rcs.shield_hp < rcs.max_shield_hp
                             || rcs.armor_hp < rcs.max_armor_hp
                             || rcs.structure_hp < rcs.max_structure_hp
                     }
-                    None => !ball_map.contains_key(&relay.relay_ball_id),
+                    None => !view.contains_ball(relay.relay_ball_id),
                 };
                 if was_attacked {
                     damaged_relays.push(relay.relay_ball_id);
@@ -679,10 +666,10 @@ pub async fn step_wormhole_pve_system(
             let Some(drifter_bid) = relay.spawned_drifter_ball_id else {
                 continue;
             };
-            let Some(dball) = ball_map.get(&drifter_bid) else {
+            let Some(dball) = view.ball(drifter_bid) else {
                 continue;
             };
-            let is_scrambled = scrambled_drifters.contains(&drifter_bid);
+            let is_scrambled = view.is_ball_scrambled(drifter_bid);
             if is_scrambled {
                 continue;
             }
@@ -714,6 +701,7 @@ pub async fn step_wormhole_pve_system(
             damaged_relays,
         )
     });
+    drop(view);
 
     for relay_bid in damaged_relays {
         let _ = on_decloaked_relay_attacked_sync(ctx, solar_system_id, relay_bid);
@@ -1131,8 +1119,7 @@ pub fn process_wormhole_sites_on_downtime(ctx: &ServerContext) -> usize {
 
     for (sys_id, bid) in all_removed_balls.iter().chain(removed_ast_balls.iter()) {
         let sys_handle = ctx.systems.get_or_spawn(*sys_id);
-        let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let _ = bp.remove_ball(*bid);
+        sys_handle.try_remove_ball(*bid);
     }
 
     for (sys_id, ids) in per_sys_removed_ids {

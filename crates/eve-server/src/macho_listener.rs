@@ -2228,7 +2228,7 @@ async fn dispatch_safe_logoff_teardown_grace_rpc<W: AsyncWriteExt + Unpin>(
     grace_session.character_id = Some(grace_char_id);
     let rpc_res = crate::router::dispatch::with_active_rpc_call_id(
         call_id,
-        ctx.dispatch_rpc(
+        crate::router::dispatch::with_quasar_session_change_suppressed(ctx.dispatch_rpc(
             &mut grace_session,
             service,
             bound_id,
@@ -2236,15 +2236,13 @@ async fn dispatch_safe_logoff_teardown_grace_rpc<W: AsyncWriteExt + Unpin>(
             call_args,
             call_kwargs,
             Some("machoNet:26000"),
-        ),
+        )),
     )
     .await;
     if grace_session.user_id.is_none() && session.user_id.is_some() {
         session.user_id = None;
         session.role = 0;
     }
-    ctx.quasar_gateway
-        .on_session_changed(session, ctx.now_unix());
     let succeeded = rpc_res.is_ok();
     let (_rpc_result, _err_body, rsp_pkt) = build_call_req_reply_packet(
         source,

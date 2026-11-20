@@ -508,13 +508,13 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         Vec<i64>,
         HashSet<i64>,
     ) = {
-        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let view = sys_handle.view();
         let mut lites = HashMap::new();
         let mut cand_ids = Vec::new();
         let mut dead_npcs = HashSet::new();
 
         let to_lite = |id: i64, b: &Ball| -> BallSnapshotLite {
-            let is_cloaked_or_dead = bp
+            let is_cloaked_or_dead = view
                 .combat_states
                 .get(&id)
                 .is_some_and(|cs| cs.is_cloaked || cs.structure_hp <= 0.0);
@@ -530,13 +530,13 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         };
 
         for npc in &npcs_in_sys {
-            let npc_dead = bp
+            let npc_dead = view
                 .combat_states
                 .get(&npc.ball_id)
                 .is_some_and(|cs| cs.structure_hp <= 0.0);
             if npc_dead {
                 dead_npcs.insert(npc.ball_id);
-            } else if let Some(b) = bp.balls.get(&npc.ball_id) {
+            } else if let Some(b) = view.balls.get(&npc.ball_id) {
                 lites.entry(npc.ball_id).or_insert_with(|| to_lite(npc.ball_id, b));
             } else {
                 dead_npcs.insert(npc.ball_id);
@@ -548,7 +548,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 .chain(npc.target_id.iter())
             {
                 if !lites.contains_key(&tid) {
-                    if let Some(tb) = bp.balls.get(&tid) {
+                    if let Some(tb) = view.balls.get(&tid) {
                         lites.insert(tid, to_lite(tid, tb));
                     }
                 }
@@ -556,7 +556,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         }
 
         if dead_npcs.len() < npcs_in_sys.len() {
-            for (&id, b) in &bp.balls {
+            for (&id, b) in &view.balls {
                 let is_targetable_cat = ctx
                     .sde
                     .types

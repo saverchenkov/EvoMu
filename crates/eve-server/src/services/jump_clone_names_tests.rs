@@ -195,3 +195,167 @@ fn emit_server_skills_removed_marks_zero_level_negative_sp() {
             > 0.0
     );
 }
+
+#[test]
+fn extract_skills_emptying_queue_removes_key_and_passes_sqlite_pre_roundtrip() {
+    let ctx = test_ctx();
+    let base_now = 1_800_000_000_u64;
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_now),
+    ));
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let mut sess = auth_session(1, char_id, 98_000_001, 30_000_142);
+    sess.station_id = Some(station_id);
+    sess.structure_id = None;
+
+    let extractor_id = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.skill_points = 7_000_000.0;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+        }
+        snap.next_entity_id += 1;
+        let eid = snap.next_entity_id;
+        snap.items.insert(
+            eid,
+            eve_db::InventoryItemRecord {
+                item_id: eid,
+                type_id: 40519,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 2,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let skills = snap.skills.entry(char_id).or_default();
+        skills.clear();
+        skills.insert(
+            3327,
+            TrainedSkillRecord {
+                type_id: 3327,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        skills.insert(
+            3331,
+            TrainedSkillRecord {
+                type_id: 3331,
+                level: 5,
+                skill_points: 512_000.0,
+            },
+        );
+        snap.paused_skill_queues.remove(&char_id);
+        snap.skill_queues.insert(
+            char_id,
+            vec![eve_db::SkillQueueEntry {
+                type_id: 3331,
+                target_level: 5,
+                start_sp: 400_000.0,
+                end_sp: 512_000.0,
+                duration_seconds: 3_600.0,
+                started_at_unix: Some(base_now),
+            }],
+        );
+        eid
+    });
+
+    // 1. Extracting 500,000 SP from 3331 drops its level from 5 -> 2, pruning the sole
+    //    queued entry (3331 L5) and removing char_id from snap.skill_queues.
+    extract_skills(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Dict(vec![(PyRep::Integer(3331), PyRep::Real(500_000.0))]),
+            PyRep::Integer(extractor_id),
+        ],
+    )
+    .expect("first ExtractSkills succeeds");
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.skill_queues.contains_key(&char_id),
+            "ExtractSkills pruning the last queued entry must remove char_id from snap.skill_queues"
+        );
+    });
+    assert_eq!(skill_queue_rowset(&ctx, char_id), PyRep::List(vec![]));
+    let diffs_direct = eve_testkit::pre_check::check_persist_reload_equivalence(&ctx.db)
+        .expect("SQLite PRE check after direct extraction");
+    assert!(
+        diffs_direct.is_empty(),
+        "expected zero SQLite PRE diffs after direct extraction empties queue, got: {diffs_direct:?}"
+    );
+    let reloaded_direct = ctx
+        .db
+        .reload_snapshot_from_sqlite()
+        .expect("reload snapshot from SQLite after direct extraction");
+    assert!(!reloaded_direct.skill_queues.contains_key(&char_id));
+
+    // 2. Extracting prerequisite Spaceship Command (3327 -> level 0) prunes the sole
+    //    dependent queued entry Amarr Frigate (3331 L1) and removes char_id from snap.skill_queues.
+    ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(char_id).or_default();
+        skills.clear();
+        skills.insert(
+            3327,
+            TrainedSkillRecord {
+                type_id: 3327,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        skills.insert(
+            3300,
+            TrainedSkillRecord {
+                type_id: 3300,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        snap.skill_queues.insert(
+            char_id,
+            vec![eve_db::SkillQueueEntry {
+                type_id: 3331,
+                target_level: 1,
+                start_sp: 0.0,
+                end_sp: 500.0,
+                duration_seconds: 3_600.0,
+                started_at_unix: Some(base_now),
+            }],
+        );
+    });
+    extract_skills(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Dict(vec![
+                (PyRep::Integer(3327), PyRep::Real(256_000.0)),
+                (PyRep::Integer(3300), PyRep::Real(244_000.0)),
+            ]),
+            PyRep::Integer(extractor_id),
+        ],
+    )
+    .expect("second ExtractSkills succeeds");
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.skill_queues.contains_key(&char_id),
+            "ExtractSkills dropping the last prerequisite-dependent queued entry must remove char_id from snap.skill_queues"
+        );
+    });
+    assert_eq!(skill_queue_rowset(&ctx, char_id), PyRep::List(vec![]));
+    let diffs_prereq = eve_testkit::pre_check::check_persist_reload_equivalence(&ctx.db)
+        .expect("SQLite PRE check after prerequisite extraction");
+    assert!(
+        diffs_prereq.is_empty(),
+        "expected zero SQLite PRE diffs after prerequisite extraction empties queue, got: {diffs_prereq:?}"
+    );
+    let reloaded_prereq = ctx
+        .db
+        .reload_snapshot_from_sqlite()
+        .expect("reload snapshot from SQLite after prerequisite extraction");
+    assert!(!reloaded_prereq.skill_queues.contains_key(&char_id));
+}
