@@ -674,4 +674,65 @@ async fn test_batch6_safelogoff_and_crimewatch() {
     );
 }
 
+#[tokio::test]
+async fn test_1386_safelogoff_timer_unskewed_after_advance_clock_and_activates_via_rpc() {
+    let ctx = new_ctx();
+    let empty = HashMap::new();
+    let _ = ctx.db.set_account_role("demo", eve_db::service_roles::ROLE_GM_DEFAULT);
+    let _ = ctx.db.set_account_role("other", eve_db::service_roles::ROLE_GM_DEFAULT);
+
+    let mut h1 = common::new_wire_harness(&ctx, 13_861);
+    h1.call_ok(
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &empty,
+    )
+    .await;
+    h1.call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(P1)], &empty)
+        .await;
+    ctx.advance_secs(31);
+    h1.call_ok("stationSvc", None, "Undock", &[], &empty).await;
+    let _ = h1.drain_notifications();
+
+    let mut h_gm = common::new_wire_harness(&ctx, 13_862);
+    h_gm.call_ok(
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("other".into()), PyRep::String("other-secret".into())],
+        &empty,
+    )
+    .await;
+
+    // 1. Prior AdvanceClock(+447s) adds un-rebased server virtual clock lead without rebasing client sim time.
+    h_gm.call_ok("timeControl", None, "AdvanceClock", &[PyRep::Integer(447)], &empty)
+        .await;
+    assert_eq!(ctx.unrebased_clock_offset_secs(), 447);
+
+    // 2. ship.SafeLogoff emits OnSafeLogoffTimerStarted anchored to client sim time (+30s, not +477s).
+    let now_before_safe = ctx.now_unix();
+    let expected_client_ft =
+        eve_server::sp6_lifecycle::unix_to_filetime(now_before_safe + 30 - 447);
+    let start_res = h1.call_ok("ship", None, "SafeLogoff", &[], &empty).await;
+    assert_eq!(start_res, PyRep::List(vec![]));
+    let ev_slt: Vec<_> = h1
+        .drain_notifications()
+        .into_iter()
+        .filter(|(e, _)| e == "OnSafeLogoffTimerStarted")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(ev_slt.len(), 1, "P1 receives OnSafeLogoffTimerStarted");
+    assert_eq!(ev_slt[0], vec![PyRep::Integer(expected_client_ft)]);
+    let _ = ctx.drain_notifications_for_char(P1);
+
+    // 3. Advancing +30s via timeControl.AdvanceClock RPC fires OnSafeLogoffActivated cleanly.
+    h_gm.call_ok("timeControl", None, "AdvanceClock", &[PyRep::Integer(30)], &empty)
+        .await;
+    let ev_sla = events(&ctx, P1, "OnSafeLogoffActivated");
+    assert_eq!(ev_sla.len(), 1, "P1 receives OnSafeLogoffActivated after AdvanceClock RPC");
+    assert!(ev_sla[0].is_empty(), "OnSafeLogoffActivated has arity 0");
+}
+
 }

@@ -1247,6 +1247,82 @@ fn session_owns_char_notifications(ctx: &ServerContext, session: &SessionState) 
     }
 }
 
+fn build_call_req_reply_packet(
+    req_source: &MachoAddress,
+    req_dest: &MachoAddress,
+    user_id: Option<u64>,
+    character_id: Option<i64>,
+    service: &str,
+    method: &str,
+    rpc_res: std::result::Result<PyRep, BridgeRpcError>,
+) -> (
+    std::result::Result<PyRep, BridgeRpcError>,
+    Option<PyRep>,
+    MachoPacket,
+) {
+    match rpc_res {
+        Ok(val) => {
+            let mut named_payload = HashMap::new();
+            let maybe_substruct = match &val {
+                PyRep::SubStruct(inner) => Some(inner),
+                PyRep::Tuple(items) => match items.first() {
+                    Some(PyRep::SubStruct(inner)) => Some(inner),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(inner) = maybe_substruct {
+                if let PyRep::SubStream(sub) = inner.as_ref() {
+                    if let PyRep::Tuple(oid_pair) = sub.as_ref() {
+                        if oid_pair.len() == 2 {
+                            named_payload.insert(
+                                "OID+".into(),
+                                PyRep::Dict(vec![(
+                                    oid_pair[0].clone(),
+                                    oid_pair[1].clone(),
+                                )]),
+                            );
+                        }
+                    }
+                }
+            }
+            let pkt = MachoPacket {
+                packet_type: MachoPacketType::CallRsp,
+                source: reply_source_address(req_dest),
+                destination: req_source.clone(),
+                user_id,
+                payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(val.clone()))]),
+                named_payload,
+            };
+            (Ok(val), None, pkt)
+        }
+        Err(err) => {
+            let mut client_err = err.to_client_error(service, method);
+            if let eve_proto::ClientError::User {
+                key: eve_proto::UserErrorKey::InsureShipFailedSingleContract,
+                ref mut args,
+            } = client_err
+            {
+                if !args.iter().any(|(k, _)| k == "ownerName") {
+                    if let Some(cid) = character_id {
+                        args.push(("ownerName".into(), PyRep::Integer(cid)));
+                    }
+                }
+            }
+            let payload = client_err.to_macho_error_body(MachoPacketType::CallReq as i64);
+            let pkt = MachoPacket {
+                packet_type: MachoPacketType::ErrorResponse,
+                source: reply_source_address(req_dest),
+                destination: req_source.clone(),
+                user_id,
+                payload: payload.clone(),
+                named_payload: HashMap::new(),
+            };
+            (Err(err), Some(payload), pkt)
+        }
+    }
+}
+
 fn session_owns_charsel_transition(ctx: &ServerContext, session: &SessionState) -> bool {
     session_owns_char_notifications(ctx, session)
         && session.user_id.is_some_and(|uid| {
@@ -1493,69 +1569,15 @@ pub async fn execute_call_req_wire(
         elapsed_ms
     });
 
-    let mut error_wire_body = None;
-    let (rpc_result, mut rsp_pkt) = match rpc_res {
-        Ok(val) => {
-            let mut named_payload = HashMap::new();
-            let maybe_substruct = match &val {
-                PyRep::SubStruct(inner) => Some(inner),
-                PyRep::Tuple(items) => match items.first() {
-                    Some(PyRep::SubStruct(inner)) => Some(inner),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(inner) = maybe_substruct {
-                if let PyRep::SubStream(sub) = inner.as_ref() {
-                    if let PyRep::Tuple(oid_pair) = sub.as_ref() {
-                        if oid_pair.len() == 2 {
-                            named_payload.insert(
-                                "OID+".into(),
-                                PyRep::Dict(vec![(
-                                    oid_pair[0].clone(),
-                                    oid_pair[1].clone(),
-                                )]),
-                            );
-                        }
-                    }
-                }
-            }
-            let pkt = MachoPacket {
-                packet_type: MachoPacketType::CallRsp,
-                source: reply_source_address(req_dest),
-                destination: req_source.clone(),
-                user_id: session.user_id,
-                payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(val.clone()))]),
-                named_payload,
-            };
-            (Ok(val), pkt)
-        }
-        Err(err) => {
-            let mut client_err = err.to_client_error(service, method);
-            if let eve_proto::ClientError::User {
-                key: eve_proto::UserErrorKey::InsureShipFailedSingleContract,
-                ref mut args,
-            } = client_err
-            {
-                if !args.iter().any(|(k, _)| k == "ownerName") {
-                    if let Some(cid) = session.character_id {
-                        args.push(("ownerName".into(), PyRep::Integer(cid)));
-                    }
-                }
-            }
-            let payload = client_err.to_macho_error_body(MachoPacketType::CallReq as i64);
-            error_wire_body = Some(payload.clone());
-            let pkt = MachoPacket {
-                packet_type: MachoPacketType::ErrorResponse,
-                source: reply_source_address(req_dest),
-                destination: req_source.clone(),
-                user_id: session.user_id,
-                payload,
-                named_payload: HashMap::new(),
-            };
-            (Err(err), pkt)
-        }
-    };
+    let (rpc_result, error_wire_body, mut rsp_pkt) = build_call_req_reply_packet(
+        req_source,
+        req_dest,
+        session.user_id,
+        session.character_id,
+        service,
+        method,
+        rpc_res,
+    );
     if let Some(elapsed_ms) = bootstrap_elapsed_ms {
         rsp_pkt.named_payload.insert(
             "elapsed_since_request_ms".into(),
@@ -1673,7 +1695,9 @@ pub async fn execute_call_req_wire(
     let mut post_rpc_direct_batch = None;
     let mut effective_was_live = was_live;
     let post_rpc_owns_char = session_owns_char_notifications(ctx, session);
+    let post_rpc_charsel_pending = session_owns_charsel_transition(ctx, session);
     if post_rpc_owns_char
+        && !post_rpc_charsel_pending
         && !matches!(wire.wire_state.destiny, DestinyStream::Detached)
         && !docking_transition
         && !cross_sys_pre_detach
@@ -1983,6 +2007,271 @@ pub async fn read_framed_pyrep<R: AsyncReadExt + Unpin>(stream: &mut R) -> Resul
     Ok(Some(rep))
 }
 
+/// Bounded read-only grace window after SafeLogoff clears `session.character_id = None` so V24
+/// `GameUI.DoCharacterLogoff` (`ProcessSessionReset` / `OnSessionReset`) cleanup/refresh RPCs
+/// (`skillMgr2.GetMySkillHandler`, read-only `skillMgr2` getters, `account.GetCashBalance(0)`,
+/// `accessGroupBookmarkMgr.GetMyActiveBookmarks`) succeed without spurious `CharacterNotSelected`
+/// errors while the connection remains at character selection (`#1360`, `#1386`).
+const SAFE_LOGOFF_TEARDOWN_GRACE_SECS: u64 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SafeLogoffTeardownGrace {
+    char_id: i64,
+    deadline: tokio::time::Instant,
+    temp_bindings_created: bool,
+}
+
+fn clear_safe_logoff_teardown_grace(
+    ctx: &ServerContext,
+    session_id: u64,
+    grace: &mut Option<SafeLogoffTeardownGrace>,
+) {
+    if let Some(prev) = grace.take() {
+        if prev.temp_bindings_created {
+            if let Ok(mut bound) = ctx.bound_objects.write() {
+                bound.retain(|_, e| {
+                    !(e.session_id == session_id
+                        && e.character_id == prev.char_id
+                        && e.service == "skillMgr2")
+                });
+            }
+        }
+    }
+}
+
+fn is_personal_cash_balance_args(
+    call_args: &[PyRep],
+    call_kwargs: &HashMap<String, PyRep>,
+) -> bool {
+    let parse_corp_flag = |rep: &PyRep| -> bool {
+        match rep {
+            PyRep::Bool(b) => *b,
+            PyRep::Integer(n) => *n != 0,
+            PyRep::Real(r) => *r != 0.0,
+            PyRep::String(s) | PyRep::Token(s) => s.starts_with("cash"),
+            PyRep::Tuple(items) | PyRep::List(items) => items.first().is_some_and(|v| {
+                v.as_bool() == Some(true)
+                    || v.as_i64().unwrap_or(0) != 0
+                    || v.as_str().is_some_and(|s| s.starts_with("cash"))
+            }),
+            _ => false,
+        }
+    };
+    let is_corp = call_args
+        .first()
+        .map(&parse_corp_flag)
+        .or_else(|| call_kwargs.get("isCorpWallet").map(&parse_corp_flag))
+        .or_else(|| {
+            (call_args.is_empty()
+                && call_kwargs
+                    .get("accountKey")
+                    .and_then(|v| v.as_i64())
+                    .is_some_and(|k| (1000..=1006).contains(&k)))
+            .then_some(true)
+        })
+        .unwrap_or(false);
+    !is_corp
+}
+
+#[allow(clippy::too_many_arguments)]
+fn is_safe_logoff_teardown_readonly_rpc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    grace_char_id: i64,
+    service: &str,
+    bound_id: Option<u64>,
+    method: &str,
+    call_args: &[PyRep],
+    call_kwargs: &HashMap<String, PyRep>,
+) -> Option<bool> {
+    if let Some(bid) = bound_id {
+        let is_grace_skill_mgr = ctx.bound_objects.read().ok().is_some_and(|m| {
+            m.get(&bid).is_some_and(|e| {
+                e.session_id == session.session_id
+                    && Some(e.user_id) == session.user_id
+                    && e.character_id == grace_char_id
+                    && e.service == "skillMgr2"
+            })
+        });
+        if is_grace_skill_mgr
+            && matches!(
+                method,
+                "GetSkills"
+                    | "GetSkillQueue"
+                    | "GetSkillQueueAndFreePoints"
+                    | "GetEndOfTraining"
+                    | "GetAttributes"
+                    | "GetFreeSkillPoints"
+                    | "GetImplants"
+                    | "GetBoosters"
+                    | "GetSkillHistory"
+                    | "GetRespecInfo"
+                    | "GetCharacterAttributeModifiers"
+                    | "GetSkillRequirements"
+            )
+        {
+            return Some(false);
+        }
+        return None;
+    }
+    match (service, method) {
+        ("skillMgr2", "GetMySkillHandler") => Some(true),
+        (
+            "skillMgr2",
+            "GetSkills"
+            | "GetSkillQueue"
+            | "GetSkillQueueAndFreePoints"
+            | "GetEndOfTraining"
+            | "GetAttributes"
+            | "GetFreeSkillPoints"
+            | "GetImplants"
+            | "GetBoosters"
+            | "GetSkillHistory"
+            | "GetRespecInfo"
+            | "GetCharacterAttributeModifiers"
+            | "GetSkillRequirements",
+        ) => Some(false),
+        ("account", "GetCashBalance") if is_personal_cash_balance_args(call_args, call_kwargs) => {
+            Some(false)
+        }
+        ("accessGroupBookmarkMgr", "GetMyActiveBookmarks")
+        | ("bookmark", "GetMyActiveBookmarks" | "GetBookmarks") => Some(false),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_safe_logoff_teardown_grace(
+    ctx: &ServerContext,
+    session: &SessionState,
+    grace: &mut Option<SafeLogoffTeardownGrace>,
+    service: &str,
+    bound_id: Option<u64>,
+    method: &str,
+    call_args: &[PyRep],
+    call_kwargs: &HashMap<String, PyRep>,
+) -> Option<(i64, bool)> {
+    let g = (*grace)?;
+    if session.character_id.is_some() || tokio::time::Instant::now() > g.deadline {
+        clear_safe_logoff_teardown_grace(ctx, session.session_id, grace);
+        return None;
+    }
+    let Some(uid) = session.user_id else {
+        clear_safe_logoff_teardown_grace(ctx, session.session_id, grace);
+        return None;
+    };
+    let now_unix = ctx.now_unix_secs();
+    if ctx
+        .db
+        .check_session_revoked(uid, session.session_id, now_unix)
+        .is_some()
+    {
+        clear_safe_logoff_teardown_grace(ctx, session.session_id, grace);
+        return None;
+    }
+    let owns_charsel_lock = ctx
+        .db
+        .get_online_session(uid)
+        .is_some_and(|os| os.session_id == session.session_id && os.character_id.is_none());
+    let owns_char = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&g.char_id).is_some_and(|c| c.user_id == uid));
+    if !owns_charsel_lock || !owns_char {
+        clear_safe_logoff_teardown_grace(ctx, session.session_id, grace);
+        return None;
+    }
+    let creates_temp_binding = is_safe_logoff_teardown_readonly_rpc(
+        ctx,
+        session,
+        g.char_id,
+        service,
+        bound_id,
+        method,
+        call_args,
+        call_kwargs,
+    )?;
+    Some((g.char_id, creates_temp_binding))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_safe_logoff_teardown_grace_rpc<W: AsyncWriteExt + Unpin>(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    grace_char_id: i64,
+    client_id: u64,
+    writer: &mut W,
+    source: &MachoAddress,
+    destination: &MachoAddress,
+    service: &str,
+    bound_id: Option<u64>,
+    method: &str,
+    call_args: &[PyRep],
+    call_kwargs: &HashMap<String, PyRep>,
+) -> Result<bool> {
+    let call_id = match (destination, source) {
+        (
+            MachoAddress::Node { call_id, .. }
+            | MachoAddress::Any { call_id, .. }
+            | MachoAddress::Client { call_id, .. },
+            _,
+        ) if *call_id != 0 => *call_id,
+        (
+            _,
+            MachoAddress::Client { call_id, .. }
+            | MachoAddress::Node { call_id, .. }
+            | MachoAddress::Any { call_id, .. },
+        ) => *call_id,
+        _ => 0,
+    };
+    let user_id_before = session.user_id;
+    let mut grace_session = session.clone();
+    grace_session.character_id = Some(grace_char_id);
+    let rpc_res = crate::router::dispatch::with_active_rpc_call_id(
+        call_id,
+        ctx.dispatch_rpc(
+            &mut grace_session,
+            service,
+            bound_id,
+            method,
+            call_args,
+            call_kwargs,
+            Some("machoNet:26000"),
+        ),
+    )
+    .await;
+    if grace_session.user_id.is_none() && session.user_id.is_some() {
+        session.user_id = None;
+        session.role = 0;
+    }
+    ctx.quasar_gateway
+        .on_session_changed(session, ctx.now_unix());
+    let succeeded = rpc_res.is_ok();
+    let (_rpc_result, _err_body, rsp_pkt) = build_call_req_reply_packet(
+        source,
+        destination,
+        session.user_id.or(user_id_before),
+        Some(grace_char_id),
+        service,
+        method,
+        rpc_res,
+    );
+    let out_frame = crate::outbound_sequencer::OutFrame::CallRsp {
+        call_id: 0,
+        frame: rsp_pkt.to_pyrep(),
+    };
+    write_out_frames_for_call_req(
+        writer,
+        MACHO_PROXY_NODE_ID,
+        client_id,
+        session.user_id.or(user_id_before),
+        source,
+        destination,
+        &[out_frame],
+    )
+    .await?;
+    Ok(succeeded)
+}
+
 struct SafeLogoffWireContext<'a> {
     client_id: u64,
     sys_rx: &'a mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
@@ -1994,6 +2283,7 @@ struct SafeLogoffWireContext<'a> {
     wire_state: &'a mut crate::outbound_sequencer::SessionWireState,
     deferred_ship_id: &'a mut Option<PendingDeferredShipId>,
     pending_dock: &'a mut Option<PendingDockCall>,
+    safe_logoff_teardown: &'a mut Option<SafeLogoffTeardownGrace>,
 }
 
 async fn emit_typed_notifications<W: AsyncWriteExt + Unpin>(
@@ -2107,6 +2397,13 @@ async fn handle_safe_logoff_to_charsel<W: AsyncWriteExt + Unpin>(
     crate::router::clear_session_character_state(session);
 
     ctx.release_session_bindings(session.session_id);
+    clear_safe_logoff_teardown_grace(ctx, session.session_id, wire.safe_logoff_teardown);
+    *wire.safe_logoff_teardown = Some(SafeLogoffTeardownGrace {
+        char_id: cid,
+        deadline: tokio::time::Instant::now()
+            + std::time::Duration::from_secs(SAFE_LOGOFF_TEARDOWN_GRACE_SECS),
+        temp_bindings_created: false,
+    });
     ctx.quasar_gateway
         .on_session_changed(session, ctx.now_unix());
     ctx.flight_recorder.record_wire_state(wire.wire_state);
@@ -2128,6 +2425,7 @@ async fn handle_session_closer_event<W: AsyncWriteExt + Unpin>(
         handle_safe_logoff_to_charsel(ctx, session, wire, writer, &reason).await?;
         Ok(true)
     } else {
+        clear_safe_logoff_teardown_grace(ctx, session.session_id, wire.safe_logoff_teardown);
         if reason_code == "SafeLogoff" {
             let owned_by_other = session.user_id.is_some_and(|uid| {
                 ctx.db
@@ -2303,6 +2601,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     session_guard.set_reader_abort(reader_task.abort_handle());
     let mut pending_dock: Option<PendingDockCall> = None;
     let mut deferred_ship_id: Option<PendingDeferredShipId> = None;
+    let mut safe_logoff_teardown: Option<SafeLogoffTeardownGrace> = None;
 
     loop {
         tokio::select! {
@@ -2382,6 +2681,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     wire_state: &mut wire_state,
                     deferred_ship_id: &mut deferred_ship_id,
                     pending_dock: &mut pending_dock,
+                    safe_logoff_teardown: &mut safe_logoff_teardown,
                 };
                 if !matches!(
                     handle_session_closer_event(
@@ -2741,6 +3041,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 wire_state: &mut wire_state,
                                 deferred_ship_id: &mut deferred_ship_id,
                                 pending_dock: &mut pending_dock,
+                                safe_logoff_teardown: &mut safe_logoff_teardown,
                             };
                             if handle_safe_logoff_to_charsel(
                                 &ctx,
@@ -3077,6 +3378,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         wire_state: &mut wire_state,
                         deferred_ship_id: &mut deferred_ship_id,
                         pending_dock: &mut pending_dock,
+                        safe_logoff_teardown: &mut safe_logoff_teardown,
                     };
                     if !matches!(
                         handle_session_closer_event(
@@ -3349,6 +3651,68 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     });
                                     continue;
                                 }
+                            }
+                        }
+                        if safe_logoff_teardown.is_some() {
+                            let exits_teardown_grace = session.character_id.is_some()
+                                || (bound_id.is_none()
+                                    && matches!(
+                                        (service.as_str(), method.as_str()),
+                                        ("charUnboundMgr", "SelectCharacterID")
+                                            | ("authentication", _)
+                                            | ("userSvc", "UserLogOffCharacter")
+                                    ));
+                            if exits_teardown_grace {
+                                clear_safe_logoff_teardown_grace(
+                                    &ctx,
+                                    session_id,
+                                    &mut safe_logoff_teardown,
+                                );
+                            } else if let Some((grace_cid, creates_temp_binding)) =
+                                resolve_safe_logoff_teardown_grace(
+                                    &ctx,
+                                    &session,
+                                    &mut safe_logoff_teardown,
+                                    &service,
+                                    bound_id,
+                                    &method,
+                                    &call_args,
+                                    &call_kwargs,
+                                )
+                            {
+                                match dispatch_safe_logoff_teardown_grace_rpc(
+                                    &ctx,
+                                    &mut session,
+                                    grace_cid,
+                                    client_id,
+                                    &mut writer,
+                                    &pkt.source,
+                                    &pkt.destination,
+                                    &service,
+                                    bound_id,
+                                    &method,
+                                    &call_args,
+                                    &call_kwargs,
+                                )
+                                .await
+                                {
+                                    Ok(succeeded) => {
+                                        if creates_temp_binding && succeeded {
+                                            if let Some(ref mut g) = safe_logoff_teardown {
+                                                g.temp_bindings_created = true;
+                                            }
+                                        }
+                                        if session.user_id.is_none() {
+                                            clear_safe_logoff_teardown_grace(
+                                                &ctx,
+                                                session_id,
+                                                &mut safe_logoff_teardown,
+                                            );
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                                continue;
                             }
                         }
                         let user_id_before = session.user_id;
