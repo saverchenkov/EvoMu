@@ -206,6 +206,16 @@ fn test_real_sde_cfsd_nested_flat_localization_and_queries() {
 
     let activities = sde.load_new_activity_ids().expect("newactivities");
     assert_eq!(activities.len(), 46);
+    let full_activities = sde.load_new_activities().expect("newactivities full");
+    assert_eq!(full_activities.len(), 46);
+    for id in &activities {
+        assert!(full_activities.contains_key(id));
+    }
+    assert_eq!(full_activities[&42].banner_event, 3);
+    assert_eq!(full_activities[&42].name_id, 571_107);
+    assert_eq!(full_activities[&42].start_datetime, "2020-09-28 11:00");
+    assert_eq!(full_activities[&39].integer_list_parameter, vec![55_700]);
+    assert_eq!(full_activities[&86].integer_parameter, Some(87));
 
     let shipcasters = sde.shipcaster_sde_components().expect("shipcasters");
     assert!(!shipcasters.launcher_factions.is_empty());
