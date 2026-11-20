@@ -1025,3 +1025,164 @@ async fn test_bug_reporting_env_eviction_auth_enrichment_and_zip_bounds() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&evict_dir);
 }
+
+#[test]
+fn test_is_benign_client_traceback_filters_known_ui_races_and_preserves_genuine_errors() {
+    let marketbase_alert_stack_key = "\nCaught at:\n/opt/ccp/eve/packages/carbonui/uilib.py(708) Update\n\nThrown at:\n/opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n";
+    let marketbase_alert_trace = "EXCEPTION #7 logged at 11/20/2026 05:46:24 : Info: AttributeError: 'NoneType' object has no attribute 'max'\n\nFormatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n\nThrown at:\n /opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n        absHeight = 555\nThread Locals:  session was <Session>\nStackhash: 1448116342\nEXCEPTION END\n";
+    assert!(is_benign_client_traceback(
+        marketbase_alert_stack_key,
+        marketbase_alert_trace,
+    ));
+
+    let marketbase_summary_trace = "Traceback (most recent call last):\n  File \"C:\\eve\\marketbase.py\", line 3718, in _OnResize\nAttributeError: 'NoneType' object has no attribute 'max'\n";
+    assert!(is_benign_client_traceback("", marketbase_summary_trace));
+
+    let minimap_py_trace = "log.LogException args=() kwargs={}\nTraceback (most recent call last):\n  File \"/opt/ccp/eve/packages/carbonui/graphs/minimap.py\", line 100, in UpdateAlignment\n  File \"/opt/ccp/eve/packages/carbonui/graphs/minimap.py\", line 111, in _ResizeSlider\nAttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n\nCALLSTACK:\n  File \"/opt/ccp/eve/packages/carbonui/uilib.py\", line 708, in Update\n";
+    assert!(is_benign_client_traceback(
+        "playtester:client-python:client_traceback",
+        minimap_py_trace,
+    ));
+
+    let minimap_alert_trace = "<pre>/app/client/packages/carbonui/graphs/minimap.pyj(111) _ResizeSlider\nFormatted exception info: AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\nEXCEPTION END\n";
+    assert!(is_benign_client_traceback("", minimap_alert_trace));
+
+    let minimap_pre_closed_trace = "Thrown at:\n<pre>/app/client/packages/carbonui/graphs/minimap.pyj(111) _ResizeSlider</pre>\nFormatted exception info: AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\nEXCEPTION END\n";
+    assert!(is_benign_client_traceback("", minimap_pre_closed_trace));
+
+    assert!(is_benign_client_traceback(
+        "marketbase.py:3718 in _OnResize",
+        "AttributeError: 'NoneType' object has no attribute 'max'",
+    ));
+
+    // Negative cases: genuine bugs in the same files/methods or wrapped callers must NOT be suppressed.
+    assert!(!is_benign_client_traceback(
+        "",
+        "Thrown at:\n /app/marketbase.py(3718) _OnResize\nFormatted exception info: KeyError: 'max'\nEXCEPTION END\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "",
+        "Thrown at:\n /app/marketbase.py(3718) LoadOrders\nFormatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\nEXCEPTION END\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "",
+        "  File \"/app/other_marketbase.py\", line 3718, in _OnResize\nAttributeError: 'NoneType' object has no attribute 'max'\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "",
+        "  File \"/app/marketbase.py\", line 3718, in _OnResizeWindow\nAttributeError: 'NoneType' object has no attribute 'max'\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "",
+        "  File \"/app/marketbase.py\", line 3718, in _OnResize\n  File \"/app/market_orders.py\", line 99, in ApplyFilter\nAttributeError: 'NoneType' object has no attribute 'max'\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "",
+        "  File \"/app/minimap.py\", line 111, in _ResizeSlider\nTypeError: unsupported operand type(s)\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "",
+        "  File \"/app/minimap.py\", line 100, in UpdateAlignment\nAttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "",
+        "  File \"/app/marketbase.py\", line 3718, in _OnResize\nRuntimeError: ServerException: 'NoneType' object has no attribute 'max'\n",
+    ));
+    // Downstream synthetic `<lambda>` / `<genexpr>` / non-alphanumeric stem leaf frames must not be dropped.
+    assert!(!is_benign_client_traceback(
+        "",
+        "Traceback (most recent call last):\n  File \"/app/marketbase.py\", line 3718, in _OnResize\n  File \"/app/marketbase.py\", line 3724, in <lambda>\nAttributeError: 'NoneType' object has no attribute 'max'\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "",
+        "Thrown at:\n /app/minimap.py(111) _ResizeSlider\n /app/ui-helper.py(42) <genexpr>\nFormatted exception info: AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\nEXCEPTION END\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "",
+        "Traceback (most recent call last):\n  File \"/app/marketbase.py\", line 3718, in _OnResize\n  File \"/app/my window.py\", line 88, in <listcomp>\nAttributeError: 'NoneType' object has no attribute 'max'\n",
+    ));
+    // Non-AttributeError or different AttributeError with benign substring in locals/stack_key/post-END must NOT be suppressed.
+    assert!(!is_benign_client_traceback(
+        "",
+        "  File \"/app/marketbase.py\", line 3718, in _OnResize\nRuntimeError: 'NoneType' object has no attribute 'max'\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "marketbase.py:3718 in _OnResize AttributeError: 'NoneType' object has no attribute 'max'",
+        "Thrown at:\n /app/marketbase.py(3718) _OnResize\nFormatted exception info: AttributeError: 'NoneType' object has no attribute 'buyOrders'\nThread Locals: cached = \"'NoneType' object has no attribute 'max'\"\nEXCEPTION END\nAttributeError: 'NoneType' object has no attribute 'max'\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "",
+        "Thrown at:\n /app/marketbase.py(3718) _OnResize\nFormatted exception info: KeyError: 'price'\nThread Locals: prev = \"AttributeError: 'NoneType' object has no attribute 'max'\"\nEXCEPTION END\nAttributeError: 'NoneType' object has no attribute 'max'\n",
+    ));
+    // Prose/exception lines referencing `/path/marketbase.py(3718) _OnResize` must not be misparsed as frames.
+    assert!(!is_benign_client_traceback(
+        "",
+        "Traceback (most recent call last):\n  File \"/app/other.py\", line 10, in Foo\nRuntimeError: failed in /app/marketbase.py(3718) _OnResize\nAttributeError: 'NoneType' object has no attribute 'max'\n",
+    ));
+    assert!(!is_benign_client_traceback(
+        "",
+        "AttributeError: 'NoneType' object has no attribute 'max'\nRuntimeError: /app/marketbase.py(3718) _OnResize\n",
+    ));
+}
+
+#[tokio::test]
+async fn test_schedule_incident_capture_suppresses_benign_ui_traceback_only() {
+    let dir = make_temp_dir("benign_capture_filter");
+    let ctx = ServerContext::new();
+    let session = SessionState::new(77);
+
+    let benign_market = BugIncidentBundle::build_snapshot(
+        &ctx,
+        &session,
+        1_448_116_342,
+        "Thrown at:\n/app/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize",
+        "Formatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\nThrown at:\n/app/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\nEXCEPTION END",
+    );
+    schedule_incident_capture(
+        benign_market,
+        Some(dir.clone()),
+        Some(Duration::from_millis(5)),
+    );
+
+    let benign_minimap = BugIncidentBundle::build_snapshot(
+        &ctx,
+        &session,
+        2_355_956_006_664_999_394,
+        "playtester:client-python:client_traceback",
+        "Traceback (most recent call last):\n  File \"packages/carbonui/graphs/minimap.py\", line 111, in _ResizeSlider\nAttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n",
+    );
+    schedule_incident_capture(
+        benign_minimap,
+        Some(dir.clone()),
+        Some(Duration::from_millis(5)),
+    );
+
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let queued_after_benign: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|x| x.path()))
+        .collect();
+    assert!(
+        queued_after_benign.is_empty(),
+        "Expected benign client traces to be suppressed, found: {queued_after_benign:?}"
+    );
+
+    let genuine = BugIncidentBundle::build_snapshot(
+        &ctx,
+        &session,
+        0x1122_3344,
+        "marketbase.py(3718) _OnResize",
+        "Formatted exception info: KeyError: 'price'\nThrown at:\n/app/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\nEXCEPTION END",
+    );
+    schedule_incident_capture(genuine, Some(dir.clone()), Some(Duration::from_millis(5)));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let queued_after_genuine: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|x| x.path()))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    assert_eq!(queued_after_genuine.len(), 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
