@@ -927,11 +927,22 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
                         diff_base = mb_sha
                     break
 
-    _, diff_files_out = sh(["git", "diff", "--name-only", diff_base, head, "--", "crates/", "client-bridge/", "tools/"], root)
+    _, diff_files_out = sh(
+        [
+            "git", "diff", "--name-only", diff_base, head, "--",
+            "crates/", "client-bridge/", "tools/", "Cargo.toml", "Cargo.lock", ".cargo/",
+            ".agents/skills/evomu-adversarial-review/",
+        ],
+        root,
+    )
     changed_all = [l.strip() for l in diff_files_out.splitlines() if l.strip()]
     changed_crates = [f for f in changed_all if f.startswith("crates/") and f.endswith((".rs", ".json", ".txt", ".toml", ".proto"))]
-    harness_or_journeys_touched = any(
-        f.startswith(("client-bridge/", "tools/client-harness/", "crates/eve-server/src/bin/"))
+    rust_workspace_touched = any(
+        f.startswith(("crates/", ".cargo/")) or f in ("Cargo.toml", "Cargo.lock")
+        for f in changed_all
+    )
+    bridge_or_bin_touched = any(
+        f.startswith(("client-bridge/", "crates/eve-server/src/bin/"))
         for f in changed_all
     )
     client_harness_touched = any(f.startswith("tools/client-harness/") for f in changed_all)
@@ -941,6 +952,7 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
         or (f.startswith("tools/") and "/" not in f[len("tools/"):] and f.endswith(".py"))
         for f in changed_all
     )
+    agents_gate_touched = any(f.startswith(".agents/skills/evomu-adversarial-review/") for f in changed_all)
     router_auth_touched = any(_is_central_router_auth_file(f) for f in changed_crates)
     t1_client_err_touched = any(
         f.startswith("crates/eve-testkit/") or f.rsplit("/", 1)[-1] == "client_error.rs"
@@ -951,14 +963,15 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
     t4_combat_touched = any(_matches_t4_combat_module_file(f) for f in changed_crates)
     t5_struct_touched = any(_matches_t5_structure_pos_file(f) for f in changed_crates)
     t6_proto_touched = any(_matches_t6_proto_quasar_file(f) for f in changed_crates)
-    include_sentinel = any(f.endswith((".rs", ".json", ".txt")) for f in changed_crates) or harness_or_journeys_touched
+    # Only emit Rust sentinel/canary suites when at least one Rust/crate/workspace file changed.
+    include_sentinel = rust_workspace_touched
 
     direct_lib_filters_by_crate = {}
     extra_lib_filters_by_crate = {}
     whole_lib_crates = set()
     non_server_integ = []
     direct_server_it = []
-    if harness_or_journeys_touched:
+    if bridge_or_bin_touched:
         direct_server_it.append("rpc_dispatch_and_client_harness_e2e")
     changed_server_stems = set()
     quasar_crate_touched = False
@@ -1316,16 +1329,24 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
     if t6_proto_touched:
         _add_cmd([cargo, "test", "-p", "eve-proto", "--lib", T6_PROTO_LIB_TEST])
 
-    # TT-06 / TT-29: Python unittest discovery suites when `tools/` changes
+    # TT-06 / TT-29: Python unittest discovery suites when `tools/` or `.agents/` changes
     if client_harness_touched and os.path.isdir(os.path.join(root, "tools", "client-harness")):
         _add_cmd([sys.executable, "-m", "unittest", "discover", "-s", "tools/client-harness", "-p", "test_*.py", "-v"])
     if sde_import_touched and os.path.isdir(os.path.join(root, "tools", "sde-import")):
         _add_cmd([sys.executable, "-m", "unittest", "discover", "-s", "tools/sde-import", "-p", "test_*.py", "-v"])
     if tools_py_touched and os.path.isdir(os.path.join(root, "tools", "tests")):
         _add_cmd([sys.executable, "-m", "unittest", "discover", "-s", "tools/tests", "-p", "test_*.py", "-v"])
+    if agents_gate_touched and os.path.isdir(os.path.join(root, ".agents", "skills", "evomu-adversarial-review", "tests")):
+        _add_cmd([
+            sys.executable, "-m", "unittest", "discover",
+            "-s", ".agents/skills/evomu-adversarial-review/tests", "-p", "test_*.py", "-v",
+        ])
 
     if not cmds:
-        _add_cmd([cargo, "test", "-p", "eve-server", "--lib", "config::tests"])
+        if not rust_workspace_touched and os.path.isfile(os.path.join(root, "tools", "tests", "test_release_guard.py")):
+            _add_cmd([sys.executable, "-m", "unittest", "discover", "-s", "tools/tests", "-p", "test_release_guard.py", "-v"])
+        else:
+            _add_cmd([cargo, "test", "-p", "eve-server", "--lib", "config::tests"])
     return cmds
 
 
