@@ -460,11 +460,7 @@ pub(crate) fn best_asks_to_summary_rows<'a>(
 
 pub(crate) fn sweep_and_notify_expired(ctx: &ServerContext) {
     crate::services::station_structure::structure_upwell_ops::sync_pending_profiles_in_ctx(ctx);
-    let now = ctx.now_unix();
-    let swept = ctx.db.with_mut_snapshot(|s| super::market_contracts::sweep_expired_orders(s, now));
-    if !swept.is_empty() {
-        super::market_contracts::emit_expired_order_notifications(ctx, &swept);
-    }
+    super::market_contracts::sweep_expired_orders_and_notify(ctx, ctx.now_unix());
 }
 
 pub fn handle(

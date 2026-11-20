@@ -528,7 +528,7 @@ fn buy_multiple_items_and_price_history_queries() {
     .unwrap()
     .unwrap();
     assert!(old_hist.is_crowset());
-    assert_eq!(old_hist.row_count(), Some(1));
+    assert_eq!(old_hist.row_count(), Some(0));
 
     let new_hist = handle_orders_escrow(
         &ctx,
@@ -541,6 +541,7 @@ fn buy_multiple_items_and_price_history_queries() {
     .unwrap()
     .unwrap();
     assert!(new_hist.is_crowset());
+    assert_eq!(new_hist.row_count(), Some(1));
 
     // Self-trade BuyMultipleItems emits buyer debit OnAccountChange before seller credit (#789)
     // and PlaceMultiSellOrder accepts integer 0 for useCorp (#795)
@@ -2462,26 +2463,78 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
         assert_eq!(corp_plex.quantity, 2);
     });
 
-    // GetOldPriceHistory / GetNewPriceHistory(PLEX_TYPE_ID) queried from a third region and region=None aggregate globally.
+    // GetNewPriceHistory(PLEX_TYPE_ID) aggregates today's PLEX trades globally (even from region=None);
+    // GetOldPriceHistory(PLEX_TYPE_ID) only returns days strictly before today UTC (zero duplicate overlap).
+    let yesterday_date = eve_db::ledger::unix_secs_to_date_str(ctx.now_unix().saturating_sub(86_400));
     for test_reg in [Some(other_region_id), None] {
         remote_buyer_sess.region_id = test_reg;
-        for method in ["GetOldPriceHistory", "GetNewPriceHistory"] {
-            let hist = call_escrow_kw(
-                &ctx,
-                &mut remote_buyer_sess,
-                method,
-                &[PyRep::Integer(PLEX_TYPE_ID as i64)],
-                &kw,
-            )
-            .expect("GetPriceHistory for PLEX");
-            let rows = hist.crowset_rows().expect("PLEX history rows");
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].dbrow_get("lowPrice"), Some(&PyRep::Real(4_900_000.0)));
-            assert_eq!(rows[0].dbrow_get("highPrice"), Some(&PyRep::Real(5_100_000.0)));
-            assert_eq!(rows[0].dbrow_get("volume"), Some(&PyRep::Integer(9)));
-            assert_eq!(rows[0].dbrow_get("orders"), Some(&PyRep::Integer(3)));
-        }
+        let old_hist = call_escrow_kw(
+            &ctx,
+            &mut remote_buyer_sess,
+            "GetOldPriceHistory",
+            &[PyRep::Integer(PLEX_TYPE_ID as i64)],
+            &kw,
+        )
+        .expect("GetOldPriceHistory for PLEX");
+        assert!(old_hist.crowset_rows().expect("old rows").is_empty());
+
+        let new_hist = call_escrow_kw(
+            &ctx,
+            &mut remote_buyer_sess,
+            "GetNewPriceHistory",
+            &[PyRep::Integer(PLEX_TYPE_ID as i64)],
+            &kw,
+        )
+        .expect("GetNewPriceHistory for PLEX");
+        let rows = new_hist.crowset_rows().expect("PLEX history rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].dbrow_get("lowPrice"), Some(&PyRep::Real(4_900_000.0)));
+        assert_eq!(rows[0].dbrow_get("highPrice"), Some(&PyRep::Real(5_100_000.0)));
+        assert_eq!(rows[0].dbrow_get("volume"), Some(&PyRep::Integer(9)));
+        assert_eq!(rows[0].dbrow_get("orders"), Some(&PyRep::Integer(3)));
     }
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_history
+            .entry((THE_FORGE_REGION_ID, PLEX_TYPE_ID))
+            .or_default()
+            .push(eve_db::MarketHistoryDayRecord {
+                date: yesterday_date.clone(),
+                lowest: 4_800_000.0,
+                highest: 4_850_000.0,
+                average: 4_820_000.0,
+                volume: 4,
+                order_count: 1,
+                open_price: None,
+                close_price: None,
+            });
+    });
+    remote_buyer_sess.region_id = None;
+    let old_hist_yest = call_escrow_kw(
+        &ctx,
+        &mut remote_buyer_sess,
+        "GetOldPriceHistory",
+        &[PyRep::Integer(PLEX_TYPE_ID as i64)],
+        &kw,
+    )
+    .expect("GetOldPriceHistory yesterday");
+    let old_rows = old_hist_yest.crowset_rows().expect("old PLEX rows");
+    assert_eq!(old_rows.len(), 1);
+    assert_eq!(old_rows[0].dbrow_get("volume"), Some(&PyRep::Integer(4)));
+    let new_hist_today = call_escrow_kw(
+        &ctx,
+        &mut remote_buyer_sess,
+        "GetNewPriceHistory",
+        &[PyRep::Integer(PLEX_TYPE_ID as i64)],
+        &kw,
+    )
+    .expect("GetNewPriceHistory today");
+    let new_rows = new_hist_today.crowset_rows().expect("new PLEX rows");
+    assert_eq!(new_rows.len(), 1);
+    assert_eq!(new_rows[0].dbrow_get("volume"), Some(&PyRep::Integer(9)));
+    assert_ne!(
+        old_rows[0].dbrow_get("historyDate"),
+        new_rows[0].dbrow_get("historyDate")
+    );
 
     // With region=None, non-PLEX types still return NoRegion without mutating DB state.
     let (orders_before, next_eid_before) =
@@ -2501,4 +2554,100 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
         ctx.db.with_snapshot(|s| (s.market_orders.len(), s.next_entity_id));
     assert_eq!(orders_before, orders_after);
     assert_eq!(next_eid_before, next_eid_after);
+}
+
+#[test]
+fn cancel_char_order_rejects_unowned_order_before_sweeping_expired_orders() {
+    use crate::services::market_trading::{save_market_order_meta, MarketOrderMeta};
+    use eve_db::{IskCents, MarketOrderRecord};
+
+    let ctx = test_ctx();
+    let owner_id = 90_000_001_i64;
+    let attacker_id = 90_000_002_i64;
+    let now = ctx.now_unix();
+    let kw = HashMap::new();
+    let (owned_oid, expired_oid) = (9_700_001_i64, 9_700_002_i64);
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.retain(|_, o| o.is_npc);
+        s.market_orders.insert(
+            owned_oid,
+            MarketOrderRecord {
+                order_id: owned_oid,
+                owner_id,
+                station_id: JITA_STATION_ID,
+                region_id: 10_000_002,
+                type_id: 34,
+                is_bid: true,
+                price: IskCents::from_isk(10),
+                vol_entered: 10,
+                vol_remaining: 10,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(100),
+            },
+        );
+        save_market_order_meta(
+            s,
+            owned_oid,
+            MarketOrderMeta {
+                range: -1,
+                duration: 90,
+                issue_unix: now,
+                order_state: None,
+                account_key: None,
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+        s.market_orders.insert(
+            expired_oid,
+            MarketOrderRecord {
+                order_id: expired_oid,
+                owner_id,
+                station_id: JITA_STATION_ID,
+                region_id: 10_000_002,
+                type_id: 34,
+                is_bid: true,
+                price: IskCents::from_isk(10),
+                vol_entered: 5,
+                vol_remaining: 5,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(50),
+            },
+        );
+        save_market_order_meta(
+            s,
+            expired_oid,
+            MarketOrderMeta {
+                range: -1,
+                duration: 1,
+                issue_unix: now.saturating_sub(2 * 86_400),
+                order_state: None,
+                account_key: None,
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+    });
+
+    let attacker_corp_id = ctx.db.with_snapshot(|s| s.characters[&attacker_id].corporation_id);
+    let mut attacker_sess = jita_session(attacker_id, attacker_corp_id);
+    let eid_before = ctx.db.with_snapshot(|s| s.next_entity_id);
+    let err = call_escrow_kw(
+        &ctx,
+        &mut attacker_sess,
+        "CancelCharOrder",
+        &[PyRep::Integer(owned_oid)],
+        &kw,
+    )
+    .expect_err("Cancelling another character's order must fail");
+    assert_eq!(err.code, "OrderOwnershipViolation");
+
+    // Unowned cancel failure must NOT trigger a global expiry sweep.
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&expired_oid].vol_remaining, 5);
+        assert_eq!(s.next_entity_id, eid_before);
+    });
 }

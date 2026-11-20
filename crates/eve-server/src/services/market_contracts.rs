@@ -507,18 +507,29 @@ pub fn handle(
                 let Some((tids, is_python_set)) = crate::services::market_price_history::extract_type_ids_arg(args.first()) else {
                     return Some(Err(rpc_err("InvalidArgument", "GetHistoryForManyTypeIDs requires a list or set of typeIDs")));
                 };
+                let now_unix = ctx.now_unix();
                 let entries = ctx.db.with_snapshot(|snap| {
                     let hdr = DBRowDescriptor::market_history_header();
                     let mut out = Vec::with_capacity(tids.len());
                     for tid in tids {
-                        let rows = if (tid as TypeId) == PLEX_TYPE_ID {
-                            crate::services::market_price_history::build_global_price_history_rows(snap, PLEX_TYPE_ID)
-                        } else {
-                            crate::services::market_price_history::build_price_history_rows(snap, tid as TypeId, region_id)
-                        };
+                        let is_plex = (tid as TypeId) == PLEX_TYPE_ID;
                         let val = if is_python_set {
-                            PyRep::Tuple(vec![hdr.build_crowset(Vec::new()), hdr.build_crowset(rows)])
+                            let (old_rows, new_rows) = if is_plex {
+                                crate::services::market_price_history::build_partitioned_global_price_history_rows(
+                                    snap, PLEX_TYPE_ID, now_unix,
+                                )
+                            } else {
+                                crate::services::market_price_history::build_partitioned_price_history_rows(
+                                    snap, tid as TypeId, region_id, now_unix,
+                                )
+                            };
+                            PyRep::Tuple(vec![hdr.build_crowset(old_rows), hdr.build_crowset(new_rows)])
                         } else {
+                            let rows = if is_plex {
+                                crate::services::market_price_history::build_global_price_history_rows(snap, PLEX_TYPE_ID)
+                            } else {
+                                crate::services::market_price_history::build_price_history_rows(snap, tid as TypeId, region_id)
+                            };
                             hdr.build_crowset(rows)
                         };
                         out.push((PyRep::Integer(tid), val));
@@ -598,8 +609,8 @@ pub fn handle(
                     Err(e) => return Some(Err(e)),
                 };
                 let now_unix = ctx.now_unix();
-                let (swept_list, rows) = ctx.db.with_mut_snapshot(|snap| {
-                    let swept = sweep_expired_orders(snap, now_unix);
+                let _ = sweep_expired_orders_and_notify(ctx, now_unix);
+                let rows = ctx.db.with_snapshot(|snap| {
                     let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                     let mut orders: Vec<MarketOrderRecord> = snap.market_orders.values().filter(|o| {
                             !o.is_npc
@@ -608,7 +619,7 @@ pub fn handle(
                                     || (include_corp && o.owner_id == corp_id))
                         }).cloned().collect();
                     orders.sort_by_key(|o| o.order_id);
-                    let out = orders.into_iter().filter_map(|o| {
+                    orders.into_iter().filter_map(|o| {
                             let meta = load_market_order_meta(snap, &o, now_unix);
                             if meta.closed_unix.is_some_and(|c| now_unix.saturating_sub(c) > 90 * 86_400) {
                                 return None;
@@ -642,10 +653,8 @@ pub fn handle(
                                 PyRep::Integer(meta.duration), PyRep::Bool(is_corp), PyRep::Integer(sys_id as i64),
                                 PyRep::Real(0.0), PyRep::Integer(last_change), PyRep::Integer(acct_key), PyRep::Integer(const_id as i64),
                             ])
-                        }).collect();
-                    (swept, out)
+                        }).collect()
                 });
-                emit_expired_order_notifications(ctx, &swept_list);
                 return Some(Ok(PyRep::rowset(
                     vec![
                         "orderID", "typeID", "charID", "regionID", "stationID", "range", "bid", "price",
@@ -985,54 +994,36 @@ pub fn handle(
             }
 
             "GetPlexBest" => {
-                if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+                if let Err(e) = ServerContext::require_character(session) {
+                    return Some(Err(e));
+                }
                 let now_unix = ctx.now_unix();
-                let (best_ask, best_bid, ask_vol, bid_vol, summary_rows) =
-                    ctx.db.with_snapshot(|snap| {
-                        let mut min_ask: Option<&MarketOrderRecord> = None;
-                        let mut max_bid: Option<&MarketOrderRecord> = None;
-                        let mut total_ask_vol = 0_i64;
-                        let mut total_bid_vol = 0_i64;
-                        for o in snap.market_orders.values()
-                            .filter(|o| {
-                                o.type_id == PLEX_TYPE_ID
-                                    && o.vol_remaining > 0
-                                    && !is_order_expired(snap, o, now_unix)
-                            })
-                        {
-                            if o.is_bid {
-                                total_bid_vol += o.vol_remaining as i64;
-                                if max_bid.map(|b| o.price.0 > b.price.0).unwrap_or(true) { max_bid = Some(o); }
-                            } else { total_ask_vol += o.vol_remaining as i64;
-                                if min_ask.map(|a| o.price.0 < a.price.0).unwrap_or(true) { min_ask = Some(o); }
-                            }
+                let summary_rows = ctx.db.with_snapshot(|snap| {
+                    let mut min_ask: Option<&MarketOrderRecord> = None;
+                    for o in snap.market_orders.values().filter(|o| {
+                        o.type_id == PLEX_TYPE_ID
+                            && !o.is_bid
+                            && o.vol_remaining > 0
+                            && !is_order_expired(snap, o, now_unix)
+                    }) {
+                        if min_ask.map(|a| o.price.0 < a.price.0).unwrap_or(true) {
+                            min_ask = Some(o);
                         }
-                        let rows = if let Some(a) = min_ask {
-                            vec![vec![
-                                PyRep::Real(a.price.to_wire_f64()),
-                                PyRep::Real(a.vol_remaining as f64),
-                                PyRep::Integer(PLEX_TYPE_ID as i64),
-                                PyRep::Integer(a.station_id),
-                            ]]
-                        } else { Vec::new()
-                        };
-                        (
-                            min_ask.map(|a| a.price.to_wire_f64()).unwrap_or(0.0),
-                            max_bid.map(|b| b.price.to_wire_f64()).unwrap_or(0.0),
-                            total_ask_vol,
-                            total_bid_vol,
-                            rows,
-                        )
-                    });
-                let summary = DBRowDescriptor::market_summary_header().build_cindexed_rowset("typeID", summary_rows);
-                return Some(Ok(PyRep::Dict(vec![
-                    (PyRep::String("typeID".into()), PyRep::Integer(PLEX_TYPE_ID as i64)),
-                    (PyRep::String("bestAskPrice".into()), PyRep::Real(best_ask)),
-                    (PyRep::String("bestBidPrice".into()), PyRep::Real(best_bid)),
-                    (PyRep::String("totalAskVolume".into()), PyRep::Integer(ask_vol)),
-                    (PyRep::String("totalBidVolume".into()), PyRep::Integer(bid_vol)),
-                    (PyRep::String("summary".into()), summary),
-                ])));
+                    }
+                    if let Some(a) = min_ask {
+                        vec![vec![
+                            PyRep::Real(a.price.to_wire_f64()),
+                            PyRep::Real(a.vol_remaining as f64),
+                            PyRep::Integer(PLEX_TYPE_ID as i64),
+                            PyRep::Integer(a.station_id),
+                        ]]
+                    } else {
+                        Vec::new()
+                    }
+                });
+                return Some(Ok(
+                    DBRowDescriptor::market_summary_header().build_cindexed_rowset("typeID", summary_rows)
+                ));
             }
 
             "GetPlexOrders" => {
@@ -1060,19 +1051,32 @@ pub fn handle(
             }
 
             "GetPlexHistory" => {
-                let rows = ctx.db.with_snapshot(|snap| {
-                    crate::services::market_price_history::build_global_price_history_rows(snap, PLEX_TYPE_ID)
+                let now_unix = ctx.now_unix();
+                let (old_rows, new_rows) = ctx.db.with_snapshot(|snap| {
+                    crate::services::market_price_history::build_partitioned_global_price_history_rows(
+                        snap,
+                        PLEX_TYPE_ID,
+                        now_unix,
+                    )
                 });
                 let hdr = DBRowDescriptor::market_history_header();
                 return Some(Ok(PyRep::Dict(vec![(
                     PyRep::Integer(PLEX_TYPE_ID as i64),
-                    PyRep::Tuple(vec![hdr.build_crowset(Vec::new()), hdr.build_crowset(rows)]),
+                    PyRep::Tuple(vec![hdr.build_crowset(old_rows), hdr.build_crowset(new_rows)]),
                 )])));
             }
 
             "GetPlexNewPriceHistory" | "GetPlexOldPriceHistory" => {
+                let now_unix = ctx.now_unix();
+                let is_old = method == "GetPlexOldPriceHistory";
                 let rows = ctx.db.with_snapshot(|snap| {
-                    crate::services::market_price_history::build_global_price_history_rows(snap, PLEX_TYPE_ID)
+                    let (old_rows, new_rows) =
+                        crate::services::market_price_history::build_partitioned_global_price_history_rows(
+                            snap,
+                            PLEX_TYPE_ID,
+                            now_unix,
+                        );
+                    if is_old { old_rows } else { new_rows }
                 });
                 return Some(Ok(DBRowDescriptor::market_history_header().build_crowset(rows)));
             }

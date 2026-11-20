@@ -380,7 +380,7 @@ fn get_system_asks_and_plex_best_omit_expired_orders_without_sweeping() {
         assert_eq!(s.market_orders[&710_001].vol_remaining, 50);
     });
 
-    // Seed expired PLEX buy order and verify GetPlexBest omits it on read without mutating DB
+    // Seed expired PLEX sell and buy orders and verify GetPlexBest omits expired asks on read without mutating DB
     ctx.db.with_mut_snapshot(|s| {
         s.market_orders.insert(
             710_002,
@@ -390,13 +390,13 @@ fn get_system_asks_and_plex_best_omit_expired_orders_without_sweeping() {
                 station_id: JITA_STATION_ID,
                 region_id: THE_FORGE_REGION_ID,
                 type_id: PLEX_TYPE_ID,
-                is_bid: true,
+                is_bid: false,
                 price: IskCents::from_isk(5_000_000),
                 vol_entered: 2,
                 vol_remaining: 2,
                 min_volume: 1,
                 is_npc: false,
-                escrow: IskCents::from_isk(10_000_000),
+                escrow: IskCents(0),
             },
         );
         save_market_order_meta(
@@ -416,10 +416,16 @@ fn get_system_asks_and_plex_best_omit_expired_orders_without_sweeping() {
     let plex_best = handle(&ctx, &mut sess, "marketProxy", "GetPlexBest", &[], &kw)
         .unwrap()
         .unwrap();
-    assert_eq!(plex_best.dict_get("totalBidVolume"), Some(&PyRep::Integer(0)));
+    assert!(plex_best.is_cindexed_rowset());
+    assert!(
+        !plex_best
+            .cindexed_rowset_entries()
+            .unwrap()
+            .iter()
+            .any(|(k, _)| k == &PyRep::Integer(PLEX_TYPE_ID as i64))
+    );
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.market_orders[&710_002].vol_remaining, 2);
-        assert_eq!(s.market_orders[&710_002].escrow, IskCents::from_isk(10_000_000));
     });
 
     // Explicit sweep cleans up both expired orders.
@@ -427,7 +433,6 @@ fn get_system_asks_and_plex_best_omit_expired_orders_without_sweeping() {
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.market_orders[&710_001].vol_remaining, 0);
         assert_eq!(s.market_orders[&710_002].vol_remaining, 0);
-        assert_eq!(s.market_orders[&710_002].escrow, IskCents(0));
     });
 }
 
@@ -1223,40 +1228,68 @@ fn plex_history_rpcs_aggregate_globally_and_read_pure_across_regions() {
     let mut sess = jita_session(char_id, corp_id);
     let kw = std::collections::HashMap::new();
 
+    let now_unix = ctx.now_unix();
+    let old_date = eve_db::ledger::unix_secs_to_date_str(now_unix.saturating_sub(86_400));
+    let today_date = eve_db::ledger::unix_secs_to_date_str(now_unix);
+
     ctx.db.with_mut_snapshot(|s| {
         s.market_orders.retain(|_, o| o.is_npc || o.vol_remaining <= 0);
         s.market_history.clear();
         s.market_transactions.clear();
         s.market_history.insert(
             (THE_FORGE_REGION_ID, PLEX_TYPE_ID),
-            vec![MarketHistoryDayRecord {
-                date: "2025-03-10".into(),
-                lowest: 5_000_000.0,
-                highest: 5_200_000.0,
-                average: 5_100_000.0,
-                volume: 30,
-                order_count: 2,
-                open_price: None,
-                close_price: None,
-            }],
+            vec![
+                MarketHistoryDayRecord {
+                    date: old_date.clone(),
+                    lowest: 4_600_000.0,
+                    highest: 4_800_000.0,
+                    average: 4_700_000.0,
+                    volume: 20,
+                    order_count: 1,
+                    open_price: None,
+                    close_price: None,
+                },
+                MarketHistoryDayRecord {
+                    date: today_date.clone(),
+                    lowest: 5_000_000.0,
+                    highest: 5_200_000.0,
+                    average: 5_100_000.0,
+                    volume: 30,
+                    order_count: 2,
+                    open_price: None,
+                    close_price: None,
+                },
+            ],
         );
         s.market_history.insert(
             (10_000_043, PLEX_TYPE_ID),
-            vec![MarketHistoryDayRecord {
-                date: "2025-03-10".into(),
-                lowest: 4_700_000.0,
-                highest: 4_900_000.0,
-                average: 4_800_000.0,
-                volume: 10,
-                order_count: 1,
-                open_price: None,
-                close_price: None,
-            }],
+            vec![
+                MarketHistoryDayRecord {
+                    date: old_date.clone(),
+                    lowest: 4_500_000.0,
+                    highest: 4_700_000.0,
+                    average: 4_600_000.0,
+                    volume: 20,
+                    order_count: 1,
+                    open_price: None,
+                    close_price: None,
+                },
+                MarketHistoryDayRecord {
+                    date: today_date.clone(),
+                    lowest: 4_700_000.0,
+                    highest: 4_900_000.0,
+                    average: 4_800_000.0,
+                    volume: 10,
+                    order_count: 1,
+                    open_price: None,
+                    close_price: None,
+                },
+            ],
         );
         s.market_history.insert(
             (THE_FORGE_REGION_ID, 34),
             vec![MarketHistoryDayRecord {
-                date: "2025-03-10".into(),
+                date: old_date.clone(),
                 lowest: 5.0,
                 highest: 5.0,
                 average: 5.0,
@@ -1271,39 +1304,55 @@ fn plex_history_rpcs_aggregate_globally_and_read_pure_across_regions() {
     let next_eid_before = ctx.db.with_snapshot(|s| s.next_entity_id);
     for region_opt in [Some(10_000_032_u32), None] {
         sess.region_id = region_opt;
-        for method in [
-            "GetPlexHistory",
-            "GetPlexNewPriceHistory",
-            "GetPlexOldPriceHistory",
-        ] {
-            let res = handle(&ctx, &mut sess, "marketProxy", method, &[], &kw)
-                .unwrap()
-                .unwrap();
-            let hist_rep = if method == "GetPlexHistory" {
-                let PyRep::Dict(entries) = res else {
-                    panic!("GetPlexHistory must return Dict");
-                };
-                assert_eq!(entries.len(), 1);
-                assert_eq!(entries[0].0, PyRep::Integer(44_992));
-                let PyRep::Tuple(mut parts) = entries.into_iter().next().unwrap().1 else {
-                    panic!("GetPlexHistory value must be (old, new) Tuple");
-                };
-                assert_eq!(parts.len(), 2);
-                assert!(parts[0].crowset_rows().expect("old crowset").is_empty());
-                parts.swap_remove(1)
-            } else {
-                assert!(res.is_crowset(), "{method} must return CRowset");
-                res
-            };
-            let rows = hist_rep.crowset_rows().expect("crowset rows");
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].dbrow_get("lowPrice"), Some(&PyRep::Real(4_700_000.0)));
-            assert_eq!(rows[0].dbrow_get("highPrice"), Some(&PyRep::Real(5_200_000.0)));
-            let avg = rows[0].dbrow_get("avgPrice").and_then(PyRep::as_f64).unwrap();
-            assert!((avg - 5_025_000.0).abs() < 1e-4);
-            assert_eq!(rows[0].dbrow_get("volume"), Some(&PyRep::Integer(40)));
-            assert_eq!(rows[0].dbrow_get("orders"), Some(&PyRep::Integer(3)));
-        }
+        let hist_tuple_res = handle(&ctx, &mut sess, "marketProxy", "GetPlexHistory", &[], &kw)
+            .unwrap()
+            .unwrap();
+        let PyRep::Dict(entries) = hist_tuple_res else {
+            panic!("GetPlexHistory must return Dict");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, PyRep::Integer(44_992));
+        let PyRep::Tuple(parts) = &entries[0].1 else {
+            panic!("GetPlexHistory value must be (old, new) Tuple");
+        };
+        assert_eq!(parts.len(), 2);
+        let tuple_old_rows = parts[0].crowset_rows().expect("old crowset");
+        let tuple_new_rows = parts[1].crowset_rows().expect("new crowset");
+        assert_eq!(tuple_old_rows.len(), 1);
+        assert_eq!(tuple_new_rows.len(), 1);
+
+        let old_res = handle(&ctx, &mut sess, "marketProxy", "GetPlexOldPriceHistory", &[], &kw)
+            .unwrap()
+            .unwrap();
+        assert!(old_res.is_crowset());
+        let old_rows = old_res.crowset_rows().expect("old rows");
+        assert_eq!(old_rows.len(), 1);
+        assert_eq!(old_rows[0].dbrow_get("lowPrice"), Some(&PyRep::Real(4_500_000.0)));
+        assert_eq!(old_rows[0].dbrow_get("highPrice"), Some(&PyRep::Real(4_800_000.0)));
+        assert!((old_rows[0].dbrow_get("avgPrice").and_then(PyRep::as_f64).unwrap() - 4_650_000.0).abs() < 1e-4);
+        assert_eq!(old_rows[0].dbrow_get("volume"), Some(&PyRep::Integer(40)));
+        assert_eq!(old_rows[0].dbrow_get("orders"), Some(&PyRep::Integer(2)));
+
+        let new_res = handle(&ctx, &mut sess, "marketProxy", "GetPlexNewPriceHistory", &[], &kw)
+            .unwrap()
+            .unwrap();
+        assert!(new_res.is_crowset());
+        let new_rows = new_res.crowset_rows().expect("new rows");
+        assert_eq!(new_rows.len(), 1);
+        assert_eq!(new_rows[0].dbrow_get("lowPrice"), Some(&PyRep::Real(4_700_000.0)));
+        assert_eq!(new_rows[0].dbrow_get("highPrice"), Some(&PyRep::Real(5_200_000.0)));
+        let avg = new_rows[0].dbrow_get("avgPrice").and_then(PyRep::as_f64).unwrap();
+        assert!((avg - 5_025_000.0).abs() < 1e-4);
+        assert_eq!(new_rows[0].dbrow_get("volume"), Some(&PyRep::Integer(40)));
+        assert_eq!(new_rows[0].dbrow_get("orders"), Some(&PyRep::Integer(3)));
+
+        assert_ne!(
+            old_rows[0].dbrow_get("historyDate"),
+            new_rows[0].dbrow_get("historyDate"),
+            "GetPlexOldPriceHistory and GetPlexNewPriceHistory must be strictly date-disjoint"
+        );
+        assert_eq!(tuple_old_rows, old_rows);
+        assert_eq!(tuple_new_rows, new_rows);
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.next_entity_id), next_eid_before);
 
@@ -1330,8 +1379,9 @@ fn plex_history_rpcs_aggregate_globally_and_read_pure_across_regions() {
         .find(|(k, _)| k.as_i64() == Some(PLEX_TYPE_ID as i64))
         .and_then(|(_, v)| v.crowset_rows())
         .expect("PLEX global history rows");
-    assert_eq!(plex_rows.len(), 1);
+    assert_eq!(plex_rows.len(), 2);
     assert_eq!(plex_rows[0].dbrow_get("volume"), Some(&PyRep::Integer(40)));
+    assert_eq!(plex_rows[1].dbrow_get("volume"), Some(&PyRep::Integer(40)));
     let trit_rows = entries
         .iter()
         .find(|(k, _)| k.as_i64() == Some(34))
@@ -1502,9 +1552,17 @@ async fn dispatch_rpc_market_read_getters_stay_pure_and_omit_expired_orders() {
         .dispatch_rpc(&mut sess, "marketProxy", None, "GetPlexBest", &[], &kw, None)
         .await
         .expect("GetPlexBest");
-    assert_eq!(plex_best.dict_get("bestAskPrice").and_then(PyRep::as_f64), Some(5_100_000.0));
-    assert_eq!(plex_best.dict_get("bestBidPrice").and_then(PyRep::as_f64), Some(0.0));
-    assert_eq!(plex_best.dict_get("totalBidVolume"), Some(&PyRep::Integer(0)));
+    assert!(plex_best.is_cindexed_rowset());
+    let pb_entries = plex_best.cindexed_rowset_entries().unwrap();
+    let pb_row = pb_entries
+        .iter()
+        .find(|(k, _)| k == &PyRep::Integer(PLEX_TYPE_ID as i64))
+        .map(|(_, v)| v)
+        .expect("GetPlexBest must key active PLEX ask by integer typeID 44992");
+    assert_eq!(pb_row.dbrow_get("typeID"), Some(&PyRep::Integer(PLEX_TYPE_ID as i64)));
+    assert_eq!(pb_row.dbrow_get("price").and_then(PyRep::as_f64), Some(5_100_000.0));
+    assert_eq!(pb_row.dbrow_get("volRemaining").and_then(PyRep::as_f64), Some(5.0));
+    assert_eq!(pb_row.dbrow_get("stationID"), Some(&PyRep::Integer(JITA_STATION_ID)));
 
     let plex_orders = ctx
         .dispatch_rpc(&mut sess, "marketProxy", None, "GetPlexOrders", &[], &kw, None)
@@ -1546,6 +1604,23 @@ async fn dispatch_rpc_market_read_getters_stay_pure_and_omit_expired_orders() {
     assert_eq!(ctx.db.get_character(char_id).unwrap().balance, char_bal_before);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
     assert!(sess.notifications.is_empty());
+
+    // After sweeping expired orders, GetMarketOrderHistory with zero expired orders stays snapshot-read-pure
+    // (does not emit notifications or bump next_entity_id).
+    assert_eq!(
+        crate::services::market_contracts::sweep_expired_orders_and_notify(&ctx, ctx.now_unix()),
+        3
+    );
+    let _ = ctx.drain_notifications_for_char(char_id);
+    sess.notifications.clear();
+    let eid_clean = ctx.db.with_snapshot(|s| s.next_entity_id);
+    let order_hist = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetMarketOrderHistory", &[PyRep::Bool(false)], &kw, None)
+        .await
+        .expect("GetMarketOrderHistory");
+    assert!(matches!(order_hist, PyRep::Rowset { .. }));
+    assert_eq!(ctx.db.with_snapshot(|s| s.next_entity_id), eid_clean);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 }
 
 #[cfg(test)]

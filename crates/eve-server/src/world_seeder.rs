@@ -199,6 +199,9 @@ pub fn seed_dual_anchor_markets(db: &WorldRepository, sde: &SdeRegistry) -> usiz
         }
     });
     if already_seeded {
+        if db.with_snapshot(|snap| needs_sleeper_blue_loot_seed(snap, sde)) {
+            return db.with_mut_snapshot(|snap| seed_sleeper_blue_loot_buy_orders_in_snap(snap, sde, None));
+        }
         return 0;
     }
     seed_market_catalog_internal(db, sde, is_persistent)

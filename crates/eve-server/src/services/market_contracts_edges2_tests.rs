@@ -699,8 +699,8 @@ fn plex_history_aliases_empty_best_sell_validation_and_hangar_fallback() {
     let empty_best = handle(&ctx, &mut sess, "marketProxy", "GetPlexBest", &[], &kw)
         .unwrap()
         .unwrap();
-    assert_eq!(empty_best.dict_get("bestBidPrice"), Some(&PyRep::Real(0.0)));
-    assert_eq!(empty_best.dict_get("bestAskPrice"), Some(&PyRep::Real(0.0)));
+    assert!(empty_best.is_cindexed_rowset());
+    assert!(empty_best.cindexed_rowset_entries().unwrap().is_empty());
 
     // PLEX history aliases
     let r_hist = handle(&ctx, &mut sess, "marketProxy", "GetPlexHistory", &[], &kw)
@@ -1245,11 +1245,12 @@ fn plex_history_aliases_transaction_fallback_and_sleeper_helper_edges() {
         );
     });
 
-    for method in [
-        "GetPlexHistory",
-        "GetPlexNewPriceHistory",
-        "GetPlexOldPriceHistory",
-    ] {
+    let old_plex_hist = handle(&ctx, &mut sess, "marketProxy", "GetPlexOldPriceHistory", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert!(old_plex_hist.crowset_rows().expect("old PLEX rows").is_empty());
+
+    for method in ["GetPlexHistory", "GetPlexNewPriceHistory"] {
         let rep = handle(&ctx, &mut sess, "marketProxy", method, &[], &kw)
             .unwrap()
             .unwrap();

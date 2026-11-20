@@ -926,7 +926,49 @@ pub fn handle_orders_escrow(
                 }));
             };
             let now_unix = ctx.now_unix();
-            if ctx.db.with_snapshot(|snap| snap.market_orders.contains_key(&order_id)) {
+            let should_sweep = ctx.db.with_snapshot(|snap| {
+                let Some(order) = snap.market_orders.get(&order_id) else {
+                    return false;
+                };
+                if order.vol_remaining <= 0 {
+                    return false;
+                }
+                if order.owner_id == char_id {
+                    return true;
+                }
+                let caller_corp_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .unwrap_or(0);
+                if caller_corp_id == 0 || order.owner_id != caller_corp_id {
+                    return false;
+                }
+                if !snap.corporations.contains_key(&caller_corp_id) {
+                    return false;
+                }
+                let issued_by = snap.market_order_meta.get(&order_id).and_then(|m| m.issued_by);
+                if issued_by == Some(char_id) {
+                    return true;
+                }
+                let meta = load_market_order_meta(snap, order, now_unix);
+                let order_acct_key = meta.account_key.unwrap_or_else(|| {
+                    snap.market_order_meta
+                        .get(&order_id)
+                        .and_then(|m| m.wallet_division)
+                        .map(|d| (999 + d).clamp(1000, 1006) as u16)
+                        .unwrap_or(1000)
+                });
+                market_orders_corp_auth::require_corp_market_order_role(
+                    snap,
+                    caller_corp_id,
+                    char_id,
+                    order_acct_key,
+                    now_unix,
+                )
+                .is_ok()
+            });
+            if should_sweep {
                 super::sweep_and_notify_expired(ctx);
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1587,12 +1629,19 @@ pub fn handle_orders_escrow(
             };
             let type_id = raw_type_id as TypeId;
 
+            let now_unix = ctx.now_unix();
+            let is_old = method == "GetOldPriceHistory";
             let rows = ctx.db.with_snapshot(|snap| {
-                if is_plex {
-                    crate::services::market_price_history::build_global_price_history_rows(snap, type_id)
+                let (old_rows, new_rows) = if is_plex {
+                    crate::services::market_price_history::build_partitioned_global_price_history_rows(
+                        snap, type_id, now_unix,
+                    )
                 } else {
-                    crate::services::market_price_history::build_price_history_rows(snap, type_id, region_id)
-                }
+                    crate::services::market_price_history::build_partitioned_price_history_rows(
+                        snap, type_id, region_id, now_unix,
+                    )
+                };
+                if is_old { old_rows } else { new_rows }
             });
             let hdr = DBRowDescriptor::market_history_header();
             Some(Ok(hdr.build_crowset(rows)))

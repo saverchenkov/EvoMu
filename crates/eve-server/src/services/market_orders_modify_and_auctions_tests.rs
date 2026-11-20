@@ -257,8 +257,15 @@ fn plex_orders_history_and_contract_auction_finish_lifecycle() {
     let best = handle(&ctx, &mut sess, "marketProxy", "GetPlexBest", &[], &kw)
         .unwrap()
         .unwrap();
-    assert_eq!(best.dict_get("bestAskPrice").and_then(PyRep::as_f64), Some(4_500_000.0));
-    assert_eq!(best.dict_get("totalAskVolume").and_then(PyRep::as_i64), Some(10));
+    assert!(best.is_cindexed_rowset());
+    let best_entries = best.cindexed_rowset_entries().expect("GetPlexBest CIndexedRowset entries");
+    let plex_row = best_entries
+        .iter()
+        .find(|(k, _)| k == &PyRep::Integer(PLEX_TYPE_ID as i64))
+        .map(|(_, v)| v)
+        .expect("GetPlexBest must index by integer typeID 44992");
+    assert_eq!(plex_row.dbrow_get("price").and_then(PyRep::as_f64), Some(4_500_000.0));
+    assert_eq!(plex_row.dbrow_get("volRemaining").and_then(PyRep::as_f64), Some(10.0));
 
     let plex_orders = handle(&ctx, &mut sess, "marketProxy", "GetPlexOrders", &[], &kw)
         .unwrap()

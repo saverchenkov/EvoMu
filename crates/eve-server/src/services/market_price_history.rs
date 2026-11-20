@@ -590,6 +590,48 @@ pub fn build_global_price_history_rows(
     )
 }
 
+/// Partitions canonical `market_history_header` rows by `now_unix`'s UTC midnight into
+/// `(old_rows, new_rows)`, keeping strictly pre-today dates (`historyDate < today`) in
+/// `old_rows` and today/recent dates (`historyDate >= today`) in `new_rows` so combining
+/// `GetOldPriceHistory` + `GetNewPriceHistory` (or PLEX equivalents) never duplicates days.
+pub fn partition_price_history_rows(
+    rows: Vec<Vec<PyRep>>,
+    now_unix: u64,
+) -> (Vec<Vec<PyRep>>, Vec<Vec<PyRep>>) {
+    let today_date = eve_db::ledger::unix_secs_to_date_str(now_unix);
+    let today_filetime = date_str_to_filetime(&today_date).unwrap_or(0);
+    let mut old_rows = Vec::new();
+    let mut new_rows = Vec::new();
+    for row in rows {
+        let row_ft = row.first().and_then(PyRep::as_i64).unwrap_or(0);
+        if row_ft < today_filetime {
+            old_rows.push(row);
+        } else {
+            new_rows.push(row);
+        }
+    }
+    (old_rows, new_rows)
+}
+
+/// Builds partitioned `(old_rows, new_rows)` regional price history for `(region_id, type_id)`.
+pub fn build_partitioned_price_history_rows(
+    snap: &WorldStateSnapshot,
+    type_id: TypeId,
+    region_id: u32,
+    now_unix: u64,
+) -> (Vec<Vec<PyRep>>, Vec<Vec<PyRep>>) {
+    partition_price_history_rows(build_price_history_rows(snap, type_id, region_id), now_unix)
+}
+
+/// Builds partitioned `(old_rows, new_rows)` global price history for `type_id` across all regions.
+pub fn build_partitioned_global_price_history_rows(
+    snap: &WorldStateSnapshot,
+    type_id: TypeId,
+    now_unix: u64,
+) -> (Vec<Vec<PyRep>>, Vec<Vec<PyRep>>) {
+    partition_price_history_rows(build_global_price_history_rows(snap, type_id), now_unix)
+}
+
 /// Resolves `(solar_system_id, constellation_id)` for a station or structure ID.
 pub(crate) fn resolve_station_solar_and_constellation(
     ctx: &ServerContext,

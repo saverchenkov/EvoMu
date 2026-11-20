@@ -155,13 +155,22 @@ async fn test_market_proxy_plex_and_order_rpcs() {
     let remaining_vault = ctx.db.with_snapshot(|snap| snap.plex_vault_balance(90_000_001));
     assert_eq!(remaining_vault, initial_vault - 100);
 
-    // 7. GetPlexBest
+    // 7. GetPlexBest (CIndexedRowset keyed by integer PLEX typeID = 44992)
     let best = ctx
         .dispatch_rpc(&mut s1, "marketProxy", None, "GetPlexBest", &[], &empty_kw, None)
         .await
         .expect("GetPlexBest");
-    let best_kv = kv_map(&best);
-    assert!(best_kv.contains_key("bestAskPrice"));
+    assert!(best.is_cindexed_rowset(), "GetPlexBest must return CIndexedRowset");
+    let best_entries = best
+        .cindexed_rowset_entries()
+        .expect("GetPlexBest CIndexedRowset entries");
+    let best_row = best_entries
+        .iter()
+        .find(|(k, _)| k == &PyRep::Integer(44_992))
+        .map(|(_, v)| v)
+        .expect("GetPlexBest must contain integer key 44992");
+    assert_eq!(best_row.dbrow_get("typeID"), Some(&PyRep::Integer(44_992)));
+    assert!(best_row.dbrow_get("price").and_then(PyRep::as_f64).unwrap_or(0.0) > 0.0);
 
     // 8. GetPlexOrders
     let orders = ctx
@@ -1061,42 +1070,32 @@ async fn test_market_price_history_authentic_aggregates_and_empty_untraded() {
         assert!((day.close_isk() - 6.00).abs() < 1e-4, "Close price must be latest trade price (6.00)");
     });
 
-    // 5. Verify marketProxy.GetOldPriceHistory returns authentic daily OHLC aggregate
+    // 5. Verify marketProxy.GetOldPriceHistory omits same-day trades (disjoint partition)
     let old_hist_after = ctx
         .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetOldPriceHistory", &[PyRep::Integer(TRITANIUM as i64)], &empty_kw, None)
         .await
         .expect("GetOldPriceHistory after trades");
     assert!(old_hist_after.is_crowset());
-    let rows_after = old_hist_after.crowset_rows().expect("crowset rows");
-    assert_eq!(rows_after.len(), 1, "Expected exactly 1 daily aggregate row");
-    let row = &rows_after[0];
-    let low_price = row.dbrow_get("lowPrice").and_then(|v| v.as_f64()).expect("lowPrice");
-    let high_price = row.dbrow_get("highPrice").and_then(|v| v.as_f64()).expect("highPrice");
-    let avg_price = row.dbrow_get("avgPrice").and_then(|v| v.as_f64()).expect("avgPrice");
-    let vol = row.dbrow_get("volume").and_then(|v| v.as_i64()).expect("volume");
-    let orders = row.dbrow_get("orders").and_then(|v| v.as_i64()).expect("orders");
+    assert!(
+        old_hist_after.crowset_rows().expect("crowset rows").is_empty(),
+        "Same-day trades must not appear in GetOldPriceHistory"
+    );
 
-    assert!((low_price - 4.00).abs() < 1e-4, "lowPrice must match executed low");
-    assert!((high_price - 6.00).abs() < 1e-4, "highPrice must match executed high");
+    // 6. Verify marketProxy.GetNewPriceHistory returns authentic today daily OHLC aggregate
     let expected_avg = 2800.0 / 600.0;
-    assert!((avg_price - expected_avg).abs() < 1e-4, "avgPrice must match volume-weighted average");
-    assert_eq!(vol, 600, "volume must match executed units");
-    assert_eq!(orders, 2, "orders must match executed order count");
-
-    // 6. Verify marketProxy.GetNewPriceHistory returns identical authentic aggregate
     let new_hist_after = ctx
         .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetNewPriceHistory", &[PyRep::Integer(TRITANIUM as i64)], &empty_kw, None)
         .await
         .expect("GetNewPriceHistory after trades");
     assert!(new_hist_after.is_crowset());
     let new_rows = new_hist_after.crowset_rows().expect("crowset rows");
-    assert_eq!(new_rows.len(), 1);
+    assert_eq!(new_rows.len(), 1, "Expected exactly 1 daily aggregate row");
     let new_row = &new_rows[0];
-    assert!((new_row.dbrow_get("lowPrice").unwrap().as_f64().unwrap() - 4.00).abs() < 1e-4);
-    assert!((new_row.dbrow_get("highPrice").unwrap().as_f64().unwrap() - 6.00).abs() < 1e-4);
-    assert!((new_row.dbrow_get("avgPrice").unwrap().as_f64().unwrap() - expected_avg).abs() < 1e-4);
-    assert_eq!(new_row.dbrow_get("volume").unwrap().as_i64().unwrap(), 600);
-    assert_eq!(new_row.dbrow_get("orders").unwrap().as_i64().unwrap(), 2);
+    assert!((new_row.dbrow_get("lowPrice").unwrap().as_f64().unwrap() - 4.00).abs() < 1e-4, "lowPrice must match executed low");
+    assert!((new_row.dbrow_get("highPrice").unwrap().as_f64().unwrap() - 6.00).abs() < 1e-4, "highPrice must match executed high");
+    assert!((new_row.dbrow_get("avgPrice").unwrap().as_f64().unwrap() - expected_avg).abs() < 1e-4, "avgPrice must match volume-weighted average");
+    assert_eq!(new_row.dbrow_get("volume").unwrap().as_i64().unwrap(), 600, "volume must match executed units");
+    assert_eq!(new_row.dbrow_get("orders").unwrap().as_i64().unwrap(), 2, "orders must match executed order count");
 
     // 7. Verify marketProxy.GetHistoryForManyTypeIDs
     let many_hist_after = ctx
@@ -1212,11 +1211,18 @@ async fn test_market_price_history_buymultiple_and_modifyorder() {
     assert_eq!(bm_kv.get("totalQuantity").and_then(|v| v.as_i64()), Some(300));
 
     // 3. Verify price history and market transactions after BuyMultipleItems
+    // 3. Verify price history and market transactions after BuyMultipleItems (today -> GetNewPriceHistory)
     let old_hist_bm = ctx
         .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetOldPriceHistory", &[PyRep::Integer(PYERITE as i64)], &empty_kw, None)
         .await
         .expect("GetOldPriceHistory after BuyMultipleItems");
-    let rows_bm = old_hist_bm.crowset_rows().expect("crowset rows");
+    assert!(old_hist_bm.crowset_rows().expect("old crowset rows").is_empty());
+
+    let new_hist_bm = ctx
+        .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetNewPriceHistory", &[PyRep::Integer(PYERITE as i64)], &empty_kw, None)
+        .await
+        .expect("GetNewPriceHistory after BuyMultipleItems");
+    let rows_bm = new_hist_bm.crowset_rows().expect("crowset rows");
     assert_eq!(rows_bm.len(), 1, "Expected 1 row after BuyMultipleItems");
     assert_eq!(rows_bm[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 300);
     assert_eq!(rows_bm[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 1);
@@ -1277,26 +1283,23 @@ async fn test_market_price_history_buymultiple_and_modifyorder() {
     let PyRep::KeyVal(mo_kv) = mod_res else { panic!("Expected KeyVal"); };
     assert_eq!(mo_kv.get("orderID").and_then(|v| v.as_i64()), Some(buy_oid));
 
-    // 6. Verify combined price history in GetOldPriceHistory and GetNewPriceHistory:
+    // 6. Verify partitioned price history in GetOldPriceHistory (empty today) and GetNewPriceHistory:
     // Volume was 300, now + 500 = 800; Orders was 1, now + 1 = 2; Average = 10.00 ISK
     let old_hist_mod = ctx
         .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetOldPriceHistory", &[PyRep::Integer(PYERITE as i64)], &empty_kw, None)
         .await
         .expect("GetOldPriceHistory after ModifyCharOrder");
-    let rows_mod = old_hist_mod.crowset_rows().expect("crowset rows");
-    assert_eq!(rows_mod.len(), 1, "Expected 1 aggregate row");
-    assert_eq!(rows_mod[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 800, "Volume must reflect BuyMultipleItems + ModifyCharOrder fills");
-    assert_eq!(rows_mod[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 2, "Orders count must be 2");
-    assert!((rows_mod[0].dbrow_get("avgPrice").unwrap().as_f64().unwrap() - 10.00).abs() < 1e-4);
+    assert!(old_hist_mod.crowset_rows().expect("old crowset rows").is_empty());
 
     let new_hist_mod = ctx
         .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetNewPriceHistory", &[PyRep::Integer(PYERITE as i64)], &empty_kw, None)
         .await
         .expect("GetNewPriceHistory after ModifyCharOrder");
     let new_rows_mod = new_hist_mod.crowset_rows().expect("crowset rows");
-    assert_eq!(new_rows_mod.len(), 1);
-    assert_eq!(new_rows_mod[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 800);
-    assert_eq!(new_rows_mod[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 2);
+    assert_eq!(new_rows_mod.len(), 1, "Expected 1 aggregate row");
+    assert_eq!(new_rows_mod[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 800, "Volume must reflect BuyMultipleItems + ModifyCharOrder fills");
+    assert_eq!(new_rows_mod[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 2, "Orders count must be 2");
+    assert!((new_rows_mod[0].dbrow_get("avgPrice").unwrap().as_f64().unwrap() - 10.00).abs() < 1e-4);
 
     ctx.db.with_snapshot(|snap| {
         let has_mod_tx = snap.market_transactions.values().any(|t| t.type_id == PYERITE && t.quantity == 500 && t.price.0 == 1_000);
@@ -1390,11 +1393,17 @@ async fn test_market_modify_sell_order_crossing() {
     assert_eq!(mso_kv.get("orderID").and_then(|v| v.as_i64()), Some(sell_oid));
     assert_eq!(mso_kv.get("escrowISK").and_then(|v| v.as_f64()), Some(0.0));
 
-    // Verify price history recorded fill @ 50.00 ISK for 400 units
-    let hist = ctx
+    // Verify price history recorded today's fill @ 50.00 ISK for 400 units in GetNewPriceHistory (and empty GetOldPriceHistory)
+    let old_hist = ctx
         .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetOldPriceHistory", &[PyRep::Integer(MEXALLON as i64)], &empty_kw, None)
         .await
         .expect("GetOldPriceHistory after sell order crossing");
+    assert!(old_hist.crowset_rows().expect("old crowset rows").is_empty());
+
+    let hist = ctx
+        .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetNewPriceHistory", &[PyRep::Integer(MEXALLON as i64)], &empty_kw, None)
+        .await
+        .expect("GetNewPriceHistory after sell order crossing");
     let rows = hist.crowset_rows().expect("crowset rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 400);

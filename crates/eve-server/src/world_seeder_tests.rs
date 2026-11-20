@@ -307,7 +307,7 @@ fn seed_dual_anchor_and_full_catalog_create_tier1_and_tier2_orders_idempotently(
             .all(|o| !(o.station_id == 60_008_494 && o.type_id == 880_040)));
 
         // Sleeper blue loot permanent NPC buy orders (`30_744..=30_747`) are seeded at CONCORD & DED stations
-        // (range=-1, vol=9_999_999), NOT at Jita (`60_003_760`) or Amarr (`60_008_494`).
+        // (range=-1, vol=1_000_000), NOT at Jita (`60_003_760`) or Amarr (`60_008_494`).
         for (station_id, expected_owner) in [
             (60_012_310_i64, 1_000_125_i64), // Mastakomon V - CONCORD Bureau (The Forge)
             (60_013_048_i64, 1_000_137_i64), // Mastakomon XI - Moon 2 - DED Assembly Plant (The Forge)
@@ -408,6 +408,14 @@ fn persistent_sqlite_world_upgrades_from_v1_to_v2_full_catalog() {
     let upgraded = seed_dual_anchor_markets(&db, &sde);
     assert!(upgraded > 0);
     // Second call sees v2_full_catalog and skips re-seeding.
+    assert_eq!(seed_dual_anchor_markets(&db, &sde), 0);
+    // Simulate an already-seeded v2_full_catalog DB missing Sleeper blue loot NPC buy orders:
+    // seed_dual_anchor_markets still tops them up without re-seeding the full catalog.
+    db.with_mut_snapshot(|snap| {
+        snap.market_orders
+            .retain(|_, o| !crate::services::market_contracts::is_permanent_npc_sleeper_buy_order(o));
+    });
+    assert!(seed_dual_anchor_markets(&db, &sde) > 0);
     assert_eq!(seed_dual_anchor_markets(&db, &sde), 0);
 
     drop(db);

@@ -1557,3 +1557,62 @@ fn crossed_modify_cross_region_plex_corp_buyer_delivers_to_bid_station() {
         assert_eq!(delivered.quantity, 2);
     });
 }
+
+#[test]
+fn partitioned_price_history_separates_pre_today_and_today_disjointly() {
+    use eve_db::MarketHistoryDayRecord;
+
+    let ctx = ServerContext::new();
+    let now = ctx.now_unix();
+    let two_days_ago = eve_db::ledger::unix_secs_to_date_str(now.saturating_sub(2 * 86_400));
+    let yesterday = eve_db::ledger::unix_secs_to_date_str(now.saturating_sub(86_400));
+    let today = eve_db::ledger::unix_secs_to_date_str(now);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_history.clear();
+        snap.market_history.insert(
+            (10_000_002, PLEX_TYPE_ID),
+            vec![
+                MarketHistoryDayRecord {
+                    date: two_days_ago.clone(),
+                    lowest: 4_500_000.0,
+                    highest: 4_600_000.0,
+                    average: 4_550_000.0,
+                    volume: 10,
+                    order_count: 1,
+                    open_price: None,
+                    close_price: None,
+                },
+                MarketHistoryDayRecord {
+                    date: yesterday.clone(),
+                    lowest: 4_700_000.0,
+                    highest: 4_800_000.0,
+                    average: 4_750_000.0,
+                    volume: 20,
+                    order_count: 2,
+                    open_price: None,
+                    close_price: None,
+                },
+                MarketHistoryDayRecord {
+                    date: today.clone(),
+                    lowest: 5_000_000.0,
+                    highest: 5_100_000.0,
+                    average: 5_050_000.0,
+                    volume: 30,
+                    order_count: 3,
+                    open_price: None,
+                    close_price: None,
+                },
+            ],
+        );
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        let (old_rows, new_rows) = build_partitioned_global_price_history_rows(snap, PLEX_TYPE_ID, now);
+        assert_eq!(old_rows.len(), 2);
+        assert_eq!(new_rows.len(), 1);
+        assert_eq!(old_rows[0][0], PyRep::Integer(date_str_to_filetime(&two_days_ago).unwrap()));
+        assert_eq!(old_rows[1][0], PyRep::Integer(date_str_to_filetime(&yesterday).unwrap()));
+        assert_eq!(new_rows[0][0], PyRep::Integer(date_str_to_filetime(&today).unwrap()));
+    });
+}
