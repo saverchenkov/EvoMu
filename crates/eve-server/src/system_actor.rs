@@ -1438,7 +1438,10 @@ impl SystemRegistry {
                                     ball_id,
                                 );
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
-                                remove_all_ship_module_cycles(
+                                // Tokenized removals roll back post-spawn stargate jumps after `rollback_stargate_db_transition`
+                                // already restored the origin ship's DB `module_active_states`/`module_active_charges`. Preserve
+                                // `ball_id`'s own DB states while still deactivating destination attacker cycles targeting `ball_id`.
+                                remove_all_ship_module_cycles_preserving_own_db(
                                     &mut ballpark,
                                     active_module_cycles,
                                     &base_scramble_strengths,
@@ -1446,6 +1449,7 @@ impl SystemRegistry {
                                     &db_opt,
                                     ball_id,
                                     deact_guard.as_ref(),
+                                    required_token.is_some(),
                                 );
                                 base_scramble_strengths.remove(&ball_id);
                                 base_core_strengths.remove(&ball_id);

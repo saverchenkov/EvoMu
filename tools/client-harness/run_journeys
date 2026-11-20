@@ -17,6 +17,7 @@ Supports:
 
 import argparse
 import atexit
+from collections import Counter
 import configparser
 import datetime
 import glob
@@ -1491,6 +1492,7 @@ def finalize_journey_run(
     stale_errors=None,
     bridge_harness_test=False,
     journey_byte_spans=None,
+    driver_errors=None,
 ):
     """Computes `result.json` with per-journey log attribution, real artifacts, and exit code."""
     journey_ids = [j["id"] for j in journey_list]
@@ -1500,8 +1502,22 @@ def finalize_journey_run(
         journey_ids=journey_ids,
         journey_byte_spans=journey_byte_spans,
     )
-    log_errors = list(log_artifacts["log_errors"]) + list(stale_errors or [])
+    stale_list = list(stale_errors or [])
+    driver_list = list(driver_errors or [])
     per_journey_errors = log_artifacts["per_journey_errors"]
+    attributed_counts = Counter()
+    for errs in per_journey_errors.values():
+        attributed_counts.update(errs)
+    rem_counts = Counter(attributed_counts)
+    unattributed_log_errors = []
+    for err in log_artifacts["log_errors"]:
+        if rem_counts[err] > 0:
+            rem_counts[err] -= 1
+        else:
+            unattributed_log_errors.append(err)
+
+    log_errors = list(log_artifacts["log_errors"]) + stale_list
+    global_failures = unattributed_log_errors + stale_list + driver_list
     client_excerpts = log_artifacts["client_excerpts"]
     server_excerpts = log_artifacts["server_excerpts"]
 
@@ -1512,12 +1528,23 @@ def finalize_journey_run(
         rc_info = real_outcomes.get(jid, {})
         b_info = bridge_outcomes.get(jid, {})
         j_log_errors = list(per_journey_errors.get(jid, []))
+        for gerr in global_failures:
+            if gerr not in j_log_errors:
+                j_log_errors.append(gerr)
         rc_ok = bool(
             should_launch_real_client
             and rc_info.get("passed", False)
             and not j_log_errors
         )
-        b_ok = bool(rc_info.get("bridge_verified", False) or b_info.get("bridge_verified", False))
+        rc_verified = bool(
+            should_launch_real_client
+            and rc_info.get("real_client_verified", False)
+            and not j_log_errors
+        )
+        b_ok = bool(
+            (rc_info.get("bridge_verified", False) and not j_log_errors)
+            or (b_info.get("bridge_verified", False) and not global_failures)
+        )
         cli_ex = list(client_excerpts.get(jid, []))
         srv_ex = list(server_excerpts.get(jid, []))
         rpcs_sent = list(rc_info.get("rpcs_sent", []) or [])
@@ -1536,11 +1563,7 @@ def finalize_journey_run(
             "passed": rc_ok,
             "title": j.get("title", jid),
             "bridge_verified": b_ok,
-            "real_client_verified": bool(
-                should_launch_real_client
-                and rc_info.get("real_client_verified", False)
-                and not j_log_errors
-            ),
+            "real_client_verified": rc_verified,
             "client_app_present": client_app_exists,
             "log_errors": j_log_errors,
             "traceback": rc_info.get("traceback"),
@@ -1562,6 +1585,9 @@ def finalize_journey_run(
         "client_version": (build_info or {}).get("version", ""),
         "concurrent_clients_tested": int(concurrent_clients_tested),
         "log_errors": log_errors,
+        "unattributed_log_errors": unattributed_log_errors,
+        "stale_errors": stale_list,
+        "driver_errors": driver_list,
         "destiny_log_classification": destiny_log_classification,
     }
     res_path = os.path.join(out_dir, "result.json")
@@ -1571,6 +1597,9 @@ def finalize_journey_run(
     if log_errors:
         sys.stderr.write("[run_journeys] FAIL: log errors detected: %r\n" % (log_errors[:5],))
         return result, 2
+    if driver_list:
+        sys.stderr.write("[run_journeys] FAIL: driver/harness errors detected: %r\n" % (driver_list[:5],))
+        return result, 1
 
     all_real_passed = bool(journeys_out) and all(v.get("passed") for v in journeys_out.values())
     if bridge_harness_test:
@@ -1745,6 +1774,7 @@ def main():
                 with open(server_log_path, "w") as sf:
                     sf.write("[harness] attached to live eve-server bridge on %s:%d\n" % (args.host, bridge_port))
 
+        driver_errors = []
         if should_launch_real_client and macho_port:
             ipc = IpcCoordinator(
                 args.host,
@@ -1794,7 +1824,8 @@ def main():
                 silent=bool(args.silent),
             )
             ipc.client_pid = getattr(client_proc, "pid", None)
-            deadline = time.time() + max(args.client_wait, len(journey_list) * 60.0)
+            wait_budget = max(args.client_wait, len(journey_list) * 60.0)
+            deadline = time.time() + wait_budget
             while time.time() < deadline:
                 if ipc.driver_done.is_set() and client_proc.poll() is not None:
                     break
@@ -1802,21 +1833,35 @@ def main():
                     break
                 time.sleep(0.25)
             if client_proc.poll() is None:
-                ipc.driver_done.wait(timeout=2.0)
+                if not ipc.driver_done.wait(timeout=2.0):
+                    msg = "Real client timed out after %.1fs before driver completion" % wait_budget
+                    driver_errors.append(msg)
+                    sys.stderr.write("[run_journeys] %s\n" % msg)
                 kill_real_client(client_proc, args.client_app)
-            elif client_proc in _SPAWNED:
-                _SPAWNED.remove(client_proc)
+            else:
+                if client_proc in _SPAWNED:
+                    _SPAWNED.remove(client_proc)
+                if not ipc.driver_done.is_set():
+                    msg = "Real client exited prematurely (code=%r) before driver completion" % (
+                        client_proc.returncode,
+                    )
+                    driver_errors.append(msg)
+                    sys.stderr.write("[run_journeys] %s\n" % msg)
             client_proc = None
             if ipc.driver_error:
-                sys.stderr.write("[run_journeys] real client driver error: %s\n" % ipc.driver_error)
+                msg = "real client driver error: %s" % ipc.driver_error
+                driver_errors.append(msg)
+                sys.stderr.write("[run_journeys] %s\n" % msg)
 
             outcomes_file = os.path.join(out_dir, "real_client_outcomes.json")
             if os.path.exists(outcomes_file):
                 try:
                     with open(outcomes_file, "r") as rf:
                         real_outcomes.update(json.load(rf))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    msg = "Failed to load real_client_outcomes.json: %s" % exc
+                    driver_errors.append(msg)
+                    sys.stderr.write("[run_journeys] %s\n" % msg)
             c1_authed = bool(ipc.c1_authenticated or real_outcomes)
             c2_authed = bool(ipc.c2_authenticated)
             concurrent_clients_tested = (1 if c1_authed else 0) + (1 if c2_authed else 0)
@@ -1887,6 +1932,7 @@ def main():
                 text=True,
                 timeout=15,
             )
+            stale_actions = 0
             if cls_proc.stdout.strip():
                 destiny_log_classification = json.loads(cls_proc.stdout)
                 stale_actions = int(destiny_log_classification.get("stale_at_action", 0) or 0)
@@ -1898,7 +1944,13 @@ def main():
                             int(destiny_log_classification.get("stale_at_history", 0) or 0),
                         )
                     )
+            if cls_proc.returncode not in (0, None) and stale_actions <= 0:
+                stale_errors.append(
+                    "[classify_client_log] FAIL: exited rc=%d stderr=%s"
+                    % (cls_proc.returncode, (cls_proc.stderr or "").strip()[:200])
+                )
         except Exception as exc:
+            stale_errors.append("[classify_client_log] FAIL: exception %r" % (exc,))
             sys.stderr.write("[run_journeys] classify_client_log failed: %r\n" % (exc,))
 
     _, exit_code = finalize_journey_run(
@@ -1916,6 +1968,7 @@ def main():
         stale_errors=stale_errors,
         bridge_harness_test=args.bridge_harness_test,
         journey_byte_spans=(ipc.journey_byte_spans if ipc is not None else None),
+        driver_errors=driver_errors,
     )
     return exit_code
 
