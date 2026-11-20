@@ -758,24 +758,36 @@ async fn force_decloak_on_ess_gate_activation(
     // Remove every cloak `ActiveModuleCycle` BEFORE any subsequent `set_combat_state` / tick so
     // `reconcile_tackle_and_bubbles` -> `reconcile_velocity_for_ship` sees zero active cloak
     // cycles and never resurrects `cloak_velocity_multiplier` / speed nerfs or `ModuleAlreadyActive`.
+    let ship_fit = (!active_cloaks.is_empty())
+        .then(|| ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok())
+        .flatten();
     for &(mid, mtid, _, _) in &active_cloaks {
-        let removed_delay = sys_handle
-            .remove_module_cycle(ship_id, mid)
-            .await
-            .ok()
-            .flatten()
+        let _ = sys_handle.remove_module_cycle(ship_id, mid).await;
+        // Match `dogmaIM.Deactivate` (`fitting_mining_lasers.rs:324-338`): evaluate effective
+        // Dogma attribute 669 (`moduleReactivationDelay`, ms) through `ShipFittingEngine` so
+        // hull/subsystem cloak reactivation bonuses (e.g. Force Recon group 833 / Covert T3C
+        // group 963 5s bonus) and `dynamic_attribute_overrides` apply, falling back to raw SDE
+        // `default_attributes` only when fitting lookup fails. Cloaks (group 330) are not
+        // cycle-gated, so absent/non-positive attr 669 yields `0.0` rather than inflating by
+        // `remove_module_cycle`'s `+rem_cycle` (GH #1423, #1431).
+        let react_delay_ms = ship_fit
+            .as_ref()
+            .map(|fit| {
+                fit.build_effective_module_state(mid, mtid, false, &ctx.sde)
+                    .get_attribute(669, &ctx.sde)
+            })
+            .or_else(|| {
+                ctx.sde
+                    .types
+                    .get(&mtid)
+                    .and_then(|t| t.default_attributes.get(&669).copied())
+            })
             .unwrap_or(0.0);
-        // Prefer SDE attribute 669 (`moduleReactivationDelay`, ms) directly when present (> 0)
-        // so `remove_module_cycle`'s `rem_cycle + reactivation_delay_s` does not inflate the
-        // cloak reactivation cooldown by up to +1.0s compared to `dogmaIM.Deactivate` (GH #1423).
-        let react_delay_s = ctx
-            .sde
-            .types
-            .get(&mtid)
-            .and_then(|t| t.default_attributes.get(&669).copied())
-            .filter(|&ms| ms.is_finite() && ms > 0.0)
-            .map(|ms| ms / 1000.0)
-            .unwrap_or(removed_delay);
+        let react_delay_s = if react_delay_ms.is_finite() && react_delay_ms > 0.0 {
+            react_delay_ms / 1000.0
+        } else {
+            0.0
+        };
         if react_delay_s > 0.0 {
             ctx.record_module_reactivation_delay(ship_id, mid, react_delay_s);
         }
