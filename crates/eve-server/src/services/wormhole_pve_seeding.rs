@@ -765,6 +765,75 @@ pub async fn seed_special_wormhole_pve_sites(
     true
 }
 
+fn is_empire_sentry_faction(faction_id: u32) -> bool {
+    matches!(faction_id, 500_001..=500_004 | 500_006..=500_008)
+}
+
+/// Resolves an empire faction ID from an NPC type name or Navy archetype when SDE `faction_id` is absent.
+fn resolve_empire_faction_from_name(type_name: &str, archetype: &str) -> Option<u32> {
+    if type_name.contains("Republic Fleet")
+        || type_name.contains("Minmatar")
+        || archetype == "MinmatarNavy"
+    {
+        Some(500_002)
+    } else if type_name.contains("Imperial Navy")
+        || type_name.contains("Amarr")
+        || archetype == "AmarrNavy"
+    {
+        Some(500_003)
+    } else if type_name.contains("Federal Navy")
+        || type_name.contains("Gallente")
+        || archetype == "GallenteNavy"
+    {
+        Some(500_004)
+    } else if type_name.contains("Caldari")
+        || type_name.contains("State Navy")
+        || type_name.contains("State Police")
+        || type_name.contains("State Peacekeeper")
+        || archetype == "CaldariNavy"
+    {
+        Some(500_001)
+    } else if type_name.contains("CONCORD") {
+        Some(500_006)
+    } else if type_name.contains("Ammatar") {
+        Some(500_007)
+    } else if type_name.contains("Khanid") {
+        Some(500_008)
+    } else {
+        None
+    }
+}
+
+/// Resolves a system's governing empire faction from station, constellation, or region SDE ownership.
+fn resolve_system_empire_faction(ctx: &ServerContext, solar_system_id: u32) -> u32 {
+    ctx.sde
+        .solar_systems
+        .get(&solar_system_id)
+        .and_then(|sys| {
+            sys.stations
+                .iter()
+                .find_map(|st| {
+                    st.owner_faction_id
+                        .filter(|&f| f > 0)
+                        .map(|f| f as u32)
+                        .filter(|&f| is_empire_sentry_faction(f))
+                })
+                .or_else(|| {
+                    ctx.sde
+                        .constellations
+                        .get(&sys.constellation_id)
+                        .and_then(|c| c.faction_id.filter(|&f| is_empire_sentry_faction(f)))
+                })
+                .or_else(|| {
+                    ctx.sde
+                        .regions
+                        .get(&sys.region_id)
+                        .and_then(|r| r.faction_id.filter(|&f| is_empire_sentry_faction(f)))
+                })
+        })
+        .unwrap_or(500_001)
+}
+
 /// Builds `(Ball, CombatState, ExtendedNpcEntity)` for `spawn_specialized_npc_entity`.
 pub fn build_specialized_npc_components(
     ctx: &ServerContext,
@@ -779,11 +848,12 @@ pub fn build_specialized_npc_components(
     let attr = |aid: u16| -> Option<f64> {
         sde_type.and_then(|t| t.default_attributes.get(&aid).copied())
     };
-    let is_static_structure = matches!(archetype, "SleeperSentry" | "TransmissionRelay");
+    let is_static_structure = matches!(archetype, "SleeperSentry" | "EmpireSentry" | "TransmissionRelay");
     let max_vel = if is_static_structure { 0.0 } else { attr(37).unwrap_or(350.0) };
     let opt_range = match archetype {
         "TransmissionRelay" => 0.0,
         "SleeperSentry" => attr(54).unwrap_or(250_000.0),
+        "EmpireSentry" => attr(54).unwrap_or(500_000.0),
         _ => attr(54).unwrap_or(15_000.0).max(5_000.0),
     };
     let orb_range = if is_static_structure {
@@ -791,7 +861,7 @@ pub fn build_specialized_npc_components(
     } else {
         (opt_range * 0.6).clamp(2_500.0, 20_000.0)
     };
-    let bounty = if matches!(archetype, "Sleeper" | "SleeperSentry" | "TransmissionRelay") {
+    let bounty = if matches!(archetype, "Sleeper" | "SleeperSentry" | "EmpireSentry" | "TransmissionRelay") {
         0.0
     } else {
         attr(481).unwrap_or(0.0)
@@ -821,27 +891,20 @@ pub fn build_specialized_npc_components(
                 | "MinmatarNavy"
                 | "AmarrNavy"
                 | "GallenteNavy" => {
-                    if type_name.contains("Republic Fleet")
-                        || type_name.contains("Minmatar")
-                        || archetype == "MinmatarNavy"
-                    {
-                        500_002
-                    } else if type_name.contains("Imperial Navy")
-                        || type_name.contains("Amarr")
-                        || archetype == "AmarrNavy"
-                    {
-                        500_003
-                    } else if type_name.contains("Federal Navy")
-                        || type_name.contains("Gallente")
-                        || archetype == "GallenteNavy"
-                    {
-                        500_004
-                    } else {
-                        500_001
-                    }
+                    resolve_empire_faction_from_name(type_name, archetype).unwrap_or(500_001)
                 }
+                // Gate/station sentry types in EVE SDE omit `faction_id`; resolve empire sovereignty
+                // rather than falling back to regional pirate factions.
+                "EmpireSentry" => resolve_empire_faction_from_name(type_name, archetype)
+                    .unwrap_or_else(|| {
+                        if is_empire_sentry_faction(spawn_group_id) {
+                            spawn_group_id
+                        } else {
+                            resolve_system_empire_faction(ctx, solar_system_id)
+                        }
+                    }),
                 "Sleeper" | "PochvenHypnosianSleeper" => 500_021,
-                "RogueDrone" => 500_008,
+                "RogueDrone" => 500_025,
                 "EDENCOM" => 500_027,
                 "Drifter" => 500_024,
                 "Triglavian" => 500_026,
