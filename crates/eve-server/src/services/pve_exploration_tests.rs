@@ -1400,3 +1400,291 @@ async fn unseeded_dungeon_restrictions_dungeon_id_gate_alias_and_ended_incursion
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activate_acceleration_gate_read_pure_on_invalid_calls_in_seeded_system() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_050_513;
+    let ship_id: i64 = 1_050_401_513;
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("exp_r6_f02", "pw", char_id, "ExpR6F02");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter (Frigate)
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_820_100)));
+    let kw = HashMap::new();
+
+    // Seed the system so it contains an active DSG-{sys_id} DungeonRuntimeInstance.
+    ensure_system_pve_sites_seeded(&ctx, sys_id).await;
+    let (dsg_inst_id, dsg_entry_gate_ball_id, dsg_r0_gate_ball_id) = ctx.db.with_snapshot(|snap| {
+        snap.dungeon_runtime
+            .instances
+            .values()
+            .find(|i| !i.completed && !i.despawned && i.solar_system_id == sys_id)
+            .map(|i| {
+                (
+                    i.instance_id,
+                    i.entry_gate_ball_id
+                        .expect("seeded DSG instance has materialized entry_gate_ball_id"),
+                    i.rooms
+                        .first()
+                        .and_then(|r| r.gate_ball_id)
+                        .expect("seeded 2-room DSG instance has materialized room 0 gate_ball_id"),
+                )
+            })
+            .expect("seeded system must contain an active DSG DungeonRuntimeInstance")
+    });
+
+    // Spawn the pilot's ship ball at origin (well outside 2,500m of DSG-{sys_id} at [68M, -34M, 26M]).
+    let _ = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await;
+
+    let mut sess = SessionState::new(513);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+
+    let e_seeded = ctx.db.state_epoch();
+    let c_seeded = ctx.db.tx_commit_count();
+
+    // 1. Non-matching integer gate ID falls through as None (no EveDb write).
+    assert!(
+        handle_pve_exploration(
+            &ctx,
+            &mut sess,
+            "keeper",
+            "ActivateAccelerationGate",
+            &[PyRep::Integer(999_999_999)],
+            &kw,
+        )
+        .await
+        .is_none()
+    );
+
+    // 2. Non-matching string gate IDs and empty args return DungeonNotFound (no EveDb write).
+    for bad_args in [
+        vec![PyRep::String("NO-SUCH-GATE".into())],
+        vec![PyRep::String("DNG-INST-999999".into())],
+        Vec::new(),
+    ] {
+        let err = handle_pve_exploration(
+            &ctx,
+            &mut sess,
+            "keeper",
+            "ActivateAccelerationGate",
+            &bad_args,
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect_err("invalid gate arg must return DungeonNotFound");
+        assert_eq!(err.code, "DungeonNotFound");
+    }
+
+    // 3. EnterNextDungeonRoom with non-matching integer returns DungeonNotFound (no EveDb write).
+    let next_err = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "EnterNextDungeonRoom",
+        &[PyRep::Integer(999_999_999)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("invalid EnterNextDungeonRoom integer must return DungeonNotFound");
+    assert_eq!(next_err.code, "DungeonNotFound");
+
+    // 4. Shipless session with non-matching integer gate ID must not falsely match has_runtime_gate.
+    let mut shipless = sess.clone();
+    shipless.ship_id = None;
+    assert!(
+        handle_pve_exploration(
+            &ctx,
+            &mut shipless,
+            "keeper",
+            "ActivateAccelerationGate",
+            &[PyRep::Integer(999_999_999)],
+            &kw,
+        )
+        .await
+        .is_none()
+    );
+
+    // 5. Direct try_activate_dungeon_runtime_gate misses stay read-pure (with_snapshot).
+    assert!(
+        crate::services::pve_dungeon_runtime_rpc::try_activate_dungeon_runtime_gate(
+            &ctx,
+            &mut sess,
+            sys_id,
+            &[PyRep::Integer(999_999_999)],
+        )
+        .await
+        .is_none()
+    );
+    assert!(
+        crate::services::pve_dungeon_runtime_rpc::try_activate_dungeon_runtime_gate(
+            &ctx,
+            &mut sess,
+            sys_id,
+            &[PyRep::String("DNG-INST-999999".into())],
+        )
+        .await
+        .is_none()
+    );
+
+    // 6. Matching DSG-{sys_id} runtime gate out-of-range error paths (DNG-INST-*, entry gate, room gate) stay read-pure.
+    let dng_tag_err = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::String(format!("DNG-INST-{dsg_inst_id}"))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("out-of-range DNG-INST-* gate must reject");
+    assert_eq!(dng_tag_err.code, "OutsideGateActivationRange");
+
+    for matched_gate_id in [dsg_entry_gate_ball_id, dsg_r0_gate_ball_id] {
+        let gate_err = handle_pve_exploration(
+            &ctx,
+            &mut sess,
+            "keeper",
+            "ActivateAccelerationGate",
+            &[PyRep::Integer(matched_gate_id)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect_err("out-of-range runtime gate ball must reject");
+        assert_eq!(gate_err.code, "OutsideGateActivationRange");
+    }
+
+    assert_eq!(ctx.db.state_epoch(), e_seeded);
+    assert_eq!(ctx.db.tx_commit_count(), c_seeded);
+
+    // 7. Regression (#1435): Valid active INC-* gate call when incursion metadata is lazily
+    //    initialized (balls not yet spawned) must spawn the incursion NPC ball into the ballpark,
+    //    while unknown INC-* IDs stay read-pure and return DungeonNotFound.
+    let (const_id, _) = crate::services::pve_incursion_lifecycle::eligible_incursion_constellations(&ctx)
+        .into_iter()
+        .next()
+        .expect("eligible incursion constellation");
+    crate::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.initialized = true;
+        crate::services::pve_incursion_sites::seed_incursion_for_constellation(&ctx, reg, const_id);
+    });
+    let (inc_sys, inc_site_id, inc_npc_ball_id) =
+        crate::services::pve_special_sites::read_pve_special_reg(&ctx, |reg| {
+            let inc = reg.incursions.get(&const_id).expect("seeded incursion");
+            let s = inc.sites.first().expect("incursion site");
+            let first_npc_ball = s
+                .escort_spawns
+                .first()
+                .map(|e| e.npc_ball_id)
+                .unwrap_or(s.boss_npc_ball_id);
+            (s.solar_system_id, s.site_id.clone(), first_npc_ball)
+        });
+    let inc_handle = ctx.systems.get_or_spawn(inc_sys);
+    assert!(
+        inc_handle.get_ball_snapshot(inc_npc_ball_id).await.ok().flatten().is_none(),
+        "lazy incursion metadata must not have spawned NPC ball prior to ActivateAccelerationGate"
+    );
+    sess.solar_system_id = Some(inc_sys);
+    let _ = inc_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await;
+
+    let e_inc = ctx.db.state_epoch();
+    let c_inc = ctx.db.tx_commit_count();
+    let bogus_inc_err = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::String("INC-BOGUS-999999".into())],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("unknown INC-* site must reject with DungeonNotFound");
+    assert_eq!(bogus_inc_err.code, "DungeonNotFound");
+    assert_eq!(ctx.db.state_epoch(), e_inc);
+    assert_eq!(ctx.db.tx_commit_count(), c_inc);
+    assert!(
+        inc_handle.get_ball_snapshot(inc_npc_ball_id).await.ok().flatten().is_none(),
+        "bogus INC-* gate call must not spawn incursion NPC balls"
+    );
+
+    let inc_gate_err = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::String(inc_site_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("active INC-* site with live NPCs rejects with IncursionSiteNpcsRemaining");
+    assert_eq!(inc_gate_err.code, "IncursionSiteNpcsRemaining");
+    assert!(
+        inc_handle.get_ball_snapshot(inc_npc_ball_id).await.ok().flatten().is_some(),
+        "valid active INC-* gate call must spawn incursion NPC ball into system ballpark (#1435)"
+    );
+}

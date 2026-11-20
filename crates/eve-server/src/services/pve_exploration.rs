@@ -1631,20 +1631,27 @@ async fn handle_activate_acceleration_gate(
         Err(e) => return Some(Err(e)),
     };
     let gate_ball_arg = args.first().and_then(|a| a.as_i64());
+    let gate_str_arg = args.first().and_then(|a| a.as_str());
     let has_runtime_gate = ctx.db.with_snapshot(|snap| {
-        snap.dungeon_runtime
-            .instances
-            .values()
-            .any(|i| !i.completed && !i.despawned && i.solar_system_id == sys_id)
-            || gate_ball_arg.is_some_and(|gate_id| {
-                // Delegate active Homefront outer gates through `try_activate_dungeon_runtime_gate`.
-                snap.dungeon_runtime.homefront_runtimes.values().any(|r| {
-                    r.solar_system_id == sys_id
-                        && r.outer_gate_ball_id == gate_id
-                        && !r.completed
-                        && !r.failed
-                })
+        snap.dungeon_runtime.instances.values().any(|i| {
+            !i.completed
+                && !i.despawned
+                && i.solar_system_id == sys_id
+                && (gate_ball_arg.is_some_and(|gate_id| {
+                    i.entry_gate_ball_id == Some(gate_id)
+                        || i.rooms.iter().enumerate().any(|(r_idx, r)| {
+                            r.gate_ball_id == Some(gate_id) && r_idx + 1 < i.rooms.len()
+                        })
+                }) || gate_str_arg.is_some_and(|s| s == format!("DNG-INST-{}", i.instance_id)))
+        }) || gate_ball_arg.is_some_and(|gate_id| {
+            // Delegate active Homefront outer gates through `try_activate_dungeon_runtime_gate`.
+            snap.dungeon_runtime.homefront_runtimes.values().any(|r| {
+                r.solar_system_id == sys_id
+                    && r.outer_gate_ball_id == gate_id
+                    && !r.completed
+                    && !r.failed
             })
+        })
     });
     if has_runtime_gate {
         if session.ship_id.is_none() {
@@ -1761,6 +1768,7 @@ async fn handle_activate_acceleration_gate(
                 });
                 (exists, reg.initialized)
             });
+        let mut spawned_for_system = false;
         if !inc_exists {
             if !special_initialized && is_naturally_seedable_incursion_site(ctx, sys_id, &site_id)
             {
@@ -1770,6 +1778,7 @@ async fn handle_activate_acceleration_gate(
                     ),
                 )
                 .await;
+                spawned_for_system = true;
                 inc_exists = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
                     reg.incursions.values().any(|inc| {
                         inc.state != "Ended"
@@ -1789,6 +1798,14 @@ async fn handle_activate_acceleration_gate(
                     format!("Incursion site {site_id} not found"),
                 )));
             }
+        }
+        if !spawned_for_system {
+            Box::pin(
+                crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
+                    ctx, sys_id,
+                ),
+            )
+            .await;
         }
         let res = Box::pin(
             crate::services::pve_incursion_sites::process_incursion_site_completion_and_payout(

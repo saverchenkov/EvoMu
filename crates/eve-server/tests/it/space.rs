@@ -153,6 +153,23 @@ async fn test_phase_0_s6_request_scans_unimplemented_rpc() {
     .await
     .expect("SelectCharacterID");
 
+    let docked_err = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[], &kw, None)
+        .await;
+    assert_eq!(docked_err.unwrap_err().code, "NotInSpace");
+
+    // Undock into Jita space to verify unbound empty-args RequestScans still rejects with UnimplementedRPC
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = 30_000_142;
+        }
+    });
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.solar_system_id = Some(30_000_142);
+
     let s6_err = ctx
         .dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[], &kw, None)
         .await;
