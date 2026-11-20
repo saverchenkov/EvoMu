@@ -87,14 +87,15 @@ fn verify_control_acl_or_role_with_profile(
     verify_control_acl_or_role_with_profile_at(snap, ext, st, prof_opt, char_id, 0)
 }
 
-pub(crate) fn verify_control_acl_or_role_with_profile_at(
+fn has_defense_acl_permission(
     snap: &WorldStateSnapshot,
     ext: &ops::StructureExtendedState,
-    st: &eve_db::UpwellStructureRecord,
     prof_opt: Option<&ops::StructureAccessProfile>,
     char_id: i64,
-    now_unix: u64,
-) -> Result<(), BridgeRpcError> {
+) -> Result<bool, BridgeRpcError> {
+    let Some(p) = prof_opt else {
+        return Ok(false);
+    };
     let caller_corp = snap
         .characters
         .get(&char_id)
@@ -106,45 +107,55 @@ pub(crate) fn verify_control_acl_or_role_with_profile_at(
         .and_then(|c| c.alliance_id)
         .or_else(|| snap.corporations.get(&caller_corp).and_then(|c| c.alliance_id))
         .unwrap_or(0);
-    let has_defense_acl = if let Some(p) = prof_opt {
-        if p.blocked_characters.contains(&char_id)
-            || p.defense_blocked_characters.contains(&char_id)
-            || (caller_corp > 0 && p.blocked_corporations.contains(&caller_corp))
-            || (caller_ally > 0 && p.blocked_alliances.contains(&caller_ally))
-        {
-            return Err(err(
-                "DefenseAccessDenied",
-                format!("Character {char_id} (corp {caller_corp}, alliance {caller_ally}) is blocked by structure profile"),
-            ));
-        }
-        use crate::services::structure_acl_defense_rules::{is_acl_role_allowed, is_acl_role_excluded};
-        for &gid in &p.defense_group_ids {
-            if let Some(grp) = ext.owner_groups.get(&gid) {
-                if grp.members.get(&char_id).copied().is_some_and(is_acl_role_excluded)
-                    || (caller_corp > 0 && grp.members.get(&caller_corp).copied().is_some_and(is_acl_role_excluded))
-                    || (caller_ally > 0 && grp.members.get(&caller_ally).copied().is_some_and(is_acl_role_excluded))
-                {
-                    return Err(err(
-                        "DefenseAccessDenied",
-                        format!("Character {char_id} is blocked in defense access group {gid}"),
-                    ));
-                }
+    if p.blocked_characters.contains(&char_id)
+        || p.defense_blocked_characters.contains(&char_id)
+        || (caller_corp > 0 && p.blocked_corporations.contains(&caller_corp))
+        || (caller_ally > 0 && p.blocked_alliances.contains(&caller_ally))
+    {
+        return Err(err(
+            "DefenseAccessDenied",
+            format!("Character {char_id} (corp {caller_corp}, alliance {caller_ally}) is blocked by structure profile"),
+        ));
+    }
+    use crate::services::structure_acl_defense_rules::{is_acl_role_allowed, is_acl_role_excluded};
+    for &gid in &p.defense_group_ids {
+        if let Some(grp) = ext.owner_groups.get(&gid) {
+            if grp.members.get(&char_id).copied().is_some_and(is_acl_role_excluded)
+                || (caller_corp > 0 && grp.members.get(&caller_corp).copied().is_some_and(is_acl_role_excluded))
+                || (caller_ally > 0 && grp.members.get(&caller_ally).copied().is_some_and(is_acl_role_excluded))
+            {
+                return Err(err(
+                    "DefenseAccessDenied",
+                    format!("Character {char_id} is blocked in defense access group {gid}"),
+                ));
             }
         }
-        p.defense_allowed_characters.contains(&char_id)
-            || p.defense_group_ids.iter().any(|gid| {
-                ext.owner_groups.get(gid).is_some_and(|g| {
-                    g.members.get(&0).copied().is_some_and(is_acl_role_allowed)
-                        || g.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
-                        || (caller_corp > 0 && g.members.get(&caller_corp).copied().is_some_and(is_acl_role_allowed))
-                        || (caller_ally > 0 && g.members.get(&caller_ally).copied().is_some_and(is_acl_role_allowed))
-                })
+    }
+    Ok(p.defense_allowed_characters.contains(&char_id)
+        || p.defense_group_ids.iter().any(|gid| {
+            ext.owner_groups.get(gid).is_some_and(|g| {
+                g.members.get(&0).copied().is_some_and(is_acl_role_allowed)
+                    || g.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
+                    || (caller_corp > 0 && g.members.get(&caller_corp).copied().is_some_and(is_acl_role_allowed))
+                    || (caller_ally > 0 && g.members.get(&caller_ally).copied().is_some_and(is_acl_role_allowed))
             })
-    } else {
-        false
-    };
+        }))
+}
 
-    if !has_defense_acl {
+pub(crate) fn verify_control_acl_or_role_with_profile_at(
+    snap: &WorldStateSnapshot,
+    ext: &ops::StructureExtendedState,
+    st: &eve_db::UpwellStructureRecord,
+    prof_opt: Option<&ops::StructureAccessProfile>,
+    char_id: i64,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    if !has_defense_acl_permission(snap, ext, prof_opt, char_id)? {
+        let caller_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .unwrap_or(0);
         if st.owner_corp_id != caller_corp {
             return Err(err(
                 "DefenseAccessDenied",
@@ -929,42 +940,91 @@ pub fn handle_get_structure_pilot(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0)
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let explicit_structure_id = crate::router::RpcArgs::positional(args).opt_i64(0, "")?;
+    let structure_id = explicit_structure_id
         .or(session.structure_id)
-        .ok_or_else(|| err("MissingStructureId", "GetStructurePilot requires structureID"))?;
+        .ok_or_else(|| {
+            let msg = "GetStructurePilot requires structureID";
+            BridgeRpcError::with_client_error(
+                "MissingStructureId",
+                msg,
+                eve_proto::ClientError::CustomInfo(msg.into()),
+            )
+        })?;
+    if structure_id <= 0 {
+        return Err(ops::structure_not_found_err(structure_id));
+    }
+    let is_gm = session.has_gm_role();
     let now_unix = ctx.now_unix();
-    let has_due_profile = ctx.db.with_snapshot(|snap| {
-        load_ext_state(snap)
+    let (has_due_profile, current_pilot) = ctx.db.with_snapshot(|snap| {
+        let Some(st) = snap.structures.get(&structure_id) else {
+            return Err(ops::structure_not_found_err(structure_id));
+        };
+        let ext = load_ext_state(snap);
+        let due_profile = ext
             .pending_profile_applications
             .get(&structure_id)
-            .is_some_and(|&(_, t)| now_unix >= t)
-    });
-    if has_due_profile {
-        let released = ctx.db.with_mut_snapshot(|snap| {
-            let mut ext = load_ext_state(snap);
-            apply_pending_profile_applications_with_snap(snap, &mut ext, now_unix)
-        });
-        notify_released_structure_controllers(ctx, &released);
-    }
-    ctx.db.with_snapshot(|snap| {
-        if snap
-            .structures
-            .get(&structure_id)
-            .is_some_and(|s| s.state == "Destroyed")
-        {
-            return Err(err(
-                "StructureDestroyed",
-                format!("Structure {structure_id} has been destroyed"),
+            .filter(|&&(_, t)| now_unix >= t)
+            .map(|&(pid, _)| pid);
+        let effective_prof = due_profile
+            .and_then(|pid| ext.profiles_by_id.get(&pid))
+            .or_else(|| ext.access_profiles.get(&structure_id));
+        let is_docked = snap
+            .characters
+            .get(&char_id)
+            .is_some_and(|c| c.structure_id == Some(structure_id));
+        let is_active_pilot =
+            ext.active_pilot_by_structure.get(&structure_id).copied() == Some(char_id);
+        let is_corp_controller = ops::has_db_structure_corp_role(
+            ctx,
+            snap,
+            char_id,
+            st,
+            eve_db::corp_roles::ROLE_DIRECTOR
+                | eve_db::corp_roles::ROLE_STATION_MANAGER
+                | eve_db::corp_roles::ROLE_STARBASE_OPERATOR
+                | eve_db::corp_roles::ROLE_STARBASE_CONFIG,
+            now_unix,
+        );
+        let has_acl = has_defense_acl_permission(snap, &ext, effective_prof, char_id)
+            .unwrap_or(false);
+        let is_authorized = is_gm
+            || is_docked
+            || is_corp_controller
+            || has_acl
+            || (due_profile.is_none() && is_active_pilot);
+        if !is_authorized {
+            return Err(BridgeRpcError::with_client_error(
+                "DefenseAccessDenied",
+                format!(
+                    "Character {char_id} is not authorized to inspect pilot of structure {structure_id}"
+                ),
+                eve_proto::ClientError::user(eve_proto::UserErrorKey::AccessDenied),
             ));
         }
-        Ok(load_ext_state(snap)
-            .active_pilot_by_structure
-            .get(&structure_id)
-            .copied()
-            .map(PyRep::Integer)
-            .unwrap_or(PyRep::None))
-    })
+        if st.state == "Destroyed" {
+            return Err(ops::structure_destroyed_err(structure_id));
+        }
+        Ok((
+            due_profile.is_some(),
+            ext.active_pilot_by_structure.get(&structure_id).copied(),
+        ))
+    })?;
+    let active_pilot = if has_due_profile {
+        let (released, pilot) = ctx.db.with_mut_snapshot(|snap| {
+            let mut ext = load_ext_state(snap);
+            let released =
+                apply_pending_profile_applications_with_snap(snap, &mut ext, now_unix);
+            let pilot = ext.active_pilot_by_structure.get(&structure_id).copied();
+            (released, pilot)
+        });
+        notify_released_structure_controllers(ctx, &released);
+        pilot
+    } else {
+        current_pilot
+    };
+    Ok(active_pilot.map(PyRep::Integer).unwrap_or(PyRep::None))
 }
 
 struct HostileTargetInfo {
