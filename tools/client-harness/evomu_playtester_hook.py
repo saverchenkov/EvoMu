@@ -5487,7 +5487,7 @@ def _execute_action(sm, action):
         atype = "click_widget" if raw_target else "click_xy"
     elif raw_atype == "drag":
         atype = "drag_widget"
-    elif raw_atype == "type":
+    elif raw_atype in ("type", "input_text", "enter_text"):
         atype = "type_text"
     elif raw_atype == "key_press":
         atype = "press_key"

@@ -2407,6 +2407,31 @@ class TestHookExecutionAndInclientHelpers(unittest.TestCase):
         self.assertEqual(len(captured_settle), 1)
         self.assertGreaterEqual(captured_settle[0]["min_settle_ms"], 180)
 
+    def test_input_text_alias_executes_type_text_on_quick_filter(self):
+        hook = _load_hook_with_py2_stubs()
+        set_values = []
+
+        class FakeFilterEdit:
+            name = "quickFilterInputBox"
+            def SetValue(self, val):
+                set_values.append(val)
+
+        fake_uicore = types.SimpleNamespace(cmd=None, registry=None, layer=None, desktop=None)
+        fake_sm = mock.MagicMock()
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_find_widget", return_value=FakeFilterEdit()), \
+             mock.patch.object(hook, "_resolve_editable_widget", side_effect=lambda n: n), \
+             mock.patch.object(hook, "_settle_after_action", return_value=50):
+            res = hook._execute_action(fake_sm, {"type": "input_text", "target": "InvContQuickFilter/quickFilterInputBox", "command": "1MN Afterburner I", "wait_ms": 300})
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("typed_into"), "quickFilterInputBox")
+        self.assertEqual(set_values, ["1MN Afterburner I"])
+
     def test_type_text_missing_command_does_not_type_widget_path(self):
         hook = _load_hook_with_py2_stubs()
         set_values = []
