@@ -989,22 +989,57 @@ fn t() {
             self.assertEqual(status.strip(), "")
 
     def test_tt06_python_unittest_selection_and_in_place_archiving(self):
-        # 1. `tools/client-harness/` changes trigger Python unittest discovery + harness IT
+        # 1. Pure `tools/client-harness/` changes trigger Python unittest discovery ONLY (ZERO `cargo test` commands!)
         def fake_harness_diff(cmd, cwd, env=None, timeout=None):
             if cmd[:3] == ["git", "diff", "--name-only"]:
-                return 0, "tools/client-harness/playtester.py\n"
+                return 0, "tools/client-harness/playtester.py\ntools/client-harness/scenarios/combat_aftermath.json\n"
             return 0, ""
 
         with mock.patch.object(run_review, "sh", side_effect=fake_harness_diff):
             cmds = run_review.derive_affected_test_commands(REPO_ROOT, "origin/main", "cargo", head="FAKE_SHA")
-        self.assertIn(
-            [sys.executable, "-m", "unittest", "discover", "-s", "tools/client-harness", "-p", "test_*.py", "-v"],
+        self.assertEqual(
             cmds,
+            [[sys.executable, "-m", "unittest", "discover", "-s", "tools/client-harness", "-p", "test_*.py", "-v"]],
         )
-        self.assertIn(
-            ["cargo", "test", "-j", "4", "-p", "eve-server", "--test", "it", "rpc_dispatch_and_client_harness_e2e"],
-            cmds,
+        self.assertEqual(
+            [c for c in cmds if os.path.basename(c[0]) == "cargo"],
+            [],
+            "Pure tools/client-harness/ diff must emit 0 cargo test commands",
         )
+
+        # 1b. Pure docs/non-Rust diff emits ZERO `cargo test` commands (runs lightweight Python release_guard unittest)
+        def fake_docs_diff(cmd, cwd, env=None, timeout=None):
+            return 0, ""
+
+        with mock.patch.object(run_review, "sh", side_effect=fake_docs_diff):
+            dcmds = run_review.derive_affected_test_commands(REPO_ROOT, "origin/main", "cargo", head="FAKE_SHA")
+        self.assertEqual([c for c in dcmds if os.path.basename(c[0]) == "cargo"], [])
+        self.assertEqual(
+            dcmds,
+            [[sys.executable, "-m", "unittest", "discover", "-s", "tools/tests", "-p", "test_release_guard.py", "-v"]],
+        )
+
+        # 1c. Workspace Cargo.toml / Cargo.lock / .cargo/* AND crates/eve-server/* diffs still emit all 12 surgical canaries!
+        for rust_path in ("Cargo.toml", "Cargo.lock", ".cargo/config.toml", "crates/eve-server/src/services/market_orders.rs"):
+            def fake_rust_diff(cmd, cwd, env=None, timeout=None, _p=rust_path):
+                if cmd[:3] == ["git", "diff", "--name-only"]:
+                    return 0, _p + "\n"
+                return 0, ""
+
+            with mock.patch.object(run_review, "sh", side_effect=fake_rust_diff):
+                rcmds = run_review.derive_affected_test_commands(REPO_ROOT, "origin/main", "cargo", head="FAKE_SHA")
+            for cflt in run_review.SENTINEL_IT_CANARY_TESTS:
+                self.assertIn(
+                    ["cargo", "test", "-j", "4", "-p", "eve-server", "--test", "it", cflt],
+                    rcmds,
+                    "%s must emit IT canary %s" % (rust_path, cflt),
+                )
+            for cflt in run_review.SENTINEL_LIB_CANARY_TESTS:
+                self.assertIn(
+                    ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", cflt],
+                    rcmds,
+                    "%s must emit lib canary %s" % (rust_path, cflt),
+                )
 
         # 2. Python-only `tools/sync_bugs_to_github.py` runs `tools/tests` WITHOUT acquiring a cargo slot!
         def fake_tools_diff(cmd, cwd, env=None, timeout=None):
