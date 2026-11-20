@@ -534,6 +534,261 @@ async fn unauthorized_controller_revocation_and_auto_defense_tick_work() {
     assert!(after_cs.shield_hp < 50_000.0);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn get_structure_pilot_enforces_db_authz_and_is_read_pure_before_due_profile() {
+    let ctx = test_ctx();
+    let (corp_id, rival_corp_id) = (98_651_i64, 98_652_i64);
+    let (sid, sid_due, dead_sid, missing_sid) = (
+        10_000_650_001_i64,
+        10_000_650_002_i64,
+        10_000_650_003_i64,
+        10_000_650_999_i64,
+    );
+    let (
+        ceo_id,
+        gunner_id,
+        roleless_id,
+        starbase_op_id,
+        docked_guest_id,
+        outsider_id,
+        acl_gunner_id,
+        gm_id,
+    ) = (
+        65_101_i64,
+        65_102_i64,
+        65_103_i64,
+        65_104_i64,
+        65_105_i64,
+        65_106_i64,
+        65_107_i64,
+        65_108_i64,
+    );
+
+    seed_pilot_and_structure(&ctx, ceo_id, corp_id, 30_000_142, 65_201, sid, 35_832, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.structure_id = None;
+        }
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.extend([ceo_id, gunner_id, roleless_id, starbase_op_id]);
+        corp.member_roles
+            .insert(gunner_id, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
+        corp.member_roles.insert(roleless_id, 0);
+        corp.member_roles
+            .insert(starbase_op_id, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
+
+        let mut rival = CorporationRecord::default();
+        rival.corporation_id = rival_corp_id;
+        rival.name = "Rival Control Corp".into();
+        rival.ticker = "RVC".into();
+        rival.ceo_id = outsider_id;
+        rival.members = std::collections::HashSet::from([docked_guest_id, outsider_id, acl_gunner_id, gm_id]);
+        snap.corporations.insert(rival_corp_id, rival);
+
+        let base_ch = snap.characters[&ceo_id].clone();
+        for (cid, c_corp, c_struct, ship_id) in [
+            (gunner_id, corp_id, Some(sid), 65_202_i64),
+            (roleless_id, corp_id, None, 65_203_i64),
+            (starbase_op_id, corp_id, None, 65_204_i64),
+            (docked_guest_id, rival_corp_id, Some(sid), 65_205_i64),
+            (outsider_id, rival_corp_id, None, 65_206_i64),
+            (acl_gunner_id, rival_corp_id, None, 65_207_i64),
+            (gm_id, rival_corp_id, None, 65_208_i64),
+        ] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.name = format!("CtrlAuth {cid}");
+            ch.corporation_id = c_corp;
+            ch.structure_id = c_struct;
+            ch.active_ship_id = ship_id;
+            snap.characters.insert(cid, ch);
+            let uid = cid as u64;
+            if !snap.accounts.values().any(|a| a.user_id == uid) {
+                let uname = format!("u{uid}");
+                snap.accounts.insert(
+                    uname.clone(),
+                    eve_db::AccountRecord {
+                        user_id: uid,
+                        username: uname,
+                        password_token: String::new(),
+                        role: 0,
+                        banned_until_unix: None,
+                        ban_reason: None,
+                    },
+                );
+            }
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 670,
+                    owner_id: cid,
+                    location_id: c_struct.unwrap_or(30_000_142),
+                    flag: if c_struct.is_some() {
+                        InventoryFlag::Hangar
+                    } else {
+                        InventoryFlag::None
+                    },
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let mut st_due = snap.structures[&sid].clone();
+        st_due.structure_id = sid_due;
+        snap.structures.insert(sid_due, st_due);
+
+        let mut st_dead = snap.structures[&sid].clone();
+        st_dead.structure_id = dead_sid;
+        st_dead.state = "Destroyed".into();
+        snap.structures.insert(dead_sid, st_dead);
+
+        let mut prof_allow = ops::StructureAccessProfile::default();
+        prof_allow.profile_id = 901;
+        prof_allow.owner_corp_id = corp_id;
+        prof_allow.defense_allowed_characters.insert(acl_gunner_id);
+
+        let mut prof_revoke = ops::StructureAccessProfile::default();
+        prof_revoke.profile_id = 902;
+        prof_revoke.owner_corp_id = corp_id;
+        prof_revoke.corp_only = true;
+        prof_revoke.defense_blocked_characters.insert(acl_gunner_id);
+
+        let mut ext = load_ext_state(snap);
+        ext.active_pilot_by_structure.insert(sid, gunner_id);
+        ext.active_pilot_by_structure.insert(sid_due, acl_gunner_id);
+        ext.profiles_by_id.insert(901, prof_allow.clone());
+        ext.profiles_by_id.insert(902, prof_revoke);
+        ext.structure_profile_id.insert(sid, 901);
+        ext.access_profiles.insert(sid, prof_allow.clone());
+        ext.structure_profile_id.insert(sid_due, 901);
+        ext.access_profiles.insert(sid_due, prof_allow);
+        ext.pending_profile_applications.insert(sid_due, (902, 1));
+        ext.pending_profile_applications.insert(dead_sid, (902, 1));
+        save_ext_state(snap, &ext);
+    });
+    ctx.db
+        .acquire_online_lock(
+            acl_gunner_id as u64,
+            921,
+            Some(acl_gunner_id),
+            true,
+            ctx.now_unix(),
+        )
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(acl_gunner_id);
+
+    let commits_before = ctx.db.tx_commit_count();
+    let epoch_before = ctx.db.state_epoch();
+
+    // Unauthenticated & missing structureID arg rejected read-purely.
+    let unauth = SessionState::new(920);
+    assert!(handle_get_structure_pilot(&ctx, &unauth, &[PyRep::Integer(sid)]).is_err());
+    let undocked_ceo = make_session(ceo_id, corp_id, 30_000_142, Some(65_201), None, 0);
+    assert_eq!(
+        handle_get_structure_pilot(&ctx, &undocked_ceo, &[])
+            .unwrap_err()
+            .code,
+        "MissingStructureId"
+    );
+
+    // Cross-corp outsider with spoofed session fields, undocked roleless member, and revoked ACL pilot
+    // are ALL rejected read-purely even when `pending_profile_applications` is due on `sid_due` & `dead_sid`.
+    let spoof = make_session(
+        outsider_id,
+        corp_id,
+        30_000_142,
+        Some(65_206),
+        Some(sid_due),
+        u64::MAX,
+    );
+    let roleless_sess = make_session(roleless_id, corp_id, 30_000_142, Some(65_203), None, u64::MAX);
+    let revoked_acl_sess = make_session(acl_gunner_id, rival_corp_id, 30_000_142, Some(65_207), None, 0);
+    for (sess_ref, target) in [
+        (&spoof, sid_due),
+        (&spoof, dead_sid),
+        (&roleless_sess, sid_due),
+        (&revoked_acl_sess, sid_due),
+    ] {
+        let err = handle_get_structure_pilot(&ctx, sess_ref, &[PyRep::Integer(target)])
+            .expect_err("unauthorized GetStructurePilot must reject");
+        assert_eq!(err.code, "DefenseAccessDenied");
+        assert_eq!(
+            err.client_error.as_deref(),
+            Some(&eve_proto::ClientError::user(eve_proto::UserErrorKey::AccessDenied))
+        );
+    }
+
+    // Destroyed structure rejects authorized CEO read-purely (does not apply due profile), and missing/bad ID rejects.
+    assert_eq!(
+        handle_get_structure_pilot(&ctx, &undocked_ceo, &[PyRep::Integer(dead_sid)])
+            .unwrap_err()
+            .code,
+        "StructureDestroyed"
+    );
+    assert_eq!(
+        handle_get_structure_pilot(&ctx, &undocked_ceo, &[PyRep::Integer(missing_sid)])
+            .unwrap_err()
+            .code,
+        "StructureNotFound"
+    );
+
+    // Authorized read-only checks on `sid`: DB-docked rival guest, undocked StarbaseOperator, undocked CEO,
+    // undocked non-revoked ACL gunner, and GM all succeed cleanly.
+    let docked_guest_sess = make_session(docked_guest_id, rival_corp_id, 30_000_142, Some(65_205), None, 0);
+    let starbase_op_sess = make_session(starbase_op_id, corp_id, 30_000_142, Some(65_204), None, 0);
+    let acl_gunner_sess = make_session(acl_gunner_id, rival_corp_id, 30_000_142, Some(65_207), None, 0);
+    let mut gm_sess = make_session(gm_id, rival_corp_id, 30_000_142, Some(65_208), None, 0);
+    gm_sess.role = service_roles::ROLE_GM_DEFAULT;
+    for sess_ref in [
+        &docked_guest_sess,
+        &starbase_op_sess,
+        &undocked_ceo,
+        &acl_gunner_sess,
+        &gm_sess,
+    ] {
+        assert_eq!(
+            handle_get_structure_pilot(&ctx, sess_ref, &[PyRep::Integer(sid)])
+                .expect("authorized GetStructurePilot must succeed"),
+            PyRep::Integer(gunner_id)
+        );
+    }
+
+    // Confirm zero DB mutations and zero controller-release notifications occurred across all checks above.
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
+    assert!(ctx.drain_notifications_for_char(acl_gunner_id).is_empty());
+    ctx.db.with_snapshot(|snap| {
+        let ext = load_ext_state(snap);
+        assert!(ext.pending_profile_applications.contains_key(&sid_due));
+        assert!(ext.pending_profile_applications.contains_key(&dead_sid));
+        assert_eq!(ext.active_pilot_by_structure.get(&sid_due), Some(&acl_gunner_id));
+    });
+
+    // Authorized CEO calling GetStructurePilot on `sid_due` applies due profile 902 and releases revoked `acl_gunner_id`.
+    assert_eq!(
+        handle_get_structure_pilot(&ctx, &undocked_ceo, &[PyRep::Integer(sid_due)])
+            .expect("authorized CEO triggers due profile application"),
+        PyRep::None
+    );
+    assert!(ctx.db.tx_commit_count() > commits_before);
+    ctx.db.with_snapshot(|snap| {
+        let ext = load_ext_state(snap);
+        assert_eq!(ext.structure_profile_id.get(&sid_due), Some(&902));
+        assert!(!ext.pending_profile_applications.contains_key(&sid_due));
+        assert!(!ext.active_pilot_by_structure.contains_key(&sid_due));
+    });
+    assert!(
+        ctx.drain_notifications_for_char(acl_gunner_id)
+            .iter()
+            .any(|n| n.event == "OnSessionChanged")
+    );
+}
+
 #[cfg(test)]
 #[path = "structure_control_ops_extra_unit_tests.rs"]
 mod extra_unit_tests;
