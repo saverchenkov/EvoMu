@@ -72,6 +72,7 @@ pub(super) fn resolve_fw_or_special_warp_target(
             !h.cleared
                 && ((target_id > 0
                     && (i64::from(h.dungeon_id) == target_id
+                        || i64::from(h.solar_system_id) == target_id
                         || h.rooms.first().is_some_and(|r| {
                             r.beacon_ball_id > 0 && r.beacon_ball_id == target_id
                         })))
