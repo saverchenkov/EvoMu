@@ -2065,7 +2065,15 @@ class PlaytesterMemory:
             try:
                 loaded = json.loads(self.memory_path.read_text(encoding="utf-8"))
                 # Merge any newly added initial_frontier items into existing coverage_frontier
+                # and refresh canonical metadata (persona/title/acceptance) on known entries.
                 frontier = loaded.setdefault("coverage_frontier", [])
+                default_by_feature = {entry["feature"]: entry for entry in default_frontier}
+                for item in frontier:
+                    if isinstance(item, dict) and item.get("feature") in default_by_feature:
+                        tmpl = default_by_feature[item["feature"]]
+                        for key in ("persona", "title", "acceptance"):
+                            if key in tmpl:
+                                item[key] = tmpl[key]
                 known = {
                     item.get("feature")
                     for item in frontier
