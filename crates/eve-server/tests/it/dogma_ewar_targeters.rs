@@ -617,7 +617,7 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
     );
 
     crate::dogma_ewar_disruptors::verify_ewar_disruptors_painter_and_locks(
-        &ctx, &mut sess, ship_id, victim_id, damp_mod_id, damp_rng_script_id, damp_scan_script_id,
+        &ctx, &mut sess, &mut victim_sess, ship_id, victim_id, damp_mod_id, damp_rng_script_id, damp_scan_script_id,
         td_mod_id, gd_mod_id, tp_mod_id, opt_script_id, trk_script_id,
         m_rng_script_id, m_prec_script_id, target_turret_id, target_launcher_id,
     ).await;
