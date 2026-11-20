@@ -30,8 +30,8 @@ pub async fn try_activate_dungeon_runtime_gate(
     let arg_int = args.first().and_then(|a| a.as_i64());
     let arg_str = args.first().and_then(|a| a.as_str());
 
-    let match_info = with_dungeon_runtime_store(ctx, |store| {
-        for inst in store.instances.values() {
+    let match_info = ctx.db.with_snapshot(|snap| {
+        for inst in snap.dungeon_runtime.instances.values() {
             if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
                 continue;
             }
@@ -134,16 +134,20 @@ pub async fn try_activate_dungeon_runtime_gate(
         }));
     }
 
-    let dungeon_id = with_dungeon_runtime_store(ctx, |store| {
-        store.instances.get(&instance_id).map(|i| i.dungeon_id)
-    })
-    .unwrap_or(0);
-    let item_mass = ctx.db.with_snapshot(|snap| {
-        snap.items
+    let (dungeon_id, item_mass) = ctx.db.with_snapshot(|snap| {
+        let did = snap
+            .dungeon_runtime
+            .instances
+            .get(&instance_id)
+            .map(|i| i.dungeon_id)
+            .unwrap_or(0);
+        let mass = snap
+            .items
             .get(&ship_id)
             .and_then(|it| ctx.sde.types.get(&it.type_id))
             .map(|t| t.mass)
-            .unwrap_or(ship_ball.mass)
+            .unwrap_or(ship_ball.mass);
+        (did, mass)
     });
     let effective_mass = item_mass.max(ship_ball.mass);
     if let Err(e) = crate::services::pve_dungeon_runtime::check_dungeon_runtime_gate_ship_allowed(

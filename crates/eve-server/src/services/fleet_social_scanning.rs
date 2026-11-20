@@ -225,17 +225,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                 if let Some((ready_sigs, ready_anoms)) = read_system_signatures_ready(ctx, sys_id, now_unix) {
                     (ready_sigs, ready_anoms)
                 } else {
-                    let need_seed = ctx.db.with_snapshot(|snap| {
-                        snap.cosmic_signatures.get(&sys_id).is_none_or(|sigs| {
-                            !sigs.iter().any(|s| {
-                                !s.signature_id.starts_with("K162-")
-                                    && !s.signature_id.starts_with("DNG-")
-                            })
-                        })
-                    });
-                    if need_seed {
-                        let _ = ensure_system_signatures(ctx, sys_id).await;
-                    }
+                    let _ = ensure_system_signatures(ctx, sys_id).await;
                     let any_expired = ctx.db.with_snapshot(|snap| {
                         snap.cosmic_signatures.get(&sys_id).is_some_and(|sigs| {
                             sigs.iter().any(|sig| {

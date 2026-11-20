@@ -817,9 +817,6 @@ pub(crate) fn handle_add_module_cycle(
     {
         cycle.damage_vector = eve_destiny::DamageVector::new(0.0, 0.0, 0.0, 0.0);
     }
-    if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-        cs.undock_invulnerable_remaining_ticks = 0;
-    }
     if cycle.is_mwd_or_mjd || cycle.mjd_jump_distance_m.is_some() {
         let disabled = ballpark
             .combat_states
@@ -866,6 +863,9 @@ pub(crate) fn handle_add_module_cycle(
             }
             cs.capacitor = (cs.capacitor - cycle.cap_need_per_cycle).max(0.0);
         }
+    }
+    if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+        cs.undock_invulnerable_remaining_ticks = 0;
     }
     if cycle.cap_booster_inject_amount > 0.0 {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {

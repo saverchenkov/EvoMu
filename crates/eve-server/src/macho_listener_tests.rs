@@ -2904,3 +2904,455 @@ async fn test_1386_safe_logoff_teardown_grace_expires_and_clears_temp_bindings()
     .is_none());
     assert!(displaced.is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1434_teardown_grace_suppresses_quasar_session_change_and_preserves_cached_notice() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) =
+        connect_and_authenticate(addr, "demo", "demo-secret").await;
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        2,
+        "stationSvc",
+        "Undock",
+        Vec::new(),
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(sys_id as i64), PyRep::None],
+    )
+    .await;
+
+    let session_id = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("online lock in space")
+        .session_id;
+    let mut sub_sess = SessionState::new(session_id);
+    sub_sess.user_id = Some(user_id);
+    sub_sess.character_id = Some(char_id);
+    let mut notice_rx =
+        ctx.quasar_gateway
+            .subscribe_session(&sub_sess, Vec::new(), ctx.now_unix());
+
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        4,
+        "ship",
+        "SafeLogoff",
+        Vec::new(),
+    )
+    .await;
+
+    ctx.advance_secs(30);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(remaining, read_framed_pyrep(&mut s))
+            .await
+            .expect("timed out waiting for OnSafeLogoffActivated")
+            .expect("read error")
+            .expect("EOF");
+        let pkt = MachoPacket::from_pyrep(&rep).unwrap();
+        if pkt.packet_type == MachoPacketType::Notification {
+            if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                if broadcast_id == "OnSafeLogoffActivated" {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Wait for `handle_safe_logoff_to_charsel` to update the live Quasar subscriber to charsel (`character_id = None`).
+    let mut transitioned = false;
+    for _ in 0..200 {
+        if ctx
+            .quasar_gateway
+            .subscribers
+            .read()
+            .unwrap()
+            .get(&session_id)
+            .is_some_and(|sub| {
+                sub.character_id.is_none()
+                    && sub.corporation_id.is_none()
+                    && sub.solar_system_id.is_none()
+            })
+        {
+            transitioned = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(
+        transitioned,
+        "live Quasar subscriber did not clear character tenancy on SafeLogoffCharsel"
+    );
+
+    // Drain any pre-logoff Quasar notices emitted while the character was still in space.
+    while notice_rx.try_recv().is_ok() {}
+    let _ = ctx.quasar_gateway.poll_notices(session_id);
+
+    // Publish a character-scoped Quasar notice while the session is at charsel: it must be
+    // cached in `NoticeRoutingCache` (within the 10s window) rather than delivered immediately.
+    let sentinel_type_url = "type.googleapis.com/eve_public.debug.Notice".to_string();
+    let sentinel_bytes = vec![0xCA, 0xFE, 0x14, 0x34];
+    let (_, delivered_immediately) = ctx
+        .quasar_gateway
+        .publish_notice(
+            crate::quasar_gateway::NoticeScope::Character(char_id as u32),
+            eve_proto::quasar::GoogleAny {
+                type_url: sentinel_type_url.clone(),
+                value: sentinel_bytes.clone(),
+            },
+            ctx.now_unix(),
+        )
+        .expect("publish cached character notice");
+    assert_eq!(delivered_immediately, 0);
+    assert!(
+        ctx.quasar_gateway
+            .routing_cache
+            .read()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| {
+                e.scope == crate::quasar_gateway::NoticeScope::Character(char_id as u32)
+                    && e.notice
+                        .payload
+                        .as_ref()
+                        .is_some_and(|p| p.type_url == sentinel_type_url && p.value == sentinel_bytes)
+            }),
+        "cached Character notice must be present in NoticeRoutingCache before teardown-grace RPCs"
+    );
+
+    // Invoke teardown-grace RPCs: each must succeed AND leave Quasar tenancy + NoticeRoutingCache untouched.
+    let (skill_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        10,
+        "skillMgr2",
+        None,
+        "GetMySkillHandler",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(skill_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let (cash_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        11,
+        "account",
+        None,
+        "GetCashBalance",
+        vec![PyRep::Integer(0)],
+    )
+    .await;
+    assert_eq!(cash_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let (bm_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        12,
+        "accessGroupBookmarkMgr",
+        None,
+        "GetMyActiveBookmarks",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(bm_rsp.packet_type, MachoPacketType::CallRsp);
+
+    assert!(
+        matches!(
+            notice_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "teardown-grace RPCs must NOT deliver cached Character Quasar notices to charsel stream"
+    );
+    assert!(
+        ctx.quasar_gateway.poll_notices(session_id).is_empty(),
+        "teardown-grace RPCs must NOT enqueue cached Character Quasar notices into charsel inbox"
+    );
+    assert_eq!(
+        ctx.quasar_gateway
+            .subscribers
+            .read()
+            .unwrap()
+            .get(&session_id)
+            .map(|sub| (sub.character_id, sub.corporation_id, sub.solar_system_id)),
+        Some((None, None, None)),
+        "live Quasar subscriber must stay cleanly at character_id == None during teardown-grace RPCs"
+    );
+    assert!(
+        ctx.quasar_gateway
+            .routing_cache
+            .read()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| {
+                e.scope == crate::quasar_gateway::NoticeScope::Character(char_id as u32)
+                    && e.notice
+                        .payload
+                        .as_ref()
+                        .is_some_and(|p| p.type_url == sentinel_type_url && p.value == sentinel_bytes)
+            }),
+        "cached Character notice must remain undrained in NoticeRoutingCache after teardown-grace RPCs"
+    );
+
+    // Re-selecting the character clears teardown grace; the next normal RPC (unsuppressed)
+    // attaches Quasar character tenancy via `dispatch_rpc_inner` and flushes the cached notice.
+    let (reenter_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        13,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    assert_eq!(reenter_rsp.packet_type, MachoPacketType::CallRsp);
+    let (post_reenter_cash_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        14,
+        "account",
+        None,
+        "GetCashBalance",
+        vec![PyRep::Integer(0)],
+    )
+    .await;
+    assert_eq!(post_reenter_cash_rsp.packet_type, MachoPacketType::CallRsp);
+    assert_eq!(
+        ctx.quasar_gateway
+            .subscribers
+            .read()
+            .unwrap()
+            .get(&session_id)
+            .and_then(|sub| sub.character_id),
+        Some(char_id as u32),
+        "post-SelectCharacterID normal RPC must legitimately attach Quasar character tenancy"
+    );
+    let mut rx_notices = Vec::new();
+    while let Ok(n) = notice_rx.try_recv() {
+        rx_notices.push(n);
+    }
+    let polled_notices = ctx.quasar_gateway.poll_notices(session_id);
+    assert!(
+        rx_notices.iter().any(|n| {
+            n.payload
+                .as_ref()
+                .is_some_and(|p| p.type_url == sentinel_type_url && p.value == sentinel_bytes)
+        }),
+        "cached Character notice must be delivered to Quasar stream once SelectCharacterID succeeds"
+    );
+    assert!(
+        polled_notices.iter().any(|n| {
+            n.payload
+                .as_ref()
+                .is_some_and(|p| p.type_url == sentinel_type_url && p.value == sentinel_bytes)
+        }),
+        "cached Character notice must be delivered to Quasar inbox once SelectCharacterID succeeds"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1434_self_gm_advance_clock_wire_delivers_safe_logoff_without_remove_ball() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let gm_char_id = 90_000_003_i64;
+    let sys_id = 30_000_142_u32;
+    ctx.db
+        .provision_gm_account("admin", "admin-secret", gm_char_id, "ISD Polaris");
+
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) =
+        connect_and_authenticate(addr, "admin", "admin-secret").await;
+
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(gm_char_id)],
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        2,
+        "stationSvc",
+        "Undock",
+        Vec::new(),
+    )
+    .await;
+    let (_bind_rsp, bind_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(sys_id as i64), PyRep::None],
+    )
+    .await;
+    assert!(
+        bind_notifs
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "DoDestinyUpdate")),
+        "MachoBindObject must initialize live DoDestinyUpdate stream"
+    );
+
+    let jita = ctx.systems.get_or_spawn(sys_id);
+    let active_ship_id = ctx.db.get_character(gm_char_id).unwrap().active_ship_id;
+    assert!(jita.get_ball_snapshot(active_ship_id).await.unwrap().is_some());
+
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        4,
+        "ship",
+        "SafeLogoff",
+        Vec::new(),
+    )
+    .await;
+
+    // Flush SafeLogoff's pre-timer Stop / SetSpeedFraction(0.0) tick before self-GM AdvanceClock.
+    let _ = jita.step_manual(1.0).await.unwrap();
+    write_framed_pyrep(
+        &mut s,
+        &test_1386_make_ping(client_id, user_id, 5).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    loop {
+        let rep = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_framed_pyrep(&mut s),
+        )
+        .await
+        .expect("timed out waiting for pre-completion PingRsp")
+        .expect("read error waiting for pre-completion PingRsp")
+        .expect("socket closed before pre-completion PingRsp");
+        if MachoPacket::from_pyrep(&rep)
+            .is_some_and(|p| p.packet_type == MachoPacketType::PingRsp)
+        {
+            break;
+        }
+    }
+
+    // Complete SafeLogoff via self-GM `timeControl.AdvanceClock(30)` on the SAME TCP connection,
+    // exercising the `!post_rpc_charsel_pending` guard in `execute_call_req_wire`.
+    let adv_req = make_call_req(
+        client_id,
+        user_id,
+        6,
+        "timeControl",
+        None,
+        "AdvanceClock",
+        vec![PyRep::Integer(30)],
+    );
+    write_framed_pyrep(&mut s, &adv_req.to_pyrep()).await.unwrap();
+
+    let mut got_call_rsp = false;
+    let mut got_safe_logoff = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !(got_call_rsp && got_safe_logoff) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(remaining, read_framed_pyrep(&mut s))
+            .await
+            .expect("timed out waiting for AdvanceClock CallRsp and OnSafeLogoffActivated")
+            .expect("read error after self-GM AdvanceClock")
+            .expect("TCP closed instead of clean SafeLogoff");
+        assert!(
+            GPSTransportClosed::from_pyrep(&rep).is_none(),
+            "self-GM SafeLogoff must not send GPSTransportClosed: {rep:?}"
+        );
+        assert!(
+            !test_1386_packet_contains_ascii(&rep, "DoDestinyUpdate")
+                && !test_1386_packet_contains_ascii(&rep, "RemoveBall"),
+            "self-GM AdvanceClock SafeLogoff must NOT leak DoDestinyUpdate/RemoveBall: {rep:?}"
+        );
+        let pkt = MachoPacket::from_pyrep(&rep).expect("decode post-AdvanceClock frame");
+        assert_ne!(
+            pkt.packet_type,
+            MachoPacketType::SessionChangeNotification,
+            "self-GM SafeLogoff must not emit SessionChangeNotification"
+        );
+        match pkt.packet_type {
+            MachoPacketType::CallRsp => got_call_rsp = true,
+            MachoPacketType::Notification => {
+                if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                    if broadcast_id == "OnSafeLogoffActivated" {
+                        got_safe_logoff = true;
+                    }
+                }
+            }
+            MachoPacketType::ErrorResponse => {
+                panic!("unexpected ErrorResponse from self-GM AdvanceClock: {pkt:?}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        jita.get_ball_snapshot(active_ship_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "ship ball must be removed on self-GM safe logoff"
+    );
+    let online = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("online lock preserved at charsel");
+    assert!(online.character_id.is_none());
+
+    let (charsel_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        7,
+        "charUnboundMgr",
+        None,
+        "GetCharacterSelectionData",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(charsel_rsp.packet_type, MachoPacketType::CallRsp);
+}

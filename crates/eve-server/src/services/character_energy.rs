@@ -209,20 +209,46 @@ pub fn set_character_energy(
     updated_state
 }
 
-/// Regenerates CEQ up to `now` and deducts `amount` CEQ, returning `InsufficientEnergy` if insufficient.
+/// Regenerates CEQ up to `now` and atomically deducts `amount` CEQ, returning
+/// `InsufficientEnergy` without mutating state or emitting notifications when insufficient.
 pub fn consume_character_energy(
     ctx: &ServerContext,
     char_id: i64,
     amount: i64,
 ) -> Result<CharacterEnergyState, BridgeRpcError> {
-    let cur = get_character_energy(ctx, char_id);
     if amount <= 0 {
-        return Ok(cur);
+        return Ok(read_character_energy(ctx, char_id));
     }
-    if cur.current_energy < amount {
-        return Err(BridgeRpcError::user_error("InsufficientEnergy"));
-    }
-    Ok(set_character_energy(ctx, char_id, cur.current_energy - amount))
+    let now_ft = unix_to_filetime(ctx.now_unix());
+    let updated_state = {
+        let mut g = ctx.cluster_misc_state.lock().unwrap();
+        let mut candidate = g
+            .char_energy
+            .get(&char_id)
+            .cloned()
+            .unwrap_or_else(|| default_energy_state(now_ft));
+        let _ = compute_regenerated_energy(&mut candidate, now_ft);
+        if candidate.current_energy < amount {
+            return Err(BridgeRpcError::user_error("InsufficientEnergy"));
+        }
+        candidate.current_energy = (candidate.current_energy - amount).clamp(0, candidate.max_energy);
+        candidate.energy_rem = 0.0;
+        candidate.last_update_time = now_ft;
+        g.char_energy.insert(char_id, candidate.clone());
+        candidate
+    };
+
+    crate::services::cluster_macho_misc_services::persist_misc_state(ctx);
+
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnCharacterEnergyChanged {
+            character_id: char_id,
+            new_energy_state: energy_to_keyval(&updated_state),
+        },
+    );
+
+    Ok(updated_state)
 }
 
 /// Dispatches RPC calls for `characterEnergyMgr`.

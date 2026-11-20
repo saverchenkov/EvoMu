@@ -2010,3 +2010,380 @@ async fn entity_return_home_and_p1_r2_scoop_salvage_guards() {
         Some(InventoryFlag::DroneBay)
     );
 }
+
+#[tokio::test]
+async fn bf1_strict_ship_not_in_space_and_db_char_mismatch_rejects_even_with_active_drones() {
+    const CODE_SHIP_NOT_IN_SPACE: &str = "ShipNotInSpace";
+
+    let (ctx, mut sess, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let kwargs = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let ship_pos = DVec3::new(100_000.0, 0.0, 0.0);
+
+    let spawn_ship = |pos: DVec3| Ball {
+        id: ship_id,
+        type_id: 587,
+        position: pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+
+    sys_handle
+        .spawn_ball_with_combat(spawn_ship(ship_pos), CombatState::default())
+        .await
+        .unwrap();
+
+    let d1_id = 702_001i64;
+    let salv_id = 702_002i64;
+    let origin_aban_id = 702_003i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            d1_id,
+            make_fighter_item(d1_id, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 1),
+        );
+        snap.items.insert(
+            salv_id,
+            make_fighter_item(salv_id, 32_787, char_id, ship_id, InventoryFlag::DroneBay, 1),
+        );
+        snap.items.insert(
+            origin_aban_id,
+            make_fighter_item(origin_aban_id, 2_456, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+    });
+
+    let launch_res = handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Integer(d1_id), PyRep::Integer(salv_id)])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("LaunchDrones succeeds");
+    let (d1_ball, salv_ball) = match launch_res {
+        PyRep::List(v) => (v[0].as_i64().unwrap(), v[1].as_i64().unwrap()),
+        other => panic!("expected LaunchDrones list, got {other:?}"),
+    };
+
+    // Abandoned drone near DVec3::ZERO (100m from origin, 99.9km from ship_pos)
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: origin_aban_id,
+                type_id: 2_456,
+                position: DVec3::new(100.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 2_600.0,
+                inertia: 1.0,
+                mass: 1_000.0,
+                radius: 10.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut ab = rt.active_drones_in_space[&d1_ball].clone();
+        ab.ball_id = origin_aban_id;
+        ab.drone_item_id = origin_aban_id;
+        ab.owner_char_id = 0;
+        ab.parent_ship_id = 0;
+        ab.is_abandoned = true;
+        rt.active_drones_in_space.insert(origin_aban_id, ab);
+    });
+
+    // While ship ball is spawned at (100_000, 0, 0), ScoopToDroneBay on drone at (100, 0, 0) uses real ship_pos -> OutOfScoopRange
+    let far_scoop_err = handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "ship",
+        "ScoopToDroneBay",
+        &[PyRep::Integer(origin_aban_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(far_scoop_err.code, "OutOfScoopRange");
+
+    let gated_cmds: &[(&str, &str, Vec<PyRep>)] = &[
+        ("entity", "CmdReturnBay", vec![PyRep::List(vec![PyRep::Integer(d1_ball)])]),
+        ("entity", "CmdReturnHome", vec![PyRep::List(vec![PyRep::Integer(d1_ball)])]),
+        ("entity", "CmdReturnAndOrbit", vec![PyRep::List(vec![PyRep::Integer(d1_ball)])]),
+        ("entity", "CmdAssist", vec![PyRep::Integer(90_000_777)]),
+        ("entity", "CmdGuard", vec![PyRep::Integer(90_000_777)]),
+        ("entity", "CmdAbandonDrone", vec![PyRep::List(vec![PyRep::Integer(d1_ball)])]),
+        ("entity", "CmdReconnectToDrones", vec![PyRep::List(vec![PyRep::Integer(origin_aban_id)])]),
+        ("entity", "CmdSalvage", vec![PyRep::Integer(999_001)]),
+        ("ship", "ScoopToDroneBay", vec![PyRep::Integer(origin_aban_id)]),
+        ("ship", "ScoopDrone", vec![PyRep::Integer(origin_aban_id)]),
+    ];
+
+    // 1. Remove active ship ball while active drones still exist in space -> unconditional ShipNotInSpace
+    assert!(sys_handle.remove_ball(ship_id).await.is_some());
+    for (svc, method, args) in gated_cmds {
+        let err = handle_npcs_drones(&ctx, &mut sess, svc, method, args, &kwargs)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            err.code, CODE_SHIP_NOT_IN_SPACE,
+            "{svc}.{method} must reject with ShipNotInSpace when ship ball is absent even with active drones"
+        );
+    }
+
+    // Re-spawn ship ball and verify DB solar_system_id mismatch rejects all commands with ShipNotInSpace
+    sys_handle
+        .spawn_ball_with_combat(spawn_ship(ship_pos), CombatState::default())
+        .await
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = 30_002_187;
+    });
+    for (svc, method, args) in gated_cmds {
+        let err = handle_npcs_drones(&ctx, &mut sess, svc, method, args, &kwargs)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            err.code, CODE_SHIP_NOT_IN_SPACE,
+            "{svc}.{method} must reject DB solar_system_id mismatch"
+        );
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = sys_id;
+    });
+
+    // 3. DB active_ship_id mismatch rejects all commands with ShipNotInSpace
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = ship_id + 999;
+    });
+    for (svc, method, args) in gated_cmds {
+        let err = handle_npcs_drones(&ctx, &mut sess, svc, method, args, &kwargs)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            err.code, CODE_SHIP_NOT_IN_SPACE,
+            "{svc}.{method} must reject DB active_ship_id mismatch"
+        );
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = ship_id;
+    });
+
+    // Verify none of the rejected calls mutated any drone state
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drones_in_space[&d1_ball].is_abandoned);
+        assert_eq!(rt.active_drones_in_space[&d1_ball].parent_ship_id, ship_id);
+        assert!(!rt.active_drones_in_space[&salv_ball].is_abandoned);
+        assert!(rt.active_drones_in_space[&origin_aban_id].is_abandoned);
+    });
+}
+
+#[tokio::test]
+async fn bf2_none_arg_with_drone_ids_kwarg_and_cross_system_abandon_isolation() {
+    let (ctx, mut sess, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let other_sys_id = 30_002_187u32;
+    let empty_kw = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let ship_pos = DVec3::new(50_000.0, 0.0, 0.0);
+
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: ship_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    let d1_item = 703_001i64;
+    let d2_item = 703_002i64;
+    let other_sys_drone = 703_003i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            d1_item,
+            make_fighter_item(d1_item, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 1),
+        );
+        snap.items.insert(
+            d2_item,
+            make_fighter_item(d2_item, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 1),
+        );
+        snap.items.insert(
+            other_sys_drone,
+            make_fighter_item(
+                other_sys_drone,
+                2_456,
+                char_id,
+                other_sys_id as i64,
+                InventoryFlag::None,
+                1,
+            ),
+        );
+    });
+
+    let launch_res = handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Integer(d1_item), PyRep::Integer(d2_item)])],
+        &empty_kw,
+    )
+    .await
+    .unwrap()
+    .expect("LaunchDrones succeeds");
+    let (d1, d2) = match launch_res {
+        PyRep::List(v) => (v[0].as_i64().unwrap(), v[1].as_i64().unwrap()),
+        other => panic!("expected LaunchDrones list, got {other:?}"),
+    };
+    let _ = sys_handle
+        .set_ball_position(d1, ship_pos + DVec3::new(500.0, 0.0, 0.0))
+        .await;
+    let _ = sys_handle
+        .set_ball_position(d2, ship_pos + DVec3::new(600.0, 0.0, 0.0))
+        .await;
+
+    // Seed an active drone owned by the same pilot in another solar system
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut cross = rt.active_drones_in_space[&d1].clone();
+        cross.ball_id = other_sys_drone;
+        cross.drone_item_id = other_sys_drone;
+        cross.solar_system_id = other_sys_id;
+        cross.owner_char_id = char_id;
+        cross.parent_ship_id = ship_id;
+        cross.is_abandoned = false;
+        rt.active_drones_in_space.insert(other_sys_drone, cross);
+    });
+
+    let mut kw_d1 = HashMap::new();
+    kw_d1.insert("droneIDs".into(), PyRep::List(vec![PyRep::Integer(d1)]));
+    let mut kw_other = HashMap::new();
+    kw_other.insert("droneIDs".into(), PyRep::List(vec![PyRep::Integer(other_sys_drone)]));
+
+    // 1. CmdAbandonDrone(None, droneIDs=[d1]) abandons ONLY d1; d2 and cross-system drone stay untouched
+    handle_npcs_drones(&ctx, &mut sess, "entity", "CmdAbandonDrone", &[PyRep::None], &kw_d1)
+        .await
+        .unwrap()
+        .expect("CmdAbandonDrone(None, droneIDs=[d1]) succeeds");
+    with_combat_runtime(&ctx, |rt| {
+        assert!(rt.active_drones_in_space[&d1].is_abandoned, "d1 must be abandoned");
+        assert!(!rt.active_drones_in_space[&d2].is_abandoned, "d2 must remain controlled");
+        assert_eq!(rt.active_drones_in_space[&d2].parent_ship_id, ship_id);
+        assert!(
+            !rt.active_drones_in_space[&other_sys_drone].is_abandoned,
+            "cross-system drone must remain active"
+        );
+    });
+
+    // Cross-system drone filter rejects via RPC and is ignored by direct sp6_lifecycle::handle_cmd_abandon_drone
+    let cross_err = handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "entity",
+        "CmdAbandonDrone",
+        &[PyRep::None],
+        &kw_other,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(cross_err.code, "DroneNotFound");
+    crate::sp6_lifecycle::handle_cmd_abandon_drone(&ctx, &mut sess, &[PyRep::None], &kw_other)
+        .await
+        .expect("direct handle_cmd_abandon_drone ignores cross-system ID");
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drones_in_space[&other_sys_drone].is_abandoned);
+    });
+
+    // Wildcard CmdAbandonDrone([]) abandons remaining same-system drone d2, but NEVER cross-system drone
+    handle_npcs_drones(&ctx, &mut sess, "entity", "CmdAbandonDrone", &[], &empty_kw)
+        .await
+        .unwrap()
+        .expect("wildcard CmdAbandonDrone succeeds for remaining same-system drone d2");
+    with_combat_runtime(&ctx, |rt| {
+        assert!(rt.active_drones_in_space[&d1].is_abandoned);
+        assert!(rt.active_drones_in_space[&d2].is_abandoned);
+        assert!(
+            !rt.active_drones_in_space[&other_sys_drone].is_abandoned,
+            "same-system filter must protect drones in other solar systems"
+        );
+    });
+
+    // 2. CmdReconnectToDrones(None, droneIDs=[d1]) reconnects ONLY d1; d2 remains abandoned
+    handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "entity",
+        "CmdReconnectToDrones",
+        &[PyRep::None],
+        &kw_d1,
+    )
+    .await
+    .unwrap()
+    .expect("CmdReconnectToDrones(None, droneIDs=[d1]) succeeds");
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drones_in_space[&d1].is_abandoned, "d1 must be reconnected");
+        assert_eq!(rt.active_drones_in_space[&d1].parent_ship_id, ship_id);
+        assert!(rt.active_drones_in_space[&d2].is_abandoned, "d2 must stay abandoned");
+    });
+
+    // Direct sp6_lifecycle::handle_cmd_reconnect_to_drones(None, droneIDs=[d2]) reconnects d2 cleanly
+    let mut kw_d2 = HashMap::new();
+    kw_d2.insert("droneIDs".into(), PyRep::List(vec![PyRep::Integer(d2)]));
+    crate::sp6_lifecycle::handle_cmd_reconnect_to_drones(&ctx, &mut sess, &[PyRep::None], &kw_d2)
+        .await
+        .expect("direct handle_cmd_reconnect_to_drones honors kwargs[droneIDs] after None");
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drones_in_space[&d2].is_abandoned);
+        assert_eq!(rt.active_drones_in_space[&d2].parent_ship_id, ship_id);
+    });
+
+    // 3. CmdReturnBay(None, droneIDs=[d1]) recalls ONLY d1 to DroneBay; d2 remains active in space
+    handle_npcs_drones(&ctx, &mut sess, "entity", "CmdReturnBay", &[PyRep::None], &kw_d1)
+        .await
+        .unwrap()
+        .expect("CmdReturnBay(None, droneIDs=[d1]) succeeds");
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drones_in_space.contains_key(&d1), "d1 must be recalled to bay");
+        assert!(rt.active_drones_in_space.contains_key(&d2), "d2 must remain in space");
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&d1_item].flag, InventoryFlag::DroneBay);
+        assert_eq!(snap.items[&d1_item].location_id, ship_id);
+        assert_eq!(snap.items[&d2_item].flag, InventoryFlag::None);
+        assert_eq!(snap.items[&d2_item].location_id, sys_id as i64);
+    });
+
+    // Direct sp6_lifecycle::handle_cmd_return_bay(None, droneIDs=[d2]) recalls d2 cleanly
+    crate::sp6_lifecycle::handle_cmd_return_bay(&ctx, &mut sess, &[PyRep::None], &kw_d2)
+        .await
+        .expect("direct handle_cmd_return_bay honors kwargs[droneIDs] after None");
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drones_in_space.contains_key(&d2));
+        assert!(
+            !rt.active_drones_in_space[&other_sys_drone].is_abandoned,
+            "cross-system drone remains intact throughout"
+        );
+    });
+}
