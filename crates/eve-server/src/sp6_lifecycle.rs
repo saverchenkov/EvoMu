@@ -2486,7 +2486,18 @@ pub async fn handle_cmd_abandon_drone(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let target_ids: Vec<i64> = match args.first().or_else(|| kwargs.get("droneIDs")) {
+    let Some(sys_id) = session.solar_system_id else {
+        return Err(BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Session has no active solar system".into(),
+            client_error: None,
+        });
+    };
+    let raw_target = match args.first() {
+        Some(PyRep::None) | None => kwargs.get("droneIDs"),
+        other => other,
+    };
+    let target_ids: Vec<i64> = match raw_target {
         Some(PyRep::List(list) | PyRep::Tuple(list)) => {
             list.iter().filter_map(|x| x.as_i64()).collect()
         }
@@ -2497,7 +2508,7 @@ pub async fn handle_cmd_abandon_drone(
     let mut abandoned_balls = Vec::new();
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         for d in rt.active_drones_in_space.values_mut() {
-            if d.owner_char_id == char_id && !d.is_abandoned {
+            if d.solar_system_id == sys_id && d.owner_char_id == char_id && !d.is_abandoned {
                 let matches_filter = target_ids.is_empty()
                     || target_ids.contains(&d.ball_id)
                     || target_ids.contains(&d.drone_item_id);
@@ -2514,24 +2525,22 @@ pub async fn handle_cmd_abandon_drone(
         }
     });
 
-    if let Some(sys_id) = session.solar_system_id {
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        for &(bid, tid) in &abandoned_balls {
-            let _ = sys_handle
-                .emit_destiny_event(
-                    bid,
-                    eve_destiny::DestinyEvent::OnDroneStateChange {
-                        drone_id: bid,
-                        owner_id: 0,
-                        controller_id: 0,
-                        activity_state: 0,
-                        type_id: tid,
-                        controller_owner_id: 0,
-                        target_id: None,
-                    },
-                )
-                .await;
-        }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for &(bid, tid) in &abandoned_balls {
+        let _ = sys_handle
+            .emit_destiny_event(
+                bid,
+                eve_destiny::DestinyEvent::OnDroneStateChange {
+                    drone_id: bid,
+                    owner_id: 0,
+                    controller_id: 0,
+                    activity_state: 0,
+                    type_id: tid,
+                    controller_owner_id: 0,
+                    target_id: None,
+                },
+            )
+            .await;
     }
 
     for &(bid, _) in &abandoned_balls {
@@ -2561,7 +2570,11 @@ pub async fn handle_cmd_reconnect_to_drones(
         return Err(e);
     }
 
-    let target_ids: Vec<i64> = match args.first().or_else(|| kwargs.get("droneIDs")) {
+    let raw_target = match args.first() {
+        Some(PyRep::None) | None => kwargs.get("droneIDs"),
+        other => other,
+    };
+    let target_ids: Vec<i64> = match raw_target {
         Some(PyRep::List(list) | PyRep::Tuple(list)) => list.iter().filter_map(|x| x.as_i64()).collect(),
         Some(v) => v.as_i64().into_iter().collect(),
         None => Vec::new(),

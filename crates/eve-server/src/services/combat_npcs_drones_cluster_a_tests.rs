@@ -1285,7 +1285,7 @@ async fn launch_engage_return_scoop_error_and_sentry_kill_paths() {
         );
     });
     sess.ship_id = Some(zero_bay_ship_id);
-    assert_eq!(call_drone_rpc(&ctx, &mut sess, "ScoopDrone", &[PyRep::Integer(sentry_ball)]).await.unwrap_err().code, "DroneNotInSpace");
+    assert_eq!(call_drone_rpc(&ctx, &mut sess, "ScoopDrone", &[PyRep::Integer(sentry_ball)]).await.unwrap_err().code, "ShipNotInSpace");
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().active_ship_id = zero_bay_ship_id;
     });
