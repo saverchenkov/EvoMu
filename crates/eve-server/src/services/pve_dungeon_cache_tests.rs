@@ -2247,3 +2247,250 @@ async fn docked_synthetic_ore_and_ice_instance_ids_warp_before_and_after_seeding
         .await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_combat_anomaly_instances_seasonal_cooldown_and_readonly_purity() {
+    let sde = shared_sde();
+    let sys_id: SolarSystemId = 30_000_142;
+    let pilot_id: i64 = 90_099_701;
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("season_cache_pilot", "pw", pilot_id, "SeasonCachePilot");
+    let (uid, ship_id) = db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&pilot_id).expect("char");
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        (ch.user_id, ch.active_ship_id)
+    });
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    let mut sess = SessionState::new(9950 + (pilot_id % 1000) as u64);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(pilot_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    let kw = Default::default();
+
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_775_800_000,
+    )));
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cfg = crate::services::season_fsd::load_season_config(snap);
+        cfg.season_id = 1;
+        cfg.season_name = "Crimson Harvest".into();
+        cfg.start_time_ft = now_ft - 3_600 * 10_000_000;
+        cfg.end_time_ft = now_ft + 7_200 * 10_000_000;
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
+    });
+
+    // 1. Docked GetCombatAnomalyInstances is strictly read-only and must not spawn seasonal sites.
+    sess.station_id = Some(60_003_760);
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+    let docked_pre = unpack_system_dungeon_instances(
+        &handle(
+            &ctx,
+            &mut sess,
+            "dungeonInstanceCacheMgr",
+            "GetCombatAnomalyInstances",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("docked GetCombatAnomalyInstances"),
+        sys_id,
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(
+        ctx.db.with_snapshot(|s| !s
+            .cosmic_anomalies
+            .get(&sys_id)
+            .into_iter()
+            .flatten()
+            .any(|a| a.anomaly_type == "SeasonalEventSite")),
+        "docked GetCombatAnomalyInstances must not spawn seasonal sites ({docked_pre:?})"
+    );
+
+    // 2. Undocked GetCombatAnomalyInstances seeds one seasonal site at SDE-derived coordinates.
+    sess.station_id = None;
+    let undocked_spawned = unpack_system_dungeon_instances(
+        &handle(
+            &ctx,
+            &mut sess,
+            "dungeonInstanceCacheMgr",
+            "GetCombatAnomalyInstances",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("undocked GetCombatAnomalyInstances"),
+        sys_id,
+    );
+    let (site1, pos1) = ctx.db.with_snapshot(|snap| {
+        let rec = snap.pve_special_sites.seasonal_event_sites[&sys_id][0].clone();
+        let anom = snap.cosmic_anomalies[&sys_id]
+            .iter()
+            .find(|a| a.anomaly_type == "SeasonalEventSite" && !a.cleared)
+            .expect("spawned seasonal anomaly");
+        assert!(
+            undocked_spawned
+                .get(&rec.dungeon_id)
+                .is_some_and(|ids| ids.contains(&rec.instance_id)),
+            "undocked reply must expose spawned seasonal site"
+        );
+        (rec, anom.position)
+    });
+
+    // 3. Complete all objectives -> immediate GetCombatAnomalyInstances (docked & undocked) must NOT respawn.
+    assert!(
+        crate::services::pve_special_sites_combat::on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_id,
+            site1.boss_npc_ball_id,
+            Some(pilot_id),
+        )
+        .await
+        .is_empty()
+    );
+    assert!(
+        crate::services::pve_special_sites_combat::on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_id,
+            site1.escort_ball_ids[0],
+            Some(pilot_id),
+        )
+        .await
+        .is_empty()
+    );
+    assert_eq!(
+        crate::services::pve_special_sites_combat::on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_id,
+            site1.escort_ball_ids[1],
+            Some(pilot_id),
+        )
+        .await
+        .len(),
+        1
+    );
+
+    let during_cooldown = unpack_system_dungeon_instances(
+        &handle(
+            &ctx,
+            &mut sess,
+            "dungeonInstanceCacheMgr",
+            "GetCombatAnomalyInstances",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("cooldown GetCombatAnomalyInstances"),
+        sys_id,
+    );
+    assert!(
+        !during_cooldown.values().flatten().any(|&id| id == site1.instance_id),
+        "completed seasonal site must stay absent"
+    );
+    assert!(
+        ctx.db.with_snapshot(|s| !s
+            .cosmic_anomalies
+            .get(&sys_id)
+            .into_iter()
+            .flatten()
+            .any(|a| a.anomaly_type == "SeasonalEventSite" && !a.cleared)),
+        "GetCombatAnomalyInstances must not respawn seasonal site before cooldown expires"
+    );
+
+    ctx.db.clock().advance_secs(500);
+    let _ = handle(
+        &ctx,
+        &mut sess,
+        "dungeonInstanceCacheMgr",
+        "GetCombatAnomalyInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("mid-cooldown GetCombatAnomalyInstances");
+    assert!(
+        ctx.db.with_snapshot(|s| !s
+            .cosmic_anomalies
+            .get(&sys_id)
+            .into_iter()
+            .flatten()
+            .any(|a| a.anomaly_type == "SeasonalEventSite" && !a.cleared)),
+        "partial cooldown advance must still block seasonal respawn"
+    );
+
+    // 4. After cooldown expires, undocked GetCombatAnomalyInstances respawns at new coordinates.
+    ctx.db.clock().advance_secs(
+        crate::services::pve_special_sites_combat::SEASONAL_RESPAWN_COOLDOWN_SECS,
+    );
+    let after_cooldown = unpack_system_dungeon_instances(
+        &handle(
+            &ctx,
+            &mut sess,
+            "dungeonInstanceCacheMgr",
+            "GetCombatAnomalyInstances",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("post-cooldown GetCombatAnomalyInstances"),
+        sys_id,
+    );
+    let (site2_iid, site2_did, pos2) = ctx.db.with_snapshot(|snap| {
+        let rec = snap.pve_special_sites.seasonal_event_sites[&sys_id]
+            .iter()
+            .find(|s| !s.completed)
+            .expect("respawned site after cooldown");
+        let anom = snap.cosmic_anomalies[&sys_id]
+            .iter()
+            .find(|a| a.anomaly_type == "SeasonalEventSite" && !a.cleared)
+            .expect("respawned anomaly");
+        assert!(after_cooldown.get(&rec.dungeon_id).is_some_and(|ids| ids.contains(&rec.instance_id)));
+        (rec.instance_id, rec.dungeon_id, anom.position)
+    });
+    assert_ne!(site2_iid, site1.instance_id);
+    assert_ne!(pos2, pos1, "respawned seasonal site must not reuse identical coordinates");
+
+    // 5. Advance clock past window end -> docked read-only call hides expired seasonal site with zero writes.
+    ctx.db.clock().advance_secs(10_000);
+    sess.station_id = Some(60_003_760);
+    let epoch_pre_exp = ctx.db.state_epoch();
+    let commits_pre_exp = ctx.db.tx_commit_count();
+    let docked_expired = unpack_system_dungeon_instances(
+        &handle(
+            &ctx,
+            &mut sess,
+            "dungeonInstanceCacheMgr",
+            "GetCombatAnomalyInstances",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("docked expired GetCombatAnomalyInstances"),
+        sys_id,
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch_pre_exp);
+    assert_eq!(ctx.db.tx_commit_count(), commits_pre_exp);
+    assert!(
+        !docked_expired
+            .get(&site2_did)
+            .is_some_and(|ids| ids.contains(&site2_iid)),
+        "docked read-only GetCombatAnomalyInstances must hide expired seasonal anomalies"
+    );
+}

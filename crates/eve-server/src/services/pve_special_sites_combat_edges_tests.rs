@@ -619,6 +619,9 @@ async fn drifter_hive_multi_room_partial_wave_beacon_and_warden_without_ship_or_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seasonal_site_npc_destroyed_and_ensure_seasonal_sites_edges() {
     let ctx = build_combat_test_ctx();
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_775_900_000,
+    )));
     let sys_id = 30_000_142;
     let killer = 91_004_001;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -722,7 +725,7 @@ async fn seasonal_site_npc_destroyed_and_ensure_seasonal_sites_edges() {
         );
     });
 
-    let c_sea = on_special_site_npc_destroyed_core(
+    let c_boss = on_special_site_npc_destroyed_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
@@ -731,27 +734,52 @@ async fn seasonal_site_npc_destroyed_and_ensure_seasonal_sites_edges() {
         Some(killer),
     )
     .await;
+    assert!(c_boss.is_empty(), "boss kill must not pay out before escorts are destroyed");
+    assert!(
+        sys_handle.get_ball_snapshot(95_002).await.unwrap().is_some(),
+        "live seasonal escort must not auto-despawn when boss dies"
+    );
+    let c_sea = on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_id,
+        95_002,
+        Some(killer),
+    )
+    .await;
     assert_eq!(c_sea.len(), 1);
-    assert!(sys_handle.get_ball_snapshot(95_002).await.unwrap().is_none());
     let cleared_501 = ctx.db.with_snapshot(|s| {
         s.cosmic_anomalies
             .get(&sys_id)
             .is_some_and(|v| v.iter().any(|a| a.anomaly_id == "dng-900001-501" && a.cleared))
     });
-    assert!(cleared_501, "seasonal anomaly should be marked cleared when boss dies");
+    assert!(cleared_501, "seasonal anomaly should be marked cleared once full objectives complete");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&killer].balance.0), 500_000 * 100);
 
+    assert!(
+        on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_id,
+            95_011,
+            None,
+        )
+        .await
+        .is_empty()
+    );
+    assert!(sys_handle.get_ball_snapshot(95_012).await.unwrap().is_some());
     let c_nok = on_special_site_npc_destroyed_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
         sys_id,
-        95_011,
+        95_012,
         None,
     )
     .await;
     assert!(c_nok.is_empty());
-    assert!(sys_handle.get_ball_snapshot(95_012).await.unwrap().is_none());
 
     let future_cfg = SeasonConfig {
         season_id: 88,
@@ -767,16 +795,26 @@ async fn seasonal_site_npc_destroyed_and_ensure_seasonal_sites_edges() {
     assert!(rem_future.is_empty(), "completed and expired seasonal sites must be pruned");
     assert!(sys_handle.get_ball_snapshot(95_021).await.unwrap().is_none());
 
+    // Cooldown must still block immediate respawn even if an active season is configured.
     let active_cfg = SeasonConfig {
         season_id: 89,
         season_name: "Winter Nexus".into(),
         start_time_ft: now_ft - 10_000_000_000,
-        end_time_ft: now_ft + 10_000_000_000,
+        end_time_ft: now_ft + 100_000_000_000,
         ..SeasonConfig::default()
     };
     ctx.db.with_mut_snapshot(|s| {
         s.seasons_and_campaigns.season_configuration = serde_json::from_str(&String::from(serde_json::to_string(&active_cfg).unwrap())).ok();
     });
+    let blocked_by_cooldown = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    assert!(
+        blocked_by_cooldown.is_empty(),
+        "per-system cooldown must prevent immediate respawn after seasonal site completion"
+    );
+
+    ctx.db
+        .clock()
+        .advance_secs(SEASONAL_RESPAWN_COOLDOWN_SECS + 5);
     let active1 = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
     assert_eq!(active1.len(), 1);
     let active2 = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;

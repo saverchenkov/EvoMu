@@ -22,6 +22,12 @@ use std::sync::Arc;
 type CharacterId = i64;
 
 const SEASONAL_DETAILS_NOTE_ID: i64 = -8_300_000_000_001;
+const SEASONAL_COOLDOWN_NOTE_ID: i64 = -8_300_000_000_002;
+pub const SEASONAL_RESPAWN_COOLDOWN_SECS: u64 = 1_800;
+
+fn default_seasonal_site_position() -> [f64; 3] {
+    [1.5e11, 2.0e10, -1.0e11]
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SeasonalSiteDetails {
@@ -37,6 +43,37 @@ pub struct SeasonalSiteDetails {
     pub exploration_site_id: String,
     pub crate_type_id: u32,
     pub crate_loot_pool: Vec<(u32, i64)>,
+    #[serde(default)]
+    pub boss_defeated: bool,
+    #[serde(default)]
+    pub defeated_escort_ball_ids: Vec<i64>,
+    #[serde(default = "default_seasonal_site_position")]
+    pub site_position: [f64; 3],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SeasonalCooldownStore {
+    #[serde(default)]
+    until_by_system: BTreeMap<SolarSystemId, u64>,
+    #[serde(default)]
+    spawn_seq_by_system: BTreeMap<SolarSystemId, usize>,
+}
+
+fn load_seasonal_cooldown_store(snap: &eve_db::WorldStateSnapshot) -> SeasonalCooldownStore {
+    crate::services::pve_special_sites::load_json_owner_note(snap, SEASONAL_COOLDOWN_NOTE_ID)
+}
+
+fn save_seasonal_cooldown_store(
+    snap: &mut eve_db::WorldStateSnapshot,
+    store: &SeasonalCooldownStore,
+) {
+    crate::services::pve_special_sites::save_json_owner_note(
+        snap,
+        SEASONAL_COOLDOWN_NOTE_ID,
+        "seasonal_cooldowns",
+        store.until_by_system.is_empty() && store.spawn_seq_by_system.is_empty(),
+        store,
+    );
 }
 
 pub fn load_seasonal_site_details_map(
@@ -77,7 +114,7 @@ enum SeasonTheme {
 impl SeasonTheme {
     fn from_season(season: &eve_db::SeasonConfig) -> Self {
         let lower = season.season_name.to_lowercase();
-        if lower.contains("winter") || season.season_id == 2 {
+        if lower.contains("winter") || lower.contains("wightstorm") || season.season_id == 2 {
             Self::WinterNexus
         } else if lower.contains("gala") || lower.contains("guardian") {
             Self::GuardiansGala
@@ -97,35 +134,37 @@ impl SeasonTheme {
         }
     }
 
-    fn dungeon_candidates(self) -> &'static [u32] {
+    fn dungeon_keywords(self) -> &'static [&'static str] {
         match self {
-            Self::CrimsonHarvest => &[8_923, 8_926, 9_238, 9_241, 8_933],
-            Self::WinterNexus => &[9_030, 9_046, 9_047, 9_029],
-            Self::GuardiansGala => &[8_678, 9_051],
-            Self::LiberationDay => &[9_180, 9_207],
+            Self::CrimsonHarvest => &["crimson", "tetrimon"],
+            Self::WinterNexus => &["wightstorm", "winter"],
+            Self::GuardiansGala => &["gala"],
+            Self::LiberationDay => &["liberation"],
         }
     }
 
-    fn crate_candidates(self) -> &'static [u32] {
+    fn crate_keywords(self) -> &'static [&'static str] {
         match self {
-            Self::CrimsonHarvest => &[
-                53_060, 53_055, 53_057, 53_058, 97_206, 90_134, 90_135, 90_137,
-            ],
-            Self::WinterNexus => &[86_495, 86_496, 90_739],
-            Self::GuardiansGala => &[50_045],
-            Self::LiberationDay => &[95_657, 55_807],
+            Self::CrimsonHarvest => &["crimson", "tetrimon", "halloween", "headhunter"],
+            Self::WinterNexus => &["winter", "wightstorm", "yoiul", "chilling"],
+            Self::GuardiansGala => &["gala"],
+            Self::LiberationDay => &["liberation", "minmatar"],
         }
     }
 
-    // DERIVED: V24 SDE seasonal dungeons encode item crate drops (`crates.fsdbinary`) and
-    // season point thresholds (`fsd_challenge_definitions`), while per-site ISK completion
-    // bounties are synthesized per seasonal theme and security multiplier.
-    fn base_isk(self) -> i64 {
+    fn npc_keywords_for_dungeon(
+        self,
+        dungeon_name: &str,
+    ) -> (&'static [&'static str], &'static [&'static str]) {
+        let lower_dname = dungeon_name.to_lowercase();
         match self {
-            Self::CrimsonHarvest => 2_250_000,
-            Self::WinterNexus => 2_500_000,
-            Self::GuardiansGala => 3_000_000,
-            Self::LiberationDay => 2_000_000,
+            Self::CrimsonHarvest if lower_dname.contains("tetrimon") => {
+                (&["tetrimon"], &["tetrimon"])
+            }
+            Self::CrimsonHarvest => (&["harvest", "blood raider", "tetrimon"], &["crimson harvest", "tetrimon"]),
+            Self::WinterNexus => (&["direwight", "frostwight", "wightstorm", "sansha"], &["wightstorm"]),
+            Self::GuardiansGala => (&["gala", "guardian angels"], &["gala"]),
+            Self::LiberationDay => (&["republic ", "minmatar", "tetrimon"], &["network node", "com tower", "data"]),
         }
     }
 }
@@ -134,6 +173,7 @@ struct ResolvedSeasonalSpec {
     theme: SeasonTheme,
     dungeon_id: u32,
     dungeon_name: String,
+    faction_id: u32,
     boss_type_id: u32,
     escort_type_id: u32,
     relay_type_id: u32,
@@ -150,23 +190,145 @@ fn first_known_type(sde: &eve_sde::SdeRegistry, candidates: &[u32]) -> Option<u3
         .find(|tid| sde.types.contains_key(tid))
 }
 
-// DERIVED: Client FSD provides `season.fsdbinary`, `crates.fsdbinary`, `challenges.fsdbinary`, and
-// `sde_dungeons` header entries (`archetype_id == 45`), but omits CCP's per-site NPC ship picks,
-// wave/relay pairings, and security-status ISK scaling; those ship/relay candidate lists and sec
-// multipliers are server-derived, while crate loot tables and challenge points come from FSD.
+fn find_sde_npc_by_keywords_and_groups(
+    sde: &eve_sde::SdeRegistry,
+    keywords: &[&str],
+    group_tiers: &[u32],
+    exclude_keywords: &[&str],
+) -> Option<u32> {
+    for &gid in group_tiers {
+        let mut best: Option<u32> = None;
+        for t in sde.types.values() {
+            if t.category_id != 11 || t.group_id != gid {
+                continue;
+            }
+            let lower = t.name.to_lowercase();
+            if exclude_keywords.iter().any(|ex| lower.contains(ex)) {
+                continue;
+            }
+            if keywords.is_empty() || keywords.iter().any(|kw| lower.contains(kw)) {
+                best = Some(best.map_or(t.type_id, |prev| prev.min(t.type_id)));
+            }
+        }
+        if best.is_some() {
+            return best;
+        }
+    }
+    None
+}
+
+fn find_sde_relay_type(sde: &eve_sde::SdeRegistry, keywords: &[&str]) -> Option<u32> {
+    for allow_any_name in [false, true] {
+        let mut best: Option<u32> = None;
+        for t in sde.types.values() {
+            if t.category_id != 11 || !matches!(t.group_id, 306 | 1207) {
+                continue;
+            }
+            let lower = t.name.to_lowercase();
+            if lower.contains("old content") {
+                continue;
+            }
+            if allow_any_name || keywords.iter().any(|kw| lower.contains(kw)) {
+                best = Some(best.map_or(t.type_id, |prev| prev.min(t.type_id)));
+            }
+        }
+        if best.is_some() {
+            return best;
+        }
+    }
+    None
+}
+
+fn resolve_seasonal_booster_type_id(
+    sde: &eve_sde::SdeRegistry,
+    season_theme: &str,
+) -> Option<u32> {
+    let lower_theme = season_theme.to_lowercase();
+    let theme_terms: &[&str] = if lower_theme.contains("winter") {
+        &["winter", "wightstorm", "yoiul", "cerebral"]
+    } else if lower_theme.contains("gala") {
+        &["gala", "cerebral"]
+    } else if lower_theme.contains("liberation") {
+        &["liberation", "cerebral"]
+    } else {
+        &["crimson", "tetrimon", "cerebral"]
+    };
+    let is_valid_booster = |t: &eve_sde::InvType| -> bool {
+        if t.group_id != 303 || !t.published {
+            return false;
+        }
+        let lower = t.name.to_lowercase();
+        !lower.contains("expired") && !lower.contains("qa ") && !lower.contains("serenity")
+    };
+    let mut preferred: Option<u32> = None;
+    let mut fallback: Option<u32> = None;
+    for t in sde.types.values() {
+        if !is_valid_booster(t) {
+            continue;
+        }
+        fallback = Some(fallback.map_or(t.type_id, |prev| prev.min(t.type_id)));
+        let lower = t.name.to_lowercase();
+        if theme_terms.iter().any(|kw| lower.contains(kw))
+            || lower.contains("pyrolancea")
+            || lower.contains("blue pill")
+        {
+            preferred = Some(preferred.map_or(t.type_id, |prev| prev.min(t.type_id)));
+        }
+    }
+    preferred.or(fallback)
+}
+
+fn resolve_loot_container_type_id(sde: &eve_sde::SdeRegistry) -> u32 {
+    if let Some(tid) = sde
+        .types
+        .values()
+        .filter(|t| {
+            t.published
+                && t.group_id == 12
+                && t.category_id == 2
+                && t.name.to_lowercase().contains("cargo container")
+        })
+        .map(|t| t.type_id)
+        .min()
+    {
+        return tid;
+    }
+    first_known_type(sde, &[17_996, 23]).unwrap_or(23)
+}
+
 fn resolve_seasonal_event_spec(
     sde: &eve_sde::SdeRegistry,
     season: &eve_db::SeasonConfig,
     sys_id: SolarSystemId,
 ) -> ResolvedSeasonalSpec {
     let theme = SeasonTheme::from_season(season);
-    let mut matching_dungeons: Vec<(u32, String)> = theme
-        .dungeon_candidates()
-        .iter()
-        .filter_map(|did| {
-            sde.dungeons
-                .get(did)
-                .map(|d| (d.dungeon_id, d.name.trim().to_string()))
+    let dng_keywords = theme.dungeon_keywords();
+    let mut matching_dungeons: Vec<(u32, String, Option<u32>, Option<u32>, Option<u32>)> = sde
+        .dungeons
+        .values()
+        .filter(|d| {
+            if !d.archetype_id.is_some_and(|a| matches!(a, 24 | 31 | 45)) {
+                return false;
+            }
+            let lower = d.name.to_lowercase();
+            let excluded = lower.contains("do not translate")
+                || lower.contains("spawner")
+                || lower.contains("arena")
+                || lower.contains("proving")
+                || lower.contains("supply depot")
+                || lower.contains("drudge")
+                || lower.contains("anchorage")
+                || lower.contains("hub");
+            !excluded && dng_keywords.iter().any(|kw| lower.contains(kw))
+        })
+        .map(|d| {
+            (
+                d.dungeon_id,
+                d.name.trim().to_string(),
+                d.faction_id,
+                d.difficulty,
+                d.archetype_id,
+            )
         })
         .collect();
     if matching_dungeons.is_empty() {
@@ -174,78 +336,85 @@ fn resolve_seasonal_event_spec(
             .dungeons
             .values()
             .filter(|d| d.archetype_id == Some(45))
-            .map(|d| (d.dungeon_id, d.name.trim().to_string()))
+            .map(|d| {
+                (
+                    d.dungeon_id,
+                    d.name.trim().to_string(),
+                    d.faction_id,
+                    d.difficulty,
+                    d.archetype_id,
+                )
+            })
             .collect();
-        matching_dungeons.sort_by_key(|(did, _)| *did);
     }
+    matching_dungeons.sort_by_key(|(did, _, _, _, _)| *did);
 
-    let (dungeon_id, dungeon_name) = if !matching_dungeons.is_empty() {
-        let pick_idx = (sys_id as usize + season.season_id.unsigned_abs() as usize)
-            % matching_dungeons.len();
-        matching_dungeons[pick_idx].clone()
-    } else {
-        (8_923, "Tetrimon Base".to_string())
-    };
-
-    let lower_dname = dungeon_name.to_lowercase();
-    let (boss_candidates, escort_candidates, relay_candidates): (&[u32], &[u32], &[u32]) =
-        match theme {
-            SeasonTheme::CrimsonHarvest if lower_dname.contains("tetrimon") => (
-                &[56_676, 89_489, 59_990, 56_648],
-                &[56_648, 59_990],
-                &[89_515, 60_712, 59_503, 23],
-            ),
-            SeasonTheme::CrimsonHarvest => (
-                &[17_615, 56_676, 17_993],
-                &[17_993, 56_648],
-                &[89_516, 60_710, 59_503, 23],
-            ),
-            SeasonTheme::WinterNexus => (
-                &[56_871, 24_195],
-                &[56_871, 24_191],
-                &[91_044, 59_503, 23],
-            ),
-            SeasonTheme::GuardiansGala => (
-                &[57_321, 53_947],
-                &[53_947, 57_321],
-                &[59_503, 23],
-            ),
-            SeasonTheme::LiberationDay => (
-                &[56_676, 17_615],
-                &[56_648, 17_993],
-                &[59_503, 23],
-            ),
+    let (dungeon_id, dungeon_name, dungeon_faction_id, dungeon_difficulty, dungeon_archetype) =
+        if !matching_dungeons.is_empty() {
+            let pick_idx = (sys_id as usize + season.season_id.unsigned_abs() as usize)
+                % matching_dungeons.len();
+            matching_dungeons[pick_idx].clone()
+        } else {
+            (
+                8_923,
+                format!("{} Site", theme.label()),
+                None,
+                Some(3),
+                Some(24),
+            )
         };
 
-    let boss_type_id = first_known_type(sde, boss_candidates)
-        .or_else(|| {
-            sde.types
-                .values()
-                .find(|t| t.published && matches!(t.group_id, 550 | 552 | 553))
-                .map(|t| t.type_id)
-        })
-        .unwrap_or(56_676);
-    let escort_type_id = first_known_type(sde, escort_candidates)
-        .or_else(|| {
-            sde.types
-                .values()
-                .find(|t| t.published && matches!(t.group_id, 550 | 551))
-                .map(|t| t.type_id)
-        })
-        .unwrap_or(boss_type_id);
-    let relay_type_id = first_known_type(sde, relay_candidates).unwrap_or(23);
+    let (npc_keywords, relay_keywords) = theme.npc_keywords_for_dungeon(&dungeon_name);
+    let npc_exclude = &["relay", "node", "array", "tower", "databank", "hub", "can", "sentry", "spawn"];
+    let boss_type_id = find_sde_npc_by_keywords_and_groups(
+        sde,
+        npc_keywords,
+        &[1667, 1666, 553, 552],
+        npc_exclude,
+    )
+    .or_else(|| find_sde_npc_by_keywords_and_groups(sde, &[], &[1667, 553, 552], npc_exclude))
+    .unwrap_or(56_676);
+
+    let escort_type_id = find_sde_npc_by_keywords_and_groups(
+        sde,
+        npc_keywords,
+        &[1568, 1664, 1665, 1666, 550, 551, 552],
+        npc_exclude,
+    )
+    .or_else(|| find_sde_npc_by_keywords_and_groups(sde, &[], &[1568, 1664, 550, 551], npc_exclude))
+    .unwrap_or(boss_type_id);
+
+    let relay_type_id = find_sde_relay_type(sde, relay_keywords)
+        .unwrap_or_else(|| first_known_type(sde, &[23]).unwrap_or(23));
 
     // Avoid poisoning OnceLock tables inside `season_fsd` when synthetic unit-test SDEs omit full FSD data.
     let (crate_type_id, crate_loot_pool, reward_points) = if sde.types.len() > 100 {
         let crate_tables = crate::services::season_fsd::fsd_crate_loot_tables(sde);
-        let picked_crate = theme
-            .crate_candidates()
-            .iter()
+        let crate_kws = theme.crate_keywords();
+        let picked_crate = crate_tables
+            .keys()
             .copied()
-            .find(|tid| crate_tables.contains_key(tid))
+            .find(|tid| {
+                sde.types.get(tid).is_some_and(|t| {
+                    let lower = t.name.to_lowercase();
+                    t.published
+                        && !lower.contains("expired")
+                        && crate_kws.iter().any(|kw| lower.contains(kw))
+                })
+            })
             .or_else(|| crate_tables.keys().copied().next())
-            .or_else(|| first_known_type(sde, theme.crate_candidates()))
-            .unwrap_or(53_060);
+            .or_else(|| {
+                sde.types
+                    .values()
+                    .filter(|t| {
+                        t.published
+                            && t.group_id == 1194
+                            && !t.name.to_lowercase().contains("expired")
+                    })
+                    .map(|t| t.type_id)
+                    .min()
+            })
+            .unwrap_or(34);
         let pool: Vec<(u32, i64)> = crate_tables
             .get(&picked_crate)
             .map(|entries| {
@@ -279,7 +448,12 @@ fn resolve_seasonal_event_spec(
             .unwrap_or(30);
         (picked_crate, pool, pts)
     } else {
-        let picked_crate = first_known_type(sde, theme.crate_candidates())
+        let picked_crate = sde
+            .types
+            .values()
+            .filter(|t| t.published && t.group_id == 1194)
+            .map(|t| t.type_id)
+            .min()
             .or_else(|| first_known_type(sde, &[2048, 34]))
             .unwrap_or(34);
         (picked_crate, Vec::new(), 30)
@@ -297,12 +471,27 @@ fn resolve_seasonal_event_spec(
     } else {
         2.0
     };
-    let reward_isk = ((theme.base_isk() as f64) * sec_mult).round() as i64;
+    let difficulty = dungeon_difficulty
+        .unwrap_or(match dungeon_archetype {
+            Some(31) => 4,
+            Some(45) => 2,
+            _ => 3,
+        })
+        .clamp(1, 5);
+    let base_isk = 1_500_000 + i64::from(difficulty) * 250_000;
+    let reward_isk = ((base_isk as f64) * sec_mult).round() as i64;
+    let faction_id = dungeon_faction_id.unwrap_or(match theme {
+        SeasonTheme::CrimsonHarvest => 500_012,
+        SeasonTheme::WinterNexus => 500_019,
+        SeasonTheme::GuardiansGala => 500_020,
+        SeasonTheme::LiberationDay => 500_002,
+    });
 
     ResolvedSeasonalSpec {
         theme,
         dungeon_id,
         dungeon_name,
+        faction_id,
         boss_type_id,
         escort_type_id,
         relay_type_id,
@@ -583,132 +772,239 @@ pub async fn on_special_site_npc_destroyed_core(
         }
     }
 
-    // 3. Check Seasonal Event sites
-    let mut seasonal_escorts = Vec::new();
-    let seasonal_res = with_pve_special_reg_db(db, now_sec, |reg| {
-        let mut found = None;
-        if let Some(list) = reg.seasonal_event_sites.get_mut(&solar_system_id) {
-            for site in list.iter_mut() {
-                if site.boss_npc_ball_id == npc_ball_id && !site.completed {
-                    site.completed = true;
-                    seasonal_escorts = site.escort_ball_ids.clone();
-                    found = Some((
-                        site.dungeon_id,
-                        site.instance_id,
-                        site.dungeon_name.clone(),
-                        site.reward_isk,
-                        site.reward_points,
-                        site.loot_type_id,
-                    ));
+    // 3. Check Seasonal Event sites (single atomic snapshot transaction for objective progress,
+    //    completion claim, cooldown arming, exploration/anomaly cleanup, and reward payout).
+    enum SeasonalKillOutcome {
+        PartialProgress,
+        Completed {
+            acct_change: Option<(CharacterId, f64)>,
+            relay_ball_to_remove: Option<i64>,
+            container_id: Option<i64>,
+            site_position: [f64; 3],
+        },
+    }
+
+    let seasonal_tx: Result<Option<SeasonalKillOutcome>, String> = db.try_with_mut_snapshot(|snap| {
+        if snap.pve_special_sites.sim_clock_sec < now_sec {
+            snap.pve_special_sites.sim_clock_sec = now_sec;
+        }
+        let mut matched_idx = None;
+        if let Some(list) = snap.pve_special_sites.seasonal_event_sites.get(&solar_system_id) {
+            for (idx, site) in list.iter().enumerate() {
+                if !site.completed
+                    && (site.boss_npc_ball_id == npc_ball_id
+                        || site.escort_ball_ids.contains(&npc_ball_id))
+                {
+                    matched_idx = Some(idx);
                     break;
                 }
             }
         }
-        found
-    });
+        let Some(idx) = matched_idx else {
+            return Ok(None);
+        };
 
-    if let Some((did, iid, dname, reward_isk, reward_points, loot_tid)) = seasonal_res {
-        let mut relay_bid_to_remove: Option<i64> = None;
-        let mut exp_site_to_clear: Option<String> = None;
-        let mut pool_loot: Vec<(u32, i64)> = Vec::new();
-        let mut relay_hacked = false;
-        let details_opt = _db_read_and_clear_seasonal_details(db, iid);
-        if let Some(details) = details_opt {
-            if details.relay_ball_id != 0 {
-                relay_bid_to_remove = Some(details.relay_ball_id);
+        let mut details_map = load_seasonal_site_details_map(snap);
+        let site = &mut snap
+            .pve_special_sites
+            .seasonal_event_sites
+            .get_mut(&solar_system_id)
+            .ok_or_else(|| "missing seasonal site list".to_string())?[idx];
+        let mut details = details_map.remove(&site.instance_id).unwrap_or_else(|| SeasonalSiteDetails {
+            instance_id: site.instance_id,
+            dungeon_id: site.dungeon_id,
+            dungeon_name: site.dungeon_name.clone(),
+            boss_type_id: site.boss_type_id,
+            crate_type_id: site.loot_type_id,
+            ..Default::default()
+        });
+
+        if site.boss_npc_ball_id == npc_ball_id {
+            if details.boss_defeated {
+                details_map.insert(site.instance_id, details);
+                save_seasonal_site_details_map(snap, &details_map);
+                return Ok(None);
             }
-            if !details.exploration_site_id.is_empty() {
-                exp_site_to_clear = Some(details.exploration_site_id);
+            details.boss_defeated = true;
+        } else if site.escort_ball_ids.contains(&npc_ball_id) {
+            if details.defeated_escort_ball_ids.contains(&npc_ball_id) {
+                details_map.insert(site.instance_id, details);
+                save_seasonal_site_details_map(snap, &details_map);
+                return Ok(None);
             }
-            pool_loot = details.crate_loot_pool;
-            relay_hacked = details.relay_hacked;
+            details.defeated_escort_ball_ids.push(npc_ball_id);
         }
-        let sys_handle = _systems.get_or_spawn(solar_system_id);
-        for ebid in seasonal_escorts {
-            sys_handle.try_remove_ball(ebid);
+
+        let all_escorts_defeated = site
+            .escort_ball_ids
+            .iter()
+            .all(|ebid| details.defeated_escort_ball_ids.contains(ebid));
+        if !(details.boss_defeated && all_escorts_defeated) {
+            details_map.insert(site.instance_id, details);
+            save_seasonal_site_details_map(snap, &details_map);
+            return Ok(Some(SeasonalKillOutcome::PartialProgress));
         }
-        if let Some(relay_bid) = relay_bid_to_remove {
-            sys_handle.try_remove_ball(relay_bid);
-        }
-        if let Some(exp_sid) = exp_site_to_clear {
-            crate::services::pve_exploration::with_pve_exploration_reg_db(db, now_sec, |reg| {
-                if let Some(sites) = reg.sites_by_system.get_mut(&solar_system_id) {
+
+        // Full objective completion: claim completion, arm per-system cooldown, clear registries,
+        // and disburse all ISK, season points, crate, pool, and booster inside this transaction.
+        let did = site.dungeon_id;
+        let iid = site.instance_id;
+        let dname = site.dungeon_name.clone();
+        let reward_isk = site.reward_isk.max(0);
+        let reward_points = site.reward_points.max(0);
+        let loot_tid = site.loot_type_id;
+        let site_position = details.site_position;
+        site.completed = true;
+
+        let mut cooldowns = load_seasonal_cooldown_store(snap);
+        cooldowns.until_by_system.insert(
+            solar_system_id,
+            now_sec.saturating_add(SEASONAL_RESPAWN_COOLDOWN_SECS),
+        );
+        save_seasonal_cooldown_store(snap, &cooldowns);
+        save_seasonal_site_details_map(snap, &details_map);
+
+        if !details.exploration_site_id.is_empty() {
+            if let Some(note) = snap
+                .owner_notes
+                .get_mut(&crate::services::pve_exploration::PVE_EXPLORATION_NOTE_ID)
+            {
+                let mut exp_reg =
+                    serde_json::from_str::<crate::services::pve_exploration::PveExplorationRegistry>(
+                        &note.note,
+                    )
+                    .map_err(|e| format!("failed to parse exploration registry: {e}"))?;
+                let mut exp_changed = false;
+                if let Some(sites) = exp_reg.sites_by_system.get_mut(&solar_system_id) {
                     for s in sites.iter_mut() {
-                        if s.site_id == exp_sid {
+                        if s.site_id == details.exploration_site_id && !s.cleared {
                             s.cleared = true;
+                            exp_changed = true;
                         }
                     }
                 }
-            });
+                if exp_changed {
+                    note.note = serde_json::to_string(&exp_reg)
+                        .map_err(|e| format!("failed to serialize exploration registry: {e}"))?;
+                    note.timestamp_unix = now_sec;
+                }
+            }
         }
+
         let anom_key = format!("dng-{did}-{iid}");
-        let spawned_cid = db.with_mut_snapshot(|snap| {
-            if let Some(list) = snap.cosmic_anomalies.get_mut(&solar_system_id) {
-                for a in list.iter_mut() {
-                    if a.anomaly_id == anom_key {
-                        a.cleared = true;
+        if let Some(list) = snap.cosmic_anomalies.get_mut(&solar_system_id) {
+            for a in list.iter_mut() {
+                if a.anomaly_id == anom_key {
+                    a.cleared = true;
+                }
+            }
+        }
+        let relay_ball_to_remove = if details.relay_ball_id != 0 {
+            snap.transient_items.remove(&details.relay_ball_id);
+            snap.item_positions.remove(&details.relay_ball_id);
+            Some(details.relay_ball_id)
+        } else {
+            None
+        };
+
+        let mut acct_change = None;
+        let container_id = if let Some(cid) = killer_char_id {
+            let add_cents = IskCents::from_isk(reward_isk);
+            let ch = snap
+                .characters
+                .get_mut(&cid)
+                .ok_or_else(|| format!("missing killer character {cid}"))?;
+            ch.balance = ch
+                .balance
+                .checked_add(add_cents)
+                .ok_or_else(|| "seasonal completion ISK balance overflow".to_string())?;
+            let new_bal = ch.balance;
+            let ship_id = ch.active_ship_id;
+            acct_change = Some((cid, new_bal.to_wire_f64()));
+            snap.append_journal(
+                cid,
+                "BountyPrizes",
+                add_cents,
+                new_bal,
+                format!("Seasonal Event Site Completion ({dname})"),
+            );
+
+            let mut st = crate::services::season_manager::load_season_state_from_blobs(snap, cid);
+            st.season_points = st.season_points.saturating_add(reward_points);
+            crate::services::season_manager::save_season_state_to_blobs(snap, cid, &st);
+
+            let mut loot_specs = Vec::new();
+            if loot_tid != 0 && _sde.types.contains_key(&loot_tid) {
+                loot_specs.push((snap.alloc_entity_id(), loot_tid, 1));
+            }
+            if details.relay_hacked {
+                for &(ptid, pqty) in &details.crate_loot_pool {
+                    if ptid != loot_tid && pqty > 0 && _sde.types.contains_key(&ptid) {
+                        let qty = pqty.clamp(1, i64::from(i32::MAX)) as i32;
+                        loot_specs.push((snap.alloc_entity_id(), ptid, qty));
                     }
                 }
             }
-            if let Some(relay_bid) = relay_bid_to_remove {
-                snap.transient_items.remove(&relay_bid);
-                snap.item_positions.remove(&relay_bid);
-            }
-            if let Some(cid) = killer_char_id {
-                let mut ship_id = 0;
-                if let Some(ch) = snap.characters.get_mut(&cid) {
-                    ch.balance = ch
-                        .balance
-                        .checked_add(IskCents::from_isk(reward_isk))
-                        .unwrap_or(ch.balance);
-                    let new_bal = ch.balance;
-                    acct_changes.push((cid, new_bal.to_wire_f64()));
-                    ship_id = ch.active_ship_id;
-                    snap.append_journal(
-                        cid,
-                        "BountyPrizes",
-                        IskCents::from_isk(reward_isk),
-                        new_bal,
-                        format!("Seasonal Event Site Completion ({dname})"),
-                    );
-                }
-                let mut st = crate::services::season_manager::load_season_state_from_blobs(snap, cid);
-                st.season_points = st.season_points.saturating_add(reward_points);
-                crate::services::season_manager::save_season_state_to_blobs(snap, cid, &st);
-                let mut loot_specs = Vec::new();
-                if loot_tid != 0 && _sde.types.contains_key(&loot_tid) {
-                    loot_specs.push((snap.alloc_entity_id(), loot_tid, 1));
-                }
-                if relay_hacked {
-                    for (ptid, pqty) in pool_loot {
-                        if ptid != loot_tid && pqty > 0 && _sde.types.contains_key(&ptid) {
-                            let qty = pqty.clamp(1, i64::from(i32::MAX)) as i32;
-                            loot_specs.push((snap.alloc_entity_id(), ptid, qty));
-                        }
-                    }
-                }
-                let booster_tid = if _sde.types.contains_key(&9950) { 9950 } else { 15457 };
-                if booster_tid != loot_tid && _sde.types.contains_key(&booster_tid) {
+            let theme_hint = if details.season_theme.is_empty() {
+                dname.as_str()
+            } else {
+                details.season_theme.as_str()
+            };
+            if let Some(booster_tid) = resolve_seasonal_booster_type_id(_sde, theme_hint) {
+                if booster_tid != loot_tid {
                     loot_specs.push((snap.alloc_entity_id(), booster_tid, 1));
                 }
-                deposit_loot_into_ship_or_container_in_snapshot(
-                    snap,
-                    _sde,
-                    cid,
-                    solar_system_id,
-                    ship_id,
-                    &loot_specs,
-                )
-            } else {
-                None
             }
-        });
-        if let Some(container_id) = spawned_cid {
-            let cont_type = if _sde.types.contains_key(&17996) { 17996 } else { 23 };
+            deposit_loot_into_ship_or_container_in_snapshot(
+                snap,
+                _sde,
+                cid,
+                solar_system_id,
+                ship_id,
+                &loot_specs,
+            )
+        } else {
+            None
+        };
+
+        Ok(Some(SeasonalKillOutcome::Completed {
+            acct_change,
+            relay_ball_to_remove,
+            container_id,
+            site_position,
+        }))
+    });
+
+    match seasonal_tx {
+        Ok(Some(SeasonalKillOutcome::Completed {
+            acct_change,
+            relay_ball_to_remove,
+            container_id,
+            site_position,
+        })) => {
+            if let Some(chg) = acct_change {
+                acct_changes.push(chg);
+            }
             let sys_handle = _systems.get_or_spawn(solar_system_id);
-            let _ = sys_handle
-                .spawn_ball(make_site_npc_ball(container_id, cont_type, DVec3::new(1.5e11, 2.0e10, -1.0e11)))
-                .await;
+            if let Some(relay_bid) = relay_ball_to_remove {
+                sys_handle.try_remove_ball(relay_bid);
+            }
+            if let Some(cid_container) = container_id {
+                let cont_type = resolve_loot_container_type_id(_sde);
+                let drop_pos = DVec3::from_array(site_position) + DVec3::new(500.0, 0.0, 0.0);
+                let _ = sys_handle
+                    .spawn_ball(make_site_npc_ball(cid_container, cont_type, drop_pos))
+                    .await;
+            }
+        }
+        Ok(Some(SeasonalKillOutcome::PartialProgress)) | Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(
+                solar_system_id,
+                npc_ball_id,
+                error = %err,
+                "Seasonal site atomic completion transaction rolled back"
+            );
         }
     }
 
@@ -727,7 +1023,7 @@ pub(crate) async fn on_seasonal_relay_hacked(
         let mut map = load_seasonal_site_details_map(snap);
         let found_iid = map
             .iter_mut()
-            .find(|(_, d)| d.exploration_site_id == site_id)
+            .find(|(_, d)| d.exploration_site_id == site_id && !d.boss_defeated)
             .map(|(&iid, d)| {
                 d.relay_hacked = true;
                 iid
@@ -743,7 +1039,11 @@ pub(crate) async fn on_seasonal_relay_hacked(
     let boss_bid_opt = with_pve_special_reg(ctx, |reg| {
         reg.seasonal_event_sites
             .get(&sys_id)
-            .and_then(|list| list.iter().find(|s| s.instance_id == inst_id).map(|s| s.boss_npc_ball_id))
+            .and_then(|list| {
+                list.iter()
+                    .find(|s| s.instance_id == inst_id && !s.completed)
+                    .map(|s| s.boss_npc_ball_id)
+            })
     });
     if let Some(boss_bid) = boss_bid_opt {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -762,40 +1062,104 @@ pub(crate) async fn on_seasonal_relay_hacked(
     }
 }
 
-fn _db_read_and_clear_seasonal_details(
-    db: &WorldRepository,
-    instance_id: i64,
-) -> Option<SeasonalSiteDetails> {
-    db.with_mut_snapshot(|snap| {
-        let mut map = load_seasonal_site_details_map(snap);
-        let removed = map.remove(&instance_id);
-        if removed.is_some() {
-            save_seasonal_site_details_map(snap, &map);
+fn active_season_in_snapshot(
+    snap: &eve_db::WorldStateSnapshot,
+    now_ft: i64,
+) -> Option<crate::services::season_fsd::SeasonConfig> {
+    if let Some(cfg) = snap.seasons_and_campaigns.season_configuration.clone() {
+        (now_ft >= cfg.start_time_ft && now_ft <= cfg.end_time_ft).then_some(cfg)
+    } else if !snap.seasons_and_campaigns.seasons_catalog.is_empty() {
+        snap.seasons_and_campaigns
+            .seasons_catalog
+            .values()
+            .find(|s| now_ft >= s.start_time_ft && now_ft <= s.end_time_ft)
+            .cloned()
+    } else {
+        None
+    }
+}
+
+/// Strictly read-only view of active, uncompleted seasonal anomaly instances for `sys_id`.
+/// Never mutates DB state and filters out completed, cleared, expired, or wrong-season entries.
+pub(crate) fn active_seasonal_anomaly_instances_readonly(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+) -> BTreeMap<u32, Vec<i64>> {
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_sec = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+        let Some(season) = active_season_in_snapshot(snap, now_ft) else {
+            return out;
+        };
+        let Some(anoms) = snap.cosmic_anomalies.get(&sys_id) else {
+            return out;
+        };
+        let sites = snap.pve_special_sites.seasonal_event_sites.get(&sys_id);
+        for a in anoms {
+            if a.anomaly_type != "SeasonalEventSite" || a.cleared {
+                continue;
+            }
+            if now_sec >= a.created_unix.saturating_add(a.lifetime_seconds) {
+                continue;
+            }
+            let Some(rest) = a.anomaly_id.strip_prefix("dng-") else {
+                continue;
+            };
+            let Some((d_str, i_str)) = rest.split_once('-') else {
+                continue;
+            };
+            let (Ok(did), Ok(iid)) = (d_str.parse::<u32>(), i_str.parse::<i64>()) else {
+                continue;
+            };
+            let site_valid = sites.is_some_and(|list| {
+                list.iter().any(|s| {
+                    s.instance_id == iid
+                        && !s.completed
+                        && s.season_id == season.season_id
+                        && now_ft >= s.window_start_ft
+                        && now_ft <= s.window_end_ft
+                })
+            });
+            if site_valid {
+                out.entry(did).or_default().push(iid);
+            }
         }
-        removed
+        out
     })
 }
 
-/// Spawns seasonal event sites in `sys_id` during an active seasonal event window and despawns expired ones.
+fn configure_seasonal_npc_entity(
+    entity: &mut crate::services::combat_crimewatch::ExtendedNpcEntity,
+    fallback_faction_id: u32,
+) {
+    entity.archetype = "Pirate".to_string();
+    entity.bounty_isk = 0.0;
+    if entity.faction_id == 0 {
+        entity.faction_id = fallback_faction_id;
+    }
+    let total_dmg = entity.damage_vector.em
+        + entity.damage_vector.thermal
+        + entity.damage_vector.kinetic
+        + entity.damage_vector.explosive;
+    if total_dmg <= 0.0 {
+        entity.damage_vector =
+            crate::combat::npc_ai::faction_damage_vector(entity.faction_id, 100.0);
+    }
+    if entity.optimal_range < 15_000.0 {
+        entity.optimal_range = 25_000.0;
+    }
+}
+
+/// Spawns seasonal event sites in `sys_id` during an active seasonal event window (subject to
+/// persisted per-system cooldown) and despawns completed, expired, or out-of-window ones.
 pub async fn ensure_seasonal_event_sites_for_system(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
 ) -> Vec<crate::services::pve_special_sites::SeasonalEventSiteRecord> {
     let now_ft = ctx.now_blueos_filetime_ticks();
     let now_sec = ctx.now_unix();
-    let active_season: Option<crate::services::season_fsd::SeasonConfig> = ctx.db.with_snapshot(|snap| {
-        if let Some(cfg) = snap.seasons_and_campaigns.season_configuration.clone() {
-            (now_ft >= cfg.start_time_ft && now_ft <= cfg.end_time_ft).then_some(cfg)
-        } else if !snap.seasons_and_campaigns.seasons_catalog.is_empty() {
-            snap.seasons_and_campaigns
-                .seasons_catalog
-                .values()
-                .find(|s| now_ft >= s.start_time_ft && now_ft <= s.end_time_ft)
-                .cloned()
-        } else {
-            None
-        }
-    });
+    let active_season = ctx.db.with_snapshot(|snap| active_season_in_snapshot(snap, now_ft));
     let in_window = active_season.is_some();
     let active_season_id = active_season.as_ref().map(|a| a.season_id);
 
@@ -850,6 +1214,13 @@ pub async fn ensure_seasonal_event_sites_for_system(
                 list.retain(|a| !expired_anom_ids.contains(&a.anomaly_id));
             }
         });
+        if !expired_balls.is_empty() {
+            crate::services::combat_crimewatch::with_mut_combat_ephemeral(ctx, |rt| {
+                for bid in &expired_balls {
+                    rt.npc_entities.remove(bid);
+                }
+            });
+        }
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         for bid in expired_balls.into_iter().chain(relay_balls.into_iter()) {
             sys_handle.try_remove_ball(bid);
@@ -863,20 +1234,136 @@ pub async fn ensure_seasonal_event_sites_for_system(
         }
     }
 
-    if let Some(season) = active_season.filter(|_| active_sites.is_empty()) {
-        let spec = resolve_seasonal_event_spec(&ctx.sde, &season, sys_id);
+    // Re-materialize only living, non-defeated NPCs for any existing uncompleted site missing from
+    // `rt.npc_entities` or ballpark (e.g. after server restart), never resurrecting defeated ones.
+    if !active_sites.is_empty() {
+        let details_by_iid = ctx.db.with_snapshot(load_seasonal_site_details_map);
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let mut rebuilt = Vec::new();
+        for site in &active_sites {
+            let details = details_by_iid.get(&site.instance_id);
+            let site_pos = DVec3::from_array(
+                details
+                    .map(|d| d.site_position)
+                    .unwrap_or_else(default_seasonal_site_position),
+            );
+            let boss_defeated = details.is_some_and(|d| d.boss_defeated);
+            let escort_tid = details.map(|d| d.escort_type_id).unwrap_or(site.boss_type_id);
+            let mut candidates: Vec<(i64, u32, DVec3)> = Vec::new();
+            if !boss_defeated {
+                candidates.push((
+                    site.boss_npc_ball_id,
+                    site.boss_type_id,
+                    site_pos + DVec3::new(2_500.0, 0.0, 0.0),
+                ));
+            }
+            for (idx, &ebid) in site.escort_ball_ids.iter().enumerate() {
+                if details.is_some_and(|d| d.defeated_escort_ball_ids.contains(&ebid)) {
+                    continue;
+                }
+                let offset = match idx {
+                    0 => DVec3::new(-2_500.0, 0.0, 0.0),
+                    _ => DVec3::new(-3_200.0, 1_200.0, 0.0),
+                };
+                candidates.push((ebid, escort_tid, site_pos + offset));
+            }
+            for (bid, tid, npc_pos) in candidates {
+                let in_ai = crate::services::combat_crimewatch::with_combat_ephemeral(ctx, |rt| {
+                    rt.npc_entities.contains_key(&bid)
+                });
+                let in_ballpark = sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_some();
+                if !in_ai || !in_ballpark {
+                    let _ = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_batch_with_start_id(
+                        ctx,
+                        sys_id,
+                        &[(tid, "", 0, npc_pos)],
+                        bid,
+                        |entity| configure_seasonal_npc_entity(entity, 500_012),
+                        &mut rebuilt,
+                    )
+                    .await;
+                }
+            }
+        }
+        if !rebuilt.is_empty() {
+            crate::services::combat_crimewatch::with_mut_combat_ephemeral(ctx, |rt| {
+                for (bid, ent) in rebuilt {
+                    rt.npc_entities.insert(bid, ent);
+                }
+            });
+        }
+        return active_sites;
+    }
 
-        let (new_site, relay_bid) = with_pve_special_reg(ctx, |reg| {
-            reg.next_seq += 1;
-            let inst_id = 1_895_000_000 + reg.next_seq;
-            reg.next_seq += 1;
-            let boss_bid = 1_895_500_000 + reg.next_seq;
-            reg.next_seq += 1;
-            let escort_bid_1 = 1_895_500_000 + reg.next_seq;
-            reg.next_seq += 1;
-            let escort_bid_2 = 1_895_500_000 + reg.next_seq;
-            reg.next_seq += 1;
-            let relay_bid = 1_895_500_000 + reg.next_seq;
+    if let Some(season) = active_season {
+        let cooldown_active = ctx.db.with_snapshot(|snap| {
+            let cooldowns = load_seasonal_cooldown_store(snap);
+            cooldowns
+                .until_by_system
+                .get(&sys_id)
+                .copied()
+                .is_some_and(|until| now_sec < until)
+        });
+        if cooldown_active {
+            return active_sites;
+        }
+
+        let spec = resolve_seasonal_event_spec(&ctx.sde, &season, sys_id);
+        let spawn_slot = ctx.db.with_snapshot(|snap| {
+            load_seasonal_cooldown_store(snap)
+                .spawn_seq_by_system
+                .get(&sys_id)
+                .copied()
+                .unwrap_or(0)
+                + 1
+        });
+        let au_scale = 0.35 + 0.15 * ((spawn_slot % 3) as f64);
+        let pos_arr = crate::services::sov_fw_insurgency::derive_system_site_position_from_sde(
+            ctx,
+            sys_id,
+            spawn_slot,
+            au_scale,
+        );
+        let pos = DVec3::from_array(pos_arr);
+        let relay_pos = pos + DVec3::new(0.0, 2_200.0, 0.0);
+
+        enum SpawnReservation {
+            Created(crate::services::pve_special_sites::SeasonalEventSiteRecord, i64, String),
+            AlreadyPresent(Vec<crate::services::pve_special_sites::SeasonalEventSiteRecord>),
+            CooldownBlocked,
+        }
+
+        let reservation = ctx.db.with_mut_snapshot(|snap| {
+            if snap.pve_special_sites.sim_clock_sec < now_sec {
+                snap.pve_special_sites.sim_clock_sec = now_sec;
+            }
+            if let Some(existing) = snap.pve_special_sites.seasonal_event_sites.get(&sys_id) {
+                if !existing.is_empty() {
+                    return SpawnReservation::AlreadyPresent(existing.clone());
+                }
+            }
+            let mut cooldowns = load_seasonal_cooldown_store(snap);
+            if cooldowns
+                .until_by_system
+                .get(&sys_id)
+                .copied()
+                .is_some_and(|until| now_sec < until)
+            {
+                return SpawnReservation::CooldownBlocked;
+            }
+            let seq_entry = cooldowns.spawn_seq_by_system.entry(sys_id).or_default();
+            *seq_entry += 1;
+            save_seasonal_cooldown_store(snap, &cooldowns);
+
+            snap.pve_special_sites.next_seq += 1;
+            let inst_id = 1_895_000_000 + snap.pve_special_sites.next_seq;
+            let npc_start_id = snap.next_entity_id + 1;
+            snap.next_entity_id += 3;
+            let boss_bid = npc_start_id;
+            let escort_bid_1 = npc_start_id + 1;
+            let escort_bid_2 = npc_start_id + 2;
+            let relay_bid = snap.alloc_entity_id();
+
             let rec = crate::services::pve_special_sites::SeasonalEventSiteRecord {
                 instance_id: inst_id,
                 season_id: season.season_id,
@@ -893,34 +1380,32 @@ pub async fn ensure_seasonal_event_sites_for_system(
                 loot_type_id: spec.crate_type_id,
                 completed: false,
             };
-            reg.seasonal_event_sites
+            snap.pve_special_sites
+                .seasonal_event_sites
                 .entry(sys_id)
                 .or_default()
                 .push(rec.clone());
-            (rec, relay_bid)
-        });
 
-        let pos = DVec3::new(1.5e11, 2.0e10, -1.0e11);
-        let relay_pos = pos + DVec3::new(0.0, 2_200.0, 0.0);
-        let exp_site_id = format!("SHK-{}-{}", new_site.dungeon_id, new_site.instance_id);
-        let details = SeasonalSiteDetails {
-            instance_id: new_site.instance_id,
-            season_theme: spec.theme.label().to_string(),
-            dungeon_id: new_site.dungeon_id,
-            dungeon_name: new_site.dungeon_name.clone(),
-            boss_type_id: new_site.boss_type_id,
-            escort_type_id: spec.escort_type_id,
-            relay_ball_id: relay_bid,
-            relay_type_id: spec.relay_type_id,
-            relay_hacked: false,
-            exploration_site_id: exp_site_id.clone(),
-            crate_type_id: spec.crate_type_id,
-            crate_loot_pool: spec.crate_loot_pool.clone(),
-        };
-
-        ctx.db.with_mut_snapshot(|snap| {
+            let exp_site_id = format!("SHK-{}-{}", rec.dungeon_id, rec.instance_id);
+            let details = SeasonalSiteDetails {
+                instance_id: rec.instance_id,
+                season_theme: spec.theme.label().to_string(),
+                dungeon_id: rec.dungeon_id,
+                dungeon_name: rec.dungeon_name.clone(),
+                boss_type_id: rec.boss_type_id,
+                escort_type_id: spec.escort_type_id,
+                relay_ball_id: relay_bid,
+                relay_type_id: spec.relay_type_id,
+                relay_hacked: false,
+                exploration_site_id: exp_site_id.clone(),
+                crate_type_id: spec.crate_type_id,
+                crate_loot_pool: spec.crate_loot_pool.clone(),
+                boss_defeated: false,
+                defeated_escort_ball_ids: Vec::new(),
+                site_position: pos_arr,
+            };
             let mut details_map = load_seasonal_site_details_map(snap);
-            details_map.insert(new_site.instance_id, details);
+            details_map.insert(rec.instance_id, details);
             save_seasonal_site_details_map(snap, &details_map);
 
             snap.insert_transient_item(eve_db::InventoryItemRecord {
@@ -941,11 +1426,11 @@ pub async fn ensure_seasonal_event_sites_for_system(
                 .entry(sys_id)
                 .or_default()
                 .push(eve_db::CosmicAnomalyRecord {
-                    anomaly_id: format!("dng-{}-{}", new_site.dungeon_id, new_site.instance_id),
+                    anomaly_id: format!("dng-{}-{}", rec.dungeon_id, rec.instance_id),
                     solar_system_id: sys_id,
                     anomaly_type: "SeasonalEventSite".to_string(),
-                    name: new_site.dungeon_name.clone(),
-                    position: [pos.x, pos.y, pos.z],
+                    name: rec.dungeon_name.clone(),
+                    position: pos_arr,
                     signal_strength: 1.0,
                     ore_types: Vec::new(),
                     remaining_volume: 0.0,
@@ -953,61 +1438,85 @@ pub async fn ensure_seasonal_event_sites_for_system(
                     lifetime_seconds: 86_400,
                     cleared: false,
                 });
+
+            SpawnReservation::Created(rec, relay_bid, exp_site_id)
         });
 
-        crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
-            reg.sites_by_system
-                .entry(sys_id)
-                .or_default()
-                .push(crate::services::pve_exploration::PveSiteInstance {
-                    site_id: exp_site_id,
-                    dungeon_id: new_site.dungeon_id,
-                    dungeon_name: new_site.dungeon_name.clone(),
-                    solar_system_id: sys_id,
-                    site_category: "Data".into(),
-                    position: [pos.x, pos.y, pos.z],
-                    probe_required: true,
-                    signal_strength: 1.0,
-                    current_room: 1,
-                    total_rooms: 1,
-                    current_wave: 1,
-                    total_waves: 1,
-                    hackable_can_ids: vec![relay_bid],
-                    npc_guards_spawned: true,
-                    created_unix: now_sec,
-                    lifetime_seconds: 86_400,
-                    ..Default::default()
+        match reservation {
+            SpawnReservation::AlreadyPresent(existing) => return existing,
+            SpawnReservation::CooldownBlocked => return active_sites,
+            SpawnReservation::Created(new_site, relay_bid, exp_site_id) => {
+                crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
+                    reg.sites_by_system
+                        .entry(sys_id)
+                        .or_default()
+                        .push(crate::services::pve_exploration::PveSiteInstance {
+                            site_id: exp_site_id,
+                            dungeon_id: new_site.dungeon_id,
+                            dungeon_name: new_site.dungeon_name.clone(),
+                            solar_system_id: sys_id,
+                            site_category: "Data".into(),
+                            position: pos_arr,
+                            probe_required: true,
+                            signal_strength: 1.0,
+                            current_room: 1,
+                            total_rooms: 1,
+                            current_wave: 1,
+                            total_waves: 1,
+                            hackable_can_ids: vec![relay_bid],
+                            npc_guards_spawned: true,
+                            created_unix: now_sec,
+                            lifetime_seconds: 86_400,
+                            ..Default::default()
+                        });
                 });
-        });
 
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let boss_ball = make_site_npc_ball(
-            new_site.boss_npc_ball_id,
-            new_site.boss_type_id,
-            pos + DVec3::new(2_500.0, 0.0, 0.0),
-        );
-        let escort_ball_1 = make_site_npc_ball(
-            new_site.escort_ball_ids[0],
-            spec.escort_type_id,
-            pos + DVec3::new(-2_500.0, 0.0, 0.0),
-        );
-        let escort_ball_2 = make_site_npc_ball(
-            new_site.escort_ball_ids[1],
-            spec.escort_type_id,
-            pos + DVec3::new(-3_200.0, 1_200.0, 0.0),
-        );
-        let mut relay_ball = make_site_npc_ball(relay_bid, spec.relay_type_id, relay_pos);
-        relay_ball.max_velocity = 0.0;
-        relay_ball.speed_fraction = 0.0;
-        relay_ball.radius = 500.0;
-        let boss_cs = build_special_site_npc_combat_state(&ctx.sde, new_site.boss_type_id);
-        let escort_cs_1 = build_special_site_npc_combat_state(&ctx.sde, spec.escort_type_id);
-        let escort_cs_2 = build_special_site_npc_combat_state(&ctx.sde, spec.escort_type_id);
-        let _ = sys_handle.spawn_ball_with_combat(boss_ball, boss_cs).await;
-        let _ = sys_handle.spawn_ball_with_combat(escort_ball_1, escort_cs_1).await;
-        let _ = sys_handle.spawn_ball_with_combat(escort_ball_2, escort_cs_2).await;
-        let _ = sys_handle.spawn_ball(relay_ball).await;
-        active_sites.push(new_site);
+                let npc_specs = [
+                    (
+                        new_site.boss_type_id,
+                        "",
+                        spec.faction_id,
+                        pos + DVec3::new(2_500.0, 0.0, 0.0),
+                    ),
+                    (
+                        spec.escort_type_id,
+                        "",
+                        spec.faction_id,
+                        pos + DVec3::new(-2_500.0, 0.0, 0.0),
+                    ),
+                    (
+                        spec.escort_type_id,
+                        "",
+                        spec.faction_id,
+                        pos + DVec3::new(-3_200.0, 1_200.0, 0.0),
+                    ),
+                ];
+                let mut built = Vec::with_capacity(3);
+                let _ = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_batch_with_start_id(
+                    ctx,
+                    sys_id,
+                    &npc_specs,
+                    new_site.boss_npc_ball_id,
+                    |entity| configure_seasonal_npc_entity(entity, spec.faction_id),
+                    &mut built,
+                )
+                .await;
+                crate::services::combat_crimewatch::with_mut_combat_ephemeral(ctx, |rt| {
+                    for (bid, entity) in built {
+                        rt.npc_entities.insert(bid, entity);
+                    }
+                });
+
+                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                let mut relay_ball = make_site_npc_ball(relay_bid, spec.relay_type_id, relay_pos);
+                relay_ball.max_velocity = 0.0;
+                relay_ball.speed_fraction = 0.0;
+                relay_ball.radius = 500.0;
+                let _ = sys_handle.spawn_ball(relay_ball).await;
+
+                active_sites.push(new_site);
+            }
+        }
     }
 
     active_sites

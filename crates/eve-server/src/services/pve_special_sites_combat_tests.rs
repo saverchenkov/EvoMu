@@ -221,8 +221,17 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
     assert_ne!(details.relay_ball_id, 0);
     assert_eq!(seasonal[0].escort_ball_ids.len(), 2);
     let s_boss = seasonal[0].boss_npc_ball_id;
-    let s_changes = on_special_site_npc_destroyed_core(&ctx.systems, &ctx.db, &ctx.sde, sys_id, s_boss, Some(90_060_001)).await;
-    assert_eq!(s_changes.len(), 1);
+    let s_escorts = seasonal[0].escort_ball_ids.clone();
+    let boss_only = on_special_site_npc_destroyed_core(&ctx.systems, &ctx.db, &ctx.sde, sys_id, s_boss, Some(90_060_001)).await;
+    assert!(boss_only.is_empty(), "boss kill alone must not pay out while escorts survive");
+    for (idx, &ebid) in s_escorts.iter().enumerate() {
+        let s_changes = on_special_site_npc_destroyed_core(&ctx.systems, &ctx.db, &ctx.sde, sys_id, ebid, Some(90_060_001)).await;
+        if idx + 1 < s_escorts.len() {
+            assert!(s_changes.is_empty());
+        } else {
+            assert_eq!(s_changes.len(), 1);
+        }
+    }
     ctx.db.with_snapshot(|snap| {
         let st = crate::services::season_manager::load_season_state(snap, 90_060_001);
         assert!(st.season_points >= seasonal[0].reward_points);
@@ -661,12 +670,37 @@ async fn seasonal_boss_consecutive_kills_allocate_disjoint_item_ids_for_both_pil
         save_seasonal_site_details_map(snap, &dmap);
     });
 
+    assert!(
+        on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_1,
+            sites_1[0].boss_npc_ball_id,
+            Some(pilot_1),
+        )
+        .await
+        .is_empty(),
+        "site 1 boss kill alone must not complete before escorts die"
+    );
+    assert!(
+        on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_1,
+            sites_1[0].escort_ball_ids[0],
+            Some(pilot_1),
+        )
+        .await
+        .is_empty()
+    );
     let ch1 = on_special_site_npc_destroyed_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
         sys_1,
-        sites_1[0].boss_npc_ball_id,
+        sites_1[0].escort_ball_ids[1],
         Some(pilot_1),
     )
     .await;
@@ -681,15 +715,39 @@ async fn seasonal_boss_consecutive_kills_allocate_disjoint_item_ids_for_both_pil
     });
     assert!(
         p1_items_after_kill1.len() >= 2,
-        "First seasonal boss kill must deposit multiple items: {p1_items_after_kill1:?}"
+        "First seasonal site completion must deposit multiple items: {p1_items_after_kill1:?}"
     );
 
+    assert!(
+        on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_2,
+            sites_2[0].boss_npc_ball_id,
+            Some(pilot_2),
+        )
+        .await
+        .is_empty()
+    );
+    assert!(
+        on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_2,
+            sites_2[0].escort_ball_ids[0],
+            Some(pilot_2),
+        )
+        .await
+        .is_empty()
+    );
     let ch2 = on_special_site_npc_destroyed_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
         sys_2,
-        sites_2[0].boss_npc_ball_id,
+        sites_2[0].escort_ball_ids[1],
         Some(pilot_2),
     )
     .await;
@@ -714,7 +772,7 @@ async fn seasonal_boss_consecutive_kills_allocate_disjoint_item_ids_for_both_pil
             .collect();
         assert!(
             p2_items.len() >= 2,
-            "Second seasonal boss kill must deposit multiple items: {p2_items:?}"
+            "Second seasonal site completion must deposit multiple items: {p2_items:?}"
         );
         let p1_ids: std::collections::HashSet<i64> =
             p1_items_after_kill1.iter().map(|&(id, _, _)| id).collect();
@@ -724,5 +782,272 @@ async fn seasonal_boss_consecutive_kills_allocate_disjoint_item_ids_for_both_pil
                 "Consecutive seasonal boss loot item IDs must be strictly disjoint"
             );
         }
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seasonal_npcs_registered_in_rt_npc_entities_fight_back_and_despawn_clears_ai() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    let sys_id: SolarSystemId = 30_000_142;
+    let pilot: i64 = 90_060_301;
+    let ship_id: i64 = 1_060_301;
+    db.provision_gm_account("season_ai", "pw", pilot, "SeasonAi");
+
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_600_000)));
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: pilot,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut cfg = crate::services::season_fsd::load_season_config(snap);
+        cfg.season_id = 1;
+        cfg.season_name = "Crimson Harvest".into();
+        cfg.start_time_ft = now_ft - 3_600 * 10_000_000;
+        cfg.end_time_ft = now_ft + 3_600 * 10_000_000;
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
+    });
+
+    let sites = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    assert_eq!(sites.len(), 1);
+    let site = &sites[0];
+    let details = get_seasonal_site_details(&ctx, site.instance_id).expect("details");
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    let mut npc_ids = vec![site.boss_npc_ball_id];
+    npc_ids.extend_from_slice(&site.escort_ball_ids);
+    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        for &nid in &npc_ids {
+            let ent = rt
+                .npc_entities
+                .get(&nid)
+                .expect("seasonal NPC must be registered in rt.npc_entities");
+            assert_eq!(ent.archetype, "Pirate");
+            assert_eq!(ent.bounty_isk, 0.0);
+            let dmg_sum = ent.damage_vector.em
+                + ent.damage_vector.thermal
+                + ent.damage_vector.kinetic
+                + ent.damage_vector.explosive;
+            assert!(dmg_sum > 0.0, "seasonal NPC {nid} must have weapon damage");
+        }
+    });
+
+    // Place a player ship within weapon range of the site and step NPC AI -> seasonal NPCs engage.
+    let player_pos = DVec3::from_array(details.site_position) + DVec3::new(1_000.0, 0.0, 0.0);
+    let mut player_ball = make_site_npc_ball(ship_id, 587, player_pos);
+    player_ball.radius = 40.0;
+    let player_cs = eve_destiny::CombatState {
+        shield_hp: 5_000.0,
+        max_shield_hp: 5_000.0,
+        armor_hp: 5_000.0,
+        max_armor_hp: 5_000.0,
+        structure_hp: 5_000.0,
+        max_structure_hp: 5_000.0,
+        signature_radius: 40.0,
+        ..Default::default()
+    };
+    let _ = sys_handle.spawn_ball_with_combat(player_ball, player_cs).await;
+    crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(&ctx, sys_id).await;
+
+    let targeted = crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        npc_ids
+            .iter()
+            .any(|nid| rt.npc_entities.get(nid).and_then(|e| e.target_id) == Some(ship_id))
+    });
+    assert!(
+        targeted,
+        "seasonal NPCs in rt.npc_entities must acquire and target nearby pilots"
+    );
+    let ship_shield_after = sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .expect("combat state")
+        .expect("player ball")
+        .shield_hp;
+    assert!(
+        ship_shield_after < 5_000.0,
+        "seasonal NPCs must actively shoot back and damage player ship ({ship_shield_after})"
+    );
+
+    // Expiring the seasonal window removes NPCs from both ballpark and rt.npc_entities.
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_610_000)));
+    let remaining = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    assert!(remaining.is_empty());
+    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        for &nid in &npc_ids {
+            assert!(
+                !rt.npc_entities.contains_key(&nid),
+                "expired seasonal NPC {nid} must be removed from rt.npc_entities"
+            );
+        }
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seasonal_completion_atomic_rollback_and_no_double_pay_and_sde_fallback() {
+    // 1. Minimal synthetic SDE fallback (PVE-055): no seasonal dungeons/FSD tables must not panic.
+    let empty_sde = Arc::new(SdeRegistry::default());
+    let fallback_spec = resolve_seasonal_event_spec(
+        &empty_sde,
+        &eve_db::SeasonConfig {
+            season_id: 1,
+            season_name: "Crimson Harvest".into(),
+            ..Default::default()
+        },
+        30_000_142,
+    );
+    assert!(fallback_spec.reward_isk > 0);
+    assert!(fallback_spec.reward_points > 0);
+
+    // 2. Atomic completion: rollback on mid-flight error + no double-pay after commit.
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    let sys_id: SolarSystemId = 30_000_142;
+    let pilot: i64 = 90_060_401;
+    let ship_id: i64 = 1_060_401;
+    db.provision_gm_account("season_atomic", "pw", pilot, "SeasonAtomic");
+
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_700_000)));
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+            ch.balance = IskCents(0);
+        }
+        let mut cfg = crate::services::season_fsd::load_season_config(snap);
+        cfg.start_time_ft = now_ft - 3_600 * 10_000_000;
+        cfg.end_time_ft = now_ft + 3_600 * 10_000_000;
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
+    });
+
+    let sites = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    assert_eq!(sites.len(), 1);
+    let site = sites[0].clone();
+    let details = get_seasonal_site_details(&ctx, site.instance_id).expect("details");
+    let anom_key = format!("dng-{}-{}", site.dungeon_id, site.instance_id);
+
+    // Destroy boss and first escort -> partial progress only.
+    assert!(
+        on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_id,
+            site.boss_npc_ball_id,
+            Some(pilot),
+        )
+        .await
+        .is_empty()
+    );
+    assert!(
+        on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_id,
+            site.escort_ball_ids[0],
+            Some(pilot),
+        )
+        .await
+        .is_empty()
+    );
+
+    // Trigger final kill with nonexistent character ID -> atomic transaction rolls back ALL writes.
+    let bad_kill = on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_id,
+        site.escort_ball_ids[1],
+        Some(999_999_999),
+    )
+    .await;
+    assert!(bad_kill.is_empty());
+    ctx.db.with_snapshot(|snap| {
+        let rec = snap.pve_special_sites.seasonal_event_sites[&sys_id]
+            .iter()
+            .find(|s| s.instance_id == site.instance_id)
+            .expect("site still present after rollback");
+        assert!(!rec.completed, "site.completed must remain false after rollback");
+        assert!(
+            load_seasonal_site_details_map(snap).contains_key(&site.instance_id),
+            "details must not be deleted on aborted completion"
+        );
+        assert!(
+            load_seasonal_cooldown_store(snap)
+                .until_by_system
+                .get(&sys_id)
+                .is_none(),
+            "cooldown must not be armed on aborted completion"
+        );
+        assert!(
+            snap.cosmic_anomalies[&sys_id]
+                .iter()
+                .any(|a| a.anomaly_id == anom_key && !a.cleared),
+            "anomaly must remain uncleared after rollback"
+        );
+        assert!(
+            snap.transient_items.contains_key(&details.relay_ball_id),
+            "relay item must remain after rollback"
+        );
+    });
+    let exp_still_open = crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&sys_id)
+            .is_some_and(|l| l.iter().any(|s| s.site_id == details.exploration_site_id && !s.cleared))
+    });
+    assert!(exp_still_open, "exploration site must stay uncleared after rollback");
+
+    // Valid final kill commits atomically, then replay cannot double-pay.
+    let ok_kill = on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_id,
+        site.escort_ball_ids[1],
+        Some(pilot),
+    )
+    .await;
+    assert_eq!(ok_kill.len(), 1);
+    let replay_kill = on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_id,
+        site.escort_ball_ids[1],
+        Some(pilot),
+    )
+    .await;
+    assert!(replay_kill.is_empty(), "replay after completion must never double-pay");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.characters[&pilot].balance.0,
+            site.reward_isk * 100,
+            "wallet must receive exactly one completion payout"
+        );
+        let st = crate::services::season_manager::load_season_state(snap, pilot);
+        assert_eq!(st.season_points, site.reward_points);
     });
 }
