@@ -142,23 +142,55 @@ fn can_gunner_access_structure_combat(
     st: &eve_db::UpwellStructureRecord,
     char_id: i64,
 ) -> bool {
-    if st.state == "Destroyed" {
+    if st.owner_corp_id <= 0
+        || is_npc_corporation_id(ctx, st.owner_corp_id)
+        || !snap.corporations.contains_key(&st.owner_corp_id)
+        || !crate::services::structure_control_ops::is_structure_combat_operational(Some(ctx), st)
+    {
         return false;
     }
     let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
-    if ext.active_pilot_by_structure.get(&st.structure_id) == Some(&char_id) {
-        return true;
-    }
     let now_unix = ctx.now_unix();
     let prof_opt = crate::services::structure_profile_services::effective_profile_for_structure(
         &ext,
         st.structure_id,
         Some(now_unix),
     );
-    crate::services::structure_control_ops::verify_control_acl_or_role_with_profile_at(
+    if crate::services::structure_control_ops::verify_control_acl_or_role_with_profile_at(
         snap, &ext, st, prof_opt, char_id, now_unix,
     )
-    .is_ok()
+    .is_err()
+    {
+        return false;
+    }
+    // Without an active defense ACL grant source, fail closed unless the caller is
+    // an active owner-corp member holding CEO status or an explicit control role.
+    let may_use_defense_acl = prof_opt
+        .is_some_and(|p| !p.defense_group_ids.is_empty() || !p.defense_allowed_characters.is_empty());
+    if !may_use_defense_acl {
+        let is_owner_corp_member = snap
+            .characters
+            .get(&char_id)
+            .is_some_and(|ch| ch.corporation_id == st.owner_corp_id);
+        if !is_owner_corp_member {
+            return false;
+        }
+        const CTRL_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
+            | eve_db::corp_roles::ROLE_STATION_MANAGER
+            | eve_db::corp_roles::ROLE_STARBASE_OPERATOR
+            | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
+        let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+            st.owner_corp_id,
+            char_id,
+            Some(st.structure_id),
+            0,
+            now_unix,
+        );
+        if !is_ceo && (eff_roles & CTRL_ROLES) == 0 {
+            return false;
+        }
+    }
+    true
 }
 
 fn authorize_corp_flag_access(
@@ -610,13 +642,54 @@ fn handle_item_get_info(
 
     let (subloc_key_opt, item_opt, raw_id) = if let Some((loc_id, flag_u16, sub_tid)) = subloc_tuple {
         let charge_opt = ctx.db.with_snapshot(|snap| {
+            let db_corp = snap
+                .characters
+                .get(&char_id)
+                .map(|ch| ch.corporation_id)
+                .filter(|&cid| cid > 0);
+            let caller_corp = db_corp.or_else(|| session.corporation_id.filter(|&cid| cid > 0));
+            let struct_owner = snap
+                .structures
+                .get(&loc_id)
+                .map(|st| st.owner_corp_id)
+                .filter(|&oid| oid > 0);
+            let loc_owner = snap
+                .items
+                .get(&loc_id)
+                .map(|loc| loc.owner_id)
+                .filter(|&oid| oid > 0);
+            let is_personal_hangar =
+                matches!(InventoryFlag::from_u16(flag_u16), InventoryFlag::Hangar);
             snap.items
                 .values()
-                .find(|i| {
+                .filter(|i| {
                     i.location_id == loc_id
                         && (i.flag as u16) == flag_u16
                         && i.type_id == sub_tid
                         && i.quantity > 0
+                })
+                .min_by_key(|i| {
+                    // Shared hangars and containers can hold stacks from multiple owners at the
+                    // same `(location_id, flag, type_id)`; prefer the caller's own (or corp/location)
+                    // stack deterministically before falling back to any remaining stack so
+                    // authorization still runs and denies unauthorized foreign inspections.
+                    let owner_rank = if i.owner_id == char_id {
+                        0_u8
+                    } else if !is_personal_hangar && caller_corp == Some(i.owner_id) {
+                        1_u8
+                    } else if !is_personal_hangar
+                        && (struct_owner == Some(i.owner_id) || loc_owner == Some(i.owner_id))
+                    {
+                        2_u8
+                    } else if caller_corp == Some(i.owner_id)
+                        || struct_owner == Some(i.owner_id)
+                        || loc_owner == Some(i.owner_id)
+                    {
+                        3_u8
+                    } else {
+                        4_u8
+                    };
+                    (owner_rank, i.item_id)
                 })
                 .cloned()
         });

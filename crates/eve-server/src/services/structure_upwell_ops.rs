@@ -1006,36 +1006,76 @@ fn handle_structure_clear_memoized(
     Ok(PyRep::None)
 }
 
+fn structure_control_role_denial_reason(
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    st: &UpwellStructureRecord,
+    now_unix: u64,
+) -> Option<String> {
+    if st.owner_corp_id <= 0 || (1_000_000..2_000_000).contains(&st.owner_corp_id) {
+        return Some(format!(
+            "Structure {} has no registered player owner corporation",
+            st.structure_id
+        ));
+    }
+    let Some(corp) = snap.corporations.get(&st.owner_corp_id) else {
+        return Some(format!(
+            "Structure {} owner corporation {} is not registered",
+            st.structure_id, st.owner_corp_id
+        ));
+    };
+    let has_role_anchor = corp.ceo_id == char_id
+        || corp.member_roles.contains_key(&char_id)
+        || snap
+            .corp_role_assignments
+            .contains_key(&(st.owner_corp_id, char_id));
+    let is_member = match snap.characters.get(&char_id) {
+        Some(ch) => {
+            ch.corporation_id == st.owner_corp_id
+                && (corp.members.is_empty() || corp.members.contains(&char_id) || has_role_anchor)
+        }
+        None => corp.members.contains(&char_id) || (corp.ceo_id != 0 && has_role_anchor),
+    };
+    if !is_member {
+        return Some(format!(
+            "Character {char_id} lacks membership in structure {} owner corporation {}",
+            st.structure_id, st.owner_corp_id
+        ));
+    }
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+        st.owner_corp_id,
+        char_id,
+        Some(st.structure_id),
+        0,
+        now_unix,
+    );
+    const CTRL_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
+        | eve_db::corp_roles::ROLE_STATION_MANAGER
+        | eve_db::corp_roles::ROLE_STARBASE_OPERATOR
+        | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
+    let has_role_registry = corp.ceo_id != 0
+        || !corp.member_roles.is_empty()
+        || snap
+            .corp_role_assignments
+            .keys()
+            .any(|&(cid, _)| cid == st.owner_corp_id);
+    if has_role_registry && !is_ceo && (eff_roles & CTRL_ROLES) == 0 {
+        return Some(format!(
+            "Character {char_id} lacks structure defense/control role for structure {}",
+            st.structure_id
+        ));
+    }
+    None
+}
+
 pub(crate) fn require_structure_control_role_at(
     snap: &WorldStateSnapshot,
     char_id: i64,
     st: &UpwellStructureRecord,
     now_unix: u64,
 ) -> Result<(), BridgeRpcError> {
-    if let Some(corp) = snap.corporations.get(&st.owner_corp_id) {
-        let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
-            st.owner_corp_id,
-            char_id,
-            Some(st.structure_id),
-            0,
-            now_unix,
-        );
-        const CTRL_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
-            | eve_db::corp_roles::ROLE_STATION_MANAGER
-            | eve_db::corp_roles::ROLE_STARBASE_OPERATOR
-            | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
-        if (corp.ceo_id != 0 || !corp.member_roles.is_empty())
-            && !is_ceo
-            && (eff_roles & CTRL_ROLES) == 0
-        {
-            return Err(err(
-                "CorpRoleDenied",
-                format!(
-                    "Character {char_id} lacks structure defense/control role for structure {}",
-                    st.structure_id
-                ),
-            ));
-        }
+    if let Some(reason) = structure_control_role_denial_reason(snap, char_id, st, now_unix) {
+        return Err(err("CorpRoleDenied", reason));
     }
     Ok(())
 }

@@ -3800,3 +3800,674 @@ async fn r2_p1_3_structure_sublocation_authz_allows_gunners_and_denies_unauthori
         );
     }
 }
+
+#[tokio::test]
+async fn hf1476_structure_combat_access_denies_stale_active_pilot_and_invalid_owner_corps() {
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+    };
+    use eve_db::corp_roles::{ROLE_ACCOUNTANT, ROLE_STARBASE_OPERATOR};
+    use eve_db::{CharacterRecord, CorporationRecord, UpwellStructureRecord};
+    use std::collections::HashSet;
+
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let sys_id = 30_000_142u32;
+    let corp_id = 98_476_101i64;
+    let empty_role_corp_id = 98_476_102i64;
+    let other_corp_id = 98_476_103i64;
+    let unregistered_corp_id = 98_476_199i64;
+    let npc_corp_id = 1_000_009i64;
+
+    let char_gunner = 96_476_001i64;
+    let char_role_op = 96_476_002i64;
+    let char_empty_mem = 96_476_003i64;
+    let char_outsider = 96_476_004i64;
+    let char_ceo = 96_476_005i64;
+
+    let sid_valid = 1_096_476_000_001i64;
+    let sid_uncored_fort = 1_096_476_000_002i64;
+    let sid_anchoring = 1_096_476_000_003i64;
+    let sid_anchor_vuln = 1_096_476_000_004i64;
+    let sid_unanchored = 1_096_476_000_005i64;
+    let sid_zero_corp = 1_096_476_000_006i64;
+    let sid_npc_corp = 1_096_476_000_007i64;
+    let sid_unreg_corp = 1_096_476_000_008i64;
+    let sid_empty_corp = 1_096_476_000_009i64;
+
+    let mod_valid = 96_476_101i64;
+    let mod_uncored_fort = 96_476_102i64;
+    let mod_anchoring = 96_476_103i64;
+    let mod_anchor_vuln = 96_476_104i64;
+    let mod_unanchored = 96_476_105i64;
+    let mod_zero_corp = 96_476_106i64;
+    let mod_npc_corp = 96_476_107i64;
+    let mod_unreg_corp = 96_476_108i64;
+    let mod_empty_corp = 96_476_109i64;
+
+    let ship_id = 96_476_500i64;
+    let cmd_a = 96_476_501i64;
+    let cmd_b = 96_476_502i64;
+    let strip_a = 96_476_503i64;
+    let strip_b = 96_476_504i64;
+
+    let now = ctx.now_unix();
+    let group_gunner = 76_001i64;
+    let group_outsider = 76_002i64;
+    let prof_initial_id = 76_101i64;
+    let prof_revoked_id = 76_102i64;
+    let prof_outsider_id = 76_103i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_char = snap.characters.values().next().cloned().expect("seed char");
+        for (cid, cid_corp) in [
+            (char_gunner, corp_id),
+            (char_role_op, corp_id),
+            (char_ceo, corp_id),
+            (char_empty_mem, empty_role_corp_id),
+            (char_outsider, npc_corp_id),
+        ] {
+            snap.characters.insert(
+                cid,
+                CharacterRecord {
+                    character_id: cid,
+                    corporation_id: cid_corp,
+                    solar_system_id: sys_id,
+                    station_id: None,
+                    structure_id: None,
+                    active_ship_id: if cid == char_role_op { ship_id } else { 0 },
+                    ..base_char.clone()
+                },
+            );
+        }
+
+        let mut corp = CorporationRecord::new(corp_id, "Combat Corp 1476", "C76", char_ceo);
+        corp.members.insert(char_gunner);
+        corp.members.insert(char_role_op);
+        corp.members.insert(char_ceo);
+        corp.member_roles.insert(char_role_op, ROLE_STARBASE_OPERATOR);
+        corp.member_roles.insert(char_gunner, ROLE_ACCOUNTANT);
+        snap.corporations.insert(corp_id, corp);
+
+        let mut empty_corp = CorporationRecord::new(empty_role_corp_id, "Empty Role Corp", "ERC", 0);
+        empty_corp.members.insert(char_empty_mem);
+        snap.corporations.insert(empty_role_corp_id, empty_corp);
+
+        let specs = [
+            (sid_valid, mod_valid, 35_832u32, corp_id, "ShieldVulnerable", true),
+            (sid_uncored_fort, mod_uncored_fort, 35_833, corp_id, "ShieldVulnerable", false),
+            (sid_anchoring, mod_anchoring, 35_832, corp_id, "Anchoring", true),
+            (sid_anchor_vuln, mod_anchor_vuln, 35_832, corp_id, "AnchorVulnerable", true),
+            (sid_unanchored, mod_unanchored, 35_832, corp_id, "Unanchored", true),
+            (sid_zero_corp, mod_zero_corp, 35_832, 0, "ShieldVulnerable", true),
+            (sid_npc_corp, mod_npc_corp, 35_832, npc_corp_id, "ShieldVulnerable", true),
+            (sid_unreg_corp, mod_unreg_corp, 35_832, unregistered_corp_id, "ShieldVulnerable", true),
+            (sid_empty_corp, mod_empty_corp, 35_832, empty_role_corp_id, "ShieldVulnerable", true),
+        ];
+        for (sid, mod_id, tid, owner_corp_id, state, cored) in specs {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: tid,
+                    owner_corp_id,
+                    solar_system_id: sys_id,
+                    state: state.into(),
+                    quantum_core_installed: cored,
+                    reinforced_until_unix: if state == "ShieldVulnerable" { 0 } else { now + 86_400 },
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                mod_id,
+                InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: 35_921,
+                    owner_id: owner_corp_id.max(0),
+                    location_id: sid,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            group_gunner,
+            AccessGroupRecord {
+                group_id: group_gunner,
+                creator_id: char_role_op,
+                owner_corp_id: corp_id,
+                name: "Gunners".into(),
+                description: String::new(),
+                members: HashMap::from([(char_gunner, 1)]),
+            },
+        );
+        ext.owner_groups.insert(
+            group_outsider,
+            AccessGroupRecord {
+                group_id: group_outsider,
+                creator_id: char_outsider,
+                owner_corp_id: other_corp_id,
+                name: "Fake".into(),
+                description: String::new(),
+                members: HashMap::from([(char_outsider, 1)]),
+            },
+        );
+
+        let prof_initial = StructureAccessProfile {
+            profile_id: prof_initial_id,
+            owner_corp_id: corp_id,
+            defense_group_ids: HashSet::from([group_gunner]),
+            ..Default::default()
+        };
+        let prof_revoked = StructureAccessProfile {
+            profile_id: prof_revoked_id,
+            owner_corp_id: corp_id,
+            ..Default::default()
+        };
+        let prof_outsider = StructureAccessProfile {
+            profile_id: prof_outsider_id,
+            owner_corp_id: corp_id,
+            defense_group_ids: HashSet::from([group_outsider]),
+            ..Default::default()
+        };
+        ext.access_profiles.insert(sid_valid, prof_initial);
+        ext.profiles_by_id.insert(prof_revoked_id, prof_revoked);
+        ext.pending_profile_applications
+            .insert(sid_valid, (prof_revoked_id, now + 60));
+        ext.active_pilot_by_structure.insert(sid_valid, char_gunner);
+
+        for invalid_sid in [
+            sid_uncored_fort,
+            sid_anchoring,
+            sid_anchor_vuln,
+            sid_unanchored,
+            sid_zero_corp,
+            sid_npc_corp,
+            sid_unreg_corp,
+        ] {
+            ext.access_profiles.insert(invalid_sid, prof_outsider.clone());
+            ext.active_pilot_by_structure.insert(invalid_sid, char_outsider);
+        }
+        ext.active_pilot_by_structure
+            .insert(sid_empty_corp, char_empty_mem);
+        save_ext_state(snap, &ext);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_role_op,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        for (mod_id, tid, flag) in [
+            (cmd_a, 42_526u32, InventoryFlag::HiSlot0),
+            (cmd_b, 42_526, InventoryFlag::HiSlot1),
+            (strip_a, 17_912, InventoryFlag::HiSlot2),
+            (strip_b, 17_912, InventoryFlag::HiSlot3),
+        ] {
+            snap.items.insert(
+                mod_id,
+                InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: tid,
+                    owner_id: char_role_op,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_350_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: char_role_op,
+                char_id: Some(char_role_op),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let mk_sess = |cid: i64, cid_corp: i64, sid: i64| {
+        let mut s = SessionState::new(cid as u64);
+        s.user_id = Some(cid as u64);
+        s.character_id = Some(cid);
+        s.corporation_id = Some(cid_corp);
+        s.solar_system_id = Some(sys_id);
+        s.structure_id = Some(sid);
+        s
+    };
+    let kw = HashMap::new();
+
+    // Gunner starts allowed under active prof_initial.
+    let mut gunner_sess = mk_sess(char_gunner, corp_id, sid_valid);
+    assert!(
+        handle_dogma_im(&ctx, &mut gunner_sess, None, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(mod_valid)], &kw)
+            .await
+            .expect("handled")
+            .is_ok()
+    );
+
+    // Delayed profile transition revokes ACL; stale active_pilot_by_structure must NOT keep access alive.
+    ctx.advance_virtual_clock(120);
+    let err = handle_dogma_im(&ctx, &mut gunner_sess, None, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(mod_valid)], &kw)
+        .await
+        .expect("handled")
+        .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+
+    // Operational corp operator is allowed, then denied when role or corp membership is removed.
+    let mut op_sess = mk_sess(char_role_op, corp_id, sid_valid);
+    assert!(
+        handle_dogma_im(&ctx, &mut op_sess, None, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(mod_valid)], &kw)
+            .await
+            .expect("handled")
+            .is_ok()
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .expect("corp")
+            .member_roles
+            .remove(&char_role_op);
+    });
+    let err = handle_dogma_im(&ctx, &mut op_sess, None, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(mod_valid)], &kw)
+        .await
+        .expect("handled")
+        .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .expect("corp")
+            .member_roles
+            .insert(char_role_op, ROLE_STARBASE_OPERATOR);
+        snap.characters
+            .get_mut(&char_role_op)
+            .expect("op")
+            .corporation_id = other_corp_id;
+    });
+    let err = handle_dogma_im(&ctx, &mut op_sess, None, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(mod_valid)], &kw)
+        .await
+        .expect("handled")
+        .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+
+    // Empty role-registry corp fails closed on combat path even for members / active pilot.
+    let mut empty_mem_sess = mk_sess(char_empty_mem, empty_role_corp_id, sid_empty_corp);
+    let err = handle_dogma_im(&ctx, &mut empty_mem_sess, None, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(mod_empty_corp)], &kw)
+        .await
+        .expect("handled")
+        .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+
+    // Uncored Fortizar, non-operational states, and owner_corp_id == 0 / NPC / unregistered all fail closed.
+    for (sid, mod_id) in [
+        (sid_uncored_fort, mod_uncored_fort),
+        (sid_anchoring, mod_anchoring),
+        (sid_anchor_vuln, mod_anchor_vuln),
+        (sid_unanchored, mod_unanchored),
+        (sid_zero_corp, mod_zero_corp),
+        (sid_npc_corp, mod_npc_corp),
+        (sid_unreg_corp, mod_unreg_corp),
+    ] {
+        let mut s = mk_sess(char_outsider, npc_corp_id, sid);
+        let err = handle_dogma_im(&ctx, &mut s, None, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(mod_id)], &kw)
+            .await
+            .expect("handled")
+            .unwrap_err();
+        assert_eq!(err.code, "AccessDenied", "structure {sid} must fail closed");
+    }
+
+    // LinkWeapons rejects chargeGroup1 Command Bursts and Strip Miners.
+    let mut ship_sess = SessionState::new(char_role_op as u64);
+    ship_sess.user_id = Some(char_role_op as u64);
+    ship_sess.character_id = Some(char_role_op);
+    ship_sess.corporation_id = Some(other_corp_id);
+    ship_sess.solar_system_id = Some(sys_id);
+    ship_sess.ship_id = Some(ship_id);
+    for (a, b) in [(cmd_a, cmd_b), (strip_a, strip_b)] {
+        let err = handle_dogma_im(
+            &ctx,
+            &mut ship_sess,
+            None,
+            "dogmaIM",
+            "LinkWeapons",
+            &[PyRep::Integer(ship_id), PyRep::Integer(a), PyRep::Integer(b)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .unwrap_err();
+        assert_eq!(err.code, "InvalidWeaponGroup");
+    }
+}
+
+#[tokio::test]
+async fn hf1476_sublocation_lookup_prefers_caller_owner_on_shared_locations() {
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, StructureAccessProfile,
+    };
+    use eve_db::corp_roles::ROLE_DIRECTOR;
+    use eve_db::{CharacterRecord, CorporationRecord, UpwellStructureRecord};
+    use std::collections::HashSet;
+
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let sys_id = 30_000_142u32;
+    let station_id = 60_003_760i64;
+    let corp_id = 98_476_201i64;
+    let ally_corp_id = 98_476_202i64;
+    let sid = 1_096_476_000_201i64;
+
+    let caller_id = 96_476_201i64;
+    let stranger_a = 96_476_202i64;
+    let stranger_b = 96_476_203i64;
+    let gunner_ally = 96_476_204i64;
+    let outsider_id = 96_476_205i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_char = snap.characters.values().next().cloned().expect("seed char");
+        for (cid, cid_corp) in [
+            (caller_id, corp_id),
+            (stranger_a, ally_corp_id),
+            (stranger_b, ally_corp_id),
+            (gunner_ally, ally_corp_id),
+            (outsider_id, ally_corp_id),
+        ] {
+            snap.characters.insert(
+                cid,
+                CharacterRecord {
+                    character_id: cid,
+                    corporation_id: cid_corp,
+                    ..base_char.clone()
+                },
+            );
+        }
+
+        let mut corp = CorporationRecord::new(corp_id, "Shared Loc Corp", "SLC", caller_id);
+        corp.members.insert(caller_id);
+        corp.member_roles.insert(caller_id, ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        ext.access_profiles.insert(
+            sid,
+            StructureAccessProfile {
+                profile_id: 76_201,
+                owner_corp_id: corp_id,
+                defense_allowed_characters: HashSet::from([gunner_ally]),
+                ..Default::default()
+            },
+        );
+        save_ext_state(snap, &ext);
+
+        // Shared corp station container with smaller corp/foreign stacks before caller's stack.
+        let corp_box_id = 96_476_250i64;
+        snap.items.insert(
+            corp_box_id,
+            InventoryItemRecord {
+                item_id: corp_box_id,
+                type_id: 17_366,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        for (item_id, owner_id, type_id) in [
+            (96_476_300, corp_id, 183u32),
+            (96_476_301, stranger_a, 183),
+            (96_476_302, caller_id, 183),
+            (96_476_303, stranger_b, 183),
+            (96_476_304, stranger_a, 185),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id,
+                    location_id: corp_box_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 50,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+
+        // Shared structure CorpSAG1 with smaller foreign stack before owner_corp_id stack.
+        for (item_id, owner_id, type_id) in [
+            (96_476_311, stranger_a, 183u32),
+            (96_476_312, corp_id, 183),
+            (96_476_313, stranger_a, 185),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id,
+                    location_id: sid,
+                    flag: InventoryFlag::CorpSAG1,
+                    quantity: 40,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+
+        // Shared structure HiSlot0 with smaller unrelated stack before structure-corp loaded charge.
+        for (item_id, owner_id) in [(96_476_321, stranger_a), (96_476_322, corp_id)] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id: 183,
+                    owner_id,
+                    location_id: sid,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 20,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mk_station_sess = |cid: i64, cid_corp: i64| {
+        let mut s = SessionState::new(cid as u64);
+        s.user_id = Some(cid as u64);
+        s.character_id = Some(cid);
+        s.corporation_id = Some(cid_corp);
+        s.solar_system_id = Some(sys_id);
+        s.station_id = Some(station_id);
+        s
+    };
+    let mk_struct_sess = |cid: i64, cid_corp: i64| {
+        let mut s = SessionState::new(cid as u64);
+        s.user_id = Some(cid as u64);
+        s.character_id = Some(cid);
+        s.corporation_id = Some(cid_corp);
+        s.solar_system_id = Some(sys_id);
+        s.structure_id = Some(sid);
+        s
+    };
+    let subloc = |loc: i64, flag: InventoryFlag, tid: u32| {
+        PyRep::Tuple(vec![
+            PyRep::Integer(loc),
+            PyRep::Integer(i64::from(flag as u16)),
+            PyRep::Integer(i64::from(tid)),
+        ])
+    };
+    let kw = HashMap::new();
+
+    let corp_box_id = 96_476_250i64;
+    let mut caller_station_sess = mk_station_sess(caller_id, corp_id);
+    let box_info = handle_dogma_im(
+        &ctx,
+        &mut caller_station_sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[subloc(corp_box_id, InventoryFlag::Hangar, 183)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("caller stack preferred over smaller corp and foreign stacks");
+    assert!(
+        format!("{box_info:?}").contains("\"ownerID\": Integer(96476201)"),
+        "expected caller-owned stack (owner_rank=0), got {box_info:?}"
+    );
+    let err = handle_dogma_im(
+        &ctx,
+        &mut caller_station_sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[subloc(corp_box_id, InventoryFlag::Hangar, 185)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+
+    let mut outsider_station_sess = mk_station_sess(outsider_id, ally_corp_id);
+    let err = handle_dogma_im(
+        &ctx,
+        &mut outsider_station_sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[subloc(corp_box_id, InventoryFlag::Hangar, 183)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+
+    let mut caller_struct_sess = mk_struct_sess(caller_id, corp_id);
+    assert!(
+        handle_dogma_im(
+            &ctx,
+            &mut caller_struct_sess,
+            None,
+            "dogmaIM",
+            "ItemGetInfo",
+            &[subloc(sid, InventoryFlag::CorpSAG1, 183)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .is_ok()
+    );
+    let err = handle_dogma_im(
+        &ctx,
+        &mut caller_struct_sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[subloc(sid, InventoryFlag::CorpSAG1, 185)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+
+    let mut ally_struct_sess = mk_struct_sess(gunner_ally, ally_corp_id);
+    let err = handle_dogma_im(
+        &ctx,
+        &mut ally_struct_sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[subloc(sid, InventoryFlag::CorpSAG1, 183)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+    assert!(
+        handle_dogma_im(
+            &ctx,
+            &mut ally_struct_sess,
+            None,
+            "dogmaIM",
+            "ItemGetInfo",
+            &[subloc(sid, InventoryFlag::HiSlot0, 183)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .is_ok()
+    );
+
+    let mut outsider_struct_sess = mk_struct_sess(outsider_id, ally_corp_id);
+    let err = handle_dogma_im(
+        &ctx,
+        &mut outsider_struct_sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[subloc(sid, InventoryFlag::HiSlot0, 183)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+}
