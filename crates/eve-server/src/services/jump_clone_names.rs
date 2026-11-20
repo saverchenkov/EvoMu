@@ -621,6 +621,7 @@ pub(crate) fn extract_skills(
         } else {
             None
         };
+        let mut remove_empty_queue = false;
         if let Some(queue) = snap.skill_queues.get_mut(&char_id) {
             let mut valid_next_lvl: std::collections::HashMap<u32, u8> = projected_levels.clone();
             queue.retain_mut(|q| {
@@ -684,11 +685,16 @@ pub(crate) fn extract_skills(
                 valid_next_lvl.insert(q.type_id, q.target_level);
                 true
             });
-            if !snap.paused_skill_queues.contains(&char_id) {
+            if queue.is_empty() {
+                remove_empty_queue = true;
+            } else if !snap.paused_skill_queues.contains(&char_id) {
                 if let Some(head) = queue.first_mut() {
                     head.started_at_unix.get_or_insert(ctx.now_unix());
                 }
             }
+        }
+        if remove_empty_queue {
+            snap.skill_queues.remove(&char_id);
         }
 
         let now_ft = ctx.now_blueos_filetime_ticks();

@@ -4870,5 +4870,488 @@ class TestDirectionalScannerOpenAndVisibility(unittest.TestCase):
         self.assertEqual(dock_calls, [])
 
 
+class TestFittingShipSwapStaleKeyErrorGuard(unittest.TestCase):
+    """Regression tests for #1410: V24 fittingWnd stale-ship KeyError during ship swap."""
+
+    def _load_fresh_evomu_site(self):
+        sys.modules.setdefault("__builtin__", builtins)
+        site_path = HARNESS_DIR / "evomu_site.py"
+        spec = importlib.util.spec_from_file_location("evomu_site_1410_test", site_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def setUp(self):
+        self._saved_modules = dict(sys.modules)
+        self._saved_session = getattr(builtins, "session", None)
+        self._saved_sm = getattr(builtins, "sm", None)
+        self.site = self._load_fresh_evomu_site()
+
+    def tearDown(self):
+        for k in list(sys.modules.keys()):
+            if k not in self._saved_modules:
+                sys.modules.pop(k, None)
+        for k, v in self._saved_modules.items():
+            sys.modules[k] = v
+        if self._saved_session is None:
+            if hasattr(builtins, "session"):
+                delattr(builtins, "session")
+        else:
+            builtins.session = self._saved_session
+        if self._saved_sm is None:
+            if hasattr(builtins, "sm"):
+                delattr(builtins, "sm")
+        else:
+            builtins.sm = self._saved_sm
+
+    def _make_fake_dogma_and_controller(
+        self,
+        old_ship_id=1897898652,
+        new_ship_id=1896955150,
+        simulated=False,
+    ):
+        class FakeDogmaLocation:
+            def __init__(self):
+                self.dogmaItems = {old_ship_id: object()}
+                self.current_ship_id = old_ship_id
+                self.shipIDBeingDisembarked = None
+                self.shipIDBeingEmbarked = None
+
+            def GetCurrentShipID(self):
+                return self.current_ship_id
+
+            def IsSwitchingShips(self):
+                return self.shipIDBeingDisembarked is not None
+
+        dl = FakeDogmaLocation()
+
+        class FakeFittingController:
+            def __init__(self):
+                self._itemID = old_ship_id
+                self.dogmaLocation = dl
+                self._simulated = simulated
+
+            def GetItemID(self):
+                return self._itemID
+
+            def GetDogmaLocation(self):
+                return self.dogmaLocation
+
+            def IsSimulated(self):
+                return self._simulated
+
+        ctrl = FakeFittingController()
+        return dl, ctrl
+
+    def _register_fitting_modules(self, eval_fn, icon_fn, stats_fn, stats_drone_fn, drone_panel_fn):
+        fw_mod = types.ModuleType("shipfitting.fittingWarnings")
+        fw_mod.EvaluateFit = eval_fn
+        sys.modules["shipfitting.fittingWarnings"] = fw_mod
+
+        wic_mod = types.ModuleType("eve.client.script.ui.shared.fittingScreen.warningIconCont")
+
+        class WarningIconCont:
+            def __init__(self, controller, destroyed=False):
+                self.fittingController = controller
+                self.destroyed = destroyed
+
+            def __UpdateIcon_thread(self):
+                return icon_fn(self)
+
+        wic_mod.WarningIconCont = WarningIconCont
+        sys.modules["eve.client.script.ui.shared.fittingScreen.warningIconCont"] = wic_mod
+
+        sp_mod = types.ModuleType("eve.client.script.ui.shared.fittingScreen.statsPanel")
+
+        class StatsPanel:
+            def __init__(self, controller, drone_panel=None, destroyed=False):
+                self.controller = controller
+                self.droneStatsParent = drone_panel
+                self.destroyed = destroyed
+
+            def UpdateStats(self):
+                return stats_fn(self)
+
+            def UpdateDroneStats(self):
+                return stats_drone_fn(self)
+
+        sp_mod.StatsPanel = StatsPanel
+        sys.modules["eve.client.script.ui.shared.fittingScreen.statsPanel"] = sp_mod
+
+        dp_mod = types.ModuleType("eve.client.script.ui.shared.fittingScreen.fittingPanels.dronePanel")
+
+        class DronePanel:
+            def __init__(self, controller, destroyed=False):
+                self.controller = controller
+                self.destroyed = destroyed
+
+            def UpdateDroneStats(self):
+                return drone_panel_fn(self)
+
+        dp_mod.DronePanel = DronePanel
+        sys.modules["eve.client.script.ui.shared.fittingScreen.fittingPanels.dronePanel"] = dp_mod
+
+        self.assertTrue(self.site._install_fitting_active_ship_guard())
+        return fw_mod, WarningIconCont, StatsPanel, DronePanel
+
+    def test_1410_stale_ship_keyerror_during_ship_swap_suppressed_cleanly(self):
+        old_ship = 1897898652
+        new_ship = 1896955150
+        dl, ctrl = self._make_fake_dogma_and_controller(old_ship, new_ship)
+        builtins.session = types.SimpleNamespace(shipid=old_ship, stationid=60003760)
+
+        def simulate_unload_and_raise_stale():
+            # Simulate _MakeShipActive unloading old_ship during an RPC yield while
+            # session.shipid has already transitioned to new_ship.
+            dl.shipIDBeingDisembarked = old_ship
+            dl.shipIDBeingEmbarked = new_ship
+            builtins.session.shipid = new_ship
+            dl.dogmaItems.pop(old_ship, None)
+            raise KeyError(old_ship)
+
+        def simulate_full_swap_and_raise_stale():
+            # Even if ProcessActiveShipChanged already updated controller._itemID and
+            # cleared shipIDBeingDisembarked before the yielded tasklet resumed,
+            # initial_ship_ids captured at entry still identifies old_ship.
+            builtins.session.shipid = new_ship
+            dl.current_ship_id = new_ship
+            dl.shipIDBeingDisembarked = None
+            dl.shipIDBeingEmbarked = None
+            dl.dogmaItems = {new_ship: object()}
+            ctrl._itemID = new_ship
+            raise KeyError(old_ship)
+
+        mode = {"fn": simulate_unload_and_raise_stale}
+
+        fw_mod, WarningIconCont, StatsPanel, DronePanel = self._register_fitting_modules(
+            eval_fn=lambda _ctrl: mode["fn"](),
+            icon_fn=lambda _self: mode["fn"](),
+            stats_fn=lambda self: self.UpdateDroneStats(),
+            stats_drone_fn=lambda self: self.droneStatsParent.UpdateDroneStats(),
+            drone_panel_fn=lambda _self: mode["fn"](),
+        )
+
+        # Mid-swap yield: all 4 paths suppress stale old_ship KeyError cleanly.
+        dp = DronePanel(ctrl)
+        sp = StatsPanel(ctrl, drone_panel=dp)
+        wic = WarningIconCont(ctrl)
+        self.assertIsNone(fw_mod.EvaluateFit(ctrl))
+        self.assertIsNone(wic._WarningIconCont__UpdateIcon_thread())
+        self.assertIsNone(sp.UpdateStats())
+        self.assertIsNone(sp.UpdateDroneStats())
+        self.assertIsNone(dp.UpdateDroneStats())
+
+        # Post-swap yield: controller and dogmaLocation already settled on new_ship
+        # while the resumed tasklet still indexed old_ship.
+        mode["fn"] = simulate_full_swap_and_raise_stale
+        for runner in (
+            lambda: fw_mod.EvaluateFit(ctrl),
+            lambda: wic._WarningIconCont__UpdateIcon_thread(),
+            lambda: sp.UpdateStats(),
+            lambda: dp.UpdateDroneStats(),
+        ):
+            dl.dogmaItems = {old_ship: object()}
+            dl.current_ship_id = old_ship
+            ctrl._itemID = old_ship
+            builtins.session.shipid = old_ship
+            self.assertIsNone(runner())
+
+        # Destroyed panels short-circuit cleanly without invoking body.
+        called = []
+        destroyed_sp = StatsPanel(ctrl, drone_panel=dp, destroyed=True)
+        destroyed_dp = DronePanel(ctrl, destroyed=True)
+        mode["fn"] = lambda: called.append("ran")
+        self.assertIsNone(destroyed_sp.UpdateStats())
+        self.assertIsNone(destroyed_dp.UpdateDroneStats())
+        self.assertEqual(called, [])
+
+    def test_1410_unrelated_keyerrors_and_non_keyerrors_still_propagate(self):
+        old_ship = 1897898652
+        new_ship = 1896955150
+        dl, ctrl = self._make_fake_dogma_and_controller(old_ship, new_ship)
+        builtins.session = types.SimpleNamespace(shipid=new_ship, stationid=60003760)
+        dl.shipIDBeingDisembarked = old_ship
+        dl.shipIDBeingEmbarked = new_ship
+        dl.dogmaItems = {new_ship: object()}
+
+        exc_box = {"exc": None}
+
+        def raise_box(*_args, **_kwargs):
+            raise exc_box["exc"]
+
+        fw_mod, WarningIconCont, StatsPanel, DronePanel = self._register_fitting_modules(
+            eval_fn=raise_box,
+            icon_fn=raise_box,
+            stats_fn=raise_box,
+            stats_drone_fn=raise_box,
+            drone_panel_fn=raise_box,
+        )
+
+        dp = DronePanel(ctrl)
+        sp = StatsPanel(ctrl, drone_panel=dp)
+        wic = WarningIconCont(ctrl)
+        targets = (
+            ("EvaluateFit", lambda: fw_mod.EvaluateFit(ctrl)),
+            ("WarningIconCont", lambda: wic._WarningIconCont__UpdateIcon_thread()),
+            ("StatsPanel.UpdateStats", lambda: sp.UpdateStats()),
+            ("StatsPanel.UpdateDroneStats", lambda: sp.UpdateDroneStats()),
+            ("DronePanel.UpdateDroneStats", lambda: dp.UpdateDroneStats()),
+        )
+
+        # 1) Missing dogma attribute IDs (e.g. 1271 droneBandwidth, 14 hiSlots) MUST propagate even during ship swap.
+        for bad_exc in (
+            KeyError(1271),
+            KeyError(14),
+            KeyError(1897899999),  # unrelated item ID
+            KeyError("missing_attr"),
+            KeyError(True),
+            ValueError("unexpected value"),
+            RuntimeError("unexpected runtime error"),
+            IndexError("list index out of range"),
+        ):
+            exc_box["exc"] = bad_exc
+            for label, fn in targets:
+                with self.subTest(case=repr(bad_exc), target=label):
+                    with self.assertRaises(type(bad_exc)):
+                        fn()
+
+        # 2) KeyError(old_ship) MUST propagate if old_ship is STILL in dogmaItems (error from another dict).
+        dl.dogmaItems = {old_ship: object(), new_ship: object()}
+        exc_box["exc"] = KeyError(old_ship)
+        for label, fn in targets:
+            with self.subTest(case="still_in_dogmaItems", target=label):
+                with self.assertRaises(KeyError):
+                    fn()
+
+        # 3) KeyError(old_ship) MUST propagate when NOT switching ships and session/dogma/controller agree on old_ship.
+        dl.dogmaItems = {}
+        dl.shipIDBeingDisembarked = None
+        dl.shipIDBeingEmbarked = None
+        dl.current_ship_id = old_ship
+        ctrl._itemID = old_ship
+        builtins.session.shipid = old_ship
+        exc_box["exc"] = KeyError(old_ship)
+        for label, fn in targets:
+            with self.subTest(case="settled_active_ship_missing", target=label):
+                with self.assertRaises(KeyError):
+                    fn()
+
+        # 4) Simulated fitting controller KeyError MUST propagate even when session.shipid != simulated ship ID.
+        sim_dl, sim_ctrl = self._make_fake_dogma_and_controller(old_ship, new_ship, simulated=True)
+        sim_dl.dogmaItems = {}
+        builtins.session.shipid = new_ship
+        exc_box["exc"] = KeyError(old_ship)
+        sim_dp = DronePanel(sim_ctrl)
+        sim_sp = StatsPanel(sim_ctrl, drone_panel=sim_dp)
+        sim_wic = WarningIconCont(sim_ctrl)
+        for label, fn in (
+            ("EvaluateFit", lambda: fw_mod.EvaluateFit(sim_ctrl)),
+            ("WarningIconCont", lambda: sim_wic._WarningIconCont__UpdateIcon_thread()),
+            ("StatsPanel.UpdateStats", lambda: sim_sp.UpdateStats()),
+            ("DronePanel.UpdateDroneStats", lambda: sim_dp.UpdateDroneStats()),
+        ):
+            with self.subTest(case="simulated_controller", target=label):
+                with self.assertRaises(KeyError):
+                    fn()
+
+    def test_1410_meta_hook_schedules_post_import_guard_for_fitting_panels(self):
+        scheduled = []
+        sys.modules["uthread"] = types.SimpleNamespace(new=lambda fn: scheduled.append(fn))
+        hook = self.site._EvomuMetaHook()
+        for mod_name in (
+            "shipfitting.fittingWarnings",
+            "eve.client.script.ui.shared.fittingScreen.warningIconCont",
+            "eve.client.script.ui.shared.fittingScreen.statsPanel",
+            "eve.client.script.ui.shared.fittingScreen.fittingPanels.dronePanel",
+        ):
+            scheduled.clear()
+            self.assertIsNone(hook.find_module(mod_name))
+            self.assertEqual(scheduled, [self.site._install_fitting_active_ship_guard])
+
+    def test_1443_partially_initialized_fitting_modules_not_marked_until_callable_wrapped(self):
+        old_ship = 1897898652
+        new_ship = 1896955150
+        dl, ctrl = self._make_fake_dogma_and_controller(old_ship, new_ship)
+        builtins.session = types.SimpleNamespace(shipid=old_ship, stationid=60003760)
+
+        scheduled = []
+        sys.modules["uthread"] = types.SimpleNamespace(new=lambda fn: scheduled.append(fn))
+        hook = self.site._EvomuMetaHook()
+
+        # 1) Top-level import of fittingWarnings schedules the deferred uthread callback.
+        self.assertIsNone(hook.find_module("shipfitting.fittingWarnings"))
+        self.assertEqual(scheduled, [self.site._install_fitting_active_ship_guard])
+
+        # 2) Simulate partially-initialized modules in sys.modules BEFORE their callables
+        #    are bound (e.g. during nested top-level imports inside each module).
+        fw_mod = types.ModuleType("shipfitting.fittingWarnings")
+        sys.modules["shipfitting.fittingWarnings"] = fw_mod
+
+        fsvc_mod = types.ModuleType("eve.client.script.environment.fittingSvc")
+
+        class FakeFittingSvc(object):
+            pass
+
+        fsvc_mod.fittingSvc = FakeFittingSvc
+        sys.modules["eve.client.script.environment.fittingSvc"] = fsvc_mod
+
+        wic_mod = types.ModuleType("eve.client.script.ui.shared.fittingScreen.warningIconCont")
+
+        class PartialWarningIconCont(object):
+            def __init__(self, controller):
+                self.fittingController = controller
+                self.destroyed = False
+
+        wic_mod.WarningIconCont = PartialWarningIconCont
+        sys.modules["eve.client.script.ui.shared.fittingScreen.warningIconCont"] = wic_mod
+
+        # Nested import triggers _EvomuMetaHook.find_module -> _install_fitting_active_ship_guard.
+        self.assertIsNone(hook.find_module("shipfitting.someNestedDependency"))
+        self.assertFalse(self.site._install_fitting_active_ship_guard())
+        self.assertNotIn("fittingWarnings", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertNotIn("fittingSvc", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertNotIn("warningIconCont", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        # 3) Module initialization completes and binds EvaluateFit / methods.
+        def raw_evaluate_fit(_controller):
+            dl.shipIDBeingDisembarked = old_ship
+            dl.shipIDBeingEmbarked = new_ship
+            builtins.session.shipid = new_ship
+            dl.dogmaItems.pop(old_ship, None)
+            raise KeyError(old_ship)
+
+        def raw_get_fitting_dict(self):
+            return {"ship": builtins.session.shipid}
+
+        def raw_update_icon_thread(self):
+            dl.shipIDBeingDisembarked = old_ship
+            dl.shipIDBeingEmbarked = new_ship
+            builtins.session.shipid = new_ship
+            dl.dogmaItems.pop(old_ship, None)
+            raise KeyError(old_ship)
+
+        fw_mod.EvaluateFit = raw_evaluate_fit
+        FakeFittingSvc.GetFittingDictForActiveShip = raw_get_fitting_dict
+        PartialWarningIconCont._WarningIconCont__UpdateIcon_thread = raw_update_icon_thread
+
+        # 4) Execute the deferred uthread callback scheduled in step 1.
+        self.assertTrue(scheduled[0]())
+        self.assertIn("fittingWarnings", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertIn("fittingSvc", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertIn("warningIconCont", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertTrue(getattr(fw_mod.EvaluateFit, "_evomu_camera_guard", False))
+        self.assertTrue(
+            getattr(FakeFittingSvc.GetFittingDictForActiveShip, "_evomu_camera_guard", False)
+        )
+        self.assertTrue(
+            getattr(
+                PartialWarningIconCont._WarningIconCont__UpdateIcon_thread,
+                "_evomu_camera_guard",
+                False,
+            )
+        )
+
+        # Wrapped EvaluateFit and WarningIconCont suppress stale-ship KeyError cleanly.
+        self.assertIsNone(fw_mod.EvaluateFit(ctrl))
+        dl.dogmaItems = {old_ship: object()}
+        dl.shipIDBeingDisembarked = None
+        dl.shipIDBeingEmbarked = None
+        builtins.session.shipid = old_ship
+        wic = PartialWarningIconCont(ctrl)
+        self.assertIsNone(wic._WarningIconCont__UpdateIcon_thread())
+
+        # Wrapped fittingSvc.GetFittingDictForActiveShip rejects missing active ship.
+        builtins.session.shipid = None
+        with self.assertRaises(RuntimeError):
+            FakeFittingSvc().GetFittingDictForActiveShip()
+
+        # Already-wrapped callables are recorded without double-wrapping or reporting changed=True.
+        wrapped_eval = fw_mod.EvaluateFit
+        self.site._HOOKED_CAMERA_GUARD_TARGETS.discard("fittingWarnings")
+        self.assertFalse(self.site._install_fitting_active_ship_guard())
+        self.assertIn("fittingWarnings", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertIs(fw_mod.EvaluateFit, wrapped_eval)
+
+    def test_1443_stale_ship_keyerror_fails_closed_when_dogma_location_or_items_missing(self):
+        old_ship = 1897898652
+        new_ship = 1896955150
+        dl, ctrl = self._make_fake_dogma_and_controller(old_ship, new_ship)
+        builtins.session = types.SimpleNamespace(shipid=new_ship, stationid=60003760)
+        if hasattr(builtins, "sm"):
+            delattr(builtins, "sm")
+
+        class BrokenContainer(object):
+            def __contains__(self, _key):
+                raise RuntimeError("dogmaItems lookup failed")
+
+        # 1) dogmaLocation is None -> fail closed (False).
+        ctrl.dogmaLocation = None
+        self.assertFalse(
+            self.site._is_stale_ship_dogma_key_error(
+                KeyError(old_ship),
+                controller=ctrl,
+                initial_ship_ids=set([old_ship]),
+            )
+        )
+
+        # 2) dogmaItems is None -> fail closed (False) even when ship swap flags are set.
+        ctrl.dogmaLocation = dl
+        dl.shipIDBeingDisembarked = old_ship
+        dl.shipIDBeingEmbarked = new_ship
+        dl.dogmaItems = None
+        self.assertFalse(
+            self.site._is_stale_ship_dogma_key_error(
+                KeyError(old_ship),
+                controller=ctrl,
+                initial_ship_ids=set([old_ship]),
+            )
+        )
+
+        # 3) dogmaItems without __contains__ or raising in __contains__ -> fail closed (False).
+        for bad_items in (object(), BrokenContainer()):
+            dl.dogmaItems = bad_items
+            self.assertFalse(
+                self.site._is_stale_ship_dogma_key_error(
+                    KeyError(old_ship),
+                    controller=ctrl,
+                    initial_ship_ids=set([old_ship]),
+                )
+            )
+
+        # 4) End-to-end wrappers MUST re-raise KeyError when dogmaLocation or dogmaItems is None.
+        def raise_old_ship(*_args, **_kwargs):
+            raise KeyError(old_ship)
+
+        fw_mod, WarningIconCont, StatsPanel, DronePanel = self._register_fitting_modules(
+            eval_fn=raise_old_ship,
+            icon_fn=raise_old_ship,
+            stats_fn=raise_old_ship,
+            stats_drone_fn=raise_old_ship,
+            drone_panel_fn=raise_old_ship,
+        )
+        dp = DronePanel(ctrl)
+        sp = StatsPanel(ctrl, drone_panel=dp)
+        wic = WarningIconCont(ctrl)
+        targets = (
+            ("EvaluateFit", lambda: fw_mod.EvaluateFit(ctrl)),
+            ("WarningIconCont", lambda: wic._WarningIconCont__UpdateIcon_thread()),
+            ("StatsPanel.UpdateStats", lambda: sp.UpdateStats()),
+            ("DronePanel.UpdateDroneStats", lambda: dp.UpdateDroneStats()),
+        )
+
+        ctrl.dogmaLocation = None
+        for label, fn in targets:
+            with self.subTest(case="dogmaLocation_none", target=label):
+                with self.assertRaises(KeyError):
+                    fn()
+
+        ctrl.dogmaLocation = dl
+        dl.dogmaItems = None
+        for label, fn in targets:
+            with self.subTest(case="dogmaItems_none", target=label):
+                with self.assertRaises(KeyError):
+                    fn()
+
+
 if __name__ == "__main__":
     unittest.main()

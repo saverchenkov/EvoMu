@@ -143,7 +143,7 @@ fn caller_corp_id_db_first(
 }
 
 /// Returns `true` when `corp_id` cannot represent a player corporation (`<= 0` or an NPC corp).
-fn is_npc_corporation(ctx: &ServerContext, corp_id: i64) -> bool {
+pub(crate) fn is_npc_corporation(ctx: &ServerContext, corp_id: i64) -> bool {
     corp_id <= 0
         || (1_000_000..2_000_000).contains(&corp_id)
         || ctx.sde.npc_corporations.contains_key(&corp_id)
@@ -199,6 +199,44 @@ fn verify_corp_industry_job_read_access(
 }
 
 /// Returns `true` when `char_id` is an active member of player corporation `target_corp_id`
+/// in `snap` and holds CEO status or any role bit in `required_roles` from authoritative DB state.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn has_corp_monitor_access_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: Option<&SessionState>,
+    char_id: i64,
+    target_corp_id: i64,
+    location_id: Option<i64>,
+    required_roles: u64,
+    now_unix: u64,
+) -> bool {
+    if is_npc_corporation(ctx, target_corp_id) {
+        return false;
+    }
+    let char_corp = match session {
+        Some(sess) => caller_corp_id_db_first(snap, sess, char_id),
+        None => snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .unwrap_or(0),
+    };
+    if char_corp != target_corp_id {
+        return false;
+    }
+    let Some(corp) = snap.corporations.get(&target_corp_id) else {
+        return false;
+    };
+    if corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id) {
+        return false;
+    }
+    let (is_ceo, caller_roles) =
+        snap.effective_corp_roles_at(target_corp_id, char_id, location_id, 0, now_unix);
+    is_ceo || (caller_roles & required_roles) != 0
+}
+
+/// Returns `true` when `char_id` is an active member of player corporation `target_corp_id`
 /// and holds CEO status or any role bit in `required_roles` from authoritative DB state.
 #[allow(clippy::too_many_arguments)]
 fn has_corp_monitor_access(
@@ -211,21 +249,16 @@ fn has_corp_monitor_access(
     required_roles: u64,
     now_unix: u64,
 ) -> bool {
-    if is_npc_corporation(ctx, target_corp_id) {
-        return false;
-    }
-    if caller_corp_id_db_first(snap, session, char_id) != target_corp_id {
-        return false;
-    }
-    let Some(corp) = snap.corporations.get(&target_corp_id) else {
-        return false;
-    };
-    if corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id) {
-        return false;
-    }
-    let (is_ceo, caller_roles) =
-        snap.effective_corp_roles_at(target_corp_id, char_id, location_id, 0, now_unix);
-    is_ceo || (caller_roles & required_roles) != 0
+    has_corp_monitor_access_in_snap(
+        ctx,
+        snap,
+        Some(session),
+        char_id,
+        target_corp_id,
+        location_id,
+        required_roles,
+        now_unix,
+    )
 }
 
 /// Computes a read-only effective job and pause-metadata view at `now_unix` without mutating

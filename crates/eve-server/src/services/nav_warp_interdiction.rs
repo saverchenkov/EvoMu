@@ -32,33 +32,98 @@ fn nav_err(code: &'static str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
-async fn break_cloak_or_undock_invuln(
+#[derive(Debug, Clone, Copy, Default)]
+struct PreCommitCloakInvulnSnapshot {
+    had_gate_cloak: bool,
+    had_non_covert_cloak: bool,
+    had_undock_invuln: bool,
+}
+
+impl PreCommitCloakInvulnSnapshot {
+    fn from_combat_state(
+        cs: Option<&eve_destiny::CombatState>,
+        is_covert_cloaked: bool,
+    ) -> Self {
+        match cs {
+            Some(cs) => Self {
+                had_gate_cloak: cs.gate_cloak_remaining_ticks > 0,
+                had_non_covert_cloak: !is_covert_cloaked
+                    && cs.is_cloaked
+                    && !cs.is_covert_cloak
+                    && cs.gate_cloak_remaining_ticks == 0,
+                had_undock_invuln: cs.undock_invulnerable_remaining_ticks > 0,
+            },
+            None => Self::default(),
+        }
+    }
+}
+
+async fn snapshot_pre_commit_cloak_and_invuln(
+    sys_handle: &crate::system_actor::SystemHandle,
+    ship_id: i64,
+    is_covert_cloaked: bool,
+) -> PreCommitCloakInvulnSnapshot {
+    let cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
+    PreCommitCloakInvulnSnapshot::from_combat_state(cs.as_ref(), is_covert_cloaked)
+}
+
+/// Clears any remaining post-commit gate/non-covert cloak, undock invulnerability, and
+/// `ctx.location_change_invuln`, emitting at most one `OnJumpCloakCancelled` and at most one
+/// `OnInvulnCancelled` even when both `undock_invulnerable_remaining_ticks > 0` and
+/// `ctx.location_change_invuln` cancel together (`#1384`).
+async fn commit_movement_cloak_and_invuln_break(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
     char_id: i64,
     ship_id: i64,
     is_covert_cloaked: bool,
+    pre: PreCommitCloakInvulnSnapshot,
 ) {
-    if !is_covert_cloaked {
-        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
-            ctx, sys_handle, char_id, ship_id,
-        )
-        .await;
-        return;
-    }
-    let cleared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let cleared_flag = std::sync::Arc::clone(&cleared);
-    let _ = sys_handle
-        .modify_combat_state(ship_id, move |cs| {
-            if cs.undock_invulnerable_remaining_ticks > 0 {
+    let had_location_invuln = ctx
+        .location_change_invuln
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&char_id)
+        .is_some_and(|until| ctx.now_unix() < until);
+
+    let post_cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
+    let still_had_gate_cloak = post_cs
+        .as_ref()
+        .is_some_and(|cs| cs.gate_cloak_remaining_ticks > 0);
+    let still_had_non_covert_cloak = !is_covert_cloaked
+        && post_cs.as_ref().is_some_and(|cs| {
+            cs.is_cloaked && !cs.is_covert_cloak && cs.gate_cloak_remaining_ticks == 0
+        });
+    let still_had_undock_invuln = post_cs
+        .as_ref()
+        .is_some_and(|cs| cs.undock_invulnerable_remaining_ticks > 0);
+
+    let broken_cloak_post = if !is_covert_cloaked
+        && (still_had_gate_cloak || still_had_non_covert_cloak)
+    {
+        sys_handle.break_gate_cloak(ship_id).await.unwrap_or(false)
+    } else {
+        false
+    };
+    if still_had_undock_invuln {
+        let _ = sys_handle
+            .modify_combat_state(ship_id, |cs| {
                 cs.undock_invulnerable_remaining_ticks = 0;
-                cleared_flag.store(true, std::sync::atomic::Ordering::Release);
-            }
-        })
-        .await;
-    if cleared.load(std::sync::atomic::Ordering::Acquire) {
+            })
+            .await;
+    }
+
+    let emit_cloak_cancelled =
+        !is_covert_cloaked && (pre.had_gate_cloak || pre.had_non_covert_cloak || broken_cloak_post);
+    let emit_invuln_cancelled =
+        (pre.had_undock_invuln || still_had_undock_invuln || had_location_invuln) && ship_id > 0;
+    if emit_cloak_cancelled || emit_invuln_cancelled {
         crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
-            ctx, char_id, ship_id, false, true,
+            ctx,
+            char_id,
+            ship_id,
+            emit_cloak_cancelled,
+            emit_invuln_cancelled,
         );
     }
 }
@@ -483,6 +548,13 @@ pub(crate) async fn validate_pre_warp_common(
     Ok(())
 }
 
+/// Client/server warp-exit deceleration skew tolerance (`4.0 s`), matching `#1001`
+/// (`space_warp_jump::evaluate_surface_perimeter` / `is_warp_finishing_within`) so V24
+/// `autopilot.py:559-562` (`AP_ApproachDestID` -> `CmdSetSpeedFraction` + `CmdFollowBall`)
+/// does not raise `ShipAlreadyInWarp` when client `_destiny.so` exits `DSTBALL_WARP`
+/// slightly ahead of the server's 1 Hz `WarpPhase::Decelerating` dropout (`#1439`).
+pub(crate) const WARP_EXIT_APPROACH_HORIZON_SECS: f64 = 4.0;
+
 /// Rejects mid-warp trajectory redirection once a ship has exited `WarpPhase::Aligning`.
 pub(crate) fn ensure_not_in_active_warp(mode: &MovementMode) -> Result<(), BridgeRpcError> {
     if matches!(
@@ -496,6 +568,28 @@ pub(crate) fn ensure_not_in_active_warp(mode: &MovementMode) -> Result<(), Bridg
         });
     }
     Ok(())
+}
+
+/// Checks active-warp eligibility for autopilot approach RPCs (`CmdSetSpeedFraction`,
+/// `CmdFollowBall`, `#1439`).
+///
+/// - When `allow_warp_exit_noop` is `true` and `ball` is inside the final `<= 4.0 s` of
+///   `WarpPhase::Decelerating` (`is_warp_finishing_within`), returns `Ok(true)` so the caller
+///   can reply as a pure no-op without mutating active warp state.
+/// - Otherwise delegates to [`ensure_not_in_active_warp`], returning `Ok(false)` when not in
+///   active warp (`Aligning` or any sub-warp mode) or `Err(ShipAlreadyInWarp)` during
+///   `Accelerating`, `Cruising`, or early `Decelerating` (`> 4.0 s` remaining).
+pub(crate) fn check_warp_exit_approach_or_reject(
+    ball: &eve_destiny::Ball,
+    allow_warp_exit_noop: bool,
+) -> Result<bool, BridgeRpcError> {
+    if allow_warp_exit_noop
+        && eve_destiny::physics::is_warp_finishing_within(ball, WARP_EXIT_APPROACH_HORIZON_SECS)
+    {
+        return Ok(true);
+    }
+    ensure_not_in_active_warp(&ball.mode)?;
+    Ok(false)
 }
 
 /// Shared warp-initiation side effects: clears jump/undock invulnerability timers,
@@ -624,6 +718,7 @@ pub(crate) async fn execute_agency_content_warp(
     let cap_per_m = (eff_warp_cap_need * current_ball.mass) / 149_597_870_700.0;
     let req_cap = cap_per_m * requested_dist_m;
 
+    let mut cap_debit_update: Option<(f64, f64, f64)> = None;
     if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
         if (cs.max_capacitor - 250.0).abs() < 1e-6
             && (cs.capacitor - 250.0).abs() < 1e-6
@@ -654,14 +749,7 @@ pub(crate) async fn execute_agency_content_warp(
         } else {
             cs.capacitor = (cs.capacitor - req_cap).max(0.0);
         }
-        let _ = sys_handle.set_capacitor(ship_id, cs.capacitor).await;
-        let _ = ctx.notify_ship_capacitor_change(
-            char_id,
-            ship_id,
-            cs.capacitor,
-            cs.max_capacitor,
-            Some(old_cap),
-        );
+        cap_debit_update = Some((cs.capacitor, cs.max_capacitor, old_cap));
     }
 
     let warp_speed = crate::services::space_destiny::compute_pilot_warp_speed_au_s(
@@ -670,7 +758,8 @@ pub(crate) async fn execute_agency_content_warp(
         sys_id,
         current_ball.type_id,
     );
-    break_cloak_or_undock_invuln(ctx, sys_handle, char_id, ship_id, is_covert_cloaked).await;
+    let pre_cloak_invuln =
+        snapshot_pre_commit_cloak_and_invuln(sys_handle, ship_id, is_covert_cloaked).await;
     let mode = MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
     if let Err(e) = sys_handle
         .set_warp_movement_mode(
@@ -684,8 +773,10 @@ pub(crate) async fn execute_agency_content_warp(
             "WarpScrambled"
         } else if e.contains("CloakedCannotWarp") {
             "CloakedCannotWarp"
+        } else if e.contains(ERR_SHIP_ALREADY_IN_WARP) {
+            ERR_SHIP_ALREADY_IN_WARP
         } else {
-            "DestinyCommandFailed"
+            ERR_DESTINY_COMMAND_FAILED
         };
         return Err(BridgeRpcError {
             code: code.into(),
@@ -693,13 +784,33 @@ pub(crate) async fn execute_agency_content_warp(
             client_error: None,
         });
     }
+    if let Some((new_cap, max_cap, old_cap)) = cap_debit_update {
+        let _ = sys_handle.set_capacitor(ship_id, new_cap).await;
+        let _ = ctx.notify_ship_capacitor_change(
+            char_id,
+            ship_id,
+            new_cap,
+            max_cap,
+            Some(old_cap),
+        );
+    }
+    commit_movement_cloak_and_invuln_break(
+        ctx,
+        sys_handle,
+        char_id,
+        ship_id,
+        is_covert_cloaked,
+        pre_cloak_invuln,
+    )
+    .await;
     on_warp_initiated_hooks(ctx, sys_handle, char_id, ship_id, sys_id).await;
     crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);
     Ok(())
 }
 
 /// Validates subwarp navigation guards (active warp, tourney move lock, immobilization, MJD spool),
-/// breaks invulnerability and safe-logoff countdown, preserves covert cloak, and issues `GotoPoint`.
+/// issues `GotoPoint`, and after movement commits breaks invulnerability and safe-logoff countdown
+/// while preserving covert cloak.
 pub(crate) async fn execute_subwarp_goto_point(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
@@ -726,7 +837,20 @@ pub(crate) async fn execute_subwarp_goto_point(
             "Ship is immobilized while superweapon warmup or 5-minute Lance caster lock is active",
         ));
     }
-    if current_ball.max_velocity <= 1e-9
+    let post_sync_ball = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b);
+    if let Some(ref b) = post_sync_ball {
+        ensure_not_in_active_warp(&b.mode)?;
+    }
+    let post_sync_max_velocity = post_sync_ball
+        .as_ref()
+        .map(|b| b.max_velocity)
+        .unwrap_or(current_ball.max_velocity);
+    if post_sync_max_velocity <= 1e-9
         && (crate::services::space_navigation_advanced::check_immobilizing_module_active(
             ctx, ship_id, "maneuver",
         )
@@ -745,22 +869,14 @@ pub(crate) async fn execute_subwarp_goto_point(
     )
     .await?;
 
-    let is_covert_cloaked = sys_handle
-        .get_combat_state(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|cs| {
-            cs.is_cloaked && cs.is_covert_cloak && cs.gate_cloak_remaining_ticks == 0
-        });
-
-    crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
-    let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
-        ctx,
-        char_id,
-        "SAFE_LOGOFF_ABORT_MOVING",
+    let pre_cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
+    let is_covert_cloaked = pre_cs.as_ref().is_some_and(|cs| {
+        cs.is_cloaked && cs.is_covert_cloak && cs.gate_cloak_remaining_ticks == 0
+    });
+    let pre_cloak_invuln = PreCommitCloakInvulnSnapshot::from_combat_state(
+        pre_cs.as_ref(),
+        is_covert_cloaked,
     );
-    break_cloak_or_undock_invuln(ctx, sys_handle, char_id, ship_id, is_covert_cloaked).await;
 
     sys_handle.goto_point(ship_id, dest_pos).await.map_err(|e| {
         let code = if e.starts_with(ERR_SHIP_ALREADY_IN_WARP) {
@@ -771,8 +887,27 @@ pub(crate) async fn execute_subwarp_goto_point(
         nav_err(code, e)
     })?;
 
+    commit_movement_cloak_and_invuln_break(
+        ctx,
+        sys_handle,
+        char_id,
+        ship_id,
+        is_covert_cloaked,
+        pre_cloak_invuln,
+    )
+    .await;
+    let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
+        ctx,
+        char_id,
+        "SAFE_LOGOFF_ABORT_MOVING",
+    );
+
+    let effective_mode = post_sync_ball
+        .as_ref()
+        .map(|b| &b.mode)
+        .unwrap_or(&current_ball.mode);
     if matches!(
-        current_ball.mode,
+        effective_mode,
         MovementMode::Warp {
             phase: eve_destiny::WarpPhase::Aligning,
             ..
@@ -1045,10 +1180,8 @@ pub async fn handle_use_warp_vector(
         sys_id,
         ship_ball.type_id,
     );
-    break_cloak_or_undock_invuln(
-        ctx,
+    let pre_cloak_invuln = snapshot_pre_commit_cloak_and_invuln(
         &sys_handle,
-        char_id,
         ship_id,
         validated.is_covert_cloaked,
     )
@@ -1069,6 +1202,15 @@ pub async fn handle_use_warp_vector(
             client_error: None,
         });
     }
+    commit_movement_cloak_and_invuln_break(
+        ctx,
+        &sys_handle,
+        char_id,
+        ship_id,
+        validated.is_covert_cloaked,
+        pre_cloak_invuln,
+    )
+    .await;
     on_warp_initiated_hooks(ctx, &sys_handle, char_id, ship_id, sys_id).await;
 
     crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);

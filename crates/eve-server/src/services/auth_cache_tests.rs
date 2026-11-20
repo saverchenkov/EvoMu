@@ -2376,3 +2376,185 @@ async fn authentication_login_displacement_defers_logoff_for_live_session_and_lo
         "displacing a headless session without a closer must still log off synchronously"
     );
 }
+
+#[tokio::test]
+async fn gm_setskill_and_giveskill_emptying_queue_removes_key_and_passes_sqlite_pre_roundtrip() {
+    let ctx = test_ctx();
+    let base_now = 1_800_000_000_u64;
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_now),
+    ));
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
+    sess.role = service_roles::ROLE_GM_MASK;
+    let kw = HashMap::new();
+    ctx.db
+        .acquire_online_lock(uid, sess.session_id.max(1), Some(cid), true, base_now)
+        .expect("online lock cid");
+
+    // Seed prerequisites cleanly via /giveskill.
+    for cmd in ["/giveskill 3300 1", "/giveskill 3327 5"] {
+        let _ = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String(cmd.into())],
+                &kw,
+                None,
+            )
+            .await
+            .expect(cmd);
+    }
+
+    let assert_removed_and_pre_clean = |ctx: &ServerContext, label: &str| {
+        ctx.db.with_snapshot(|snap| {
+            assert!(
+                !snap.skill_queues.contains_key(&cid),
+                "{label}: snap.skill_queues must remove cid instead of retaining empty Vec"
+            );
+        });
+        let diffs = eve_testkit::pre_check::check_persist_reload_equivalence(&ctx.db)
+            .expect("SQLite PRE check");
+        assert!(
+            diffs.is_empty(),
+            "{label}: expected zero SQLite PRE diffs, got: {diffs:?}"
+        );
+        let reloaded = ctx
+            .db
+            .reload_snapshot_from_sqlite()
+            .expect("reload snapshot from SQLite");
+        assert!(
+            !reloaded.skill_queues.contains_key(&cid),
+            "{label}: reloaded snapshot must not contain cid in skill_queues"
+        );
+    };
+
+    // 1. /giveskill completing the sole queued entry removes cid from snap.skill_queues.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.paused_skill_queues.remove(&cid);
+        snap.skill_queues.insert(
+            cid,
+            vec![eve_db::SkillQueueEntry {
+                type_id: 3300,
+                target_level: 2,
+                start_sp: 250.0,
+                end_sp: 1_414.213_562,
+                duration_seconds: 120.0,
+                started_at_unix: Some(base_now),
+            }],
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill 3300 2".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/giveskill 3300 2");
+    assert!(
+        ctx.drain_notifications_for_char(cid)
+            .iter()
+            .any(|n| n.event == "OnNewSkillQueueSaved"),
+        "/giveskill emptying queue must emit OnNewSkillQueueSaved"
+    );
+    assert_removed_and_pre_clean(&ctx, "/giveskill completing sole queued entry");
+
+    // 2. /setskill removing prerequisite Spaceship Command (3327 -> 0) drops sole dependent
+    //    queued entry Amarr Frigate (3331 L1) and removes cid from snap.skill_queues.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skill_queues.insert(
+            cid,
+            vec![eve_db::SkillQueueEntry {
+                type_id: 3331,
+                target_level: 1,
+                start_sp: 0.0,
+                end_sp: 500.0,
+                duration_seconds: 60.0,
+                started_at_unix: Some(base_now),
+            }],
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/setskill 3327 0".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/setskill 3327 0");
+    assert!(
+        ctx.drain_notifications_for_char(cid)
+            .iter()
+            .any(|n| n.event == "OnNewSkillQueueSaved"),
+        "/setskill dropping prerequisite-dependent sole entry must emit OnNewSkillQueueSaved"
+    );
+    assert_removed_and_pre_clean(&ctx, "/setskill dropping prerequisite-dependent sole entry");
+
+    // 3. /setskill removing a queued skill directly (3300 -> 0) empties the queue and removes key.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skill_queues.insert(
+            cid,
+            vec![eve_db::SkillQueueEntry {
+                type_id: 3300,
+                target_level: 3,
+                start_sp: 1_414.213_562,
+                end_sp: 8_000.0,
+                duration_seconds: 300.0,
+                started_at_unix: Some(base_now),
+            }],
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/setskill 3300 0".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/setskill 3300 0");
+    assert!(
+        ctx.drain_notifications_for_char(cid)
+            .iter()
+            .any(|n| n.event == "OnNewSkillQueueSaved"),
+        "/setskill 0 removing sole queued skill must emit OnNewSkillQueueSaved"
+    );
+    assert_removed_and_pre_clean(&ctx, "/setskill 0 removing sole queued skill");
+
+    // 4. Stale pre-existing empty Vec in snap.skill_queues is also cleaned up on /giveskill.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skill_queues.insert(cid, Vec::new());
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill 3300 1".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/giveskill 3300 1 on stale empty queue");
+    assert_removed_and_pre_clean(&ctx, "/giveskill cleaning pre-existing empty Vec");
+}

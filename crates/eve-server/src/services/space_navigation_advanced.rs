@@ -458,21 +458,43 @@ fn zarzakh_gate_toll_explicit_confirm(args: &[PyRep], kwargs: &HashMap<String, P
 }
 
 fn ask_confirm_zarzakh_gate_toll_error(ship_id: i64, toll: i64, mass: f64) -> BridgeRpcError {
-    BridgeRpcError {
-        code: "AskConfirmZarzakhGateToll".into(),
-        message: format!(
-            "Confirm Zarzakh stargate transit toll of {toll} ISK for ship {ship_id} (effective mass {mass:.0} kg)"
-        ),
-        client_error: None,
-    }
+    let message = format!(
+        "Confirm Zarzakh stargate transit toll of {toll} ISK for ship {ship_id} (effective mass {mass:.0} kg)"
+    );
+    BridgeRpcError::with_client_error(
+        "AskConfirmZarzakhGateToll",
+        message.clone(),
+        eve_proto::ClientError::CustomInfo(message),
+    )
 }
 
-fn zarzakh_toll_rpc_error(code: &str) -> BridgeRpcError {
-    BridgeRpcError {
-        code: code.into(),
-        message: code.into(),
-        client_error: None,
-    }
+fn zarzakh_toll_declined_error() -> BridgeRpcError {
+    let message = "Zarzakh stargate transit toll was declined";
+    BridgeRpcError::with_client_error(
+        "ZarzakhGateTollDeclined",
+        message,
+        eve_proto::ClientError::CustomInfo(message.into()),
+    )
+}
+
+fn zarzakh_toll_character_not_found_error(char_id: i64) -> BridgeRpcError {
+    let message = format!("Character {char_id} not found for Zarzakh stargate transit toll");
+    BridgeRpcError::with_client_error(
+        "CharacterNotFound",
+        message.clone(),
+        eve_proto::ClientError::CustomInfo(message),
+    )
+}
+
+fn zarzakh_toll_insufficient_funds_error(toll_cents: eve_db::IskCents) -> BridgeRpcError {
+    BridgeRpcError::with_client_error(
+        "InsufficientFundsForZarzakhGateToll",
+        format!(
+            "Insufficient ISK for Zarzakh stargate transit toll ({:.2} ISK required)",
+            toll_cents.to_wire_f64()
+        ),
+        eve_proto::ClientError::user(eve_proto::UserErrorKey::NotEnoughMoney),
+    )
 }
 
 /// Read-only pre-validation of Zarzakh entry gate toll before lazy stargate activation or ship
@@ -506,7 +528,7 @@ pub fn prevalidate_zarzakh_gate_toll(
         crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
             st.zarzakh_toll_quotes.remove(&char_id);
         });
-        return Err(zarzakh_toll_rpc_error("ZarzakhGateTollDeclined"));
+        return Err(zarzakh_toll_declined_error());
     }
 
     let (mass, toll, toll_cents) = compute_zarzakh_gate_toll(ctx, ship_id, current_ball);
@@ -543,11 +565,11 @@ pub fn prevalidate_zarzakh_gate_toll(
         let c = s
             .characters
             .get(&char_id)
-            .ok_or_else(|| zarzakh_toll_rpc_error("CharacterNotFound"))?;
+            .ok_or_else(|| zarzakh_toll_character_not_found_error(char_id))?;
         if c.balance < effective_toll_cents
             || c.balance.checked_sub(effective_toll_cents).is_none()
         {
-            return Err(zarzakh_toll_rpc_error("InsufficientFundsForZarzakhGateToll"));
+            return Err(zarzakh_toll_insufficient_funds_error(effective_toll_cents));
         }
         Ok(())
     });
@@ -585,7 +607,7 @@ pub fn process_zarzakh_gate_toll_with_amount(
             st.zarzakh_toll_quotes.remove(&char_id);
         });
         crate::services::cluster_macho_misc_services::persist_misc_state(ctx);
-        return Err(BridgeRpcError::user_error("ZarzakhGateTollDeclined"));
+        return Err(zarzakh_toll_declined_error());
     }
 
     let (mass, toll, toll_cents) = compute_zarzakh_gate_toll(ctx, ship_id, current_ball);
@@ -625,16 +647,14 @@ pub fn process_zarzakh_gate_toll_with_amount(
         let c = s
             .characters
             .get_mut(&char_id)
-            .ok_or_else(|| BridgeRpcError::user_error("CharacterNotFound"))?;
+            .ok_or_else(|| zarzakh_toll_character_not_found_error(char_id))?;
         if c.balance < effective_toll_cents {
-            return Err(BridgeRpcError::user_error(
-                "InsufficientFundsForZarzakhGateToll",
-            ));
+            return Err(zarzakh_toll_insufficient_funds_error(effective_toll_cents));
         }
         c.balance = c
             .balance
             .checked_sub(effective_toll_cents)
-            .ok_or_else(|| BridgeRpcError::user_error("InsufficientFundsForZarzakhGateToll"))?;
+            .ok_or_else(|| zarzakh_toll_insufficient_funds_error(effective_toll_cents))?;
         let bal_after = c.balance;
         s.next_entity_id += 1;
         let j_id = s.next_entity_id;
