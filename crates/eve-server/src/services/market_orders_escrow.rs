@@ -26,6 +26,16 @@ fn is_container_item(ctx: &ServerContext, snap: &eve_db::WorldStateSnapshot, ite
     })
 }
 
+fn checked_order_total(order_price: IskCents, quantity_i32: i32) -> Result<IskCents, BridgeRpcError> {
+    order_price
+        .checked_mul_qty(quantity_i32 as i64)
+        .ok_or_else(|| BridgeRpcError {
+            code: "MarketOrderOverflow".into(),
+            message: "Order total cost overflows 64-bit ISK cents".into(),
+            client_error: None,
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_multi_sell_entry_source(
     ctx: &ServerContext,
@@ -42,7 +52,7 @@ fn resolve_multi_sell_entry_source(
     quantity_i32: i32,
     sim_vault_plex: &mut i64,
     sim_item_qty: &mut HashMap<i64, i32>,
-) -> Result<Option<i64>, BridgeRpcError> {
+) -> Result<Option<InventoryItemRecord>, BridgeRpcError> {
     let is_sellable_item = |i: &InventoryItemRecord| {
         market_orders_corp_auth::is_item_sellable_on_market(
             snap, ext, i, char_id, caller_corp_id, use_corp, station_id, session_ship_id, now_unix,
@@ -199,48 +209,41 @@ fn resolve_multi_sell_entry_source(
         });
     }
     sim_item_qty.insert(item_id, rem_qty - quantity_i32);
-    Ok(Some(item_id))
+    Ok(Some(item.clone()))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_multi_sell_station_and_items(
+fn resolve_multi_sell_station_corp_and_damage(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
+    upwell_opt: Option<(i64, f64, Option<i64>)>,
     docked_station_id: i64,
     region_id: u32,
     char_id: i64,
-    session_ship_id: Option<i64>,
+    station_owner_corp: i64,
     is_structure: bool,
     use_corp: bool,
     account_key: u16,
     now_unix: u64,
     damaged_fitted_ships: &std::collections::HashSet<i64>,
     parsed_items: &[(i64, TypeId, i64, IskCents, i32, i64)],
-) -> Result<(), BridgeRpcError> {
-    let upwell_opt = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
-        ctx, snap, docked_station_id, char_id, now_unix, "MarketHubOffline",
-    )?;
-    if is_structure {
-        let Some(_) = upwell_opt else {
-            return Err(BridgeRpcError {
-                code: "InvalidMarketStation".into(),
-                message: format!("Station {docked_station_id} is not in region {region_id}"),
-                client_error: None,
-            });
-        };
-        if !snap
-            .structures
+) -> Result<(i64, Option<i64>, i64), BridgeRpcError> {
+    let (owner_corp_id, pilot_bps_opt) = if !is_structure {
+        (station_owner_corp, None)
+    } else if let Some((st_corp_id, _, pilot_bps)) = upwell_opt.filter(|_| {
+        snap.structures
             .get(&docked_station_id)
             .and_then(|st| ctx.sde.solar_systems.get(&st.solar_system_id))
             .is_some_and(|sys| sys.region_id == region_id)
-        {
-            return Err(BridgeRpcError {
-                code: "InvalidMarketStation".into(),
-                message: format!("Structure {docked_station_id} is not in region {region_id}"),
-                client_error: None,
-            });
-        }
-    }
+    }) {
+        (st_corp_id, pilot_bps)
+    } else {
+        return Err(BridgeRpcError {
+            code: "InvalidMarketStation".into(),
+            message: format!("Station {docked_station_id} is not in region {region_id}"),
+            client_error: None,
+        });
+    };
     let caller_corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
     if use_corp {
         market_orders_corp_auth::require_corp_market_order_role(
@@ -266,17 +269,48 @@ fn validate_multi_sell_station_and_items(
             client_error: None,
         });
     }
+    Ok((owner_corp_id, pilot_bps_opt, caller_corp_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_multi_sell_station_and_items(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    docked_station_id: i64,
+    region_id: u32,
+    char_id: i64,
+    station_owner_corp: i64,
+    session_ship_id: Option<i64>,
+    is_structure: bool,
+    use_corp: bool,
+    account_key: u16,
+    now_unix: u64,
+    damaged_fitted_ships: &std::collections::HashSet<i64>,
+    parsed_items: &[(i64, TypeId, i64, IskCents, i32, i64)],
+) -> Result<(), BridgeRpcError> {
+    let upwell_opt = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+        ctx, snap, docked_station_id, char_id, now_unix, "MarketHubOffline",
+    )?;
+    let (_, _, caller_corp_id) = resolve_multi_sell_station_corp_and_damage(
+        ctx,
+        snap,
+        upwell_opt,
+        docked_station_id,
+        region_id,
+        char_id,
+        station_owner_corp,
+        is_structure,
+        use_corp,
+        account_key,
+        now_unix,
+        damaged_fitted_ships,
+        parsed_items,
+    )?;
     let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
     let mut sim_vault_plex = snap.plex_vault_balance(char_id);
     let mut sim_item_qty = HashMap::new();
     for &(station_id, type_id, raw_item_id, order_price, quantity_i32, _) in parsed_items {
-        let _ = order_price
-            .checked_mul_qty(quantity_i32 as i64)
-            .ok_or_else(|| BridgeRpcError {
-                code: "MarketOrderOverflow".into(),
-                message: "Order total cost overflows 64-bit ISK cents".into(),
-                client_error: None,
-            })?;
+        let _ = checked_order_total(order_price, quantity_i32)?;
         let _ = resolve_multi_sell_entry_source(
             ctx,
             snap,
@@ -557,6 +591,7 @@ pub fn handle_orders_escrow(
                     docked_station_id,
                     region_id,
                     char_id,
+                    station_owner_corp,
                     session.ship_id,
                     is_structure,
                     use_corp,
@@ -575,26 +610,23 @@ pub fn handle_orders_escrow(
                 let upwell_opt = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
                     ctx, snap, docked_station_id, char_id, now_unix, "MarketHubOffline",
                 )?;
-                let (owner_corp_id, pilot_bps_opt) = if !is_structure {
-                    (station_owner_corp, None)
-                } else if let Some((st_corp_id, _, pilot_bps)) = upwell_opt {
-                    if !snap.structures.get(&docked_station_id).and_then(|st| ctx.sde.solar_systems.get(&st.solar_system_id)).is_some_and(|sys| sys.region_id == region_id) {
-                        return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Structure {docked_station_id} is not in region {region_id}"), client_error: None });
-                    }
-                    (st_corp_id, pilot_bps)
-                } else {
-                    return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {docked_station_id} is not in region {region_id}"), client_error: None });
-                };
-                let caller_corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let (owner_corp_id, pilot_bps_opt, caller_corp_id) = resolve_multi_sell_station_corp_and_damage(
+                    ctx,
+                    snap,
+                    upwell_opt,
+                    docked_station_id,
+                    region_id,
+                    char_id,
+                    station_owner_corp,
+                    is_structure,
+                    use_corp,
+                    account_key,
+                    now_unix,
+                    &damaged_fitted_ships,
+                    &parsed_items,
+                )?;
                 let div_id = (account_key.saturating_sub(999)).clamp(1, 7) as u8;
                 if use_corp {
-                    market_orders_corp_auth::require_corp_market_order_role(
-                        snap,
-                        caller_corp_id,
-                        char_id,
-                        account_key,
-                        now_unix,
-                    )?;
                     if let Some(corp) = snap.corporations.get_mut(&caller_corp_id) {
                         corp.ensure_wallet_divisions();
                     }
@@ -631,11 +663,6 @@ pub fn handle_orders_escrow(
                 };
                 let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
 
-                let damaged_count = crate::services::notify_emitters_skills_trade_godma::count_damaged_sell_items(snap, &damaged_fitted_ships, char_id, caller_corp_id, use_corp, &parsed_items);
-                if damaged_count > 0 {
-                    return Err(BridgeRpcError { code: "CantRepackageDamagedItem".into(), message: damaged_count.to_string(), client_error: None });
-                }
-
                 let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
                 let mut order_ids = Vec::with_capacity(parsed_items.len());
                 let mut total_broker_fee = IskCents(0);
@@ -651,14 +678,8 @@ pub fn handle_orders_escrow(
                 let mut live_vault_unused = snap.plex_vault_balance(char_id);
                 let mut empty_sim = HashMap::new();
                 for (station_id, type_id, raw_item_id, order_price, quantity_i32, item_dur) in parsed_items {
-                    let _ = order_price
-                        .checked_mul_qty(quantity_i32 as i64)
-                        .ok_or_else(|| BridgeRpcError {
-                            code: "MarketOrderOverflow".into(),
-                            message: "Order total cost overflows 64-bit ISK cents".into(),
-                            client_error: None,
-                        })?;
-                    let resolved_item_id = resolve_multi_sell_entry_source(
+                    let _ = checked_order_total(order_price, quantity_i32)?;
+                    let resolved_item = resolve_multi_sell_entry_source(
                         ctx,
                         snap,
                         &ext,
@@ -674,14 +695,8 @@ pub fn handle_orders_escrow(
                         &mut live_vault_unused,
                         &mut empty_sim,
                     )?;
-                    if let Some(item_id) = resolved_item_id {
-                        let Some(item) = snap.items.get(&item_id).cloned() else {
-                            return Err(BridgeRpcError {
-                                code: "InsufficientInventoryForSellOrder".into(),
-                                message: format!("Item {item_id} not found in seller inventory"),
-                                client_error: None,
-                            });
-                        };
+                    if let Some(item) = resolved_item {
+                        let item_id = item.item_id;
                         let old_qty = item.quantity;
                         let old_loc = item.location_id;
                         let old_flag = item.flag;
@@ -1640,11 +1655,7 @@ pub fn handle_orders_escrow(
                         let desired = rem.min(avail);
                         let fill_qty = desired.min(max_affordable);
                         if fill_qty < desired { stopped_by_isk = true; }
-                        let fill_gross = ask_price.checked_mul_qty(fill_qty as i64).ok_or_else(|| BridgeRpcError {
-                            code: "MarketOrderOverflow".into(),
-                            message: "Order fill cost overflowed ISK bounds".into(),
-                            client_error: None,
-                        })?;
+                        let fill_gross = checked_order_total(ask_price, fill_qty)?;
                         avail_isk = avail_isk.checked_sub(fill_gross).unwrap_or(IskCents(0));
                         total_cost = total_cost.checked_add(fill_gross).ok_or_else(|| BridgeRpcError {
                             code: "MarketOrderOverflow".into(),

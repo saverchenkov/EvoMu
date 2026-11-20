@@ -551,6 +551,32 @@ fn find_sellable_plex_hangar_stack(
         .map(|i| i.item_id)
 }
 
+fn insufficient_plex_balance_error(vault_plex: i64, quantity: i64) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "InsufficientPlexBalance".into(),
+        message: format!(
+            "Insufficient PLEX in vault ({vault_plex}) or hangar to sell {quantity} PLEX"
+        ),
+        client_error: None,
+    }
+}
+
+fn resolve_plex_sell_source_checked(
+    snap: &eve_db::WorldStateSnapshot,
+    station_id: i64,
+    char_id: i64,
+    quantity: i64,
+    qty_i32: i32,
+) -> Result<Option<i64>, BridgeRpcError> {
+    let vault_plex = snap.plex_vault_balance(char_id);
+    if vault_plex >= quantity {
+        return Ok(None);
+    }
+    find_sellable_plex_hangar_stack(snap, char_id, station_id, qty_i32)
+        .map(Some)
+        .ok_or_else(|| insufficient_plex_balance_error(vault_plex, quantity))
+}
+
 fn validate_plex_sell_preconditions(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -563,16 +589,7 @@ fn validate_plex_sell_preconditions(
     let _ = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
         ctx, snap, station_id, char_id, now_unix, "MarketHubOffline",
     )?;
-    let vault_plex = snap.plex_vault_balance(char_id);
-    if vault_plex < quantity && find_sellable_plex_hangar_stack(snap, char_id, station_id, qty_i32).is_none() {
-        return Err(BridgeRpcError {
-            code: "InsufficientPlexBalance".into(),
-            message: format!(
-                "Insufficient PLEX in vault ({vault_plex}) or hangar to sell {quantity} PLEX"
-            ),
-            client_error: None,
-        });
-    }
+    let _ = resolve_plex_sell_source_checked(snap, station_id, char_id, quantity, qty_i32)?;
     Ok(())
 }
 
@@ -1333,29 +1350,17 @@ pub fn handle(
 
                     // Consume PLEX from character's PLEX Vault (`plex_balance`) or station hangar item (`44992`)
                     let vault_plex = snap.plex_vault_balance(char_id);
-                    if vault_plex >= quantity {
-                        let _ = snap.adjust_plex_vault(char_id, -quantity);
-                    } else {
-                        let Some(hid) = find_sellable_plex_hangar_stack(snap, char_id, station_id, qty_i32) else {
-                            return Err(BridgeRpcError {
-                                code: "InsufficientPlexBalance".into(),
-                                message: format!(
-                                    "Insufficient PLEX in vault ({vault_plex}) or hangar to sell {quantity} PLEX"
-                                ),
-                                client_error: None,
-                            });
-                        };
-                        let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
-                        opts.required_location_id = Some(station_id);
-                        opts.required_flag = Some(InventoryFlag::Hangar);
-                        snap.consume_exact_item_quantity(hid, qty_i32, opts)
-                            .map_err(|_| BridgeRpcError {
-                                code: "InsufficientPlexBalance".into(),
-                                message: format!(
-                                    "Insufficient unlocked PLEX in vault ({vault_plex}) or hangar to sell {quantity} PLEX"
-                                ),
-                                client_error: None,
-                            })?;
+                    match resolve_plex_sell_source_checked(snap, station_id, char_id, quantity, qty_i32)? {
+                        None => {
+                            let _ = snap.adjust_plex_vault(char_id, -quantity);
+                        }
+                        Some(hid) => {
+                            let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
+                            opts.required_location_id = Some(station_id);
+                            opts.required_flag = Some(InventoryFlag::Hangar);
+                            snap.consume_exact_item_quantity(hid, qty_i32, opts)
+                                .map_err(|_| insufficient_plex_balance_error(vault_plex, quantity))?;
+                        }
                     }
 
                     // Match globally against any resting PLEX buy orders across all regions

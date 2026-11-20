@@ -464,33 +464,34 @@ pub(crate) fn sweep_and_notify_expired(ctx: &ServerContext) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_place_buy_order_station_and_corp_access(
-    ctx: &ServerContext,
+fn resolve_place_buy_order_station_and_corp_access(
     snap: &eve_db::WorldStateSnapshot,
     station_id: i64,
     region_id: u32,
     char_id: i64,
-    station_known_in_sde: bool,
+    station_owner_corp: Option<i64>,
+    upwell_opt: Option<(i64, f64, Option<i64>)>,
     use_corp: bool,
     account_key: u16,
     now_unix: u64,
-) -> Result<(), BridgeRpcError> {
-    let upwell_opt = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
-        ctx, snap, station_id, char_id, now_unix, "MarketHubOffline",
-    )?;
-    if !station_known_in_sde && upwell_opt.is_none() {
+) -> Result<(i64, Option<(i64, f64, Option<i64>)>, i64), BridgeRpcError> {
+    let (owner_corp_id, structure_broker_opt) = if let Some(owner_corp) = station_owner_corp {
+        (owner_corp, None)
+    } else if let Some((st_corp_id, st_rate, pilot_bps)) = upwell_opt {
+        (st_corp_id, Some((st_corp_id, st_rate, pilot_bps)))
+    } else {
         return Err(BridgeRpcError {
             code: "InvalidMarketStation".into(),
             message: format!("Station {station_id} is not in region {region_id}"),
             client_error: None,
         });
-    }
+    };
+    let caller_corp_id = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .unwrap_or(0);
     if use_corp {
-        let caller_corp_id = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.corporation_id)
-            .unwrap_or(0);
         market_orders_corp_auth::require_corp_market_order_role(
             snap,
             caller_corp_id,
@@ -499,7 +500,7 @@ fn validate_place_buy_order_station_and_corp_access(
             now_unix,
         )?;
     }
-    Ok(())
+    Ok((owner_corp_id, structure_broker_opt, caller_corp_id))
 }
 
 pub fn handle(
@@ -1102,18 +1103,23 @@ pub fn handle(
                 }));
             }
             let now_unix = ctx.now_unix();
+            let station_owner_corp_opt = station_info.map(|s| s.owner_corporation_id);
             if let Err(e) = ctx.db.with_snapshot(|snap| {
-                validate_place_buy_order_station_and_corp_access(
-                    ctx,
+                let upwell_opt = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                    ctx, snap, station_id, char_id, now_unix, "MarketHubOffline",
+                )?;
+                let _ = resolve_place_buy_order_station_and_corp_access(
                     snap,
                     station_id,
                     region_id,
                     char_id,
-                    station_info.is_some(),
+                    station_owner_corp_opt,
+                    upwell_opt,
                     use_corp,
                     account_key,
                     now_unix,
-                )
+                )?;
+                Ok::<(), BridgeRpcError>(())
             }) {
                 return Some(Err(e));
             }
@@ -1124,37 +1130,26 @@ pub fn handle(
                 let upwell_opt = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
                     ctx, snap, station_id, char_id, now_unix, "MarketHubOffline",
                 )?;
-                let (owner_corp_id, structure_broker_opt) = if let Some(station_def) = station_info {
-                    (station_def.owner_corporation_id, None)
-                } else if let Some((st_corp_id, st_rate, pilot_bps)) = upwell_opt {
-                    (st_corp_id, Some((st_corp_id, st_rate, pilot_bps)))
-                } else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidMarketStation".into(),
-                        message: format!("Station {station_id} is not in region {region_id}"),
-                        client_error: None,
-                    });
-                };
+                let (owner_corp_id, structure_broker_opt, caller_corp_id) =
+                    resolve_place_buy_order_station_and_corp_access(
+                        snap,
+                        station_id,
+                        region_id,
+                        char_id,
+                        station_owner_corp_opt,
+                        upwell_opt,
+                        use_corp,
+                        account_key,
+                        now_unix,
+                    )?;
                 let broker_rate = if let Some((_, st_rate, _)) = structure_broker_opt {
                     st_rate
                 } else {
                     let tier_mult = 1.0 - (f64::from(m_tier) * 0.10).min(0.50);
                     compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing) * tier_mult
                 };
-                let caller_corp_id = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
                 let div_id = (account_key.saturating_sub(999)).clamp(1, 7) as u8;
                 if use_corp {
-                    market_orders_corp_auth::require_corp_market_order_role(
-                        snap,
-                        caller_corp_id,
-                        char_id,
-                        account_key,
-                        now_unix,
-                    )?;
                     if let Some(corp) = snap.corporations.get_mut(&caller_corp_id) {
                         corp.ensure_wallet_divisions();
                     }
