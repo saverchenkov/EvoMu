@@ -1362,9 +1362,10 @@ fn is_structure_view_outside_bootstrapped(ctx: &ServerContext, session: &Session
             })
 }
 
-/// Clears View Outside wire/stream/guard state when a pilot releases their last `beyonce`
-/// binding while still structure-docked (`Enter Hangar`, `#1448` / `#1461`).
-fn detach_structure_view_outside_on_beyonce_release(
+/// Clears View Outside wire/stream/guard state for `session_id` without pruning `"beyonce"`
+/// bindings (shared by docked release reconciliation and post-`Undock` reconciliation where
+/// `station_structure::handle` already minted a fresh post-undock `"beyonce"` object).
+fn detach_structure_view_outside_wire_state(
     ctx: &ServerContext,
     session_id: u64,
     char_id: Option<i64>,
@@ -1378,12 +1379,70 @@ fn detach_structure_view_outside_on_beyonce_release(
     ctx.systems
         .clear_explicit_update_state_guards_for_session(session_id);
     ctx.clear_pending_structure_view_outside_set_state_for_session(session_id);
-    ctx.prune_bound_service_without_notify(session_id, "beyonce");
     if let Some(cid) = char_id {
         ctx.clear_space_ballpark_bootstrapped_for_session(session_id, cid);
         crate::services::space_destiny::reset_update_state_rate_limit(ctx, session_id, cid);
     }
     ctx.flight_recorder.record_wire_state(wire_state);
+}
+
+/// Clears View Outside wire/stream/guard state when a pilot releases their last `beyonce`
+/// binding while still structure-docked (`Enter Hangar`, `#1448` / `#1461`).
+fn detach_structure_view_outside_on_beyonce_release(
+    ctx: &ServerContext,
+    session_id: u64,
+    char_id: Option<i64>,
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    sys_rx: &mut TickRxSlot<'_>,
+    subscribed_sys_id: &mut Option<u32>,
+) {
+    detach_structure_view_outside_wire_state(
+        ctx,
+        session_id,
+        char_id,
+        wire_state,
+        sys_rx,
+        subscribed_sys_id,
+    );
+    ctx.prune_bound_service_without_notify(session_id, "beyonce");
+}
+
+#[cfg(test)]
+type PreUndockDispatchHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+static PRE_UNDOCK_DISPATCH_HOOKS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<(u64, i64), PreUndockDispatchHook>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn set_pre_undock_dispatch_hook_for_test(
+    ctx: &ServerContext,
+    char_id: i64,
+    hook: Option<PreUndockDispatchHook>,
+) {
+    let map = PRE_UNDOCK_DISPATCH_HOOKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    match hook {
+        Some(h) => {
+            guard.insert((ctx.instance_id, char_id), h);
+        }
+        None => {
+            guard.remove(&(ctx.instance_id, char_id));
+        }
+    }
+}
+
+#[cfg(test)]
+fn run_pre_undock_dispatch_hook_for_test(ctx: &ServerContext, char_id: i64) {
+    let hook = PRE_UNDOCK_DISPATCH_HOOKS.get().and_then(|map| {
+        map.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(ctx.instance_id, char_id))
+    });
+    if let Some(h) = hook {
+        h();
+    }
 }
 
 struct InternalCallReqWireRefs<'a> {
@@ -1650,6 +1709,15 @@ async fn execute_call_req_wire_inner(
         }
     }
     let had_beyonce_before_rpc = ctx.has_bound_service(session.session_id, "beyonce");
+    #[cfg(test)]
+    if matches!(
+        (effective_service, method),
+        ("ship" | "structureDocking" | "stationSvc", "Undock")
+    ) {
+        if let Some(cid) = session.character_id {
+            run_pre_undock_dispatch_hook_for_test(ctx, cid);
+        }
+    }
     let rpc_res = crate::router::dispatch::with_active_rpc_call_id(
         call_id,
         ctx.dispatch_rpc(
@@ -1730,9 +1798,9 @@ async fn execute_call_req_wire_inner(
 
     let owns_char_session = session_owns_char_notifications(ctx, session);
     // Reconcile mid-RPC Upwell `Undock` races where Quasar `Activated("hangar")` cleared
-    // `space_ballpark_bootstrapped` after pre-RPC reconciliation (`1612`) and before
-    // `station_structure::undock_character` checked `was_view_outside`, so `macho_listener`
-    // matches `station_structure`'s Hangar -> Undock path instead of emitting premature `SetState`.
+    // `space_ballpark_bootstrapped` after pre-RPC reconciliation and before
+    // `station_structure::handle` checked `was_view_outside`, detaching stale docked wire/stream
+    // state without pruning `station_structure`'s freshly bound post-undock `beyonce` object.
     let post_rpc_stream_active = !matches!(wire.wire_state.destiny, DestinyStream::Detached)
         || wire.subscribed_sys_id.is_some();
     if rpc_res.is_ok()
@@ -1753,7 +1821,7 @@ async fn execute_call_req_wire_inner(
                 !ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
             })
     {
-        detach_structure_view_outside_on_beyonce_release(
+        detach_structure_view_outside_wire_state(
             ctx,
             session.session_id,
             session.character_id,

@@ -5982,13 +5982,23 @@ async fn test_1477_f01_quasar_ui_view_activated_fails_closed_without_auth_or_whi
     assert!(ctx.has_bound_service(macho_sid, "beyonce"));
 
     // 1. Fail-closed auth/session checks while docked in structure View Outside:
-    //    `user_id == None`, wrong `character_id`, unknown `user_id`, and NPC station-docked
-    //    character must all leave `space_ballpark_bootstrapped` and `beyonce` binding intact.
+    //    `user_id == None`, `character_id == None`, wrong `character_id`, unknown `user_id`, and
+    //    NPC station-docked character must all leave `space_ballpark_bootstrapped` and `beyonce`
+    //    binding intact.
     let mut missing_uid_sess = eve_machonet::SessionState::new(999_147_710);
     missing_uid_sess.user_id = None;
     missing_uid_sess.character_id = Some(char_id);
     ctx.quasar_gateway.publish_event(
         &missing_uid_sess,
+        build_test_1477_ui_view_activated_event(&ctx, "hangar"),
+        ctx.now_unix(),
+    );
+
+    let mut missing_char_sess = eve_machonet::SessionState::new(999_147_714);
+    missing_char_sess.user_id = Some(user_id);
+    missing_char_sess.character_id = None;
+    ctx.quasar_gateway.publish_event(
+        &missing_char_sess,
         build_test_1477_ui_view_activated_event(&ctx, "hangar"),
         ctx.now_unix(),
     );
@@ -6654,4 +6664,193 @@ async fn test_1477_r2_f01_displaced_session_tick_and_rpc_preserve_replacement_vi
     assert_eq!(undock2_states[0].0, Some(ship_id));
     assert!(undock2_states[0].1.iter().any(|b| b.id == struct_id));
     assert!(undock2_states[0].1.iter().any(|b| b.id == nearby_ball_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1477_r3_p1_mid_rpc_quasar_hangar_defers_undock_and_preserves_new_beyonce_bound_id() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let sys_id = 30_000_144_u32;
+    let char_id = 90_000_001_i64;
+    let struct_id = 1_040_001_477_106_i64;
+    let nearby_ball_id = 900_000_147_706_i64;
+    let (ship_id, sys_handle) =
+        setup_upwell_docked_pilot(&ctx, char_id, sys_id, struct_id, nearby_ball_id);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: nearby_ball_id,
+            type_id: 1230,
+            position: eve_destiny::DVec3::new(254_000.0, 0.0, 0.0),
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 120.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) = connect_and_authenticate(addr, "demo", "demo-secret").await;
+    let (sel_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
+    let macho_sid = ctx.db.get_online_session(user_id).expect("online").session_id;
+
+    // 1. Enter structure View Outside (`GetFormations` -> `MachoBindObject`).
+    let (form_rsp, _) =
+        test_1386_call_rpc(&mut s, client_id, user_id, 2, "beyonce", "GetFormations", Vec::new())
+            .await;
+    assert_eq!(form_rsp.packet_type, MachoPacketType::CallRsp);
+    let (bind_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(i64::from(sys_id)), PyRep::None],
+    )
+    .await;
+    assert_eq!(bind_rsp.packet_type, MachoPacketType::CallRsp);
+    let docked_beyonce_bid = *ctx
+        .bound_objects
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(_, b)| b.session_id == macho_sid && b.service == "beyonce")
+        .map(|(bid, _)| bid)
+        .expect("docked beyonce binding");
+    assert!(ctx.is_space_ballpark_bootstrapped(macho_sid, char_id, sys_id));
+    assert_eq!(sys_handle.event_tx.receiver_count(), 1);
+
+    // 2. Inject a mid-RPC Quasar `Activated("hangar")` strictly AFTER pre-RPC reconciliation
+    //    (`!is_structure_view_outside_bootstrapped`) saw View Outside live, and BEFORE
+    //    `station_structure::undock_character` reads `was_view_outside`.
+    let hook_ctx = Arc::clone(&ctx);
+    set_pre_undock_dispatch_hook_for_test(
+        &ctx,
+        char_id,
+        Some(Box::new(move || {
+            let grpc_sess = grpc_style_quasar_session(999_147_730, user_id, char_id);
+            hook_ctx.quasar_gateway.publish_event(
+                &grpc_sess,
+                build_test_1477_ui_view_activated_event(&hook_ctx, "hangar"),
+                hook_ctx.now_unix(),
+            );
+        })),
+    );
+
+    ctx.advance_secs(12);
+    let (undock_rsp, mut undock_notifs) =
+        test_1386_call_rpc(&mut s, client_id, user_id, 4, "ship", "Undock", Vec::new()).await;
+    set_pre_undock_dispatch_hook_for_test(&ctx, char_id, None);
+    assert_eq!(undock_rsp.packet_type, MachoPacketType::CallRsp);
+    while let Ok(Ok(Some(rep))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), read_framed_pyrep(&mut s)).await
+    {
+        undock_notifs.push(MachoPacket::from_pyrep(&rep).expect("decode post-Undock packet"));
+    }
+    assert!(
+        !undock_notifs
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "SetState")
+                || test_1386_packet_contains_ascii(&p.to_pyrep(), "DoDestinyUpdate")),
+        "mid-RPC Activated(\"hangar\") before Undock must reconcile wire stream and defer SetState"
+    );
+    assert!(
+        !ctx.is_space_ballpark_bootstrapped(macho_sid, char_id, sys_id),
+        "mid-RPC Activated(\"hangar\") Undock must leave space_ballpark_bootstrapped cleared until OnAddBallpark"
+    );
+    assert_eq!(
+        sys_handle.event_tx.receiver_count(),
+        1,
+        "post-Undock in-space session attaches space sys_rx while awaiting initial SetState"
+    );
+
+    // 3. The newly minted `beyonceBoundID` returned in `Undock`'s `CallRsp` MUST remain
+    //    registered in `ctx.bound_objects` (not pruned by post-RPC wire cleanup) and succeed on
+    //    a bound `beyonce.UpdateStateRequest` call returning `SetState(ego=ship_id)`.
+    let undock_kv = match &undock_rsp.payload {
+        PyRep::Tuple(items) => match items.first() {
+            Some(PyRep::SubStream(inner)) => inner.as_ref(),
+            _ => panic!("unexpected Undock CallRsp payload: {:?}", undock_rsp.payload),
+        },
+        _ => panic!("unexpected Undock CallRsp payload: {:?}", undock_rsp.payload),
+    };
+    let post_undock_beyonce_bid = undock_kv
+        .dict_get("beyonceBoundID")
+        .and_then(|v| v.as_i64())
+        .expect("Undock CallRsp must contain beyonceBoundID") as u64;
+    let bound_result_bid = match undock_kv.dict_get("boundResult") {
+        Some(PyRep::List(items)) => items.first().and_then(|v| v.as_i64()).map(|v| v as u64),
+        _ => None,
+    };
+    assert_eq!(bound_result_bid, Some(post_undock_beyonce_bid));
+    assert_ne!(post_undock_beyonce_bid, docked_beyonce_bid);
+    assert!(
+        ctx.bound_objects
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&post_undock_beyonce_bid)
+            .is_some_and(|b| b.session_id == macho_sid && b.service == "beyonce"),
+        "post-undock beyonceBoundID {post_undock_beyonce_bid} must remain bound after mid-RPC Undock reconciliation"
+    );
+
+    let _ = sys_handle.step_manual(1.0).await.unwrap();
+    let (usr_rsp, mut usr_notifs) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        5,
+        "beyonce",
+        Some(post_undock_beyonce_bid as i64),
+        "UpdateStateRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        usr_rsp.packet_type,
+        MachoPacketType::CallRsp,
+        "bound UpdateStateRequest on Undock's beyonceBoundID must succeed (not InvalidBoundObject): {usr_rsp:?}"
+    );
+    let mut saw_set_state = usr_notifs
+        .iter()
+        .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "SetState"));
+    if !saw_set_state {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !saw_set_state {
+            let rem = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if rem.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(rem, read_framed_pyrep(&mut s)).await {
+                Ok(Ok(Some(rep))) => {
+                    let pkt = MachoPacket::from_pyrep(&rep).expect("decode UpdateStateRequest packet");
+                    saw_set_state = test_1386_packet_contains_ascii(&pkt.to_pyrep(), "SetState");
+                    usr_notifs.push(pkt);
+                }
+                _ => break,
+            }
+        }
+    }
+    let mut ship_states = Vec::new();
+    for pkt in &usr_notifs {
+        collect_set_states_from_pyrep_tree(&pkt.payload, &mut ship_states);
+    }
+    assert_eq!(ship_states.len(), 1);
+    assert_eq!(ship_states[0].0, Some(ship_id));
+    assert!(ship_states[0].1.iter().any(|b| b.id == ship_id));
+    assert!(ship_states[0].1.iter().any(|b| b.id == struct_id));
+    assert!(ship_states[0].1.iter().any(|b| b.id == nearby_ball_id));
 }

@@ -1674,7 +1674,7 @@ impl ServerContext {
         let Some(cid) = os.character_id else {
             return;
         };
-        if session.character_id.is_some_and(|scid| scid != cid) {
+        if session.character_id != Some(cid) {
             return;
         }
         let docked_in_structure = self.db.with_snapshot(|s| {
