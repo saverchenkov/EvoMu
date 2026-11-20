@@ -533,8 +533,17 @@ impl SdeRegistry {
     }
 }
 
-fn cfsd_opt_nonempty_str(buf: &[u8], rel: u64) -> Option<String> {
-    cfsd_opt_str(buf, rel).filter(|s| !s.is_empty())
+fn read_opt_masked_str(
+    buf: &crate::cfsd_nested_tables::CfsdBuf<'_>,
+    mask: u32,
+    bit: u32,
+    pos: usize,
+) -> Result<Option<String>, SdeError> {
+    if mask & bit == 0 {
+        return Ok(None);
+    }
+    let s = buf.str_at(buf.u64(pos)?)?;
+    Ok((!s.is_empty()).then_some(s))
 }
 
 fn read_opt_f32x4(
@@ -614,12 +623,21 @@ fn decode_cfsd_str_dict<T>(
 
 impl SdeRegistry {
     /// Loads `res:/staticdata/graphicids.fsdbinary` (`6,200` graphic definitions, stride `160`).
+    ///
+    /// Optional-attribute bitmask at `+156` (`0..=13`, sorted alphabetically by field name):
+    /// `0=albedoColor (+96)`, `1=ammoColor (+112)`, `2=animationStateObjects (+8)`,
+    /// `3=controllerVariableOverrides (+24)`, `4=emissiveColor (+128)`,
+    /// `5=explosionBucketID (+144)`, `6=graphicFile (+40)`, `7=graphicLocationID (+148)`,
+    /// `8=iconInfo (+48..+64: folder Str +48, inner u32 mask +56 bit 0)`, `9=sofFactionName (+64)`,
+    /// `10=sofHullName (+72)`, `11=sofLayout (+80)`, `12=sofMaterialSetID (+152)`,
+    /// `13=sofRaceName (+88)`.
     pub fn load_graphic_ids(&self) -> Result<HashMap<u32, GraphicIdInfo>, SdeError> {
         let (raw, recs) = self.read_cfsd_bytes("res:/staticdata/graphicids.fsdbinary", 160)?;
         let buf = crate::cfsd_nested_tables::CfsdBuf(&raw);
         let mut out = HashMap::with_capacity(recs.len());
         for rec in recs {
-            let id = u64_le(&raw, rec) as u32;
+            let id = u32::try_from(buf.u64(rec)?)
+                .map_err(|_| SdeError::InvalidSchema("graphic_id overflows u32".to_string()))?;
             let mask = buf.u32(rec + 156)?;
             let animation_state_objects = if mask & (1 << 2) != 0 {
                 decode_cfsd_str_dict(&buf, rec + 8, |b, p| b.str_at(b.u64(p)?))?
@@ -636,20 +654,26 @@ impl SdeRegistry {
             } else {
                 Vec::new()
             };
+            let icon_folder = if mask & (1 << 8) != 0 {
+                let icon_mask = buf.u32(rec + 56)?;
+                read_opt_masked_str(&buf, icon_mask, 1, rec + 48)?
+            } else {
+                None
+            };
             out.insert(
                 id,
                 GraphicIdInfo {
                     graphic_id: id,
-                    graphic_file: cfsd_opt_nonempty_str(&raw, u64_le(&raw, rec + 40)),
-                    icon_folder: cfsd_opt_nonempty_str(&raw, u64_le(&raw, rec + 48)),
-                    sof_faction_name: cfsd_opt_nonempty_str(&raw, u64_le(&raw, rec + 64)),
-                    sof_hull_name: cfsd_opt_nonempty_str(&raw, u64_le(&raw, rec + 72)),
-                    sof_race_name: cfsd_opt_nonempty_str(&raw, u64_le(&raw, rec + 88)),
+                    graphic_file: read_opt_masked_str(&buf, mask, 1 << 6, rec + 40)?,
+                    icon_folder,
+                    sof_faction_name: read_opt_masked_str(&buf, mask, 1 << 9, rec + 64)?,
+                    sof_hull_name: read_opt_masked_str(&buf, mask, 1 << 10, rec + 72)?,
+                    sof_race_name: read_opt_masked_str(&buf, mask, 1 << 13, rec + 88)?,
                     // Client `graphicIDsLoader.so` does not ship `collisionFile`.
                     collision_file: None,
-                    sof_material_set_id: read_opt_masked_u32(&buf, mask, 1 << 5, rec + 144)?,
+                    sof_material_set_id: read_opt_masked_u32(&buf, mask, 1 << 12, rec + 152)?,
                     graphic_location_id: read_opt_masked_u32(&buf, mask, 1 << 7, rec + 148)?,
-                    explosion_bucket_id: read_opt_masked_u32(&buf, mask, 1 << 12, rec + 152)?,
+                    explosion_bucket_id: read_opt_masked_u32(&buf, mask, 1 << 5, rec + 144)?,
                     albedo_color: read_opt_f32x4(&buf, mask, 1 << 0, rec + 96)?,
                     ammo_color: read_opt_f32x4(&buf, mask, 1 << 1, rec + 112)?,
                     emissive_color: read_opt_f32x4(&buf, mask, 1 << 4, rec + 128)?,

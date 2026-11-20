@@ -216,6 +216,7 @@ fn units_accounting_metagroups_graphics_icons_sounds_and_raw_types() {
     for (i, c) in [0.1f32, 0.2, 0.3, 1.0].into_iter().enumerate() {
         b_gr.write_f32(g0 + 128 + i * 4, c);
     }
+    b_gr.write_u32(g0 + 56, 1);
     b_gr.write_u32(g0 + 144, 18);
     b_gr.write_u32(g0 + 148, 50);
     b_gr.write_u32(g0 + 152, 99);
@@ -238,9 +239,9 @@ fn units_accounting_metagroups_graphics_icons_sounds_and_raw_types() {
             sof_hull_name: Some("mf1".to_string()),
             sof_race_name: Some("minmatar_race".to_string()),
             collision_file: None,
-            sof_material_set_id: Some(18),
+            sof_material_set_id: Some(99),
             graphic_location_id: Some(50),
-            explosion_bucket_id: Some(99),
+            explosion_bucket_id: Some(18),
             albedo_color: Some([0.25, 0.5, 0.75, 1.0]),
             ammo_color: Some([1.0, 0.0, 0.5, 1.0]),
             emissive_color: Some([0.1, 0.2, 0.3, 1.0]),

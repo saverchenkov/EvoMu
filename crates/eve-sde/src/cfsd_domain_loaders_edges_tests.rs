@@ -197,7 +197,7 @@ fn domain_loaders_handle_empty_contraband_optional_nones_and_negative_clamps() {
     assert!(gr[&77].controller_variable_overrides.is_empty());
     assert_eq!(gr[&77].sof_dna(), None);
 
-    // Non-zero string offsets pointing to empty "" strings (matching real V24 graphicids.fsdbinary)
+    // Masked string offsets pointing to empty "" strings (matching real V24 graphicids.fsdbinary)
     // must decode to None, and partial SOF fields must not fabricate sof_dna.
     let mut gr_empty_sde = SdeRegistry::default();
     let mut gr_empty_buf = vec![0u8; 64];
@@ -214,10 +214,13 @@ fn domain_loaders_handle_empty_contraband_optional_nones_and_negative_clamps() {
         gr_empty_buf[rec_pos + str_off..rec_pos + str_off + 8]
             .copy_from_slice(&empty_rel.to_le_bytes());
     }
+    gr_empty_buf[rec_pos + 56..rec_pos + 60].copy_from_slice(&1u32.to_le_bytes());
     gr_empty_buf.extend_from_slice(&("generic".len() as u64).to_le_bytes());
     let race_rel = (gr_empty_buf.len() - 32) as u64;
     gr_empty_buf.extend_from_slice(b"generic");
     gr_empty_buf[rec_pos + 88..rec_pos + 96].copy_from_slice(&race_rel.to_le_bytes());
+    let str_mask = (1u32 << 6) | (1 << 8) | (1 << 9) | (1 << 10) | (1 << 13);
+    gr_empty_buf[rec_pos + 156..rec_pos + 160].copy_from_slice(&str_mask.to_le_bytes());
     files.push(reg_bytes(
         &mut gr_empty_sde,
         "res:/staticdata/graphicids.fsdbinary",
@@ -232,21 +235,47 @@ fn domain_loaders_handle_empty_contraband_optional_nones_and_negative_clamps() {
     assert_eq!(gr_empty[&78].sof_race_name.as_deref(), Some("generic"));
     assert_eq!(gr_empty[&78].sof_dna(), None);
 
-    // Out-of-bounds nested list offset when mask bit 11 is set must return Err, not panic.
-    let mut gr_bad_sde = SdeRegistry::default();
-    let mut gr_bad_buf = gr_buf.clone();
-    gr_bad_buf[gr_rec + 80..gr_rec + 88].copy_from_slice(&999_999u64.to_le_bytes());
-    gr_bad_buf[gr_rec + 156..gr_rec + 160].copy_from_slice(&(1u32 << 11).to_le_bytes());
+    // Unmasked OOB string offsets (including iconInfo with inner mask 0) must be ignored -> Ok(None).
+    let mut gr_unmasked_oob_sde = SdeRegistry::default();
+    let mut gr_unmasked_oob_buf = gr_buf.clone();
+    gr_unmasked_oob_buf[gr_rec + 40..gr_rec + 48].copy_from_slice(&999_999u64.to_le_bytes());
+    gr_unmasked_oob_buf[gr_rec + 48..gr_rec + 56].copy_from_slice(&999_999u64.to_le_bytes());
+    gr_unmasked_oob_buf[gr_rec + 56..gr_rec + 60].copy_from_slice(&0u32.to_le_bytes());
+    gr_unmasked_oob_buf[gr_rec + 156..gr_rec + 160].copy_from_slice(&(1u32 << 8).to_le_bytes());
     files.push(reg_bytes(
-        &mut gr_bad_sde,
+        &mut gr_unmasked_oob_sde,
         "res:/staticdata/graphicids.fsdbinary",
-        "gr_bad_nested",
-        &gr_bad_buf,
+        "gr_unmasked_oob",
+        &gr_unmasked_oob_buf,
     ));
-    assert!(matches!(
-        gr_bad_sde.load_graphic_ids(),
-        Err(SdeError::InvalidSchema(_))
-    ));
+    let gr_unmasked = gr_unmasked_oob_sde
+        .load_graphic_ids()
+        .expect("unmasked oob graphicids");
+    assert_eq!(gr_unmasked.values().next().unwrap().graphic_file, None);
+    assert_eq!(gr_unmasked.values().next().unwrap().icon_folder, None);
+
+    // Masked OOB string and nested list offsets must return Err(InvalidSchema), not silently become None.
+    for (label, off, outer_mask, inner_mask) in [
+        ("gr_bad_str", 40usize, 1u32 << 6, 0u32),
+        ("gr_bad_icon", 48usize, 1u32 << 8, 1u32),
+        ("gr_bad_nested", 80usize, 1u32 << 11, 0u32),
+    ] {
+        let mut gr_bad_sde = SdeRegistry::default();
+        let mut gr_bad_buf = gr_buf.clone();
+        gr_bad_buf[gr_rec + off..gr_rec + off + 8].copy_from_slice(&999_999u64.to_le_bytes());
+        gr_bad_buf[gr_rec + 56..gr_rec + 60].copy_from_slice(&inner_mask.to_le_bytes());
+        gr_bad_buf[gr_rec + 156..gr_rec + 160].copy_from_slice(&outer_mask.to_le_bytes());
+        files.push(reg_bytes(
+            &mut gr_bad_sde,
+            "res:/staticdata/graphicids.fsdbinary",
+            label,
+            &gr_bad_buf,
+        ));
+        assert!(
+            matches!(gr_bad_sde.load_graphic_ids(), Err(SdeError::InvalidSchema(_))),
+            "{label} should return InvalidSchema"
+        );
+    }
 
     let mut ic_buf = vec![0u8; 64];
     ic_buf[40..48].copy_from_slice(&1u64.to_le_bytes());
