@@ -737,6 +737,28 @@ impl SystemHandle {
         combat_state: CombatState,
         slim_meta: SlimItemMeta,
     ) -> Result<u64, String> {
+        self.spawn_ball_with_meta_impl(ball, combat_state, slim_meta, None)
+            .await
+    }
+
+    pub async fn spawn_ball_with_meta_tagged(
+        &self,
+        ball: Ball,
+        combat_state: CombatState,
+        slim_meta: SlimItemMeta,
+        spawn_token: u64,
+    ) -> Result<u64, String> {
+        self.spawn_ball_with_meta_impl(ball, combat_state, slim_meta, Some(spawn_token))
+            .await
+    }
+
+    async fn spawn_ball_with_meta_impl(
+        &self,
+        ball: Ball,
+        combat_state: CombatState,
+        slim_meta: SlimItemMeta,
+        spawn_token: Option<u64>,
+    ) -> Result<u64, String> {
         #[cfg(test)]
         let ball_id = ball.id;
         #[cfg(test)]
@@ -753,13 +775,23 @@ impl SystemHandle {
             ),
         );
         let (tx, rx) = oneshot::channel();
-        self.cmd_sender()
-            .send(SystemCommand::SpawnBallWithMeta {
+        let cmd = match spawn_token {
+            Some(tok) => SystemCommand::SpawnBallWithMetaTagged {
+                ball,
+                combat_state,
+                slim_meta,
+                spawn_token: tok,
+                reply: tx,
+            },
+            None => SystemCommand::SpawnBallWithMeta {
                 ball,
                 combat_state,
                 slim_meta,
                 reply: tx,
-            })
+            },
+        };
+        self.cmd_sender()
+            .send(cmd)
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
         #[cfg(test)]
@@ -933,6 +965,29 @@ impl SystemHandle {
             })
             .await;
         rx.await.ok().flatten()
+    }
+
+    /// Removes `ball_id` only if its active actor spawn token still equals `spawn_token`.
+    /// Never pre-clears `ball_positions` or nanite repairs if a newer spawn owns `ball_id`.
+    pub async fn remove_ball_if_token(
+        &self,
+        ball_id: BallId,
+        spawn_token: u64,
+    ) -> Option<Ball> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .cmd_sender()
+            .send(SystemCommand::RemoveBallIfToken {
+                ball_id,
+                spawn_token,
+                reply: tx,
+            })
+            .await;
+        let removed = rx.await.ok().flatten();
+        if removed.is_some() {
+            self.cancel_ship_nanite_repairs_sync(ball_id, true);
+        }
+        removed
     }
 
     pub async fn accept_docking(

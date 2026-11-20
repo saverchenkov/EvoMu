@@ -736,6 +736,13 @@ pub enum SystemCommand {
         slim_meta: SlimItemMeta,
         reply: oneshot::Sender<Result<u64, String>>,
     },
+    SpawnBallWithMetaTagged {
+        ball: Ball,
+        combat_state: CombatState,
+        slim_meta: SlimItemMeta,
+        spawn_token: u64,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
     ChangeSlimItem {
         ball_id: BallId,
         slim_meta: SlimItemMeta,
@@ -786,6 +793,12 @@ pub enum SystemCommand {
     },
     RemoveBall {
         ball_id: BallId,
+        reply: oneshot::Sender<Option<Ball>>,
+    },
+    /// Atomically removes `ball_id` only when its active spawn token matches `spawn_token`.
+    RemoveBallIfToken {
+        ball_id: BallId,
+        spawn_token: u64,
         reply: oneshot::Sender<Option<Ball>>,
     },
     AcceptDocking {

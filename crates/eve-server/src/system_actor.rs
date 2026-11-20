@@ -1012,6 +1012,7 @@ impl SystemRegistry {
 
         tokio::spawn(async move {
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
+            let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
             // parity: feat:lifecycle.world-unobserved-system-sim, plan:SP-7
             while let Some(cmd) = cmd_rx.recv().await {
                 let cmd_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1105,6 +1106,7 @@ impl SystemRegistry {
                         match cmd {
                             SystemCommand::SpawnBall { ball, reply } => {
                                 let ball_id = ball.id;
+                                ball_spawn_tokens.remove(&ball_id);
                                 let was_warping = matches!(
                                     ballpark.balls.get(&ball_id).map(|b| &b.mode),
                                     Some(eve_destiny::MovementMode::Warp { .. })
@@ -1143,6 +1145,7 @@ impl SystemRegistry {
                                 reply,
                             } => {
                                 let ball_id = ball.id;
+                                ball_spawn_tokens.remove(&ball_id);
                                 let was_warping = matches!(
                                     ballpark.balls.get(&ball_id).map(|b| &b.mode),
                                     Some(eve_destiny::MovementMode::Warp { .. })
@@ -1170,12 +1173,24 @@ impl SystemRegistry {
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 defer_reply(&mut deferred_replies, reply, Ok(tick));
                             }
-                            SystemCommand::SpawnBallWithMeta {
-                                ball,
-                                combat_state,
-                                slim_meta,
-                                reply,
-                            } => {
+                            cmd @ (SystemCommand::SpawnBallWithMeta { .. }
+                            | SystemCommand::SpawnBallWithMetaTagged { .. }) => {
+                                let (ball, combat_state, slim_meta, spawn_token, reply) = match cmd {
+                                    SystemCommand::SpawnBallWithMeta {
+                                        ball,
+                                        combat_state,
+                                        slim_meta,
+                                        reply,
+                                    } => (ball, combat_state, slim_meta, None, reply),
+                                    SystemCommand::SpawnBallWithMetaTagged {
+                                        ball,
+                                        combat_state,
+                                        slim_meta,
+                                        spawn_token,
+                                        reply,
+                                    } => (ball, combat_state, slim_meta, Some(spawn_token), reply),
+                                    _ => unreachable!(),
+                                };
                                 if reply.is_closed() {
                                     // Caller dropped `spawn_ball_with_meta(...).await` while this command
                                     // was queued; discard before mutating `ballpark` so cancelled jumps
@@ -1183,6 +1198,14 @@ impl SystemRegistry {
                                     return None;
                                 }
                                 let ball_id = ball.id;
+                                match spawn_token {
+                                    Some(tok) => {
+                                        ball_spawn_tokens.insert(ball_id, tok);
+                                    }
+                                    None => {
+                                        ball_spawn_tokens.remove(&ball_id);
+                                    }
+                                }
                                 let was_warping = matches!(
                                     ballpark.balls.get(&ball_id).map(|b| &b.mode),
                                     Some(eve_destiny::MovementMode::Warp { .. })
@@ -1358,7 +1381,26 @@ impl SystemRegistry {
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 defer_reply(&mut deferred_replies, reply, populated);
                             }
-                            SystemCommand::RemoveBall { ball_id, reply } => {
+                            cmd @ (SystemCommand::RemoveBall { .. }
+                            | SystemCommand::RemoveBallIfToken { .. }) => {
+                                let (ball_id, required_token, reply) = match cmd {
+                                    SystemCommand::RemoveBall { ball_id, reply } => {
+                                        (ball_id, None, reply)
+                                    }
+                                    SystemCommand::RemoveBallIfToken {
+                                        ball_id,
+                                        spawn_token,
+                                        reply,
+                                    } => (ball_id, Some(spawn_token), reply),
+                                    _ => unreachable!(),
+                                };
+                                if let Some(tok) = required_token {
+                                    if ball_spawn_tokens.get(&ball_id).copied() != Some(tok) {
+                                        defer_reply(&mut deferred_replies, reply, None);
+                                        return None;
+                                    }
+                                }
+                                ball_spawn_tokens.remove(&ball_id);
                                 crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
                                     &mut ballpark,
                                     &db_opt,
@@ -1394,6 +1436,7 @@ impl SystemRegistry {
                                 station_pos,
                                 reply,
                             } => {
+                                ball_spawn_tokens.remove(&ship_id);
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 // #1081 Req 5: Stop active propulsion OnSpecialFX on grid before detaching ball on dock.
                                 emit_propulsion_stop_fx_before_detach(
@@ -1433,6 +1476,7 @@ impl SystemRegistry {
                                 accept_docking_target,
                                 reply,
                             } => {
+                                ball_spawn_tokens.remove(&ball_id);
                                 explicit_update_state_guards_actor
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
@@ -1528,6 +1572,7 @@ impl SystemRegistry {
                                     defer_reply(&mut deferred_replies, reply, Ok(ballpark.current_tick));
                                     return None;
                                 }
+                                ball_spawn_tokens.remove(&ball_id);
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 let tick = cycles_tackle::spawn_ball_with_combat_in_actor(
                                     &mut ballpark,
