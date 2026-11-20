@@ -1670,10 +1670,15 @@ async fn execute_call_req_wire_inner(
     {
         ctx.sync_session(session);
     }
+    // Only detach View Outside on post-RPC beyonce release when already docked in
+    // this structure; Space -> Structure Dock releases beyonce via "dock" transition
+    // and must keep destiny attached until the pre-dock DoDestinyUpdate drain runs.
     if rpc_res.is_ok()
         && had_beyonce_before_rpc
         && !ctx.has_bound_service(session.session_id, "beyonce")
         && session.character_id.is_some()
+        && prev_session.station_id.is_none()
+        && prev_session.structure_id == session.structure_id
         && session.station_id.is_none()
         && session.structure_id.is_some()
     {
