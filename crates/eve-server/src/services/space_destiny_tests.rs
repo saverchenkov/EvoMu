@@ -1593,11 +1593,29 @@ async fn update_state_request_structure_view_outside_observes_structure_and_neve
         ctx.is_space_ballpark_bootstrapped(sess.session_id, cid, sys_a),
         "View Outside UpdateStateRequest must mark ballpark bootstrapped for deduplication"
     );
+    assert_eq!(
+        take_pending_structure_set_state(sess.session_id, cid),
+        Some(struct_id),
+        "View Outside UpdateStateRequest must record a one-shot session SetState refresh"
+    );
     let (_, evs, _) = handle_a.drain_observer_updates(struct_id).await.unwrap();
     assert!(
-        evs.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })),
-        "View Outside must queue SetState observing structure_id={struct_id}, got {evs:?}"
+        !evs.iter()
+            .any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })),
+        "View Outside must NOT queue SetState into shared observer_events[{struct_id}], got {evs:?}"
     );
+    let (_, ss_kv, ss_updates) = handle_a.get_set_state(struct_id).await.unwrap();
+    assert_eq!(ss_kv.dict_get("ego").and_then(|v| v.as_i64()), Some(struct_id));
+    let decoded_balls = match ss_kv.dict_get("state") {
+        Some(PyRep::Bytes(b)) => eve_destiny::wire::decode_add_balls(b).unwrap().2,
+        other => panic!("unexpected SetState state payload: {other:?}"),
+    };
+    assert!(decoded_balls.iter().any(|b| b.id == struct_id));
+    assert!(
+        !decoded_balls.iter().any(|b| b.id == docked_ship),
+        "non-destructive get_set_state must NEVER contain docked_ship={docked_ship}"
+    );
+    assert!(matches!(ss_updates, PyRep::List(items) if items.len() == 1));
     assert!(
         handle_a
             .drain_observer_updates(docked_ship)
@@ -1613,6 +1631,11 @@ async fn update_state_request_structure_view_outside_observes_structure_and_neve
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(
+        take_pending_structure_set_state(sess.session_id, cid),
+        None,
+        "rapid repeat View Outside UpdateStateRequest must respect cooldown"
+    );
     let (_, evs_dup, _) = handle_a.drain_observer_updates(struct_id).await.unwrap();
     assert!(
         !evs_dup

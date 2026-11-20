@@ -775,7 +775,7 @@ impl ServerContext {
         "timeControl",
     ];
 
-    fn owned_bound_service_for_metrics(
+    pub(crate) fn owned_bound_service_for_metrics(
         &self,
         session: &SessionState,
         bound_id: u64,
@@ -791,6 +791,16 @@ impl ServerContext {
                     .map(|e| e.service.clone())
             })
             .or_else(|| self.transition_grace_service_for_bound_id(session, bound_id))
+    }
+
+    pub(crate) fn has_bound_service(&self, session_id: u64, service: &str) -> bool {
+        self.bound_objects
+            .read()
+            .ok()
+            .is_some_and(|m| {
+                m.values()
+                    .any(|e| e.session_id == session_id && e.service == service)
+            })
     }
 
     fn is_trackable_latency_service(&self, effective_service: &str) -> bool {
