@@ -230,6 +230,19 @@ impl SessionWireState {
         }
     }
 
+    /// Returns `true` when this wire session still needs its initial `SetState` batch
+    /// delivered on the wire (either not yet `Live`, or initialized synthetically by
+    /// `ClientWireSession` at `set_state_stamp: 0` without any accepted `SetState` batch).
+    pub fn needs_initial_set_state(&self) -> bool {
+        match self.destiny {
+            DestinyStream::Detached | DestinyStream::AwaitingSetState { .. } => true,
+            DestinyStream::Live {
+                set_state_stamp: 0, ..
+            } => self.last_wire_epoch_and_stamp.is_none(),
+            DestinyStream::Live { .. } => false,
+        }
+    }
+
     /// Transitions the session out of space (docking or logoff), setting `DestinyStream::Detached`.
     pub fn leave_space(&mut self) {
         self.in_space = false;

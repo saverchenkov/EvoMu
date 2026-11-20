@@ -798,6 +798,74 @@ pub(crate) async fn handle_update_state_request(
     handle_update_state_request_inner(ctx, session, bound_entry, false).await
 }
 
+async fn push_set_state_with_guard_and_bootstrap(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    sys_id: u32,
+    observer_ball_id: i64,
+    handle: &crate::system_actor::SystemHandle,
+    is_explicit_rpc: bool,
+    force_bypass_cooldown: bool,
+) -> Result<(), BridgeRpcError> {
+    let was_bootstrapped = ctx.is_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
+    let current_tick = handle.query_current_tick().await.unwrap_or(0);
+    let guard_key = (session.session_id, char_id);
+    let mut should_push_set_state = true;
+    if !is_explicit_rpc {
+        ctx.systems
+            .clear_explicit_update_state_guard(session.session_id, char_id);
+    } else {
+        let mut map = ctx
+            .systems
+            .explicit_update_state_guards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let force_bypass = !was_bootstrapped || force_bypass_cooldown;
+        let in_cooldown = !force_bypass
+            && map.get(&guard_key).copied().is_some_and(|prev| {
+                prev.sys_id == sys_id
+                    && prev.ship_id == observer_ball_id
+                    && current_tick >= prev.last_push_tick
+                    && current_tick.saturating_sub(prev.last_push_tick)
+                        < UPDATE_STATE_COOLDOWN_TICKS
+                    && prev.last_push_at.elapsed() < UPDATE_STATE_COOLDOWN_WALL
+            });
+        if in_cooldown {
+            should_push_set_state = false;
+        } else {
+            if map.len() > 4_096 {
+                let now = Instant::now();
+                map.retain(|_, v| now.duration_since(v.last_push_at) < Duration::from_secs(600));
+            }
+            map.insert(
+                guard_key,
+                crate::system_actor::ExplicitUpdateStateGuard {
+                    sys_id,
+                    ship_id: observer_ball_id,
+                    last_push_tick: current_tick,
+                    last_push_at: Instant::now(),
+                },
+            );
+        }
+    }
+    if should_push_set_state {
+        handle
+            .push_set_state(observer_ball_id)
+            .await
+            .map_err(|e| BridgeRpcError {
+                code: "DestinyQueryFailed".into(),
+                message: e,
+                client_error: None,
+            })?;
+    }
+    ctx.mark_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
+    crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(
+        ctx, sys_id,
+    );
+    Ok(())
+}
+
 async fn handle_update_state_request_inner(
     ctx: &ServerContext,
     session: &SessionState,
@@ -826,7 +894,74 @@ async fn handle_update_state_request_inner(
             client_error: None,
         })?,
     };
-    if session.station_id.is_some() || session.structure_id.is_some() {
+    if session.station_id.is_some() {
+        return Ok(PyRep::None);
+    }
+    if let Some(structure_id) = session.structure_id {
+        // Upwell "View Outside" binds beyonce while docked (`structure_id.is_some()`):
+        // observe the structure exterior ball itself and never spawn the pilot's docked ship ball.
+        let is_valid_docked_structure = ctx.db.with_snapshot(|snap| {
+            let Some(ch) = snap.characters.get(&char_id) else {
+                return false;
+            };
+            if ch.station_id.is_some()
+                || ch.structure_id != Some(structure_id)
+                || ch.solar_system_id != sys_id
+            {
+                return false;
+            }
+            snap.structures.get(&structure_id).is_some_and(|st| {
+                st.solar_system_id == sys_id && !st.state.eq_ignore_ascii_case("Destroyed")
+            })
+        });
+        if !is_valid_docked_structure {
+            return Ok(PyRep::None);
+        }
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        let had_ball = handle
+            .get_ball_snapshot(structure_id)
+            .await
+            .map_err(|e| BridgeRpcError {
+                code: "DestinyQueryFailed".into(),
+                message: e,
+                client_error: None,
+            })?
+            .is_some();
+        if !had_ball {
+            crate::services::station_structure::structure_lifecycle_rpc::ensure_structure_ball_in_space(
+                ctx,
+                sys_id,
+                structure_id,
+            )
+            .await;
+        }
+        let has_ball = had_ball
+            || handle
+                .get_ball_snapshot(structure_id)
+                .await
+                .map_err(|e| BridgeRpcError {
+                    code: "DestinyQueryFailed".into(),
+                    message: e,
+                    client_error: None,
+                })?
+                .is_some();
+        if !has_ball {
+            return Ok(PyRep::None);
+        }
+        crate::services::mobile_deployables_ext::sync_system_deployables(ctx, sys_id).await;
+        crate::services::structure_weapons_ops::trigger_system_structures_auto_defense(ctx, sys_id)
+            .await;
+        push_set_state_with_guard_and_bootstrap(
+            ctx,
+            session,
+            char_id,
+            sys_id,
+            structure_id,
+            &handle,
+            is_explicit_rpc,
+            !had_ball,
+        )
+        .await?;
         return Ok(PyRep::None);
     }
     let Some(ship_id) = session.ship_id else {
@@ -1017,60 +1152,17 @@ async fn handle_update_state_request_inner(
     }
     crate::services::mobile_deployables_ext::sync_system_deployables(ctx, sys_id).await;
     crate::services::structure_weapons_ops::trigger_system_structures_auto_defense(ctx, sys_id).await;
-    let was_bootstrapped = ctx.is_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
-    let current_tick = handle.query_current_tick().await.unwrap_or(0);
-    let guard_key = (session.session_id, char_id);
-    let mut should_push_set_state = true;
-    if !is_explicit_rpc {
-        ctx.systems
-            .clear_explicit_update_state_guard(session.session_id, char_id);
-    } else {
-        let mut map = ctx
-            .systems
-            .explicit_update_state_guards
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let force_bypass =
-            !was_bootstrapped || spawned_new_ball || forced_stop_warp || did_warp_finish;
-        let in_cooldown = !force_bypass
-            && map.get(&guard_key).copied().is_some_and(|prev| {
-                prev.sys_id == sys_id
-                    && prev.ship_id == ship_id
-                    && current_tick >= prev.last_push_tick
-                    && current_tick.saturating_sub(prev.last_push_tick)
-                        < UPDATE_STATE_COOLDOWN_TICKS
-                    && prev.last_push_at.elapsed() < UPDATE_STATE_COOLDOWN_WALL
-            });
-        if in_cooldown {
-            should_push_set_state = false;
-        } else {
-            if map.len() > 4_096 {
-                let now = Instant::now();
-                map.retain(|_, v| now.duration_since(v.last_push_at) < Duration::from_secs(600));
-            }
-            map.insert(
-                guard_key,
-                crate::system_actor::ExplicitUpdateStateGuard {
-                    sys_id,
-                    ship_id,
-                    last_push_tick: current_tick,
-                    last_push_at: Instant::now(),
-                },
-            );
-        }
-    }
-    if should_push_set_state {
-        handle
-            .push_set_state(ship_id)
-            .await
-            .map_err(|e| BridgeRpcError {
-                code: "DestinyQueryFailed".into(),
-                message: e,
-                client_error: None,
-            })?;
-    }
-    ctx.mark_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
-    crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(ctx, sys_id);
+    push_set_state_with_guard_and_bootstrap(
+        ctx,
+        session,
+        char_id,
+        sys_id,
+        ship_id,
+        &handle,
+        is_explicit_rpc,
+        spawned_new_ball || forced_stop_warp || did_warp_finish,
+    )
+    .await?;
     Ok(PyRep::None)
 }
 
