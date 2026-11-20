@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 
 pub const PROBE_STATE_INACTIVE: i32 = 0; pub const PROBE_STATE_IDLE: i32 = 1; pub const PROBE_STATE_MOVING: i32 = 2;
 pub const PROBE_STATE_WARPING: i32 = 3; pub const PROBE_STATE_SCANNING: i32 = 4; pub const PROBE_STATE_RETURNING: i32 = 5;
+const MAX_ACTIVE_SCANNER_PROBES: usize = 8;
 
 fn resolve_caller_solar_system(ctx: &ServerContext, session: &SessionState, char_id: i64) -> u32 {
     session
@@ -1057,6 +1058,114 @@ async fn handle_qa_scan_sites(
     Some(Ok(PyRep::List(results)))
 }
 
+enum SetActivityStateMutationError {
+    ProbeNotFound(i64),
+    MaxProbesLaunched,
+}
+
+/// Validates target ownership and enforces EVE's 8-probe active cap before applying
+/// `scanMgr.SetActivityState` transitions inside the probe map write lock.
+fn apply_set_activity_state_updates(
+    map: &mut HashMap<i64, crate::router::ActiveScannerProbe>,
+    char_id: i64,
+    sys_id: u32,
+    per_probe_states: &HashMap<i64, i32>,
+    bulk_state: Option<i32>,
+) -> Result<Vec<(i64, i32)>, SetActivityStateMutationError> {
+    let mut changed = Vec::new();
+    let matches_scope = |p: &crate::router::ActiveScannerProbe| {
+        p.owner_char_id == char_id && (sys_id == 0 || p.solar_system_id == sys_id)
+    };
+
+    if !per_probe_states.is_empty() {
+        let mut target_pids: Vec<i64> = per_probe_states.keys().copied().collect();
+        target_pids.sort_unstable();
+        for &pid in &target_pids {
+            let valid_target = map
+                .get(&pid)
+                .is_some_and(|p| matches_scope(p) && p.state >= 0);
+            if !valid_target {
+                return Err(SetActivityStateMutationError::ProbeNotFound(pid));
+            }
+        }
+        // Reject atomically before mutating if activating inactive (`0`) probes would exceed 8 active.
+        let activating_from_inactive = target_pids.iter().any(|pid| {
+            per_probe_states[pid] > PROBE_STATE_INACTIVE
+                && map
+                    .get(pid)
+                    .is_some_and(|p| p.state == PROBE_STATE_INACTIVE)
+        });
+        if activating_from_inactive {
+            let projected_active = map
+                .values()
+                .filter(|p| matches_scope(p))
+                .filter(|p| {
+                    per_probe_states
+                        .get(&p.probe_id)
+                        .copied()
+                        .unwrap_or(p.state)
+                        > PROBE_STATE_INACTIVE
+                })
+                .count();
+            if projected_active > MAX_ACTIVE_SCANNER_PROBES {
+                return Err(SetActivityStateMutationError::MaxProbesLaunched);
+            }
+        }
+        for pid in target_pids {
+            let st = per_probe_states[&pid];
+            if let Some(p) = map.get_mut(&pid) {
+                if p.state != st {
+                    p.state = st;
+                    changed.push((pid, st));
+                }
+            }
+        }
+    } else if let Some(st) = bulk_state {
+        if st > PROBE_STATE_INACTIVE {
+            // Cap bulk `0 -> >0` reactivations to remaining active slots in deterministic probe_id order
+            // (matching `handle_reconnect_probes`) while still updating already-active probes.
+            let existing_active = map
+                .values()
+                .filter(|p| matches_scope(p) && p.state > PROBE_STATE_INACTIVE)
+                .count();
+            let remaining_slots = MAX_ACTIVE_SCANNER_PROBES.saturating_sub(existing_active);
+            let mut inactive_ids: Vec<i64> = map
+                .values()
+                .filter(|p| matches_scope(p) && p.state == PROBE_STATE_INACTIVE)
+                .map(|p| p.probe_id)
+                .collect();
+            inactive_ids.sort_unstable();
+            inactive_ids.truncate(remaining_slots);
+
+            for p in map.values_mut() {
+                if matches_scope(p) && p.state > PROBE_STATE_INACTIVE && p.state != st {
+                    p.state = st;
+                    changed.push((p.probe_id, st));
+                }
+            }
+            for pid in inactive_ids {
+                if let Some(p) = map.get_mut(&pid) {
+                    p.state = st;
+                    changed.push((pid, st));
+                }
+            }
+            changed.sort_unstable_by_key(|&(pid, _)| pid);
+        } else {
+            for p in map.values_mut() {
+                if !matches_scope(p) || p.state < 0 {
+                    continue;
+                }
+                if p.state != st {
+                    p.state = st;
+                    changed.push((p.probe_id, st));
+                }
+            }
+            changed.sort_unstable_by_key(|&(pid, _)| pid);
+        }
+    }
+    Ok(changed)
+}
+
 fn handle_set_activity_state(
     ctx: &ServerContext,
     session: &SessionState,
@@ -1190,54 +1299,26 @@ fn handle_set_activity_state(
         return Some(Err(e));
     }
 
-    let mut changed: Vec<(i64, i32)> = Vec::new();
-    let mut rejected_pid: Option<i64> = None;
-    if let Ok(mut map) = ctx.active_scanner_probes.write() {
-        if !per_probe_states.is_empty() {
-            for &pid in per_probe_states.keys() {
-                let valid_active = map.get(&pid).is_some_and(|p| {
-                    p.owner_char_id == char_id
-                        && (sys_id == 0 || p.solar_system_id == sys_id)
-                        && p.state >= 0
-                });
-                if !valid_active {
-                    rejected_pid = Some(pid);
-                    break;
-                }
-            }
-            if rejected_pid.is_none() {
-                for (&pid, &st) in &per_probe_states {
-                    if let Some(p) = map.get_mut(&pid) {
-                        if p.state != st {
-                            p.state = st;
-                            changed.push((pid, st));
-                        }
-                    }
-                }
-            }
-        } else if let Some(st) = bulk_state {
-            for p in map.values_mut() {
-                if p.owner_char_id != char_id
-                    || (sys_id > 0 && p.solar_system_id != sys_id)
-                    || p.state < 0
-                {
-                    continue;
-                }
-                if p.state != st {
-                    p.state = st;
-                    changed.push((p.probe_id, st));
-                }
-            }
+    let mutation_res = if let Ok(mut map) = ctx.active_scanner_probes.write() {
+        apply_set_activity_state_updates(&mut map, char_id, sys_id, &per_probe_states, bulk_state)
+    } else {
+        Ok(Vec::new())
+    };
+    let changed = match mutation_res {
+        Ok(c) => c,
+        Err(SetActivityStateMutationError::ProbeNotFound(pid)) => {
+            return Some(Err(probe_rpc_err(
+                "ProbeNotFound",
+                format!("Scanner probe {pid} not found"),
+            )));
         }
-    }
-    if let Some(pid) = rejected_pid {
-        let msg = format!("Scanner probe {pid} not found");
-        return Some(Err(BridgeRpcError::with_client_error(
-            "ProbeNotFound",
-            msg.clone(),
-            eve_proto::ClientError::CustomInfo(msg),
-        )));
-    }
+        Err(SetActivityStateMutationError::MaxProbesLaunched) => {
+            return Some(Err(probe_rpc_err(
+                "MaxProbesLaunched",
+                "Maximum of 8 active scanner probes already in space",
+            )));
+        }
+    };
     if !changed.is_empty() {
         sync_scanner_probes_to_db(ctx);
     }

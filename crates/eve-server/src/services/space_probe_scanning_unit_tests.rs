@@ -2128,3 +2128,343 @@ async fn recover_and_destroy_probe_guards_and_range_step_clamping() {
         "bulk DestroyProbe must preserve negative-state cargo sentinels"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_activity_state_enforces_8_probe_cap_across_relaunch_per_probe_and_bulk() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let char_id = 90_000_001_i64;
+    ctx.db
+        .acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let launcher_id = 710_951_i64;
+    let charge_id = 710_952_i64;
+
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            launcher_id,
+            InventoryItemRecord {
+                item_id: launcher_id,
+                type_id: 17_938,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 30_013,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 16,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let bound = BoundObjectEntry {
+        bound_id: 960,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("scanMgr:{sys_id}"),
+        ref_id: 960,
+    };
+    let kw = HashMap::new();
+    let mut launch_kw = HashMap::new();
+    launch_kw.insert("probeCount".into(), PyRep::Integer(8));
+
+    // 1. Launch 8 probes -> SetActivityState(0) -> relaunch 8 more probes.
+    activate_scan_probe_launcher(
+        &ctx,
+        &sess,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        launcher_id,
+        17_938,
+        InventoryFlag::HiSlot0 as u16,
+        "useMissiles",
+        None,
+        &launch_kw,
+    )
+    .await
+    .expect("first 8-probe launch");
+
+    let mut wave1_ids: Vec<i64> = ctx
+        .active_scanner_probes
+        .read()
+        .unwrap()
+        .values()
+        .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+        .map(|p| p.probe_id)
+        .collect();
+    wave1_ids.sort_unstable();
+    assert_eq!(wave1_ids.len(), 8);
+
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(i64::from(PROBE_STATE_INACTIVE))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("deactivate wave 1");
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        assert!(wave1_ids.iter().all(|id| map[id].state == PROBE_STATE_INACTIVE));
+    }
+
+    activate_scan_probe_launcher(
+        &ctx,
+        &sess,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        launcher_id,
+        17_938,
+        InventoryFlag::HiSlot0 as u16,
+        "useMissiles",
+        None,
+        &launch_kw,
+    )
+    .await
+    .expect("second 8-probe launch while wave 1 is inactive");
+
+    let mut wave2_ids: Vec<i64> = ctx
+        .active_scanner_probes
+        .read()
+        .unwrap()
+        .values()
+        .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+        .map(|p| p.probe_id)
+        .collect();
+    wave2_ids.sort_unstable();
+    assert_eq!(wave2_ids.len(), 8);
+
+    // Unrelated active probe in another system must not count toward sys_id's 8-probe cap.
+    let other_sys_pid = 890_800_999_i64;
+    ctx.active_scanner_probes.write().unwrap().insert(
+        other_sys_pid,
+        ActiveScannerProbe {
+            probe_id: other_sys_pid,
+            probe_type_id: 30_013,
+            owner_char_id: char_id,
+            ship_id,
+            launcher_module_id: launcher_id,
+            solar_system_id: 30_000_144,
+            position: [0.0; 3],
+            destination: [0.0; 3],
+            range_step: 4,
+            scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+            base_sensor_strength: 40.0,
+            max_flight_time_s: 3_600.0,
+            launched_at_unix: ctx.now_unix(),
+            state: PROBE_STATE_IDLE,
+            warp_end_ft: None,
+        },
+    );
+
+    let active_in_sys = || -> usize {
+        ctx.active_scanner_probes
+            .read()
+            .unwrap()
+            .values()
+            .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+            .count()
+    };
+
+    // 2. Per-probe reactivation exceeding 8 active probes rejects atomically with MaxProbesLaunched.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let c0 = ctx.db.tx_commit_count();
+    for bad_args in [
+        vec![PyRep::Integer(wave1_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_IDLE))],
+        vec![
+            PyRep::List(vec![PyRep::Integer(wave1_ids[0]), PyRep::Integer(wave1_ids[1])]),
+            PyRep::Integer(i64::from(PROBE_STATE_IDLE)),
+        ],
+        vec![PyRep::Dict(vec![
+            (PyRep::Integer(wave2_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_SCANNING))),
+            (PyRep::Integer(wave1_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_IDLE))),
+        ])],
+    ] {
+        let err = handle_scan_and_wormhole_extras(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "scanMgr",
+            "SetActivityState",
+            &bad_args,
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect_err("reactivating >8 probes must reject with MaxProbesLaunched");
+        assert_eq!(err.code, "MaxProbesLaunched");
+    }
+    assert_eq!(ctx.db.tx_commit_count(), c0, "rejected SetActivityState must not write DB");
+    assert!(
+        ctx.drain_notifications_for_char(char_id).is_empty(),
+        "rejected SetActivityState must not emit OnProbeStateChanged"
+    );
+    assert_eq!(active_in_sys(), 8);
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        assert_eq!(map[&wave2_ids[0]].state, PROBE_STATE_IDLE, "failed dict must not partially mutate wave2");
+        assert_eq!(map[&wave1_ids[0]].state, PROBE_STATE_INACTIVE);
+    }
+
+    // Per-probe 1-for-1 swap keeping projected active count at 8 succeeds atomically.
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Dict(vec![
+            (PyRep::Integer(wave2_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_INACTIVE))),
+            (PyRep::Integer(wave1_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_IDLE))),
+        ])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("atomic 1-for-1 probe swap stays within 8-probe cap");
+    assert_eq!(active_in_sys(), 8);
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Dict(vec![
+            (PyRep::Integer(wave1_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_INACTIVE))),
+            (PyRep::Integer(wave2_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_IDLE))),
+        ])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("swap back succeeds");
+
+    // 3. Bulk SetActivityState(>0) when 8 are active updates already-active probes and leaves inactive probes at 0.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(i64::from(PROBE_STATE_SCANNING))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("bulk SetActivityState(4) succeeds with 8-probe cap");
+    assert_eq!(active_in_sys(), 8);
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        assert!(wave2_ids.iter().all(|id| map[id].state == PROBE_STATE_SCANNING));
+        assert!(wave1_ids.iter().all(|id| map[id].state == PROBE_STATE_INACTIVE));
+    }
+
+    // 4. Deactivate 3 active probes (5 active, 11 inactive) -> bulk SetActivityState(1) reactivates
+    //    only the lowest 3 inactive probes by probe_id so total active count remains capped at 8.
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[
+            PyRep::List(wave2_ids[..3].iter().copied().map(PyRep::Integer).collect()),
+            PyRep::Integer(i64::from(PROBE_STATE_INACTIVE)),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("deactivate 3 probes");
+    assert_eq!(active_in_sys(), 5);
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(i64::from(PROBE_STATE_IDLE))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("bulk SetActivityState(1) caps reactivations to 3 remaining slots");
+    assert_eq!(active_in_sys(), 8, "bulk reactivation must never exceed 8 active probes");
+
+    let mut all_inactive_before: Vec<i64> = wave1_ids
+        .iter()
+        .copied()
+        .chain(wave2_ids[..3].iter().copied())
+        .collect();
+    all_inactive_before.sort_unstable();
+    let expected_reactivated = &all_inactive_before[..3];
+    let expected_still_inactive = &all_inactive_before[3..];
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        for pid in &wave2_ids[3..] {
+            assert_eq!(map[pid].state, PROBE_STATE_IDLE);
+        }
+        for pid in expected_reactivated {
+            assert_eq!(map[pid].state, PROBE_STATE_IDLE);
+        }
+        for pid in expected_still_inactive {
+            assert_eq!(map[pid].state, PROBE_STATE_INACTIVE);
+        }
+        assert_eq!(map[&other_sys_pid].state, PROBE_STATE_IDLE);
+    }
+    let state_notifs: Vec<i64> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnProbeStateChanged")
+        .filter_map(|n| n.args.first().and_then(|v| v.as_i64()))
+        .collect();
+    assert_eq!(state_notifs.len(), 8, "5 updated + 3 reactivated = 8 OnProbeStateChanged events");
+    for pid in expected_still_inactive {
+        assert!(!state_notifs.contains(pid), "capped probe {pid} must not emit OnProbeStateChanged");
+    }
+}
