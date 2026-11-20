@@ -102,7 +102,7 @@ fn is_on_grid_visible_ball(
         return false;
     };
     let view = sys.view();
-    if view.is_ball_cloaked(target_ball_id) {
+    if view.is_ball_cloaked(target_ball_id) || view.is_gate_cloaked(target_ball_id) {
         return false;
     }
     let (Some(caller_pos), Some(target_pos)) = (
@@ -111,7 +111,13 @@ fn is_on_grid_visible_ball(
     ) else {
         return false;
     };
-    (caller_pos - target_pos).length() <= 250_000.0
+    match (
+        view.bubble_id_for_ball(caller_ship),
+        view.bubble_id_for_ball(target_ball_id),
+    ) {
+        (Some(caller_bubble), Some(target_bubble)) => caller_bubble == target_bubble,
+        _ => (caller_pos - target_pos).length() <= eve_destiny::BUBBLE_RADIUS_METERS,
+    }
 }
 
 fn authorize_item_info_access(
@@ -221,9 +227,7 @@ fn authorize_item_info_access(
                     let div_roles = eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[div_idx]
                         | eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[div_idx]
                         | eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx];
-                    if (role_mask & div_roles) != 0 {
-                        return true;
-                    }
+                    return (role_mask & div_roles) != 0;
                 }
                 if matches!(
                     root_flag,
@@ -236,19 +240,38 @@ fn authorize_item_info_access(
                         | eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE
                         | eve_db::corp_roles::ROLE_FACTORY_MANAGER
                         | eve_db::corp_roles::ROLE_TRADER;
-                    if (role_mask & deliveries_roles) != 0 {
-                        return true;
-                    }
+                    return (role_mask & deliveries_roles) != 0;
                 }
                 if snap
                     .structures
-                    .get(&item.location_id)
+                    .get(&root_loc)
                     .is_some_and(|st| st.owner_corp_id == caller_corp)
                 {
-                    let struct_roles = eve_db::corp_roles::ROLE_STATION_MANAGER
-                        | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
-                    if (role_mask & struct_roles) != 0 {
-                        return true;
+                    let is_structure_equipment_flag =
+                        matches!(flag_num, 11..=34 | 92..=94 | 158..=171 | 180)
+                            || matches!(
+                                root_flag,
+                                InventoryFlag::SpecializedAmmoHold
+                                    | InventoryFlag::QuantumCoreRoom
+                            );
+                    if is_structure_equipment_flag {
+                        let equip_roles = eve_db::corp_roles::ROLE_STATION_MANAGER
+                            | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
+                        if (role_mask & equip_roles) != 0 {
+                            return true;
+                        }
+                    }
+                    if matches!(
+                        root_flag,
+                        InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay
+                    ) {
+                        let fuel_roles = eve_db::corp_roles::ROLE_STATION_MANAGER
+                            | eve_db::corp_roles::ROLE_STARBASE_CARETAKER
+                            | eve_db::corp_roles::ROLE_STARBASE_OPERATOR
+                            | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
+                        if (role_mask & fuel_roles) != 0 {
+                            return true;
+                        }
                     }
                 }
             }
@@ -307,10 +330,11 @@ fn validate_link_all_weapons_preconditions(
             .characters
             .get(&char_id)
             .is_some_and(|ch| ch.station_id.is_some() || ch.structure_id.is_some());
-        let db_active_mismatch = snap
+        let db_active_ship_id = snap
             .characters
             .get(&char_id)
-            .is_some_and(|ch| ch.active_ship_id > 0 && ch.active_ship_id != ship_id);
+            .map(|ch| ch.active_ship_id)
+            .filter(|&id| id > 0);
         let mut counts_by_type: HashMap<u32, usize> = HashMap::new();
         for item in snap.items.values() {
             if item.location_id == ship_id && matches!(item.flag as u16, 27..=34) {
@@ -325,9 +349,9 @@ fn validate_link_all_weapons_preconditions(
             }
         }
         let has_linkable_pair = counts_by_type.values().any(|&n| n >= 2);
-        Ok((ship.location_id, db_docked, db_active_mismatch, has_linkable_pair))
+        Ok((ship.location_id, db_docked, db_active_ship_id, has_linkable_pair))
     })?;
-    let (ship_loc_id, db_docked, db_active_mismatch, has_linkable_pair) = ship_check;
+    let (ship_loc_id, db_docked, db_active_ship_id, has_linkable_pair) = ship_check;
 
     if session.station_id.is_some() || session.structure_id.is_some() || db_docked {
         return Err(BridgeRpcError {
@@ -350,7 +374,7 @@ fn validate_link_all_weapons_preconditions(
             client_error: None,
         });
     }
-    if session.ship_id.is_some_and(|sid| sid != ship_id) || db_active_mismatch {
+    if session.ship_id != Some(ship_id) || db_active_ship_id != Some(ship_id) {
         return Err(BridgeRpcError {
             code: "ShipNotActive".into(),
             message: format!("Ship {ship_id} is not the caller's active ship"),

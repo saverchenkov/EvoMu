@@ -1505,9 +1505,13 @@ async fn issue_1352_item_get_info_enforces_auth_ownership_corp_roles_grid_and_gm
     let corp_member_wrong_div_id = 96_352_005i64;
     let npc_member_id = 96_352_006i64;
     let gm_id = 96_352_007i64;
+    let corp_equip_mgr_id = 96_352_008i64;
+    let corp_station_mgr_id = 96_352_009i64;
+    let corp_fuel_tech_id = 96_352_010i64;
 
     let player_corp_id = 98_352_001i64;
     let npc_corp_id = 1_000_009i64;
+    let structure_id = 1_096_352_000_002i64;
 
     let caller_ship_id = 96_352_100i64;
     let nested_in_caller_ship_id = 96_352_101i64;
@@ -1520,9 +1524,16 @@ async fn issue_1352_item_get_info_enforces_auth_ownership_corp_roles_grid_and_gm
     let victim_space_off_grid_id = 96_352_212i64;
     let victim_space_cloaked_id = 96_352_213i64;
     let victim_other_sys_ship_id = 96_352_214i64;
+    let victim_space_far_bubble_id = 96_352_215i64;
+    let victim_space_gate_cloaked_id = 96_352_216i64;
     let corp_office_id = 96_352_300i64;
     let corp_sag2_item_id = 96_352_301i64;
     let npc_corp_item_id = 96_352_302i64;
+    let struct_sag2_item_id = 96_352_310i64;
+    let struct_deliveries_item_id = 96_352_311i64;
+    let struct_hi_mod_id = 96_352_312i64;
+    let struct_core_id = 96_352_313i64;
+    let struct_fuel_id = 96_352_314i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         let base_char = snap.characters.values().next().cloned().expect("seed char");
@@ -1537,13 +1548,44 @@ async fn issue_1352_item_get_info_enforces_auth_ownership_corp_roles_grid_and_gm
         corp.members.insert(corp_member_ok_id);
         corp.members.insert(corp_member_roleless_id);
         corp.members.insert(corp_member_wrong_div_id);
+        corp.members.insert(corp_equip_mgr_id);
+        corp.members.insert(corp_station_mgr_id);
+        corp.members.insert(corp_fuel_tech_id);
         corp.member_roles.insert(victim_id, u64::MAX);
         corp.member_roles
             .insert(corp_member_ok_id, eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[1]);
         corp.member_roles.insert(corp_member_roleless_id, 0);
         corp.member_roles
             .insert(corp_member_wrong_div_id, eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[0]);
+        corp.member_roles
+            .insert(corp_equip_mgr_id, eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG);
+        corp.member_roles
+            .insert(corp_station_mgr_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
+        corp.member_roles
+            .insert(corp_fuel_tech_id, eve_db::corp_roles::ROLE_STARBASE_CARETAKER);
         snap.corporations.insert(player_corp_id, corp);
+
+        snap.structures.insert(
+            structure_id,
+            eve_db::UpwellStructureRecord {
+                structure_id,
+                type_id: 35832,
+                owner_corp_id: player_corp_id,
+                solar_system_id: sys_id,
+                name: "Authz Test Astrahus".into(),
+                position: [10_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
 
         let mut gov = eve_db::CorpGovState::default();
         gov.offices.insert(station_id, corp_office_id);
@@ -1555,6 +1597,9 @@ async fn issue_1352_item_get_info_enforces_auth_ownership_corp_roles_grid_and_gm
             (corp_member_ok_id, player_corp_id, Some(station_id), 0),
             (corp_member_roleless_id, player_corp_id, Some(station_id), 0),
             (corp_member_wrong_div_id, player_corp_id, Some(station_id), 0),
+            (corp_equip_mgr_id, player_corp_id, Some(station_id), 0),
+            (corp_station_mgr_id, player_corp_id, Some(station_id), 0),
+            (corp_fuel_tech_id, player_corp_id, Some(station_id), 0),
             (npc_member_id, npc_corp_id, Some(station_id), 0),
             (gm_id, npc_corp_id, Some(station_id), 0),
         ] {
@@ -1638,6 +1683,34 @@ async fn issue_1352_item_get_info_enforces_auth_ownership_corp_roles_grid_and_gm
             npc_corp_item_id,
             mk_item(npc_corp_item_id, 34, npc_corp_id, station_id, InventoryFlag::CorpSAG2, 500, false),
         );
+        snap.items.insert(
+            victim_space_far_bubble_id,
+            mk_item(victim_space_far_bubble_id, 587, victim_id, i64::from(sys_id), InventoryFlag::None, 1, true),
+        );
+        snap.items.insert(
+            victim_space_gate_cloaked_id,
+            mk_item(victim_space_gate_cloaked_id, 587, victim_id, i64::from(sys_id), InventoryFlag::None, 1, true),
+        );
+        snap.items.insert(
+            struct_sag2_item_id,
+            mk_item(struct_sag2_item_id, 34, player_corp_id, structure_id, InventoryFlag::CorpSAG2, 100, false),
+        );
+        snap.items.insert(
+            struct_deliveries_item_id,
+            mk_item(struct_deliveries_item_id, 34, player_corp_id, structure_id, InventoryFlag::Deliveries, 100, false),
+        );
+        snap.items.insert(
+            struct_hi_mod_id,
+            mk_item(struct_hi_mod_id, 2889, player_corp_id, structure_id, InventoryFlag::HiSlot0, 1, true),
+        );
+        snap.items.insert(
+            struct_core_id,
+            mk_item(struct_core_id, 34, player_corp_id, structure_id, InventoryFlag::QuantumCoreRoom, 1, true),
+        );
+        snap.items.insert(
+            struct_fuel_id,
+            mk_item(struct_fuel_id, 34, player_corp_id, structure_id, InventoryFlag::StructureFuel, 200, false),
+        );
     });
 
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -1682,8 +1755,37 @@ async fn issue_1352_item_get_info_enforces_auth_ownership_corp_roles_grid_and_gm
         .await;
     let _ = sys
         .spawn_ball_with_meta(
-            mk_ball(victim_space_off_grid_id, 300_000.0),
+            mk_ball(victim_space_off_grid_id, 20_000_000.0),
             CombatState::default(),
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: victim_id,
+                char_id: Some(victim_id),
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = sys
+        .spawn_ball_with_meta(
+            mk_ball(victim_space_far_bubble_id, 300_000.0),
+            CombatState::default(),
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: victim_id,
+                char_id: Some(victim_id),
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = sys
+        .spawn_ball_with_meta(
+            mk_ball(victim_space_gate_cloaked_id, 5_000.0),
+            CombatState {
+                gate_cloak_remaining_ticks: 30,
+                ..Default::default()
+            },
             SlimItemMeta {
                 group_id: 25,
                 category_id: 6,
@@ -1787,6 +1889,7 @@ async fn issue_1352_item_get_info_enforces_auth_ownership_corp_roles_grid_and_gm
             victim_space_on_grid_mod_id,
             victim_space_off_grid_id,
             victim_space_cloaked_id,
+            victim_space_gate_cloaked_id,
             victim_other_sys_ship_id,
         ] {
             let err = handle_dogma_im(&ctx, &mut caller_sess, None, svc, meth, &[PyRep::Integer(denied_id)], &kw)
@@ -1807,21 +1910,24 @@ async fn issue_1352_item_get_info_enforces_auth_ownership_corp_roles_grid_and_gm
         assert_eq!(sub_err.code, "AccessDenied", "{svc}.{meth} must deny foreign sublocation tuple");
     }
 
-    // 3. On-grid visible uncloaked space ship is allowed for undocked caller in same system.
+    // 3. On-grid visible uncloaked space ships (including >250 km within 8,000 km grid bubble)
+    // are allowed for undocked caller in same system.
     for (svc, meth) in endpoints {
-        let info = handle_dogma_im(
-            &ctx,
-            &mut caller_sess,
-            None,
-            svc,
-            meth,
-            &[PyRep::Integer(victim_space_on_grid_id)],
-            &kw,
-        )
-        .await
-        .expect("handled")
-        .expect("on-grid space ship must be inspectable");
-        assert_eq!(info.dict_get("typeID"), Some(&PyRep::Integer(587)));
+        for visible_id in [victim_space_on_grid_id, victim_space_far_bubble_id] {
+            let info = handle_dogma_im(
+                &ctx,
+                &mut caller_sess,
+                None,
+                svc,
+                meth,
+                &[PyRep::Integer(visible_id)],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .expect("on-grid space ship must be inspectable");
+            assert_eq!(info.dict_get("typeID"), Some(&PyRep::Integer(587)));
+        }
     }
 
     // 4. Player-corp hangar item: DB role member allowed; roleless (even with spoofed session role),
@@ -1888,6 +1994,101 @@ async fn issue_1352_item_get_info_enforces_auth_ownership_corp_roles_grid_and_gm
                 .unwrap_err()
                 .code,
             "AccessDenied"
+        );
+    }
+
+    // 4b. Structure-hosted items: ROLE_EQUIPMENT_CONFIG / ROLE_STATION_MANAGER can inspect
+    // equipment/core flags but CANNOT bypass CorpSAG / Deliveries; fuel technician can inspect
+    // StructureFuel but NOT equipment slots.
+    let mut equip_sess = mk_sess(
+        corp_equip_mgr_id,
+        player_corp_id,
+        Some(station_id),
+        None,
+        eve_machonet::service_roles::ROLE_PLAYER,
+    );
+    let mut station_mgr_sess = mk_sess(
+        corp_station_mgr_id,
+        player_corp_id,
+        Some(station_id),
+        None,
+        eve_machonet::service_roles::ROLE_PLAYER,
+    );
+    let mut fuel_tech_sess = mk_sess(
+        corp_fuel_tech_id,
+        player_corp_id,
+        Some(station_id),
+        None,
+        eve_machonet::service_roles::ROLE_PLAYER,
+    );
+    for (svc, meth) in endpoints {
+        for allowed_id in [struct_hi_mod_id, struct_core_id] {
+            assert!(
+                handle_dogma_im(&ctx, &mut equip_sess, None, svc, meth, &[PyRep::Integer(allowed_id)], &kw)
+                    .await
+                    .expect("handled")
+                    .is_ok(),
+                "ROLE_EQUIPMENT_CONFIG must inspect structure item {allowed_id} on {svc}.{meth}"
+            );
+            assert!(
+                handle_dogma_im(&ctx, &mut station_mgr_sess, None, svc, meth, &[PyRep::Integer(allowed_id)], &kw)
+                    .await
+                    .expect("handled")
+                    .is_ok(),
+                "ROLE_STATION_MANAGER must inspect structure item {allowed_id} on {svc}.{meth}"
+            );
+        }
+        assert!(
+            handle_dogma_im(&ctx, &mut corp_ok_sess, None, svc, meth, &[PyRep::Integer(struct_sag2_item_id)], &kw)
+                .await
+                .expect("handled")
+                .is_ok(),
+            "CorpSAG2 query role must inspect structure CorpSAG2 item on {svc}.{meth}"
+        );
+        assert!(
+            handle_dogma_im(&ctx, &mut fuel_tech_sess, None, svc, meth, &[PyRep::Integer(struct_fuel_id)], &kw)
+                .await
+                .expect("handled")
+                .is_ok(),
+            "fuel technician role must inspect StructureFuel on {svc}.{meth}"
+        );
+        assert!(
+            handle_dogma_im(&ctx, &mut station_mgr_sess, None, svc, meth, &[PyRep::Integer(struct_fuel_id)], &kw)
+                .await
+                .expect("handled")
+                .is_ok(),
+            "ROLE_STATION_MANAGER must inspect StructureFuel on {svc}.{meth}"
+        );
+        for denied_id in [struct_sag2_item_id, struct_deliveries_item_id, struct_fuel_id] {
+            assert_eq!(
+                handle_dogma_im(&ctx, &mut equip_sess, None, svc, meth, &[PyRep::Integer(denied_id)], &kw)
+                    .await
+                    .expect("handled")
+                    .unwrap_err()
+                    .code,
+                "AccessDenied",
+                "ROLE_EQUIPMENT_CONFIG must be denied structure item {denied_id} on {svc}.{meth}"
+            );
+        }
+        for denied_id in [struct_sag2_item_id, struct_deliveries_item_id] {
+            assert_eq!(
+                handle_dogma_im(&ctx, &mut station_mgr_sess, None, svc, meth, &[PyRep::Integer(denied_id)], &kw)
+                    .await
+                    .expect("handled")
+                    .unwrap_err()
+                    .code,
+                "AccessDenied",
+                "ROLE_STATION_MANAGER must be denied structure hangar/deliveries item {denied_id} on {svc}.{meth}"
+            );
+        }
+        assert_eq!(
+            handle_dogma_im(&ctx, &mut fuel_tech_sess, None, svc, meth, &[PyRep::Integer(struct_hi_mod_id)], &kw)
+                .await
+                .expect("handled")
+                .unwrap_err()
+                .code,
+            "AccessDenied",
+            "fuel technician must be denied structure HiSlot0 item on {svc}.{meth}"
         );
     }
 
@@ -2097,6 +2298,56 @@ async fn issue_1352_link_all_weapons_guards_auth_owner_docked_cloaked_and_read_p
         "ShipNotActive"
     );
     assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+
+    // 6b. Unboarded caller (active_ship_id == 0 && sess.ship_id == None) and
+    // session/DB active-ship disagreement -> ShipNotActive, zero DB mutation.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = 0;
+        }
+    });
+    sess.ship_id = None;
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    assert_eq!(
+        handle_dogma_im(&ctx, &mut sess, None, "dogmaIM", "LinkAllWeapons", &[PyRep::Integer(ship_id)], &kw)
+            .await
+            .expect("handled")
+            .unwrap_err()
+            .code,
+        "ShipNotActive"
+    );
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+
+    sess.ship_id = Some(ship_id);
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    assert_eq!(
+        handle_dogma_im(&ctx, &mut sess, None, "dogmaIM", "LinkAllWeapons", &[PyRep::Integer(ship_id)], &kw)
+            .await
+            .expect("handled")
+            .unwrap_err()
+            .code,
+        "ShipNotActive"
+    );
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
+    });
+    sess.ship_id = None;
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    assert_eq!(
+        handle_dogma_im(&ctx, &mut sess, None, "dogmaIM", "LinkAllWeapons", &[PyRep::Integer(ship_id)], &kw)
+            .await
+            .expect("handled")
+            .unwrap_err()
+            .code,
+        "ShipNotActive"
+    );
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+
+    sess.ship_id = Some(ship_id);
 
     // 7. Cloaked in space -> CannotLinkWeaponsWhileCloaked, zero DB mutation.
     let _ = sys
