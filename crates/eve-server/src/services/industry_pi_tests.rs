@@ -969,6 +969,426 @@ fn industry_job_solar_system_resolution_handles_four_hop_limit_and_cycles() {
     }
 }
 
+#[test]
+fn industry_monitor_connect_and_disconnect_enforce_db_authoritative_corp_roles() {
+    let ctx = make_test_context();
+    let station_hq = 60_003_760_i64;
+    let station_other = 60_003_761_i64;
+
+    let corp_a = 98_200_101_i64;
+    let corp_b = 98_200_102_i64;
+    let npc_corp = 1_000_170_i64;
+    let uninserted_corp = 98_200_888_i64;
+
+    let char_ceo = 91_200_001_i64;
+    let char_fm = 91_200_002_i64;
+    let char_dir = 91_200_003_i64;
+    let char_omitted = 91_200_004_i64;
+    let char_excluded = 91_200_005_i64;
+    let char_ex_member = 91_200_006_i64;
+    let char_npc = 91_200_007_i64;
+    let char_uninserted = 91_200_008_i64;
+    let char_other_installer = 91_200_009_i64;
+    let char_hq_take1 = 91_200_010_i64;
+
+    let corp_job_ceo = 9501_i64;
+    let corp_job_fm = 9502_i64;
+    let npc_job_id = 9503_i64;
+    let uninserted_job_id = 9504_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp_a_rec = eve_db::CorporationRecord::new(corp_a, "Monitor Corp", "MONC", char_ceo);
+        corp_a_rec.hq_station_id = Some(station_hq);
+        corp_a_rec.members = std::collections::HashSet::from([
+            char_ceo,
+            char_fm,
+            char_dir,
+            char_omitted,
+            char_hq_take1,
+        ]);
+        corp_a_rec.member_roles = HashMap::from([
+            (char_fm, eve_db::corp_roles::ROLE_FACTORY_MANAGER),
+            (char_dir, eve_db::corp_roles::ROLE_DIRECTOR),
+            // Leftover DB role for excluded member must still be denied.
+            (char_excluded, eve_db::corp_roles::ROLE_DIRECTOR),
+        ]);
+        snap.corporations.insert(corp_a, corp_a_rec);
+
+        let mut corp_b_rec = eve_db::CorporationRecord::new(corp_b, "Other Corp", "OTHR", char_ex_member);
+        corp_b_rec.members = std::collections::HashSet::from([char_ex_member]);
+        corp_b_rec.member_roles = HashMap::from([(char_ex_member, eve_db::corp_roles::ROLE_DIRECTOR)]);
+        snap.corporations.insert(corp_b, corp_b_rec);
+
+        // Even if an NPC corp record exists in snapshot with CEO/Director, NPC corps must be rejected.
+        let mut npc_corp_rec = eve_db::CorporationRecord::new(npc_corp, "NPC Corp", "NPCC", char_npc);
+        npc_corp_rec.members = std::collections::HashSet::from([char_npc, char_other_installer]);
+        npc_corp_rec.member_roles = HashMap::from([(char_npc, eve_db::corp_roles::ROLE_DIRECTOR)]);
+        snap.corporations.insert(npc_corp, npc_corp_rec);
+
+        // Uninserted corp has a stale corp_role_assignments entry, but no snap.corporations entry.
+        snap.corp_role_assignments.insert(
+            (uninserted_corp, char_uninserted),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: char_uninserted,
+                roles: eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER,
+                ..Default::default()
+            },
+        );
+
+        // Location-scoped Take1 (bit 13) at HQ only for char_hq_take1.
+        snap.corp_role_assignments.insert(
+            (corp_a, char_hq_take1),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: char_hq_take1,
+                roles_at_hq: 1u64 << 13,
+                ..Default::default()
+            },
+        );
+
+        for (cid, corpid, name) in [
+            (char_ceo, corp_a, "MonCEO"),
+            (char_fm, corp_a, "MonFM"),
+            (char_dir, corp_a, "MonDir"),
+            (char_omitted, corp_a, "MonOmitted"),
+            (char_excluded, corp_a, "MonExcluded"),
+            (char_ex_member, corp_b, "MonExMember"),
+            (char_npc, npc_corp, "MonNpc"),
+            (char_uninserted, uninserted_corp, "MonUninserted"),
+            (char_other_installer, corp_b, "MonOtherInstaller"),
+            (char_hq_take1, corp_a, "MonHqTake1"),
+        ] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: corpid,
+                    station_id: Some(station_hq),
+                    home_station_id: station_hq,
+                    name: name.into(),
+                    ..Default::default()
+                },
+            );
+        }
+
+        let seed_corp_job = |snap: &mut eve_db::WorldStateSnapshot,
+                             job_id: i64,
+                             installer_id: i64,
+                             owner_corp_id: i64| {
+            snap.industry_jobs.insert(
+                job_id,
+                IndustryJobRecord {
+                    job_id,
+                    installer_id,
+                    facility_id: station_hq,
+                    blueprint_item_id: 95_000 + job_id,
+                    blueprint_type_id: 688,
+                    activity_id: 1,
+                    runs: 1,
+                    product_type_id: 587,
+                    status: "Active".into(),
+                    duration_seconds: 600,
+                    start_unix: 1_000,
+                    blueprint_location_id: station_hq,
+                    output_location_id: station_hq,
+                    ..Default::default()
+                },
+            );
+            save_job_cost_meta(
+                snap,
+                job_id,
+                &IndustryJobCostMeta {
+                    use_corp: true,
+                    owner_id: owner_corp_id,
+                    ..Default::default()
+                },
+            );
+        };
+        seed_corp_job(snap, corp_job_ceo, char_ceo, corp_a);
+        seed_corp_job(snap, corp_job_fm, char_fm, corp_a);
+        seed_corp_job(snap, npc_job_id, char_other_installer, npc_corp);
+        seed_corp_job(snap, uninserted_job_id, char_other_installer, uninserted_corp);
+
+        snap.items.insert(
+            995_001,
+            InventoryItemRecord {
+                item_id: 995_001,
+                type_id: 34,
+                owner_id: corp_a,
+                location_id: station_hq,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 750,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mk_hangar_kv = |owner_id: i64, location_id: i64| {
+        PyRep::keyval([
+            ("ownerID", PyRep::Integer(owner_id)),
+            ("locationID", PyRep::Integer(location_id)),
+            ("inputFlagID", PyRep::Integer(InventoryFlag::CorpSAG1 as i64)),
+        ])
+    };
+    let corp_sag1_hq_kv = mk_hangar_kv(corp_a, station_hq);
+    let corp_sag1_other_kv = mk_hangar_kv(corp_a, station_other);
+
+    // 1. Member omitted from BOTH member_roles and corp_role_assignments with stale session.corp_role
+    //    must be denied on ConnectJob (jobID + hangar KeyVal) and DisconnectJob without mutating DB.
+    let snap_before_omitted = ctx.db.with_snapshot(|snap| {
+        let corp = snap.corporations.get(&corp_a).expect("corp_a seeded");
+        assert!(corp.members.contains(&char_omitted));
+        assert!(!corp.member_roles.contains_key(&char_omitted));
+        assert!(!snap.corp_role_assignments.contains_key(&(corp_a, char_omitted)));
+        snap.clone()
+    });
+    let mut s_omitted = char_session(char_omitted, corp_a);
+    s_omitted.corp_role =
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 13);
+    assert_eq!(
+        handle_industry_job_queries(
+            &ctx,
+            &mut s_omitted,
+            "industryMonitor",
+            "ConnectJob",
+            &[PyRep::Integer(corp_job_ceo)],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+    assert_eq!(
+        handle_industry_job_queries(
+            &ctx,
+            &mut s_omitted,
+            "industryMonitor",
+            "ConnectJob",
+            std::slice::from_ref(&corp_sag1_hq_kv),
+            &HashMap::new(),
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+    assert_eq!(
+        handle_industry_job_queries(
+            &ctx,
+            &mut s_omitted,
+            "industryMonitor",
+            "DisconnectJob",
+            &[PyRep::Integer(corp_job_ceo)],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.clone()), snap_before_omitted);
+
+    // 2. Ex-member with stale session.corporation_id = corp_a while DB corporation_id = corp_b.
+    let mut s_ex = char_session(char_ex_member, corp_a);
+    s_ex.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    for (method, arg) in [
+        ("ConnectJob", PyRep::Integer(corp_job_ceo)),
+        ("ConnectJob", corp_sag1_hq_kv.clone()),
+        ("DisconnectJob", PyRep::Integer(corp_job_ceo)),
+    ] {
+        assert_eq!(
+            handle_industry_job_queries(
+                &ctx,
+                &mut s_ex,
+                "industryMonitor",
+                method,
+                &[arg],
+                &HashMap::new(),
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "CrpAccessDenied"
+        );
+    }
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.clone()), snap_before_omitted);
+
+    // 3. Excluded member (not in non-empty corp.members despite stale DB role + session role).
+    let mut s_excluded = char_session(char_excluded, corp_a);
+    s_excluded.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    for (method, arg) in [
+        ("ConnectJob", PyRep::Integer(corp_job_ceo)),
+        ("ConnectJob", corp_sag1_hq_kv.clone()),
+        ("DisconnectJob", PyRep::Integer(corp_job_ceo)),
+    ] {
+        assert_eq!(
+            handle_industry_job_queries(
+                &ctx,
+                &mut s_excluded,
+                "industryMonitor",
+                method,
+                &[arg],
+                &HashMap::new(),
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "CrpAccessDenied"
+        );
+    }
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.clone()), snap_before_omitted);
+
+    // 4. NPC corporation is always denied even when present in snap.corporations with CEO/Director.
+    let mut s_npc = char_session(char_npc, npc_corp);
+    s_npc.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    for (method, arg) in [
+        ("ConnectJob", PyRep::Integer(npc_job_id)),
+        ("ConnectJob", mk_hangar_kv(npc_corp, station_hq)),
+        ("DisconnectJob", PyRep::Integer(npc_job_id)),
+    ] {
+        assert_eq!(
+            handle_industry_job_queries(
+                &ctx,
+                &mut s_npc,
+                "industryMonitor",
+                method,
+                &[arg],
+                &HashMap::new(),
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "CrpAccessDenied"
+        );
+    }
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.clone()), snap_before_omitted);
+
+    // 5. Uninserted player corporation (missing from snap.corporations) is denied even with
+    //    corp_role_assignments and stale session.corp_role.
+    let mut s_uninserted = char_session(char_uninserted, uninserted_corp);
+    s_uninserted.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    for (method, arg) in [
+        ("ConnectJob", PyRep::Integer(uninserted_job_id)),
+        ("ConnectJob", mk_hangar_kv(uninserted_corp, station_hq)),
+        ("DisconnectJob", PyRep::Integer(uninserted_job_id)),
+    ] {
+        assert_eq!(
+            handle_industry_job_queries(
+                &ctx,
+                &mut s_uninserted,
+                "industryMonitor",
+                method,
+                &[arg],
+                &HashMap::new(),
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "CrpAccessDenied"
+        );
+    }
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.clone()), snap_before_omitted);
+
+    // 6. Location-scoped hangar division role (roles_at_hq Take1) is denied at another station
+    //    and succeeds at HQ with session.corp_role = 0.
+    let mut s_hq_take1 = char_session(char_hq_take1, corp_a);
+    assert_eq!(
+        handle_industry_job_queries(
+            &ctx,
+            &mut s_hq_take1,
+            "industryMonitor",
+            "ConnectJob",
+            &[corp_sag1_other_kv],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+    let hq_conn = handle_industry_job_queries(
+        &ctx,
+        &mut s_hq_take1,
+        "industryMonitor",
+        "ConnectJob",
+        std::slice::from_ref(&corp_sag1_hq_kv),
+        &HashMap::new(),
+    )
+    .unwrap()
+    .expect("HQ Take1 holder must connect CorpSAG1 at HQ");
+    let PyRep::Tuple(hq_parts) = hq_conn else {
+        panic!("expected (monitorID, avail) tuple");
+    };
+    let hq_mon_id = hq_parts[0].as_i64().unwrap();
+    assert_eq!(hq_parts[1], PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(750))]));
+    assert_eq!(
+        handle_industry_job_queries(
+            &ctx,
+            &mut s_hq_take1,
+            "industryMonitor",
+            "DisconnectJob",
+            &[PyRep::Integer(hq_mon_id)],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // 7. Authorized DB role holders (ROLE_FACTORY_MANAGER, ROLE_DIRECTOR, CEO) succeed cleanly
+    //    with session.corp_role = 0 on both ConnectJob and DisconnectJob.
+    for (cid, target_job_id) in [
+        (char_fm, corp_job_ceo),
+        (char_dir, corp_job_ceo),
+        (char_ceo, corp_job_fm),
+    ] {
+        let mut sess = char_session(cid, corp_a);
+        assert_eq!(sess.corp_role, 0);
+        let conn = handle_industry_job_queries(
+            &ctx,
+            &mut sess,
+            "industryMonitor",
+            "ConnectJob",
+            &[PyRep::Integer(target_job_id)],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .expect("DB-authorized corp role holder must succeed on ConnectJob");
+        let PyRep::Tuple(parts) = conn else {
+            panic!("expected (monitorID, avail) tuple");
+        };
+        let mon_id = parts[0].as_i64().unwrap();
+        assert_eq!(parts[1], PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(750))]));
+
+        let disc_job = handle_industry_job_queries(
+            &ctx,
+            &mut sess,
+            "industryMonitor",
+            "DisconnectJob",
+            &[PyRep::Integer(target_job_id)],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .expect("DB-authorized corp role holder must succeed on DisconnectJob(jobID)");
+        assert_eq!(disc_job.dict_get("jobID"), Some(&PyRep::Integer(target_job_id)));
+        assert_eq!(disc_job.dict_get("connected"), Some(&PyRep::Bool(false)));
+        assert_eq!(disc_job.dict_get("unsubscribed"), Some(&PyRep::Bool(true)));
+
+        let disc_mon = handle_industry_job_queries(
+            &ctx,
+            &mut sess,
+            "industryMonitor",
+            "DisconnectJob",
+            &[PyRep::Integer(mon_id)],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .expect("DisconnectJob(monitorID) must succeed");
+        assert_eq!(disc_mon, PyRep::Bool(true));
+    }
+}
+
 #[cfg(test)]
 #[path = "industry_pi_extra_unit_tests.rs"]
 mod industry_pi_extra_unit_tests;
