@@ -571,6 +571,505 @@ async fn test_sp7_self_destruct_server_timer_detonates_without_second_client_cal
     assert_eq!(sess.ship_id, Some(cap_id), "Connected session ship_id must reconcile to capsule after server-timer death");
 }
 
+fn decode_set_state_ball_it(pyrep: &PyRep, ship_id: i64) -> eve_destiny::wire::DecodedBall {
+    let PyRep::List(entries) = pyrep else {
+        panic!("expected DoDestinyUpdate PyRep::List, got {pyrep:?}");
+    };
+    for entry in entries {
+        let PyRep::Tuple(stamped) = entry else {
+            continue;
+        };
+        let Some(PyRep::Tuple(action)) = stamped.get(1) else {
+            continue;
+        };
+        if action.first() != Some(&PyRep::String("SetState".into())) {
+            continue;
+        }
+        let Some(PyRep::Tuple(args)) = action.get(1) else {
+            panic!("expected SetState args tuple");
+        };
+        let Some(PyRep::KeyVal(kv)) = args.first() else {
+            panic!("expected SetState KeyVal");
+        };
+        let Some((_, PyRep::Bytes(state_bytes))) = kv.iter().find(|(k, _)| *k == "state") else {
+            panic!("expected SetState state bytes");
+        };
+        let (_, _, decoded) =
+            eve_destiny::wire::decode_add_balls(state_bytes).expect("decode SetState bytes");
+        return decoded
+            .into_iter()
+            .find(|b| b.id == ship_id)
+            .expect("ship ball present in SetState bytes");
+    }
+    panic!("SetState action missing from DoDestinyUpdate: {pyrep:?}");
+}
+
+#[tokio::test]
+async fn test_sp6_bonused_venture_hp_and_mid_warp_restart_recovery_across_sqlite_reopen() {
+    let char_id = 90_000_001_i64;
+    let empty = HashMap::new();
+
+    let (ctx2, sys_id, ship_id, warp_dest) = {
+        let ctx = ServerContext::new();
+        pin_clock(&ctx);
+
+        ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.clone_grade = 2; // Omega so level 5 HP skills are uncapped
+            let sid = ch.active_ship_id;
+            snap.items.get_mut(&sid).unwrap().type_id = 32_880; // Venture: base 225 / 175 / 200
+            snap.items.retain(|_, it| {
+                it.location_id != sid || !matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=129)
+            });
+            for (skill_id, level) in [
+                (3419_u32, 5_u8),  // Shield Management -> +25% (281.25)
+                (3394_u32, 5_u8),  // Hull Upgrades -> +25% (218.75)
+                (3392_u32, 5_u8),  // Mechanics -> +25% (250.0)
+                (32918_u32, 1_u8), // Mining Frigate
+            ] {
+                snap.skills.entry(char_id).or_default().insert(
+                    skill_id,
+                    eve_db::TrainedSkillRecord {
+                        type_id: skill_id,
+                        level,
+                        skill_points: 256_000.0,
+                    },
+                );
+            }
+        });
+
+        let (mut sess, sys_id, ship_id) = setup_pilot_in_space(&ctx, char_id).await;
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+        let initial_cs = sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .expect("initial Venture combat state");
+        assert!((initial_cs.max_shield_hp - 281.25).abs() < 1e-6);
+        assert!((initial_cs.shield_hp - 281.25).abs() < 1e-6);
+        assert!((initial_cs.max_armor_hp - 218.75).abs() < 1e-6);
+        assert!((initial_cs.armor_hp - 218.75).abs() < 1e-6);
+        assert!((initial_cs.max_structure_hp - 250.0).abs() < 1e-6);
+        assert!((initial_cs.structure_hp - 250.0).abs() < 1e-6);
+
+        let origin_pos = sys_handle.get_ball_position_sync(ship_id).unwrap();
+        let target_cel = ctx
+            .sde
+            .celestials_in_system(sys_id)
+            .into_iter()
+            .filter(|c| c.position.distance(origin_pos) > 5.0 * eve_destiny::AU_METERS)
+            .min_by_key(|c| c.position.distance(origin_pos) as i64)
+            .expect("system must have a celestial > 5 AU away");
+
+        let beyonce_oid = ctx.bind_object(&sess, "beyonce", sys_id as i64).unwrap();
+        ctx.dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_oid),
+            "CmdWarpToStuff",
+            &[
+                PyRep::String("item".into()),
+                PyRep::Integer(target_cel.celestial_id),
+            ],
+            &empty,
+            None,
+        )
+        .await
+        .expect("CmdWarpToStuff");
+
+        let mut entered_cruising = false;
+        let mut warp_dest = origin_pos;
+        for _ in 0..60 {
+            let _ = sys_handle.step_manual(1.0).await;
+            let (_, b) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+            if let MovementMode::Warp {
+                phase: eve_destiny::WarpPhase::Cruising,
+                destination,
+                ..
+            } = b.mode
+            {
+                entered_cruising = true;
+                warp_dest = destination;
+                break;
+            }
+        }
+        assert!(entered_cruising, "Venture must enter WarpPhase::Cruising");
+        assert!(sys_handle.committed_warp_destination_sync(ship_id).is_some());
+
+        ctx.dispatch_rpc(
+            &mut sess,
+            "userSvc",
+            None,
+            "UserLogOffCharacter",
+            &[PyRep::Integer(char_id)],
+            &empty,
+            None,
+        )
+        .await
+        .expect("UserLogOffCharacter mid-warp");
+
+        let disc = with_sp6_state(&ctx.db, |st| st.disconnected_ships.get(&char_id).cloned())
+            .expect("DisconnectedShipEntry persisted mid-warp");
+        assert!(disc.pre_warp_position.is_none());
+        assert!(disc.emergency_warp_dest.is_some());
+        assert!(DVec3::from_array(disc.last_velocity).length() > eve_destiny::AU_METERS);
+
+        let ctx2 = persist_and_reopen_sqlite(&ctx, "sp6_bonused_mid_warp");
+        (ctx2, sys_id, ship_id, warp_dest)
+    };
+
+    pin_clock(&ctx2);
+    // Pre-spawn system actor so `populate_persisted_space_objects` materializes persisted
+    // disconnected ships before client reconnect (`#1453` + `#1454`).
+    let sys_handle2 = ctx2.systems.get_or_spawn(sys_id);
+
+    let pre_cs = sys_handle2
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .expect("restored Venture combat state before login");
+    assert!(
+        (pre_cs.max_shield_hp - 281.25).abs() < 1e-6,
+        "restarted Venture must keep bonused 281.25 shield max, got {}",
+        pre_cs.max_shield_hp
+    );
+    assert!(
+        (pre_cs.shield_hp - 281.25).abs() < 1e-6,
+        "restarted Venture must not clamp bonused shield HP down to 225.0 (#1453), got {}",
+        pre_cs.shield_hp
+    );
+    assert!((pre_cs.max_armor_hp - 218.75).abs() < 1e-6);
+    assert!((pre_cs.armor_hp - 218.75).abs() < 1e-6);
+    assert!((pre_cs.max_structure_hp - 250.0).abs() < 1e-6);
+    assert!((pre_cs.structure_hp - 250.0).abs() < 1e-6);
+    assert!(!pre_cs.is_emergency_warping);
+
+    let (_, pre_ball) = sys_handle2.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            pre_ball.mode,
+            MovementMode::Warp {
+                phase: eve_destiny::WarpPhase::Cruising,
+                destination,
+                ..
+            } if destination.distance(warp_dest) < 1.0
+        ),
+        "restart mid-warp must reconstruct Cruising phase rather than Aligning (#1454): {:?}",
+        pre_ball.mode
+    );
+    assert!(pre_ball.velocity.length() > eve_destiny::AU_METERS);
+    assert!((pre_ball.speed_fraction - 1.0).abs() < 1e-6);
+    assert!(sys_handle2.committed_warp_destination_sync(ship_id).is_some());
+
+    // Log pilot back in and verify client reconnect preserves active mid-warp and finishes cleanly.
+    let mut sess2 = SessionState::default();
+    login_pilot(&ctx2, &mut sess2, "demo", "demo-secret").await;
+    ctx2.dispatch_rpc(
+        &mut sess2,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &empty,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID after mid-warp restart");
+    assert_eq!(sess2.ship_id, Some(ship_id));
+    assert!(ctx2.active_warps.lock().unwrap().contains_key(&ship_id));
+
+    let beyonce_oid2 = ctx2.bind_object(&sess2, "beyonce", sys_id as i64).unwrap();
+    let _ = ctx2.drain_notifications_for_char(char_id);
+    ctx2.dispatch_rpc(
+        &mut sess2,
+        "beyonce",
+        Some(beyonce_oid2),
+        "UpdateStateRequest",
+        &[],
+        &empty,
+        None,
+    )
+    .await
+    .expect("UpdateStateRequest on reconnect");
+
+    let mut landed = false;
+    for _ in 0..240 {
+        let _ = sys_handle2.step_manual(1.0).await;
+        let (_, b) = sys_handle2.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if matches!(b.mode, MovementMode::Stop) {
+            landed = true;
+            assert_eq!(b.velocity, DVec3::ZERO, "warp exit must zero velocity (#1454)");
+            assert_eq!(b.speed_fraction, 0.0);
+            break;
+        }
+    }
+    assert!(landed, "resumed mid-warp must land cleanly");
+    let (_, landed_ball) = sys_handle2.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    for _ in 0..10 {
+        let _ = sys_handle2.step_manual(1.0).await;
+    }
+    let (_, post_drift_ball) = sys_handle2.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert_eq!(
+        post_drift_ball.position, landed_ball.position,
+        "zero residual drift after warp exit (#1454)"
+    );
+    assert!(ctx2.pending_warp_finished.lock().unwrap().contains(&ship_id));
+
+    ctx2.dispatch_rpc(
+        &mut sess2,
+        "beyonce",
+        Some(beyonce_oid2),
+        "UpdateStateRequest",
+        &[],
+        &empty,
+        None,
+    )
+    .await
+    .expect("UpdateStateRequest after landing");
+    let fin_notes = ctx2.drain_notifications_for_char(char_id);
+    assert!(
+        fin_notes.iter().any(|n| n.event == "OnWarpFinished"),
+        "resumed mid-warp landing must emit OnWarpFinished (#1454)"
+    );
+    let final_cs = sys_handle2.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((final_cs.shield_hp - 281.25).abs() < 1e-6);
+    assert!((final_cs.armor_hp - 218.75).abs() < 1e-6);
+    assert!((final_cs.structure_hp - 250.0).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn test_sp6_emergency_warp_cruising_redirect_on_warp_finished_and_cold_solo_mid_warp_reopen() {
+    let char_id = 90_000_002_i64;
+    let empty = HashMap::new();
+
+    // Part 1: Outbound emergency warp in WarpPhase::Cruising redirects cleanly to return warp,
+    // puts return warp in SetState (#1458), lands at zero velocity, and emits OnWarpFinished (#1454).
+    let ctx = ServerContext::new();
+    pin_clock(&ctx);
+    let (mut sess, sys_id, ship_id) = setup_pilot_in_space(&ctx, char_id).await;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let orig_pos = sys_handle.get_ball_position_sync(ship_id).unwrap();
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "userSvc",
+        None,
+        "UserLogOffCharacter",
+        &[PyRep::Integer(char_id)],
+        &empty,
+        None,
+    )
+    .await
+    .expect("UserLogOffCharacter emergency warp");
+
+    let mut emg_left_aligning = false;
+    for _ in 0..40 {
+        let _ = sys_handle.step_manual(1.0).await;
+        let (_, b) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if matches!(
+            b.mode,
+            MovementMode::Warp { phase, .. } if phase != eve_destiny::WarpPhase::Aligning
+        ) && b.position.distance(orig_pos) > 10_000.0
+        {
+            emg_left_aligning = true;
+            break;
+        }
+    }
+    assert!(
+        emg_left_aligning,
+        "outbound emergency warp must advance past Aligning phase"
+    );
+
+    ctx.dispatch_rpc(&mut sess, "authentication", None, "Logout", &[], &empty, None)
+        .await
+        .expect("Logout to release online lock after UserLogOffCharacter");
+
+    let mut sess_re = SessionState::default();
+    login_pilot(&ctx, &mut sess_re, "other", "other-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess_re,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &empty,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID reconnect mid-emergency-warp");
+
+    let (_, obs_evs, pyrep) = sys_handle.drain_observer_updates(ship_id).await.unwrap();
+    assert_eq!(
+        obs_evs.first(),
+        Some(&eve_destiny::DestinyEvent::SetState {
+            observer_ball_id: ship_id
+        }),
+        "reconnect must queue SetState at index 0 after setting return warp (#1458), got {obs_evs:?}"
+    );
+    assert!(
+        !obs_evs
+            .iter()
+            .any(|e| matches!(e, eve_destiny::DestinyEvent::Stop { .. })),
+        "reconnect must not emit stale Stop before SetState (#1458), got {obs_evs:?}"
+    );
+    let set_state_ball = decode_set_state_ball_it(&pyrep, ship_id);
+    assert_eq!(set_state_ball.mode, eve_destiny::wire::DST_BALL_WARP);
+    assert!(set_state_ball
+        .warp_destination
+        .is_some_and(|d| d.distance(orig_pos) < 1.0));
+    assert!(ctx.return_warps.lock().unwrap().contains(&ship_id));
+
+    let beyonce_oid = ctx.bind_object(&sess_re, "beyonce", sys_id as i64).unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let mut return_landed = false;
+    for _ in 0..240 {
+        let _ = sys_handle.step_manual(1.0).await;
+        let (_, b) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if matches!(b.mode, MovementMode::Stop) {
+            return_landed = true;
+            assert_eq!(b.velocity, DVec3::ZERO);
+            assert_eq!(b.speed_fraction, 0.0);
+            break;
+        }
+    }
+    assert!(return_landed, "return warp must land cleanly");
+    ctx.dispatch_rpc(
+        &mut sess_re,
+        "beyonce",
+        Some(beyonce_oid),
+        "UpdateStateRequest",
+        &[],
+        &empty,
+        None,
+    )
+    .await
+    .expect("UpdateStateRequest after return warp landing");
+    let return_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        return_notes.iter().any(|n| n.event == "OnWarpFinished"),
+        "reconnect return-warp landing must emit OnWarpFinished (#1454)"
+    );
+
+    // Part 2: Cold SQLite reopen where the solo mid-client-warp pilot logs in BEFORE
+    // `get_or_spawn(sys_id)` has materialized `populate_persisted_space_objects`.
+    let target_cel = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .filter(|c| c.position.distance(orig_pos) > 5.0 * eve_destiny::AU_METERS)
+        .min_by_key(|c| c.position.distance(orig_pos) as i64)
+        .expect("system must have celestial > 5 AU");
+    ctx.dispatch_rpc(
+        &mut sess_re,
+        "beyonce",
+        Some(beyonce_oid),
+        "CmdWarpToStuff",
+        &[
+            PyRep::String("item".into()),
+            PyRep::Integer(target_cel.celestial_id),
+        ],
+        &empty,
+        None,
+    )
+    .await
+    .expect("CmdWarpToStuff for cold reopen");
+    let mut warp_cruising = false;
+    for _ in 0..60 {
+        let _ = sys_handle.step_manual(1.0).await;
+        let (_, b) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if matches!(
+            b.mode,
+            MovementMode::Warp {
+                phase: eve_destiny::WarpPhase::Cruising,
+                ..
+            }
+        ) {
+            warp_cruising = true;
+            break;
+        }
+    }
+    assert!(warp_cruising);
+    ctx.dispatch_rpc(
+        &mut sess_re,
+        "userSvc",
+        None,
+        "UserLogOffCharacter",
+        &[PyRep::Integer(char_id)],
+        &empty,
+        None,
+    )
+    .await
+    .expect("UserLogOffCharacter before cold SQLite reopen");
+    ctx.dispatch_rpc(&mut sess_re, "authentication", None, "Logout", &[], &empty, None)
+        .await
+        .expect("Logout before cold SQLite reopen");
+
+    let ctx_cold = persist_and_reopen_sqlite(&ctx, "sp6_cold_solo_mid_warp");
+    pin_clock(&ctx_cold);
+    let mut sess_cold = SessionState::default();
+    login_pilot(&ctx_cold, &mut sess_cold, "other", "other-secret").await;
+    ctx_cold
+        .dispatch_rpc(
+            &mut sess_cold,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &empty,
+            None,
+        )
+        .await
+        .expect("SelectCharacterID cold solo reconnect");
+
+    let sys_cold = ctx_cold.systems.get_or_spawn(sys_id);
+    let (_, cold_ball) = sys_cold.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            cold_ball.mode,
+            MovementMode::Warp {
+                phase: eve_destiny::WarpPhase::Cruising,
+                ..
+            }
+        ),
+        "cold solo reconnect mid-warp must resume Cruising warp (#1454): {:?}",
+        cold_ball.mode
+    );
+    assert!(ctx_cold.active_warps.lock().unwrap().contains_key(&ship_id));
+    let beyonce_cold = ctx_cold.bind_object(&sess_cold, "beyonce", sys_id as i64).unwrap();
+    let _ = ctx_cold.drain_notifications_for_char(char_id);
+    let mut cold_landed = false;
+    for _ in 0..240 {
+        let _ = sys_cold.step_manual(1.0).await;
+        let (_, b) = sys_cold.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if matches!(b.mode, MovementMode::Stop) {
+            cold_landed = true;
+            assert_eq!(b.velocity, DVec3::ZERO);
+            break;
+        }
+    }
+    assert!(cold_landed, "cold-reopened mid-warp must land cleanly");
+    ctx_cold
+        .dispatch_rpc(
+            &mut sess_cold,
+            "beyonce",
+            Some(beyonce_cold),
+            "UpdateStateRequest",
+            &[],
+            &empty,
+            None,
+        )
+        .await
+        .expect("UpdateStateRequest after cold landing");
+    assert!(
+        ctx_cold
+            .drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnWarpFinished"),
+        "cold solo reconnect warp landing must emit OnWarpFinished (#1454)"
+    );
+}
+
 
 
 pub(crate) mod abyssal_disconnect_collapse_and_salvage_lifecycle {

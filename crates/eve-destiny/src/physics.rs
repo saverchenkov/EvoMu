@@ -1078,19 +1078,8 @@ impl Ballpark {
         for ball_id in warp_exit_stops {
             let mut landing_pos = None;
             if let Some(b) = self.balls.get_mut(&ball_id) {
-                let max_v = b.max_velocity.max(0.0);
-                if !b.velocity.is_finite() {
-                    b.velocity = DVec3::ZERO;
-                } else {
-                    let speed = b.velocity.length();
-                    if speed > max_v {
-                        b.velocity = if max_v > 0.0 {
-                            (b.velocity / speed) * max_v
-                        } else {
-                            DVec3::ZERO
-                        };
-                    }
-                }
+                b.velocity = DVec3::ZERO;
+                b.speed_fraction = 0.0;
                 if b.position.is_finite() {
                     landing_pos = Some(b.position.to_array());
                 }
@@ -1104,6 +1093,10 @@ impl Ballpark {
             }
             let ev_pos = landing_pos.map(|position| DestinyEvent::SetBallPosition { ball_id, position });
             let ev = DestinyEvent::Stop { ball_id };
+            let ev_vel = DestinyEvent::SetBallVelocity {
+                ball_id,
+                velocity: [0.0, 0.0, 0.0],
+            };
             let ev_massive = DestinyEvent::SetBallMassive {
                 ball_id,
                 is_massive: true,
@@ -1119,6 +1112,7 @@ impl Ballpark {
                 self.pending_events.push(pos_ev.clone());
             }
             self.pending_events.push(ev.clone());
+            self.pending_events.push(ev_vel.clone());
             self.pending_events.push(ev_massive.clone());
             self.pending_events.push(ev_deact.clone());
             self.pending_events.push(ev_sfx.clone());
@@ -1129,6 +1123,7 @@ impl Ballpark {
                     self.queue_event_for_grid_observers(gid, None, pos_ev);
                 }
                 self.queue_event_for_grid_observers(gid, None, &ev);
+                self.queue_event_for_grid_observers(gid, None, &ev_vel);
                 self.queue_event_for_grid_observers(gid, None, &ev_massive);
                 self.queue_event_for_grid_observers(gid, None, &ev_sfx);
             }
@@ -1681,12 +1676,10 @@ pub(crate) fn step_warp_ball(
         let stop_thresh = (0.5 * ball.max_velocity).min(100.0).max(1.0);
         if rem_plus_1 * k_d < stop_thresh {
             let rem_dist = (rem_plus_1 - 1.0).max(0.0);
-            let speed = (rem_plus_1 * k_d).min(ball.max_velocity.max(0.0));
             ball.position = destination - dir * rem_dist;
-            ball.velocity = dir * speed;
+            ball.velocity = DVec3::ZERO;
             ball.speed_fraction = 0.0;
             ball.mode = MovementMode::Stop;
-            integrate_subwarp(ball, DVec3::ZERO, remaining_dt);
             return true;
         }
         let rem_dist = (rem_plus_1 - 1.0).max(0.0);

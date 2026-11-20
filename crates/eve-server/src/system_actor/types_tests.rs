@@ -379,6 +379,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::SpawnBall { .. } => "SpawnBall",
             SystemCommand::SpawnBallWithCombat { .. } => "SpawnBallWithCombat",
             SystemCommand::SpawnBallWithMeta { .. } => "SpawnBallWithMeta",
+            SystemCommand::SpawnBallWithMetaTagged { .. } => "SpawnBallWithMetaTagged",
             SystemCommand::ChangeSlimItem { .. } => "ChangeSlimItem",
             SystemCommand::SetBallWormholeStages { .. } => "SetBallWormholeStages",
             SystemCommand::SetBallMaxVelocity { .. } => "SetBallMaxVelocity",
@@ -390,6 +391,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::BreakGateCloak { .. } => "BreakGateCloak",
             SystemCommand::PopulateAsteroids { .. } => "PopulateAsteroids",
             SystemCommand::RemoveBall { .. } => "RemoveBall",
+            SystemCommand::RemoveBallIfToken { .. } => "RemoveBallIfToken",
             SystemCommand::AcceptDocking { .. } => "AcceptDocking",
             SystemCommand::EmitPackagedActions { .. } => "EmitPackagedActions",
             SystemCommand::SetMovementMode { .. } => "SetMovementMode",
@@ -452,6 +454,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::FlushPeerObserverUpdates { .. } => "FlushPeerObserverUpdates",
             SystemCommand::TakeBall { .. } => "TakeBall",
             SystemCommand::RestoreBall { .. } => "RestoreBall",
+            SystemCommand::RestoreBallIfAbsent { .. } => "RestoreBallIfAbsent",
             SystemCommand::ModifyCombatState { .. } => "ModifyCombatState",
             SystemCommand::FlushConditionCheckpoint { .. } => "FlushConditionCheckpoint",
             SystemCommand::ApplyFitProjection { .. } => "ApplyFitProjection",
@@ -564,14 +567,41 @@ fn system_command_all_variants_construct_and_match() {
             reply: oneshot::channel().0,
         },
         SystemCommand::CurrentTick { reply: oneshot::channel().0 },
+        SystemCommand::RestoreBallIfAbsent {
+            taken: super::TakenBall {
+                tick: 0,
+                ball: ball.clone(),
+                combat_state: None,
+                slim_meta: None,
+                cycles_cleared: 0,
+                removed_own_cycles: Vec::new(),
+                pre_cleanup_combat_flags: None,
+            },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SpawnBallWithMetaTagged {
+            ball: ball.clone(),
+            combat_state: CombatState::default(),
+            slim_meta: SlimItemMeta::default(),
+            spawn_token: 1,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RemoveBallIfToken {
+            ball_id: 1,
+            spawn_token: 1,
+            reply: oneshot::channel().0,
+        },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 73);
+    assert_eq!(tags.len(), 76);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
     assert_eq!(tags[71], "RepairCombatState");
     assert_eq!(tags[72], "CurrentTick");
+    assert_eq!(tags[73], "RestoreBallIfAbsent");
+    assert_eq!(tags[74], "SpawnBallWithMetaTagged");
+    assert_eq!(tags[75], "RemoveBallIfToken");
 }
 
 #[test]
