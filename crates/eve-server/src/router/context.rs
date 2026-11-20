@@ -1077,6 +1077,19 @@ impl ServerContext {
         crate::services::combat_crimewatch::sync_combat_runtime_from_db(&ctx);
         crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
         crate::services::quasar_cosmetics_live::install_macho_notify_sink(&ctx);
+        {
+            let ctx_weak = ctx.downgrade();
+            let sink: crate::quasar_gateway::UiViewActivatedSink =
+                Arc::new(move |session, view_name| {
+                    if let Some(ctx) = ctx_weak.upgrade() {
+                        ctx.handle_quasar_ui_view_activated(session, view_name);
+                    }
+                });
+            *ctx.quasar_gateway
+                .ui_view_activated_sink
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = Some(sink);
+        }
         crate::services::quasar_payment_store_types::register_item_mutation_notifier(&ctx);
         crate::services::cosmetics_ui_ops::ensure_rookie_overview_seeded(&ctx);
         ctx.install_tx_post_commit_listener(); ctx.wire_module_deactivation_hook();
@@ -1546,6 +1559,17 @@ impl ServerContext {
         self.clear_pending_structure_view_outside_set_state_for_char(char_id);
     }
 
+    pub fn clear_space_ballpark_bootstrapped_for_session(&self, session_id: u64, char_id: i64) {
+        {
+            let mut m = self
+                .space_ballpark_bootstrapped
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            m.remove(&(session_id, char_id));
+        }
+        self.clear_pending_structure_view_outside_set_state(session_id, char_id);
+    }
+
     pub(crate) fn set_pending_structure_view_outside_set_state(
         &self,
         session_id: u64,
@@ -1600,6 +1624,74 @@ impl ServerContext {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         m.retain(|&(_, cid), _| cid != char_id);
+    }
+
+    /// Removes all bound objects for `(session_id, service)` without emitting
+    /// `OnMachoObjectDisconnect` and purges matching transition-grace entries (`#1477`).
+    pub(crate) fn prune_bound_service_without_notify(
+        &self,
+        session_id: u64,
+        service: &str,
+    ) -> usize {
+        let target_bids: Vec<u64> = self
+            .bound_objects
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|(&bid, e)| {
+                (e.session_id == session_id && e.service == service).then_some(bid)
+            })
+            .collect();
+        for &bid in &target_bids {
+            self.remove_bound_object_without_notify(session_id, bid);
+        }
+        target_bids.len()
+    }
+
+    /// Clears docked structure View Outside state when Quasar telemetry reports the client
+    /// activated a non-space, non-structure primary UI view (`"hangar"`, `"station"`, etc.).
+    /// CCP's `ObjectCallGPCS.__ReleaseObjectHelper` delays `OID-` / `ClientHasReleasedTheseObjects`
+    /// by 30s after `michelle.RemoveBallpark()`, whereas `viewStateSvc._LogViewActivated` fires
+    /// immediately over Quasar (`/eve_public.gateway.Events/Publish`) (`#1477`).
+    pub fn handle_quasar_ui_view_activated(
+        &self,
+        session: &eve_machonet::SessionState,
+        view_unique_name: &str,
+    ) {
+        let clears_ballpark = matches!(
+            view_unique_name.trim().to_ascii_lowercase().as_str(),
+            "hangar" | "station" | "charsel" | "charactercreation" | "login" | "dockpanelview"
+        );
+        if !clears_ballpark {
+            return;
+        }
+        let Some(uid) = session.user_id else {
+            return;
+        };
+        let Some(os) = self.db.get_online_session(uid) else {
+            return;
+        };
+        let Some(cid) = os.character_id else {
+            return;
+        };
+        if session.character_id != Some(cid) {
+            return;
+        }
+        let docked_in_structure = self.db.with_snapshot(|s| {
+            s.characters.get(&cid).is_some_and(|c| {
+                c.user_id == uid && c.station_id.is_none() && c.structure_id.is_some()
+            })
+        });
+        if !docked_in_structure {
+            return;
+        }
+        self.clear_space_ballpark_bootstrapped_for_session(os.session_id, cid);
+        self.prune_bound_service_without_notify(os.session_id, "beyonce");
+        crate::services::space_destiny::reset_update_state_rate_limit(
+            self,
+            os.session_id,
+            cid,
+        );
     }
 
     /// Marks `(session_id, char_id)` as having received its initial `OnServerBrainUpdated`;

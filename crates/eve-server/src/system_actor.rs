@@ -188,6 +188,58 @@ pub(crate) fn machonet_wallclock_ms(
     (machonet_wallclock_filetime_ticks(clock, unrebased_clock_offset_secs) / 10_000).max(0) as u64
 }
 
+#[derive(Clone, Debug)]
+enum SpecialSiteBallSpawnState {
+    Spawning(Arc<tokio::sync::Notify>),
+    Spawned,
+}
+
+type SpecialSiteBallSpawnMap =
+    Arc<RankedMutex<HashMap<(SolarSystemId, i64), SpecialSiteBallSpawnState>, RANK_LEAF>>;
+
+/// RAII reservation for spawning a PvE special-site ball once.
+/// Dropping without calling [`Self::confirm`] rolls back the in-flight `Spawning` entry and
+/// wakes concurrent waiters so transient errors or dropped futures remain recoverable.
+pub struct SpecialSiteBallSpawnGuard {
+    table: SpecialSiteBallSpawnMap,
+    solar_system_id: SolarSystemId,
+    ball_id: i64,
+    notify: Arc<tokio::sync::Notify>,
+    confirmed: bool,
+}
+
+impl SpecialSiteBallSpawnGuard {
+    /// Marks `(solar_system_id, ball_id)` as `Spawned` and notifies any concurrent waiters.
+    pub fn confirm(mut self) {
+        self.confirmed = true;
+        {
+            let mut guard = self.table.lock().unwrap_or_else(|e| e.into_inner());
+            guard.insert(
+                (self.solar_system_id, self.ball_id),
+                SpecialSiteBallSpawnState::Spawned,
+            );
+        }
+        self.notify.notify_waiters();
+    }
+}
+
+impl Drop for SpecialSiteBallSpawnGuard {
+    fn drop(&mut self) {
+        if !self.confirmed {
+            {
+                let mut guard = self.table.lock().unwrap_or_else(|e| e.into_inner());
+                if matches!(
+                    guard.get(&(self.solar_system_id, self.ball_id)),
+                    Some(SpecialSiteBallSpawnState::Spawning(n)) if Arc::ptr_eq(n, &self.notify)
+                ) {
+                    guard.remove(&(self.solar_system_id, self.ball_id));
+                }
+            }
+            self.notify.notify_waiters();
+        }
+    }
+}
+
 pub struct SystemRegistry {
     pub(crate) systems: RankedRwLock<HashMap<SolarSystemId, SystemHandle>, RANK_SYSTEM_REGISTRY>,
     sde: Option<Arc<SdeRegistry>>,
@@ -201,9 +253,9 @@ pub struct SystemRegistry {
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<SystemStepHook>, RANK_LEAF>>,
     pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-    /// PvE special-site balls (system, ball id) already spawned once into this registry's ballparks.
-    /// Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed in space.
-    special_site_spawned_balls: RankedMutex<std::collections::HashSet<(SolarSystemId, i64)>, RANK_LEAF>,
+    /// PvE special-site balls (system, ball id) in-flight or already spawned into this registry's
+    /// ballparks. Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed.
+    special_site_spawned_balls: SpecialSiteBallSpawnMap,
     /// Wormhole ore anomalies (system, anomaly_id) whose initial Sleeper guard wave has been hydrated
     /// in this registry's ballparks, preventing player scan RPCs from respawning killed guards.
     hydrated_wh_ore_anomalies: RankedMutex<std::collections::HashSet<(SolarSystemId, String)>, RANK_LEAF>,
@@ -255,7 +307,7 @@ impl SystemRegistry {
             target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
             system_step_hook: Arc::new(RankedRwLock::new(None)),
             post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
-            special_site_spawned_balls: RankedMutex::new(std::collections::HashSet::new()),
+            special_site_spawned_balls: Arc::new(RankedMutex::new(HashMap::new())),
             hydrated_wh_ore_anomalies: RankedMutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RankedRwLock::new(Default::default())),
             module_reload_sim_deadlines: Arc::new(RankedRwLock::new(HashMap::new())),
@@ -712,7 +764,84 @@ impl SystemRegistry {
     /// Records that PvE special-site ball `ball_id` has been spawned in `solar_system_id`.
     /// Returns `true` only the first time, so destroyed site NPCs are never re-spawned.
     pub fn claim_special_site_ball(&self, solar_system_id: SolarSystemId, ball_id: i64) -> bool {
-        self.special_site_spawned_balls.lock().unwrap_or_else(|e| e.into_inner()).insert((solar_system_id, ball_id))
+        use std::collections::hash_map::Entry;
+        let mut guard = self
+            .special_site_spawned_balls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match guard.entry((solar_system_id, ball_id)) {
+            Entry::Vacant(entry) => {
+                entry.insert(SpecialSiteBallSpawnState::Spawned);
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+
+    /// Returns `true` when `(solar_system_id, ball_id)` has reached confirmed `Spawned` state.
+    pub fn is_special_site_ball_spawned(&self, solar_system_id: SolarSystemId, ball_id: i64) -> bool {
+        matches!(
+            self.special_site_spawned_balls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&(solar_system_id, ball_id)),
+            Some(SpecialSiteBallSpawnState::Spawned)
+        )
+    }
+
+    /// Acquires an exclusive RAII spawn slot for `(solar_system_id, ball_id)`.
+    /// Concurrent callers wait until any in-flight spawner confirms or drops; returns `None` once
+    /// the ball is already `Spawned`.
+    pub async fn begin_special_site_ball_spawn(
+        &self,
+        solar_system_id: SolarSystemId,
+        ball_id: i64,
+    ) -> Option<SpecialSiteBallSpawnGuard> {
+        use std::collections::hash_map::Entry;
+        loop {
+            let notify = {
+                let mut guard = self
+                    .special_site_spawned_balls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                match guard.entry((solar_system_id, ball_id)) {
+                    Entry::Occupied(entry) => match entry.get() {
+                        SpecialSiteBallSpawnState::Spawned => return None,
+                        SpecialSiteBallSpawnState::Spawning(notify) => Arc::clone(notify),
+                    },
+                    Entry::Vacant(entry) => {
+                        let notify = Arc::new(tokio::sync::Notify::new());
+                        entry.insert(SpecialSiteBallSpawnState::Spawning(Arc::clone(&notify)));
+                        return Some(SpecialSiteBallSpawnGuard {
+                            table: Arc::clone(&self.special_site_spawned_balls),
+                            solar_system_id,
+                            ball_id,
+                            notify,
+                            confirmed: false,
+                        });
+                    }
+                }
+            };
+            // Pin and register on `Notify` before re-checking the map under the mutex so a
+            // concurrent `confirm()` or `Drop` cannot fire `notify_waiters()` in between.
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            let _registered = notified.as_mut().enable();
+            let still_waiting = {
+                let guard = self
+                    .special_site_spawned_balls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                matches!(
+                    guard.get(&(solar_system_id, ball_id)),
+                    Some(SpecialSiteBallSpawnState::Spawning(current))
+                        if Arc::ptr_eq(current, &notify)
+                )
+            };
+            if still_waiting {
+                notified.await;
+            }
+        }
     }
 
     /// Marks wormhole ore `anomaly_id` in `solar_system_id` as hydrated for this ballpark registry.

@@ -1236,3 +1236,56 @@ async fn try_step_full_tick_refreshes_system_view_sim_elapsed_and_expired_bastio
     assert!(!after.has_active_bastion(ship_id));
     assert!(!after.has_active_module(ship_id));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn special_site_ball_spawn_guard_rollback_confirm_and_notify_wakeup() {
+    let reg = Arc::new(SystemRegistry::new());
+    let sys_id: SolarSystemId = 30_000_142;
+    let ball_id: i64 = 700_099;
+
+    // 1. Acquiring the guard enters `Spawning` without marking `Spawned`.
+    let g1 = reg
+        .begin_special_site_ball_spawn(sys_id, ball_id)
+        .await
+        .expect("first caller acquires spawn guard");
+    assert!(!reg.is_special_site_ball_spawned(sys_id, ball_id));
+    assert!(
+        !reg.claim_special_site_ball(sys_id, ball_id),
+        "legacy claim must not overwrite an active Spawning guard"
+    );
+
+    // 2. A concurrent caller waits on `Notify` while `g1` is held, then takes over when `g1` drops unconfirmed.
+    let reg_w1 = Arc::clone(&reg);
+    let w1 = tokio::spawn(async move {
+        reg_w1.begin_special_site_ball_spawn(sys_id, ball_id).await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    assert!(!w1.is_finished(), "concurrent waiter must block while Spawning guard is held");
+
+    drop(g1);
+    let g2 = tokio::time::timeout(std::time::Duration::from_secs(2), w1)
+        .await
+        .expect("waiter must wake after unconfirmed guard Drop")
+        .expect("waiter task succeeds")
+        .expect("rolled-back slot must hand off Some(guard) to retrying caller");
+    assert!(!reg.is_special_site_ball_spawned(sys_id, ball_id));
+
+    // 3. A second concurrent waiter blocks on `g2` and observes `None` (AlreadySpawned) once `g2.confirm()` runs.
+    let reg_w2 = Arc::clone(&reg);
+    let w2 = tokio::spawn(async move {
+        reg_w2.begin_special_site_ball_spawn(sys_id, ball_id).await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    assert!(!w2.is_finished(), "second waiter must block until confirm()");
+
+    g2.confirm();
+    assert!(reg.is_special_site_ball_spawned(sys_id, ball_id));
+    let w2_res = tokio::time::timeout(std::time::Duration::from_secs(2), w2)
+        .await
+        .expect("waiter must wake after confirm()")
+        .expect("second waiter task succeeds");
+    assert!(w2_res.is_none(), "after confirm(), concurrent waiter must observe AlreadySpawned (None)");
+    assert!(reg.begin_special_site_ball_spawn(sys_id, ball_id).await.is_none());
+}

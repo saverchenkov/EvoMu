@@ -5435,6 +5435,21 @@ class PlaytesterBugOracle:
             and "cannotloadnotenoughcharges" in txt
         ):
             return False
+        # Vanilla V24 UI drone helpers (e.g. LaunchDrones partial-stack capacity rejection)
+        # defer expected game-rule UserErrors onto a background tasklet via eveMisc.py:raise_.
+        if (
+            "usererror" in txt
+            and "evemisc.py" in txt
+            and ("in raise_" in txt or "function raise_" in txt)
+            and any(
+                marker in txt
+                for marker in (
+                    "nodronemanagementabilitiesleft",
+                    "notenoughdronebayspace",
+                )
+            )
+        ):
+            return False
         return True
 
     @classmethod

@@ -190,8 +190,17 @@ pub async fn create_player_pilot(ctx: &ServerContext, sess_id: u64, user: &str, 
 pub async fn fund_pilot_isk(ctx: &ServerContext, sess: &mut SessionState, packs: i64) {
     let packs = packs.max(20);
     rpc_ok(ctx, sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(4), PyRep::Integer(packs)]).await;
-    let plex_best = rpc_ok(ctx, sess, "marketProxy", "GetPlexBest", &[]).await;
-    let p = (plex_best.dict_get("bestBidPrice").and_then(PyRep::as_f64).unwrap_or(5_000_000.0) * 0.99).max(1_000.0);
+    let best_bid = match rpc_ok(ctx, sess, "marketProxy", "GetPlexOrders", &[]).await {
+        PyRep::Tuple(parts) if parts.len() >= 2 => parts[1]
+            .crowset_rows()
+            .expect("PLEX bid rows")
+            .iter()
+            .filter_map(|r| r.dbrow_get("price").and_then(PyRep::as_f64))
+            .fold(0.0_f64, f64::max),
+        _ => 0.0,
+    };
+    let best_bid = if best_bid > 0.0 { best_bid } else { 5_000_000.0 };
+    let p = (best_bid * 0.99).max(1_000.0);
     let s = 10.0_f64.powi(p.log10().floor() as i32 - 3);
     rpc_ok(ctx, sess, "marketProxy", "PlacePlexSellOrder", &[PyRep::Real((p / s).floor() * s), PyRep::Integer(packs * 500), PyRep::Integer(90)]).await;
 }
