@@ -1126,3 +1126,493 @@ fn crossed_modify_fills_cover_corp_upwell_refund_shortfall_and_plex_vault_paths(
         assert_eq!(by_col.get("credit"), Some(&&PyRep::Real(expected_credit)));
     }
 }
+
+#[test]
+fn global_plex_price_history_and_crossed_modify_sleeper_plex_edges() {
+    use crate::services::market_contracts::{
+        is_permanent_npc_sleeper_buy_order, JITA_STATION_ID, PLEX_TYPE_ID,
+        SLEEPER_BLUE_LOOT_ORDERS, THE_FORGE_REGION_ID,
+    };
+    use crate::services::market_trading::{save_market_order_meta, MarketOrderMeta as TradingOrderMeta};
+    use eve_db::ledger::MarketTransactionRecord;
+    use eve_db::{IskCents, MarketHistoryDayRecord, MarketOrderRecord};
+
+    let ctx = test_ctx();
+    let seller_id = 90_000_001_i64;
+    let buyer_id = 90_000_002_i64;
+    let domain_region_id = 10_000_043_u32;
+    let sinq_region_id = 10_000_032_u32;
+
+    // 1. build_global_price_history_rows aggregates multi-region market_history by date (volume-weighted average)
+    //    while keeping regional build_price_history_rows scoped per region.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_history.clear();
+        snap.market_transactions.clear();
+        snap.market_history.insert(
+            (THE_FORGE_REGION_ID, PLEX_TYPE_ID),
+            vec![MarketHistoryDayRecord {
+                date: "2025-02-01".into(),
+                lowest: 5_000_000.0,
+                highest: 5_200_000.0,
+                average: 5_100_000.0,
+                volume: 40,
+                order_count: 2,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+        snap.market_history.insert(
+            (domain_region_id, PLEX_TYPE_ID),
+            vec![MarketHistoryDayRecord {
+                date: "2025-02-01".into(),
+                lowest: 4_800_000.0,
+                highest: 5_000_000.0,
+                average: 4_900_000.0,
+                volume: 10,
+                order_count: 1,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+        snap.market_history.insert(
+            (sinq_region_id, PLEX_TYPE_ID),
+            vec![MarketHistoryDayRecord {
+                date: "2025-02-02".into(),
+                lowest: 5_050_000.0,
+                highest: 5_050_000.0,
+                average: 5_050_000.0,
+                volume: 5,
+                order_count: 1,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+        snap.market_history.insert(
+            (THE_FORGE_REGION_ID, 34),
+            vec![MarketHistoryDayRecord {
+                date: "2025-02-01".into(),
+                lowest: 4.0,
+                highest: 4.0,
+                average: 4.0,
+                volume: 100,
+                order_count: 1,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(build_price_history_rows(snap, 34, domain_region_id).is_empty());
+        let rows = build_global_price_history_rows(snap, PLEX_TYPE_ID);
+        assert_eq!(rows.len(), 2);
+        // Day 1 (`2025-02-01`): low=4.8M, high=5.2M, avg=(40*5.1M + 10*4.9M)/50 = 5.06M, vol=50, orders=3
+        assert_eq!(rows[0][0], PyRep::Integer(date_str_to_filetime("2025-02-01").unwrap()));
+        assert_eq!(rows[0][1], PyRep::Real(4_800_000.0));
+        assert_eq!(rows[0][2], PyRep::Real(5_200_000.0));
+        let avg0 = rows[0][3].as_f64().unwrap();
+        assert!((avg0 - 5_060_000.0).abs() < 1e-4);
+        assert_eq!(rows[0][4], PyRep::Integer(50));
+        assert_eq!(rows[0][5], PyRep::Integer(3));
+        // Day 2 (`2025-02-02`): single region row preserved exactly
+        assert_eq!(rows[1][0], PyRep::Integer(date_str_to_filetime("2025-02-02").unwrap()));
+        assert_eq!(rows[1][3], PyRep::Real(5_050_000.0));
+        assert_eq!(rows[1][4], PyRep::Integer(5));
+        assert_eq!(rows[1][5], PyRep::Integer(1));
+    });
+
+    // 2. Global fallback across market_transactions when market_history has no entries for PLEX.
+    let now = ctx.now_unix();
+    let amarr_station = 60_008_494_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_history.clear();
+        snap.market_transactions.clear();
+        snap.market_transactions.insert(
+            101,
+            MarketTransactionRecord {
+                transaction_id: 101,
+                date_unix: now,
+                type_id: PLEX_TYPE_ID,
+                quantity: 3,
+                price: IskCents::from_isk(5_000_000),
+                location_id: JITA_STATION_ID,
+                buyer_id,
+                seller_id,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 1,
+            },
+        );
+        snap.market_transactions.insert(
+            102,
+            MarketTransactionRecord {
+                transaction_id: 102,
+                date_unix: now,
+                type_id: PLEX_TYPE_ID,
+                quantity: 1,
+                price: IskCents::from_isk(5_400_000),
+                location_id: amarr_station,
+                buyer_id,
+                seller_id,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 2,
+            },
+        );
+        snap.market_transactions.insert(
+            103,
+            MarketTransactionRecord {
+                transaction_id: 103,
+                date_unix: now,
+                type_id: 34,
+                quantity: 500,
+                price: IskCents::from_isk(4),
+                location_id: JITA_STATION_ID,
+                buyer_id,
+                seller_id,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 3,
+            },
+        );
+    });
+    ctx.db.with_snapshot(|snap| {
+        let fb_rows = build_global_price_history_rows(snap, PLEX_TYPE_ID);
+        assert_eq!(fb_rows.len(), 1);
+        assert_eq!(fb_rows[0][1], PyRep::Real(5_000_000.0));
+        assert_eq!(fb_rows[0][2], PyRep::Real(5_400_000.0));
+        assert!((fb_rows[0][3].as_f64().unwrap() - 5_100_000.0).abs() < 1e-4);
+        assert_eq!(fb_rows[0][4], PyRep::Integer(4));
+        assert_eq!(fb_rows[0][5], PyRep::Integer(2));
+    });
+
+    // 3. execute_crossed_order_fills_on_modify sell branch:
+    //    (a) crossing a permanent NPC Sleeper buy order keeps vol_remaining full and creates no NPC hangar item;
+    //    (b) modifying a PLEX sell order downward crosses a PLEX bid in another region and credits buyer's PLEX vault.
+    let (sleeper_tid, sleeper_price_isk) = SLEEPER_BLUE_LOOT_ORDERS[1]; // 30_745 @ 500,000 ISK
+    let (npc_bid_id, seller_sleeper_ask_id, forge_plex_bid_id, domain_plex_ask_id) =
+        (9_600_001_i64, 9_600_002_i64, 9_600_003_i64, 9_600_004_i64);
+    let npc_items_before = ctx.db.with_snapshot(|snap| {
+        snap.items.values().filter(|i| i.owner_id == 1_000_125).count()
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.clear();
+        snap.skills.entry(seller_id).or_default().remove(&16622);
+        snap.characters.get_mut(&seller_id).unwrap().balance = IskCents::from_isk(10_000_000);
+        let cur_vault = snap.plex_vault_balance(buyer_id);
+        let _ = snap.adjust_plex_vault(buyer_id, -cur_vault);
+
+        snap.market_orders.insert(
+            npc_bid_id,
+            MarketOrderRecord {
+                order_id: npc_bid_id,
+                owner_id: 1_000_125,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: sleeper_tid,
+                is_bid: true,
+                price: IskCents::from_isk(sleeper_price_isk),
+                vol_entered: 1_000_000,
+                vol_remaining: 1_000_000,
+                min_volume: 1,
+                is_npc: true,
+                escrow: IskCents(0),
+            },
+        );
+        snap.market_orders.insert(
+            seller_sleeper_ask_id,
+            MarketOrderRecord {
+                order_id: seller_sleeper_ask_id,
+                owner_id: seller_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: sleeper_tid,
+                is_bid: false,
+                price: IskCents::from_isk(sleeper_price_isk + 100_000),
+                vol_entered: 3,
+                vol_remaining: 3,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        snap.market_orders.insert(
+            forge_plex_bid_id,
+            MarketOrderRecord {
+                order_id: forge_plex_bid_id,
+                owner_id: buyer_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: PLEX_TYPE_ID,
+                is_bid: true,
+                price: IskCents::from_isk(5_100_000),
+                vol_entered: 2,
+                vol_remaining: 2,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(10_200_000),
+            },
+        );
+        snap.market_orders.insert(
+            domain_plex_ask_id,
+            MarketOrderRecord {
+                order_id: domain_plex_ask_id,
+                owner_id: seller_id,
+                station_id: amarr_station,
+                region_id: domain_region_id,
+                type_id: PLEX_TYPE_ID,
+                is_bid: false,
+                price: IskCents::from_isk(5_300_000),
+                vol_entered: 2,
+                vol_remaining: 2,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        for oid in [npc_bid_id, seller_sleeper_ask_id, forge_plex_bid_id, domain_plex_ask_id] {
+            save_market_order_meta(
+                snap,
+                oid,
+                TradingOrderMeta {
+                    range: 32767,
+                    duration: 90,
+                    issue_unix: now,
+                    order_state: None,
+                    account_key: None,
+                    final_vol_remaining: None,
+                    closed_unix: None,
+                },
+            );
+        }
+    });
+
+    let (sleeper_res, plex_res) = ctx.db.try_with_mut_snapshot(|snap| {
+        let mut s_meta = TradingOrderMeta {
+            range: 32767,
+            duration: 90,
+            issue_unix: now,
+            order_state: None,
+            account_key: None,
+            final_vol_remaining: None,
+            closed_unix: None,
+        };
+        let sleeper_price = IskCents::from_isk(sleeper_price_isk);
+        snap.market_orders.get_mut(&seller_sleeper_ask_id).unwrap().price = sleeper_price;
+        let r1 = execute_crossed_order_fills_on_modify(
+            &ctx,
+            snap,
+            seller_sleeper_ask_id,
+            sleeper_price,
+            1.0,
+            false,
+            0,
+            seller_id,
+            now,
+            &mut s_meta,
+        )?;
+
+        let mut p_meta = s_meta;
+        let plex_price = IskCents::from_isk(5_100_000);
+        snap.market_orders.get_mut(&domain_plex_ask_id).unwrap().price = plex_price;
+        let r2 = execute_crossed_order_fills_on_modify(
+            &ctx,
+            snap,
+            domain_plex_ask_id,
+            plex_price,
+            1.0,
+            false,
+            0,
+            seller_id,
+            now,
+            &mut p_meta,
+        )?;
+        Ok::<_, eve_proto::BridgeRpcError>((r1, r2))
+    }).expect("crossed modify sells");
+
+    assert!(sleeper_res.item_deliveries.is_empty());
+    assert!(plex_res.item_deliveries.is_empty());
+    ctx.db.with_snapshot(|snap| {
+        let npc_ord = &snap.market_orders[&npc_bid_id];
+        assert!(is_permanent_npc_sleeper_buy_order(npc_ord));
+        assert_eq!(npc_ord.vol_remaining, 1_000_000);
+        assert_eq!(snap.market_orders[&seller_sleeper_ask_id].vol_remaining, 0);
+        assert_eq!(snap.market_orders[&forge_plex_bid_id].vol_remaining, 0);
+        assert_eq!(snap.market_orders[&domain_plex_ask_id].vol_remaining, 0);
+        assert_eq!(snap.plex_vault_balance(buyer_id), 2);
+        let npc_items_after = snap.items.values().filter(|i| i.owner_id == 1_000_125).count();
+        assert_eq!(npc_items_after, npc_items_before);
+    });
+}
+
+#[test]
+fn crossed_modify_cross_region_plex_corp_buyer_delivers_to_bid_station() {
+    use crate::services::market_contracts::PLEX_TYPE_ID;
+    use crate::services::market_trading::{save_market_order_meta, MarketOrderMeta};
+    use eve_db::{CorporationRecord, InventoryFlag, IskCents};
+
+    let ctx = test_ctx();
+    let seller_id = 90_000_001_i64;
+    let corp_id = 98_000_777_i64;
+    let jita_station = 60_003_760_i64;
+    let the_forge_region = 10_000_002_u32;
+    let amarr_station = 60_008_494_i64;
+    let domain_region = 10_000_043_u32;
+    let now = 1_750_000_000_u64;
+
+    let corp_bid_id = 9_450_001_i64;
+    let jita_ask_id = 9_450_002_i64;
+
+    let mut ask_meta = MarketOrderMeta {
+        range: 32_767,
+        duration: 90,
+        issue_unix: now,
+        order_state: None,
+        account_key: Some(1000),
+        final_vol_remaining: None,
+        closed_unix: None,
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.clear();
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = 90_000_002;
+        corp.name = "DomainPlexCorp".into();
+        corp.ticker = "DPLC".into();
+        corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+        snap.corporations.insert(corp_id, corp);
+
+        snap.market_orders.insert(
+            corp_bid_id,
+            MarketOrderRecord {
+                order_id: corp_bid_id,
+                owner_id: corp_id,
+                station_id: amarr_station,
+                region_id: domain_region,
+                type_id: PLEX_TYPE_ID,
+                is_bid: true,
+                price: IskCents::from_isk(5_100_000),
+                vol_entered: 2,
+                vol_remaining: 2,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(10_200_000),
+            },
+        );
+        snap.market_orders.insert(
+            jita_ask_id,
+            MarketOrderRecord {
+                order_id: jita_ask_id,
+                owner_id: seller_id,
+                station_id: jita_station,
+                region_id: the_forge_region,
+                type_id: PLEX_TYPE_ID,
+                is_bid: false,
+                price: IskCents::from_isk(5_500_000),
+                vol_entered: 2,
+                vol_remaining: 2,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        for oid in [corp_bid_id, jita_ask_id] {
+            save_market_order_meta(snap, oid, ask_meta);
+        }
+    });
+
+    let res = ctx
+        .db
+        .with_mut_snapshot(|snap| {
+            let new_price = IskCents::from_isk(5_100_000);
+            snap.market_orders.get_mut(&jita_ask_id).unwrap().price = new_price;
+            execute_crossed_order_fills_on_modify(
+                &ctx,
+                snap,
+                jita_ask_id,
+                new_price,
+                1.0,
+                false,
+                0,
+                seller_id,
+                now,
+                &mut ask_meta,
+            )
+        })
+        .expect("crossed modify sell into corp PLEX bid");
+
+    assert_eq!(res.item_deliveries.len(), 1);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.market_orders[&corp_bid_id].vol_remaining, 0);
+        assert_eq!(snap.market_orders[&jita_ask_id].vol_remaining, 0);
+        let delivered = snap
+            .items
+            .values()
+            .find(|it| it.owner_id == corp_id && it.type_id == PLEX_TYPE_ID && it.flag == InventoryFlag::Deliveries)
+            .expect("Corp cross-region PLEX delivery item must exist");
+        assert_eq!(
+            delivered.location_id, amarr_station,
+            "Corp PLEX delivery must land at buyer bid station {amarr_station}, not seller station {jita_station}"
+        );
+        assert_eq!(delivered.quantity, 2);
+    });
+}
+
+#[test]
+fn partitioned_price_history_separates_pre_today_and_today_disjointly() {
+    use eve_db::MarketHistoryDayRecord;
+
+    let ctx = ServerContext::new();
+    let now = ctx.now_unix();
+    let two_days_ago = eve_db::ledger::unix_secs_to_date_str(now.saturating_sub(2 * 86_400));
+    let yesterday = eve_db::ledger::unix_secs_to_date_str(now.saturating_sub(86_400));
+    let today = eve_db::ledger::unix_secs_to_date_str(now);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_history.clear();
+        snap.market_history.insert(
+            (10_000_002, PLEX_TYPE_ID),
+            vec![
+                MarketHistoryDayRecord {
+                    date: two_days_ago.clone(),
+                    lowest: 4_500_000.0,
+                    highest: 4_600_000.0,
+                    average: 4_550_000.0,
+                    volume: 10,
+                    order_count: 1,
+                    open_price: None,
+                    close_price: None,
+                },
+                MarketHistoryDayRecord {
+                    date: yesterday.clone(),
+                    lowest: 4_700_000.0,
+                    highest: 4_800_000.0,
+                    average: 4_750_000.0,
+                    volume: 20,
+                    order_count: 2,
+                    open_price: None,
+                    close_price: None,
+                },
+                MarketHistoryDayRecord {
+                    date: today.clone(),
+                    lowest: 5_000_000.0,
+                    highest: 5_100_000.0,
+                    average: 5_050_000.0,
+                    volume: 30,
+                    order_count: 3,
+                    open_price: None,
+                    close_price: None,
+                },
+            ],
+        );
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        let (old_rows, new_rows) = build_partitioned_global_price_history_rows(snap, PLEX_TYPE_ID, now);
+        assert_eq!(old_rows.len(), 2);
+        assert_eq!(new_rows.len(), 1);
+        assert_eq!(old_rows[0][0], PyRep::Integer(date_str_to_filetime(&two_days_ago).unwrap()));
+        assert_eq!(old_rows[1][0], PyRep::Integer(date_str_to_filetime(&yesterday).unwrap()));
+        assert_eq!(new_rows[0][0], PyRep::Integer(date_str_to_filetime(&today).unwrap()));
+    });
+}

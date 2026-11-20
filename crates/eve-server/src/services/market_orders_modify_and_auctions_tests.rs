@@ -257,8 +257,15 @@ fn plex_orders_history_and_contract_auction_finish_lifecycle() {
     let best = handle(&ctx, &mut sess, "marketProxy", "GetPlexBest", &[], &kw)
         .unwrap()
         .unwrap();
-    assert_eq!(best.dict_get("bestAskPrice").and_then(PyRep::as_f64), Some(4_500_000.0));
-    assert_eq!(best.dict_get("totalAskVolume").and_then(PyRep::as_i64), Some(10));
+    assert!(best.is_cindexed_rowset());
+    let best_entries = best.cindexed_rowset_entries().expect("GetPlexBest CIndexedRowset entries");
+    let plex_row = best_entries
+        .iter()
+        .find(|(k, _)| k == &PyRep::Integer(PLEX_TYPE_ID as i64))
+        .map(|(_, v)| v)
+        .expect("GetPlexBest must index by integer typeID 44992");
+    assert_eq!(plex_row.dbrow_get("price").and_then(PyRep::as_f64), Some(4_500_000.0));
+    assert_eq!(plex_row.dbrow_get("volRemaining").and_then(PyRep::as_f64), Some(10.0));
 
     let plex_orders = handle(&ctx, &mut sess, "marketProxy", "GetPlexOrders", &[], &kw)
         .unwrap()
@@ -273,7 +280,17 @@ fn plex_orders_history_and_contract_auction_finish_lifecycle() {
     let plex_hist = handle(&ctx, &mut sess, "marketProxy", "GetPlexHistory", &[], &kw)
         .unwrap()
         .unwrap();
-    assert!(plex_hist.is_crowset());
+    let PyRep::Dict(entries) = plex_hist else {
+        panic!("GetPlexHistory must return Dict");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, PyRep::Integer(44_992));
+    let PyRep::Tuple(parts) = &entries[0].1 else {
+        panic!("GetPlexHistory value must be (old, new) Tuple");
+    };
+    assert_eq!(parts.len(), 2);
+    assert!(parts[0].is_crowset());
+    assert!(parts[1].is_crowset());
 
     // Account & Vault balance RPCs
     let cash = handle(&ctx, &mut sess, "account", "GetCashBalance", &[], &kw)

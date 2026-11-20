@@ -1449,6 +1449,11 @@ pub struct Ballpark {
     /// Optional V24 `OnSpecialFX` 14-arg wire metadata keyed by `(ball_id, module_id, guid)`.
     #[serde(skip, default)]
     pub special_fx_meta: BTreeMap<(BallId, Option<i64>, String), SpecialFxWireMeta>,
+    /// Deferred V24 `OnSpecialFX` metadata retained across `emit_tick..=emit_tick + 1` when
+    /// a caster or target ball is removed while its `OnSpecialFX` event is still queued (`#1396`).
+    #[serde(skip, default)]
+    pub(crate) pending_pruned_fx_meta:
+        BTreeMap<(BallId, Option<i64>, String), (u64, SpecialFxWireMeta)>,
     /// Tracks the latest `current_tick` at which each ball already received its direct owner `GotoDirection` echo (`#1078`).
     #[serde(skip, default)]
     pub(crate) same_tick_owner_goto_tick: BTreeMap<BallId, u64>,
