@@ -1573,3 +1573,677 @@ async fn dungeon_instance_cache_mgr_docked_and_range_reads_are_read_pure_and_fai
     assert_eq!(ctx.db.state_epoch(), epoch_seeded);
     assert_eq!(ctx.db.tx_commit_count(), commits_seeded);
 }
+
+fn unpack_system_dungeon_instances(
+    rep: &PyRep,
+    expected_sys: SolarSystemId,
+) -> std::collections::BTreeMap<u32, Vec<i64>> {
+    let PyRep::Dict(systems) = rep else {
+        panic!("expected outer dict, got {rep:?}");
+    };
+    assert_eq!(systems.len(), 1, "expected single system entry in {rep:?}");
+    let (sk, sv) = &systems[0];
+    assert_eq!(sk.as_i64(), Some(i64::from(expected_sys)));
+    let PyRep::Dict(dungeons) = sv else {
+        panic!("expected inner dungeon dict, got {sv:?}");
+    };
+    dungeons
+        .iter()
+        .map(|(dk, dv)| {
+            let did = dk
+                .as_i64()
+                .and_then(|v| u32::try_from(v).ok())
+                .expect("u32 dungeon id");
+            let PyRep::List(ids) = dv else {
+                panic!("expected instance id list, got {dv:?}");
+            };
+            let iids = ids
+                .iter()
+                .map(|v| v.as_i64().expect("i64 instance id"))
+                .collect();
+            (did, iids)
+        })
+        .collect()
+}
+
+fn unpack_system_counts_dict(rep: &PyRep) -> std::collections::BTreeMap<SolarSystemId, i64> {
+    let PyRep::Dict(entries) = rep else {
+        panic!("expected count dict, got {rep:?}");
+    };
+    entries
+        .iter()
+        .map(|(sk, cv)| {
+            let sid = sk
+                .as_i64()
+                .and_then(|v| u32::try_from(v).ok())
+                .expect("u32 solar system id");
+            let cnt = cv.as_i64().expect("i64 count");
+            (sid, cnt)
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn docked_pochven_and_wormhole_ore_anomaly_reads_match_seeded_counts_without_db_writes() {
+    use crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde;
+
+    let sde = shared_sde();
+    let kw = HashMap::new();
+
+    let pochven_sys = sde
+        .solar_systems
+        .values()
+        .filter(|s| s.region_id == 10_000_070)
+        .map(|s| s.solar_system_id)
+        .min()
+        .expect("SDE contains Pochven solar system");
+    let wh_sys = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .filter(|&sid| {
+            let (c, _, shat, _) = system_wormhole_profile_sde(&sde, sid);
+            (1..=4).contains(&c) && !shat
+        })
+        .min()
+        .expect("SDE contains non-shattered C1-C4 wormhole");
+    let c56_wh_sys = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .filter(|&sid| {
+            let (c, _, shat, _) = system_wormhole_profile_sde(&sde, sid);
+            (5..=6).contains(&c) && !shat
+        })
+        .min()
+        .expect("SDE contains non-shattered C5-C6 wormhole");
+    let shat_wh_sys = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .filter(|&sid| system_wormhole_profile_sde(&sde, sid).0 == 13)
+        .min()
+        .expect("SDE contains C13 shattered wormhole");
+
+    let db = Arc::new(WorldRepository::new_empty());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(
+        Arc::clone(&sde),
+        db,
+    ));
+
+    let mut docked = SessionState::new(9931);
+    docked.user_id = Some(95);
+    docked.character_id = Some(90_099_195);
+    docked.station_id = Some(60_003_760);
+
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+
+    // 1. Unseeded Pochven: deterministic [primary_did, 8974] read-only, matches undocked seeded shape/count.
+    docked.solar_system_id = Some(pochven_sys);
+    let poch_docked_rep = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetOreAnomalyInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked Pochven GetOreAnomalyInstances");
+    let poch_docked_cnt = unpack_system_counts_dict(
+        &handle(
+            &ctx,
+            &mut docked,
+            "dungeonInstanceCacheMgr",
+            "GetOreAnomaliesCount",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("docked Pochven GetOreAnomaliesCount"),
+    );
+    let poch_range_cnt = unpack_system_counts_dict(
+        &handle(
+            &ctx,
+            &mut docked,
+            "dungeonInstanceCacheMgr",
+            "GetOreAnomaliesCountInRange",
+            &[PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("docked Pochven GetOreAnomaliesCountInRange"),
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(ctx.db.with_snapshot(|s| s.cosmic_anomalies.is_empty()));
+
+    let poch_docked_map = unpack_system_dungeon_instances(&poch_docked_rep, pochven_sys);
+    assert_eq!(poch_docked_map.len(), 2, "Pochven must expose primary + 8974 ore dungeons");
+    assert_eq!(poch_docked_cnt.get(&pochven_sys).copied(), Some(2));
+    assert_eq!(poch_range_cnt.get(&pochven_sys).copied(), Some(2));
+    for (&sid, &cnt) in &poch_range_cnt {
+        if sde.solar_systems.get(&sid).is_some_and(|s| s.region_id == 10_000_070) {
+            assert_eq!(cnt, 2, "Pochven neighbor {sid} count in range");
+        }
+    }
+
+    // 2. Unseeded non-shattered C1-C4 WH: all 4 deterministic ore dungeons, zero DB mutations.
+    docked.solar_system_id = Some(wh_sys);
+    let wh_docked_rep = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetOreAnomalyInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked WH GetOreAnomalyInstances");
+    let wh_docked_cnt = unpack_system_counts_dict(
+        &handle(
+            &ctx,
+            &mut docked,
+            "dungeonInstanceCacheMgr",
+            "GetOreAnomaliesCount",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("docked WH GetOreAnomaliesCount"),
+    );
+    let wh_range_cnt = unpack_system_counts_dict(
+        &handle(
+            &ctx,
+            &mut docked,
+            "dungeonInstanceCacheMgr",
+            "GetOreAnomaliesCountInRange",
+            &[PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("docked WH GetOreAnomaliesCountInRange"),
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(ctx.db.with_snapshot(|s| s.cosmic_anomalies.is_empty()));
+
+    let wh_docked_map = unpack_system_dungeon_instances(&wh_docked_rep, wh_sys);
+    assert_eq!(wh_docked_map.len(), 4, "C1-C4 WH must expose all 4 ore dungeons");
+    assert_eq!(wh_docked_cnt.get(&wh_sys).copied(), Some(4));
+    assert_eq!(wh_range_cnt.get(&wh_sys).copied(), Some(4));
+
+    // 3. Shattered C13 WH exposes deterministic Shattered Debris Field; C5/C6 random draw stays 0 unseeded.
+    docked.solar_system_id = Some(shat_wh_sys);
+    let shat_docked_map = unpack_system_dungeon_instances(
+        &handle(
+            &ctx,
+            &mut docked,
+            "dungeonInstanceCacheMgr",
+            "GetOreAnomalyInstances",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("docked C13 GetOreAnomalyInstances"),
+        shat_wh_sys,
+    );
+    assert_eq!(shat_docked_map.len(), 1);
+    docked.solar_system_id = Some(c56_wh_sys);
+    let c56_docked_cnt = unpack_system_counts_dict(
+        &handle(
+            &ctx,
+            &mut docked,
+            "dungeonInstanceCacheMgr",
+            "GetOreAnomaliesCount",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("docked C5-C6 GetOreAnomaliesCount"),
+    );
+    assert_eq!(c56_docked_cnt.get(&c56_wh_sys).copied(), Some(0));
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+
+    // 4. Undocked seeded parity for Pochven and C1-C4 WH matches unseeded dungeon IDs and counts.
+    let mut undocked = docked.clone();
+    undocked.station_id = None;
+    undocked.solar_system_id = Some(pochven_sys);
+    let poch_seeded_map = unpack_system_dungeon_instances(
+        &handle(
+            &ctx,
+            &mut undocked,
+            "dungeonInstanceCacheMgr",
+            "GetOreAnomalyInstances",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("undocked Pochven GetOreAnomalyInstances"),
+        pochven_sys,
+    );
+    let poch_seeded_keys: std::collections::BTreeSet<u32> = poch_seeded_map.keys().copied().collect();
+    let poch_docked_keys: std::collections::BTreeSet<u32> = poch_docked_map.keys().copied().collect();
+    assert_eq!(poch_docked_keys, poch_seeded_keys);
+
+    undocked.solar_system_id = Some(wh_sys);
+    let wh_seeded_map = unpack_system_dungeon_instances(
+        &handle(
+            &ctx,
+            &mut undocked,
+            "dungeonInstanceCacheMgr",
+            "GetOreAnomalyInstances",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("undocked WH GetOreAnomalyInstances"),
+        wh_sys,
+    );
+    let wh_seeded_keys: std::collections::BTreeSet<u32> = wh_seeded_map.keys().copied().collect();
+    let wh_docked_keys: std::collections::BTreeSet<u32> = wh_docked_map.keys().copied().collect();
+    assert_eq!(wh_docked_keys, wh_seeded_keys);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn docked_synthetic_ore_and_ice_instance_ids_warp_before_and_after_seeding() {
+    use crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde;
+
+    const SITE_NOT_FOUND_ERR: &str = "SiteNotFound";
+    let sde = shared_sde();
+    let kw = HashMap::new();
+    let designated_ice_sys: SolarSystemId = 30_000_180;
+    let pochven_sys = sde
+        .solar_systems
+        .values()
+        .filter(|s| s.region_id == 10_000_070)
+        .map(|s| s.solar_system_id)
+        .min()
+        .expect("SDE contains Pochven solar system");
+    let wh_sys = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .filter(|&sid| {
+            let (c, _, shat, _) = system_wormhole_profile_sde(&sde, sid);
+            (1..=4).contains(&c) && !shat
+        })
+        .min()
+        .expect("SDE contains non-shattered C1-C4 wormhole");
+
+    let probe_ctx = ServerContext::with_sde_and_repository(
+        Arc::clone(&sde),
+        Arc::new(WorldRepository::new_empty()),
+    );
+    let non_designated_ice_sys = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .filter(|&sid| {
+            !crate::services::mining_sites::is_designated_ice_system(sid)
+                && sde
+                    .solar_systems
+                    .get(&sid)
+                    .is_some_and(|s| s.region_id != 10_000_070)
+                && unseeded_ice_belt_dungeon_for_system(&probe_ctx, sid).is_some()
+        })
+        .min()
+        .expect("SDE contains non-designated known-space ice belt system");
+
+    async fn setup_space_session(
+        sde: &Arc<SdeRegistry>,
+        sys_id: SolarSystemId,
+        char_id: i64,
+        uname: &str,
+    ) -> (Arc<ServerContext>, SessionState, i64) {
+        let db = Arc::new(WorldRepository::new_empty());
+        db.provision_gm_account(uname, "pw", char_id, uname);
+        let (uid, ship_id) = db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&char_id).expect("char");
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            let uid = ch.user_id;
+            let ship_id = ch.active_ship_id;
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = i64::from(sys_id);
+            }
+            (uid, ship_id)
+        });
+        let ctx = Arc::new(ServerContext::with_sde_and_repository(
+            Arc::clone(sde),
+            db,
+        ));
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        sys_h
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: ship_id,
+                    type_id: 587,
+                    position: glam::DVec3::ZERO,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 350.0,
+                    inertia: 0.5,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                ctx.build_ship_combat_state(char_id, ship_id, 587),
+            )
+            .await
+            .expect("spawn ball");
+        let mut sess = SessionState::new(9950 + (char_id % 1000) as u64);
+        sess.user_id = Some(uid);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(sys_id);
+        sess.ship_id = Some(ship_id);
+        (ctx, sess, ship_id)
+    }
+
+    async fn assert_warps_to_anomaly(
+        ctx: &ServerContext,
+        sess: &mut SessionState,
+        sys_id: SolarSystemId,
+        ship_id: i64,
+        arg: PyRep,
+        expected_did: u32,
+        anomaly_type: &str,
+        synthetic_iid: i64,
+        kw: &HashMap<String, PyRep>,
+    ) {
+        let rep = handle(ctx, sess, "custom_agency_provider", "warp_to_content", &[arg], kw)
+            .await
+            .expect("handled")
+            .expect("warp_to_content succeeds");
+        assert_eq!(rep, PyRep::None);
+
+        let (seeded_iid, anom_pos) = ctx.db.with_snapshot(|snap| {
+            let prefix = format!("DNG-{expected_did}-");
+            let anom = snap
+                .cosmic_anomalies
+                .get(&sys_id)
+                .into_iter()
+                .flatten()
+                .find(|a| {
+                    a.anomaly_type == anomaly_type
+                        && !a.cleared
+                        && a.anomaly_id.starts_with(&prefix)
+                })
+                .expect("matching seeded anomaly");
+            let (_, seq) = parse_dng_site_id(&anom.anomaly_id).expect("DNG anomaly_id");
+            (seq, glam::DVec3::from_array(anom.position))
+        });
+        assert_ne!(
+            seeded_iid, synthetic_iid,
+            "seeded sequential DB id must differ from pre-seed docked synthetic id"
+        );
+        let sys_h = ctx.systems.get_handle(sys_id).expect("ballpark handle");
+        let (_, ball) = sys_h
+            .get_ball_snapshot(ship_id)
+            .await
+            .unwrap()
+            .expect("ship ball");
+        match ball.mode {
+            eve_destiny::MovementMode::Warp { destination, .. } => {
+                assert_eq!(destination, anom_pos);
+            }
+            other => panic!("expected Warp mode, got {other:?}"),
+        }
+        sys_h
+            .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+            .await
+            .unwrap();
+        sys_h.set_capacitor(ship_id, 300.0).await.unwrap();
+    }
+
+    async fn assert_post_seed_synthetic_warps_no_reseed(
+        ctx: &ServerContext,
+        sess: &mut SessionState,
+        sys_id: SolarSystemId,
+        ship_id: i64,
+        expected_did: u32,
+        anomaly_type: &str,
+        synthetic_iid: i64,
+        kw: &HashMap<String, PyRep>,
+    ) {
+        let char_id = sess.character_id.expect("char");
+        let (seeded_anoms, seeded_sigs, seeded_asteroids, seeded_next_id) =
+            ctx.db.with_snapshot(|s| {
+                (
+                    s.cosmic_anomalies.get(&sys_id).cloned(),
+                    s.cosmic_signatures.get(&sys_id).cloned(),
+                    s.asteroids.len(),
+                    s.next_entity_id,
+                )
+            });
+        // Direct read-only lookup of synthetic instanceID (with and without dungeonID) preserves DB state.
+        let e0 = ctx.db.state_epoch();
+        let c0 = ctx.db.tx_commit_count();
+        for did_opt in [Some(expected_did), None] {
+            let (pos, unscanned, _, _) = resolve_warp_target_readonly(
+                ctx,
+                char_id,
+                sys_id,
+                Some(synthetic_iid),
+                did_opt,
+            );
+            assert!(pos.is_some());
+            assert!(!unscanned);
+        }
+        assert_eq!(ctx.db.state_epoch(), e0);
+        assert_eq!(ctx.db.tx_commit_count(), c0);
+
+        for after_arg in [
+            PyRep::keyval([
+                ("dungeonID", PyRep::Integer(i64::from(expected_did))),
+                ("instanceID", PyRep::Integer(synthetic_iid)),
+            ]),
+            PyRep::Integer(synthetic_iid),
+        ] {
+            assert_warps_to_anomaly(
+                ctx,
+                sess,
+                sys_id,
+                ship_id,
+                after_arg,
+                expected_did,
+                anomaly_type,
+                synthetic_iid,
+                kw,
+            )
+            .await;
+        }
+        let (after_anoms, after_sigs, after_asteroids, after_next_id) =
+            ctx.db.with_snapshot(|s| {
+                (
+                    s.cosmic_anomalies.get(&sys_id).cloned(),
+                    s.cosmic_signatures.get(&sys_id).cloned(),
+                    s.asteroids.len(),
+                    s.next_entity_id,
+                )
+            });
+        assert_eq!(after_anoms, seeded_anoms);
+        assert_eq!(after_sigs, seeded_sigs);
+        assert_eq!(after_asteroids, seeded_asteroids);
+        assert_eq!(after_next_id, seeded_next_id);
+    }
+
+    // 1. Ore anomalies (High-Sec & Pochven with contentPiece, WH with bare synthetic instanceID), before & after seeding.
+    for (idx, (sys_id, use_bare_before)) in [
+        (designated_ice_sys, false),
+        (pochven_sys, false),
+        (wh_sys, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (ctx, mut sess, ship_id) =
+            setup_space_session(&sde, sys_id, 90_099_300 + idx as i64, &format!("ore_iid_{idx}"))
+                .await;
+
+        sess.station_id = Some(60_003_760);
+        let docked_map = unpack_system_dungeon_instances(
+            &handle(
+                &ctx,
+                &mut sess,
+                "dungeonInstanceCacheMgr",
+                "GetOreAnomalyInstances",
+                &[],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .expect("docked GetOreAnomalyInstances"),
+            sys_id,
+        );
+        assert!(ctx.db.with_snapshot(|s| !s.cosmic_anomalies.contains_key(&sys_id)));
+        let (&ore_did, ore_iids) = docked_map
+            .iter()
+            .min_by_key(|(&did, _)| did)
+            .expect("at least one ore dungeon");
+        let synth_iid = ore_iids[0];
+        sess.station_id = None;
+
+        // Cross-system synthetic ID & mismatched {dungeonID, instanceID} must stay SiteNotFound read-only.
+        let e0 = ctx.db.state_epoch();
+        let c0 = ctx.db.tx_commit_count();
+        let wrong_sys_iid = deterministic_mining_instance_id(ore_did, sys_id.wrapping_add(1));
+        for bad_arg in [
+            PyRep::Integer(wrong_sys_iid),
+            PyRep::keyval([
+                ("dungeonID", PyRep::Integer(i64::from(ore_did + 1))),
+                ("instanceID", PyRep::Integer(synth_iid)),
+            ]),
+        ] {
+            let err = handle(
+                &ctx,
+                &mut sess,
+                "custom_agency_provider",
+                "warp_to_content",
+                &[bad_arg],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .unwrap_err();
+            assert_eq!(err.code, SITE_NOT_FOUND_ERR);
+        }
+        assert_eq!(ctx.db.state_epoch(), e0);
+        assert_eq!(ctx.db.tx_commit_count(), c0);
+
+        let before_arg = if use_bare_before {
+            PyRep::Integer(synth_iid)
+        } else {
+            PyRep::keyval([
+                ("dungeonID", PyRep::Integer(i64::from(ore_did))),
+                ("instanceID", PyRep::Integer(synth_iid)),
+            ])
+        };
+        assert_warps_to_anomaly(
+            &ctx,
+            &mut sess,
+            sys_id,
+            ship_id,
+            before_arg,
+            ore_did,
+            "OreAnomaly",
+            synth_iid,
+            &kw,
+        )
+        .await;
+
+        assert_post_seed_synthetic_warps_no_reseed(
+            &ctx,
+            &mut sess,
+            sys_id,
+            ship_id,
+            ore_did,
+            "OreAnomaly",
+            synth_iid,
+            &kw,
+        )
+        .await;
+    }
+
+    // 2. Ice belts (designated AND non-designated), before & after seeding via docked synthetic instanceIDs.
+    for (idx, (sys_id, use_bare_before)) in [
+        (designated_ice_sys, false),
+        (non_designated_ice_sys, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (ctx, mut sess, ship_id) =
+            setup_space_session(&sde, sys_id, 90_099_400 + idx as i64, &format!("ice_iid_{idx}"))
+                .await;
+
+        sess.station_id = Some(60_003_760);
+        let docked_ice = unpack_system_dungeon_instances(
+            &handle(
+                &ctx,
+                &mut sess,
+                "dungeonInstanceCacheMgr",
+                "GetIceBeltInstances",
+                &[],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .expect("docked GetIceBeltInstances"),
+            sys_id,
+        );
+        assert!(ctx.db.with_snapshot(|s| !s.cosmic_anomalies.contains_key(&sys_id)));
+        let (&ice_did, ice_iids) = docked_ice
+            .iter()
+            .min_by_key(|(&did, _)| did)
+            .expect("ice belt dungeon");
+        let synth_ice_iid = ice_iids[0];
+        sess.station_id = None;
+
+        let before_arg = if use_bare_before {
+            PyRep::Integer(synth_ice_iid)
+        } else {
+            PyRep::keyval([
+                ("dungeonID", PyRep::Integer(i64::from(ice_did))),
+                ("instanceID", PyRep::Integer(synth_ice_iid)),
+            ])
+        };
+        assert_warps_to_anomaly(
+            &ctx,
+            &mut sess,
+            sys_id,
+            ship_id,
+            before_arg,
+            ice_did,
+            ICE_BELT_ANOMALY_TYPE,
+            synth_ice_iid,
+            &kw,
+        )
+        .await;
+
+        assert_post_seed_synthetic_warps_no_reseed(
+            &ctx,
+            &mut sess,
+            sys_id,
+            ship_id,
+            ice_did,
+            ICE_BELT_ANOMALY_TYPE,
+            synth_ice_iid,
+            &kw,
+        )
+        .await;
+    }
+}

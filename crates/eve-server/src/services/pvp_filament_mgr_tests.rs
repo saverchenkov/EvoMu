@@ -17,18 +17,16 @@ mod extra_unit_tests;
 
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
+fn shared_sde() -> Arc<SdeRegistry> {
+    Arc::clone(SHARED_SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
+}
+
 fn test_ctx() -> ServerContext {
-    if let Some(sde) = SHARED_SDE.get() {
-        ServerContext::with_sde_and_repository(
-            Arc::clone(sde),
-            Arc::new(eve_db::WorldRepository::with_demo_seed()),
-        )
-        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
-    } else {
-        let ctx = ServerContext::new();
-        let _ = SHARED_SDE.set(Arc::clone(&ctx.sde));
-        ctx
-    }
+    ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    )
+    .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
 }
 
 #[test]
@@ -448,7 +446,7 @@ fn event_schedule_reads_do_not_mutate_db() {
 #[test]
 fn pvp_filament_reads_and_leave_queue_guards_preserve_values_without_mutating_empty_db() {
     let db = Arc::new(eve_db::WorldRepository::new_empty());
-    let sde = Arc::new(SdeRegistry::default());
+    let sde = shared_sde();
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let kw = HashMap::new();
@@ -680,4 +678,57 @@ fn pvp_filament_reads_and_leave_queue_guards_preserve_values_without_mutating_em
     assert!(ctx
         .db
         .with_snapshot(|s| !load_pvp_store(s).queue.contains_key(&cid)));
+}
+
+#[test]
+fn empty_sde_pvp_event_and_match_spec_reads_do_not_poison_canonical_cache() {
+    let empty_sde = Arc::new(SdeRegistry::default());
+    let empty_db = Arc::new(eve_db::WorldRepository::new_empty());
+    let empty_ctx = ServerContext::with_sde_and_repository(Arc::clone(&empty_sde), empty_db);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let kw = HashMap::new();
+
+    let mut sess = SessionState::default();
+    sess.user_id = Some(101);
+    sess.character_id = Some(90_099_778);
+    sess.solar_system_id = Some(30_000_142);
+
+    let e0 = empty_ctx.db.state_epoch();
+    let c0 = empty_ctx.db.tx_commit_count();
+    assert!(load_sde_pvp_events(&empty_sde).is_empty());
+    assert!(load_sde_pvp_match_specs(&empty_sde).is_none());
+    let empty_spec = get_pvp_filament_match_spec(&empty_sde, 56_088);
+    assert_eq!(empty_spec.fleet_size, 1);
+    let empty_all = rt
+        .block_on(handle(&empty_ctx, &mut sess, "pvpFilamentMgr", "GetAllEvents", &[], &kw))
+        .unwrap()
+        .expect("GetAllEvents with empty SDE succeeds");
+    assert!(matches!(empty_all, PyRep::Dict(ref d) if d.is_empty()));
+    assert_eq!(empty_ctx.db.state_epoch(), e0);
+    assert_eq!(empty_ctx.db.tx_commit_count(), c0);
+
+    // Subsequent canonical SDE reads must load full Proving Grounds tables cleanly.
+    let full_sde = shared_sde();
+    let full_events = load_sde_pvp_events(&full_sde);
+    assert!(
+        !full_events.is_empty(),
+        "empty SDE reads must not poison SDE_PVP_EVENTS"
+    );
+    let full_specs = load_sde_pvp_match_specs(&full_sde)
+        .expect("empty SDE reads must not poison SDE_PVP_MATCH_SPECS");
+    assert!(!full_specs.is_empty());
+
+    let full_ctx = ServerContext::with_sde_and_repository(
+        Arc::clone(&full_sde),
+        Arc::new(eve_db::WorldRepository::new_empty()),
+    );
+    let full_all = rt
+        .block_on(handle(&full_ctx, &mut sess, "pvpFilamentMgr", "GetAllEvents", &[], &kw))
+        .unwrap()
+        .expect("GetAllEvents with canonical SDE succeeds");
+    assert!(matches!(full_all, PyRep::Dict(ref d) if !d.is_empty()));
+
+    // Populating canonical cache must also leave empty-SDE lookups non-populated.
+    assert!(load_sde_pvp_events(&empty_sde).is_empty());
+    assert!(load_sde_pvp_match_specs(&empty_sde).is_none());
 }

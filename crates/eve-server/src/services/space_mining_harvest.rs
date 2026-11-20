@@ -272,6 +272,60 @@ pub fn deposit_mined_ore_and_record_ledger_with_waste(
 
 /// Seeds or respawns the regional `"IceBelt"` cosmic anomaly and its SDE ice asteroids in a
 /// designated ice solar system (`plan:MN-08`, 4-hour = `14,400`s respawn after depletion).
+fn ice_belt_has_remaining_asteroid<'a>(
+    mut asteroids: impl Iterator<Item = &'a eve_db::AsteroidRecord>,
+    sys_id: u32,
+    anom_pos: glam::DVec3,
+) -> bool {
+    asteroids.any(|a| {
+        a.solar_system_id == sys_id
+            && a.quantity > 0
+            && glam::DVec3::new(a.position.0, a.position.1, a.position.2).distance(anom_pos)
+                <= 50_000.0
+    })
+}
+
+fn ice_belt_ready_for_respawn(anoms: &[eve_db::CosmicAnomalyRecord], now: u64) -> bool {
+    let has_uncleared = anoms
+        .iter()
+        .any(|a| a.anomaly_type == "IceBelt" && !a.cleared);
+    !has_uncleared
+        && anoms.iter().any(|a| {
+            a.anomaly_type == "IceBelt"
+                && a.cleared
+                && crate::services::mining_sites::is_ice_belt_ready_to_respawn(
+                    now.saturating_sub(a.created_unix),
+                )
+        })
+}
+
+fn ice_belt_needs_clear_or_respawn(
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+    now: u64,
+) -> bool {
+    let anoms = snap
+        .cosmic_anomalies
+        .get(&sys_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let needs_clear = anoms
+        .iter()
+        .filter(|a| a.anomaly_type == "IceBelt" && !a.cleared)
+        .any(|anom| {
+            !ice_belt_has_remaining_asteroid(
+                snap.asteroids.values(),
+                sys_id,
+                glam::DVec3::from_array(anom.position),
+            )
+        });
+    if needs_clear {
+        return true;
+    }
+    let has_any_ice = anoms.iter().any(|a| a.anomaly_type == "IceBelt");
+    !has_any_ice || ice_belt_ready_for_respawn(anoms, now)
+}
+
 pub fn tick_ice_belt_respawn_sync(ctx: &ServerContext, sys_id: u32) {
     if !crate::services::mining_sites::is_designated_ice_system(sys_id) {
         return;
@@ -287,6 +341,15 @@ pub fn tick_ice_belt_respawn_sync(ctx: &ServerContext, sys_id: u32) {
     {
         return;
     }
+    let now = ctx.now_unix_secs();
+    // Read-only pre-check avoids opening a write transaction on idle ticks when the ice belt
+    // already exists (either active with asteroids remaining or waiting on its 4h respawn delay).
+    if !ctx
+        .db
+        .with_snapshot(|snap| ice_belt_needs_clear_or_respawn(snap, sys_id, now))
+    {
+        return;
+    }
     let type_vol_rad = |tid: u32| -> (f64, f64) {
         ctx.sde
             .types
@@ -297,21 +360,13 @@ pub fn tick_ice_belt_respawn_sync(ctx: &ServerContext, sys_id: u32) {
     let ice_pos =
         crate::services::mining_sites::derive_system_site_position_from_sde(ctx, sys_id, 4, 10.5);
     let ice_pos_vec = glam::DVec3::from_array(ice_pos);
-    let now = ctx.now_unix_secs();
 
     let (old_ids, newly_spawned) = ctx.db.with_mut_snapshot(|snap| {
         let mut newly_cleared_ids = Vec::new();
         if let Some(anoms) = snap.cosmic_anomalies.get_mut(&sys_id) {
             for anom in anoms.iter_mut().filter(|a| a.anomaly_type == "IceBelt" && !a.cleared) {
                 let anom_pos = glam::DVec3::from_array(anom.position);
-                let any_remaining = snap.asteroids.values().any(|a| {
-                    a.solar_system_id == sys_id
-                        && a.quantity > 0
-                        && glam::DVec3::new(a.position.0, a.position.1, a.position.2)
-                            .distance(anom_pos)
-                            <= 50_000.0
-                });
-                if !any_remaining {
+                if !ice_belt_has_remaining_asteroid(snap.asteroids.values(), sys_id, anom_pos) {
                     anom.cleared = true;
                     anom.remaining_volume = 0.0;
                     anom.created_unix = now;
@@ -330,25 +385,13 @@ pub fn tick_ice_belt_respawn_sync(ctx: &ServerContext, sys_id: u32) {
             }
         }
 
-        let has_any_ice = snap
+        let anoms = snap
             .cosmic_anomalies
             .get(&sys_id)
-            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "IceBelt"));
-        let has_uncleared = snap
-            .cosmic_anomalies
-            .get(&sys_id)
-            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "IceBelt" && !a.cleared));
-        let ready_to_respawn = !has_uncleared
-            && snap.cosmic_anomalies.get(&sys_id).is_some_and(|list| {
-                list.iter().any(|a| {
-                    a.anomaly_type == "IceBelt"
-                        && a.cleared
-                        && crate::services::mining_sites::is_ice_belt_ready_to_respawn(
-                            now.saturating_sub(a.created_unix),
-                        )
-                })
-            });
-        if has_any_ice && !ready_to_respawn {
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let has_any_ice = anoms.iter().any(|a| a.anomaly_type == "IceBelt");
+        if has_any_ice && !ice_belt_ready_for_respawn(anoms, now) {
             return (Vec::new(), Vec::new());
         }
 
@@ -481,18 +524,7 @@ pub fn tick_all_ice_belt_respawns_sync(ctx: &ServerContext) {
     let sys_ids: Vec<u32> = ctx.db.with_snapshot(|snap| {
         snap.cosmic_anomalies
             .iter()
-            .filter_map(|(&sys_id, anoms)| {
-                let has_uncleared = anoms.iter().any(|a| a.anomaly_type == "IceBelt" && !a.cleared);
-                let ready = !has_uncleared
-                    && anoms.iter().any(|a| {
-                        a.anomaly_type == "IceBelt"
-                            && a.cleared
-                            && crate::services::mining_sites::is_ice_belt_ready_to_respawn(
-                                now.saturating_sub(a.created_unix),
-                            )
-                    });
-                ready.then_some(sys_id)
-            })
+            .filter_map(|(&sys_id, anoms)| ice_belt_ready_for_respawn(anoms, now).then_some(sys_id))
             .collect()
     });
     for sys_id in sys_ids {
