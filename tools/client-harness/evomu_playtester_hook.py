@@ -2788,8 +2788,30 @@ def _stale_module_button_reason(node, sm=None):
     return ""
 
 
+_BR_TAG_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
+_STR_VALUE_TYPES = (str, type(u""))
+_EXPLICIT_MODULE_SLOT_PREFIXES = (
+    "ModuleButton_",
+    "inFlightHighSlot",
+    "inFlightMediumSlot",
+    "inFlightLowSlot",
+    "hiSlot",
+    "medSlot",
+    "lowSlot",
+)
+
+
+def _is_explicit_module_slot_or_id(token):
+    """Return True if token names a HUD slot key, ModuleButton_* widget, or numeric ID."""
+    if not token or len(token.split()) > 1:
+        return False
+    if token.isdigit():
+        return True
+    return token.startswith(_EXPLICIT_MODULE_SLOT_PREFIXES)
+
+
 def _module_button_display_name(node):
-    """Resolve a HUD ModuleButton's display name via evetypes or widget metadata."""
+    """Resolve a HUD ModuleButton's display name via evetypes or line-preserving metadata."""
     if node is None:
         return ""
     minfo = getattr(node, "moduleinfo", None)
@@ -2809,12 +2831,24 @@ def _module_button_display_name(node):
                 pass
     for attr in ("hint", "label", "caption", "text"):
         val = getattr(node, attr, None)
-        if val and not callable(val):
-            raw_txt = _strip_tags(_safe_str(val, 160)).strip()
-            if raw_txt:
-                first_line = raw_txt.splitlines()[0].strip()
-                if first_line and not first_line.startswith("ModuleButton_"):
-                    return first_line
+        if val is None or callable(val):
+            continue
+        if hasattr(val, "text") and not isinstance(val, _STR_VALUE_TYPES):
+            val = getattr(val, "text", None)
+            if val is None or callable(val):
+                continue
+        u_raw = _to_unicode(val)
+        if not u_raw:
+            continue
+        u_lines_src = _BR_TAG_RE.sub(u"\n", u_raw[:2048])
+        for raw_line in u_lines_src.splitlines():
+            clean_line = _safe_str(_strip_tags(raw_line), 128).strip()
+            if (
+                clean_line
+                and not clean_line.startswith("ModuleButton_")
+                and not clean_line.startswith("<")
+            ):
+                return clean_line
     return ""
 
 
@@ -5847,7 +5881,7 @@ def _execute_action(sm, action):
                     explicit_tid = int(_mod_parts[-1])
                     mod_name_raw = " ".join(_mod_parts[:-1]).strip()
                     _mod_parts = mod_name_raw.split() if mod_name_raw else []
-                mod_target = mod_name_raw if len(_mod_parts) <= 1 else ""
+                mod_target = mod_name_raw if _is_explicit_module_slot_or_id(mod_name_raw) else ""
                 if mod_target.isdigit() and int(mod_target) >= 50000000:
                     explicit_tid = int(mod_target)
                     mod_target = ""
@@ -5904,9 +5938,9 @@ def _execute_action(sm, action):
                                 if _short_cand not in candidates:
                                     candidates.append(_short_cand)
                 elif mod_name_raw:
-                    # Multi-word module display names (e.g. "5MN Microwarpdrive I") are resolved
-                    # via hud_slot_buttons display-name matching rather than truncating to word 1
-                    # or falling back to default mining/slot candidates.
+                    # Module display names (single- or multi-word, e.g. "Afterburner",
+                    # "5MN Microwarpdrive I") are resolved via tiered hud_slot_buttons
+                    # display-name matching rather than _find_widget or default slot fallbacks.
                     candidates = []
                 else:
                     candidates = ["inFlightHighSlot1"]
@@ -5994,7 +6028,7 @@ def _execute_action(sm, action):
                             elif fallback_offline_node is None:
                                 fallback_offline_node = ch
                                 fallback_slot_name = _safe_str(getattr(ch, "name", "") or s_key, 64)
-                        if node is not None:
+                        if node is not None or fallback_offline_node is not None:
                             break
                 if node is None and fallback_offline_node is not None:
                     node = fallback_offline_node

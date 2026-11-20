@@ -2559,17 +2559,45 @@ class TestHookExecutionAndInclientHelpers(unittest.TestCase):
         btn_blaster = FakeModuleButton("ModuleButton_562", 5001, 562, online=True)
         btn_mwd = FakeModuleButton("ModuleButton_434", 5002, 434, online=True)
         btn_stale = FakeModuleButton("ModuleButton_483", 9999, 483, online=True)
+        btn_hint_ii = FakeModuleButton("ModuleButton_440", 5004, 0, online=True, hint="<b>1MN Afterburner II</b><br>12.0 GJ")
         btn_hint = FakeModuleButton("ModuleButton_439", 5003, 0, online=True, hint="1MN Afterburner I\n10.0 GJ")
+
+        # Direct unit checks on _module_button_display_name newline, <br>, blank-line, and label.text handling
+        self.assertEqual(hook._module_button_display_name(btn_hint), "1MN Afterburner I")
+        self.assertEqual(hook._module_button_display_name(btn_hint_ii), "1MN Afterburner II")
+        btn_br_leading = FakeModuleButton(
+            "ModuleButton_441",
+            5005,
+            0,
+            online=True,
+            hint="\n  \n<br/>ModuleButton_441\n  5MN   Microwarpdrive II  \nActivation: 10 GJ",
+        )
+        self.assertEqual(hook._module_button_display_name(btn_br_leading), "5MN Microwarpdrive II")
+        btn_lbl_widget = types.SimpleNamespace(
+            name="ModuleButton_518",
+            moduleinfo=None,
+            hint=None,
+            label=types.SimpleNamespace(text="Small Shield Booster I<BR>5.0 GJ"),
+        )
+        self.assertEqual(hook._module_button_display_name(btn_lbl_widget), "Small Shield Booster I")
 
         slot_map = {
             "inFlightHighSlot1": FakeSlot("inFlightHighSlot1", [btn_blaster]),
             "inFlightHighSlot2": FakeSlot("inFlightHighSlot2", [btn_stale]),
             "inFlightMediumSlot1": FakeSlot("inFlightMediumSlot1", [btn_mwd]),
-            "inFlightMediumSlot2": FakeSlot("inFlightMediumSlot2", [btn_hint]),
+            "inFlightMediumSlot2": FakeSlot("inFlightMediumSlot2", [btn_hint_ii]),
+            "inFlightMediumSlot3": FakeSlot("inFlightMediumSlot3", [btn_hint]),
+            # Single-word lookup must NOT be shadowed by an offline widget returned from _find_widget
+            "Afterburner": FakeModuleButton("ModuleButton_999", 5003, 439, online=False),
         }
 
         evetypes_mod = types.ModuleType("evetypes")
-        evetypes_mod.GetName = lambda tid: {562: "Light Electron Blaster I", 434: "5MN Microwarpdrive I", 483: "Miner I"}.get(tid)
+        evetypes_mod.GetName = lambda tid: {
+            562: "Light Electron Blaster I",
+            434: "5MN Microwarpdrive I",
+            483: "Miner I",
+            484: "Miner II",
+        }.get(tid)
 
         park_states = types.SimpleNamespace(selected=1, activeTarget=2)
         parklife_pkg = types.ModuleType("eve.client.script.parklife")
@@ -2581,8 +2609,15 @@ class TestHookExecutionAndInclientHelpers(unittest.TestCase):
             5001: types.SimpleNamespace(typeID=562),
             5002: types.SimpleNamespace(typeID=434),
             5003: types.SimpleNamespace(typeID=439),
+            5004: types.SimpleNamespace(typeID=440),
+            5006: types.SimpleNamespace(typeID=483),
+            5007: types.SimpleNamespace(typeID=484),
         }
-        godma_svc = types.SimpleNamespace(stateManager=types.SimpleNamespace(invItems=inv_items))
+        godma_lm = mock.MagicMock()
+        godma_svc = types.SimpleNamespace(
+            stateManager=types.SimpleNamespace(invItems=inv_items),
+            GetDogmaLM=lambda: godma_lm,
+        )
         sm_obj = mock.MagicMock()
         sm_obj.GetService.side_effect = lambda name: {"godma": godma_svc, "stateSvc": st_svc}.get(name)
         fake_sess = types.SimpleNamespace(shipid=9001)
@@ -2627,9 +2662,19 @@ class TestHookExecutionAndInclientHelpers(unittest.TestCase):
         st_svc.SetState.assert_any_call(750000301, 1, 1)
         st_svc.SetState.assert_any_call(750000301, 2, 1)
 
+        # Tier-0 exact multiline hint disambiguation: "1MN Afterburner I" must win over earlier "1MN Afterburner II"
+        clicked_pre_ab = list(clicked)
         res_hint = run_activate("1MN Afterburner I", extra_mods={"evetypes": None})
         self.assertTrue(res_hint.get("ok"), res_hint)
         self.assertEqual(res_hint.get("activated_slot"), "ModuleButton_439")
+        self.assertEqual(clicked, clicked_pre_ab + ["ModuleButton_439"])
+
+        # Single-word display name must bypass _find_widget shadowing and choose online HUD button
+        btn_hint_ii.online = False
+        res_single = run_activate("Afterburner", extra_mods={"evetypes": None})
+        self.assertTrue(res_single.get("ok"), res_single)
+        self.assertEqual(res_single.get("activated_slot"), "ModuleButton_439")
+        btn_hint_ii.online = True
 
         # Stale Miner I (itemID=9999 absent from godma invItems) must be skipped and fail closed.
         clicked_before = list(clicked)
@@ -2638,6 +2683,17 @@ class TestHookExecutionAndInclientHelpers(unittest.TestCase):
         self.assertEqual(res_missing.get("activated_slot"), "none_fitted")
         self.assertIn("not found on ship HUD rack", res_missing.get("error", ""))
         self.assertEqual(clicked, clicked_before)
+
+        # Tier-0 offline exact match must NOT leak into Tier-1 online prefix match on another module (REV-02).
+        btn_miner_offline = FakeModuleButton("ModuleButton_483_real", 5006, 483, online=False)
+        btn_miner_ii_online = FakeModuleButton("ModuleButton_484", 5007, 484, online=True)
+        slot_map["inFlightHighSlot2"] = FakeSlot("inFlightHighSlot2", [btn_miner_offline])
+        slot_map["inFlightHighSlot3"] = FakeSlot("inFlightHighSlot3", [btn_miner_ii_online])
+        res_tier_stop = run_activate("Miner I")
+        self.assertTrue(res_tier_stop.get("ok"), res_tier_stop)
+        self.assertEqual(res_tier_stop.get("activated_slot"), "ModuleButton_483_real")
+        self.assertTrue(btn_miner_offline.online)
+        godma_lm.SetModuleOnline.assert_called_once_with(9001, 5006)
 
     def test_type_text_on_quick_filter_waits_for_debounce_settle(self):
         hook = _load_hook_with_py2_stubs()
