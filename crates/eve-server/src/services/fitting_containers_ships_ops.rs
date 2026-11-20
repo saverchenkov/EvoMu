@@ -2045,9 +2045,6 @@ pub(crate) mod legacy_container_ship_test_shim {
 }
 
 #[cfg(test)]
-pub(crate) use legacy_container_ship_test_shim::*;
-
-#[cfg(test)]
 #[path = "fitting_containers_ships_ops_cov_unit_tests.rs"]
 mod fitting_containers_ships_ops_cov_unit_tests;
 
