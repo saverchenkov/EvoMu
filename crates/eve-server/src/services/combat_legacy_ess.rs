@@ -883,16 +883,26 @@ pub async fn handle_legacy_and_ess(
                     base_dmg.scaled(tick_dmg / pod_cap)
                 }
                 "VortonProjector" => {
-                    let other_mission_balls: std::collections::HashSet<i64> =
-                        ctx.db.with_snapshot(|snap| {
-                            snap.active_missions
-                                .iter()
-                                .filter(|((m_char_id, _), m)| {
-                                    *m_char_id != char_id && m.state == "Accepted"
-                                })
-                                .flat_map(|(_, m)| m.spawned_npc_ball_ids.iter().copied())
-                                .collect()
-                        });
+                    let (other_mission_balls, player_ball_ids): (
+                        std::collections::HashSet<i64>,
+                        std::collections::HashSet<i64>,
+                    ) = ctx.db.with_snapshot(|snap| {
+                        let missions = snap
+                            .active_missions
+                            .iter()
+                            .filter(|((m_char_id, _), m)| {
+                                *m_char_id != char_id && m.state == "Accepted"
+                            })
+                            .flat_map(|(_, m)| m.spawned_npc_ball_ids.iter().copied())
+                            .collect();
+                        let players = snap
+                            .characters
+                            .iter()
+                            .flat_map(|(&cid, ch)| [cid, ch.active_ship_id])
+                            .filter(|&id| id > 0)
+                            .collect();
+                        (missions, players)
+                    });
                     let all_balls = sys_handle.list_balls().await.unwrap_or_default();
                     let raw_candidates: Vec<(i64, DVec3)> = all_balls
                         .into_iter()
@@ -900,6 +910,7 @@ pub async fn handle_legacy_and_ess(
                             b.id != ship_id
                                 && b.id != target_ball_id
                                 && !other_mission_balls.contains(&b.id)
+                                && !player_ball_ids.contains(&b.id)
                                 && b.position.distance(target_ball.position) <= 10_000.0
                                 && ctx
                                     .sde
@@ -952,7 +963,11 @@ pub async fn handle_legacy_and_ess(
                 (None, None)
             };
             let Some((applied_dmg, destroyed, _)) = (match sys_handle
-                .apply_damage_with_attacker(target_ball_id, scaled_dmg, Some(char_id))
+                .apply_damage_with_attacker(
+                    target_ball_id,
+                    scaled_dmg,
+                    player_target_info.is_none().then_some(char_id),
+                )
                 .await
             {
                 Ok(v) => v,
@@ -1293,13 +1308,20 @@ pub async fn handle_legacy_and_ess(
                 ])));
             }
 
-            // Target NPC ball was destroyed in Ballpark: credit bounty (ESS split only in K-space null-sec!), spawn wreck, and update mission/career progress
+            // Target NPC ball was destroyed in Ballpark: credit bounty (ESS split only in K-space null-sec!), spawn wreck, and update mission/career progress.
+            // Guard against double-minting when `npc_death_hook` already inserted `target_ball_id` into `rt.bounty_credited_balls` and queued a pending bounty tick.
+            let credit_inline_bounty = npc_base_bounty > 0.0
+                && with_mut_combat_runtime(ctx, |rt| {
+                    rt.bounty_credited_balls.insert(target_ball_id)
+                });
             let is_kspace_nullsec = sys_sec <= 0.0 && sys_id < 31_000_000;
             let dbs_mult = ctx
                 .db
                 .with_snapshot(|s| s.system_states.get(&sys_id).map(|st| st.dbs_multiplier))
                 .unwrap_or(1.35);
-            let (pilot_isk, main_ess, reserve_ess) = if is_kspace_nullsec {
+            let (pilot_isk, main_ess, reserve_ess) = if !credit_inline_bounty {
+                (0.0, 0.0, 0.0)
+            } else if is_kspace_nullsec {
                 let (p, _tax, m, r) =
                     compute_dbs_and_ess_bounty_split(npc_base_bounty, dbs_mult, 0.10);
                 (p, m, r)
@@ -1309,29 +1331,33 @@ pub async fn handle_legacy_and_ess(
             };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let pilot_cents = IskCents::from_f64_isk(pilot_isk);
-                let main_cents = IskCents::from_f64_isk(main_ess);
-                let reserve_cents = IskCents::from_f64_isk(reserve_ess);
+                if credit_inline_bounty {
+                    let pilot_cents = IskCents::from_f64_isk(pilot_isk);
+                    let main_cents = IskCents::from_f64_isk(main_ess);
+                    let reserve_cents = IskCents::from_f64_isk(reserve_ess);
 
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.balance = ch.balance.checked_add(pilot_cents).unwrap_or(ch.balance);
-                }
-                if is_kspace_nullsec && main_cents.0 > 0 {
-                    if let Some(st) = snap.system_states.get_mut(&sys_id) {
-                        st.ess_main_bank = st
-                            .ess_main_bank
-                            .checked_add(main_cents)
-                            .unwrap_or(st.ess_main_bank);
-                        crate::services::pve_ess_reserve_banks::record_ess_main_bank_contribution(
-                            st,
-                            char_id,
-                            main_cents.0,
-                            ctx.now_unix(),
-                        );
-                        st.ess_reserve_bank = st
-                            .ess_reserve_bank
-                            .checked_add(reserve_cents)
-                            .unwrap_or(st.ess_reserve_bank);
+                    if pilot_cents.0 > 0 {
+                        if let Some(ch) = snap.characters.get_mut(&char_id) {
+                            ch.balance = ch.balance.checked_add(pilot_cents).unwrap_or(ch.balance);
+                        }
+                    }
+                    if is_kspace_nullsec && main_cents.0 > 0 {
+                        if let Some(st) = snap.system_states.get_mut(&sys_id) {
+                            st.ess_main_bank = st
+                                .ess_main_bank
+                                .checked_add(main_cents)
+                                .unwrap_or(st.ess_main_bank);
+                            crate::services::pve_ess_reserve_banks::record_ess_main_bank_contribution(
+                                st,
+                                char_id,
+                                main_cents.0,
+                                ctx.now_unix(),
+                            );
+                            st.ess_reserve_bank = st
+                                .ess_reserve_bank
+                                .checked_add(reserve_cents)
+                                .unwrap_or(st.ess_reserve_bank);
+                        }
                     }
                 }
 
