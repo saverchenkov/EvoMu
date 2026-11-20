@@ -703,7 +703,21 @@ fn plex_history_aliases_empty_best_sell_validation_and_hangar_fallback() {
     assert_eq!(empty_best.dict_get("bestAskPrice"), Some(&PyRep::Real(0.0)));
 
     // PLEX history aliases
-    for m in ["GetPlexHistory", "GetPlexNewPriceHistory", "GetPlexOldPriceHistory"] {
+    let r_hist = handle(&ctx, &mut sess, "marketProxy", "GetPlexHistory", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let PyRep::Dict(entries) = r_hist else {
+        panic!("GetPlexHistory must return Dict");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, PyRep::Integer(44_992));
+    let PyRep::Tuple(parts) = &entries[0].1 else {
+        panic!("GetPlexHistory value must be (old, new) Tuple");
+    };
+    assert_eq!(parts.len(), 2);
+    assert!(parts[0].is_crowset());
+    assert!(parts[1].is_crowset());
+    for m in ["GetPlexNewPriceHistory", "GetPlexOldPriceHistory"] {
         let r = handle(&ctx, &mut sess, "marketProxy", m, &[], &kw).unwrap().unwrap();
         assert!(r.is_crowset());
     }
@@ -1239,7 +1253,22 @@ fn plex_history_aliases_transaction_fallback_and_sleeper_helper_edges() {
         let rep = handle(&ctx, &mut sess, "marketProxy", method, &[], &kw)
             .unwrap()
             .unwrap();
-        let rows = rep.crowset_rows().expect("PLEX transaction fallback rows");
+        let hist_rep = if method == "GetPlexHistory" {
+            let PyRep::Dict(entries) = rep else {
+                panic!("GetPlexHistory must return Dict");
+            };
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0, PyRep::Integer(44_992));
+            let PyRep::Tuple(mut parts) = entries.into_iter().next().unwrap().1 else {
+                panic!("GetPlexHistory value must be (old, new) Tuple");
+            };
+            assert_eq!(parts.len(), 2);
+            assert!(parts[0].crowset_rows().expect("old crowset").is_empty());
+            parts.swap_remove(1)
+        } else {
+            rep
+        };
+        let rows = hist_rep.crowset_rows().expect("PLEX transaction fallback rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].dbrow_get("lowPrice"), Some(&PyRep::Real(5_000_000.0)));
         assert_eq!(rows[0].dbrow_get("highPrice"), Some(&PyRep::Real(5_500_000.0)));
@@ -1250,6 +1279,41 @@ fn plex_history_aliases_transaction_fallback_and_sleeper_helper_edges() {
     let plex_orders = handle(&ctx, &mut sess, "marketProxy", "GetPlexOrders", &[], &kw)
         .unwrap()
         .unwrap();
-    assert!(matches!(plex_orders, PyRep::Tuple(ref parts) if parts.len() == 2));
+    let PyRep::Tuple(parts) = plex_orders else {
+        panic!("GetPlexOrders must return (asks, bids) Tuple");
+    };
+    assert_eq!(parts.len(), 2);
+    let asks_before = parts[0].crowset_rows().expect("asks crowset").len();
+    let bids_before = parts[1].crowset_rows().expect("bids crowset").len();
+
+    // Insert an expired PLEX order and verify GetPlexOrders filters it out without mutating DB.
+    ctx.db.with_mut_snapshot(|s| {
+        let mut expired = s.market_orders[&890_992].clone();
+        expired.order_id = 890_999;
+        s.market_orders.insert(890_999, expired);
+        crate::services::market_trading::save_market_order_meta(
+            s,
+            890_999,
+            crate::services::market_trading::MarketOrderMeta {
+                range: -1,
+                duration: 1,
+                issue_unix: 1,
+                order_state: None,
+                account_key: None,
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+    });
+    let plex_orders_after = handle(&ctx, &mut sess, "marketProxy", "GetPlexOrders", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let PyRep::Tuple(parts_after) = plex_orders_after else {
+        panic!("GetPlexOrders must return (asks, bids) Tuple");
+    };
+    assert_eq!(parts_after.len(), 2);
+    assert_eq!(parts_after[0].crowset_rows().expect("asks").len(), asks_before);
+    assert_eq!(parts_after[1].crowset_rows().expect("bids").len(), bids_before);
     assert_eq!(ctx.db.with_snapshot(|s| s.market_orders[&890_992].vol_remaining), 1);
+    assert!(ctx.db.with_snapshot(|s| s.market_orders.contains_key(&890_999)));
 }

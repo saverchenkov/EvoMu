@@ -1007,7 +1007,46 @@ pub(crate) mod market_modify_relist_tick_size {
         };
         assert_eq!(hist_entries.len(), 2);
 
-        // 2. StartupCheck & Sleeper Blue Loot NPC buy orders (`30744` @ 200k, `30745` @ 500k, `30746` @ 1.5M, `30747` @ 5M ISK)
+        // 2. Sleeper Blue Loot NPC buy orders (`30744` @ 200k, `30745` @ 500k, `30746` @ 1.5M, `30747` @ 5M ISK)
+        // Selected CONCORD/DED stations are already seeded by `world_seeder` on startup; Jita 4-4 (`60003760`) is NOT.
+        const CONCORD_SLEEPER_STATION_ID: i64 = 60_012_310; // Mastakomon V - CONCORD Bureau (The Forge)
+        const CONCORD_SLEEPER_SYSTEM_ID: u32 = 30_000_202;
+        const DED_FORGE_STATION_ID: i64 = 60_013_048; // Mastakomon XI - Moon 2 - DED Assembly Plant
+        const CONCORD_YULAI_STATION_ID: i64 = 60_012_256; // Yulai IX - CONCORD Bureau (Genesis)
+        const DED_DOMAIN_STATION_ID: i64 = 60_012_934; // Ruchy I - DED Testing Facilities (Domain)
+        let sleeper_cases: &[(TypeId, i64, i32)] = &[
+            (30_744, 200_000, 2),   // Neural Network Analyzer: 400k gross -> 30k tax -> 370k net
+            (30_745, 500_000, 3),   // Sleeper Data Library: 1.5M gross -> 112.5k tax -> 1.3875M net
+            (30_746, 1_500_000, 2), // Ancient Coordinates Database: 3M gross -> 225k tax -> 2.775M net
+            (30_747, 5_000_000, 1), // Sleeper Drone AI Nexus: 5M gross -> 375k tax -> 4.625M net
+        ];
+        ctx.db.with_snapshot(|snap| {
+            for st_id in [
+                CONCORD_SLEEPER_STATION_ID,
+                DED_FORGE_STATION_ID,
+                CONCORD_YULAI_STATION_ID,
+                DED_DOMAIN_STATION_ID,
+            ] {
+                for &(tid, price_isk, _) in sleeper_cases {
+                    let ord = snap
+                        .market_orders
+                        .values()
+                        .find(|o| o.is_npc && o.is_bid && o.station_id == st_id && o.type_id == tid)
+                        .unwrap_or_else(|| {
+                            panic!("Expected world_seeder Sleeper NPC buy order for {tid} at CONCORD/DED station {st_id}")
+                        });
+                    assert_eq!(ord.price, IskCents::from_isk(price_isk));
+                    assert_eq!(ord.vol_remaining, ord.vol_entered);
+                }
+            }
+            assert!(
+                snap.market_orders
+                    .values()
+                    .all(|o| !(o.station_id == JITA_STATION_ID && (30_744..=30_747).contains(&o.type_id))),
+                "Jita 4-4 must NOT carry seeded Sleeper loot orders before StartupCheck"
+            );
+        });
+
         let startup = rpc(&ctx, &mut s1, "marketProxy", "StartupCheck", &[])
             .await
             .expect("StartupCheck");
@@ -1016,22 +1055,22 @@ pub(crate) mod market_modify_relist_tick_size {
         };
         assert_eq!(st_kv.get("sleeperBuyOrdersSeeded"), Some(&PyRep::Bool(true)));
 
-        let sleeper_cases: &[(TypeId, i64, i32)] = &[
-            (30_744, 200_000, 2),   // Neural Network Analyzer: 400k gross -> 30k tax -> 370k net
-            (30_745, 500_000, 3),   // Sleeper Data Library: 1.5M gross -> 112.5k tax -> 1.3875M net
-            (30_746, 1_500_000, 2), // Ancient Coordinates Database: 3M gross -> 225k tax -> 2.775M net
-            (30_747, 5_000_000, 1), // Sleeper Drone AI Nexus: 5M gross -> 375k tax -> 4.625M net
-        ];
-        // Verify all 4 Sleeper buy orders are seeded with fixed price and full volume
+        // Verify all 4 Sleeper buy orders at Mastakomon CONCORD station (and still NONE at Jita)
         let sleeper_order_ids: Vec<(TypeId, i64, i32)> = ctx.db.with_snapshot(|snap| {
+            assert!(
+                snap.market_orders
+                    .values()
+                    .all(|o| !(o.station_id == JITA_STATION_ID && (30_744..=30_747).contains(&o.type_id))),
+                "Jita 4-4 must NOT carry seeded Sleeper loot orders after StartupCheck"
+            );
             sleeper_cases
                 .iter()
                 .map(|&(tid, price_isk, _)| {
                     let ord = snap
                         .market_orders
                         .values()
-                        .find(|o| o.is_npc && o.is_bid && o.station_id == JITA_STATION_ID && o.type_id == tid)
-                        .unwrap_or_else(|| panic!("Missing NPC buy order for Sleeper loot {tid}"));
+                        .find(|o| o.is_npc && o.is_bid && o.station_id == CONCORD_SLEEPER_STATION_ID && o.type_id == tid)
+                        .unwrap_or_else(|| panic!("Missing NPC buy order for Sleeper loot {tid} at CONCORD station"));
                     assert_eq!(ord.price, IskCents::from_isk(price_isk));
                     assert_eq!(ord.vol_remaining, ord.vol_entered);
                     (tid, ord.order_id, ord.vol_entered)
@@ -1039,7 +1078,16 @@ pub(crate) mod market_modify_relist_tick_size {
                 .collect()
         });
 
+        // Dock Pilot 1 in DB and session at Mastakomon V - CONCORD Bureau (dispatch_rpc reloads char location from DB).
+        s1.station_id = Some(CONCORD_SLEEPER_STATION_ID);
+        s1.solar_system_id = Some(CONCORD_SLEEPER_SYSTEM_ID);
+        s1.region_id = Some(THE_FORGE_REGION_ID);
         ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+                ch.station_id = Some(CONCORD_SLEEPER_STATION_ID);
+                ch.solar_system_id = CONCORD_SLEEPER_SYSTEM_ID;
+                ch.region_id = THE_FORGE_REGION_ID;
+            }
             snap.skills.entry(90_000_001).or_default().remove(&16622); // Accounting 0 -> 7.5% sales tax
         });
 
@@ -1054,7 +1102,7 @@ pub(crate) mod market_modify_relist_tick_size {
                         item_id: id,
                         type_id: tid,
                         owner_id: 90_000_001,
-                        location_id: JITA_STATION_ID,
+                        location_id: CONCORD_SLEEPER_STATION_ID,
                         flag: InventoryFlag::Hangar,
                         quantity: qty,
                         singleton: false,
@@ -1073,10 +1121,14 @@ pub(crate) mod market_modify_relist_tick_size {
             let buy_rows = book_parts[1].crowset_rows().expect("buy crowset rows");
             assert!(
                 buy_rows.iter().any(|r| {
-                    r.dbrow_get("stationID").and_then(|v| v.as_i64()) == Some(JITA_STATION_ID)
+                    r.dbrow_get("stationID").and_then(|v| v.as_i64()) == Some(CONCORD_SLEEPER_STATION_ID)
                         && (r.dbrow_get("price").and_then(|v| v.as_f64()).unwrap_or(0.0) - (price_isk as f64)).abs() < 1e-6
                 }),
-                "GetOrders({tid}) must expose permanent NPC buy order at {price_isk} ISK"
+                "GetOrders({tid}) must expose permanent NPC buy order at CONCORD station {CONCORD_SLEEPER_STATION_ID} @ {price_isk} ISK"
+            );
+            assert!(
+                buy_rows.iter().all(|r| r.dbrow_get("stationID").and_then(|v| v.as_i64()) != Some(JITA_STATION_ID)),
+                "GetOrders({tid}) must not expose a Sleeper NPC buy order at Jita 4-4"
             );
 
             let bal_before = ctx.db.get_character(90_000_001).unwrap().balance;
@@ -1087,7 +1139,7 @@ pub(crate) mod market_modify_relist_tick_size {
                 "PlaceMultiSellOrder",
                 &[
                     PyRep::List(vec![PyRep::keyval([
-                        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                        ("stationID", PyRep::Integer(CONCORD_SLEEPER_STATION_ID)),
                         ("typeID", PyRep::Integer(tid as i64)),
                         ("itemID", PyRep::Integer(item_id)),
                         ("price", PyRep::Real(price_isk as f64)),
@@ -1127,7 +1179,7 @@ pub(crate) mod market_modify_relist_tick_size {
                         item_id: id,
                         type_id: tid,
                         owner_id: 90_000_001,
-                        location_id: JITA_STATION_ID,
+                        location_id: CONCORD_SLEEPER_STATION_ID,
                         flag: InventoryFlag::Hangar,
                         quantity: rep_qty,
                         singleton: false,
@@ -1145,7 +1197,7 @@ pub(crate) mod market_modify_relist_tick_size {
                 "PlaceMultiSellOrder",
                 &[
                     PyRep::List(vec![PyRep::keyval([
-                        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                        ("stationID", PyRep::Integer(CONCORD_SLEEPER_STATION_ID)),
                         ("typeID", PyRep::Integer(tid as i64)),
                         ("itemID", PyRep::Integer(rep_item_id)),
                         ("price", PyRep::Real(price_isk as f64)),
@@ -1171,6 +1223,18 @@ pub(crate) mod market_modify_relist_tick_size {
                     ord.vol_remaining, full_vol,
                     "Permanent NPC buy order {oid} for Sleeper loot {tid} must never deplete"
                 );
+            }
+        });
+
+        // Restore Pilot 1 to Jita 4-4 (`60_003_760`, `30_000_142`) before remaining steps.
+        s1.station_id = Some(JITA_STATION_ID);
+        s1.solar_system_id = Some(JITA_SYSTEM_ID);
+        s1.region_id = Some(THE_FORGE_REGION_ID);
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+                ch.station_id = Some(JITA_STATION_ID);
+                ch.solar_system_id = JITA_SYSTEM_ID;
+                ch.region_id = THE_FORGE_REGION_ID;
             }
         });
 
@@ -1470,9 +1534,16 @@ pub(crate) mod market_modify_relist_tick_size {
         let plex_best = rpc(&ctx, &mut s2, "marketProxy", "GetPlexBest", &[])
             .await
             .expect("GetPlexBest");
-        let PyRep::KeyVal(pb_kv) = plex_best else {
-            panic!("Expected KeyVal");
+        let PyRep::Dict(pb_entries) = plex_best else {
+            panic!("Expected Dict from GetPlexBest");
         };
+        let pb_kv: HashMap<String, PyRep> = pb_entries
+            .into_iter()
+            .filter_map(|(k, v)| match k {
+                PyRep::String(s) => Some((s, v)),
+                _ => None,
+            })
+            .collect();
         assert_eq!(pb_kv.get("typeID"), Some(&PyRep::Integer(PLEX_TYPE_ID as i64)));
         assert_eq!(pb_kv.get("bestAskPrice"), Some(&PyRep::Real(5_100_000.0)));
         assert_eq!(pb_kv.get("totalAskVolume"), Some(&PyRep::Integer(100)));
@@ -1555,20 +1626,86 @@ pub(crate) mod market_modify_relist_tick_size {
         assert_eq!(sell_into_domain_bid.dict_get("plexRemainingVault"), Some(&PyRep::Integer(390)));
         assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_002)), 50);
 
-        // Query GetPlexHistory, GetPlexNewPriceHistory, and GetPlexOldPriceHistory AFTER trades
-        // across The Forge, Domain, a 3rd region with 0 local PLEX trades (Sinq Laison), and region=None
-        let mut s_third = s2.clone();
-        s_third.region_id = Some(SINQ_LAISON_REGION_ID);
-        let mut s_no_reg = s2.clone();
-        s_no_reg.region_id = None;
+        // Query GetPlexHistory, GetPlexNewPriceHistory, GetPlexOldPriceHistory, and GetOld/NewPriceHistory(PLEX)
+        // AFTER trades across The Forge, Domain, a persisted 3rd character in Sinq Laison (0 local PLEX trades),
+        // and an authenticated session with region=None (`character_id == None`).
+        let (sinq_station_id, sinq_system_id) = ctx
+            .sde
+            .stations
+            .values()
+            .find(|st| st.region_id == SINQ_LAISON_REGION_ID)
+            .map(|st| (st.station_id, st.solar_system_id))
+            .expect("Sinq Laison station in SDE");
+        let uid3 = ctx.db.provision_player_account("pilot3", "pilot3-secret");
+        let _uid_noreg = ctx.db.provision_player_account("pilot_noreg", "pilot_noreg-secret");
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch3 = snap.characters[&90_000_001].clone();
+            ch3.character_id = 90_000_003;
+            ch3.user_id = uid3;
+            ch3.name = "Sinq Laison Trader".into();
+            ch3.station_id = Some(sinq_station_id);
+            ch3.home_station_id = sinq_station_id;
+            ch3.solar_system_id = sinq_system_id;
+            ch3.region_id = SINQ_LAISON_REGION_ID;
+            ch3.active_ship_id = 100_000_003;
+            snap.characters.insert(90_000_003, ch3);
+            snap.items.insert(
+                100_000_003,
+                InventoryItemRecord {
+                    item_id: 100_000_003,
+                    type_id: 670, // Capsule
+                    owner_id: 90_000_003,
+                    location_id: sinq_station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        let mut s_third = setup_pilot(&ctx, 103, "pilot3", "pilot3-secret", 90_000_003).await;
+        assert_eq!(s_third.region_id, Some(SINQ_LAISON_REGION_ID));
+
+        let mut s_no_reg = SessionState::new(104);
+        common::login_pilot(&ctx, &mut s_no_reg, "pilot_noreg", "pilot_noreg-secret").await;
+        assert_eq!(s_no_reg.character_id, None);
+        assert_eq!(s_no_reg.region_id, None);
+
         let expected_avg_plex = ((40.0 * 5_200_000.0) + (10.0 * 5_000_000.0)) / 50.0; // 5_160_000.0
         for caller in [&mut s1, &mut s2, &mut s_third, &mut s_no_reg] {
-            for method in ["GetPlexHistory", "GetPlexNewPriceHistory", "GetPlexOldPriceHistory"] {
-                let hist_rep = rpc(&ctx, caller, "marketProxy", method, &[])
+            for method in [
+                "GetPlexHistory",
+                "GetPlexNewPriceHistory",
+                "GetPlexOldPriceHistory",
+                "GetOldPriceHistory",
+                "GetNewPriceHistory",
+            ] {
+                let args: Vec<PyRep> = if matches!(method, "GetOldPriceHistory" | "GetNewPriceHistory") {
+                    vec![PyRep::Integer(PLEX_TYPE_ID as i64)]
+                } else {
+                    vec![]
+                };
+                let hist_rep = rpc(&ctx, caller, "marketProxy", method, &args)
                     .await
                     .unwrap_or_else(|e| panic!("{method} must succeed globally: {e:?}"));
-                assert!(hist_rep.is_crowset(), "{method} must return CRowset");
-                let h_rows = hist_rep.crowset_rows().expect("PLEX history rows");
+                let hist_crowset = if method == "GetPlexHistory" {
+                    let PyRep::Dict(entries) = hist_rep else {
+                        panic!("GetPlexHistory must return Dict {{typeID: (old, new)}}");
+                    };
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0].0, PyRep::Integer(PLEX_TYPE_ID as i64));
+                    let PyRep::Tuple(mut parts) = entries.into_iter().next().unwrap().1 else {
+                        panic!("GetPlexHistory entry must be (old, new) Tuple");
+                    };
+                    assert_eq!(parts.len(), 2);
+                    assert!(parts[0].crowset_rows().expect("old crowset").is_empty());
+                    parts.swap_remove(1)
+                } else {
+                    assert!(hist_rep.is_crowset(), "{method} must return CRowset");
+                    hist_rep
+                };
+                let h_rows = hist_crowset.crowset_rows().expect("PLEX history rows");
                 assert_eq!(
                     h_rows.len(),
                     1,
@@ -1587,6 +1724,19 @@ pub(crate) mod market_modify_relist_tick_size {
                 assert_eq!(row.dbrow_get("orders"), Some(&PyRep::Integer(2)));
             }
         }
+        assert_eq!(s_third.region_id, Some(SINQ_LAISON_REGION_ID));
+        assert_eq!(s_no_reg.region_id, None);
+        let non_plex_noreg_err = rpc(
+            &ctx,
+            &mut s_no_reg,
+            "marketProxy",
+            "GetOldPriceHistory",
+            &[PyRep::Integer(TRITANIUM_TYPE_ID as i64)],
+        )
+        .await
+        .expect_err("GetOldPriceHistory(Tritanium) with region=None must fail with NoRegion");
+        assert_eq!(non_plex_noreg_err.code, "NoRegion");
+
         let many_plex = rpc(
             &ctx,
             &mut s_third,
@@ -1596,6 +1746,7 @@ pub(crate) mod market_modify_relist_tick_size {
         )
         .await
         .expect("GetHistoryForManyTypeIDs for PLEX from Sinq Laison");
+        assert_eq!(s_third.region_id, Some(SINQ_LAISON_REGION_ID));
         let PyRep::Dict(many_entries) = many_plex else { panic!("Expected Dict"); };
         let plex_many_rows = many_entries
             .iter()

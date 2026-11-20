@@ -323,7 +323,7 @@ fn sweep_expired_orders_refunds_buy_escrow_and_returns_sell_items() {
 }
 
 #[test]
-fn get_system_asks_and_plex_best_sweep_expired_orders() {
+fn get_system_asks_and_plex_best_omit_expired_orders_without_sweeping() {
     let ctx = test_ctx();
     let now = 1_750_000_000_u64;
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(now)));
@@ -332,6 +332,7 @@ fn get_system_asks_and_plex_best_sweep_expired_orders() {
     let kw = std::collections::HashMap::new();
 
     ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.clear();
         s.market_orders.insert(
             710_001,
             MarketOrderRecord {
@@ -364,7 +365,7 @@ fn get_system_asks_and_plex_best_sweep_expired_orders() {
         );
     });
 
-    handle(
+    let sys_asks = handle(
         &ctx,
         &mut sess,
         "marketProxy",
@@ -374,11 +375,12 @@ fn get_system_asks_and_plex_best_sweep_expired_orders() {
     )
     .unwrap()
     .unwrap();
+    assert!(sys_asks.cindexed_rowset_entries().unwrap().is_empty());
     ctx.db.with_snapshot(|s| {
-        assert_eq!(s.market_orders[&710_001].vol_remaining, 0);
+        assert_eq!(s.market_orders[&710_001].vol_remaining, 50);
     });
 
-    // Seed expired PLEX buy order and verify GetPlexBest sweeps it
+    // Seed expired PLEX buy order and verify GetPlexBest omits it on read without mutating DB
     ctx.db.with_mut_snapshot(|s| {
         s.market_orders.insert(
             710_002,
@@ -411,10 +413,19 @@ fn get_system_asks_and_plex_best_sweep_expired_orders() {
             },
         );
     });
-    handle(&ctx, &mut sess, "marketProxy", "GetPlexBest", &[], &kw)
+    let plex_best = handle(&ctx, &mut sess, "marketProxy", "GetPlexBest", &[], &kw)
         .unwrap()
         .unwrap();
+    assert_eq!(plex_best.dict_get("totalBidVolume"), Some(&PyRep::Integer(0)));
     ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&710_002].vol_remaining, 2);
+        assert_eq!(s.market_orders[&710_002].escrow, IskCents::from_isk(10_000_000));
+    });
+
+    // Explicit sweep cleans up both expired orders.
+    assert_eq!(sweep_expired_orders_and_notify(&ctx, now), 2);
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&710_001].vol_remaining, 0);
         assert_eq!(s.market_orders[&710_002].vol_remaining, 0);
         assert_eq!(s.market_orders[&710_002].escrow, IskCents(0));
     });
@@ -435,6 +446,9 @@ fn startup_check_and_contract_container_rbac() {
     let npc_cont_id = 9_100_813;
 
     // 1. Unauthenticated StartupCheck must fail closed without mutating market_orders.
+    // Ensure Sleeper orders start unseeded even when `test_ctx()` returns the first `ServerContext::new()`.
+    ctx.db
+        .with_mut_snapshot(|s| s.market_orders.retain(|_, o| !is_permanent_npc_sleeper_buy_order(o)));
     let before_orders = ctx.db.with_snapshot(|s| s.market_orders.len());
     let mut unauth_sess = SessionState::new(9199);
     let unauth_err = handle(&ctx, &mut unauth_sess, "marketProxy", "StartupCheck", &[], &kw)
@@ -1265,8 +1279,23 @@ fn plex_history_rpcs_aggregate_globally_and_read_pure_across_regions() {
             let res = handle(&ctx, &mut sess, "marketProxy", method, &[], &kw)
                 .unwrap()
                 .unwrap();
-            assert!(res.is_crowset(), "{method} must return CRowset");
-            let rows = res.crowset_rows().expect("crowset rows");
+            let hist_rep = if method == "GetPlexHistory" {
+                let PyRep::Dict(entries) = res else {
+                    panic!("GetPlexHistory must return Dict");
+                };
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].0, PyRep::Integer(44_992));
+                let PyRep::Tuple(mut parts) = entries.into_iter().next().unwrap().1 else {
+                    panic!("GetPlexHistory value must be (old, new) Tuple");
+                };
+                assert_eq!(parts.len(), 2);
+                assert!(parts[0].crowset_rows().expect("old crowset").is_empty());
+                parts.swap_remove(1)
+            } else {
+                assert!(res.is_crowset(), "{method} must return CRowset");
+                res
+            };
+            let rows = hist_rep.crowset_rows().expect("crowset rows");
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].dbrow_get("lowPrice"), Some(&PyRep::Real(4_700_000.0)));
             assert_eq!(rows[0].dbrow_get("highPrice"), Some(&PyRep::Real(5_200_000.0)));
@@ -1309,6 +1338,214 @@ fn plex_history_rpcs_aggregate_globally_and_read_pure_across_regions() {
         .and_then(|(_, v)| v.crowset_rows())
         .expect("Tritanium regional history rows");
     assert!(trit_rows.is_empty());
+}
+
+#[tokio::test]
+async fn dispatch_rpc_market_read_getters_stay_pure_and_omit_expired_orders() {
+    use crate::services::market_contracts::PLEX_TYPE_ID;
+    use crate::services::market_trading::{save_market_order_meta, MarketOrderMeta};
+    use eve_db::{CorporationRecord, IskCents, MarketOrderRecord};
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    let now = ctx.now_unix();
+    let kw = HashMap::new();
+
+    let mut sess = SessionState::new(77);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let active_trit_ask = 9_610_001_i64;
+    let expired_trit_bid = 9_610_002_i64;
+    let expired_corp_bid = 9_610_003_i64;
+    let active_plex_ask = 9_610_004_i64;
+    let expired_plex_bid = 9_610_005_i64;
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.clear();
+        s.corporations.entry(corp_id).or_insert_with(|| {
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = corp_id;
+            corp.ceo_id = char_id;
+            corp.name = "ReadPurityCorp".into();
+            corp.ticker = "RPUR".into();
+            corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            corp
+        });
+        let rows = [
+            (active_trit_ask, char_id, 34_u32, false, 100_i64, 50_i32, 0_i64, now, 90_i64),
+            (expired_trit_bid, char_id, 34_u32, true, 90_i64, 40_i32, 360_000_i64, 1_u64, 1_i64),
+            (expired_corp_bid, corp_id, 34_u32, true, 80_i64, 30_i32, 240_000_i64, 1_u64, 1_i64),
+            (active_plex_ask, char_id, PLEX_TYPE_ID, false, 5_100_000_i64, 5_i32, 0_i64, now, 90_i64),
+            (expired_plex_bid, char_id, PLEX_TYPE_ID, true, 4_900_000_i64, 3_i32, 1_470_000_000_i64, 1_u64, 1_i64),
+        ];
+        for (oid, owner_id, tid, is_bid, price_isk, vol, escrow_cents, issue_unix, duration) in rows {
+            s.market_orders.insert(
+                oid,
+                MarketOrderRecord {
+                    order_id: oid,
+                    owner_id,
+                    station_id: JITA_STATION_ID,
+                    region_id: THE_FORGE_REGION_ID,
+                    type_id: tid,
+                    is_bid,
+                    price: IskCents::from_isk(price_isk),
+                    vol_entered: vol,
+                    vol_remaining: vol,
+                    min_volume: 1,
+                    is_npc: false,
+                    escrow: IskCents(escrow_cents),
+                },
+            );
+            save_market_order_meta(
+                s,
+                oid,
+                MarketOrderMeta {
+                    range: -1,
+                    duration,
+                    issue_unix,
+                    order_state: None,
+                    account_key: (owner_id == corp_id).then_some(1000),
+                    final_vol_remaining: None,
+                    closed_unix: None,
+                },
+            );
+        }
+    });
+
+    let char_bal_before = ctx.db.get_character(char_id).unwrap().balance;
+    let corp_bal_before = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance());
+    let next_eid_before = ctx.db.with_snapshot(|s| s.next_entity_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    sess.notifications.clear();
+
+    // Verify all order-book / personal / corp / system / PLEX getters filter out expired orders on read.
+    let get_orders = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetOrders", &[PyRep::Integer(34)], &kw, None)
+        .await
+        .expect("GetOrders");
+    let PyRep::Tuple(parts) = get_orders else { panic!("Expected Tuple"); };
+    assert_eq!(parts[0].crowset_rows().unwrap().len(), 1);
+    assert!(parts[1].crowset_rows().unwrap().is_empty());
+
+    let station_asks = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetStationAsks", &[], &kw, None)
+        .await
+        .expect("GetStationAsks");
+    let station_ask_rows = station_asks.cindexed_rowset_entries().unwrap();
+    assert_eq!(station_ask_rows.len(), 2);
+
+    let system_asks = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetSystemAsks", &[], &kw, None)
+        .await
+        .expect("GetSystemAsks");
+    assert_eq!(system_asks.cindexed_rowset_entries().unwrap().len(), 2);
+
+    let region_best = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetRegionBest", &[], &kw, None)
+        .await
+        .expect("GetRegionBest");
+    assert_eq!(region_best.cindexed_rowset_entries().unwrap().len(), 2);
+
+    let char_orders = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetCharOrders", &[], &kw, None)
+        .await
+        .expect("GetCharOrders");
+    let PyRep::Rowset { rows: char_rows, .. } = char_orders else {
+        panic!("Expected Rowset from GetCharOrders");
+    };
+    assert_eq!(char_rows.len(), 2);
+    assert!(char_rows.iter().all(|r| {
+        let oid = r.first().and_then(PyRep::as_i64);
+        oid == Some(active_trit_ask) || oid == Some(active_plex_ask)
+    }));
+
+    let char_escrow = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetCharEscrow", &[], &kw, None)
+        .await
+        .expect("GetCharEscrow");
+    assert_eq!(char_escrow.dict_get("escrow").and_then(PyRep::as_f64), Some(0.0));
+    assert_eq!(char_escrow.dict_get("totalRemainingCostISK").and_then(PyRep::as_f64), Some(0.0));
+    assert_eq!(char_escrow.dict_get("itemsEscrow").and_then(PyRep::as_f64), Some(25_505_000.0));
+
+    let corp_orders = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetCorporationOrders", &[], &kw, None)
+        .await
+        .expect("GetCorporationOrders");
+    let PyRep::Rowset { rows: corp_rows, .. } = corp_orders else {
+        panic!("Expected Rowset from GetCorporationOrders");
+    };
+    assert!(corp_rows.is_empty());
+
+    let plex_best = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetPlexBest", &[], &kw, None)
+        .await
+        .expect("GetPlexBest");
+    assert_eq!(plex_best.dict_get("bestAskPrice").and_then(PyRep::as_f64), Some(5_100_000.0));
+    assert_eq!(plex_best.dict_get("bestBidPrice").and_then(PyRep::as_f64), Some(0.0));
+    assert_eq!(plex_best.dict_get("totalBidVolume"), Some(&PyRep::Integer(0)));
+
+    let plex_orders = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetPlexOrders", &[], &kw, None)
+        .await
+        .expect("GetPlexOrders");
+    let PyRep::Tuple(plex_parts) = plex_orders else { panic!("Expected Tuple"); };
+    assert_eq!(plex_parts[0].crowset_rows().unwrap().len(), 1);
+    assert!(plex_parts[1].crowset_rows().unwrap().is_empty());
+
+    // Call history getters through full dispatch_rpc too.
+    for (method, args) in [
+        ("GetHistoryForManyTypeIDs", vec![PyRep::List(vec![PyRep::Integer(PLEX_TYPE_ID as i64), PyRep::Integer(34)])]),
+        ("GetOldPriceHistory", vec![PyRep::Integer(PLEX_TYPE_ID as i64)]),
+        ("GetNewPriceHistory", vec![PyRep::Integer(34)]),
+        ("GetPlexHistory", vec![]),
+        ("GetPlexNewPriceHistory", vec![]),
+        ("GetPlexOldPriceHistory", vec![]),
+    ] {
+        ctx.dispatch_rpc(&mut sess, "marketProxy", None, method, &args, &kw, None)
+            .await
+            .unwrap_or_else(|e| panic!("{method} dispatch_rpc failed: {e:?}"));
+    }
+
+    // Confirm ZERO world-state mutation occurred across any read getter!
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders.len(), 5);
+        for (oid, expected_vol) in [
+            (active_trit_ask, 50),
+            (expired_trit_bid, 40),
+            (expired_corp_bid, 30),
+            (active_plex_ask, 5),
+            (expired_plex_bid, 3),
+        ] {
+            assert_eq!(s.market_orders[&oid].vol_remaining, expected_vol);
+        }
+        assert_eq!(s.next_entity_id, next_eid_before);
+        assert_eq!(s.corporations[&corp_id].master_wallet_balance(), corp_bal_before);
+    });
+    assert_eq!(ctx.db.get_character(char_id).unwrap().balance, char_bal_before);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    assert!(sess.notifications.is_empty());
 }
 
 #[cfg(test)]

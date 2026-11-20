@@ -168,7 +168,18 @@ fn build_synthetic_sde() -> SdeRegistry {
     fac_t.default_attributes = HashMap::from([(1692, 4.0)]);
     sde.types.insert(fac_t.type_id, fac_t);
 
-    // 7. Excluded cosmetic item (cat 91) and unpublished item
+    // 7. Excluded cosmetic item (cat 91), Sleeper blue loot (`30_744`, CONCORD/DED only), and unpublished item
+    let mut sleeper_t = base_type.clone();
+    sleeper_t.type_id = 30_744;
+    sleeper_t.category_id = 4;
+    sleeper_t.group_id = 886;
+    sleeper_t.base_price = 200_000.0;
+    sleeper_t.published = true;
+    sleeper_t.market_group_id = Some(1224);
+    sleeper_t.meta_group_id = Some(1);
+    sleeper_t.default_attributes.clear();
+    sde.types.insert(sleeper_t.type_id, sleeper_t);
+
     let mut skin_t = base_type.clone();
     skin_t.type_id = 880_090;
     skin_t.category_id = 91;
@@ -294,6 +305,38 @@ fn seed_dual_anchor_and_full_catalog_create_tier1_and_tier2_orders_idempotently(
             .market_orders
             .values()
             .all(|o| !(o.station_id == 60_008_494 && o.type_id == 880_040)));
+
+        // Sleeper blue loot permanent NPC buy orders (`30_744..=30_747`) are seeded at CONCORD & DED stations
+        // (range=-1, vol=9_999_999), NOT at Jita (`60_003_760`) or Amarr (`60_008_494`).
+        for (station_id, expected_owner) in [
+            (60_012_310_i64, 1_000_125_i64), // Mastakomon V - CONCORD Bureau (The Forge)
+            (60_013_048_i64, 1_000_137_i64), // Mastakomon XI - Moon 2 - DED Assembly Plant (The Forge)
+            (60_012_256_i64, 1_000_125_i64), // Yulai IX - CONCORD Bureau (Genesis)
+            (60_012_934_i64, 1_000_137_i64), // Ruchy I - DED Testing Facilities (Domain)
+        ] {
+            for (tid, price_isk) in [
+                (30_744_u32, 200_000_i64),
+                (30_745_u32, 500_000_i64),
+                (30_746_u32, 1_500_000_i64),
+                (30_747_u32, 5_000_000_i64),
+            ] {
+                let order = snap
+                    .market_orders
+                    .values()
+                    .find(|o| o.station_id == station_id && o.type_id == tid && o.is_bid && o.is_npc)
+                    .unwrap_or_else(|| {
+                        panic!("expected Sleeper buy order for type {tid} at station {station_id}")
+                    });
+                assert_eq!(order.owner_id, expected_owner);
+                assert_eq!(order.price, IskCents::from_isk(price_isk));
+                assert_eq!(order.vol_entered, 1_000_000);
+                assert_eq!(order.vol_remaining, 1_000_000);
+            }
+        }
+        assert!(snap.market_orders.values().all(|o| {
+            !((o.station_id == 60_003_760 || o.station_id == 60_008_494)
+                && (30_744..=30_747).contains(&o.type_id))
+        }));
     });
 
     // Now seed full catalog: Jita gets T2 item (with bid because meta_group_id==2), BOM item, and fallback item.
@@ -342,6 +385,10 @@ fn seed_dual_anchor_and_full_catalog_create_tier1_and_tier2_orders_idempotently(
         assert!(crate::services::market_contracts::is_valid_4_sig_fig_price(
             crate::services::market_contracts::round_to_4_sig_figs(12_560.58)
         ));
+        assert!(snap.market_orders.values().all(|o| {
+            !((o.station_id == 60_003_760 || o.station_id == 60_008_494)
+                && (30_744..=30_747).contains(&o.type_id))
+        }));
     });
 }
 

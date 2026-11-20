@@ -2105,13 +2105,25 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
             s.characters[&buyer_id].corporation_id,
         )
     });
+    const CONCORD_STATION_ID: i64 = 60_012_310; // Mastakomon V - CONCORD Bureau (The Forge)
+    const CONCORD_SYSTEM_ID: u32 = 30_000_202;
     let mut sess = jita_session(char_id, corp_id);
+    sess.station_id = Some(CONCORD_STATION_ID);
+    sess.solar_system_id = Some(CONCORD_SYSTEM_ID);
     let kw = HashMap::new();
 
-    // Seed permanent NPC buy orders for all 4 Sleeper loot types via StartupCheck.
+    // Seed permanent NPC buy orders at CONCORD/DED stations (NOT Jita) via StartupCheck.
     handle_contracts(&ctx, &mut sess, "marketProxy", "StartupCheck", &[], &kw)
         .unwrap()
         .unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert!(
+            s.market_orders
+                .values()
+                .all(|o| !(o.station_id == JITA_STATION_ID && is_permanent_npc_sleeper_buy_order(o))),
+            "Jita 4-4 must NOT carry permanent Sleeper NPC buy orders"
+        );
+    });
 
     // Remove Accounting (0 -> 7.5% sales tax) and clear competing market orders.
     ctx.db.with_mut_snapshot(|s| {
@@ -2127,7 +2139,7 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
                     item_id: iid,
                     type_id: tid,
                     owner_id: char_id,
-                    location_id: JITA_STATION_ID,
+                    location_id: CONCORD_STATION_ID,
                     flag: InventoryFlag::Hangar,
                     quantity: 10,
                     singleton: false,
@@ -2142,7 +2154,7 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
             MarketOrderRecord {
                 order_id: 9_390_001,
                 owner_id: 1_000_035,
-                station_id: JITA_STATION_ID,
+                station_id: CONCORD_STATION_ID,
                 region_id: THE_FORGE_REGION_ID,
                 type_id: 34,
                 is_bid: true,
@@ -2162,7 +2174,7 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
                 item_id: trit_iid,
                 type_id: 34,
                 owner_id: char_id,
-                location_id: JITA_STATION_ID,
+                location_id: CONCORD_STATION_ID,
                 flag: InventoryFlag::Hangar,
                 quantity: 15,
                 singleton: false,
@@ -2180,7 +2192,7 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
             let qty = 2_i64;
             expected_gross_cents += price_isk * qty * 100;
             batch.push(PyRep::keyval([
-                ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                ("stationID", PyRep::Integer(CONCORD_STATION_ID)),
                 ("typeID", PyRep::Integer(tid as i64)),
                 ("itemID", PyRep::Integer(0)),
                 ("price", PyRep::Real(price_isk as f64)),
@@ -2214,8 +2226,8 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
                 let ord = s
                     .market_orders
                     .values()
-                    .find(|o| is_permanent_npc_sleeper_buy_order(o) && o.station_id == JITA_STATION_ID && o.type_id == tid)
-                    .expect("Permanent Sleeper NPC buy order must exist");
+                    .find(|o| is_permanent_npc_sleeper_buy_order(o) && o.station_id == CONCORD_STATION_ID && o.type_id == tid)
+                    .expect("Permanent Sleeper NPC buy order must exist at CONCORD station");
                 assert_eq!(
                     ord.vol_remaining, ord.vol_entered,
                     "Sleeper NPC buy order for {tid} depleted in round {round}"
@@ -2231,7 +2243,7 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
         "PlaceMultiSellOrder",
         &[
             PyRep::List(vec![PyRep::keyval([
-                ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                ("stationID", PyRep::Integer(CONCORD_STATION_ID)),
                 ("typeID", PyRep::Integer(34)),
                 ("itemID", PyRep::Integer(0)),
                 ("price", PyRep::Real(10.0)),
@@ -2245,6 +2257,10 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
     )
     .unwrap();
     assert_eq!(ctx.db.with_snapshot(|s| s.market_orders[&9_390_001].vol_remaining), 35);
+
+    // Move session back to Jita for subsequent PLEX tests.
+    sess.station_id = Some(JITA_STATION_ID);
+    sess.solar_system_id = Some(30_000_142);
 
     // Cross-region PLEX BuyMultipleItems + PlaceMultiSellOrder (from vault) + global GetOldPriceHistory/GetNewPriceHistory
     let remote_station = ctx
@@ -2367,22 +2383,122 @@ fn sleeper_npc_buy_orders_never_deplete_and_plex_cross_region_escrow_paths() {
     assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(buyer_id)), 7);
     assert_eq!(ctx.db.with_snapshot(|s| s.market_orders[&9_390_003].vol_remaining), 0);
 
-    // GetOldPriceHistory / GetNewPriceHistory(PLEX_TYPE_ID) queried from a third region aggregate globally.
-    remote_buyer_sess.region_id = Some(other_region_id);
+    // Corporate cross-region PLEX PlaceMultiSellOrder must deliver PLEX to buyer's bid station (`Deliveries`), not seller's station.
+    let corp_plex_bid_id = 9_390_005_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.entry(buyer_corp_id).or_insert_with(|| {
+            let mut corp = eve_db::CorporationRecord::default();
+            corp.corporation_id = buyer_corp_id;
+            corp.ceo_id = buyer_id;
+            corp.name = "RemotePlexCorp".into();
+            corp.ticker = "RPLC".into();
+            corp.set_division_balance(1, IskCents::from_isk(25_000_000));
+            corp
+        });
+        s.market_orders.insert(
+            corp_plex_bid_id,
+            MarketOrderRecord {
+                order_id: corp_plex_bid_id,
+                owner_id: buyer_corp_id,
+                station_id: remote_station.station_id,
+                region_id: remote_station.region_id,
+                type_id: PLEX_TYPE_ID,
+                is_bid: true,
+                price: IskCents::from_isk(5_000_000),
+                vol_entered: 2,
+                vol_remaining: 2,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(10_000_000),
+            },
+        );
+        crate::services::market_trading::save_market_order_meta(
+            s,
+            corp_plex_bid_id,
+            crate::services::market_trading::MarketOrderMeta {
+                range: 32_767,
+                duration: 90,
+                issue_unix: ctx.now_unix(),
+                order_state: None,
+                account_key: Some(1000),
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+    });
+    let corp_multi_sell = call_escrow_kw(
+        &ctx,
+        &mut sess,
+        "PlaceMultiSellOrder",
+        &[
+            PyRep::List(vec![PyRep::keyval([
+                ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                ("typeID", PyRep::Integer(PLEX_TYPE_ID as i64)),
+                ("itemID", PyRep::Integer(0)),
+                ("price", PyRep::Real(5_000_000.0)),
+                ("quantity", PyRep::Integer(2)),
+            ])]),
+            PyRep::Bool(false),
+            PyRep::Integer(0),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .expect("Cross-region PlaceMultiSellOrder for corp PLEX bid");
+    assert_eq!(corp_multi_sell.dict_get("filledImmediately"), Some(&PyRep::Bool(true)));
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.plex_vault_balance(char_id), 14);
+        assert_eq!(s.market_orders[&corp_plex_bid_id].vol_remaining, 0);
+        let corp_plex = s
+            .items
+            .values()
+            .find(|it| it.owner_id == buyer_corp_id && it.type_id == PLEX_TYPE_ID && it.flag == InventoryFlag::Deliveries)
+            .expect("Corp cross-region PLEX delivery item");
+        assert_eq!(
+            corp_plex.location_id, remote_station.station_id,
+            "Corp PLEX delivery must go to buyer station {}, not seller Jita",
+            remote_station.station_id
+        );
+        assert_eq!(corp_plex.quantity, 2);
+    });
+
+    // GetOldPriceHistory / GetNewPriceHistory(PLEX_TYPE_ID) queried from a third region and region=None aggregate globally.
+    for test_reg in [Some(other_region_id), None] {
+        remote_buyer_sess.region_id = test_reg;
+        for method in ["GetOldPriceHistory", "GetNewPriceHistory"] {
+            let hist = call_escrow_kw(
+                &ctx,
+                &mut remote_buyer_sess,
+                method,
+                &[PyRep::Integer(PLEX_TYPE_ID as i64)],
+                &kw,
+            )
+            .expect("GetPriceHistory for PLEX");
+            let rows = hist.crowset_rows().expect("PLEX history rows");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].dbrow_get("lowPrice"), Some(&PyRep::Real(4_900_000.0)));
+            assert_eq!(rows[0].dbrow_get("highPrice"), Some(&PyRep::Real(5_100_000.0)));
+            assert_eq!(rows[0].dbrow_get("volume"), Some(&PyRep::Integer(9)));
+            assert_eq!(rows[0].dbrow_get("orders"), Some(&PyRep::Integer(3)));
+        }
+    }
+
+    // With region=None, non-PLEX types still return NoRegion without mutating DB state.
+    let (orders_before, next_eid_before) =
+        ctx.db.with_snapshot(|s| (s.market_orders.len(), s.next_entity_id));
     for method in ["GetOldPriceHistory", "GetNewPriceHistory"] {
-        let hist = call_escrow_kw(
+        let err = call_escrow_kw(
             &ctx,
             &mut remote_buyer_sess,
             method,
-            &[PyRep::Integer(PLEX_TYPE_ID as i64)],
+            &[PyRep::Integer(34)],
             &kw,
         )
-        .expect("GetPriceHistory for PLEX");
-        let rows = hist.crowset_rows().expect("PLEX history rows");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].dbrow_get("lowPrice"), Some(&PyRep::Real(4_900_000.0)));
-        assert_eq!(rows[0].dbrow_get("highPrice"), Some(&PyRep::Real(5_100_000.0)));
-        assert_eq!(rows[0].dbrow_get("volume"), Some(&PyRep::Integer(7)));
-        assert_eq!(rows[0].dbrow_get("orders"), Some(&PyRep::Integer(2)));
+        .expect_err("Non-PLEX price history with region=None must fail with NoRegion");
+        assert_eq!(err.code, "NoRegion");
     }
+    let (orders_after, next_eid_after) =
+        ctx.db.with_snapshot(|s| (s.market_orders.len(), s.next_entity_id));
+    assert_eq!(orders_before, orders_after);
+    assert_eq!(next_eid_before, next_eid_after);
 }

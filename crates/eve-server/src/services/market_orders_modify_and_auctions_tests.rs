@@ -273,7 +273,17 @@ fn plex_orders_history_and_contract_auction_finish_lifecycle() {
     let plex_hist = handle(&ctx, &mut sess, "marketProxy", "GetPlexHistory", &[], &kw)
         .unwrap()
         .unwrap();
-    assert!(plex_hist.is_crowset());
+    let PyRep::Dict(entries) = plex_hist else {
+        panic!("GetPlexHistory must return Dict");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, PyRep::Integer(44_992));
+    let PyRep::Tuple(parts) = &entries[0].1 else {
+        panic!("GetPlexHistory value must be (old, new) Tuple");
+    };
+    assert_eq!(parts.len(), 2);
+    assert!(parts[0].is_crowset());
+    assert!(parts[1].is_crowset());
 
     // Account & Vault balance RPCs
     let cash = handle(&ctx, &mut sess, "account", "GetCashBalance", &[], &kw)

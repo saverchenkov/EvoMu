@@ -1444,3 +1444,116 @@ fn global_plex_price_history_and_crossed_modify_sleeper_plex_edges() {
         assert_eq!(npc_items_after, npc_items_before);
     });
 }
+
+#[test]
+fn crossed_modify_cross_region_plex_corp_buyer_delivers_to_bid_station() {
+    use crate::services::market_contracts::PLEX_TYPE_ID;
+    use crate::services::market_trading::{save_market_order_meta, MarketOrderMeta};
+    use eve_db::{CorporationRecord, InventoryFlag, IskCents};
+
+    let ctx = test_ctx();
+    let seller_id = 90_000_001_i64;
+    let corp_id = 98_000_777_i64;
+    let jita_station = 60_003_760_i64;
+    let the_forge_region = 10_000_002_u32;
+    let amarr_station = 60_008_494_i64;
+    let domain_region = 10_000_043_u32;
+    let now = 1_750_000_000_u64;
+
+    let corp_bid_id = 9_450_001_i64;
+    let jita_ask_id = 9_450_002_i64;
+
+    let mut ask_meta = MarketOrderMeta {
+        range: 32_767,
+        duration: 90,
+        issue_unix: now,
+        order_state: None,
+        account_key: Some(1000),
+        final_vol_remaining: None,
+        closed_unix: None,
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.clear();
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = 90_000_002;
+        corp.name = "DomainPlexCorp".into();
+        corp.ticker = "DPLC".into();
+        corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+        snap.corporations.insert(corp_id, corp);
+
+        snap.market_orders.insert(
+            corp_bid_id,
+            MarketOrderRecord {
+                order_id: corp_bid_id,
+                owner_id: corp_id,
+                station_id: amarr_station,
+                region_id: domain_region,
+                type_id: PLEX_TYPE_ID,
+                is_bid: true,
+                price: IskCents::from_isk(5_100_000),
+                vol_entered: 2,
+                vol_remaining: 2,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(10_200_000),
+            },
+        );
+        snap.market_orders.insert(
+            jita_ask_id,
+            MarketOrderRecord {
+                order_id: jita_ask_id,
+                owner_id: seller_id,
+                station_id: jita_station,
+                region_id: the_forge_region,
+                type_id: PLEX_TYPE_ID,
+                is_bid: false,
+                price: IskCents::from_isk(5_500_000),
+                vol_entered: 2,
+                vol_remaining: 2,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        for oid in [corp_bid_id, jita_ask_id] {
+            save_market_order_meta(snap, oid, ask_meta);
+        }
+    });
+
+    let res = ctx
+        .db
+        .with_mut_snapshot(|snap| {
+            let new_price = IskCents::from_isk(5_100_000);
+            snap.market_orders.get_mut(&jita_ask_id).unwrap().price = new_price;
+            execute_crossed_order_fills_on_modify(
+                &ctx,
+                snap,
+                jita_ask_id,
+                new_price,
+                1.0,
+                false,
+                0,
+                seller_id,
+                now,
+                &mut ask_meta,
+            )
+        })
+        .expect("crossed modify sell into corp PLEX bid");
+
+    assert_eq!(res.item_deliveries.len(), 1);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.market_orders[&corp_bid_id].vol_remaining, 0);
+        assert_eq!(snap.market_orders[&jita_ask_id].vol_remaining, 0);
+        let delivered = snap
+            .items
+            .values()
+            .find(|it| it.owner_id == corp_id && it.type_id == PLEX_TYPE_ID && it.flag == InventoryFlag::Deliveries)
+            .expect("Corp cross-region PLEX delivery item must exist");
+        assert_eq!(
+            delivered.location_id, amarr_station,
+            "Corp PLEX delivery must land at buyer bid station {amarr_station}, not seller station {jita_station}"
+        );
+        assert_eq!(delivered.quantity, 2);
+    });
+}

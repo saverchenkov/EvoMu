@@ -175,7 +175,17 @@ async fn test_market_proxy_plex_and_order_rpcs() {
         .dispatch_rpc(&mut s1, "marketProxy", None, "GetPlexHistory", &[], &empty_kw, None)
         .await
         .expect("GetPlexHistory");
-    assert!(matches!(h1, PyRep::ObjectEx { .. } | PyRep::Rowset { .. }));
+    let PyRep::Dict(entries) = h1 else {
+        panic!("Expected Dict from GetPlexHistory");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, PyRep::Integer(44_992));
+    let PyRep::Tuple(parts) = &entries[0].1 else {
+        panic!("Expected (old, new) Tuple from GetPlexHistory");
+    };
+    assert_eq!(parts.len(), 2);
+    assert!(matches!(parts[0], PyRep::ObjectEx { .. } | PyRep::Rowset { .. }));
+    assert!(matches!(parts[1], PyRep::ObjectEx { .. } | PyRep::Rowset { .. }));
 
     let h2 = ctx
         .dispatch_rpc(

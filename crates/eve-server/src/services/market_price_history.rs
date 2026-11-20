@@ -379,9 +379,10 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                     snap.next_entity_id += 1;
                     let delivery_item_id = snap.next_entity_id;
                     let flag = if buyer_is_corp { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
+                    let deliv_loc = if order.type_id == PLEX_TYPE_ID { bid.station_id } else { order.station_id };
                     let rec = InventoryItemRecord {
                         item_id: delivery_item_id, type_id: order.type_id, owner_id: bid.owner_id,
-                        location_id: order.station_id, flag, quantity: fill_qty, singleton: false,
+                        location_id: deliv_loc, flag, quantity: fill_qty, singleton: false,
                         version: 1, ..Default::default()
                     };
                     snap.items.insert(delivery_item_id, rec.clone());

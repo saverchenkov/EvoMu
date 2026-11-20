@@ -160,6 +160,7 @@ pub fn handle_orders_escrow(
             }
 
             let now_unix = ctx.now_unix();
+            super::sweep_and_notify_expired(ctx);
             let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
             let damaged_fitted_ships: std::collections::HashSet<i64> = ctx
                 .ship_fittings
@@ -628,7 +629,11 @@ pub fn handle_orders_escrow(
                                     item_id: new_item_id,
                                     type_id,
                                     owner_id: resting.owner_id,
-                                    location_id: station_id,
+                                    location_id: if type_id == crate::services::market_contracts::PLEX_TYPE_ID {
+                                        resting.station_id
+                                    } else {
+                                        station_id
+                                    },
                                     flag: if buyer_is_corp {
                                         InventoryFlag::Deliveries
                                     } else {
@@ -921,6 +926,9 @@ pub fn handle_orders_escrow(
                 }));
             };
             let now_unix = ctx.now_unix();
+            if ctx.db.with_snapshot(|snap| snap.market_orders.contains_key(&order_id)) {
+                super::sweep_and_notify_expired(ctx);
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(order) = snap.market_orders.get(&order_id).cloned() else {
                     return Err(BridgeRpcError {
@@ -1219,6 +1227,7 @@ pub fn handle_orders_escrow(
             }
 
             let now_unix = ctx.now_unix();
+            super::sweep_and_notify_expired(ctx);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let _ = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
                     ctx, snap, station_id, char_id, now_unix, "MarketServiceOffline",
@@ -1551,17 +1560,25 @@ pub fn handle_orders_escrow(
         }
 
         "GetOldPriceHistory" | "GetNewPriceHistory" => {
-            let Some(region_id) = session.region_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoRegion".into(),
-                    message: "Session has no active region".into(),
-                    client_error: None,
-                }));
-            };
-            let raw_type_id = args.first().and_then(|a| {
+            let raw_type_id_opt = args.first().and_then(|a| {
                 a.as_i64().or_else(|| a.dict_get("typeID").and_then(|v| v.as_i64()))
             }).or_else(|| _kwargs.get("typeID").and_then(|v| v.as_i64()));
-            let Some(raw_type_id) = raw_type_id else {
+            let is_plex = raw_type_id_opt.is_some_and(|id| {
+                u32::try_from(id).ok() == Some(crate::services::market_contracts::PLEX_TYPE_ID)
+            });
+            let region_id = if is_plex {
+                0
+            } else {
+                let Some(region_id) = session.region_id else {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoRegion".into(),
+                        message: "Session has no active region".into(),
+                        client_error: None,
+                    }));
+                };
+                region_id
+            };
+            let Some(raw_type_id) = raw_type_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMarketOrder".into(),
                     message: "GetPriceHistory requires typeID".into(),
@@ -1571,7 +1588,7 @@ pub fn handle_orders_escrow(
             let type_id = raw_type_id as TypeId;
 
             let rows = ctx.db.with_snapshot(|snap| {
-                if type_id == crate::services::market_contracts::PLEX_TYPE_ID {
+                if is_plex {
                     crate::services::market_price_history::build_global_price_history_rows(snap, type_id)
                 } else {
                     crate::services::market_price_history::build_price_history_rows(snap, type_id, region_id)

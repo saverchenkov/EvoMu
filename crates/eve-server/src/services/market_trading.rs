@@ -96,7 +96,21 @@ pub(crate) fn load_market_order_meta(snap: &eve_db::WorldStateSnapshot, o: &Mark
         };
         return MarketOrderMeta { range, duration: m.duration_days, issue_unix: m.issued_unix, order_state, account_key: m.wallet_division.map(|k| (k as u16) + 999), final_vol_remaining: None, closed_unix: None };
     }
-    MarketOrderMeta { range: if o.is_npc || !o.is_bid { 32767 } else { -1 }, duration: if o.is_npc { 365 } else { 90 }, issue_unix: default_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None }
+    MarketOrderMeta {
+        range: if super::market_contracts::is_permanent_npc_sleeper_buy_order(o) {
+            -1
+        } else if o.is_npc || !o.is_bid {
+            32767
+        } else {
+            -1
+        },
+        duration: if o.is_npc { 365 } else { 90 },
+        issue_unix: default_unix,
+        order_state: None,
+        account_key: None,
+        final_vol_remaining: None,
+        closed_unix: None,
+    }
 }
 
 pub(crate) fn unix_to_filetime(unix_secs: u64) -> i64 {
@@ -464,7 +478,6 @@ pub fn handle(
     if service != "marketProxy" {
         return None;
     }
-    sweep_and_notify_expired(ctx);
 
     match method {
         "GetMarketGroups" => {
@@ -566,6 +579,7 @@ pub fn handle(
                     .filter(|o| {
                         o.type_id == type_id
                             && o.vol_remaining > 0
+                            && !super::market_contracts::is_order_expired(snap, o, now_unix)
                             && o.region_id == region_id
                             && crate::domain::market_acl::can_caller_view_market_location_at(
                                 Some(ctx),
@@ -619,6 +633,7 @@ pub fn handle(
                 best_asks_to_summary_rows(snap.market_orders.values().filter(|o| {
                     !o.is_bid
                         && o.vol_remaining > 0
+                        && !super::market_contracts::is_order_expired(snap, o, now_unix)
                         && o.region_id == region_id
                         && o.station_id == station_id
                         && crate::domain::market_acl::can_caller_view_market_location_at(
@@ -651,6 +666,7 @@ pub fn handle(
                 best_asks_to_summary_rows(snap.market_orders.values().filter(|o| {
                     !o.is_bid
                         && o.vol_remaining > 0
+                        && !super::market_contracts::is_order_expired(snap, o, now_unix)
                         && o.region_id == region_id
                         && crate::domain::market_acl::can_caller_view_market_location_at(
                             Some(ctx),
@@ -684,6 +700,7 @@ pub fn handle(
                         o.owner_id == char_id
                             && !o.is_npc
                             && o.vol_remaining > 0
+                            && !super::market_contracts::is_order_expired(snap, o, now_unix)
                             && filter_type_id.map(|tid| o.type_id == tid).unwrap_or(true)
                     })
                     .collect();
@@ -740,12 +757,19 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let now_unix = ctx.now_unix();
             let (total_escrow, total_remaining_cost, items_escrow, rows) = ctx.db.with_snapshot(|snap| {
                 let mut esc_sum = IskCents(0);
                 let mut full_sum = IskCents(0);
                 let mut sell_items_sum = IskCents(0);
                 let mut order_rows = Vec::new();
-                for o in snap.market_orders.values().filter(|o| o.owner_id == char_id && !o.is_npc && !o.is_bid && o.vol_remaining > 0) {
+                for o in snap.market_orders.values().filter(|o| {
+                    o.owner_id == char_id
+                        && !o.is_npc
+                        && !o.is_bid
+                        && o.vol_remaining > 0
+                        && !super::market_contracts::is_order_expired(snap, o, now_unix)
+                }) {
                     let val = o.price.checked_mul_qty(o.vol_remaining as i64).unwrap_or(IskCents(0));
                     sell_items_sum = sell_items_sum.checked_add(val).unwrap_or(sell_items_sum);
                 }
@@ -753,7 +777,11 @@ pub fn handle(
                     .market_orders
                     .values()
                     .filter(|o| {
-                        o.owner_id == char_id && !o.is_npc && o.is_bid && o.vol_remaining > 0
+                        o.owner_id == char_id
+                            && !o.is_npc
+                            && o.is_bid
+                            && o.vol_remaining > 0
+                            && !super::market_contracts::is_order_expired(snap, o, now_unix)
                     })
                     .collect();
                 orders.sort_by_key(|o| o.order_id);
@@ -1039,6 +1067,7 @@ pub fn handle(
                 }));
             }
             let now_unix = ctx.now_unix();
+            sweep_and_notify_expired(ctx);
             let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
