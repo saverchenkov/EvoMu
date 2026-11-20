@@ -822,11 +822,12 @@ async fn newbie_ship_clears_stale_future_cooldown_timestamp() {
     .await
     .expect("CreateNewbieShip route handled")
     .expect("stale future cooldown timestamp must not block CreateNewbieShip");
+    let corv_id = claim_res
+        .dict_get("shipID")
+        .and_then(|v| v.as_i64())
+        .expect("expected spawned corvette shipID");
     assert!(
-        claim_res
-            .dict_get("shipID")
-            .and_then(|v| v.as_i64())
-            .is_some_and(|id| id > 0),
+        corv_id > 0,
         "expected spawned corvette shipID in response: {claim_res:?}"
     );
     ctx.db.with_snapshot(|snap| {
@@ -836,7 +837,29 @@ async fn newbie_ship_clears_stale_future_cooldown_timestamp() {
         );
     });
 
-    // Normal active cooldown still blocks within 60s.
+    // While still seated in the corvette, AlreadyInNewbieShip takes precedence over active cooldown (#1417).
+    let already_corv_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("CreateNewbieShip route handled")
+    .expect_err("calling while already in corvette must return AlreadyInNewbieShip");
+    assert_eq!(already_corv_err.code, "AlreadyInNewbieShip");
+
+    // Normal active cooldown still blocks fresh spawn within 60s when back in capsule with no corvette in station.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(item) = snap.items.get_mut(&corv_id) {
+            item.location_id = 60_008_494;
+        }
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = capsule_id;
+    });
+    sess.ship_id = Some(capsule_id);
     let cooldown_err = handle_ships_mastery_and_fitting_ext(
         &ctx,
         &mut sess,
@@ -851,29 +874,56 @@ async fn newbie_ship_clears_stale_future_cooldown_timestamp() {
     .expect_err("fresh cooldown timestamp within 60s must return NewbieShipCooldown");
     assert_eq!(cooldown_err.code, "NewbieShipCooldown");
 
-    // When a stale future key is detected and the claim subsequently exits early, the stale key is deleted.
+    // When a stale future key is detected on the V24 Hangar-board path (which does not write a new
+    // cooldown key), the stale future key is purged from the snapshot.
     let rifter_id = 96_500_420_i64;
+    let hangar_corv_b = 96_500_421_i64;
     let char_b = 96_500_402_i64;
     let claim_key_b = -8_800_000_i64 - char_b;
     seed_pilot(&ctx, char_b, sys_id, Some(station_id), rifter_id, 587);
     ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_b).or_default().insert(
+            3327,
+            eve_db::TrainedSkillRecord {
+                type_id: 3327,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+        snap.items.insert(
+            hangar_corv_b,
+            InventoryItemRecord {
+                item_id: hangar_corv_b,
+                type_id: 588, // Reaper
+                owner_id: char_b,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
         snap.item_custom_names
             .insert(claim_key_b, (fixed_now + 5_000).to_string());
     });
     let mut sess_b = make_session(char_b, sys_id, Some(station_id), Some(rifter_id));
-    let early_err = handle_ships_mastery_and_fitting_ext(
+    let board_b = handle_ships_mastery_and_fitting_ext(
         &ctx,
         &mut sess_b,
         None,
         "dogmaIM",
         "CreateNewbieShip",
-        &[],
+        &[PyRep::Integer(rifter_id), PyRep::Integer(station_id)],
         &kw,
     )
     .await
     .expect("CreateNewbieShip route handled")
-    .expect_err("0-arg call in non-capsule ship fails after stale cleanup");
-    assert_eq!(early_err.code, "AlreadyInNewbieShip");
+    .expect("V24 Hangar-board call must succeed and purge stale future cooldown key");
+    assert_eq!(
+        board_b.dict_get("shipID").and_then(|v| v.as_i64()),
+        Some(hangar_corv_b)
+    );
     ctx.db.with_snapshot(|snap| {
         assert!(
             !snap.item_custom_names.contains_key(&claim_key_b),
