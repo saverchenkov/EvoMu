@@ -8,9 +8,9 @@
 
 use crate::router::ServerContext;
 use crate::services::pve_exploration::{
-    next_pve_seq, now_sec, read_pve_exploration_reg, with_pve_exploration_reg,
-    HackingGameSession, HackingNodeKind, HackingTileState, HackingUtilityKind,
-    PveExplorationRegistry, SpewedLootCan,
+    next_pve_seq, now_sec, read_pve_exploration_reg, try_with_pve_exploration_reg,
+    with_pve_exploration_reg, HackingGameSession, HackingNodeKind, HackingTileState,
+    HackingUtilityKind, PveExplorationRegistry, SpewedLootCan,
 };
 #[cfg(test)]
 use crate::services::pve_exploration::ensure_system_pve_sites_seeded;
@@ -632,25 +632,29 @@ pub async fn handle_pve_hacking(
             if is_ghost {
                 let ghost_expired = with_pve_exploration_reg(ctx, |reg| {
                     let now = now_sec(reg);
-                    if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
+                    let expired = if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
                         if let Some(s) = sites.iter_mut().find(|x| x.site_id == site_id) {
                             let dur = s.ghost_detonate_after_sec.max(90);
                             if s.ghost_timer_started_at.is_none() {
                                 s.ghost_timer_started_at = Some(now);
                                 s.ghost_detonate_after_sec = dur;
                             }
-                            return s
-                                .ghost_timer_started_at
-                                .is_some_and(|st| now >= st + s.ghost_detonate_after_sec);
+                            !s.ghost_detonated
+                                && s.ghost_timer_started_at
+                                    .is_some_and(|st| now >= st + s.ghost_detonate_after_sec)
+                        } else {
+                            false
                         }
+                    } else {
+                        false
+                    };
+                    if expired {
+                        reg.hacked_containers.insert((sys_id, container_id));
                     }
-                    false
+                    expired
                 });
 
                 if ghost_expired {
-                    with_pve_exploration_reg(ctx, |reg| {
-                        reg.hacked_containers.insert((sys_id, container_id));
-                    });
                     let (dmg, npcs) = detonate_ghost_site(ctx, session, sys_id, &site_id).await;
                     return Some(Ok(PyRep::keyval([
                         ("status", PyRep::String("GhostSiteDetonated".into())),
@@ -709,7 +713,7 @@ pub async fn handle_pve_hacking(
                 .map(|t| t.clamp(min_difficulty, 5))
                 .unwrap_or(min_difficulty);
             let rng_seed = ctx.mechanic_rng.try_next_u64().unwrap_or(0);
-            let game = match with_pve_exploration_reg(ctx, |reg| -> Result<HackingGameSession, BridgeRpcError> {
+            let game = match try_with_pve_exploration_reg(ctx, |reg| -> Result<HackingGameSession, BridgeRpcError> {
                 if site_id.starts_with("HOMEFRONT_") {
                     // Already validated via is_homefront_hackable_structure above
                 } else if struct_pos.is_some() {
@@ -848,7 +852,7 @@ pub async fn handle_pve_hacking(
                 return Some(Err(e));
             }
 
-            let step_res = with_pve_exploration_reg(ctx, |reg| {
+            let step_res = try_with_pve_exploration_reg(ctx, |reg| {
                 let _now = now_sec(reg);
                 validate_clicked_tile_in_reg(session, reg, char_id, container_id, tile_idx)?;
                 let mut game = reg.hacking_games.remove(&(char_id, container_id)).ok_or_else(|| {
@@ -893,12 +897,6 @@ pub async fn handle_pve_hacking(
                 } else {
                     (revealed_count as f64 / game.tiles.len().max(1) as f64).clamp(0.0, 1.0)
                 };
-                crate::services::notify_emitters_space_dungeons::emit_local_hack_progress_updated(
-                    ctx,
-                    game.solar_system_id,
-                    container_id,
-                    hack_prog,
-                );
                 if timer_expired || game.virus_coherence <= 0 {
                     game.status = "Failed".into();
                 } else if core_destroyed {
@@ -968,7 +966,7 @@ pub async fn handle_pve_hacking(
                 let out_tuple = (
                     game.solar_system_id, game.site_id.clone(), game.is_relic, game.status.clone(),
                     game.virus_coherence, eff_str, kind_name, rem_coh, dist_to_core, spewed,
-                    detonate, timer_expired, failed_twice, puzzle_solved, already_hacked,
+                    detonate, timer_expired, failed_twice, puzzle_solved, already_hacked, hack_prog,
                 );
                 reg.hacking_games.insert((char_id, container_id), game);
                 Ok(out_tuple)
@@ -977,11 +975,17 @@ pub async fn handle_pve_hacking(
             let (
                 sys_id, site_id, is_relic, status, virus_coh, eff_strength, tile_kind_str, tile_coh,
                 dist_to_core, spewed_cans, trigger_ghost_detonation, ghost_timer_expired,
-                trigger_second_fail_explosion, sleeper_puzzle_solved, already_hacked,
+                trigger_second_fail_explosion, sleeper_puzzle_solved, already_hacked, hack_prog,
             ) = match step_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            crate::services::notify_emitters_space_dungeons::emit_local_hack_progress_updated(
+                ctx,
+                sys_id,
+                container_id,
+                hack_prog,
+            );
 
             let (ghost_dmg, ghost_npcs) = if trigger_ghost_detonation {
                 let target_can = if ghost_timer_expired { None } else { Some(container_id) };
@@ -1164,7 +1168,7 @@ pub async fn handle_pve_hacking(
                 }
                 Some(true) => {}
             }
-            let quit_res = with_pve_exploration_reg(ctx, |reg| {
+            let quit_res = try_with_pve_exploration_reg(ctx, |reg| {
                 let Some(game) = reg.hacking_games.get(&(char_id, container_id)) else {
                     return Err(hacking_client_err(
                         "NoActiveHackingGame",
@@ -1320,7 +1324,7 @@ async fn handle_hacking_used_utility_on_virus(
         validate_virus_utility_target_in_reg(session, reg, char_id, container_id, slot_idx, target_tile_u32)
     })?;
 
-    with_pve_exploration_reg(ctx, |reg| {
+    try_with_pve_exploration_reg(ctx, |reg| {
         let util = validate_virus_utility_target_in_reg(
             session,
             reg,
@@ -1495,7 +1499,7 @@ async fn handle_hacking_used_utility(
         )
     })?;
 
-    with_pve_exploration_reg(ctx, |reg| {
+    try_with_pve_exploration_reg(ctx, |reg| {
         let util = validate_explicit_utility_target_in_reg(
             session,
             reg,
