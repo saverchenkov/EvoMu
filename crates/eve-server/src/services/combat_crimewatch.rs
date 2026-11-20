@@ -1924,8 +1924,10 @@ pub fn is_legal_war_or_suspect_target(
             return true;
         }
     }
-    let att_entity = att.alliance_id.unwrap_or(att.corporation_id);
-    let vic_entity = vic.alliance_id.unwrap_or(vic.corporation_id);
+    use crate::services::social_corp_fleet::social_wars::social_wars_helpers::{
+        entity_matches_war_owner, is_ally_neg_active_at,
+    };
+
     snap.wars.values().any(|w| {
         if !w.active {
             return false;
@@ -1942,20 +1944,21 @@ pub fn is_legal_war_or_suspect_target(
         if !w.mutual && now_unix < w.started_unix.saturating_add(86_400) {
             return false;
         }
-        let is_agg = |ent: i64, corp: i64| w.aggressor_corp_id == ent || w.aggressor_corp_id == corp;
-        let is_def_or_ally = |ent: i64, corp: i64| {
-            w.defender_corp_id == ent
-                || w.defender_corp_id == corp
+        let is_agg = |corp: i64, alliance: Option<i64>| {
+            entity_matches_war_owner(snap, corp, alliance, w.aggressor_corp_id)
+        };
+        let is_def_or_ally = |corp: i64, alliance: Option<i64>| {
+            entity_matches_war_owner(snap, corp, alliance, w.defender_corp_id)
                 || snap.war_state.negotiations.iter().any(|n| {
                     n.war_id == w.war_id
-                        && n.kind == eve_db::PersistedNegKind::Ally
-                        && n.status == "Accepted"
-                        && now_unix >= n.effective_unix.unwrap_or(0)
-                        && (n.from_corp == ent || n.from_corp == corp)
+                        && is_ally_neg_active_at(snap, n, now_unix)
+                        && entity_matches_war_owner(snap, corp, alliance, n.from_corp)
                 })
         };
-        (is_agg(att_entity, att.corporation_id) && is_def_or_ally(vic_entity, vic.corporation_id))
-            || (is_agg(vic_entity, vic.corporation_id) && is_def_or_ally(att_entity, att.corporation_id))
+        (is_agg(att.corporation_id, att.alliance_id)
+            && is_def_or_ally(vic.corporation_id, vic.alliance_id))
+            || (is_agg(vic.corporation_id, vic.alliance_id)
+                && is_def_or_ally(att.corporation_id, att.alliance_id))
     })
 }
 

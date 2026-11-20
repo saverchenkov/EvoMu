@@ -1435,23 +1435,54 @@ pub async fn handle_crimewatch(
     }
 }
 
-pub(crate) fn is_war_interference_assistance(ctx: &ServerContext, helper_char_id: i64, beneficiary_char_id: i64, now_unix: u64) -> bool {
+pub(crate) fn is_war_interference_assistance(
+    ctx: &ServerContext,
+    helper_char_id: i64,
+    beneficiary_char_id: i64,
+    now_unix: u64,
+) -> bool {
+    use crate::services::social_corp_fleet::social_wars::social_wars_helpers::{
+        entity_matches_war_owner, is_ally_neg_active_at,
+    };
+
     if !crate::sp6_lifecycle::has_active_pvp_timer(ctx, beneficiary_char_id, now_unix) {
         return false;
     }
     ctx.db.with_snapshot(|snap| {
-        let (Some(helper), Some(ben)) = (snap.characters.get(&helper_char_id), snap.characters.get(&beneficiary_char_id)) else { return false; };
-        let (h_ent, b_ent) = (helper.alliance_id.unwrap_or(helper.corporation_id), ben.alliance_id.unwrap_or(ben.corporation_id));
+        let (Some(helper), Some(ben)) = (
+            snap.characters.get(&helper_char_id),
+            snap.characters.get(&beneficiary_char_id),
+        ) else {
+            return false;
+        };
         snap.wars.values().any(|w| {
-            if !w.active || (!w.mutual && now_unix < w.started_unix.saturating_add(86_400)) { return false; }
-            if snap.war_state.wars.get(&w.war_id).and_then(|m| m.finish_at_unix).is_some_and(|f| now_unix >= f) { return false; }
-            let is_agg = |ent: i64, corp: i64| w.aggressor_corp_id == ent || w.aggressor_corp_id == corp;
-            let is_def_or_ally = |ent: i64, corp: i64| {
-                w.defender_corp_id == ent || w.defender_corp_id == corp
-                    || snap.war_state.negotiations.iter().any(|n| n.war_id == w.war_id && n.kind == eve_db::PersistedNegKind::Ally && n.status == "Accepted" && now_unix >= n.effective_unix.unwrap_or(0) && (n.from_corp == ent || n.from_corp == corp))
+            if !w.active || (!w.mutual && now_unix < w.started_unix.saturating_add(86_400)) {
+                return false;
+            }
+            if snap
+                .war_state
+                .wars
+                .get(&w.war_id)
+                .and_then(|m| m.finish_at_unix)
+                .is_some_and(|f| now_unix >= f)
+            {
+                return false;
+            }
+            let is_agg = |corp: i64, alliance: Option<i64>| {
+                entity_matches_war_owner(snap, corp, alliance, w.aggressor_corp_id)
             };
-            (is_agg(b_ent, ben.corporation_id) && !is_agg(h_ent, helper.corporation_id))
-                || (is_def_or_ally(b_ent, ben.corporation_id) && !is_def_or_ally(h_ent, helper.corporation_id))
+            let is_def_or_ally = |corp: i64, alliance: Option<i64>| {
+                entity_matches_war_owner(snap, corp, alliance, w.defender_corp_id)
+                    || snap.war_state.negotiations.iter().any(|n| {
+                        n.war_id == w.war_id
+                            && is_ally_neg_active_at(snap, n, now_unix)
+                            && entity_matches_war_owner(snap, corp, alliance, n.from_corp)
+                    })
+            };
+            (is_agg(ben.corporation_id, ben.alliance_id)
+                && !is_agg(helper.corporation_id, helper.alliance_id))
+                || (is_def_or_ally(ben.corporation_id, ben.alliance_id)
+                    && !is_def_or_ally(helper.corporation_id, helper.alliance_id))
         })
     })
 }

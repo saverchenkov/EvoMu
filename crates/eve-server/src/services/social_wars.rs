@@ -141,6 +141,18 @@ fn war_kills(ctx: &ServerContext, war_id: i64) -> Option<WarKillsSummary> {
     ctx.db.with_snapshot(|snap| war_kills_in_snap(ctx, snap, war_id))
 }
 
+/// Returns `true` when `corp_id` has executive authority for war side `side_id`
+/// (either directly owning `side_id` or serving as `executor_corp_id` of alliance `side_id`).
+fn corp_represents_war_side(snap: &WorldStateSnapshot, corp_id: i64, side_id: i64) -> bool {
+    corp_id > 0
+        && side_id > 0
+        && (corp_id == side_id
+            || snap
+                .alliances
+                .get(&side_id)
+                .is_some_and(|a| a.executor_corp_id == corp_id))
+}
+
 fn handle_war_registry_unbind(
     ctx: &ServerContext,
     session: &SessionState,
@@ -434,6 +446,9 @@ fn handle_war_registry_gm_rpc(
                             neg.effective_unix = Some(now);
                         }
                     }
+                    snap.war_state
+                        .ally_expires_unix
+                        .retain(|&(wid, _), exp| wid != war_id || *exp > now);
                 }
                 let prev_active = war.active;
                 if let Some(w_mut) = snap.wars.get_mut(&war_id) {
@@ -522,31 +537,43 @@ fn handle_war_registry_gm_rpc(
                     return Err(WarGmError::InvalidArgument
                         .with_message("GMExtendAllyContract requires positive allyID"));
                 };
-                let Some(ts_or_delta) = call.third.and_then(parse_war_unix_timestamp) else {
+                let Some(ts_or_delta) = call
+                    .third
+                    .and_then(parse_war_unix_timestamp)
+                    .filter(|&v| v > 0)
+                else {
                     return Err(WarGmError::InvalidArgument.with_message(
-                        "GMExtendAllyContract requires valid extension duration or timestamp",
+                        "GMExtendAllyContract requires positive extension duration or timestamp",
                     ));
                 };
-                let has_accepted_ally = snap.war_state.negotiations.iter().any(|n| {
-                    n.war_id == war_id
-                        && n.kind == NegKind::Ally
-                        && n.from_corp == ally_id
-                        && n.status == "Accepted"
-                });
-                if !has_accepted_ally {
+                let Some(effective_unix) = snap
+                    .war_state
+                    .negotiations
+                    .iter()
+                    .rev()
+                    .find(|n| {
+                        n.war_id == war_id
+                            && n.kind == NegKind::Ally
+                            && n.from_corp == ally_id
+                            && n.status == "Accepted"
+                    })
+                    .map(|n| n.effective_unix.unwrap_or(now))
+                else {
                     return Err(WarGmError::AllyNotFound.with_message(format!(
                         "Accepted ally {ally_id} not found in war {war_id}"
                     )));
-                }
+                };
                 const MAX_EXTEND_SECS: u64 = 365 * 86_400;
                 let current_exp = snap
                     .war_state
                     .ally_expires_unix
                     .get(&(war_id, ally_id))
                     .copied();
-                let updated_exp = if ts_or_delta > 0 && ts_or_delta <= MAX_EXTEND_SECS {
+                let updated_exp = if ts_or_delta <= MAX_EXTEND_SECS {
                     current_exp
-                        .map_or(now, |exp| exp.max(now))
+                        .unwrap_or(effective_unix)
+                        .max(now)
+                        .max(effective_unix)
                         .saturating_add(ts_or_delta)
                 } else {
                     ts_or_delta
@@ -969,29 +996,50 @@ pub(super) fn handle_wars(
             if !isk.is_finite() || isk < 0.0 {
                 return err("InvalidIskValue", "ISK value must be a non-negative number");
             }
-            let (Some(w), open_for_allies, war_already_ending, is_player_corp) =
-                ctx.db.with_snapshot(|snap| {
-                    (
-                        snap.wars.get(&war_id).cloned(),
-                        snap.war_state.wars.get(&war_id).is_some_and(|m| m.open_for_allies),
-                        snap.war_state.wars.get(&war_id).is_some_and(|m| m.finish_at_unix.is_some()),
-                        snap.corporations.contains_key(&my_corp),
-                    )
-                })
-            else {
+            let (
+                Some(w),
+                open_for_allies,
+                war_already_ending,
+                is_player_corp,
+                can_negotiate_surrender,
+                is_own_war_member,
+            ) = ctx.db.with_snapshot(|snap| {
+                let w_opt = snap.wars.get(&war_id).cloned();
+                let can_negotiate_surrender = w_opt.as_ref().is_some_and(|w| {
+                    corp_represents_war_side(snap, my_corp, w.aggressor_corp_id)
+                        || corp_represents_war_side(snap, my_corp, w.defender_corp_id)
+                });
+                let is_own_war_member = w_opt.as_ref().is_some_and(|w| {
+                    my_corp == w.aggressor_corp_id
+                        || my_corp == w.defender_corp_id
+                        || same_alliance(snap, my_corp, w.aggressor_corp_id)
+                        || same_alliance(snap, my_corp, w.defender_corp_id)
+                });
+                (
+                    w_opt,
+                    snap.war_state.wars.get(&war_id).is_some_and(|m| m.open_for_allies),
+                    snap.war_state.wars.get(&war_id).is_some_and(|m| m.finish_at_unix.is_some()),
+                    snap.corporations.contains_key(&my_corp),
+                    can_negotiate_surrender,
+                    is_own_war_member,
+                )
+            }) else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
             if !w.active {
                 return err("WarNotActive", format!("War {war_id} has ended"));
             }
-            let party = my_corp == w.aggressor_corp_id || my_corp == w.defender_corp_id;
             let kind = if method == "CreateSurrenderNegotiation" { NegKind::Surrender } else { NegKind::Ally };
             match kind {
-                NegKind::Surrender if !party => return err("NotWarParticipant", "Only war participants can negotiate surrender"),
+                NegKind::Surrender if !can_negotiate_surrender => {
+                    return err("NotWarParticipant", "Only war participants can negotiate surrender")
+                }
                 NegKind::Surrender if war_already_ending => {
                     return err("WarAlreadyEnding", format!("War {war_id} surrender has already been accepted"));
                 }
-                NegKind::Ally if party => return err("CannotAllyOwnWar", "War participants cannot offer themselves as allies"),
+                NegKind::Ally if is_own_war_member => {
+                    return err("CannotAllyOwnWar", "War participants cannot offer themselves as allies")
+                }
                 NegKind::Ally if !open_for_allies => {
                     return err("WarNotOpenForAllies", "The defender has not opened this war for allies")
                 }
@@ -1002,12 +1050,17 @@ pub(super) fn handle_wars(
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let st = &mut snap.war_state;
+                let ally_unexpired = st
+                    .ally_expires_unix
+                    .get(&(war_id, my_corp))
+                    .is_none_or(|&exp| exp > now);
                 if kind == NegKind::Ally
                     && st.negotiations.iter().any(|neg| {
                         neg.war_id == war_id
                             && neg.kind == NegKind::Ally
                             && neg.from_corp == my_corp
-                            && matches!(neg.status.as_str(), "Offered" | "Accepted")
+                            && (neg.status == "Offered"
+                                || (neg.status == "Accepted" && ally_unexpired))
                     })
                 {
                     return Err(BridgeRpcError {
@@ -1113,7 +1166,7 @@ pub(super) fn handle_wars(
                 return err("CorpRoleDenied", "Acting on war negotiations requires CEO or Director role");
             }
             let neg_id = arg_i64(0).unwrap_or(0);
-            let Some((idx, n, w_opt)) = ctx.db.with_snapshot(|snap| {
+            let Some((idx, n, w_opt, allowed)) = ctx.db.with_snapshot(|snap| {
                 let idx = snap
                     .war_state
                     .negotiations
@@ -1121,7 +1174,15 @@ pub(super) fn handle_wars(
                     .position(|n| n.id == neg_id && n.status == "Offered")?;
                 let n = snap.war_state.negotiations[idx].clone();
                 let w = snap.wars.get(&n.war_id).cloned();
-                Some((idx, n, w))
+                let allowed = w.as_ref().is_some_and(|w| {
+                    let caller_is_agg = corp_represents_war_side(snap, my_corp, w.aggressor_corp_id);
+                    let caller_is_def = corp_represents_war_side(snap, my_corp, w.defender_corp_id);
+                    let from_is_agg = corp_represents_war_side(snap, n.from_corp, w.aggressor_corp_id);
+                    let from_is_def = corp_represents_war_side(snap, n.from_corp, w.defender_corp_id);
+                    my_corp != n.from_corp
+                        && ((caller_is_agg && from_is_def) || (caller_is_def && from_is_agg))
+                });
+                Some((idx, n, w, allowed))
             }) else {
                 return err("NegotiationNotFound", format!("No open negotiation {neg_id}"));
             };
@@ -1131,7 +1192,6 @@ pub(super) fn handle_wars(
             if n.kind != NegKind::Surrender {
                 return err("NegotiationNotFound", format!("Negotiation {neg_id} is not of the requested kind"));
             }
-            let allowed = my_corp != n.from_corp && (my_corp == w.aggressor_corp_id || my_corp == w.defender_corp_id);
             if !allowed {
                 return err("NotNegotiationCounterparty", "Your corporation cannot act on this negotiation");
             }
@@ -1287,13 +1347,19 @@ pub(super) fn handle_wars(
                     });
                 }
                 if accepting {
-                    let already_allied = snap.war_state.negotiations.iter().enumerate().any(|(i, other)| {
-                        i != idx
-                            && other.war_id == n.war_id
-                            && other.kind == NegKind::Ally
-                            && other.from_corp == n.from_corp
-                            && other.status == "Accepted"
-                    });
+                    let ally_unexpired = snap
+                        .war_state
+                        .ally_expires_unix
+                        .get(&(n.war_id, n.from_corp))
+                        .is_none_or(|&exp| exp > now);
+                    let already_allied = ally_unexpired
+                        && snap.war_state.negotiations.iter().enumerate().any(|(i, other)| {
+                            i != idx
+                                && other.war_id == n.war_id
+                                && other.kind == NegKind::Ally
+                                && other.from_corp == n.from_corp
+                                && other.status == "Accepted"
+                        });
                     if already_allied {
                         return Err(BridgeRpcError {
                             code: "AlreadyWarAlly".into(),
@@ -1314,19 +1380,22 @@ pub(super) fn handle_wars(
                             && other.war_id == n.war_id
                             && other.kind == NegKind::Ally
                             && other.from_corp == n.from_corp
-                            && other.status == "Offered"
                         {
-                            other.status = "Cancelled".into();
+                            if other.status == "Offered" {
+                                other.status = "Cancelled".into();
+                            } else if other.status == "Accepted" {
+                                other.status = "Expired".into();
+                            }
                         }
                     }
-                    snap.war_lifecycle_meta
-                        .entry(n.war_id)
-                        .or_default()
-                        .allies
-                        .push(eve_db::snapshot_ext::WarAllyRecord {
-                            corporation_id: Some(n.from_corp),
-                            alliance_id: None,
-                        });
+                    let ally_rec = eve_db::snapshot_ext::WarAllyRecord {
+                        corporation_id: Some(n.from_corp),
+                        alliance_id: None,
+                    };
+                    let lm = snap.war_lifecycle_meta.entry(n.war_id).or_default();
+                    if !lm.allies.iter().any(|a| a == &ally_rec) {
+                        lm.allies.push(ally_rec);
+                    }
                 }
                 Ok::<_, BridgeRpcError>(())
             });
@@ -1678,6 +1747,7 @@ pub(super) fn handle_wars(
                             .war_state
                             .negotiations
                             .iter()
+                            .rev()
                             .find(|n| {
                                 n.war_id == war_id
                                     && n.kind == NegKind::Ally
@@ -1691,7 +1761,7 @@ pub(super) fn handle_wars(
                             .ally_expires_unix
                             .get(&(war_id, aid))
                             .copied()
-                            .unwrap_or(started + WAR_TIMER_SECS);
+                            .unwrap_or_else(|| started.saturating_add(WAR_TIMER_SECS));
                         (aid, started, finished)
                     })
                     .collect();
