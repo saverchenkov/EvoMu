@@ -2552,11 +2552,12 @@ async fn handle_get_dungeon_info(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
     else {
-        return Err(BridgeRpcError {
-            code: "DungeonNotFound".into(),
-            message: "Dungeon siteID is required".into(),
-            client_error: None,
-        });
+        let msg = "Dungeon siteID is required";
+        return Err(BridgeRpcError::with_client_error(
+            "DungeonNotFound",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        ));
     };
     read_pve_exploration_reg(ctx, |reg| {
         let now = now_sec(reg);
@@ -2568,11 +2569,12 @@ async fn handle_get_dungeon_info(
                 .or_else(|| l.iter().find(|s| !s.cleared && s.site_id == site_id))
                 .or_else(|| l.iter().find(|s| s.site_id == site_id))
         }) else {
-            return Err(BridgeRpcError {
-                code: "DungeonNotFound".into(),
-                message: format!("Dungeon site {site_id} not found"),
-                client_error: None,
-            });
+            let msg = format!("Dungeon site {site_id} not found");
+            return Err(BridgeRpcError::with_client_error(
+                "DungeonNotFound",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
         };
         Ok(PyRep::keyval([
             ("siteID", PyRep::String(site.site_id.clone())),

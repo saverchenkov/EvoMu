@@ -1161,11 +1161,12 @@ pub(super) async fn handle_scanning_and_wormholes(
         ("wormholeMgr", "GetWormholePolarization") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             if args.len() != 1 {
-                return Some(Err(BridgeRpcError {
-                    code: "WormholeNotFound".into(),
-                    message: "GetWormholePolarization requires exactly 1 wormhole target argument".into(),
-                    client_error: None,
-                }));
+                let msg = "GetWormholePolarization requires exactly 1 wormhole target argument";
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "WormholeNotFound",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
+                )));
             }
             let sys_id = session
                 .solar_system_id
@@ -1229,11 +1230,12 @@ pub(super) async fn handle_scanning_and_wormholes(
                     None
                 });
                 let Some((wh, entrance_wh_id, _exit_wh_id)) = wh_match else {
-                    return Some(Err(BridgeRpcError {
-                        code: "WormholeNotFound".into(),
-                        message: format!("Wormhole not found in system {sys_id}"),
-                        client_error: None,
-                    }));
+                    let msg = format!("Wormhole not found in system {sys_id}");
+                    return Some(Err(BridgeRpcError::with_client_error(
+                        "WormholeNotFound",
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
+                    )));
                 };
                 let dest_sys = wh.destination_system_id.unwrap_or(31_000_005) as i64;
                 let pol_key = arg_int_opt.unwrap_or(entrance_wh_id);
@@ -1262,11 +1264,12 @@ pub(super) async fn handle_scanning_and_wormholes(
                             || ctx.sde.solar_systems.contains_key(&sys))
                 })
             }) else {
-                return Some(Err(BridgeRpcError {
-                    code: "WormholeNotFound".into(),
-                    message: "Unknown or invalid wormhole target".into(),
-                    client_error: None,
-                }));
+                let msg = "Unknown or invalid wormhole target";
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "WormholeNotFound",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
+                )));
             };
             let exp_unix = ctx.db.with_snapshot(|snap| {
                 snap.wh_polarizations
@@ -1633,10 +1636,13 @@ pub(crate) fn consume_gate_key_in_cargo(
     key_type_used: Option<u32>,
 ) -> Result<(), BridgeRpcError> {
     ctx.db.try_with_mut_snapshot(|snap| {
-        let missing_key_err = || BridgeRpcError {
-            code: "MissingGateKey".into(),
-            message: "Gate key item is no longer present in cargo".into(),
-            client_error: None,
+        let missing_key_err = || {
+            let msg = "Gate key item is no longer present in cargo";
+            BridgeRpcError::with_client_error(
+                "MissingGateKey",
+                msg,
+                eve_proto::ClientError::CustomInfo(msg.into()),
+            )
         };
         let Some(item) = snap.items.get_mut(&kid) else {
             return Err(missing_key_err());
