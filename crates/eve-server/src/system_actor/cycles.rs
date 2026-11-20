@@ -2235,7 +2235,19 @@ pub(crate) fn remove_non_warp_ship_module_cycles(
     }
 }
 
-pub(crate) fn remove_all_ship_module_cycles(
+/// Removes all active module cycles owned by or targeting `ship_id`.
+///
+/// When `preserve_own_db_active_states` is `true` (used by DB-preserving stargate jumps),
+/// DB `module_active_states`/`module_active_charges`/`transient_item_attributes` cleanup and
+/// `module_deactivation_hook` emission are suppressed **only** for cycles owned by `ship_id`
+/// (`removed.ship_id == ship_id`) so DB rollback can still restore them cleanly. Any other
+/// ship's cycle targeting `ship_id` (`removed.ship_id != ship_id`) and any secondary cycle
+/// aborted by `reconcile_tackle_and_bubbles` still run full DB cleanup and
+/// `module_deactivation_hook` so attackers/fleetmates clear DB active state, receive
+/// deactivation notifications, and flush `projected_ewar` / `remote_assistance` before
+/// destination `build_ship_combat_state` runs (`#1237`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn remove_all_ship_module_cycles_preserving_own_db(
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<i64, i32>,
@@ -2243,16 +2255,23 @@ pub(crate) fn remove_all_ship_module_cycles(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ship_id: i64,
     deactivation_hook: Option<&ModuleDeactivationHook>,
+    preserve_own_db_active_states: bool,
 ) -> Vec<(ActiveModuleCycle, Option<i64>)> {
     let reentrant_db = db_opt
         .as_ref()
         .is_some_and(|db| db.is_write_locked_by_current_thread());
     let effective_db = if reentrant_db { &None } else { db_opt };
+    let no_db = None;
     let mut removed_cycles = Vec::new();
     for i in (0..active_module_cycles.len()).rev() {
         if active_module_cycles[i].ship_id == ship_id || active_module_cycles[i].target_id == Some(ship_id) {
             let removed = active_module_cycles.swap_remove(i);
-            cleanup_removed_module_cycle(ballpark, &removed, effective_db);
+            let cycle_db = if preserve_own_db_active_states && removed.ship_id == ship_id {
+                &no_db
+            } else {
+                effective_db
+            };
+            cleanup_removed_module_cycle(ballpark, &removed, cycle_db);
             let char_id = removed.owner_char_id.or_else(|| {
                 ballpark
                     .ball_slim_meta
@@ -2262,18 +2281,20 @@ pub(crate) fn remove_all_ship_module_cycles(
             removed_cycles.push((removed, char_id));
         }
     }
-    if let Some(db_ref) = effective_db {
-        let dirty = db_ref.with_snapshot(|s| {
-            (!s.module_active_states.is_empty() || !s.module_active_charges.is_empty())
-                && s.items.values().any(|it| it.location_id == ship_id && (s.module_active_states.contains(&it.item_id) || s.module_active_charges.contains_key(&it.item_id)))
-        });
-        if dirty {
-            db_ref.with_mut_snapshot(|s| {
-                for it in s.items.values().filter(|it| it.location_id == ship_id) {
-                    s.module_active_states.remove(&it.item_id);
-                    s.module_active_charges.remove(&it.item_id);
-                }
+    if !preserve_own_db_active_states {
+        if let Some(db_ref) = effective_db {
+            let dirty = db_ref.with_snapshot(|s| {
+                (!s.module_active_states.is_empty() || !s.module_active_charges.is_empty())
+                    && s.items.values().any(|it| it.location_id == ship_id && (s.module_active_states.contains(&it.item_id) || s.module_active_charges.contains_key(&it.item_id)))
             });
+            if dirty {
+                db_ref.with_mut_snapshot(|s| {
+                    for it in s.items.values().filter(|it| it.location_id == ship_id) {
+                        s.module_active_states.remove(&it.item_id);
+                        s.module_active_charges.remove(&it.item_id);
+                    }
+                });
+            }
         }
     }
     if !removed_cycles.is_empty() {
@@ -2281,11 +2302,35 @@ pub(crate) fn remove_all_ship_module_cycles(
         reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths, effective_db, hook);
         if !reentrant_db {
             for (removed, _) in &removed_cycles {
+                if preserve_own_db_active_states && removed.ship_id == ship_id {
+                    continue;
+                }
                 emit_cycle_deactivation(removed, ballpark, effective_db, deactivation_hook);
             }
         }
     }
     removed_cycles
+}
+
+pub(crate) fn remove_all_ship_module_cycles(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<i64, i32>,
+    base_core_strengths: &HashMap<i64, i32>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ship_id: i64,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+) -> Vec<(ActiveModuleCycle, Option<i64>)> {
+    remove_all_ship_module_cycles_preserving_own_db(
+        ballpark,
+        active_module_cycles,
+        base_scramble_strengths,
+        base_core_strengths,
+        db_opt,
+        ship_id,
+        deactivation_hook,
+        false,
+    )
 }
 
 /// Emits Destiny `OnSpecialFX { is_active: false }` stop events for every active propulsion

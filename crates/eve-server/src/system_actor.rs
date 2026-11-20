@@ -1507,21 +1507,38 @@ impl SystemRegistry {
                                         ball_id,
                                     );
                                 }
-                                let cycles_db_none = None;
-                                let (cycles_db_opt, cycles_deact_guard) = if preserve_db_active_states {
-                                    (&cycles_db_none, None)
+                                let pre_cleanup_combat_flags = if preserve_db_active_states {
+                                    ballpark.combat_states.get(&ball_id).map(|cs| {
+                                        types::TakenBallPreCleanupCombatFlags {
+                                            rah_armor_resonance: cs.rah_armor_resonance,
+                                            is_covert_cloak: cs.is_covert_cloak,
+                                            cloak_stabilization_remaining_s: cs.cloak_stabilization_remaining_s,
+                                            decloak_targeting_delay_remaining_s: cs.decloak_targeting_delay_remaining_s,
+                                            cloak_velocity_multiplier: cs.cloak_velocity_multiplier,
+                                        }
+                                    })
                                 } else {
-                                    (&*db_opt, deact_guard.as_ref())
+                                    None
                                 };
-                                remove_all_ship_module_cycles(
+                                let removed_cycles = remove_all_ship_module_cycles_preserving_own_db(
                                     &mut ballpark,
                                     active_module_cycles,
                                     &base_scramble_strengths,
                                     &base_core_strengths,
-                                    cycles_db_opt,
+                                    &db_opt,
                                     ball_id,
-                                    cycles_deact_guard,
+                                    deact_guard.as_ref(),
+                                    preserve_db_active_states,
                                 );
+                                let mut removed_own_cycles: Vec<ActiveModuleCycle> = if preserve_db_active_states {
+                                    removed_cycles
+                                        .into_iter()
+                                        .filter_map(|(c, _)| (c.ship_id == ball_id).then_some(c))
+                                        .collect()
+                                } else {
+                                    Vec::new()
+                                };
+                                removed_own_cycles.reverse();
                                 let cycles_cleared = before_cycles.saturating_sub(active_module_cycles.len());
                                 let lock_count = ballpark.clear_target_locks(ball_id);
                                 if lock_count > 0 {
@@ -1553,17 +1570,26 @@ impl SystemRegistry {
                                     ballpark.remove_ball(ball_id)
                                 };
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                                {
+                                    let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());
+                                    mod_guard.clear();
+                                    for c in active_module_cycles.iter() {
+                                        mod_guard.insert(c.ship_id);
+                                    }
+                                }
                                 defer_reply(&mut deferred_replies, reply, removed.map(|ball| TakenBall {
                                     tick,
                                     ball,
                                     combat_state,
                                     slim_meta,
                                     cycles_cleared,
+                                    removed_own_cycles,
+                                    pre_cleanup_combat_flags,
                                 }));
                             }
                             cmd @ (SystemCommand::RestoreBall { .. }
                             | SystemCommand::RestoreBallIfAbsent { .. }) => {
-                                let (taken, only_if_absent, reply) = match cmd {
+                                let (mut taken, only_if_absent, reply) = match cmd {
                                     SystemCommand::RestoreBall { taken, reply } => {
                                         (taken, false, reply)
                                     }
@@ -1579,6 +1605,8 @@ impl SystemRegistry {
                                     defer_reply(&mut deferred_replies, reply, Ok(ballpark.current_tick));
                                     return None;
                                 }
+                                let removed_own_cycles = std::mem::take(&mut taken.removed_own_cycles);
+                                let pre_cleanup_combat_flags = taken.pre_cleanup_combat_flags.take();
                                 ball_spawn_tokens.remove(&ball_id);
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 let tick = cycles_tackle::spawn_ball_with_combat_in_actor(
@@ -1593,6 +1621,72 @@ impl SystemRegistry {
                                     taken.combat_state.unwrap_or_default(),
                                     taken.slim_meta,
                                 );
+                                if let Some(flags) = pre_cleanup_combat_flags {
+                                    if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
+                                        cs.rah_armor_resonance = flags.rah_armor_resonance;
+                                        cs.is_covert_cloak = flags.is_covert_cloak;
+                                        cs.cloak_stabilization_remaining_s = flags.cloak_stabilization_remaining_s;
+                                        cs.decloak_targeting_delay_remaining_s = flags.decloak_targeting_delay_remaining_s;
+                                        cs.cloak_velocity_multiplier = flags.cloak_velocity_multiplier;
+                                    }
+                                }
+                                if !removed_own_cycles.is_empty() {
+                                    let mut restored_any = false;
+                                    let mut broken_lock_cycles = Vec::new();
+                                    for cycle in removed_own_cycles {
+                                        if cycle.target_id.is_none_or(|tid| tid == ball_id) {
+                                            if !active_module_cycles
+                                                .iter()
+                                                .any(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
+                                            {
+                                                active_module_cycles.push(cycle);
+                                                restored_any = true;
+                                            }
+                                        } else {
+                                            broken_lock_cycles.push(cycle);
+                                        }
+                                    }
+                                    let reentrant_db = db_opt
+                                        .as_ref()
+                                        .is_some_and(|db| db.is_write_locked_by_current_thread());
+                                    let effective_db = if reentrant_db { &None } else { &db_opt };
+                                    for cycle in &broken_lock_cycles {
+                                        cleanup_removed_module_cycle(&mut ballpark, cycle, effective_db);
+                                    }
+                                    if restored_any {
+                                        let hook = if reentrant_db { None } else { deact_guard.as_ref() };
+                                        reconcile_tackle_and_bubbles(
+                                            &mut ballpark,
+                                            active_module_cycles,
+                                            base_scramble_strengths,
+                                            base_core_strengths,
+                                            effective_db,
+                                            hook,
+                                        );
+                                        ballpark.recompute_ball_attributes(ball_id);
+                                    } else if pre_cleanup_combat_flags.is_some() {
+                                        ballpark.recompute_ball_attributes(ball_id);
+                                    }
+                                    if !reentrant_db {
+                                        for cycle in &broken_lock_cycles {
+                                            emit_cycle_deactivation(
+                                                cycle,
+                                                &ballpark,
+                                                effective_db,
+                                                deact_guard.as_ref(),
+                                            );
+                                        }
+                                    }
+                                } else if pre_cleanup_combat_flags.is_some() {
+                                    ballpark.recompute_ball_attributes(ball_id);
+                                }
+                                {
+                                    let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());
+                                    mod_guard.clear();
+                                    for c in active_module_cycles.iter() {
+                                        mod_guard.insert(c.ship_id);
+                                    }
+                                }
                                 spawned_checkpoint_ball = Some(ball_id);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 defer_reply(&mut deferred_replies, reply, Ok(tick));

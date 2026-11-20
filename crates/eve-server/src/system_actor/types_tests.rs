@@ -574,6 +574,8 @@ fn system_command_all_variants_construct_and_match() {
                 combat_state: None,
                 slim_meta: None,
                 cycles_cleared: 0,
+                removed_own_cycles: Vec::new(),
+                pre_cleanup_combat_flags: None,
             },
             reply: oneshot::channel().0,
         },

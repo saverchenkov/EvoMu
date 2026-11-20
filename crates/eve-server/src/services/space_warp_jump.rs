@@ -1243,6 +1243,34 @@ struct StargateDbRollbackSnapshot {
     phenomena_mod_ids: Vec<i64>,
     prev_ship_fit_inputs: Option<eve_db::ShipFitInputsRecord>,
     had_overloads: bool,
+    prev_transient_attrs: Vec<(i64, Vec<(u16, f64)>)>,
+}
+
+const STARGATE_SHIP_CYCLE_TRANSIENT_ATTR_IDS: [u16; 13] =
+    [109, 110, 111, 112, 113, 267, 268, 269, 270, 271, 272, 273, 274];
+const STARGATE_MOD_CYCLE_TRANSIENT_ATTR_IDS: [u16; 5] = [84, 267, 268, 269, 270];
+
+fn take_transient_attrs_subset(
+    transient_map: &mut HashMap<i64, HashMap<u16, f64>>,
+    item_id: i64,
+    attr_ids: &[u16],
+    out: &mut Vec<(i64, Vec<(u16, f64)>)>,
+) {
+    let Some(tr) = transient_map.get_mut(&item_id) else {
+        return;
+    };
+    let mut removed = Vec::new();
+    for &aid in attr_ids {
+        if let Some(val) = tr.remove(&aid) {
+            removed.push((aid, val));
+        }
+    }
+    if tr.is_empty() {
+        transient_map.remove(&item_id);
+    }
+    if !removed.is_empty() {
+        out.push((item_id, removed));
+    }
 }
 
 struct StargateLocationUpdate<'a> {
@@ -1422,6 +1450,12 @@ fn rollback_stargate_db_transition(
                 }
                 None => {
                     snap.ship_fit_inputs.remove(&rollback.ship_id);
+                }
+            }
+            for (item_id, attrs) in &rollback.prev_transient_attrs {
+                let entry = snap.transient_item_attributes.entry(*item_id).or_default();
+                for &(aid, val) in attrs {
+                    entry.insert(aid, val);
                 }
             }
             let refunded_bal = refund_zarzakh_gate_toll_in_snap(snap, char_id, debited_toll);
@@ -1641,6 +1675,7 @@ impl StargateRollbackGuard {
             Some(db_rb) => {
                 let had_fit_changes = !db_rb.prev_active_mods.is_empty()
                     || db_rb.had_overloads
+                    || !db_rb.prev_transient_attrs.is_empty()
                     || !removed_dbuffs.is_empty();
                 (
                     rollback_stargate_db_transition(&self.ctx, self.char_id, &db_rb, toll),
@@ -1885,6 +1920,30 @@ fn commit_stargate_db_transition(
         }
         let had_overloads =
             crate::router::ServerContext::clear_all_persisted_ship_overloads(snap, ship_id);
+        let mut transient_mod_ids: Vec<i64> =
+            prev_active_mods.iter().map(|&(mid, _)| mid).collect();
+        for it in snap.items.values().filter(|it| {
+            it.location_id == ship_id && snap.transient_item_attributes.contains_key(&it.item_id)
+        }) {
+            transient_mod_ids.push(it.item_id);
+        }
+        transient_mod_ids.sort_unstable();
+        transient_mod_ids.dedup();
+        let mut prev_transient_attrs = Vec::new();
+        take_transient_attrs_subset(
+            &mut snap.transient_item_attributes,
+            ship_id,
+            &STARGATE_SHIP_CYCLE_TRANSIENT_ATTR_IDS,
+            &mut prev_transient_attrs,
+        );
+        for mid in transient_mod_ids {
+            take_transient_attrs_subset(
+                &mut snap.transient_item_attributes,
+                mid,
+                &STARGATE_MOD_CYCLE_TRANSIENT_ATTR_IDS,
+                &mut prev_transient_attrs,
+            );
+        }
         let rollback = StargateDbRollbackSnapshot {
             dest_sys_id,
             prev_solar_system_id,
@@ -1907,6 +1966,7 @@ fn commit_stargate_db_transition(
             phenomena_mod_ids,
             prev_ship_fit_inputs,
             had_overloads,
+            prev_transient_attrs,
         };
         Ok((res, rollback))
     })
