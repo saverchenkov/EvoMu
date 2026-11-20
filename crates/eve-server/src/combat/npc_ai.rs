@@ -216,6 +216,9 @@ pub struct NpcSpawnManager {
     pub respawn_timers: HashMap<(u32, u32), u64>,
     /// Tracks Clone Soldier respawn cooldown per low-sec solar system: `system_id -> respawn_after_unix`.
     pub clone_soldier_respawn_timers: HashMap<u32, u64>,
+    /// Per-anchor respawn cooldown timestamps (`(system_id, location_slot, spawn_group_id) -> until`),
+    /// keeping Belt 1/2/3 and stargate cooldowns decoupled even when locations share a group ID.
+    belt_slot_respawn_timers: HashMap<(u32, u8, u32), u64>,
     /// Per-entity SDE combat profile & sub-tick weapon cooldown state (`#1396`).
     runtime: HashMap<i64, NpcRuntimeCombatState>,
 }
@@ -1090,6 +1093,15 @@ impl NpcSpawnManager {
         officer_alive: bool,
     ) -> (Vec<(u32, eve_sde::NpcSpawnGroupInfo, DVec3)>, Vec<(u32, &'static str, u32, DVec3)>) {
         let now_unix = ctx.now_unix();
+        let min_type_in_group = |gid: u32, fallback: u32| {
+            ctx.sde
+                .types
+                .values()
+                .filter(|t| t.group_id == gid)
+                .map(|t| t.type_id)
+                .min()
+                .unwrap_or(fallback)
+        };
         // Wormhole & Drifter Hive systems (31_000_000..32_000_000): spawn Drifter Cruiser + Battleship (`feat:npc.drifters`)
         if (31_000_000..32_000_000).contains(&sys_id) {
             let on_cd = self
@@ -1105,51 +1117,21 @@ impl NpcSpawnManager {
                     .first()
                     .map(|c| c.position + DVec3::new(15_000.0, 0.0, 0.0))
                     .unwrap_or(DVec3::new(15_000.0, 0.0, 0.0));
-                let cruiser_tid = ctx
-                    .sde
-                    .types
-                    .values()
-                    .filter(|t| t.group_id == 1956)
-                    .map(|t| t.type_id)
-                    .min()
-                    .unwrap_or(47153);
-                let bs_group = if (31_000_001..=31_000_006).contains(&sys_id) {
-                    1530
-                } else {
-                    1310
-                };
-                let bs_tid = ctx
-                    .sde
-                    .types
-                    .values()
-                    .filter(|t| t.group_id == bs_group)
-                    .map(|t| t.type_id)
-                    .min()
-                    .unwrap_or(34495);
+                let bs_group = if (31_000_001..=31_000_006).contains(&sys_id) { 1530 } else { 1310 };
+                let cruiser_tid = min_type_in_group(1956, 47153);
+                let bs_tid = min_type_in_group(bs_group, 34495);
                 return (
                     Vec::new(),
                     vec![
                         (cruiser_tid, "Drifter", 500_024, anchor_pos),
-                        (
-                            bs_tid,
-                            "Drifter",
-                            500_024,
-                            anchor_pos + DVec3::new(2_500.0, 0.0, 0.0),
-                        ),
+                        (bs_tid, "Drifter", 500_024, anchor_pos + DVec3::new(2_500.0, 0.0, 0.0)),
                     ],
                 );
             }
             return (Vec::new(), Vec::new());
         }
 
-        let belt_positions: Vec<DVec3> = ctx
-            .sde
-            .celestials_in_system(sys_id)
-            .into_iter()
-            .filter(|c| c.group_id == 9) // Asteroid Belt
-            .map(|c| c.position)
-            .collect();
-
+        let (belt_positions, gate_pos) = Self::belt_and_gate_anchors(&ctx.sde, sys_id);
         if belt_positions.is_empty() {
             return (Vec::new(), Vec::new());
         }
@@ -1163,35 +1145,40 @@ impl NpcSpawnManager {
         let reg_faction = regional_pirate_faction_id(ctx, sys_id);
 
         let max_ship_class: u32 = if sys_sec >= 0.45 {
-            2 // High-sec: Frigate / Destroyer
+            2 // High-sec: Frigate
         } else if sys_sec >= 0.05 {
             4 // Low-sec: up to Cruiser / Battlecruiser
         } else {
             6 // Null-sec / W-space: up to Battleship
         };
         let hull_rank = |g: &eve_sde::NpcSpawnGroupInfo| -> u8 {
-            if g.group_name.contains("Frigate") { 0 }
-            else if g.group_name.contains("Destroyer") { 1 }
-            else if g.group_name.contains("BattleCruiser") { 3 }
-            else if g.group_name.contains("Cruiser") { 2 }
-            else if g.group_name.contains("Battleship") { 4 }
-            else { 5 }
+            const RANKS: &[(&str, u8)] = &[
+                ("Frigate", 0), ("Destroyer", 1), ("BattleCruiser", 3),
+                ("Battlecruiser", 3), ("Cruiser", 2), ("Battleship", 4),
+            ];
+            RANKS.iter().find_map(|&(kw, r)| g.group_name.contains(kw).then_some(r)).unwrap_or(5)
         };
         let is_non_standard_belt_group = |g: &eve_sde::NpcSpawnGroupInfo| -> bool {
-            ["Officer", "Commander", "Hauler", "Dreadnought", "Titan", "Deadspace", "Ghost", "Mission", "Incursion"]
-                .iter()
-                .any(|kw| g.group_name.contains(kw))
+            const EXCLUDED: &[&str] = &[
+                "Officer", "Commander", "Hauler", "Dreadnought", "Titan", "Carrier",
+                "Supercarrier", "Mothership", "Industrial", "Deadspace", "Ghost",
+                "Mission", "Incursion", "Roaming", "Irregular", "Insurgency",
+            ];
+            EXCLUDED.iter().any(|kw| g.group_name.contains(kw))
         };
         let max_hull_rank: u8 = if sys_sec >= 0.45 { 0 } else if sys_sec >= 0.05 { 3 } else { 4 };
         let fits_sec_tier = |g: &eve_sde::NpcSpawnGroupInfo| -> bool {
             let hr = hull_rank(g);
-            g.ship_class <= max_ship_class && !is_non_standard_belt_group(g) && (hr <= max_hull_rank || hr == 5)
+            g.ship_class <= max_ship_class
+                && !is_non_standard_belt_group(g)
+                && (hr <= max_hull_rank || hr == 5)
         };
         let is_eligible_belt_group = |g: &eve_sde::NpcSpawnGroupInfo| -> bool {
             !g.npc_type_ids.is_empty()
                 && !crate::services::combat_crimewatch::combat_legacy_ess::is_non_combat_npc_prop_group(g.group_id)
                 && !crate::services::combat_crimewatch::combat_legacy_ess::is_invulnerable_npc_authority_group(g.group_id)
                 && !crate::services::combat_crimewatch::combat_legacy_ess::is_sleeper_or_drifter_npc_group(g.group_id)
+                // Exclude LCO Drone, Minor Threat, Convoy, Sentry, and Storyline NPC groups.
                 && !matches!(g.group_id, 279 | 286 | 297 | 298 | 383 | 495 | 520 | 522 | 523 | 527 | 533 | 534)
         };
         let regional_keyword = match reg_faction {
@@ -1201,63 +1188,89 @@ impl NpcSpawnManager {
             500_020 => "Serpentis",
             _ => "Guristas",
         };
-        let mut candidate_groups: Vec<u32> = ctx.sde.npc_spawn_groups.iter()
-            .filter(|(_, g)| is_eligible_belt_group(g) && fits_sec_tier(g) && (g.faction_id == reg_faction || (g.faction_id == 0 && g.group_name.contains(regional_keyword))))
-            .map(|(&gid, _)| gid)
-            .collect();
+        let filter_groups = |pred: &dyn Fn(&eve_sde::NpcSpawnGroupInfo) -> bool| -> Vec<u32> {
+            ctx.sde.npc_spawn_groups.iter().filter(|(_, g)| pred(g)).map(|(&gid, _)| gid).collect()
+        };
+        let mut candidate_groups = filter_groups(&|g| {
+            is_eligible_belt_group(g)
+                && fits_sec_tier(g)
+                && (g.faction_id == reg_faction
+                    || (g.faction_id == 0 && g.group_name.contains(regional_keyword)))
+        });
         if candidate_groups.is_empty() {
-            candidate_groups = ctx.sde.npc_spawn_groups.iter()
-                .filter(|(_, g)| is_eligible_belt_group(g) && (g.faction_id == reg_faction || g.faction_id == 0) && fits_sec_tier(g))
-                .map(|(&gid, _)| gid)
-                .collect();
+            candidate_groups = filter_groups(&|g| {
+                is_eligible_belt_group(g)
+                    && (g.faction_id == reg_faction || g.faction_id == 0)
+                    && fits_sec_tier(g)
+            });
         }
         if candidate_groups.is_empty() {
-            candidate_groups = ctx.sde.npc_spawn_groups.iter()
-                .filter(|(_, g)| is_eligible_belt_group(g) && (g.faction_id == reg_faction || g.faction_id == 0))
-                .map(|(&gid, _)| gid)
-                .collect();
+            candidate_groups = filter_groups(&|g| {
+                is_eligible_belt_group(g) && (g.faction_id == reg_faction || g.faction_id == 0)
+            });
         }
         if candidate_groups.is_empty() {
             candidate_groups = ctx.sde.npc_spawn_groups.keys().copied().collect();
         }
         candidate_groups.sort_by_key(|&gid| {
-            ctx.sde.npc_spawn_groups.get(&gid).map_or((true, true, u32::MAX, u8::MAX, gid), |g| {
-                (is_non_standard_belt_group(g), !g.group_name.starts_with("Asteroid "), g.ship_class, hull_rank(g), gid)
-            })
+            ctx.sde.npc_spawn_groups.get(&gid).map_or(
+                (true, true, u32::MAX, u8::MAX, gid),
+                |g| (is_non_standard_belt_group(g), !g.group_name.starts_with("Asteroid "), g.ship_class, hull_rank(g), gid),
+            )
         });
 
-        let squad_limit = if sys_sec >= 0.45 { 1 } else { 2 };
+        let squad_limit = |sg: &eve_sde::NpcSpawnGroupInfo| -> usize {
+            if sys_sec >= 0.45 || hull_rank(sg) >= 2 { 1 } else { 2 }
+        };
         let cap_belt_squad = |sg: &eve_sde::NpcSpawnGroupInfo, limit: usize| -> eve_sde::NpcSpawnGroupInfo {
             let mut trimmed = sg.clone();
+            let is_cs = |tid: u32| ctx.sde.types.get(&tid).is_some_and(|x| x.name.contains("Clone Soldier"));
+            // Strip Clone Soldier types before sorting/truncating so they never spawn as ordinary belt rats.
+            if trimmed.npc_type_ids.iter().any(|&tid| !is_cs(tid)) {
+                trimmed.npc_type_ids.retain(|&tid| !is_cs(tid));
+            }
             if trimmed.npc_type_ids.len() > limit {
                 trimmed.npc_type_ids.sort_by_key(|&tid| {
-                    let t = ctx.sde.types.get(&tid);
-                    let is_cs = t.is_some_and(|x| x.name.contains("Clone Soldier"));
-                    let bounty = t.and_then(|x| x.default_attributes.get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY).copied()).unwrap_or(f64::MAX);
-                    (is_cs, bounty.max(0.0) as u64, tid)
+                    let bounty = ctx.sde.types.get(&tid)
+                        .and_then(|x| x.default_attributes.get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY).copied())
+                        .unwrap_or(f64::MAX);
+                    (bounty.max(0.0) as u64, tid)
                 });
                 trimmed.npc_type_ids.truncate(limit);
             }
             trimmed
         };
         let mut planned_groups: Vec<(u32, eve_sde::NpcSpawnGroupInfo, DVec3)> = Vec::new();
-        if let Some(&primary_gid) = candidate_groups.first() {
-            for &belt_pos in belt_positions.iter().take(3) {
-                let group_id = primary_gid;
+        if !candidate_groups.is_empty() {
+            let belts_taken = belt_positions.len().min(3);
+            for (idx, &belt_pos) in belt_positions.iter().take(3).enumerate() {
+                // Keep Belt 0 on the lightest hull while spanning Cruiser/Battlecruiser hulls in null-sec.
+                let group_idx = if sys_sec < 0.05 && candidate_groups.len() >= 5 {
+                    [0, 2, 3].get(idx).copied().unwrap_or(idx % candidate_groups.len())
+                } else {
+                    idx % candidate_groups.len()
+                };
+                let group_id = candidate_groups[group_idx];
                 let belt_alive = self.entities.values().any(|e| e.spawn_pos.distance(belt_pos) < 25_000.0);
-                if belt_alive || self.respawn_timers.get(&(sys_id, group_id)).is_some_and(|&until| now_unix < until) {
+                if belt_alive || self.is_belt_slot_on_cooldown(sys_id, idx as u8, group_id, now_unix) {
                     continue;
                 }
                 if let Some(sg) = ctx.sde.npc_spawn_groups.get(&group_id) {
-                    planned_groups.push((group_id, cap_belt_squad(sg, squad_limit), belt_pos));
+                    planned_groups.push((group_id, cap_belt_squad(sg, squad_limit(sg)), belt_pos));
                 }
             }
             if sys_sec < 0.45 {
-                if let Some(gate_pos) = ctx.sde.celestials_in_system(sys_id).into_iter().find(|c| c.group_id == 10).map(|c| c.position) {
+                if let Some(gate_pos) = gate_pos {
+                    let gate_idx = if candidate_groups.len() > belts_taken {
+                        candidate_groups.len() - 1
+                    } else {
+                        belts_taken % candidate_groups.len()
+                    };
+                    let gate_group_id = candidate_groups[gate_idx];
                     let gate_alive = self.entities.values().any(|e| e.spawn_pos.distance(gate_pos) < 25_000.0);
-                    if !gate_alive && !self.respawn_timers.get(&(sys_id, primary_gid)).is_some_and(|&until| now_unix < until) {
-                        if let Some(sg) = ctx.sde.npc_spawn_groups.get(&primary_gid) {
-                            planned_groups.push((primary_gid, cap_belt_squad(sg, 1), gate_pos));
+                    if !gate_alive && !self.is_belt_slot_on_cooldown(sys_id, 3, gate_group_id, now_unix) {
+                        if let Some(sg) = ctx.sde.npc_spawn_groups.get(&gate_group_id) {
+                            planned_groups.push((gate_group_id, cap_belt_squad(sg, 1), gate_pos));
                         }
                     }
                 }
@@ -1886,6 +1899,40 @@ impl NpcSpawnManager {
         }
     }
 
+    fn belt_and_gate_anchors(sde: &eve_sde::SdeRegistry, sys_id: u32) -> (Vec<DVec3>, Option<DVec3>) {
+        let cels = sde.celestials_in_system(sys_id);
+        let belts = cels.iter().filter(|c| c.group_id == 9).map(|c| c.position).collect();
+        let gate = cels.iter().find(|c| c.group_id == 10).map(|c| c.position);
+        (belts, gate)
+    }
+
+    fn is_belt_slot_on_cooldown(&self, sys_id: u32, slot: u8, group_id: u32, now_unix: u64) -> bool {
+        if self.belt_slot_respawn_timers.get(&(sys_id, slot, group_id)).is_some_and(|&u| now_unix < u) {
+            return true;
+        }
+        let managed = self
+            .belt_slot_respawn_timers
+            .iter()
+            .any(|(&(s, _, gid), &u)| s == sys_id && gid == group_id && now_unix < u);
+        !managed && self.respawn_timers.get(&(sys_id, group_id)).is_some_and(|&u| now_unix < u)
+    }
+
+    fn belt_rat_location_slot(sde: &eve_sde::SdeRegistry, sys_id: u32, pos: DVec3) -> Option<u8> {
+        let (belts, gate) = Self::belt_and_gate_anchors(sde, sys_id);
+        belts
+            .iter()
+            .take(3)
+            .enumerate()
+            .map(|(i, p)| (i as u8, *p))
+            .chain(gate.into_iter().map(|p| (3u8, p)))
+            .filter_map(|(slot, p)| {
+                let d = pos.distance(p);
+                (d < 25_000.0).then_some((slot, d))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(slot, _)| slot)
+    }
+
     fn remove_npc_and_record_cooldown(
         &mut self,
         ctx: &ServerContext,
@@ -1904,6 +1951,10 @@ impl NpcSpawnManager {
             self.clone_soldier_respawn_timers.insert(sys_id, until);
             Some(until)
         } else {
+            if let Some(slot) = Self::belt_rat_location_slot(&ctx.sde, sys_id, entity.spawn_pos) {
+                self.belt_slot_respawn_timers
+                    .insert((sys_id, slot, entity.spawn_group_id), until);
+            }
             self.respawn_timers
                 .insert((sys_id, entity.spawn_group_id), until);
             None
@@ -2697,29 +2748,27 @@ fn finalize_destroyed_npc_side_effects(
             );
 
             if !(32_000_000..=32_999_999).contains(&sys_id) {
+                let make_wreck_item = |item_id, type_id, location_id, quantity, singleton| InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: killer_char_id,
+                    location_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity,
+                    singleton,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                };
                 // Spawn physical NPC wreck item (26557)
                 let wreck_id = snap.alloc_entity_id();
                 crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
                     snap, wreck_id, now_unix, true,
                 );
-                snap.items.insert(
-                    wreck_id,
-                    InventoryItemRecord {
-                        item_id: wreck_id,
-                        type_id: 26557,
-                        owner_id: killer_char_id,
-                        location_id: sys_id as i64,
-                        flag: InventoryFlag::Cargo,
-                        quantity: 1,
-                        singleton: true,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    },
-                );
+                snap.items.insert(wreck_id, make_wreck_item(wreck_id, 26557, sys_id as i64, 1, true));
                 snap.item_positions.insert(
                     wreck_id,
                     [entity.spawn_pos.x, entity.spawn_pos.y, entity.spawn_pos.z],
@@ -2733,27 +2782,9 @@ fn finalize_destroyed_npc_side_effects(
                     500011 | 500002 => 213, // Phased Plasma S
                     _ => 212, // Iron Charge S
                 };
-                let loot_drops = [(15331, 10), (ammo_type_id, 100)];
-                for &(lid_type, lid_qty) in &loot_drops {
+                for (lid_type, lid_qty) in [(15331, 10), (ammo_type_id, 100)] {
                     let lid = snap.alloc_entity_id();
-                    snap.items.insert(
-                        lid,
-                        InventoryItemRecord {
-                            item_id: lid,
-                            type_id: lid_type,
-                            owner_id: killer_char_id,
-                            location_id: wreck_id,
-                            flag: InventoryFlag::Cargo,
-                            quantity: lid_qty,
-                            singleton: false,
-                            version: 1,
-                            dynamic_attributes: HashMap::new(),
-                            source_mutaplasmid_id: None,
-                            insured_payout_isk: 0.0,
-                            is_blueprint_copy: false,
-                            blueprint_runs_remaining: None,
-                        },
-                    );
+                    snap.items.insert(lid, make_wreck_item(lid, lid_type, wreck_id, lid_qty, false));
                 }
             }
 
