@@ -818,7 +818,8 @@ async fn deactivate_enforces_active_space_cloak_and_ownership_guards_without_mut
 
     // 1b. Non-"online" Deactivate while actively cloaked MUST succeed for modules already active
     //     before cloak (e.g. MWD+cloak trick) plus groups 481 (probe launcher) & 4117 (nullifier);
-    //     re-deactivating an already-inactive 481/4117 rejects cleanly with DogmaDeactivateFailed.
+    //     re-deactivating an online inactive 481 stays idempotent while an offline 481 rejects
+    //     cleanly with DogmaDeactivateFailed.
     for mod_id in [mwd_id, probe_id, nullifier_id] {
         let ok = handle_mining_and_deactivate(
             &ctx,

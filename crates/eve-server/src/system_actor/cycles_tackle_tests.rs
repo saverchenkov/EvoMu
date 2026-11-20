@@ -1717,7 +1717,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
 
     let mut cycles = Vec::new();
 
-    // 1. MWD rejected while is_mwd_mjd_disabled == true (also clears undock invuln)
+    // 1. MWD rejected while is_mwd_mjd_disabled == true (preserves undock invuln)
     let mwd_err = handle_add_module_cycle(
         &mut bp,
         &mut cycles,
@@ -1736,9 +1736,9 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
     )
     .unwrap_err();
     assert!(mwd_err.contains("WarpScrambled"));
-    assert_eq!(bp.combat_states[&6001].undock_invulnerable_remaining_ticks, 0);
+    assert_eq!(bp.combat_states[&6001].undock_invulnerable_remaining_ticks, 5);
 
-    // 2. Insufficient capacitor rejected
+    // 2. Insufficient capacitor rejected (preserves undock invuln)
     let cap_err = handle_add_module_cycle(
         &mut bp,
         &mut cycles,
@@ -1757,8 +1757,9 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
     )
     .unwrap_err();
     assert!(cap_err.contains("Insufficient capacitor"));
+    assert_eq!(bp.combat_states[&6001].undock_invulnerable_remaining_ticks, 5);
 
-    // 3. Cap booster + shield booster + ADC + self_mass_multiplier + hic_sig_multiplier
+    // 3. Cap booster + shield booster + ADC + self_mass_multiplier + hic_sig_multiplier (clears undock invuln)
     handle_add_module_cycle(
         &mut bp,
         &mut cycles,
@@ -1781,6 +1782,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
         },
     )
     .unwrap();
+    assert_eq!(bp.combat_states[&6001].undock_invulnerable_remaining_ticks, 0);
     assert!((bp.combat_states[&6001].capacitor - 240.0).abs() < 1e-6);
     assert!((bp.combat_states[&6001].shield_hp - 350.0).abs() < 1e-6);
     assert!((bp.balls[&6001].mass - 3_000_000.0).abs() < 1e-6);

@@ -99,8 +99,6 @@ pub(crate) async fn handle_mining_and_deactivate(
                     ctx,
                     session,
                     ship_id,
-                    true,
-                    mod_group_id,
                 )
                 .await
                 {

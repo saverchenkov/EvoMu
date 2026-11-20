@@ -632,7 +632,7 @@ pub(crate) async fn prepare_dogma_take_module_offline(
     }
 
     crate::services::inventory_fitting::fitting_module_cycles::enforce_space_active_cloak_module_guard(
-        ctx, session, ship_id, false, None,
+        ctx, session, ship_id,
     )
     .await?;
 
@@ -815,7 +815,7 @@ pub async fn handle_dogma_set_module_online(
     }
 
     crate::services::inventory_fitting::fitting_module_cycles::enforce_space_active_cloak_module_guard(
-        ctx, session, ship_id, false, None,
+        ctx, session, ship_id,
     )
     .await?;
 

@@ -222,9 +222,6 @@ pub async fn handle_weapons(
                 char_id,
                 "SAFE_LOGOFF_ABORT_MODULE",
             );
-            if method != "Overload" {
-                crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
-            }
             let controlling_structure = session.structure_id.is_some() && session.structure_id == session.ship_id;
             if session.station_id.is_some() || (session.structure_id.is_some() && !controlling_structure) {
                 return Some(Err(BridgeRpcError {
@@ -403,14 +400,65 @@ pub async fn handle_weapons(
                 );
             }
             if !controlling_structure {
-                if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::enforce_space_module_cloak_and_warp_guard(
-                    ctx, &sys_handle, char_id, ship_id, mod_type,
+                if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::check_space_module_cloak_and_warp_readonly(
+                    ctx, &sys_handle, ship_id, mod_type,
                 )
                 .await
                 {
                     return Some(Err(e));
                 }
             }
+            let res = crate::router::box_fut(|| {
+                handle_weapons_after_cloak_guard(
+                    ctx,
+                    session.character_id,
+                    char_id,
+                    ship_id,
+                    sys_id,
+                    &sys_handle,
+                    attacker_tick,
+                    &attacker_ball,
+                    method,
+                    module_id,
+                    target_id_opt,
+                    m,
+                    mod_type,
+                    fit,
+                    kwargs,
+                )
+            })
+            .await;
+            if !controlling_structure && matches!(res, Some(Ok(_))) {
+                crate::services::inventory_fitting::fitting_module_cycles::break_gate_cloak_on_space_action(
+                    ctx, &sys_handle, char_id, ship_id,
+                )
+                .await;
+            }
+            res
+        }
+
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_weapons_after_cloak_guard(
+    ctx: &ServerContext,
+    session_character_id: Option<i64>,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    sys_handle: &crate::system_actor::SystemHandle,
+    attacker_tick: u64,
+    attacker_ball: &eve_destiny::Ball,
+    method: &str,
+    module_id: i64,
+    target_id_opt: Option<i64>,
+    mut m: eve_dogma::FittedModule,
+    mod_type: &eve_sde::InvType,
+    mut fit: eve_dogma::ShipFittingEngine,
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
             let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
             if let Some(tid) = target_id_opt.filter(|&t| t > 0) {
                 if crate::services::tactical_module_mechanics::is_untargetable_interdiction_probe(
@@ -427,10 +475,17 @@ pub async fn handle_weapons(
                     }));
                 }
             }
-            if matches!(
+            if (matches!(
                 mod_type.group_id,
-                52 | 65 | 68 | 71 | 72 | 201 | 208 | 291 | 379 | 862 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
-            ) && sys_handle.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_tethered)
+                52 | 65 | 68 | 71 | 72 | 201 | 208 | 291 | 379 | 862
+            ) || crate::services::inventory_fitting::fitting_module_cycles::is_weapon_group(
+                mod_type.group_id,
+            )) && sys_handle
+                .get_combat_state(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|cs| cs.is_tethered)
             {
                 return Some(Err(BridgeRpcError {
                     code: "CantActivateWhileTethered".into(),
@@ -571,9 +626,6 @@ pub async fn handle_weapons(
                             "Target {tid} is {ewar_dist:.1} m away (exceeds range {eff_max_range:.1} m)"
                         ),
                     )));
-                }
-                if method == "Overload" {
-                    crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
                 }
                 if let (Some(vc), Some((is_pod_target, v_suspect_or_crim, is_legal, is_mobile_struct))) =
                     (victim_char_opt, pvp_precheck)
@@ -764,9 +816,6 @@ pub async fn handle_weapons(
                         }
                     }
                 }
-                if method == "Overload" {
-                    crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
-                }
                 let mut eff_m = m.clone();
                 if is_overloaded {
                     eff_m.state = eve_dogma::ModuleState::Overloaded;
@@ -799,9 +848,8 @@ pub async fn handle_weapons(
             }
             // 5. Turrets (Hybrid 74, Projectile 55, Energy Laser 53, Entropic Disintegrator 1986, Vorton Projector 4060)
             //    and Missile Launchers (506..=511, 524, 1674, 4500, 4805, 4807)
-            if !matches!(
+            if !crate::services::inventory_fitting::fitting_module_cycles::is_weapon_group(
                 mod_type.group_id,
-                74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
             ) {
                 return None;
             }
@@ -821,10 +869,10 @@ pub async fn handle_weapons(
                     })
                     .map(|i| (i.item_id, i.type_id))
             });
-            let is_missile_launcher = matches!(
-                mod_type.group_id,
-                506..=511 | 524 | 1674 | 4500 | 4805 | 4807
-            );
+            let is_missile_launcher =
+                crate::services::inventory_fitting::fitting_module_cycles::is_missile_launcher_group(
+                    mod_type.group_id,
+                );
             let is_civilian_turret =
                 mod_type.capacity <= 0.0 || matches!(m.type_id, 3634 | 3636 | 3638 | 3640);
             let mut pending_weapon_autoload: Option<
@@ -1043,10 +1091,10 @@ pub async fn handle_weapons(
             };
 
             // Weapon classification & pre-validation
-            let is_missile_launcher = matches!(
-                mod_type.group_id,
-                506..=511 | 524 | 1674 | 4500 | 4805 | 4807
-            );
+            let is_missile_launcher =
+                crate::services::inventory_fitting::fitting_module_cycles::is_missile_launcher_group(
+                    mod_type.group_id,
+                );
             let is_breacher_pod = matches!(mod_type.group_id, 4500 | 4805 | 4807);
             let is_vorton = mod_type.group_id == 4060;
 
@@ -1187,7 +1235,9 @@ pub async fn handle_weapons(
             // Projectile turrets (`group_id == 55`) and Missile Launchers require 0 capacitor!
             // Hybrid turrets (`74`), Energy Lasers (`53`), Entropic Disintegrators (`1986`), and Vorton Projectors (`4060`) consume capacitor.
             let base_cap_need = if mod_type.group_id == 55
-                || matches!(mod_type.group_id, 506..=511 | 524 | 1674 | 4500 | 4805 | 4807)
+                || crate::services::inventory_fitting::fitting_module_cycles::is_missile_launcher_group(
+                    mod_type.group_id,
+                )
             {
                 0.0
             } else {
@@ -1256,9 +1306,6 @@ pub async fn handle_weapons(
                 }
                 m.charge_type_id = Some(plan.ammo_type_id);
                 fit.recalculate_stats(&ctx.sde);
-            }
-            if method == "Overload" {
-                crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
             }
             if let Some(new_cap) = pending_cap_after {
                 let _ = sys_handle.set_capacitor(ship_id, new_cap).await;
@@ -1721,7 +1768,7 @@ pub async fn handle_weapons(
                 let is_invuln = crate::services::insurgency_services::is_insurgency_stronghold_invulnerable(ctx, sys_id, target_ball_id);
                 let (app, dest) = if !is_invuln && final_dmg.total() > 0.0 {
                     sys_handle
-                        .apply_damage_with_attacker(target_ball_id, final_dmg, session.character_id)
+                        .apply_damage_with_attacker(target_ball_id, final_dmg, session_character_id)
                         .await
                         .ok()
                         .flatten()
@@ -2012,10 +2059,6 @@ pub async fn handle_weapons(
                 ("corpseItemID", PyRep::Integer(generated_corpse_id)),
                 ("state", st_state.map(PyRep::String).unwrap_or(PyRep::None)),
             ])))
-        }
-
-        _ => None,
-    }
 }
 
 pub use super::combat_weapons_spool::{clear_entropic_spool, get_entropic_spool_multiplier, handle_link_all_weapons, reset_entropic_spool};

@@ -275,12 +275,11 @@ async fn handle_module_cycles_inner(
                 let has_online_weapon = fit.modules.values().any(|wm| {
                     (27..=34).contains(&wm.flag_id)
                         && wm.state != eve_dogma::ModuleState::Offline
-                        && ctx.sde.types.get(&wm.type_id).is_some_and(|t| {
-                            matches!(
-                                t.group_id,
-                                53 | 55 | 74 | 506..=511 | 524 | 1986 | 4060 | 4500 | 4805 | 4807
-                            )
-                        })
+                        && ctx
+                            .sde
+                            .types
+                            .get(&wm.type_id)
+                            .is_some_and(|t| is_weapon_group(t.group_id))
                 });
                 if method == "Activate" && args.len() == 1 && raw_module_id > 0 && has_online_weapon {
                     return None;
@@ -307,7 +306,7 @@ async fn handle_module_cycles_inner(
             let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
                 return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id), client_error: None }));
             };
-            let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
+            let is_weapon = is_weapon_group(mod_type.group_id);
             if method == "Overload" && matches!(mod_type.group_id, 1327 | 1328 | 1330 | 1331 | 1333 | 1562) {
                 return Some(Err(
                     crate::services::structure_weapons_ops::cannot_overload_structure_module_error(),
@@ -337,7 +336,7 @@ async fn handle_module_cycles_inner(
                 );
             }
             let is_in_space = session.station_id.is_none() && session.structure_id.is_none();
-            let pre_gate_cloak_and_invuln = if is_in_space {
+            let pre_undock_invuln_ticks: u32 = if is_in_space {
                 if let Err(e) = check_space_module_cloak_and_warp_readonly(
                     ctx, &sys, ship_id, mod_type,
                 )
@@ -349,12 +348,9 @@ async fn handle_module_cycles_inner(
                     .await
                     .ok()
                     .flatten()
-                    .is_some_and(|cs| {
-                        cs.gate_cloak_remaining_ticks > 0
-                            && cs.undock_invulnerable_remaining_ticks > 0
-                    })
+                    .map_or(0, |cs| cs.undock_invulnerable_remaining_ticks)
             } else {
-                false
+                0
             };
             let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
                 tid >= 1_000_000_000_000 || ctx.db.with_snapshot(|s| s.structures.contains_key(&tid) || s.sov_runtime.mercenary_dens.contains_key(&tid) || s.sov_runtime.mto_site_balls.contains_key(&tid) || (s.system_states.get(&sys_id).is_some_and(|st| st.sov_alliance_id.is_some()) && !s.characters.contains_key(&tid) && !s.characters.values().any(|c| c.active_ship_id == tid)))
@@ -396,11 +392,12 @@ async fn handle_module_cycles_inner(
 
             if (matches!(
                 mod_type.group_id,
-                52 | 65 | 68 | 71 | 72 | 201 | 208 | 291 | 379 | 588 | 862 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
-            ) || matches!(
-                effect_name.as_str(),
-                "empWave" | "useMissiles" | "targetAttack" | "projectileFired"
-            )) && sys
+                52 | 65 | 68 | 71 | 72 | 201 | 208 | 291 | 379 | 588 | 862
+            ) || is_weapon
+                || matches!(
+                    effect_name.as_str(),
+                    "empWave" | "useMissiles" | "targetAttack" | "projectileFired"
+                )) && sys
                 .get_combat_state(ship_id)
                 .await
                 .ok()
@@ -448,7 +445,7 @@ async fn handle_module_cycles_inner(
                     return Some(Err(target_not_locked_rpc_error("Mining modules require a locked target asteroid")));
                 };
                 let res = crate::router::box_fut(|| crate::services::mining_cycle::activate(ctx, char_id, ship_id, sys_id, module_id, target_id)).await;
-                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
+                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, pre_undock_invuln_ticks, res).await;
             }
 
             if let Err(e) = crate::services::pve_ess_reserve_banks::check_ess_module_activation_allowed(ctx, sys_id, ship_id, mod_type, &effect_name).await {
@@ -478,18 +475,18 @@ async fn handle_module_cycles_inner(
                     "ActivateSinglePointTargetedModule"
                 };
                 let res = crate::router::box_fut(|| crate::services::tactical_modules::activate_superweapon_or_lance(ctx, char_id, ship_id, sys_id, module_id, sw_method, target_id_opt)).await;
-                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
+                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, 0, res).await;
             }
             if mod_type.group_id == 1154 {
                 let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
                 let res = crate::router::box_fut(|| crate::services::tactical_modules::activate_target_spectrum_breaker(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state)).await;
-                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
+                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, pre_undock_invuln_ticks, res).await;
             }
 
             if let Some(res) =
                 handle_cyno_generator_activation(ctx, &sys, char_id, ship_id, sys_id, module_id, mod_type).await
             {
-                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
+                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, 0, res).await;
             }
 
             if sys_id == 30_100_000 {
@@ -557,7 +554,7 @@ async fn handle_module_cycles_inner(
                         kwargs,
                     ))
                     .await;
-                    return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
+                    return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, pre_undock_invuln_ticks, res).await;
                 }
                 if let Some(res) = crate::router::box_fut(|| handle_scanner_analyzer_entosis_activation(
                     ctx,
@@ -571,7 +568,12 @@ async fn handle_module_cycles_inner(
                 ))
                 .await
                 {
-                    return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
+                    let finish_ticks = if mod_type.group_id == 815 {
+                        0
+                    } else {
+                        pre_undock_invuln_ticks
+                    };
+                    return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, finish_ticks, res).await;
                 }
             }
 
@@ -583,7 +585,7 @@ async fn handle_module_cycles_inner(
                         ))
                         .await
                         .and_then(|opt| opt.ok_or_else(|| BridgeRpcError::user_error("MercDenRepairFailed")));
-                        return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
+                        return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, pre_undock_invuln_ticks, res).await;
                     }
                 }
             }
@@ -605,7 +607,7 @@ async fn handle_module_cycles_inner(
                     kwargs,
                 ))
                 .await;
-                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
+                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, pre_undock_invuln_ticks, res).await;
             }
 
             // Interdiction Sphere Launcher (`group_id == 589`, e.g., `Interdiction Sphere Launcher I` `22782`)
@@ -979,7 +981,7 @@ async fn handle_module_cycles_inner(
                     )
                 };
                 if in_delay {
-                    if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) {
+                    if is_weapon {
                         return Some(Err(module_already_active_rpc_error(
                             ctx,
                             Some(m.type_id),
@@ -1119,6 +1121,20 @@ async fn handle_module_cycles_inner(
                         }
                     }
                 }
+                if let Err(e) = crate::router::box_fut(|| {
+                    precheck_module_cycle_aggression_or_assistance_safety(
+                        ctx,
+                        &sys,
+                        sys_id,
+                        char_id,
+                        mod_type.group_id,
+                        target_id_opt,
+                    )
+                })
+                .await
+                {
+                    return Some(Err(e));
+                }
                 let EwarCapitalPrep {
                     warp_scramble_points, disables_target_mwd_mjd, warp_core_stab_bonus,
                     hic_bubble_radius_m, hic_velocity_multiplier, hic_sig_multiplier, hic_mass_addition,
@@ -1134,7 +1150,17 @@ async fn handle_module_cycles_inner(
                     &mod_state, &fit, target_id_opt, is_overloaded, is_mwd, is_mjd, kwargs,
                 )).await {
                     Some(Ok(v)) => v,
-                    Some(Err(e)) => return Some(Err(e)),
+                    Some(Err(e)) => {
+                        clear_projected_ewar_and_recompute_tp(
+                            ctx,
+                            &sys,
+                            ship_id,
+                            module_id,
+                            mod_type.group_id,
+                            target_id_opt,
+                        );
+                        return Some(Err(e));
+                    }
                     None => unreachable!(),
                 };
                 deferred_post_cycle.passive_targeter_lock = passive_targeter_lock_opt;
@@ -1169,6 +1195,14 @@ async fn handle_module_cycles_inner(
                     ctx.sde.effects.get(&eid).is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
                 });
                 if is_covert_cloak && fit.ship.get_attribute(906, &ctx.sde) <= 0.0 && !matches!(ship_group_id, 830 | 833 | 898 | 963 | 1202 | 1283 | 1527 | 1972) {
+                    clear_projected_ewar_and_recompute_tp(
+                        ctx,
+                        &sys,
+                        ship_id,
+                        module_id,
+                        mod_type.group_id,
+                        target_id_opt,
+                    );
                     return Some(Err(BridgeRpcError { code: "ShipCannotUseCovertCloak".into(), message: "Ship cannot activate Covert Ops Cloaking Device".into(), client_error: None }));
                 }
                 if !effect_name.starts_with("cloaking") {
@@ -1278,6 +1312,14 @@ async fn handle_module_cycles_inner(
                         .map(|i| (i.item_id, i.type_id))
                 });
                 let Some((cid, charge_tid)) = charge_opt else {
+                    clear_projected_ewar_and_recompute_tp(
+                        ctx,
+                        &sys,
+                        ship_id,
+                        module_id,
+                        mod_type.group_id,
+                        target_id_opt,
+                    );
                     return Some(Err(BridgeRpcError::no_charges_loaded(
                         mod_type.type_id as i64,
                         "Capacitor Booster has no Cap Booster charges loaded",
@@ -1474,6 +1516,14 @@ async fn handle_module_cycles_inner(
                 }
                 Ok(())
             }) {
+                clear_projected_ewar_and_recompute_tp(
+                    ctx,
+                    &sys,
+                    ship_id,
+                    module_id,
+                    mod_type.group_id,
+                    target_id_opt,
+                );
                 return Some(Err(e));
             }
 
@@ -1548,6 +1598,14 @@ async fn handle_module_cycles_inner(
                 )
                 .await
                 {
+                    clear_projected_ewar_and_recompute_tp(
+                        ctx,
+                        &sys,
+                        ship_id,
+                        module_id,
+                        mod_type.group_id,
+                        target_id_opt,
+                    );
                     return Some(Err(e));
                 }
             }
@@ -1563,10 +1621,8 @@ async fn handle_module_cycles_inner(
             }
             let mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
             let is_turret_group = matches!(mod_type.group_id, 53 | 55 | 74 | 1986);
-            let is_missile_group = matches!(
-                mod_type.group_id,
-                506..=512 | 524 | 771 | 862 | 1245
-            );
+            let is_missile_group =
+                is_missile_launcher_group(mod_type.group_id) || matches!(mod_type.group_id, 512 | 862);
             let planned_autoload_slots = deferred_post_cycle
                 .weapon_autoload
                 .as_ref()
@@ -1581,6 +1637,14 @@ async fn handle_module_cycles_inner(
                             + planned_autoload_slots
                             < linked_turrets.len()))
             {
+                clear_projected_ewar_and_recompute_tp(
+                    ctx,
+                    &sys,
+                    ship_id,
+                    module_id,
+                    mod_type.group_id,
+                    target_id_opt,
+                );
                 return Some(Err(BridgeRpcError::no_charges(mod_type.type_id as i64)));
             }
             let weapon_dark_mult = crate::services::pve_abyssal_hazards::dark_weather_midpocket_turret_mult(
@@ -1789,7 +1853,14 @@ async fn handle_module_cycles_inner(
                         let surface_dist = atk_ball.surface_distance(&tgt_ball);
                         if is_guided_missile {
                             if weapon_optimal_m > 0.0 && surface_dist > weapon_optimal_m + 1e-6 {
-                                ctx.remove_projected_ewar_by_module(ship_id, module_id);
+                                clear_projected_ewar_and_recompute_tp(
+                                    ctx,
+                                    &sys,
+                                    ship_id,
+                                    module_id,
+                                    mod_type.group_id,
+                                    target_id_opt,
+                                );
                                 return Some(Err(BridgeRpcError::target_too_far(
                                     resolve_target_display_name(ctx, tid),
                                     mod_type.type_id as i64,
@@ -1800,7 +1871,14 @@ async fn handle_module_cycles_inner(
                             // Why: Reject out-of-range Cycle-0 turret activations before cap/ammo/timer commit (#1247).
                             let turret_max_range_m = weapon_optimal_m + 3.0 * weapon_falloff_m;
                             if turret_max_range_m > 0.0 && surface_dist > turret_max_range_m {
-                                ctx.remove_projected_ewar_by_module(ship_id, module_id);
+                                clear_projected_ewar_and_recompute_tp(
+                                    ctx,
+                                    &sys,
+                                    ship_id,
+                                    module_id,
+                                    mod_type.group_id,
+                                    target_id_opt,
+                                );
                                 return Some(Err(BridgeRpcError::target_out_of_range(
                                     resolve_target_display_name(ctx, tid),
                                     mod_type.type_id as i64,
@@ -1815,7 +1893,14 @@ async fn handle_module_cycles_inner(
                             && surface_dist > weapon_optimal_m
                         {
                             // Why: Reject out-of-range Cycle-0 Vorton / targeted non-guided missile activations before cap/ammo/timer commit (#1247).
-                            ctx.remove_projected_ewar_by_module(ship_id, module_id);
+                            clear_projected_ewar_and_recompute_tp(
+                                ctx,
+                                &sys,
+                                ship_id,
+                                module_id,
+                                mod_type.group_id,
+                                target_id_opt,
+                            );
                             return Some(Err(BridgeRpcError::target_out_of_range(
                                 resolve_target_display_name(ctx, tid),
                                 mod_type.type_id as i64,
@@ -2003,18 +2088,26 @@ async fn handle_module_cycles_inner(
                 started_at_unix: ctx.now_unix_secs(),
             };
 
-            let pre_target_combat_state = if cap_drain_target > 0.0 || remote_shield_amount > 0.0 {
-                if let Some(tid) = target_id_opt {
-                    sys.get_combat_state(tid).await.ok().flatten()
+            let pre_target_combat_state =
+                if cap_drain_target > 0.0 || remote_shield_amount > 0.0 || remote_cap_amount > 0.0 {
+                    if let Some(tid) = target_id_opt {
+                        sys.get_combat_state(tid).await.ok().flatten()
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
             if let Err(e) = sys.add_module_cycle(cycle).await {
-                ctx.remove_projected_ewar_by_module(ship_id, module_id);
+                clear_projected_ewar_and_recompute_tp(
+                    ctx,
+                    &sys,
+                    ship_id,
+                    module_id,
+                    mod_type.group_id,
+                    target_id_opt,
+                );
                 if e.contains("ModuleAlreadyActive") {
                     return Some(Err(module_already_active_rpc_error(ctx, Some(m.type_id), e)));
                 }
@@ -2029,13 +2122,21 @@ async fn handle_module_cycles_inner(
             if let Err(e) = crate::router::box_fut(|| evaluate_module_cycle_aggression_or_assistance(
                 ctx, &sys, sys_id, char_id, ship_id, mod_type.group_id, target_id_opt,
             )).await {
-                ctx.remove_projected_ewar_by_module(ship_id, module_id);
-                let _ = sys.remove_module_cycle(ship_id, module_id).await;
-                if cap_need > 0.0 {
-                    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                        let _ = sys.set_capacitor(ship_id, (cs.capacitor + cap_need).min(cs.max_capacitor)).await;
-                    }
-                }
+                rollback_post_cycle_activation(
+                    ctx,
+                    &sys,
+                    ship_id,
+                    module_id,
+                    mod_type.group_id,
+                    target_id_opt,
+                    cap_need,
+                    pre_undock_invuln_ticks,
+                    cap_drain_target,
+                    remote_shield_amount,
+                    remote_cap_amount,
+                    &pre_target_combat_state,
+                )
+                .await;
                 return Some(Err(e));
             }
 
@@ -2043,13 +2144,21 @@ async fn handle_module_cycles_inner(
                 ctx, &sys, char_id, ship_id, module_id, &m, mod_type, &mod_state,
                 target_id_opt, deferred_post_cycle,
             )).await {
-                ctx.remove_projected_ewar_by_module(ship_id, module_id);
-                let _ = sys.remove_module_cycle(ship_id, module_id).await;
-                if cap_need > 0.0 {
-                    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                        let _ = sys.set_capacitor(ship_id, (cs.capacitor + cap_need).min(cs.max_capacitor)).await;
-                    }
-                }
+                rollback_post_cycle_activation(
+                    ctx,
+                    &sys,
+                    ship_id,
+                    module_id,
+                    mod_type.group_id,
+                    target_id_opt,
+                    cap_need,
+                    pre_undock_invuln_ticks,
+                    cap_drain_target,
+                    remote_shield_amount,
+                    remote_cap_amount,
+                    &pre_target_combat_state,
+                )
+                .await;
                 return Some(Err(e));
             }
 
@@ -2059,29 +2168,33 @@ async fn handle_module_cycles_inner(
             )).await {
                 Ok(rep_opt) => rep_opt,
                 Err(e) => {
-                    ctx.remove_projected_ewar_by_module(ship_id, module_id);
-                    let _ = sys.remove_module_cycle(ship_id, module_id).await;
-                    if cap_need > 0.0 {
-                        if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                            let _ = sys.set_capacitor(ship_id, (cs.capacitor + cap_need).min(cs.max_capacitor)).await;
-                        }
-                    }
+                    rollback_post_cycle_activation(
+                        ctx,
+                        &sys,
+                        ship_id,
+                        module_id,
+                        mod_type.group_id,
+                        target_id_opt,
+                        cap_need,
+                        pre_undock_invuln_ticks,
+                        cap_drain_target,
+                        remote_shield_amount,
+                        remote_cap_amount,
+                        &pre_target_combat_state,
+                    )
+                    .await;
                     return Some(Err(e));
                 }
             };
             if is_in_space {
-                let post_cycle_still_invuln = sys
-                    .get_combat_state(ship_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|cs| cs.undock_invulnerable_remaining_ticks > 0);
-                break_gate_cloak_on_space_action(ctx, &sys, char_id, ship_id).await;
-                if pre_gate_cloak_and_invuln && !post_cycle_still_invuln {
-                    crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
-                        ctx, char_id, ship_id, false, true,
-                    );
-                }
+                commit_space_action_cloak_and_invuln_break(
+                    ctx,
+                    &sys,
+                    char_id,
+                    ship_id,
+                    pre_undock_invuln_ticks,
+                )
+                .await;
             }
             let m_params = [("typeID", m.type_id.to_string()), ("groupID", mod_type.group_id.to_string())];
             for ev in ["moduleActivate", "activateModule", "moduleActivated", "activateShipModule"] {
@@ -2115,11 +2228,7 @@ async fn handle_module_cycles_inner(
             if mod_type.group_id == 330 || m.type_id == 83485 {
                 crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
             }
-            let is_cycle_gated = is_cycle_gated_module_group(mod_type.group_id)
-                || matches!(
-                    mod_type.group_id,
-                    53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 771 | 1245 | 1674 | 4500 | 4805 | 4807
-                );
+            let is_cycle_gated = is_cycle_gated_module_group(mod_type.group_id) || is_weapon;
             if is_cycle_gated || (repeat == 0 && reactivation_delay_s > 0.0) {
                 let total_delay = if mod_type.group_id == 40 {
                     duration_s.max(reactivation_delay_s)
@@ -2366,16 +2475,92 @@ fn finalize_target_combat_hooks<'a>(
     })
 }
 
+fn clear_projected_ewar_and_recompute_tp(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    ship_id: i64,
+    module_id: i64,
+    mod_group_id: u32,
+    target_id_opt: Option<i64>,
+) {
+    ctx.remove_projected_ewar_by_module(ship_id, module_id);
+    if mod_group_id == 379 {
+        if let Some(tid) = target_id_opt {
+            let tp_mult = ctx.effective_target_painter_multiplier(tid);
+            sys.try_recompute_combat_attributes(tid, |t_cs| {
+                t_cs.tp_sig_multiplier = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
+            });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rollback_post_cycle_activation(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    ship_id: i64,
+    module_id: i64,
+    mod_group_id: u32,
+    target_id_opt: Option<i64>,
+    cap_need: f64,
+    pre_undock_invuln_ticks: u32,
+    cap_drain_target: f64,
+    remote_shield_amount: f64,
+    remote_cap_amount: f64,
+    pre_target_combat_state: &Option<eve_destiny::CombatState>,
+) {
+    clear_projected_ewar_and_recompute_tp(ctx, sys, ship_id, module_id, mod_group_id, target_id_opt);
+    let _ = sys.remove_module_cycle(ship_id, module_id).await;
+    if cap_need > 0.0 || pre_undock_invuln_ticks > 0 {
+        let _ = sys
+            .modify_combat_state(ship_id, move |cs| {
+                if cap_need > 0.0 {
+                    cs.capacitor = (cs.capacitor + cap_need).min(cs.max_capacitor);
+                }
+                if pre_undock_invuln_ticks > 0 {
+                    cs.undock_invulnerable_remaining_ticks = pre_undock_invuln_ticks;
+                }
+            })
+            .await;
+    }
+    if let (Some(tid), Some(pre_t_cs)) = (target_id_opt, pre_target_combat_state.as_ref()) {
+        if cap_drain_target > 0.0 || remote_shield_amount > 0.0 || remote_cap_amount > 0.0 {
+            let restore_cap = pre_t_cs.capacitor;
+            let restore_shield = pre_t_cs.shield_hp;
+            let restore_cap_needed = cap_drain_target > 0.0 || remote_cap_amount > 0.0;
+            let restore_shield_needed = remote_shield_amount > 0.0;
+            let _ = sys
+                .modify_combat_state(tid, move |t_cs| {
+                    if restore_cap_needed {
+                        t_cs.capacitor = restore_cap;
+                    }
+                    if restore_shield_needed {
+                        t_cs.shield_hp = restore_shield;
+                    }
+                })
+                .await;
+        }
+    }
+}
+
 async fn finish_space_activation(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
     is_in_space: bool,
     char_id: i64,
     ship_id: i64,
+    pre_undock_invuln_ticks: u32,
     res: Result<PyRep, BridgeRpcError>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if is_in_space && res.is_ok() {
-        break_gate_cloak_on_space_action(ctx, sys, char_id, ship_id).await;
+        commit_space_action_cloak_and_invuln_break(
+            ctx,
+            sys,
+            char_id,
+            ship_id,
+            pre_undock_invuln_ticks,
+        )
+        .await;
     }
     Some(res)
 }
@@ -2389,10 +2574,15 @@ fn activation_requires_explicit_target(
     mod_group_id: u32,
     is_weapon: bool,
 ) -> bool {
-    if matches!(mod_group_id, 1122 | 650 | 82) {
+    if matches!(
+        mod_group_id,
+        1122 | 650 | 82
+            | 52 | 65 | 68 | 71 | 201 | 208 | 291 | 379 | 1672
+            | 41 | 67 | 209 | 290 | 325 | 585 | 1697 | 1698 | 2018
+    ) {
         return true;
     }
-    let is_missile_launcher = matches!(mod_group_id, 506..=511 | 524 | 771 | 1245 | 1674);
+    let is_missile_launcher = is_missile_launcher_group(mod_group_id);
     if !is_weapon && !is_missile_launcher {
         return false;
     }
