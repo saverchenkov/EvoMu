@@ -862,3 +862,95 @@ fn gate_cloak_expiry_and_proximity_decloak_emit_single_add_balls2_to_observers_8
     );
     assert!(!park.combat_states[&3].was_cloaked_last_tick);
 }
+
+#[test]
+fn warp_exit_zeros_velocity_and_emits_zero_set_ball_velocity_with_zero_drift() {
+    let mut park = Ballpark::new(30_000_142);
+    let start = DVec3::ZERO;
+    let dest = DVec3::new(500_000.0, 0.0, 0.0);
+
+    let obs = make_ball(
+        1,
+        dest + DVec3::new(0.0, 5_000.0, 0.0),
+        DVec3::ZERO,
+        MovementMode::Stop,
+    );
+    let ship = make_ball(2, start, DVec3::ZERO, MovementMode::Stop);
+    park.add_ball(obs);
+    park.add_ball(ship);
+    park.set_mode(2, MovementMode::new_warp(start, dest, 3.0))
+        .expect("start warp");
+    let _ = park.drain_observer_events(1);
+    park.pending_events.clear();
+
+    let mut landed_events = None;
+    for _ in 0..120 {
+        let tick_pending = park.step(1.0);
+        let obs_evs = park.drain_observer_events(1);
+        if matches!(park.balls[&2].mode, MovementMode::Stop) {
+            landed_events = Some((tick_pending, obs_evs));
+            break;
+        }
+    }
+
+    let (pending_evs, obs_evs) = landed_events.expect("ship warp must reach MovementMode::Stop");
+    let landed_ball = &park.balls[&2];
+    assert_eq!(
+        landed_ball.velocity,
+        DVec3::ZERO,
+        "warp exit must zero velocity instead of clamping to subwarp max_velocity (#1454)"
+    );
+    assert_eq!(landed_ball.speed_fraction, 0.0);
+    let landing_pos = landed_ball.position;
+
+    for ev_stream in [&pending_evs, &obs_evs] {
+        let stop_idx = ev_stream
+            .iter()
+            .position(|e| matches!(e, DestinyEvent::Stop { ball_id: 2 }))
+            .expect("Stop event emitted on warp exit");
+        let pos_idx = ev_stream
+            .iter()
+            .position(|e| matches!(e, DestinyEvent::SetBallPosition { ball_id: 2, .. }))
+            .expect("SetBallPosition event emitted on warp exit");
+        let vel_idx = ev_stream
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    DestinyEvent::SetBallVelocity {
+                        ball_id: 2,
+                        velocity
+                    } if *velocity == [0.0, 0.0, 0.0]
+                )
+            })
+            .expect("zero SetBallVelocity event emitted on warp exit (#1454)");
+        let sfx_idx = ev_stream
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    DestinyEvent::OnSpecialFX {
+                        ball_id: 2,
+                        guid,
+                        is_active: false,
+                        ..
+                    } if guid == "effects.Warping"
+                )
+            })
+            .expect("warping stop FX emitted on warp exit");
+        assert!(pos_idx < stop_idx);
+        assert!(stop_idx < vel_idx);
+        assert!(vel_idx < sfx_idx);
+    }
+
+    for _ in 0..20 {
+        park.step(1.0);
+    }
+    assert_eq!(
+        park.balls[&2].position, landing_pos,
+        "landed ship must have zero post-warp drift over 20 ticks (#1454)"
+    );
+    assert_eq!(park.balls[&2].velocity, DVec3::ZERO);
+    assert_eq!(park.balls[&2].speed_fraction, 0.0);
+}
+

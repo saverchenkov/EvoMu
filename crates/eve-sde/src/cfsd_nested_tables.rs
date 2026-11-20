@@ -34,6 +34,9 @@ impl CfsdBuf<'_> {
             self.bytes(pos, 4)?.try_into().expect("4 bytes"),
         ))
     }
+    pub(crate) fn i32(&self, pos: usize) -> Result<i32, SdeError> {
+        Ok(self.u32(pos)? as i32)
+    }
     pub(crate) fn u64(&self, pos: usize) -> Result<u64, SdeError> {
         Ok(u64::from_le_bytes(
             self.bytes(pos, 8)?.try_into().expect("8 bytes"),
@@ -56,6 +59,16 @@ impl CfsdBuf<'_> {
         std::str::from_utf8(self.bytes(abs, len)?)
             .map(str::to_string)
             .map_err(|e| SdeError::InvalidSchema(format!("cfsd string: {e}")))
+    }
+    pub(crate) fn i32_list_at(&self, rel: u64) -> Result<Vec<i32>, SdeError> {
+        if rel == 0 {
+            return Ok(Vec::new());
+        }
+        let (at, n) = self.counted(rel)?;
+        if n > self.0.len() / 4 {
+            return Err(corrupt("i32 list count", at));
+        }
+        (0..n).map(|i| self.i32(at + i * 4)).collect()
     }
     /// Positions of every entry of a `cfsd` hash dict whose bucket table starts at `abs`
     /// (bucket count stored at `abs - 8`), with entries `stride` bytes apart.
@@ -366,8 +379,8 @@ impl SdeRegistry {
         self.load_cfsd_nested("res:/staticdata/challenges.fsdbinary")
     }
 
-    /// Loads the 46 activity IDs from `res:/staticdata/newactivities.fsdbinary` (`stride = 88`).
-    pub fn load_new_activity_ids(&self) -> Result<std::collections::BTreeSet<i64>, SdeError> {
+    /// Loads all decoded records from `res:/staticdata/newactivities.fsdbinary` (`stride = 88`).
+    pub fn load_new_activities(&self) -> Result<BTreeMap<i64, NewActivityRecord>, SdeError> {
         const RES_PATH: &str = "res:/staticdata/newactivities.fsdbinary";
         let path = self.cdn_resource_path(RES_PATH)?;
         let raw = std::fs::read(&path)
@@ -381,9 +394,42 @@ impl SdeRegistry {
         }
         let buf = CfsdBuf(&raw);
         let count = buf.u64(40)? as usize;
-        let mut out = std::collections::BTreeSet::new();
+        let mut out = BTreeMap::new();
         for rec in buf.dict_entries(56, 88)? {
-            out.insert(buf.u64(rec)? as i64);
+            let activity_id = buf.u64(rec)? as i64;
+            let mask = buf.u32(rec + 80)?;
+            let record = NewActivityRecord {
+                activity_id,
+                banner_path: buf.str_at(buf.u64(rec + 8)?)?,
+                end_datetime: buf.str_at(buf.u64(rec + 16)?)?,
+                icon_path: buf.str_at(buf.u64(rec + 24)?)?,
+                integer_list_parameter: if mask & 0x2 != 0 {
+                    buf.i32_list_at(buf.u64(rec + 32)?)?
+                } else {
+                    Vec::new()
+                },
+                start_datetime: buf.str_at(buf.u64(rec + 40)?)?,
+                url: if mask & 0x8 != 0 {
+                    Some(buf.str_at(buf.u64(rec + 48)?)?)
+                } else {
+                    None
+                },
+                banner_event: buf.i32(rec + 56)?,
+                hint_id: buf.i32(rec + 60)?,
+                info_id: if mask & 0x1 != 0 {
+                    Some(buf.i32(rec + 64)?)
+                } else {
+                    None
+                },
+                integer_parameter: if mask & 0x4 != 0 {
+                    Some(buf.i32(rec + 68)?)
+                } else {
+                    None
+                },
+                introduce_id: buf.i32(rec + 72)?,
+                name_id: buf.i32(rec + 76)?,
+            };
+            out.insert(activity_id, record);
         }
         if out.len() != count {
             return Err(SdeError::InvalidSchema(format!(
@@ -392,6 +438,11 @@ impl SdeRegistry {
             )));
         }
         Ok(out)
+    }
+
+    /// Loads the 46 activity IDs from `res:/staticdata/newactivities.fsdbinary` (`stride = 88`).
+    pub fn load_new_activity_ids(&self) -> Result<std::collections::BTreeSet<i64>, SdeError> {
+        Ok(self.load_new_activities()?.into_keys().collect())
     }
 
     /// Cached shipcaster, starter-shipcaster, landing-pad, and under-construction component
@@ -588,5 +639,24 @@ pub struct ShipcasterSdeComponents {
     pub starter_shipcasters: BTreeMap<TypeId, (SolarSystemId, i64)>,
     pub under_construction: BTreeMap<TypeId, UnderConstructionSpec>,
 }
+
+/// Decoded record from V24.01 `res:/staticdata/newactivities.fsdbinary` (`stride = 88`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewActivityRecord {
+    pub activity_id: i64,
+    pub banner_path: String,
+    pub start_datetime: String,
+    pub end_datetime: String,
+    pub icon_path: String,
+    pub url: Option<String>,
+    pub banner_event: i32,
+    pub name_id: i32,
+    pub introduce_id: i32,
+    pub hint_id: i32,
+    pub info_id: Option<i32>,
+    pub integer_parameter: Option<i32>,
+    pub integer_list_parameter: Vec<i32>,
+}
+
 #[cfg(test)] #[path = "cfsd_nested_tables_unit_tests.rs"] mod cfsd_nested_tables_unit_tests;
 

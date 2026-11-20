@@ -5,7 +5,8 @@
 //! against `SdeRegistry` and `evomu_sde.sqlite`.
 
 use eve_sde::{
-    attr_ids, EffectModifierSpec, PlanetSchematicTypeEntry, SdeRegistry, TypeMaterialEntry,
+    attr_ids, EffectModifierSpec, NewActivityRecord, PlanetSchematicTypeEntry, SdeRegistry,
+    TypeMaterialEntry,
 };
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
@@ -209,7 +210,7 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
     // parity: sde:res:/staticdata/schools.fsdbinary, sde:res:/staticdata/factions.fsdbinary, sde:res:/staticdata/npccorporations.fsdbinary
     // parity: sde:res:/staticdata/marketgroups.fsdbinary, sde:res:/staticdata/schematics.fsdbinary, sde:res:/staticdata/stationoperations.fsdbinary
     // parity: sde:res:/staticdata/stationservices.fsdbinary, sde:res:/staticdata/dynamicitemattributes.fsdbinary, sde:res:/staticdata/spacecomponentsbytype.fsdbinary
-    // parity: sde:res:/staticdata/dogmaattributes.fsdbinary, sde:res:/staticdata/dogmaeffects.fsdbinary
+    // parity: sde:res:/staticdata/dogmaattributes.fsdbinary, sde:res:/staticdata/dogmaeffects.fsdbinary, sde:res:/staticdata/newactivities.fsdbinary
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("real V24.01 SDE database must open");
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
@@ -1302,6 +1303,164 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
         attested.push("sde:res:/staticdata/spacecomponentsbytype.fsdbinary");
     }
 
+    // 21. newactivities.fsdbinary (46 records, stride 88)
+    {
+        let (raw, recs) = load_and_verify_cfsd_records(
+            &resfiles_dir,
+            &sde,
+            "res:/staticdata/newactivities.fsdbinary",
+            88,
+        );
+        assert_eq!(recs.len(), 46);
+        let activity_ids = sde
+            .load_new_activity_ids()
+            .expect("load_new_activity_ids must succeed");
+        let activities = sde
+            .load_new_activities()
+            .expect("load_new_activities must succeed");
+        assert_eq!(activity_ids.len(), 46);
+        assert_eq!(activities.len(), 46);
+
+        let mut int_param_count = 0usize;
+        let mut int_list_non_empty = 0usize;
+        for rec in recs {
+            let activity_id = read_i64_le(&raw, rec);
+            assert!(activity_id > 0);
+            assert!(activity_ids.contains(&activity_id));
+            let mask = read_u32_le(&raw, rec + 80);
+            let integer_list_parameter = if mask & 0x2 != 0 {
+                read_cfsd_u32_vec(&raw, read_u64_le(&raw, rec + 32))
+                    .into_iter()
+                    .map(|v| v as i32)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let expected = NewActivityRecord {
+                activity_id,
+                banner_path: read_cfsd_str(&raw, read_u64_le(&raw, rec + 8)),
+                end_datetime: read_cfsd_str(&raw, read_u64_le(&raw, rec + 16)),
+                icon_path: read_cfsd_str(&raw, read_u64_le(&raw, rec + 24)),
+                integer_list_parameter,
+                start_datetime: read_cfsd_str(&raw, read_u64_le(&raw, rec + 40)),
+                url: (mask & 0x8 != 0)
+                    .then(|| read_cfsd_str(&raw, read_u64_le(&raw, rec + 48))),
+                banner_event: read_i32_le(&raw, rec + 56),
+                hint_id: read_i32_le(&raw, rec + 60),
+                info_id: (mask & 0x1 != 0).then(|| read_i32_le(&raw, rec + 64)),
+                integer_parameter: (mask & 0x4 != 0).then(|| read_i32_le(&raw, rec + 68)),
+                introduce_id: read_i32_le(&raw, rec + 72),
+                name_id: read_i32_le(&raw, rec + 76),
+            };
+            assert!(!expected.banner_path.is_empty());
+            assert!(!expected.start_datetime.is_empty());
+            assert!(!expected.end_datetime.is_empty());
+            assert!(!expected.icon_path.is_empty());
+            assert!(expected.banner_event > 0);
+            assert!(expected.name_id > 0);
+            assert!(expected.introduce_id > 0);
+            assert!(expected.hint_id > 0);
+            if expected.integer_parameter.is_some() {
+                int_param_count += 1;
+            }
+            if !expected.integer_list_parameter.is_empty() {
+                int_list_non_empty += 1;
+            }
+            let actual = activities
+                .get(&activity_id)
+                .expect("activity_id in sde.load_new_activities()");
+            assert_eq!(actual, &expected);
+        }
+        assert_eq!(int_param_count, 34);
+        assert_eq!(int_list_non_empty, 8);
+
+        assert_eq!(
+            activities[&36],
+            NewActivityRecord {
+                activity_id: 36,
+                banner_path:
+                    "res:/UI/Texture/classes/NewFeatureNotify/2_SeptemberSeason _1218x580.png"
+                        .to_string(),
+                start_datetime: "2020-09-01 11:00".to_string(),
+                end_datetime: "2020-09-28 11:00".to_string(),
+                icon_path: "res:/UI/Texture/Icons/notifications/notificationIcon_33.png"
+                    .to_string(),
+                url: None,
+                banner_event: 3,
+                name_id: 570_152,
+                introduce_id: 570_153,
+                hint_id: 570_154,
+                info_id: None,
+                integer_parameter: None,
+                integer_list_parameter: Vec::new(),
+            }
+        );
+        assert_eq!(
+            activities[&39],
+            NewActivityRecord {
+                activity_id: 39,
+                banner_path:
+                    "res:/UI/Texture/classes/NewFeatureNotify/5_Defense_pack_1218x580.png"
+                        .to_string(),
+                start_datetime: "2020-09-01 11:00".to_string(),
+                end_datetime: "2021-05-01 11:00".to_string(),
+                icon_path: "res:/UI/Texture/Icons/notifications/notificationIcon_174.png"
+                    .to_string(),
+                url: None,
+                banner_event: 2,
+                name_id: 570_146,
+                introduce_id: 570_147,
+                hint_id: 570_148,
+                info_id: None,
+                integer_parameter: None,
+                integer_list_parameter: vec![55_700],
+            }
+        );
+        assert_eq!(
+            activities[&42],
+            NewActivityRecord {
+                activity_id: 42,
+                banner_path:
+                    "res:/UI/Texture/classes/NewFeatureNotify/NationalDay_02_1218x580.png"
+                        .to_string(),
+                start_datetime: "2020-09-28 11:00".to_string(),
+                end_datetime: "2020-10-31 11:00".to_string(),
+                icon_path: "res:/UI/Texture/Icons/notifications/notificationIcon_33.png"
+                    .to_string(),
+                url: None,
+                banner_event: 3,
+                name_id: 571_107,
+                introduce_id: 571_108,
+                hint_id: 571_109,
+                info_id: None,
+                integer_parameter: None,
+                integer_list_parameter: Vec::new(),
+            }
+        );
+        assert_eq!(
+            activities[&86],
+            NewActivityRecord {
+                activity_id: 86,
+                banner_path:
+                    "res:/UI/Texture/classes/NewFeatureNotify/BattleshipCer_Banner_v1.png"
+                        .to_string(),
+                start_datetime: "2021-09-01 11:00".to_string(),
+                end_datetime: "2021-10-10 11:00".to_string(),
+                icon_path: "res:/UI/Texture/Icons/notifications/notificationIcon_174.png"
+                    .to_string(),
+                url: None,
+                banner_event: 1,
+                name_id: 587_121,
+                introduce_id: 587_122,
+                hint_id: 587_123,
+                info_id: None,
+                integer_parameter: Some(87),
+                integer_list_parameter: Vec::new(),
+            }
+        );
+        attested.push("sde:res:/staticdata/newactivities.fsdbinary");
+    }
+
     // Domain checks for Agents, Dungeons, Missions, Epic Arcs, and Node Graphs (.fsdbinary tables)
     for ag in sde.agents.values() {
         assert!(!ag.name.is_empty());
@@ -1352,7 +1511,7 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
         assert!(ng.node_count > 0);
     }
 
-    assert_eq!(attested.len(), 20);
+    assert_eq!(attested.len(), 21);
     attested.push("plan:T-1");
     attested.push("plan:D-2");
     eve_testkit::attest(&attested);
