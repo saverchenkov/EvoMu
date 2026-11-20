@@ -1664,23 +1664,40 @@ fn npc_kill_faction_standings_highest_loss_wins_tick_and_legacy_note_compat() {
 fn npc_kill_faction_standings_group_exclusion_before_attr562_and_wh_sleepers() {
     let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
     sde.groups
-        .insert(925, mk_standing_test_group(925, 22, "Infrastructure Hub"));
+        .insert(925, mk_standing_test_group(925, 11, "FW Infrastructure Hub"));
+    sde.groups.insert(
+        1_167,
+        mk_standing_test_group(1_167, 11, "FW Caldari State Frigate"),
+    );
     sde.groups.insert(
         983,
         mk_standing_test_group(983, 11, "Deadspace Sleeper Sleepless Patroller"),
     );
     sde.groups
         .insert(4_036, mk_standing_test_group(4_036, 11, "Sleeper Entities"));
-    // Deliberately assign positive attr 562 to excluded groups to prove group exclusion runs BEFORE attr 562.
+    // Deliberately assign category_id 11 + positive attr 562 to excluded groups so
+    // resolve_npc_kill_standing_loss_spec passes the category_id == 11 gate and proves
+    // is_excluded_non_standing_npc_group runs BEFORE attr 562.
     sde.types.insert(
         29_302,
         mk_standing_test_type(
             29_302,
             925,
-            22,
+            11,
             "Caldari Infrastructure Hub",
             Some(500_001),
             Some(0.05),
+        ),
+    );
+    sde.types.insert(
+        32_914,
+        mk_standing_test_type(
+            32_914,
+            1_167,
+            11,
+            "State Frigate",
+            Some(500_001),
+            Some(0.005),
         ),
     );
     sde.types.insert(
@@ -1716,10 +1733,27 @@ fn npc_kill_faction_standings_group_exclusion_before_attr562_and_wh_sleepers() {
     let t0 = 1_700_001_000_u64;
     spawn_standing_test_char(&ctx, char_id, k_sys, None);
 
+    assert!(is_excluded_non_standing_npc_group(925));
+    assert!(is_excluded_non_standing_npc_group(1_167));
+    assert_eq!(
+        resolve_npc_kill_standing_loss_spec(&ctx.sde, 29_302, Some(500_001), None, k_sys),
+        None,
+        "Category 11 excluded FW i-Hub group 925 with positive attr 562 must resolve to None"
+    );
+    assert_eq!(
+        resolve_npc_kill_standing_loss_spec(&ctx.sde, 32_914, Some(500_001), None, k_sys),
+        None,
+        "Category 11 excluded FW guard group 1167 with positive attr 562 must resolve to None"
+    );
     assert!(
         apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 29_302, Some(500_001), None, t0)
             .is_empty(),
         "excluded FW i-Hub group 925 with positive attr 562 must yield zero standing loss"
+    );
+    assert!(
+        apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 32_914, Some(500_001), None, t0)
+            .is_empty(),
+        "excluded FW plex guard group 1167 with positive attr 562 must yield zero standing loss"
     );
     assert!(
         apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 30_188, Some(500_024), None, t0)
@@ -1789,6 +1823,20 @@ fn npc_kill_faction_standings_verified_against_real_sqlite_sde() {
     assert_eq!(trig.faction_id, Some(500_026));
     let expected_trig_loss = trig.default_attributes.get(&562).copied().unwrap_or(0.0);
     assert!(expected_trig_loss > 0.30);
+
+    let ihub = sde
+        .types
+        .get(&29_302)
+        .expect("real SDE type 29302 Caldari Infrastructure Hub");
+    assert_eq!(ihub.group_id, 925);
+    assert_eq!(ihub.category_id, 11);
+
+    let fw_guard = sde
+        .types
+        .get(&32_914)
+        .expect("real SDE type 32914 State Frigate");
+    assert_eq!(fw_guard.group_id, 1_167);
+    assert_eq!(fw_guard.category_id, 11);
 
     let ctx = ServerContext::with_sde_and_repository(
         sde,

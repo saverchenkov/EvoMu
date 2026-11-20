@@ -167,6 +167,52 @@ pub fn step_dynamic_bounty_multiplier(
     rate
 }
 
+fn resolve_npc_standing_hint(
+    ctx: &ServerContext,
+    sys_id: u32,
+    ball_id: i64,
+) -> (Option<u32>, Option<i64>) {
+    let explicit_faction_id = with_combat_runtime(ctx, |rt| {
+        rt.npc_entities
+            .get(&ball_id)
+            .or_else(|| rt.destroyed_npc_cache.get(&ball_id))
+            .map(|n| n.faction_id)
+            .filter(|&f| f > 0)
+    })
+    .or_else(|| {
+        ctx.npc_spawns
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&sys_id)
+            .and_then(|mgr| mgr.entities.get(&ball_id))
+            .map(|e| e.faction_id)
+            .filter(|&f| f > 0)
+    });
+    let owner_id_opt = ctx
+        .db
+        .with_snapshot(|snap| snap.items.get(&ball_id).map(|it| it.owner_id))
+        .filter(|&oid| oid > 0);
+    (explicit_faction_id, owner_id_opt)
+}
+
+fn apply_legacy_npc_kill_standing_loss(
+    ctx: &ServerContext,
+    sys_id: u32,
+    killer_char_id: i64,
+    npc_type_id: u32,
+    standing_hint: (Option<u32>, Option<i64>),
+) {
+    crate::services::agents_missions::agents_standings_arcs::apply_npc_kill_faction_standing_loss(
+        ctx,
+        sys_id,
+        killer_char_id,
+        npc_type_id,
+        standing_hint.0,
+        standing_hint.1,
+        ctx.now_unix(),
+    );
+}
+
 pub async fn handle_legacy_and_ess(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -900,18 +946,24 @@ pub async fn handle_legacy_and_ess(
                 _ => shot_dmg,
             };
 
-            let Some((applied_dmg, destroyed, _)) =
-                (match sys_handle.apply_damage(target_ball_id, scaled_dmg).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Some(Err(BridgeRpcError {
-                            code: "CombatApplicationFailed".into(),
-                            message: e,
-                            client_error: None,
-                        }))
-                    }
-                })
-            else {
+            let primary_standing_hint = if player_target_info.is_none() {
+                resolve_npc_standing_hint(ctx, sys_id, target_ball_id)
+            } else {
+                (None, None)
+            };
+            let Some((applied_dmg, destroyed, _)) = (match sys_handle
+                .apply_damage_with_attacker(target_ball_id, scaled_dmg, Some(char_id))
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "CombatApplicationFailed".into(),
+                        message: e,
+                        client_error: None,
+                    }))
+                }
+            }) else {
                 return Some(Err(BridgeRpcError {
                     code: "TargetNotInSpace".into(),
                     message: format!("Target ball {target_ball_id} no longer exists"),
@@ -921,6 +973,7 @@ pub async fn handle_legacy_and_ess(
 
             // Apply Vorton Projector secondary arcs to chained nearby targets using each arc target's missile_damage_factor
             let mut destroyed_arc_ids = Vec::new();
+            let mut destroyed_arc_kills = Vec::new();
             for arc_ball_id in &vorton_secondary_targets {
                 let arc_dmg = if let Ok(Some((_, arc_ball))) =
                     sys_handle.get_ball_snapshot(*arc_ball_id).await
@@ -941,14 +994,26 @@ pub async fn handle_legacy_and_ess(
                 } else {
                     scaled_dmg
                 };
-                if let Ok(Some((_, arc_destroyed, _))) =
-                    sys_handle.apply_damage(*arc_ball_id, arc_dmg).await
+                let arc_standing_hint = resolve_npc_standing_hint(ctx, sys_id, *arc_ball_id);
+                if let Ok(Some((_, arc_destroyed, arc_ball))) = sys_handle
+                    .apply_damage_with_attacker(*arc_ball_id, arc_dmg, Some(char_id))
+                    .await
                 {
                     if arc_destroyed {
                         ctx.living_world.mark_convoy_destroyed(*arc_ball_id);
                         destroyed_arc_ids.push(*arc_ball_id);
+                        destroyed_arc_kills.push((arc_ball.type_id, arc_standing_hint));
                     }
                 }
+            }
+            for (arc_type_id, arc_standing_hint) in destroyed_arc_kills {
+                apply_legacy_npc_kill_standing_loss(
+                    ctx,
+                    sys_id,
+                    char_id,
+                    arc_type_id,
+                    arc_standing_hint,
+                );
             }
 
             if active_convoy_opt.is_some() && destroyed {
@@ -1012,6 +1077,13 @@ pub async fn handle_legacy_and_ess(
                         Ok::<_, std::convert::Infallible>(kid)
                     })
                     .unwrap();
+                apply_legacy_npc_kill_standing_loss(
+                    ctx,
+                    sys_id,
+                    char_id,
+                    target_ball.type_id,
+                    primary_standing_hint,
+                );
                 return Some(Ok(PyRep::keyval([
                     ("targetID", PyRep::Integer(target_id)),
                     ("convoyID", PyRep::Integer(target_ball_id)),
@@ -1359,6 +1431,13 @@ pub async fn handle_legacy_and_ess(
 
             match res {
                 Ok((kill_id, wreck_id)) => {
+                    apply_legacy_npc_kill_standing_loss(
+                        ctx,
+                        sys_id,
+                        char_id,
+                        target_ball.type_id,
+                        primary_standing_hint,
+                    );
                     Some(Ok(PyRep::keyval([
                         ("targetID", PyRep::Integer(target_id)),
                         ("appliedDamage", PyRep::Real(applied_dmg)),
