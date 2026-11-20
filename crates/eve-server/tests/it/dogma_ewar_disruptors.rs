@@ -45,7 +45,7 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
     assert_eq!(damp_scan_rng, 1.0, "Targeting range script zeroes scan res reduction");
     assert!(damp_range_rng < damp_range_un, "Scripted range dampening must double range reduction");
 
-    let base_victim_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
+    let base_victim_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
         .expect("ItemGetInfo baseline victim ship");
     let base_victim_range = extract_item_attr(&base_victim_info, 76);
     let base_victim_scan = extract_item_attr(&base_victim_info, 564);
@@ -58,7 +58,7 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
         &[PyRep::Integer(damp_mod_id), PyRep::String("remoteSensorDampFalloff".into()), PyRep::Integer(victim_id), PyRep::Integer(1)],
         &kw, None,
     ).await.expect("Activate unscripted Remote Sensor Dampener I");
-    let damp_un_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
+    let damp_un_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
         .expect("ItemGetInfo victim under unscripted Sensor Dampener");
     let victim_range_un = extract_item_attr(&damp_un_info, 76);
     let victim_scan_un = extract_item_attr(&damp_un_info, 564);
@@ -86,7 +86,7 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
         &[PyRep::Integer(damp_mod_id), PyRep::String("remoteSensorDampFalloff".into()), PyRep::Integer(victim_id), PyRep::Integer(1)],
         &kw, None,
     ).await.expect("Activate Range-scripted Remote Sensor Dampener I");
-    let damp_rng_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
+    let damp_rng_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
         .expect("ItemGetInfo victim under Range-scripted Sensor Dampener");
     let victim_range_scr = extract_item_attr(&damp_rng_info, 76);
     let victim_scan_rng_scr = extract_item_attr(&damp_rng_info, 564);
@@ -109,7 +109,7 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
         &[PyRep::Integer(damp_mod_id), PyRep::String("remoteSensorDampFalloff".into()), PyRep::Integer(victim_id), PyRep::Integer(1)],
         &kw, None,
     ).await.expect("Activate ScanRes-scripted Remote Sensor Dampener I");
-    let damp_scan_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
+    let damp_scan_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
         .expect("ItemGetInfo victim under ScanRes-scripted Sensor Dampener");
     let victim_range_scan_scr = extract_item_attr(&damp_scan_info, 76);
     let victim_scan_scr = extract_item_attr(&damp_scan_info, 564);
@@ -301,10 +301,73 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
         &[PyRep::Integer(tp_mod_id), PyRep::String("targetGunneryMaxRangeAndTrackingSpeedBonusHostile".into()), PyRep::Integer(victim_id), PyRep::Integer(1)],
         &kw, None,
     ).await.expect("Activate Target Painter I via dogmaIM.Activate");
-    let tp_norm_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
+    let tp_norm_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
         .expect("ItemGetInfo victim under Target Painter I");
     let victim_sig_norm = extract_item_attr(&tp_norm_info, 552);
     assert!(victim_sig_norm > base_victim_sig * 1.24, "Activated Target Painter I must bloom victim signatureRadius (552) by >=25%");
+
+    // R2-P1-1: Foreign on-grid caller inspecting victim_id receives sanitized public hull metadata
+    // only (no private invItem, no EWAR/fitted dogma profile) and does not populate cold cache or
+    // mutate victim DB state.
+    ctx.ship_fittings.write().unwrap().remove(&victim_id);
+    let (epoch_before, tx_before) = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    let online_before = ctx.db.with_snapshot(|snap| snap.module_online_states.clone());
+    let foreign_tp_info = ctx
+        .dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None)
+        .await
+        .expect("foreign on-grid ItemGetInfo victim ship");
+    assert_eq!(
+        foreign_tp_info.dict_get("invItem"),
+        Some(&PyRep::None),
+        "Foreign on-grid ItemGetInfo must omit private invItem"
+    );
+    assert_eq!(
+        foreign_tp_info.dict_get("dynamicAttributes"),
+        Some(&PyRep::Dict(Vec::new())),
+        "Foreign on-grid ItemGetInfo must strip dynamicAttributes"
+    );
+    assert_eq!(
+        foreign_tp_info.dict_get("activeEffects"),
+        Some(&PyRep::Dict(Vec::new())),
+        "Foreign on-grid ItemGetInfo must omit activeEffects"
+    );
+    let victim_type_id = foreign_tp_info
+        .dict_get("typeID")
+        .and_then(PyRep::as_i64)
+        .expect("victim typeID") as u32;
+    let hull_defaults = &ctx
+        .sde
+        .show_info_for_type(victim_type_id)
+        .expect("victim hull show_info")
+        .default_attributes;
+    let foreign_sig = extract_item_attr(&foreign_tp_info, 552);
+    assert!(
+        (foreign_sig - hull_defaults[&552]).abs() < 1e-6 && foreign_sig < victim_sig_norm,
+        "Foreign on-grid ItemGetInfo must expose hull default signatureRadius ({}) without Target Painter EWAR bloom ({victim_sig_norm}), got {foreign_sig}",
+        hull_defaults[&552]
+    );
+    assert!(
+        (extract_item_attr(&foreign_tp_info, 76) - hull_defaults[&76]).abs() < 1e-6,
+        "Foreign on-grid ItemGetInfo must expose hull default maxTargetRange"
+    );
+    assert!(
+        (extract_item_attr(&foreign_tp_info, 564) - hull_defaults[&564]).abs() < 1e-6,
+        "Foreign on-grid ItemGetInfo must expose hull default scanResolution"
+    );
+    assert!(
+        !ctx.ship_fittings.read().unwrap().contains_key(&victim_id),
+        "Foreign on-grid ItemGetInfo must not trigger ctx.fit or populate cold ship_fittings cache"
+    );
+    assert_eq!(
+        (ctx.db.state_epoch(), ctx.db.tx_commit_count()),
+        (epoch_before, tx_before),
+        "Foreign on-grid ItemGetInfo must not commit DB state mutations"
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.module_online_states.clone()),
+        online_before,
+        "Foreign on-grid ItemGetInfo must not alter victim module online states"
+    );
     assert_eq!((victim_sig_norm / base_victim_sig * 100.0).round() as i64, 125);
     ctx.dispatch_rpc(
         sess, "dogmaIM", None, "Deactivate",
@@ -318,7 +381,7 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
         &[PyRep::Integer(tp_mod_id), PyRep::String("targetGunneryMaxRangeAndTrackingSpeedBonusHostile".into()), PyRep::Integer(victim_id), PyRep::Integer(1)],
         &kw, None,
     ).await.expect("Activate Overloaded Target Painter I");
-    let tp_ovl_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
+    let tp_ovl_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(victim_id)], &kw, None).await
         .expect("ItemGetInfo victim under Overloaded Target Painter I");
     let victim_sig_ovl = extract_item_attr(&tp_ovl_info, 552);
     assert!(victim_sig_ovl > victim_sig_norm, "Overloaded Target Painter I must bloom victim signatureRadius more than non-overloaded");

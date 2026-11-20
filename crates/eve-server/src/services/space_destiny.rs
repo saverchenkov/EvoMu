@@ -15,10 +15,19 @@ use std::time::{Duration, Instant};
 const UPDATE_STATE_COOLDOWN_TICKS: u64 = 5;
 const UPDATE_STATE_COOLDOWN_WALL: Duration = Duration::from_secs(5);
 
+pub(crate) fn take_pending_structure_set_state(
+    ctx: &ServerContext,
+    session_id: u64,
+    char_id: i64,
+) -> Option<i64> {
+    ctx.take_pending_structure_view_outside_set_state(session_id, char_id)
+}
+
 /// Clears any per-session `beyonce.UpdateStateRequest` cooldown for `(session_id, char_id)` so a
 /// lag-resync or re-attachment immediately delivers a fresh `SetState` snapshot (`#1169`).
 pub(crate) fn reset_update_state_rate_limit(ctx: &ServerContext, session_id: u64, char_id: i64) {
     ctx.systems.clear_explicit_update_state_guard(session_id, char_id);
+    ctx.clear_pending_structure_view_outside_set_state(session_id, char_id);
 }
 
 pub use eve_db::EssReservePulseState;
@@ -798,6 +807,7 @@ pub(crate) async fn handle_update_state_request(
     handle_update_state_request_inner(ctx, session, bound_entry, false).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn push_set_state_with_guard_and_bootstrap(
     ctx: &ServerContext,
     session: &SessionState,
@@ -807,6 +817,7 @@ async fn push_set_state_with_guard_and_bootstrap(
     handle: &crate::system_actor::SystemHandle,
     is_explicit_rpc: bool,
     force_bypass_cooldown: bool,
+    queue_set_state: bool,
 ) -> Result<(), BridgeRpcError> {
     let was_bootstrapped = ctx.is_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
     let current_tick = handle.query_current_tick().await.unwrap_or(0);
@@ -850,14 +861,25 @@ async fn push_set_state_with_guard_and_bootstrap(
         }
     }
     if should_push_set_state {
-        handle
-            .push_set_state(observer_ball_id)
-            .await
-            .map_err(|e| BridgeRpcError {
-                code: "DestinyQueryFailed".into(),
-                message: e,
-                client_error: None,
-            })?;
+        if queue_set_state {
+            handle
+                .push_set_state(observer_ball_id)
+                .await
+                .map_err(|e| BridgeRpcError {
+                    code: "DestinyQueryFailed".into(),
+                    message: e,
+                    client_error: None,
+                })?;
+            ctx.clear_pending_structure_view_outside_set_state(session.session_id, char_id);
+        } else {
+            ctx.set_pending_structure_view_outside_set_state(
+                session.session_id,
+                char_id,
+                observer_ball_id,
+            );
+        }
+    } else if !queue_set_state {
+        ctx.clear_pending_structure_view_outside_set_state(session.session_id, char_id);
     }
     ctx.mark_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
     crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(
@@ -960,6 +982,7 @@ async fn handle_update_state_request_inner(
             &handle,
             is_explicit_rpc,
             !had_ball,
+            false,
         )
         .await?;
         return Ok(PyRep::None);
@@ -1161,6 +1184,7 @@ async fn handle_update_state_request_inner(
         &handle,
         is_explicit_rpc,
         spawned_new_ball || forced_stop_warp || did_warp_finish,
+        true,
     )
     .await?;
     Ok(PyRep::None)

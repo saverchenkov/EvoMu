@@ -22,8 +22,8 @@ import subprocess
 
 import review_lib as rl
 
-RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v3.json"
-RATCHET_STAT_FILENAME = "ratchet_stat_index_v3.json"
+RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v4.json"
+RATCHET_STAT_FILENAME = "ratchet_stat_index_v4.json"
 
 # Protected open RFC/architecture umbrella trackers (plus #933 until all C-9 ratchets reach 0).
 DEFAULT_UMBRELLA_ISSUES = frozenset({898, 899, 900, 901, 916, 921, 922, 923, 931, 932, 933})
@@ -111,6 +111,115 @@ ARCH_DEBT_PATTERNS = {
     ),
     "positional_rpc_args_index": re.compile(r"\bargs\s*\.\s*(?:first\s*\(\s*\)|get\s*\(\s*\d+\s*\))"),
     "stringly_bridge_rpc_error_code": re.compile(r"\bBridgeRpcError\s*\{\s*code\s*:\s*\""),
+}
+
+# Custom arch_debt scanners mirroring crates/eve-testkit/src/arch_debt_ratchet.rs (TT-09)
+SLASH_CMD_PREFIX_RE = re.compile(r'(?:strip_prefix|starts_with)\s*\(\s*"/')
+ROUTER_GRACE_FN_RE = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+BALLPARK_LOCK_RE = re.compile(r"\bballpark\s*\.\s*(?:read|write|try_read|try_write|lock)\s*\(")
+
+# Companion stringly BridgeRpcError bypass scanners (TT-11 / #1195)
+STRINGLY_ERR_CONST_RE = re.compile(r"\bconst\s+[A-Z0-9_]*ERR[A-Z0-9_]*\s*:\s*&(?:'static\s+)?str\b")
+STRINGLY_ERR_NONLIT_CODE_RE = re.compile(
+    r"\bcode\s*:\s*(?:[A-Za-z_][A-Za-z0-9_:]*\s*\.\s*(?:into|to_string)\s*\(|String\s*::\s*from\s*\(\s*[A-Za-z_][A-Za-z0-9_:]*\s*\))"
+)
+STRINGLY_ERR_HELPER_FN_RE = re.compile(
+    r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]*>)?\s*\(([^)]{0,300})\)\s*->\s*([^{;]{0,120})\{"
+)
+STRINGLY_ERR_CODE_PARAM_RE = re.compile(
+    r"\bcode\s*:\s*(?:&(?:'[a-z_]+\s+)?str\b|impl\s+Into\s*<\s*String\s*>|String\b)"
+)
+STRINGLY_ERR_BYPASS_REL = ".agents/skills/evomu-adversarial-review/references/stringly_error_bypass_ratchet.json"
+
+
+def strip_comments_and_cfg_tests_keep_literals(raw, fully_stripped=None, prod_stripped=None):
+    """Strip Rust line/block comments and `#[cfg(test)]` items while keeping string/char literals intact,
+    matching `eve-testkit/src/arch_debt_ratchet.rs::strip_comments_and_cfg_tests_keep_literals`."""
+    if fully_stripped is None:
+        fully_stripped = strip_rust_comments_and_literals(raw)
+    if prod_stripped is None:
+        prod_stripped = strip_cfg_test_items(fully_stripped)
+    out = list(raw)
+    n = len(raw)
+    pos = 0
+    while pos < n:
+        m = LEX_START_RE.search(raw, pos)
+        if not m:
+            break
+        s = m.start()
+        tok = m.group(0)
+        if tok.startswith("//"):
+            for k in range(s, m.end()):
+                if out[k] != "\n":
+                    out[k] = " "
+            pos = m.end()
+        elif tok == "/*":
+            depth = 1
+            cur = m.end()
+            while cur < n and depth > 0:
+                n_open = raw.find("/*", cur)
+                n_close = raw.find("*/", cur)
+                if n_close < 0:
+                    cur = n
+                    break
+                if 0 <= n_open < n_close:
+                    depth += 1
+                    cur = n_open + 2
+                else:
+                    depth -= 1
+                    cur = n_close + 2
+            for k in range(s, cur):
+                if out[k] != "\n":
+                    out[k] = " "
+            pos = cur
+        elif m.group(1) is not None:
+            closing = '"' + m.group(1)
+            end_q = raw.find(closing, m.end())
+            pos = n if end_q < 0 else end_q + len(closing)
+        elif tok.endswith("'"):
+            pos = m.end()
+        else:
+            sm = STR_BODY_RE.match(raw, m.end())
+            pos = sm.end() if sm else n
+    if len(fully_stripped) == n and len(prod_stripped) == n and fully_stripped != prod_stripped:
+        for k in range(n):
+            if fully_stripped[k] != prod_stripped[k] and out[k] != "\n":
+                out[k] = " "
+    return "".join(out)
+
+
+def _count_slash_command_prefix_parse(text):
+    return len(SLASH_CMD_PREFIX_RE.findall(text))
+
+
+def _count_router_binding_grace_helpers(text):
+    if "grace" not in text:
+        return 0
+    count = 0
+    for fn_name in ROUTER_GRACE_FN_RE.findall(text):
+        is_per_method = (
+            (fn_name.startswith("allocate_transition_grace_")
+             and fn_name.endswith("_binding")
+             and fn_name != "allocate_transition_grace_binding_for_departed_kinds")
+            or fn_name.startswith("grace_bound_object_for_inflight_")
+            or (fn_name.startswith("has_transition_grace_") and fn_name.endswith("_binding"))
+        )
+        if is_per_method:
+            count += 1
+    return count
+
+
+def _count_ballpark_locks_outside_system_actor(text):
+    if "ballpark" not in text:
+        return 0
+    return len(BALLPARK_LOCK_RE.findall(text))
+
+
+# Custom scanners map: rule_name -> (counter_fn, default_strip_literals, default_path_include, default_path_exclude)
+ARCH_DEBT_CUSTOM_SCANNERS = {
+    "slash_command_prefix_parse": (_count_slash_command_prefix_parse, False, None, None),
+    "router_binding_grace_helpers": (_count_router_binding_grace_helpers, True, "router/binding.rs", None),
+    "ballpark_locks_outside_system_actor": (_count_ballpark_locks_outside_system_actor, True, None, "system_actor"),
 }
 
 
@@ -1223,19 +1332,175 @@ def _iter_arch_debt_entries(doc):
     ]
 
 
-def check_arch_debt_ratchet(root, rel_path="crates/eve-testkit/ratchets/arch_debt_ratchet.json"):
-    """Conditionally validate `arch_debt_ratchet.json` (#1197) when present."""
+def _scan_stringly_error_bypass_file(prod):
+    """Count TT-11 stringly BridgeRpcError bypass vectors in comment/literal/cfg(test)-stripped prod source."""
+    c_const = len(STRINGLY_ERR_CONST_RE.findall(prod))
+    c_nonlit = 0
+    c_hdefs = 0
+    c_hcalls = 0
+    if "BridgeRpcError" in prod:
+        c_nonlit = len(STRINGLY_ERR_NONLIT_CODE_RE.findall(prod))
+        helper_names = set()
+        for m in STRINGLY_ERR_HELPER_FN_RE.finditer(prod):
+            fn_name, params, ret = m.group(1), m.group(2), m.group(3)
+            if "BridgeRpcError" in ret and STRINGLY_ERR_CODE_PARAM_RE.search(params):
+                c_hdefs += 1
+                helper_names.add(fn_name)
+        for fn_name in sorted(helper_names):
+            all_calls = len(re.findall(r"(?<![A-Za-z0-9_.])\b" + re.escape(fn_name) + r"\s*\(", prod))
+            def_cnt = len(re.findall(r"\bfn\s+" + re.escape(fn_name) + r"\s*(?:<[^>]*>)?\s*\(", prod))
+            c_hcalls += max(0, all_calls - def_cnt)
+    return {
+        "const_err_str_defs": c_const,
+        "bridge_rpc_error_nonlit_code": c_nonlit,
+        "bridge_rpc_error_helper_defs": c_hdefs,
+        "bridge_rpc_error_helper_calls": c_hcalls,
+    }
+
+
+def _check_stringly_error_bypass_cached(
+    root,
+    rel_path=STRINGLY_ERR_BYPASS_REL,
+    bypass_cache=None,
+    stat_bypass=None,
+):
+    """Validate companion stringly BridgeRpcError bypass ratchet (TT-11 / #1195)."""
     full_path = os.path.join(root, rel_path)
     if not os.path.isfile(full_path):
-        return []
+        # For pre-rebase real worktrees that have `.agents/` and `arch_debt_ratchet.json`,
+        # fall back to the running gate's own reference file. Synthetic tempdirs stay isolated.
+        if (
+            rel_path == STRINGLY_ERR_BYPASS_REL
+            and os.path.isdir(os.path.join(root, ".agents"))
+            and os.path.isfile(os.path.join(root, "crates/eve-testkit/ratchets/arch_debt_ratchet.json"))
+        ):
+            fallback = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "references",
+                "stringly_error_bypass_ratchet.json",
+            )
+            if os.path.isfile(fallback):
+                full_path = fallback
+            else:
+                return [], False, False
+        else:
+            return [], False, False
+
     try:
         doc = _read_json(full_path)
     except (OSError, ValueError) as e:
-        return [("RATCHET_ARCH_DEBT", "Failed to parse %s: %s" % (rel_path, e), rel_path, 1)]
+        return [("RATCHET_ARCH_DEBT", "Failed to parse %s: %s" % (rel_path, e), rel_path, 1)], False, False
+
+    rules = doc.get("rules") if isinstance(doc, dict) else None
+    if not isinstance(rules, dict) or not rules:
+        return [("RATCHET_ARCH_DEBT", "%s missing non-empty `rules` map" % rel_path, rel_path, 1)], False, False
+
+    src_dir = os.path.join(root, "crates", "eve-server", "src")
+    if not os.path.isdir(src_dir):
+        return [], False, False
+
+    known_keys = (
+        "const_err_str_defs",
+        "bridge_rpc_error_nonlit_code",
+        "bridge_rpc_error_helper_defs",
+        "bridge_rpc_error_helper_calls",
+    )
+    violations = []
+    for k in rules:
+        if k not in known_keys:
+            violations.append(("RATCHET_ARCH_DEBT", "Unknown stringly-error bypass rule '%s'" % k, rel_path, 1))
+
+    obs = {k: [0, 0] for k in known_keys}
+    dirty = False
+    stat_dirty = False
+    for p in sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)):
+        rel = os.path.relpath(p, src_dir).replace("\\", "/")
+        if is_test_only_rel_path(rel):
+            continue
+        rec = None
+        sig = _file_sig(p) if stat_bypass is not None else None
+        if stat_bypass is not None:
+            st_hit = stat_bypass.get(rel)
+            if st_hit and st_hit.get("sig") == sig and isinstance(st_hit.get("rec"), dict):
+                rec = st_hit["rec"]
+        if rec is None:
+            raw_bytes = _read_bytes(p)
+            ckey = "%s:%s" % (rel, hashlib.sha1(raw_bytes).hexdigest()) if bypass_cache is not None else None
+            if bypass_cache is not None and isinstance(bypass_cache.get(ckey), dict):
+                rec = bypass_cache[ckey]
+            else:
+                raw = raw_bytes.decode("utf-8", errors="replace")
+                if "ERR" not in raw and "BridgeRpcError" not in raw:
+                    rec = {k: 0 for k in known_keys}
+                else:
+                    prod = strip_cfg_test_items(strip_rust_comments_and_literals(raw))
+                    rec = _scan_stringly_error_bypass_file(prod)
+                if bypass_cache is not None:
+                    bypass_cache[ckey] = rec
+                    dirty = True
+            if stat_bypass is not None:
+                stat_bypass[rel] = {"sig": sig, "rec": rec}
+                stat_dirty = True
+        for k in known_keys:
+            c = int(rec.get(k, 0) or 0)
+            if c > 0:
+                obs[k][0] += c
+                obs[k][1] += 1
+
+    for k, spec in rules.items():
+        if k not in obs or not isinstance(spec, dict):
+            continue
+        got_occ, got_files = obs[k]
+        max_occ = spec.get("max_occurrences")
+        max_files = spec.get("max_files")
+        if max_occ is not None and got_occ > max_occ:
+            violations.append((
+                "RATCHET_ARCH_DEBT",
+                "Stringly BridgeRpcError bypass metric '%s' regressed above ratchet: found %d occurrences (max %d)"
+                % (k, got_occ, max_occ),
+                rel_path,
+                1,
+            ))
+        if max_files is not None and got_files > max_files:
+            violations.append((
+                "RATCHET_ARCH_DEBT",
+                "Stringly BridgeRpcError bypass metric '%s' file count regressed above ratchet: found %d files (max %d)"
+                % (k, got_files, max_files),
+                rel_path,
+                1,
+            ))
+    return violations, dirty, stat_dirty
+
+
+def check_stringly_error_bypass_ratchet(root, rel_path=STRINGLY_ERR_BYPASS_REL):
+    """Validate companion stringly BridgeRpcError bypass ratchet (TT-11 / #1195)."""
+    viols, _, _ = _check_stringly_error_bypass_cached(root, rel_path=rel_path)
+    return viols
+
+
+def _check_arch_debt_ratchet_cached(
+    root,
+    rel_path="crates/eve-testkit/ratchets/arch_debt_ratchet.json",
+    arch_cache=None,
+    stat_arch=None,
+):
+    """Conditionally validate `arch_debt_ratchet.json` (#1197) when present.
+
+    Enforces ALL configured rules — including custom non-regex scanners (`slash_command_prefix_parse`,
+    `router_binding_grace_helpers`, `ballpark_locks_outside_system_actor`), fails hard on any rule
+    without a compiled scanner/regex/literals (TT-09), and enforces `exact: true` unconditionally (TT-10)."""
+    full_path = os.path.join(root, rel_path)
+    if not os.path.isfile(full_path):
+        return [], False, False
+    try:
+        doc = _read_json(full_path)
+    except (OSError, ValueError) as e:
+        return [("RATCHET_ARCH_DEBT", "Failed to parse %s: %s" % (rel_path, e), rel_path, 1)], False, False
 
     entries = _iter_arch_debt_entries(doc)
     compiled = []
     violations = []
+    needs_keep_literals = False
     for name, spec in entries:
         max_occ = spec.get("max_occurrences", spec.get("max_calls", spec.get("max_count")))
         max_files = spec.get("max_files")
@@ -1254,41 +1519,129 @@ def check_arch_debt_ratchet(root, rel_path="crates/eve-testkit/ratchets/arch_deb
                 1,
             ))
             continue
-        rx = None
+        if max_occ is None and max_files is None:
+            continue
+
+        counter = None
+        rule_key_sig = None
+        default_strip_lit = True
+        default_path_inc = None
+        default_path_exc = None
+
         if isinstance(spec.get("regex"), str) and spec["regex"]:
             try:
                 rx = re.compile(spec["regex"])
             except re.error as e:
                 violations.append(("RATCHET_ARCH_DEBT", "%s has invalid regex: %s" % (name, e), rel_path, 1))
                 continue
+            counter = lambda text, _rx=rx: len(_rx.findall(text))
+            rule_key_sig = ("rx", spec["regex"])
         elif isinstance(spec.get("literals"), list) and spec["literals"]:
-            rx = re.compile("|".join(re.escape(str(x)) for x in spec["literals"] if x))
+            pat = "|".join(re.escape(str(x)) for x in spec["literals"] if x)
+            rx = re.compile(pat)
+            counter = lambda text, _rx=rx: len(_rx.findall(text))
+            rule_key_sig = ("lit", pat)
+        elif name in ARCH_DEBT_CUSTOM_SCANNERS:
+            counter, default_strip_lit, default_path_inc, default_path_exc = ARCH_DEBT_CUSTOM_SCANNERS[name]
+            rule_key_sig = ("custom", name)
         elif name in ARCH_DEBT_PATTERNS:
             rx = ARCH_DEBT_PATTERNS[name]
-        if rx is not None and (max_occ is not None or max_files is not None):
-            compiled.append((name, spec, rx, max_occ, max_files))
+            counter = lambda text, _rx=rx: len(_rx.findall(text))
+            rule_key_sig = ("builtin", rx.pattern)
+        else:
+            violations.append((
+                "RATCHET_ARCH_DEBT",
+                "Architecture debt rule '%s' has no compiled regex, literals, or custom scanner and cannot be enforced (TT-09)"
+                % name,
+                rel_path,
+                1,
+            ))
+            continue
+
+        strip_lit = spec.get("strip_literals")
+        if strip_lit is None:
+            strip_lit = default_strip_lit
+        keep_literals = not bool(strip_lit)
+        needs_keep_literals = needs_keep_literals or keep_literals
+        path_inc = spec.get("path_include") if spec.get("path_include") is not None else default_path_inc
+        path_exc = (
+            spec.get("path_exclude_substring")
+            if spec.get("path_exclude_substring") is not None
+            else default_path_exc
+        )
+        compiled.append((name, spec, counter, max_occ, max_files, keep_literals, path_inc, path_exc, rule_key_sig))
 
     if not compiled:
-        return violations
+        return violations, False, False
 
     src_dir = os.path.join(root, "crates", "eve-server", "src")
     if not os.path.isdir(src_dir):
-        return violations
+        return violations, False, False
+
+    rules_sig_raw = json.dumps(
+        [(n, kl, pi, pe, rks) for n, _, _, _, _, kl, pi, pe, rks in compiled],
+        sort_keys=True,
+    )
+    rules_sig = hashlib.sha1(rules_sig_raw.encode("utf-8")).hexdigest()[:16]
 
     obs = {name: [0, 0] for name, *_ in compiled}
+    dirty = False
+    stat_dirty = False
     for p in sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)):
         rel = os.path.relpath(p, src_dir).replace("\\", "/")
         if is_test_only_rel_path(rel):
             continue
-        raw = _read_text(p)
-        prod = strip_cfg_test_items(strip_rust_comments_and_literals(raw))
-        for name, _, rx, _, _ in compiled:
-            c = len(rx.findall(prod))
-            if c > 0:
+        file_counts = None
+        sig = _file_sig(p) if stat_arch is not None else None
+        if stat_arch is not None:
+            st_hit = stat_arch.get(rel)
+            if (
+                st_hit
+                and st_hit.get("sig") == sig
+                and st_hit.get("rsig") == rules_sig
+                and isinstance(st_hit.get("counts"), dict)
+            ):
+                file_counts = st_hit["counts"]
+        if file_counts is None:
+            raw_bytes = _read_bytes(p)
+            ckey = (
+                "%s:%s:%s" % (rel, rules_sig, hashlib.sha1(raw_bytes).hexdigest())
+                if arch_cache is not None
+                else None
+            )
+            if arch_cache is not None and isinstance(arch_cache.get(ckey), dict):
+                file_counts = arch_cache[ckey]
+            else:
+                raw = raw_bytes.decode("utf-8", errors="replace")
+                fully = strip_rust_comments_and_literals(raw)
+                prod = strip_cfg_test_items(fully)
+                prod_keep = (
+                    strip_comments_and_cfg_tests_keep_literals(raw, fully, prod)
+                    if needs_keep_literals
+                    else None
+                )
+                file_counts = {}
+                for name, _, counter, _, _, keep_literals, path_inc, path_exc, _ in compiled:
+                    if path_inc is not None and rel != path_inc:
+                        continue
+                    if path_exc is not None and path_exc in rel:
+                        continue
+                    target_txt = prod_keep if keep_literals else prod
+                    c = counter(target_txt)
+                    if c > 0:
+                        file_counts[name] = c
+                if arch_cache is not None:
+                    arch_cache[ckey] = file_counts
+                    dirty = True
+            if stat_arch is not None:
+                stat_arch[rel] = {"sig": sig, "rsig": rules_sig, "counts": file_counts}
+                stat_dirty = True
+        for name, c in file_counts.items():
+            if name in obs and c > 0:
                 obs[name][0] += c
                 obs[name][1] += 1
 
-    for name, spec, _, max_occ, max_files in compiled:
+    for name, spec, _, max_occ, max_files, _, _, _, _ in compiled:
         got_occ, got_files = obs[name]
         if max_occ is not None and got_occ > max_occ:
             violations.append((
@@ -1306,16 +1659,30 @@ def check_arch_debt_ratchet(root, rel_path="crates/eve-testkit/ratchets/arch_deb
                 rel_path,
                 1,
             ))
-        if spec.get("exact") is True and os.environ.get("EVOMU_ENFORCE_EXACT_ARCH_DEBT") == "1":
+        if spec.get("exact") is True:
             if max_occ is not None and got_occ < max_occ:
                 violations.append((
                     "RATCHET_ARCH_DEBT",
-                    "Architecture debt pattern '%s' dropped below ratchet (%d < %d); lower %s in the same commit"
+                    "Architecture debt pattern '%s' dropped below exact ratchet (%d < %d); lower %s in the same commit"
                     % (name, got_occ, max_occ, rel_path),
                     rel_path,
                     1,
                 ))
-    return violations
+            if max_files is not None and got_files < max_files:
+                violations.append((
+                    "RATCHET_ARCH_DEBT",
+                    "Architecture debt pattern '%s' file count dropped below exact ratchet (%d < %d); lower %s in the same commit"
+                    % (name, got_files, max_files, rel_path),
+                    rel_path,
+                    1,
+                ))
+    return violations, dirty, stat_dirty
+
+
+def check_arch_debt_ratchet(root, rel_path="crates/eve-testkit/ratchets/arch_debt_ratchet.json"):
+    """Conditionally validate `arch_debt_ratchet.json` (#1197) when present."""
+    viols, _, _ = _check_arch_debt_ratchet_cached(root, rel_path=rel_path)
+    return viols
 
 
 def check_all_ratchets(root, cache_path=None):
@@ -1334,8 +1701,12 @@ def check_all_ratchets(root, cache_path=None):
     src_cache = cache.setdefault("src_files", {})
     it_cache = cache.setdefault("it_files", {})
     lock_cache = cache.setdefault("lock_files", {})
+    arch_cache = cache.setdefault("arch_files", {})
+    bypass_cache = cache.setdefault("bypass_files", {})
     stat_src = stat_idx.setdefault("src_files", {}) if stat_idx is not None else None
     stat_it = stat_idx.setdefault("it_files", {}) if stat_idx is not None else None
+    stat_arch = stat_idx.setdefault("arch_files", {}) if stat_idx is not None else None
+    stat_bypass = stat_idx.setdefault("bypass_files", {}) if stat_idx is not None else None
     dirty = False
     stat_dirty = False
     violations = []
@@ -1563,7 +1934,19 @@ def check_all_ratchets(root, cache_path=None):
         except (OSError, ValueError, KeyError, TypeError) as e:
             violations.append(("RATCHET_CLIENT_COMPAT", "Invalid client_compat ratchet state: %s" % e, compat_ratchet_rel, 1))
 
-    violations.extend(check_arch_debt_ratchet(root))
+    ad_viol, ad_dirty, ad_sdirty = _check_arch_debt_ratchet_cached(
+        root, arch_cache=arch_cache, stat_arch=stat_arch
+    )
+    violations.extend(ad_viol)
+    dirty = dirty or ad_dirty
+    stat_dirty = stat_dirty or ad_sdirty
+
+    sb_viol, sb_dirty, sb_sdirty = _check_stringly_error_bypass_cached(
+        root, bypass_cache=bypass_cache, stat_bypass=stat_bypass
+    )
+    violations.extend(sb_viol)
+    dirty = dirty or sb_dirty
+    stat_dirty = stat_dirty or sb_sdirty
 
     if dirty:
         _save_cache(cache_path, cache)

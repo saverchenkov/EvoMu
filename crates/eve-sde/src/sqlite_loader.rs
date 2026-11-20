@@ -1398,6 +1398,7 @@ impl SdeRegistry {
             skin_licenses,
             skin_materials,
             skins,
+            graphics: HashMap::new(),
         };
 
         if let Ok(ind_acts) = registry.load_industry_activities() {
@@ -1446,6 +1447,10 @@ impl SdeRegistry {
             .ok_or(())
         {
             registry.asteroid_types_by_system = Arc::new(sys_ores);
+        }
+
+        if let Ok(graphics) = registry.load_graphic_ids() {
+            registry.graphics = graphics;
         }
 
         Ok(registry)

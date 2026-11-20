@@ -621,6 +621,12 @@ pub async fn handle(
             let _ = sys_handle.push_set_state(ship.item_id).await;
             crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(ctx, char_id, ship.item_id, 300_000_000);
 
+            let was_view_outside = is_structure
+                && ctx.is_space_ballpark_bootstrapped(
+                    session.session_id,
+                    char_id,
+                    ch.solar_system_id,
+                );
             let undock_spec = crate::router::SessionTransitionSpec::for_kind(
                 char_id,
                 crate::router::TransitionKind::Undock { solar_system_id: ch.solar_system_id },
@@ -628,16 +634,18 @@ pub async fn handle(
             )
             .with_apply_db(false);
             let _ = ctx.execute_session_transition_sync(Some(session), undock_spec);
-            if is_structure {
-                // Upwell undock already pushed SetState(ship_id); View Outside does not
-                // re-call beyonce, while Hangar -> Undock calls GetFormations afterward and
-                // must not trigger a duplicate SetState.
+            if was_view_outside {
+                // View Outside -> Undock keeps the live client Park open without re-running
+                // AddBallpark/GetFormations, so SetState(ego=ship_id) delivers on Undock.
                 ctx.mark_space_ballpark_bootstrapped(
                     session.session_id,
                     char_id,
                     ch.solar_system_id,
                 );
             } else {
+                // Hangar -> Undock (both NPC station and Upwell hangar) destroys the hangar view
+                // before OnAddBallpark and calls GetFormations/MachoBindObject afterward; defer
+                // ballpark bootstrap until those post-OnAddBallpark calls.
                 ctx.clear_space_ballpark_bootstrapped(char_id);
             }
             if let Ok(Some(cs)) = sys_handle.get_combat_state(ship.item_id).await {
