@@ -4567,41 +4567,143 @@ fn json_mentions_any_id(val: &Value, ids: &[i64]) -> bool {
     }
 }
 
-fn struct_ext_b_slice(raw: Option<&String>, b_ids: &[i64]) -> Option<Value> {
-    let raw = raw?;
-    let val: Value = serde_json::from_str(raw).ok()?;
-    let Value::Object(map) = val else {
-        return json_mentions_any_id(&val, b_ids).then_some(val);
-    };
-    let mut out = serde_json::Map::new();
-    for (field, fval) in map {
-        match fval {
-            Value::Object(inner) => {
-                let kept: serde_json::Map<String, Value> = inner
-                    .into_iter()
-                    .filter(|(k, v)| text_mentions_any_id(k, b_ids) || json_mentions_any_id(v, b_ids))
-                    .collect();
-                if !kept.is_empty() {
-                    out.insert(field, Value::Object(kept));
-                }
-            }
-            Value::Array(items) => {
-                let kept: Vec<Value> = items
-                    .into_iter()
-                    .filter(|v| json_mentions_any_id(v, b_ids))
-                    .collect();
-                if !kept.is_empty() {
-                    out.insert(field, Value::Array(kept));
-                }
-            }
-            other => {
-                if json_mentions_any_id(&other, b_ids) {
-                    out.insert(field, other);
-                }
-            }
-        }
+fn is_entity_id_field(field: &str) -> bool {
+    field == "id"
+        || field.ends_with("_id")
+        || field.ends_with("_ids")
+        || field.ends_with("Id")
+        || field.ends_with("Ids")
+        || matches!(
+            field,
+            "owner"
+                | "character"
+                | "user"
+                | "reporter"
+                | "reported"
+                | "target"
+                | "issuer"
+                | "assignee"
+                | "members"
+                | "occupants"
+                | "participants"
+                | "recipients"
+                | "targets"
+                | "invites"
+                | "allow_list"
+                | "deny_list"
+        )
+}
+
+fn is_owner_id_field(field: &str) -> bool {
+    matches!(
+        field,
+        "owner_char_id" | "owner_id" | "char_id" | "character_id" | "user_id"
+    )
+}
+
+fn is_numeric_entity_key(k: &str) -> bool {
+    !k.is_empty()
+        && k.split(':')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn non_b_actor_ids() -> [i64; 18] {
+    [
+        CHAR_A_ID,
+        USER_A_ID as i64,
+        CORP_A_ID,
+        CHAR_A_CEO_ID,
+        USER_A_CEO_ID as i64,
+        CORP_A_OFFICE_ID,
+        CORP_A_OFFICE_ITEM_ID,
+        CORP_A_STRUCTURE_ID,
+        CHAR_C_ID,
+        USER_C_ID as i64,
+        CHAR_D_ID,
+        USER_D_ID as i64,
+        CORP_D_ID,
+        CHAR_E_ID,
+        USER_E_ID as i64,
+        CORP_E_ID,
+        CHAR_F_ID,
+        CORP_F_ID,
+    ]
+}
+
+fn object_directly_identifies_b(
+    map: &serde_json::Map<String, Value>,
+    b_ids: &[i64],
+) -> bool {
+    map.iter().any(|(k, v)| {
+        is_entity_id_field(k)
+            && (v.is_number() || v.is_string())
+            && json_mentions_any_id(v, b_ids)
+    })
+}
+
+fn object_belongs_strictly_to_non_b_owner(
+    map: &serde_json::Map<String, Value>,
+    b_ids: &[i64],
+    non_b_ids: &[i64],
+) -> bool {
+    let owned_by_non_b = map.iter().any(|(k, v)| {
+        is_owner_id_field(k)
+            && (v.is_number() || v.is_string())
+            && json_mentions_any_id(v, non_b_ids)
+            && !json_mentions_any_id(v, b_ids)
+    });
+    if !owned_by_non_b {
+        return false;
     }
-    Some(Value::Object(out))
+    !map.iter()
+        .any(|(k, v)| is_entity_id_field(k) && json_mentions_any_id(v, b_ids))
+}
+
+fn json_b_slice_inner(
+    val: &Value,
+    b_ids: &[i64],
+    non_b_ids: &[i64],
+    top_level: bool,
+) -> Option<Value> {
+    match val {
+        Value::Object(map) => {
+            if !top_level && object_directly_identifies_b(map, b_ids) {
+                return Some(Value::Object(map.clone()));
+            }
+            if !top_level && object_belongs_strictly_to_non_b_owner(map, b_ids, non_b_ids) {
+                return None;
+            }
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if text_mentions_any_id(k, b_ids) {
+                    out.insert(k.clone(), v.clone());
+                } else if is_numeric_entity_key(k) && text_mentions_any_id(k, non_b_ids) {
+                    continue;
+                } else if let Some(sub) = json_b_slice_inner(v, b_ids, non_b_ids, false) {
+                    out.insert(k.clone(), sub);
+                }
+            }
+            (!out.is_empty()).then_some(Value::Object(out))
+        }
+        Value::Array(items) => {
+            let kept: Vec<Value> = items
+                .iter()
+                .filter(|v| json_mentions_any_id(v, b_ids))
+                .cloned()
+                .collect();
+            (!kept.is_empty()).then_some(Value::Array(kept))
+        }
+        other => json_mentions_any_id(other, b_ids).then(|| other.clone()),
+    }
+}
+
+fn note_or_json_b_slice(raw: Option<&String>, b_ids: &[i64]) -> Option<Value> {
+    let raw = raw?;
+    let non_b_ids = non_b_actor_ids();
+    if let Ok(val) = serde_json::from_str::<Value>(raw) {
+        return json_b_slice_inner(&val, b_ids, &non_b_ids, true);
+    }
+    text_mentions_any_id(raw, b_ids).then(|| Value::String(raw.clone()))
 }
 
 fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRuntimeSig, b_ids: &[i64]) -> bool {
@@ -4802,8 +4904,8 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         jump_clones: _,
         active_implants: _,
         items: ref sb_items,
-        transient_items: _,
-        transient_item_attributes: _,
+        transient_items: ref sb_transient_items,
+        transient_item_attributes: ref sb_transient_item_attributes,
         saved_fittings: _,
         market_orders: ref sb_market_orders,
         wallet_journal: ref sb_wallet_journal,
@@ -4887,7 +4989,7 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         corp_shareholders: _,
         starbase_settings: _,
         corp_project_contributors: ref sb_corp_project_contributors,
-        char_research_agents: _,
+        char_research_agents: ref sb_char_research_agents,
         char_medals: _,
         char_scoped_roles: _,
         loyalty_store_offers: _,
@@ -4904,7 +5006,7 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         account_plex_vault: _,
         corp_vote_cases: ref sb_corp_vote_cases,
         corp_vote_ballots: ref sb_corp_vote_ballots,
-        orbital_provision_types: _,
+        orbital_provision_types: ref sb_orbital_provision_types,
         corp_lp_balances: _,
         char_lp_logs: _,
         next_alliance_id: _,
@@ -4945,15 +5047,15 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         pve_special_sites: ref sb_pve_special_sites,
         crab_beacons: ref sb_crab_beacons,
         abyssal_state: ref sb_abyssal_state,
-        dungeon_runtime: _,
+        dungeon_runtime: ref sb_dungeon_runtime,
         dungeon_editor: ref sb_dungeon_editor,
         fob_observatory_state: ref sb_fob_observatory_state,
-        mining_and_ess_state: _,
+        mining_and_ess_state: ref sb_mining_and_ess_state,
         pvp_filament_state: ref sb_pvp_filament_state,
         tourney_state: ref sb_tourney_state,
         deployable_state: ref sb_deployable_state,
         superweapon_runtime: ref sb_superweapon_runtime,
-        insurgency_complex_ops: _,
+        insurgency_complex_ops: ref sb_insurgency_complex_ops,
         node_graph_state: ref sb_node_graph_state,
         seasons_and_campaigns: ref sb_seasons_and_campaigns,
         quasar_commerce: ref sb_quasar_commerce,
@@ -4975,8 +5077,8 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         jump_clones: _,
         active_implants: _,
         items: ref sc_items,
-        transient_items: _,
-        transient_item_attributes: _,
+        transient_items: ref sc_transient_items,
+        transient_item_attributes: ref sc_transient_item_attributes,
         saved_fittings: _,
         market_orders: ref sc_market_orders,
         wallet_journal: ref sc_wallet_journal,
@@ -5060,7 +5162,7 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         corp_shareholders: _,
         starbase_settings: _,
         corp_project_contributors: ref sc_corp_project_contributors,
-        char_research_agents: _,
+        char_research_agents: ref sc_char_research_agents,
         char_medals: _,
         char_scoped_roles: _,
         loyalty_store_offers: _,
@@ -5077,7 +5179,7 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         account_plex_vault: _,
         corp_vote_cases: ref sc_corp_vote_cases,
         corp_vote_ballots: ref sc_corp_vote_ballots,
-        orbital_provision_types: _,
+        orbital_provision_types: ref sc_orbital_provision_types,
         corp_lp_balances: _,
         char_lp_logs: _,
         next_alliance_id: _,
@@ -5118,15 +5220,15 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         pve_special_sites: ref sc_pve_special_sites,
         crab_beacons: ref sc_crab_beacons,
         abyssal_state: ref sc_abyssal_state,
-        dungeon_runtime: _,
+        dungeon_runtime: ref sc_dungeon_runtime,
         dungeon_editor: ref sc_dungeon_editor,
         fob_observatory_state: ref sc_fob_observatory_state,
-        mining_and_ess_state: _,
+        mining_and_ess_state: ref sc_mining_and_ess_state,
         pvp_filament_state: ref sc_pvp_filament_state,
         tourney_state: ref sc_tourney_state,
         deployable_state: ref sc_deployable_state,
         superweapon_runtime: ref sc_superweapon_runtime,
-        insurgency_complex_ops: _,
+        insurgency_complex_ops: ref sc_insurgency_complex_ops,
         node_graph_state: ref sc_node_graph_state,
         seasons_and_campaigns: ref sc_seasons_and_campaigns,
         quasar_commerce: ref sc_quasar_commerce,
@@ -5204,44 +5306,75 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         return true;
     }
 
-    // 2. Target B items, ships, containers, hangars, modules, and structures.
-    let b_item_locs = [
-        fix.b_ship_id,
-        fix.b_space_ship_id,
-        fix.b_cont_id,
-        CORP_B_OFFICE_ID,
-        CORP_B_STRUCTURE_ID,
-    ];
-    let b_item_ids = [
-        fix.b_ship_id,
-        fix.b_space_ship_id,
-        fix.b_cont_id,
-        fix.b_item_id,
-        fix.b_blueprint_id,
-        fix.b_pos_id,
-        CORP_B_OFFICE_ID,
-        CORP_B_OFFICE_ITEM_ID,
-        CORP_B_STRUCTURE_ID,
-    ];
-    let is_b_item = |id: i64, it: &InventoryItemRecord| {
-        it.owner_id == CHAR_B_ID
+    // 2. Target B items, ships, containers, hangars, modules, transient items, and structures.
+    // Build Target B's full dynamic structure, item, transient-item, and jump-clone ID sets
+    // up front so item_positions, applied_ship_skins, module_* maps, and side-stores cover
+    // newly spawned / fitted / nested Target B entities as well as seeded fixtures.
+    let mut b_struct_ids: BTreeSet<i64> =
+        [CORP_B_STRUCTURE_ID, fix.b_pos_id].into_iter().collect();
+    for (&sid, st) in sb_structures.iter().chain(sc_structures.iter()) {
+        if st.owner_corp_id == CORP_B_ID {
+            b_struct_ids.insert(sid);
+        }
+    }
+    let mut b_item_ids: BTreeSet<i64> = b_entity_ids.iter().copied().collect();
+    b_item_ids.extend(b_struct_ids.iter().copied());
+    for cl in [b.jump_clones.get(&CHAR_B_ID), c.jump_clones.get(&CHAR_B_ID)]
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        b_item_ids.insert(cl.jump_clone_id);
+    }
+    loop {
+        let mut added = false;
+        for (&id, it) in sb_items
+            .iter()
+            .chain(sc_items.iter())
+            .chain(sb_transient_items.iter())
+            .chain(sc_transient_items.iter())
+        {
+            if it.owner_id == CHAR_B_ID
+                || it.owner_id == CORP_B_ID
+                || b_item_ids.contains(&id)
+                || b_item_ids.contains(&it.location_id)
+            {
+                added |= b_item_ids.insert(id);
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    let b_all_ids: Vec<i64> = b_item_ids
+        .iter()
+        .copied()
+        .filter(|&id| id >= 100_000)
+        .collect();
+
+    if filtered_entries_changed(sb_items.iter(), sc_items.iter(), |&id, it| {
+        b_item_ids.contains(&id)
+            || it.owner_id == CHAR_B_ID
             || it.owner_id == CORP_B_ID
-            || b_item_locs.contains(&it.location_id)
-            || b_item_ids.contains(&id)
-    };
-    let b_items_before: BTreeMap<i64, &InventoryItemRecord> = b
-        .items
-        .iter()
-        .filter(|(&id, it)| is_b_item(id, it))
-        .map(|(&id, it)| (id, it))
-        .collect();
-    let b_items_after: BTreeMap<i64, &InventoryItemRecord> = c
-        .items
-        .iter()
-        .filter(|(&id, it)| is_b_item(id, it))
-        .map(|(&id, it)| (id, it))
-        .collect();
-    if b_items_before != b_items_after {
+            || b_item_ids.contains(&it.location_id)
+    }) || filtered_entries_changed(
+        sb_transient_items.iter(),
+        sc_transient_items.iter(),
+        |&id, it| {
+            b_item_ids.contains(&id)
+                || it.owner_id == CHAR_B_ID
+                || it.owner_id == CORP_B_ID
+                || b_item_ids.contains(&it.location_id)
+        },
+    ) || filtered_entries_changed(
+        sb_transient_item_attributes.iter(),
+        sc_transient_item_attributes.iter(),
+        |id, _| b_item_ids.contains(id),
+    ) || filtered_entries_changed(
+        sb_orbital_provision_types.iter(),
+        sc_orbital_provision_types.iter(),
+        |id, _| b_item_ids.contains(id),
+    ) {
         return true;
     }
     for &iid in &b_item_ids {
@@ -5293,7 +5426,66 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         before != after
     }
 
-    // Use full `b_entity_ids` (including order/contract/job/fitting/mail/bookmark/killmail/project/petition IDs).
+    // Use full `b_item_ids` / `b_all_ids` (including dynamic items, ships, containers, and fixtures).
+    let b_neg_owner_note_ids: BTreeSet<i64> = [
+        -10_000_099_i64 - CHAR_B_ID,
+        -10_000_018_i64 - CHAR_B_ID,
+        -8_950_000_000_000_i64 - CHAR_B_ID,
+        -(5_100_000_000_000_i64.saturating_add(CHAR_B_ID.abs())),
+        -(5_400_000_000_000_i64.saturating_add(CHAR_B_ID.abs())),
+        -(5_400_000_000_000_i64.saturating_add(CORP_B_ID.abs())),
+    ]
+    .into_iter()
+    .chain(
+        b_struct_ids
+            .iter()
+            .map(|&sid| -(1_000_000_000_000_i64.saturating_add(sid.abs()))),
+    )
+    .chain(
+        b_all_ids
+            .iter()
+            .map(|&id| -(4_000_000_000_000_i64.saturating_add(id.abs()))),
+    )
+    .collect();
+    let owner_notes_b_slice = |notes: &WorldStateSnapshot| {
+        let mut out: BTreeMap<i64, (i64, i64, String, Option<Value>, Option<String>)> =
+            BTreeMap::new();
+        for (&nid, n) in notes.owner_notes.iter() {
+            let direct = n.character_id == CHAR_B_ID
+                || n.character_id == CORP_B_ID
+                || b_item_ids.contains(&n.item_id)
+                || b_item_ids.contains(&nid)
+                || b_neg_owner_note_ids.contains(&nid);
+            if direct {
+                out.insert(
+                    nid,
+                    (
+                        n.character_id,
+                        n.item_id,
+                        n.label.clone(),
+                        None,
+                        Some(n.note.clone()),
+                    ),
+                );
+            } else if nid < 0 || n.character_id < 0 {
+                let label_b = text_mentions_any_id(&n.label, &b_all_ids);
+                let sliced = note_or_json_b_slice(Some(&n.note), &b_all_ids);
+                if label_b || sliced.is_some() {
+                    out.insert(
+                        nid,
+                        (
+                            n.character_id,
+                            n.item_id,
+                            n.label.clone(),
+                            sliced,
+                            label_b.then(|| n.note.clone()),
+                        ),
+                    );
+                }
+            }
+        }
+        out
+    };
     if filtered_entries_changed(b.saved_fittings.iter(), c.saved_fittings.iter(), |&id, f| {
         id == fix.b_fitting_id || f.owner_id == CHAR_B_ID || f.owner_id == CORP_B_ID
     }) || filtered_entries_changed(b.market_orders.iter(), c.market_orders.iter(), |&id, o| {
@@ -5314,9 +5506,8 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         b.bookmark_folders.iter(),
         c.bookmark_folders.iter(),
         |_, f| f.owner_id == CHAR_B_ID || f.owner_id == CORP_B_ID,
-    ) || filtered_entries_changed(b.owner_notes.iter(), c.owner_notes.iter(), |_, n| {
-        n.character_id == CHAR_B_ID
-    }) || filtered_entries_changed(b.char_notes.iter(), c.char_notes.iter(), |k, _| {
+    ) || owner_notes_b_slice(b) != owner_notes_b_slice(c)
+        || filtered_entries_changed(b.char_notes.iter(), c.char_notes.iter(), |k, _| {
         k.0 == CHAR_B_ID
     }) || filtered_entries_changed(
         b.mail_assigned_labels.iter(),
@@ -5472,40 +5663,126 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
     }
 
     // 4. Exhaustive remaining Target B snapshot tables & sub-stores (verified via compiler destructuring).
-    if sb_item_custom_names.get(&-7_700_001) != sc_item_custom_names.get(&-7_700_001)
-        && struct_ext_b_slice(sb_item_custom_names.get(&-7_700_001), &b_entity_ids)
-            != struct_ext_b_slice(sc_item_custom_names.get(&-7_700_001), &b_entity_ids)
-    {
-        return true;
+    // Check all positive Target B item/entity keys, per-char negative keys (-8_800_000 - CHAR_B_ID),
+    // and every negative-key JSON/text side-store (< 0: -7_700_001, -7_700_002, -10_000_003..015, etc.).
+    fn custom_names_b_slice<'a>(
+        iter: impl IntoIterator<Item = (&'a i64, &'a String)>,
+        b_item_ids: &BTreeSet<i64>,
+        b_all_ids: &[i64],
+    ) -> BTreeMap<i64, Value> {
+        let mut out: BTreeMap<i64, Value> = BTreeMap::new();
+        for (&k, v) in iter {
+            if b_item_ids.contains(&k) || k == -8_800_000_i64 - CHAR_B_ID {
+                out.insert(k, Value::String(v.clone()));
+            } else if k < 0 {
+                if let Some(sliced) = note_or_json_b_slice(Some(v), b_all_ids) {
+                    out.insert(k, sliced);
+                }
+            }
+        }
+        out
     }
-    let b_item_ids: BTreeSet<i64> = sb_items
-        .iter()
-        .chain(sc_items.iter())
-        .filter(|(_, it)| {
-            it.owner_id == CHAR_B_ID
-                || it.owner_id == CORP_B_ID
-                || b_entity_ids.contains(&it.item_id)
-                || b_entity_ids.contains(&it.location_id)
-        })
-        .map(|(&id, _)| id)
-        .chain(b_entity_ids.iter().copied())
-        .collect();
-    if filtered_entries_changed(
-        sb_item_custom_names.iter(),
-        sc_item_custom_names.iter(),
-        |id, _| b_item_ids.contains(id),
-    ) {
+    if custom_names_b_slice(sb_item_custom_names.iter(), &b_item_ids, &b_all_ids)
+        != custom_names_b_slice(sc_item_custom_names.iter(), &b_item_ids, &b_all_ids)
+    {
         return true;
     }
     if filtered_entries_changed(
         sb_service_state_blobs.iter(),
         sc_service_state_blobs.iter(),
-        |k, v| text_mentions_any_id(k, &b_entity_ids) || text_mentions_any_id(v, &b_entity_ids),
+        |k, v| text_mentions_any_id(k, &b_all_ids) || text_mentions_any_id(v, &b_all_ids),
     ) || filtered_entries_changed(
         sb_quasar_state_blobs.iter(),
         sc_quasar_state_blobs.iter(),
-        |k, v| text_mentions_any_id(k, &b_entity_ids) || text_mentions_any_id(v, &b_entity_ids),
-    ) {
+        |k, v| text_mentions_any_id(k, &b_all_ids) || text_mentions_any_id(v, &b_all_ids),
+    ) || sb_char_research_agents.get(&CHAR_B_ID) != sc_char_research_agents.get(&CHAR_B_ID)
+        || filtered_entries_changed(
+            sb_dungeon_runtime.instances.iter(),
+            sc_dungeon_runtime.instances.iter(),
+            |_, inst| {
+                inst.owner_char_id == CHAR_B_ID
+                    || inst
+                        .entry_gate_ball_id
+                        .is_some_and(|id| b_item_ids.contains(&id))
+            },
+        )
+        || filtered_entries_changed(
+            sb_dungeon_runtime.homefront_runtimes.iter(),
+            sc_dungeon_runtime.homefront_runtimes.iter(),
+            |_, hf| {
+                hf.entered_pilots.contains_key(&CHAR_B_ID)
+                    || hf.contributions.contains_key(&CHAR_B_ID)
+                    || hf.spawned_ball_ids.iter().any(|id| b_item_ids.contains(id))
+            },
+        )
+        || filtered_entries_changed(
+            sb_mining_and_ess_state.ess_reserve_pulses.iter(),
+            sc_mining_and_ess_state.ess_reserve_pulses.iter(),
+            |_, st| st.reserve_linked_character_id == Some(CHAR_B_ID),
+        )
+        || filtered_entries_changed(
+            sb_mining_and_ess_state.phased_asteroid_fields.iter(),
+            sc_mining_and_ess_state.phased_asteroid_fields.iter(),
+            |_, st| {
+                st.connected_ship_ids.iter().any(|id| b_item_ids.contains(id))
+                    || st.asteroid_ids.iter().any(|id| b_item_ids.contains(id))
+            },
+        )
+        || sb_mining_and_ess_state
+            .moon_fractured_fields
+            .iter()
+            .filter(|entry| b_struct_ids.contains(&entry.0) || b_item_ids.contains(&entry.0))
+            .collect::<Vec<_>>()
+            != sc_mining_and_ess_state
+                .moon_fractured_fields
+                .iter()
+                .filter(|entry| b_struct_ids.contains(&entry.0) || b_item_ids.contains(&entry.0))
+                .collect::<Vec<_>>()
+        || filtered_entries_changed(
+            sb_mining_and_ess_state.mining_ledger_waste.iter(),
+            sc_mining_and_ess_state.mining_ledger_waste.iter(),
+            |&idx, _| {
+                sb_mining_ledger
+                    .get(idx)
+                    .is_some_and(|r| r.character_id == CHAR_B_ID)
+                    || sc_mining_ledger
+                        .get(idx)
+                        .is_some_and(|r| r.character_id == CHAR_B_ID)
+            },
+        )
+        || filtered_entries_changed(
+            sb_insurgency_complex_ops.outpost_raids.iter(),
+            sc_insurgency_complex_ops.outpost_raids.iter(),
+            |_, r| {
+                r.occupants
+                    .iter()
+                    .any(|(cid, sid)| *cid == CHAR_B_ID || b_item_ids.contains(sid))
+                    || r.mordus_defender_ball_id
+                        .is_some_and(|id| b_item_ids.contains(&id))
+                    || r.pirate_defender_ball_id
+                        .is_some_and(|id| b_item_ids.contains(&id))
+            },
+        )
+        || filtered_entries_changed(
+            sb_insurgency_complex_ops.mining_ambushes.iter(),
+            sc_insurgency_complex_ops.mining_ambushes.iter(),
+            |_, a| {
+                b_item_ids.contains(&a.rorqual_ball_id)
+                    || a.pirate_tackler_ids.iter().any(|id| b_item_ids.contains(id))
+                    || a.ore_defender_ids.iter().any(|id| b_item_ids.contains(id))
+            },
+        )
+        || filtered_entries_changed(
+            sb_insurgency_complex_ops.subpoint_remainders.iter(),
+            sc_insurgency_complex_ops.subpoint_remainders.iter(),
+            |k, _| text_mentions_any_id(k, &b_all_ids),
+        )
+        || filtered_entries_changed(
+            sb_insurgency_complex_ops.named_roamer_rolls.iter(),
+            sc_insurgency_complex_ops.named_roamer_rolls.iter(),
+            |k, _| text_mentions_any_id(k, &b_all_ids),
+        )
+    {
         return true;
     }
     if filtered_entries_changed(sb_sessions.iter(), sc_sessions.iter(), |_, s| {
@@ -5720,12 +5997,6 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
     // Mining ledger, moon extractions, observers, corp container logs, project contributors, market meta/txs, corp votes.
     let b_mining_before: Vec<_> = sb_mining_ledger.iter().filter(|r| r.character_id == CHAR_B_ID).collect();
     let b_mining_after: Vec<_> = sc_mining_ledger.iter().filter(|r| r.character_id == CHAR_B_ID).collect();
-    let mut b_struct_ids: BTreeSet<i64> = [CORP_B_STRUCTURE_ID, fix.b_pos_id].into_iter().collect();
-    for (&sid, st) in sb_structures.iter().chain(sc_structures.iter()) {
-        if st.owner_corp_id == CORP_B_ID {
-            b_struct_ids.insert(sid);
-        }
-    }
     let mut b_order_ids: BTreeSet<i64> = [fix.b_order_id].into_iter().collect();
     for (&oid, o) in sb_market_orders.iter().chain(sc_market_orders.iter()) {
         if o.owner_id == CHAR_B_ID || o.owner_id == CORP_B_ID {
