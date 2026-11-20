@@ -29,6 +29,26 @@ ID_RE = r"(?:S|D|P|SP|DG|C|MN|CH|E|SO|T|Q|ESI|PVE|Z|LW)-\d+"
 CITE_RE = re.compile(r"[A-Za-z0-9_./\-]+\.(?:rs|py|md|toml|json|sql|c|sh|txt):\d+")
 
 
+def active_priority_lines():
+    """Extract the pinned `## Active Execution Priority:` section from action_plan.md, if present."""
+    out = []
+    in_sec = False
+    with open(PLAN, encoding="utf-8") as fh:
+        for ln in fh:
+            raw = ln.rstrip("\n")
+            if re.match(r"^## Active Execution Priority\b", raw):
+                in_sec = True
+                out.append(raw)
+                continue
+            if in_sec:
+                if raw.strip() == "---" or raw.startswith("## "):
+                    break
+                out.append(raw)
+    while out and not out[-1].strip():
+        out.pop()
+    return ([""] + out) if out else []
+
+
 def plan_structure():
     phases, cur, titles = [], None, {}
     for ln in open(PLAN, encoding="utf-8"):
@@ -160,6 +180,7 @@ def main():
                int(js.get("DONE", 0)), int(js.get("total", 29)),
                int(js.get("smoke_DONE", 0)), int(js.get("smoke_total", 7)), parked_note),
         ]
+    L += active_priority_lines()
     areas_path = os.path.join(root, "docs", "parity", "feature_areas.json")
     if os.path.exists(areas_path):
         L += feature_area_lines(json.load(open(areas_path, encoding="utf-8"))["areas"], prow)
