@@ -350,10 +350,13 @@ pub fn save_industry_material_monitors(
     );
 }
 
-/// Checks whether `sub.char_id` is authorized to query `sub.flag_id` materials in `sub.owner_id`'s hangar.
+/// Checks whether `sub.char_id` is authorized to query `sub.flag_id` materials in `sub.owner_id`'s hangar
+/// using DB-authoritative corporation membership and location-scoped roles.
 fn can_query_industry_monitor_div(
     ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
     sub: &IndustryMaterialMonitorSub,
+    now_unix: u64,
 ) -> bool {
     if sub.owner_id == sub.char_id {
         return true;
@@ -364,18 +367,19 @@ fn can_query_industry_monitor_div(
     } else {
         0
     };
-    let (is_ceo, roles) = crate::services::fleet_social::get_effective_corp_roles(
+    let required_roles = eve_db::corp_roles::ROLE_DIRECTOR
+        | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+        | div_bits;
+    crate::services::industry_pi::has_corp_monitor_access_in_snap(
         ctx,
-        sub.owner_id,
+        snap,
+        None,
         sub.char_id,
-    );
-    is_ceo
-        || roles == u64::MAX
-        || (roles
-            & (eve_db::corp_roles::ROLE_DIRECTOR
-                | eve_db::corp_roles::ROLE_FACTORY_MANAGER
-                | div_bits))
-            != 0
+        sub.owner_id,
+        Some(sub.location_id).filter(|&id| id > 0),
+        required_roles,
+        now_unix,
+    )
 }
 
 /// Collects total unlocked, non-singleton stack quantities grouped by `type_id`
@@ -452,24 +456,29 @@ pub fn emit_industry_materials_consumed(
         return;
     }
 
+    let now_unix = ctx.now_unix();
     for (monitor_id, sub) in matching_subs {
-        if !can_query_industry_monitor_div(ctx, &sub) {
-            continue;
-        }
-        let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
+        let Some(entries) = ctx.db.with_snapshot(|snap| {
+            if !can_query_industry_monitor_div(ctx, snap, &sub, now_unix) {
+                return None;
+            }
             let avail_map = collect_available_monitor_materials(
                 snap,
                 sub.owner_id,
                 sub.location_id,
                 sub.flag_id,
             );
-            tids.iter()
-                .map(|&tid| {
-                    let avail = avail_map.get(&tid).copied().unwrap_or(0);
-                    (PyRep::Integer(i64::from(tid)), PyRep::Integer(avail))
-                })
-                .collect()
-        });
+            Some(
+                tids.iter()
+                    .map(|&tid| {
+                        let avail = avail_map.get(&tid).copied().unwrap_or(0);
+                        (PyRep::Integer(i64::from(tid)), PyRep::Integer(avail))
+                    })
+                    .collect::<Vec<(PyRep, PyRep)>>(),
+            )
+        }) else {
+            continue;
+        };
         ctx.emit_typed(
             NotificationTarget::Character(sub.char_id),
             OnIndustryMaterials {
@@ -513,11 +522,12 @@ pub fn emit_industry_materials_for_scopes(
         return;
     }
 
+    let now_unix = ctx.now_unix();
     for (monitor_id, sub) in matching_subs {
-        if !can_query_industry_monitor_div(ctx, &sub) {
-            continue;
-        }
-        let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
+        let Some(entries) = ctx.db.with_snapshot(|snap| {
+            if !can_query_industry_monitor_div(ctx, snap, &sub, now_unix) {
+                return None;
+            }
             let mut avail_map = collect_available_monitor_materials(
                 snap,
                 sub.owner_id,
@@ -532,11 +542,15 @@ pub fn emit_industry_materials_for_scopes(
                     avail_map.entry(tid).or_insert(0);
                 }
             }
-            avail_map
-                .into_iter()
-                .map(|(tid, qty)| (PyRep::Integer(i64::from(tid)), PyRep::Integer(qty)))
-                .collect()
-        });
+            Some(
+                avail_map
+                    .into_iter()
+                    .map(|(tid, qty)| (PyRep::Integer(i64::from(tid)), PyRep::Integer(qty)))
+                    .collect::<Vec<(PyRep, PyRep)>>(),
+            )
+        }) else {
+            continue;
+        };
         ctx.emit_typed(
             NotificationTarget::Character(sub.char_id),
             OnIndustryMaterials {

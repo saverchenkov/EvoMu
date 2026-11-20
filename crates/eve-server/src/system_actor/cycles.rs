@@ -92,22 +92,39 @@ pub(crate) fn sync_cycle_from_fit_projection(
     cycle: &mut ActiveModuleCycle,
     fit_projections: &HashMap<BallId, eve_dogma::FitProjection>,
 ) {
-    sync_cycle_from_fit_projection_with_shield_boost_mult(cycle, fit_projections, 1.0);
+    let _ = sync_cycle_from_fit_projection_with_shield_boost_mult(cycle, fit_projections, 1.0);
 }
 
 pub(crate) fn sync_cycle_from_fit_projection_with_shield_boost_mult(
     cycle: &mut ActiveModuleCycle,
     fit_projections: &HashMap<BallId, eve_dogma::FitProjection>,
     shield_boost_multiplier: f64,
-) {
+) -> bool {
     let Some(proj) = fit_projections.get(&cycle.ship_id) else {
-        return;
+        return false;
     };
     let Some(cp) = proj.modules.get(&cycle.module_id) else {
-        return;
+        if let Some(prop) = proj.propulsion.as_ref() {
+            if prop.module_id == cycle.module_id && prop.is_overloaded == cycle.is_overloaded {
+                if prop.speed_boost > 0.0 && prop.speed_boost.is_finite() {
+                    cycle.speed_boost_factor = prop.speed_boost;
+                }
+                if prop.is_mwd
+                    && prop.signature_radius_bonus_pct > 0.0
+                    && prop.signature_radius_bonus_pct.is_finite()
+                {
+                    cycle.hic_sig_multiplier = Some(1.0 + prop.signature_radius_bonus_pct / 100.0);
+                }
+                if prop.mass_addition > 0.0 && prop.mass_addition.is_finite() {
+                    cycle.hic_mass_addition = Some(prop.mass_addition);
+                }
+                return true;
+            }
+        }
+        return false;
     };
     if cp.is_overloaded != cycle.is_overloaded {
-        return;
+        return false;
     }
     if !cycle.grants_interdiction_nullification && cp.duration_ms > 0.0 && cp.duration_ms.is_finite()
     {
@@ -206,6 +223,7 @@ pub(crate) fn sync_cycle_from_fit_projection_with_shield_boost_mult(
     {
         cycle.hull_repair_amount = cp.hull_repair_amount;
     }
+    true
 }
 
 pub(crate) fn compute_missile_effective_damage(
@@ -1789,11 +1807,12 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                     finished_indices.push(idx);
                 } else {
                     if let Some(next_ovl) = cycle.pending_overloaded.take() {
-                        crate::system_actor::cycles_tackle::apply_overload_transition_to_cycle(
+                        crate::system_actor::cycles_tackle::apply_overload_transition_to_cycle_with_projection(
                             cycle,
                             next_ovl,
                             ballpark,
                             sde_opt,
+                            fit_projections.get(&cycle.ship_id),
                         );
                         pending_cycle_actions.push(PendingCycleAction::SyncOverloadState {
                             char_id: cycle.owner_char_id,
@@ -1807,7 +1826,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         .get(&cycle.ship_id)
                         .map(|cs| cs.shield_boost_multiplier)
                         .unwrap_or(1.0);
-                    sync_cycle_from_fit_projection_with_shield_boost_mult(
+                    let _ = sync_cycle_from_fit_projection_with_shield_boost_mult(
                         cycle,
                         fit_projections,
                         shield_boost_mult,
