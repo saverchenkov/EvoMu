@@ -3377,6 +3377,41 @@ class TestPlaytester1200OriginMainCutover(unittest.TestCase):
             self.assertIn("train_skill", pp_gm_s2)
             self.assertIn("open_structure_cosmetics", pp_gm_s2)
 
+    def test_loaded_non_gm_personas_and_stale_memory_omit_open_structure_cosmetics(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state_dir = root / ".playtester"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            # Simulate pre-existing memory.json carrying the stale open_structure_cosmetics acceptance.
+            (state_dir / "memory.json").write_text(
+                json.dumps(
+                    {
+                        "active_persona": {"id": "regression_and_critical_ui"},
+                        "coverage_frontier": [
+                            {
+                                "feature": "quasar.cosmetics.structure_states",
+                                "persona": "regression_and_critical_ui",
+                                "status": "untested",
+                                "acceptance": "Invoke open_structure_cosmetics cleanly via publicGatewaySvc without TimeoutException.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            mem = playtester.PlaytesterMemory(root, git_head="deadbeef")
+            for persona_id in ("regression_and_critical_ui", "social_corp_fleet_and_sovereignty"):
+                mem.maybe_rotate_persona(force_id=persona_id)
+                pp = playtester.build_planner_prompt(
+                    1, root / "screen.png", [], {"active_view": "hangar"}, {}, mem, "deadbeef"
+                )
+                ep = playtester.build_executor_prompt(
+                    1, 1, 1, {"plan_goal": "Test", "max_batch_steps": 1, "steps": [{}]},
+                    root / "screen.png", [], {"active_view": "hangar"}, {}, mem, [],
+                )
+                self.assertNotIn("open_structure_cosmetics", pp)
+                self.assertNotIn("open_structure_cosmetics", ep)
+
 
 class TestBenignClientLogExceptionsFiltering1313(unittest.TestCase):
     _MINIMAP_TRACE = (

@@ -320,10 +320,28 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
         )
         .await
         .expect("GetPublicInfo3");
-    let PyRep::KeyVal(pub_kv) = pub_info else {
-        panic!("Expected KeyVal from GetPublicInfo3");
+    let PyRep::Rowset {
+        columns: pub_cols,
+        rows: pub_rows,
+    } = &pub_info
+    else {
+        panic!("Expected Rowset from GetPublicInfo3, got {pub_info:?}");
     };
-    assert_eq!(pub_kv.get("characterID").and_then(|v| v.as_i64()), Some(char_id));
+    assert_eq!(pub_rows.len(), 1, "GetPublicInfo3 must return exactly 1 row");
+    assert_eq!(pub_rows[0].len(), pub_cols.len());
+    let pub_row: HashMap<&str, &PyRep> = pub_cols
+        .iter()
+        .zip(pub_rows[0].iter())
+        .map(|(c, v)| (c.as_str(), v))
+        .collect();
+    assert_eq!(pub_row.get("characterID").and_then(|v| v.as_i64()), Some(char_id));
+    assert_eq!(pub_row.get("characterName").and_then(|v| v.as_str()), Some("Aura Capsuleer"));
+    assert_eq!(pub_row.get("corporationID").and_then(|v| v.as_i64()), Some(1_000_170));
+    assert_eq!(pub_row.get("bloodlineID").and_then(|v| v.as_i64()), Some(3));
+    assert!(
+        pub_row.get("startDateTime").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
+        "GetPublicInfo3 must populate startDateTime"
+    );
 
     let bio_text = "Experienced industrial capsuleer and researcher.";
     ctx.dispatch_rpc(

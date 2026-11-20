@@ -337,8 +337,25 @@ async fn test_fw_advantage_ranks_and_war_targets() {
         .call("charMgr", None, "GetPublicInfo3", &[PyRep::Integer(char_id)], &kw)
         .await
         .expect("GetPublicInfo3");
-    assert_eq!(pub_info3.dict_get("warFactionID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
-    assert_eq!(pub_info3.dict_get("militiaRank"), Some(&PyRep::Integer(4)));
+    let PyRep::Rowset {
+        columns: pub_cols3,
+        rows: pub_rows3,
+    } = &pub_info3
+    else {
+        panic!("Expected 1-row Rowset from GetPublicInfo3, got {pub_info3:?}");
+    };
+    assert_eq!(pub_rows3.len(), 1, "GetPublicInfo3 must return 1 row");
+    assert_eq!(pub_rows3[0].len(), pub_cols3.len());
+    let row3: HashMap<&str, &PyRep> = pub_cols3
+        .iter()
+        .zip(pub_rows3[0].iter())
+        .map(|(c, v)| (c.as_str(), v))
+        .collect();
+    assert_eq!(row3.get("characterID").copied(), Some(&PyRep::Integer(char_id)));
+    assert_eq!(row3.get("warFactionID").copied(), Some(&PyRep::Integer(FACTION_MINMATAR)));
+    assert_eq!(row3.get("militiaFactionID").copied(), Some(&PyRep::Integer(FACTION_MINMATAR)));
+    assert_eq!(row3.get("militiaRank").copied(), Some(&PyRep::Integer(4)));
+    assert_eq!(row3.get("rank").copied(), Some(&PyRep::Integer(4)));
 
     // ------------------------------------------------------------------------
     // 6. feat:fw.fw-war-targets
