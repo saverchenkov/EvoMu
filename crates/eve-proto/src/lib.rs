@@ -31,6 +31,7 @@ pub use dbrow::{
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use thiserror::Error;
 
 /// Maximum allowed wire frame size (4 MiB) to prevent memory exhaustion on untrusted input.
@@ -95,7 +96,7 @@ impl From<serde_json::Error> for ProtoError {
 }
 
 /// Core algebraic representation of an EVE Online network value (`PyRep`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "$py", content = "val")]
 pub enum PyRep {
     None,
@@ -307,50 +308,84 @@ impl PyRep {
         }
     }
 
+    /// Convenience accessor for dictionary-like containers (`Dict`, `KeyVal`, `Rowset`, `DBRow`, `util.Row`).
+    ///
+    /// Uses an explicit traversal stack so deeply nested containers cannot overflow the call stack.
     pub fn dict_get(&self, key: &str) -> Option<&PyRep> {
-        match self {
-            Self::KeyVal(map) => map.get(key),
-            Self::Dict(entries) => entries
-                .iter()
-                .find(|(k, _)| k.as_str() == Some(key))
-                .map(|(_, v)| v),
-            Self::DBRow { columns, .. } => columns
-                .iter()
-                .find(|(n, _)| n == key)
-                .map(|(_, v)| v),
-            Self::Rowset { columns, rows } | Self::TupleSet { columns, rows } => columns
-                .iter()
-                .position(|c| c == key)
-                .and_then(|idx| rows.first().and_then(|r| r.get(idx))),
-            Self::Object { type_name, args } => {
-                if type_name.ends_with(".Row") || type_name == "Row" {
-                    if let Self::Tuple(parts) = args.as_ref() {
-                        if let (Some(Self::List(cols)), Some(Self::List(vals))) =
-                            (parts.first(), parts.get(1))
-                        {
-                            for (i, c) in cols.iter().enumerate() {
-                                if c.as_str() == Some(key) {
-                                    return vals.get(i);
+        let mut stack = vec![self];
+        while let Some(node) = stack.pop() {
+            match node {
+                Self::KeyVal(map) => {
+                    if let Some(v) = map.get(key) {
+                        return Some(v);
+                    }
+                }
+                Self::Dict(entries) => {
+                    if let Some(v) = entries
+                        .iter()
+                        .find(|(k, _)| k.as_str() == Some(key))
+                        .map(|(_, v)| v)
+                    {
+                        return Some(v);
+                    }
+                }
+                Self::DBRow { columns, .. } => {
+                    if let Some(v) = columns
+                        .iter()
+                        .find(|(n, _)| n == key)
+                        .map(|(_, v)| v)
+                    {
+                        return Some(v);
+                    }
+                }
+                Self::Rowset { columns, rows } | Self::TupleSet { columns, rows } => {
+                    if let Some(v) = columns
+                        .iter()
+                        .position(|c| c == key)
+                        .and_then(|idx| rows.first().and_then(|r| r.get(idx)))
+                    {
+                        return Some(v);
+                    }
+                }
+                Self::Object { type_name, args } => {
+                    if type_name.ends_with(".Row") || type_name == "Row" {
+                        if let Self::Tuple(parts) = args.as_ref() {
+                            if let (Some(Self::List(cols)), Some(Self::List(vals))) =
+                                (parts.first(), parts.get(1))
+                            {
+                                for (i, c) in cols.iter().enumerate() {
+                                    if c.as_str() == Some(key) {
+                                        return vals.get(i);
+                                    }
                                 }
                             }
                         }
                     }
+                    stack.push(args.as_ref());
                 }
-                args.dict_get(key)
+                Self::ObjectEx {
+                    header, dict, list, ..
+                } => {
+                    if let Some(v) = dict
+                        .iter()
+                        .find(|(k, _)| k.as_str() == Some(key))
+                        .map(|(_, v)| v)
+                    {
+                        return Some(v);
+                    }
+                    // Preserve `list.first()` precedence over `header` on LIFO stack.
+                    stack.push(header.as_ref());
+                    if let Some(first) = list.first() {
+                        stack.push(first);
+                    }
+                }
+                Self::Tuple(items) | Self::List(items) => {
+                    stack.extend(items.iter().rev());
+                }
+                _ => {}
             }
-            Self::ObjectEx {
-                header, dict, list, ..
-            } => dict
-                .iter()
-                .find(|(k, _)| k.as_str() == Some(key))
-                .map(|(_, v)| v)
-                .or_else(|| list.first().and_then(|r| r.dict_get(key)))
-                .or_else(|| header.dict_get(key)),
-            Self::Tuple(items) | Self::List(items) => {
-                items.iter().find_map(|it| it.dict_get(key))
-            }
-            _ => None,
         }
+        None
     }
 
     pub fn as_str(&self) -> Option<&str> {
@@ -387,72 +422,1021 @@ impl PyRep {
 
     /// Counts total AST and byte-weight units in this `PyRep` subtree (used to enforce `MAX_DECODED_NODES`
     /// and prevent saved-stream reference memory amplification DoS).
+    ///
+    /// Implemented iteratively so arbitrarily deep synthetic trees never overflow the call stack.
     pub fn node_count(&self) -> usize {
+        if let Some(leaf_weight) = Self::leaf_node_weight(self) {
+            return leaf_weight;
+        }
+        let mut total = 0usize;
+        let mut stack = vec![self];
+        while let Some(node) = stack.pop() {
+            match node {
+                Self::None | Self::Bool(_) | Self::Integer(_) | Self::Real(_) => {
+                    total = total.saturating_add(1);
+                }
+                Self::Buffer(b) | Self::Bytes(b) | Self::Picked(b) => {
+                    total = total.saturating_add(1 + (b.len() / 64));
+                }
+                Self::Token(s) | Self::String(s) => {
+                    total = total.saturating_add(1 + (s.len() / 64));
+                }
+                Self::Tuple(v) | Self::List(v) | Self::PySet(v) | Self::Set(v) => {
+                    total = total.saturating_add(1);
+                    stack.extend(v.iter());
+                }
+                Self::Dict(entries) => {
+                    total = total.saturating_add(1);
+                    for (k, v) in entries {
+                        stack.push(k);
+                        stack.push(v);
+                    }
+                }
+                Self::KeyVal(map) => {
+                    total = total.saturating_add(1);
+                    for (k, v) in map {
+                        total = total.saturating_add(1 + (k.len() / 64));
+                        stack.push(v);
+                    }
+                }
+                Self::Rowset { columns, rows } | Self::TupleSet { columns, rows } => {
+                    total = total.saturating_add(1);
+                    for c in columns {
+                        total = total.saturating_add(1 + (c.len() / 64));
+                    }
+                    for r in rows {
+                        if r.is_empty() {
+                            total = total.saturating_add(1);
+                        } else {
+                            stack.extend(r.iter());
+                        }
+                    }
+                }
+                Self::IndexRowset {
+                    key_column,
+                    columns,
+                    items,
+                } => {
+                    total = total.saturating_add(1 + (1 + (key_column.len() / 64)));
+                    for c in columns {
+                        total = total.saturating_add(1 + (c.len() / 64));
+                    }
+                    for (k, r) in items {
+                        stack.push(k);
+                        if r.is_empty() {
+                            total = total.saturating_add(1);
+                        } else {
+                            stack.extend(r.iter());
+                        }
+                    }
+                }
+                Self::DBRow {
+                    header,
+                    columns,
+                    raw_rle,
+                } => {
+                    total = total.saturating_add(1 + (raw_rle.len() / 64));
+                    stack.push(header.as_ref());
+                    for (c, v) in columns {
+                        total = total.saturating_add(1 + (c.len() / 64));
+                        stack.push(v);
+                    }
+                }
+                Self::Object { type_name, args } => {
+                    total = total.saturating_add(1 + (type_name.len() / 64));
+                    stack.push(args.as_ref());
+                }
+                Self::SubStruct(args)
+                | Self::SubStream(args)
+                | Self::ChecksumedStream { body: args, .. } => {
+                    total = total.saturating_add(1);
+                    stack.push(args.as_ref());
+                }
+                Self::ObjectEx {
+                    header, list, dict, ..
+                } => {
+                    total = total.saturating_add(1);
+                    stack.push(header.as_ref());
+                    stack.extend(list.iter());
+                    for (k, v) in dict {
+                        stack.push(k);
+                        stack.push(v);
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    fn leaf_node_weight(&self) -> Option<usize> {
         match self {
-            Self::None | Self::Bool(_) | Self::Integer(_) | Self::Real(_) => 1,
-            Self::Buffer(b) | Self::Bytes(b) | Self::Picked(b) => 1 + (b.len() / 64),
-            Self::Token(s) | Self::String(s) => 1 + (s.len() / 64),
-            Self::Tuple(v) | Self::List(v) | Self::PySet(v) | Self::Set(v) => 1 + v.iter().map(Self::node_count).sum::<usize>(),
+            Self::None | Self::Bool(_) | Self::Integer(_) | Self::Real(_) => Some(1),
+            Self::Buffer(b) | Self::Bytes(b) | Self::Picked(b) => Some(1 + (b.len() / 64)),
+            Self::Token(s) | Self::String(s) => Some(1 + (s.len() / 64)),
+            _ => None,
+        }
+    }
+
+    fn has_pyrep_children(&self) -> bool {
+        match self {
+            Self::None
+            | Self::Bool(_)
+            | Self::Integer(_)
+            | Self::Real(_)
+            | Self::Buffer(_)
+            | Self::Bytes(_)
+            | Self::Token(_)
+            | Self::String(_)
+            | Self::Picked(_) => false,
+            Self::Tuple(v) | Self::List(v) | Self::PySet(v) | Self::Set(v) => !v.is_empty(),
+            Self::Dict(v) => !v.is_empty(),
+            Self::KeyVal(m) => !m.is_empty(),
+            Self::Rowset { rows, .. } | Self::TupleSet { rows, .. } => !rows.is_empty(),
+            Self::IndexRowset { items, .. } => !items.is_empty(),
+            Self::DBRow {
+                header, columns, ..
+            } => !matches!(header.as_ref(), Self::None) || !columns.is_empty(),
+            Self::Object { args, .. }
+            | Self::SubStruct(args)
+            | Self::SubStream(args)
+            | Self::ChecksumedStream { body: args, .. } => !matches!(args.as_ref(), Self::None),
+            Self::ObjectEx {
+                header, list, dict, ..
+            } => !matches!(header.as_ref(), Self::None) || !list.is_empty() || !dict.is_empty(),
+        }
+    }
+
+    fn drain_children_into(&mut self, out: &mut Vec<PyRep>) {
+        match self {
+            Self::None
+            | Self::Bool(_)
+            | Self::Integer(_)
+            | Self::Real(_)
+            | Self::Buffer(_)
+            | Self::Bytes(_)
+            | Self::Token(_)
+            | Self::String(_)
+            | Self::Picked(_) => {}
+            Self::Tuple(v) | Self::List(v) | Self::PySet(v) | Self::Set(v) => out.append(v),
             Self::Dict(entries) => {
-                1 + entries
-                    .iter()
-                    .map(|(k, v)| k.node_count() + v.node_count())
-                    .sum::<usize>()
+                for (k, v) in entries.drain(..) {
+                    out.push(k);
+                    out.push(v);
+                }
             }
             Self::KeyVal(map) => {
-                1 + map
-                    .iter()
-                    .map(|(k, v)| (1 + (k.len() / 64)) + v.node_count())
-                    .sum::<usize>()
+                for (_, v) in map.drain() {
+                    out.push(v);
+                }
             }
-            Self::Rowset { columns, rows } | Self::TupleSet { columns, rows } => {
-                1 + columns.iter().map(|c| 1 + (c.len() / 64)).sum::<usize>()
-                    + rows
-                        .iter()
-                        .map(|r| r.iter().map(Self::node_count).sum::<usize>().max(1))
-                        .sum::<usize>()
+            Self::Rowset { rows, .. } | Self::TupleSet { rows, .. } => {
+                for mut row in rows.drain(..) {
+                    out.append(&mut row);
+                }
             }
+            Self::IndexRowset { items, .. } => {
+                for (k, mut row) in items.drain(..) {
+                    out.push(k);
+                    out.append(&mut row);
+                }
+            }
+            Self::DBRow {
+                header, columns, ..
+            } => {
+                if !matches!(header.as_ref(), Self::None) {
+                    out.push(std::mem::replace(header.as_mut(), PyRep::None));
+                }
+                for (_, v) in columns.drain(..) {
+                    out.push(v);
+                }
+            }
+            Self::Object { args, .. }
+            | Self::SubStruct(args)
+            | Self::SubStream(args)
+            | Self::ChecksumedStream { body: args, .. } => {
+                if !matches!(args.as_ref(), Self::None) {
+                    out.push(std::mem::replace(args.as_mut(), PyRep::None));
+                }
+            }
+            Self::ObjectEx {
+                header, list, dict, ..
+            } => {
+                if !matches!(header.as_ref(), Self::None) {
+                    out.push(std::mem::replace(header.as_mut(), PyRep::None));
+                }
+                out.append(list);
+                for (k, v) in dict.drain(..) {
+                    out.push(k);
+                    out.push(v);
+                }
+            }
+        }
+    }
+
+    fn try_clone_shallow(&self) -> Option<Self> {
+        match self {
+            Self::None => Some(Self::None),
+            Self::Bool(b) => Some(Self::Bool(*b)),
+            Self::Integer(i) => Some(Self::Integer(*i)),
+            Self::Real(r) => Some(Self::Real(*r)),
+            Self::Buffer(b) => Some(Self::Buffer(b.clone())),
+            Self::Bytes(b) => Some(Self::Bytes(b.clone())),
+            Self::Token(s) => Some(Self::Token(s.clone())),
+            Self::String(s) => Some(Self::String(s.clone())),
+            Self::Picked(b) => Some(Self::Picked(b.clone())),
+            Self::Tuple(v) if v.is_empty() => Some(Self::Tuple(Vec::new())),
+            Self::List(v) if v.is_empty() => Some(Self::List(Vec::new())),
+            Self::PySet(v) if v.is_empty() => Some(Self::PySet(Vec::new())),
+            Self::Set(v) if v.is_empty() => Some(Self::Set(Vec::new())),
+            Self::Dict(v) if v.is_empty() => Some(Self::Dict(Vec::new())),
+            Self::KeyVal(m) if m.is_empty() => Some(Self::KeyVal(HashMap::new())),
+            Self::Rowset { columns, rows } if rows.is_empty() => Some(Self::Rowset {
+                columns: columns.clone(),
+                rows: Vec::new(),
+            }),
+            Self::TupleSet { columns, rows } if rows.is_empty() => Some(Self::TupleSet {
+                columns: columns.clone(),
+                rows: Vec::new(),
+            }),
             Self::IndexRowset {
                 key_column,
                 columns,
                 items,
-            } => {
-                1 + (1 + (key_column.len() / 64))
-                    + columns.iter().map(|c| 1 + (c.len() / 64)).sum::<usize>()
-                    + items
-                        .iter()
-                        .map(|(k, r)| {
-                            k.node_count() + r.iter().map(Self::node_count).sum::<usize>().max(1)
-                        })
-                        .sum::<usize>()
-            }
-            Self::DBRow {
-                header,
-                columns,
-                raw_rle,
-            } => {
-                1 + (raw_rle.len() / 64)
-                    + header.node_count()
-                    + columns
-                        .iter()
-                        .map(|(c, v)| (1 + (c.len() / 64)) + v.node_count())
-                        .sum::<usize>()
-            }
-            Self::Object { type_name, args } => 1 + (type_name.len() / 64) + args.node_count(),
-            Self::SubStruct(args)
-            | Self::SubStream(args)
-            | Self::ChecksumedStream { body: args, .. } => 1 + args.node_count(),
-            Self::ObjectEx {
-                header, list, dict, ..
-            } => {
-                1 + header.node_count()
-                    + list.iter().map(Self::node_count).sum::<usize>()
-                    + dict
-                        .iter()
-                        .map(|(k, v)| k.node_count() + v.node_count())
-                        .sum::<usize>()
+            } if items.is_empty() => Some(Self::IndexRowset {
+                key_column: key_column.clone(),
+                columns: columns.clone(),
+                items: Vec::new(),
+            }),
+            _ => None,
+        }
+    }
+    /// Drops this `PyRep` subtree using an explicit heap stack so arbitrarily deep synthetic trees
+    /// can be freed in `O(1)` stack space without requiring `impl Drop for PyRep` (which would break
+    /// owned pattern destructuring such as `let PyRep::List(items) = rep` across workspace callers).
+    pub fn drop_iterative(mut self) {
+        if !self.has_pyrep_children() {
+            return;
+        }
+        let mut stack = Vec::new();
+        self.drain_children_into(&mut stack);
+        while let Some(mut node) = stack.pop() {
+            node.drain_children_into(&mut stack);
+        }
+    }
+}
+
+enum PyRepCloneTask<'a> {
+    Expand(&'a PyRep),
+    BuildTuple(usize),
+    BuildList(usize),
+    BuildPySet(usize),
+    BuildSet(usize),
+    BuildDict(usize),
+    BuildKeyVal(Vec<&'a str>),
+    BuildRowset {
+        columns: Vec<String>,
+        row_lens: Vec<usize>,
+        is_tuple_set: bool,
+    },
+    BuildIndexRowset {
+        key_column: String,
+        columns: Vec<String>,
+        row_lens: Vec<usize>,
+    },
+    BuildDBRow {
+        col_names: Vec<&'a str>,
+        raw_rle: Vec<u8>,
+    },
+    BuildObject(String),
+    BuildObjectEx {
+        is_type_2: bool,
+        list_len: usize,
+        dict_len: usize,
+    },
+    BuildSubStruct,
+    BuildChecksumedStream(u32),
+    BuildSubStream,
+}
+
+fn push_clone_seq<'a>(
+    work: &mut Vec<PyRepCloneTask<'a>>,
+    items: &'a [PyRep],
+    build: PyRepCloneTask<'a>,
+) {
+    work.push(build);
+    for item in items.iter().rev() {
+        work.push(PyRepCloneTask::Expand(item));
+    }
+}
+
+fn clone_pairs_into_dict(results: &mut Vec<PyRep>, count: usize) -> Vec<(PyRep, PyRep)> {
+    let start = results.len() - count * 2;
+    let mut out = Vec::with_capacity(count);
+    let mut iter = results.drain(start..);
+    while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+        out.push((k, v));
+    }
+    out
+}
+
+/// Iterative clone prevents call-stack exhaustion when cloning deep `PyRep` structures.
+impl Clone for PyRep {
+    fn clone(&self) -> Self {
+        if let Some(shallow) = self.try_clone_shallow() {
+            return shallow;
+        }
+        let mut work = vec![PyRepCloneTask::Expand(self)];
+        let mut results: Vec<PyRep> = Vec::new();
+        while let Some(task) = work.pop() {
+            match task {
+                PyRepCloneTask::Expand(node) => {
+                    if let Some(shallow) = node.try_clone_shallow() {
+                        results.push(shallow);
+                        continue;
+                    }
+                    match node {
+                        Self::Tuple(v) => {
+                            push_clone_seq(&mut work, v, PyRepCloneTask::BuildTuple(v.len()));
+                        }
+                        Self::List(v) => {
+                            push_clone_seq(&mut work, v, PyRepCloneTask::BuildList(v.len()));
+                        }
+                        Self::PySet(v) => {
+                            push_clone_seq(&mut work, v, PyRepCloneTask::BuildPySet(v.len()));
+                        }
+                        Self::Set(v) => {
+                            push_clone_seq(&mut work, v, PyRepCloneTask::BuildSet(v.len()));
+                        }
+                        Self::Dict(entries) => {
+                            work.push(PyRepCloneTask::BuildDict(entries.len()));
+                            for (k, v) in entries.iter().rev() {
+                                work.push(PyRepCloneTask::Expand(v));
+                                work.push(PyRepCloneTask::Expand(k));
+                            }
+                        }
+                        Self::KeyVal(map) => {
+                            let mut col_names = Vec::with_capacity(map.len());
+                            let mut vals = Vec::with_capacity(map.len());
+                            for (k, v) in map {
+                                col_names.push(k.as_str());
+                                vals.push(v);
+                            }
+                            work.push(PyRepCloneTask::BuildKeyVal(col_names));
+                            for v in vals.into_iter().rev() {
+                                work.push(PyRepCloneTask::Expand(v));
+                            }
+                        }
+                        Self::Rowset { columns, rows } | Self::TupleSet { columns, rows } => {
+                            let is_tuple_set = matches!(node, Self::TupleSet { .. });
+                            let row_lens = rows.iter().map(Vec::len).collect();
+                            work.push(PyRepCloneTask::BuildRowset {
+                                columns: columns.clone(),
+                                row_lens,
+                                is_tuple_set,
+                            });
+                            for row in rows.iter().rev() {
+                                for cell in row.iter().rev() {
+                                    work.push(PyRepCloneTask::Expand(cell));
+                                }
+                            }
+                        }
+                        Self::IndexRowset {
+                            key_column,
+                            columns,
+                            items,
+                        } => {
+                            let row_lens = items.iter().map(|(_, r)| r.len()).collect();
+                            work.push(PyRepCloneTask::BuildIndexRowset {
+                                key_column: key_column.clone(),
+                                columns: columns.clone(),
+                                row_lens,
+                            });
+                            for (k, row) in items.iter().rev() {
+                                for cell in row.iter().rev() {
+                                    work.push(PyRepCloneTask::Expand(cell));
+                                }
+                                work.push(PyRepCloneTask::Expand(k));
+                            }
+                        }
+                        Self::DBRow {
+                            header,
+                            columns,
+                            raw_rle,
+                        } => {
+                            let col_names = columns.iter().map(|(c, _)| c.as_str()).collect();
+                            work.push(PyRepCloneTask::BuildDBRow {
+                                col_names,
+                                raw_rle: raw_rle.clone(),
+                            });
+                            for (_, v) in columns.iter().rev() {
+                                work.push(PyRepCloneTask::Expand(v));
+                            }
+                            work.push(PyRepCloneTask::Expand(header.as_ref()));
+                        }
+                        Self::Object { type_name, args } => {
+                            work.push(PyRepCloneTask::BuildObject(type_name.clone()));
+                            work.push(PyRepCloneTask::Expand(args.as_ref()));
+                        }
+                        Self::ObjectEx {
+                            is_type_2,
+                            header,
+                            list,
+                            dict,
+                        } => {
+                            work.push(PyRepCloneTask::BuildObjectEx {
+                                is_type_2: *is_type_2,
+                                list_len: list.len(),
+                                dict_len: dict.len(),
+                            });
+                            for (k, v) in dict.iter().rev() {
+                                work.push(PyRepCloneTask::Expand(v));
+                                work.push(PyRepCloneTask::Expand(k));
+                            }
+                            for item in list.iter().rev() {
+                                work.push(PyRepCloneTask::Expand(item));
+                            }
+                            work.push(PyRepCloneTask::Expand(header.as_ref()));
+                        }
+                        Self::SubStruct(inner) => {
+                            work.push(PyRepCloneTask::BuildSubStruct);
+                            work.push(PyRepCloneTask::Expand(inner.as_ref()));
+                        }
+                        Self::ChecksumedStream { checksum, body } => {
+                            work.push(PyRepCloneTask::BuildChecksumedStream(*checksum));
+                            work.push(PyRepCloneTask::Expand(body.as_ref()));
+                        }
+                        Self::SubStream(inner) => {
+                            work.push(PyRepCloneTask::BuildSubStream);
+                            work.push(PyRepCloneTask::Expand(inner.as_ref()));
+                        }
+                        Self::None
+                        | Self::Bool(_)
+                        | Self::Integer(_)
+                        | Self::Real(_)
+                        | Self::Buffer(_)
+                        | Self::Bytes(_)
+                        | Self::Token(_)
+                        | Self::String(_)
+                        | Self::Picked(_) => unreachable!("handled by try_clone_shallow"),
+                    }
+                }
+                PyRepCloneTask::BuildTuple(n) => {
+                    let v = results.split_off(results.len() - n);
+                    results.push(Self::Tuple(v));
+                }
+                PyRepCloneTask::BuildList(n) => {
+                    let v = results.split_off(results.len() - n);
+                    results.push(Self::List(v));
+                }
+                PyRepCloneTask::BuildPySet(n) => {
+                    let v = results.split_off(results.len() - n);
+                    results.push(Self::PySet(v));
+                }
+                PyRepCloneTask::BuildSet(n) => {
+                    let v = results.split_off(results.len() - n);
+                    results.push(Self::Set(v));
+                }
+                PyRepCloneTask::BuildDict(n) => {
+                    let dict = clone_pairs_into_dict(&mut results, n);
+                    results.push(Self::Dict(dict));
+                }
+                PyRepCloneTask::BuildKeyVal(col_names) => {
+                    let start = results.len() - col_names.len();
+                    let mut map = HashMap::with_capacity(col_names.len());
+                    for (k, v) in col_names.into_iter().zip(results.drain(start..)) {
+                        map.insert(k.to_owned(), v);
+                    }
+                    results.push(Self::KeyVal(map));
+                }
+                PyRepCloneTask::BuildRowset {
+                    columns,
+                    row_lens,
+                    is_tuple_set,
+                } => {
+                    let total: usize = row_lens.iter().sum();
+                    let start = results.len() - total;
+                    let mut iter = results.drain(start..);
+                    let mut rows = Vec::with_capacity(row_lens.len());
+                    for len in row_lens {
+                        rows.push(iter.by_ref().take(len).collect());
+                    }
+                    drop(iter);
+                    let rep = if is_tuple_set {
+                        Self::TupleSet { columns, rows }
+                    } else {
+                        Self::Rowset { columns, rows }
+                    };
+                    results.push(rep);
+                }
+                PyRepCloneTask::BuildIndexRowset {
+                    key_column,
+                    columns,
+                    row_lens,
+                } => {
+                    let total: usize = row_lens.iter().map(|len| 1 + len).sum();
+                    let start = results.len() - total;
+                    let mut iter = results.drain(start..);
+                    let mut items = Vec::with_capacity(row_lens.len());
+                    for len in row_lens {
+                        let k = iter.next().expect("index rowset key present");
+                        let row: Vec<PyRep> = iter.by_ref().take(len).collect();
+                        items.push((k, row));
+                    }
+                    drop(iter);
+                    results.push(Self::IndexRowset {
+                        key_column,
+                        columns,
+                        items,
+                    });
+                }
+                PyRepCloneTask::BuildDBRow { col_names, raw_rle } => {
+                    let start = results.len() - 1 - col_names.len();
+                    let mut iter = results.drain(start..);
+                    let header = Box::new(iter.next().expect("dbrow header present"));
+                    let columns = col_names
+                        .into_iter()
+                        .zip(iter)
+                        .map(|(name, val)| (name.to_owned(), val))
+                        .collect();
+                    results.push(Self::DBRow {
+                        header,
+                        columns,
+                        raw_rle,
+                    });
+                }
+                PyRepCloneTask::BuildObject(type_name) => {
+                    let args = Box::new(results.pop().expect("object args present"));
+                    results.push(Self::Object { type_name, args });
+                }
+                PyRepCloneTask::BuildObjectEx {
+                    is_type_2,
+                    list_len,
+                    dict_len,
+                } => {
+                    let start = results.len() - (1 + list_len + dict_len * 2);
+                    let mut iter = results.drain(start..);
+                    let header = Box::new(iter.next().expect("objectex header present"));
+                    let list: Vec<PyRep> = iter.by_ref().take(list_len).collect();
+                    let mut dict = Vec::with_capacity(dict_len);
+                    while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+                        dict.push((k, v));
+                    }
+                    drop(iter);
+                    results.push(Self::ObjectEx {
+                        is_type_2,
+                        header,
+                        list,
+                        dict,
+                    });
+                }
+                PyRepCloneTask::BuildSubStruct => {
+                    let inner = Box::new(results.pop().expect("substruct inner present"));
+                    results.push(Self::SubStruct(inner));
+                }
+                PyRepCloneTask::BuildChecksumedStream(checksum) => {
+                    let body = Box::new(results.pop().expect("checksumed body present"));
+                    results.push(Self::ChecksumedStream { checksum, body });
+                }
+                PyRepCloneTask::BuildSubStream => {
+                    let inner = Box::new(results.pop().expect("substream inner present"));
+                    results.push(Self::SubStream(inner));
+                }
             }
         }
+        debug_assert_eq!(results.len(), 1);
+        results.pop().expect("root cloned")
+    }
+}
+
+fn try_eq_shallow(lhs: &PyRep, rhs: &PyRep) -> Option<bool> {
+    match (lhs, rhs) {
+        (PyRep::None, PyRep::None) => Some(true),
+        (PyRep::Bool(a), PyRep::Bool(b)) => Some(a == b),
+        (PyRep::Integer(a), PyRep::Integer(b)) => Some(a == b),
+        (PyRep::Real(a), PyRep::Real(b)) => Some(a == b),
+        (PyRep::Buffer(a), PyRep::Buffer(b))
+        | (PyRep::Bytes(a), PyRep::Bytes(b))
+        | (PyRep::Picked(a), PyRep::Picked(b)) => Some(a == b),
+        (PyRep::Token(a), PyRep::Token(b)) | (PyRep::String(a), PyRep::String(b)) => Some(a == b),
+        _ if std::mem::discriminant(lhs) != std::mem::discriminant(rhs) => Some(false),
+        _ => None,
+    }
+}
+
+/// Iterative equality prevents call-stack exhaustion on deep `PyRep` trees.
+impl PartialEq for PyRep {
+    fn eq(&self, other: &Self) -> bool {
+        if let Some(res) = try_eq_shallow(self, other) {
+            return res;
+        }
+        let mut stack = vec![(self, other)];
+        while let Some((lhs, rhs)) = stack.pop() {
+            if let Some(res) = try_eq_shallow(lhs, rhs) {
+                if !res {
+                    return false;
+                }
+                continue;
+            }
+            match (lhs, rhs) {
+                (Self::None, Self::None) => {}
+                (Self::Bool(a), Self::Bool(b)) => {
+                    if a != b {
+                        return false;
+                    }
+                }
+                (Self::Integer(a), Self::Integer(b)) => {
+                    if a != b {
+                        return false;
+                    }
+                }
+                (Self::Real(a), Self::Real(b)) => {
+                    if a != b {
+                        return false;
+                    }
+                }
+                (Self::Buffer(a), Self::Buffer(b))
+                | (Self::Bytes(a), Self::Bytes(b))
+                | (Self::Picked(a), Self::Picked(b)) => {
+                    if a != b {
+                        return false;
+                    }
+                }
+                (Self::Token(a), Self::Token(b)) | (Self::String(a), Self::String(b)) => {
+                    if a != b {
+                        return false;
+                    }
+                }
+                (Self::Tuple(a), Self::Tuple(b))
+                | (Self::List(a), Self::List(b))
+                | (Self::PySet(a), Self::PySet(b))
+                | (Self::Set(a), Self::Set(b)) => {
+                    if a.len() != b.len() {
+                        return false;
+                    }
+                    stack.extend(a.iter().zip(b.iter()).rev());
+                }
+                (Self::Dict(a), Self::Dict(b)) => {
+                    if a.len() != b.len() {
+                        return false;
+                    }
+                    for ((ak, av), (bk, bv)) in a.iter().zip(b.iter()).rev() {
+                        stack.push((av, bv));
+                        stack.push((ak, bk));
+                    }
+                }
+                (Self::KeyVal(a), Self::KeyVal(b)) => {
+                    if a.len() != b.len() {
+                        return false;
+                    }
+                    for (k, av) in a {
+                        let Some(bv) = b.get(k) else {
+                            return false;
+                        };
+                        stack.push((av, bv));
+                    }
+                }
+                (
+                    Self::Rowset {
+                        columns: ac,
+                        rows: ar,
+                    },
+                    Self::Rowset {
+                        columns: bc,
+                        rows: br,
+                    },
+                )
+                | (
+                    Self::TupleSet {
+                        columns: ac,
+                        rows: ar,
+                    },
+                    Self::TupleSet {
+                        columns: bc,
+                        rows: br,
+                    },
+                ) => {
+                    if ac != bc || ar.len() != br.len() {
+                        return false;
+                    }
+                    for (row_a, row_b) in ar.iter().zip(br.iter()).rev() {
+                        if row_a.len() != row_b.len() {
+                            return false;
+                        }
+                        stack.extend(row_a.iter().zip(row_b.iter()).rev());
+                    }
+                }
+                (
+                    Self::IndexRowset {
+                        key_column: akc,
+                        columns: ac,
+                        items: ai,
+                    },
+                    Self::IndexRowset {
+                        key_column: bkc,
+                        columns: bc,
+                        items: bi,
+                    },
+                ) => {
+                    if akc != bkc || ac != bc || ai.len() != bi.len() {
+                        return false;
+                    }
+                    for ((ak, ar), (bk, br)) in ai.iter().zip(bi.iter()).rev() {
+                        if ar.len() != br.len() {
+                            return false;
+                        }
+                        stack.extend(ar.iter().zip(br.iter()).rev());
+                        stack.push((ak, bk));
+                    }
+                }
+                (
+                    Self::DBRow {
+                        header: ah,
+                        columns: ac,
+                        raw_rle: arle,
+                    },
+                    Self::DBRow {
+                        header: bh,
+                        columns: bc,
+                        raw_rle: brle,
+                    },
+                ) => {
+                    if arle != brle || ac.len() != bc.len() {
+                        return false;
+                    }
+                    for ((an, av), (bn, bv)) in ac.iter().zip(bc.iter()).rev() {
+                        if an != bn {
+                            return false;
+                        }
+                        stack.push((av, bv));
+                    }
+                    stack.push((ah.as_ref(), bh.as_ref()));
+                }
+                (
+                    Self::Object {
+                        type_name: at,
+                        args: aa,
+                    },
+                    Self::Object {
+                        type_name: bt,
+                        args: ba,
+                    },
+                ) => {
+                    if at != bt {
+                        return false;
+                    }
+                    stack.push((aa.as_ref(), ba.as_ref()));
+                }
+                (
+                    Self::ObjectEx {
+                        is_type_2: a2,
+                        header: ah,
+                        list: al,
+                        dict: ad,
+                    },
+                    Self::ObjectEx {
+                        is_type_2: b2,
+                        header: bh,
+                        list: bl,
+                        dict: bd,
+                    },
+                ) => {
+                    if a2 != b2 || al.len() != bl.len() || ad.len() != bd.len() {
+                        return false;
+                    }
+                    for ((ak, av), (bk, bv)) in ad.iter().zip(bd.iter()).rev() {
+                        stack.push((av, bv));
+                        stack.push((ak, bk));
+                    }
+                    stack.extend(al.iter().zip(bl.iter()).rev());
+                    stack.push((ah.as_ref(), bh.as_ref()));
+                }
+                (Self::SubStruct(a), Self::SubStruct(b))
+                | (Self::SubStream(a), Self::SubStream(b)) => {
+                    stack.push((a.as_ref(), b.as_ref()));
+                }
+                (
+                    Self::ChecksumedStream {
+                        checksum: ac,
+                        body: ab,
+                    },
+                    Self::ChecksumedStream {
+                        checksum: bc,
+                        body: bb,
+                    },
+                ) => {
+                    if ac != bc {
+                        return false;
+                    }
+                    stack.push((ab.as_ref(), bb.as_ref()));
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+enum PyRepDebugOp<'a> {
+    Rep(&'a PyRep),
+    Lit(&'static str),
+    StrDbg(&'a str),
+    BytesDbg(&'a [u8]),
+    StrSliceDbg(&'a [String]),
+    BoolVal(bool),
+    U32Val(u32),
+}
+
+fn push_debug_list<'a>(
+    stack: &mut Vec<PyRepDebugOp<'a>>,
+    prefix: &'static str,
+    items: &'a [PyRep],
+    suffix: &'static str,
+) {
+    stack.push(PyRepDebugOp::Lit(suffix));
+    for (idx, item) in items.iter().enumerate().rev() {
+        if idx + 1 < items.len() {
+            stack.push(PyRepDebugOp::Lit(", "));
+        }
+        stack.push(PyRepDebugOp::Rep(item));
+    }
+    stack.push(PyRepDebugOp::Lit(prefix));
+}
+
+fn push_debug_pairs<'a>(
+    stack: &mut Vec<PyRepDebugOp<'a>>,
+    prefix: &'static str,
+    pairs: &'a [(PyRep, PyRep)],
+    suffix: &'static str,
+) {
+    stack.push(PyRepDebugOp::Lit(suffix));
+    for (idx, (k, v)) in pairs.iter().enumerate().rev() {
+        if idx + 1 < pairs.len() {
+            stack.push(PyRepDebugOp::Lit(", "));
+        }
+        stack.push(PyRepDebugOp::Lit(")"));
+        stack.push(PyRepDebugOp::Rep(v));
+        stack.push(PyRepDebugOp::Lit(", "));
+        stack.push(PyRepDebugOp::Rep(k));
+        stack.push(PyRepDebugOp::Lit("("));
+    }
+    stack.push(PyRepDebugOp::Lit(prefix));
+}
+
+fn push_debug_rows<'a>(
+    stack: &mut Vec<PyRepDebugOp<'a>>,
+    rows: &'a [Vec<PyRep>],
+) {
+    stack.push(PyRepDebugOp::Lit("]"));
+    for (r_idx, row) in rows.iter().enumerate().rev() {
+        if r_idx + 1 < rows.len() {
+            stack.push(PyRepDebugOp::Lit(", "));
+        }
+        push_debug_list(stack, "[", row, "]");
+    }
+    stack.push(PyRepDebugOp::Lit("["));
+}
+
+/// Iterative `Debug` formatter prevents panic/assertion stack overflow on deep `PyRep` trees.
+impl fmt::Debug for PyRep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut stack = vec![PyRepDebugOp::Rep(self)];
+        while let Some(op) = stack.pop() {
+            match op {
+                PyRepDebugOp::Lit(s) => f.write_str(s)?,
+                PyRepDebugOp::StrDbg(s) => fmt::Debug::fmt(s, f)?,
+                PyRepDebugOp::BytesDbg(b) => fmt::Debug::fmt(b, f)?,
+                PyRepDebugOp::StrSliceDbg(ss) => fmt::Debug::fmt(ss, f)?,
+                PyRepDebugOp::BoolVal(b) => fmt::Debug::fmt(&b, f)?,
+                PyRepDebugOp::U32Val(u) => fmt::Debug::fmt(&u, f)?,
+                PyRepDebugOp::Rep(node) => match node {
+                    Self::None => f.write_str("None")?,
+                    Self::Bool(b) => write!(f, "Bool({b:?})")?,
+                    Self::Integer(i) => write!(f, "Integer({i:?})")?,
+                    Self::Real(r) => write!(f, "Real({r:?})")?,
+                    Self::Buffer(b) => write!(f, "Buffer({b:?})")?,
+                    Self::Bytes(b) => write!(f, "Bytes({b:?})")?,
+                    Self::Token(s) => write!(f, "Token({s:?})")?,
+                    Self::String(s) => write!(f, "String({s:?})")?,
+                    Self::Picked(b) => write!(f, "Picked({b:?})")?,
+                    Self::Tuple(v) => push_debug_list(&mut stack, "Tuple([", v, "])"),
+                    Self::List(v) => push_debug_list(&mut stack, "List([", v, "])"),
+                    Self::PySet(v) => push_debug_list(&mut stack, "PySet([", v, "])"),
+                    Self::Set(v) => push_debug_list(&mut stack, "Set([", v, "])"),
+                    Self::Dict(pairs) => push_debug_pairs(&mut stack, "Dict([", pairs, "])"),
+                    Self::KeyVal(map) => {
+                        stack.push(PyRepDebugOp::Lit("})"));
+                        let entries: Vec<(&str, &PyRep)> =
+                            map.iter().map(|(k, v)| (k.as_str(), v)).collect();
+                        for (idx, (k, v)) in entries.iter().enumerate().rev() {
+                            if idx + 1 < entries.len() {
+                                stack.push(PyRepDebugOp::Lit(", "));
+                            }
+                            stack.push(PyRepDebugOp::Rep(v));
+                            stack.push(PyRepDebugOp::Lit(": "));
+                            stack.push(PyRepDebugOp::StrDbg(k));
+                        }
+                        stack.push(PyRepDebugOp::Lit("KeyVal({"));
+                    }
+                    Self::Rowset { columns, rows } => {
+                        stack.push(PyRepDebugOp::Lit(" }"));
+                        push_debug_rows(&mut stack, rows);
+                        stack.push(PyRepDebugOp::Lit(", rows: "));
+                        stack.push(PyRepDebugOp::StrSliceDbg(columns));
+                        stack.push(PyRepDebugOp::Lit("Rowset { columns: "));
+                    }
+                    Self::TupleSet { columns, rows } => {
+                        stack.push(PyRepDebugOp::Lit(" }"));
+                        push_debug_rows(&mut stack, rows);
+                        stack.push(PyRepDebugOp::Lit(", rows: "));
+                        stack.push(PyRepDebugOp::StrSliceDbg(columns));
+                        stack.push(PyRepDebugOp::Lit("TupleSet { columns: "));
+                    }
+                    Self::IndexRowset {
+                        key_column,
+                        columns,
+                        items,
+                    } => {
+                        stack.push(PyRepDebugOp::Lit("] }"));
+                        for (idx, (k, row)) in items.iter().enumerate().rev() {
+                            if idx + 1 < items.len() {
+                                stack.push(PyRepDebugOp::Lit(", "));
+                            }
+                            stack.push(PyRepDebugOp::Lit(")"));
+                            push_debug_list(&mut stack, "[", row, "]");
+                            stack.push(PyRepDebugOp::Lit(", "));
+                            stack.push(PyRepDebugOp::Rep(k));
+                            stack.push(PyRepDebugOp::Lit("("));
+                        }
+                        stack.push(PyRepDebugOp::Lit(", items: ["));
+                        stack.push(PyRepDebugOp::StrSliceDbg(columns));
+                        stack.push(PyRepDebugOp::Lit(", columns: "));
+                        stack.push(PyRepDebugOp::StrDbg(key_column));
+                        stack.push(PyRepDebugOp::Lit("IndexRowset { key_column: "));
+                    }
+                    Self::DBRow {
+                        header,
+                        columns,
+                        raw_rle,
+                    } => {
+                        stack.push(PyRepDebugOp::Lit(" }"));
+                        stack.push(PyRepDebugOp::BytesDbg(raw_rle));
+                        stack.push(PyRepDebugOp::Lit("], raw_rle: "));
+                        for (idx, (c, v)) in columns.iter().enumerate().rev() {
+                            if idx + 1 < columns.len() {
+                                stack.push(PyRepDebugOp::Lit(", "));
+                            }
+                            stack.push(PyRepDebugOp::Lit(")"));
+                            stack.push(PyRepDebugOp::Rep(v));
+                            stack.push(PyRepDebugOp::Lit(", "));
+                            stack.push(PyRepDebugOp::StrDbg(c));
+                            stack.push(PyRepDebugOp::Lit("("));
+                        }
+                        stack.push(PyRepDebugOp::Lit(", columns: ["));
+                        stack.push(PyRepDebugOp::Rep(header.as_ref()));
+                        stack.push(PyRepDebugOp::Lit("DBRow { header: "));
+                    }
+                    Self::Object { type_name, args } => {
+                        stack.push(PyRepDebugOp::Lit(" }"));
+                        stack.push(PyRepDebugOp::Rep(args.as_ref()));
+                        stack.push(PyRepDebugOp::Lit(", args: "));
+                        stack.push(PyRepDebugOp::StrDbg(type_name));
+                        stack.push(PyRepDebugOp::Lit("Object { type_name: "));
+                    }
+                    Self::ObjectEx {
+                        is_type_2,
+                        header,
+                        list,
+                        dict,
+                    } => {
+                        stack.push(PyRepDebugOp::Lit(" }"));
+                        push_debug_pairs(&mut stack, ", dict: [", dict, "]");
+                        push_debug_list(&mut stack, ", list: [", list, "]");
+                        stack.push(PyRepDebugOp::Rep(header.as_ref()));
+                        stack.push(PyRepDebugOp::Lit(", header: "));
+                        stack.push(PyRepDebugOp::BoolVal(*is_type_2));
+                        stack.push(PyRepDebugOp::Lit("ObjectEx { is_type_2: "));
+                    }
+                    Self::SubStruct(inner) => {
+                        stack.push(PyRepDebugOp::Lit(")"));
+                        stack.push(PyRepDebugOp::Rep(inner.as_ref()));
+                        stack.push(PyRepDebugOp::Lit("SubStruct("));
+                    }
+                    Self::ChecksumedStream { checksum, body } => {
+                        stack.push(PyRepDebugOp::Lit(" }"));
+                        stack.push(PyRepDebugOp::Rep(body.as_ref()));
+                        stack.push(PyRepDebugOp::Lit(", body: "));
+                        stack.push(PyRepDebugOp::U32Val(*checksum));
+                        stack.push(PyRepDebugOp::Lit("ChecksumedStream { checksum: "));
+                    }
+                    Self::SubStream(inner) => {
+                        stack.push(PyRepDebugOp::Lit(")"));
+                        stack.push(PyRepDebugOp::Rep(inner.as_ref()));
+                        stack.push(PyRepDebugOp::Lit("SubStream("));
+                    }
+                },
+            }
+        }
+        Ok(())
     }
 }
 

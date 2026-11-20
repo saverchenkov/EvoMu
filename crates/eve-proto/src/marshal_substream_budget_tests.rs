@@ -547,3 +547,208 @@ fn save_flag_deep_clone_retention_rejects_amplification() {
         Ok(row_rep)
     );
 }
+
+#[test]
+fn issue_1479_nine_kib_chained_saved_stream_depth_amplification_is_rejected() {
+    // Issue #1479: ~9 KiB payload chaining 120 saved slots each wrapped to `MAX_RECURSION_DEPTH - 1`.
+    // Each slot satisfies `depth <= MAX_RECURSION_DEPTH` locally and stays under `MAX_DECODED_NODES`,
+    // yet without subtree-height tracking in `saved_slots` it builds a >7,500-deep PyRep tree.
+    const SLOTS: usize = 120;
+    const CHAIN_WRAPPERS: usize = MAX_RECURSION_DEPTH - 2; // slot root (1) + wrappers (62) + child (1) = 64
+
+    let mut payload = vec![MARSHAL_HEADER_BYTE];
+    payload.extend_from_slice(&(SLOTS as u32).to_le_bytes());
+    payload.push(MarshalOpcode::PyTuple as u8);
+    payload.push(SLOTS as u8);
+
+    // Slot 1: depth 1..63 PyOneTuple + PyNone at depth 64 => height 63.
+    payload.push((MarshalOpcode::PyOneTuple as u8) | SAVE_FLAG);
+    payload.resize(payload.len() + CHAIN_WRAPPERS, MarshalOpcode::PyOneTuple as u8);
+    payload.push(MarshalOpcode::PyNone as u8);
+
+    // Slots 2..=120: depth 1..63 PyOneTuple + PySavedStreamElement(prev_slot) at depth 64.
+    for prev_slot in 1u8..=(SLOTS - 1) as u8 {
+        payload.push((MarshalOpcode::PyOneTuple as u8) | SAVE_FLAG);
+        payload.resize(payload.len() + CHAIN_WRAPPERS, MarshalOpcode::PyOneTuple as u8);
+        payload.push(MarshalOpcode::PySavedStreamElement as u8);
+        payload.push(prev_slot);
+    }
+
+    for idx in 1u32..=(SLOTS as u32) {
+        payload.extend_from_slice(&idx.to_le_bytes());
+    }
+
+    assert!(
+        payload.len() > 8_000 && payload.len() < 10_000,
+        "expected ~9 KiB adversarial payload, got {} bytes",
+        payload.len()
+    );
+    assert_eq!(decode(&payload), Err(ProtoError::RecursionLimitExceeded));
+    assert_eq!(
+        decode_with_limits(&payload, 64 * 1024, MAX_DECODED_NODES),
+        Err(ProtoError::RecursionLimitExceeded)
+    );
+
+    // Also reject a minimal 1-wrapper increment chain (`SAVE_FLAG | PyOneTuple(Ref(k))`) once depth > 64.
+    const CHAIN_SLOTS: usize = MAX_RECURSION_DEPTH + 1;
+    let mut step_chain = vec![MARSHAL_HEADER_BYTE];
+    step_chain.extend_from_slice(&(CHAIN_SLOTS as u32).to_le_bytes());
+    step_chain.push(MarshalOpcode::PyTuple as u8);
+    step_chain.push(CHAIN_SLOTS as u8);
+    step_chain.push((MarshalOpcode::PyOneTuple as u8) | SAVE_FLAG);
+    step_chain.push(MarshalOpcode::PyNone as u8); // slot 1, height = 1
+    for prev_slot in 1u8..=(CHAIN_SLOTS - 1) as u8 {
+        step_chain.push((MarshalOpcode::PyOneTuple as u8) | SAVE_FLAG);
+        step_chain.push(MarshalOpcode::PySavedStreamElement as u8);
+        step_chain.push(prev_slot);
+    }
+    for idx in 1u32..=(CHAIN_SLOTS as u32) {
+        step_chain.extend_from_slice(&idx.to_le_bytes());
+    }
+    assert_eq!(decode(&step_chain), Err(ProtoError::RecursionLimitExceeded));
+}
+
+#[test]
+fn issue_1479_saved_stream_exact_height_boundary_and_mixed_containers() {
+    // Exact boundary: saved height = 32 referenced at depth 32 -> total height 64 (allowed);
+    // referenced at depth 33 -> total height 65 (rejected).
+    let build_boundary_frame = |ref_depth: usize| {
+        let saved_wrappers = 32usize;
+        let mut frame = vec![MARSHAL_HEADER_BYTE];
+        frame.extend_from_slice(&1u32.to_le_bytes());
+        frame.push(MarshalOpcode::PyTwoTuple as u8); // depth 0; elem0/elem1 start at depth 1
+        // elem0: saved subtree at depth 1 with height 32
+        frame.push((MarshalOpcode::PyOneTuple as u8) | SAVE_FLAG);
+        frame.resize(frame.len() + (saved_wrappers - 1), MarshalOpcode::PyOneTuple as u8);
+        frame.push(MarshalOpcode::PyNone as u8);
+        // elem1: wrap PySavedStreamElement(1) at `ref_depth`
+        frame.resize(frame.len() + (ref_depth - 1), MarshalOpcode::PyOneTuple as u8);
+        frame.push(MarshalOpcode::PySavedStreamElement as u8);
+        frame.push(1);
+        frame.extend_from_slice(&1u32.to_le_bytes());
+        frame
+    };
+
+    assert!(decode(&build_boundary_frame(32)).is_ok());
+    assert_eq!(
+        decode(&build_boundary_frame(33)),
+        Err(ProtoError::RecursionLimitExceeded)
+    );
+
+    // Valid shared moderately nested PySavedStreamElement tree (e.g., KeyVal/Tuple) still decodes.
+    let mut shared = vec![MARSHAL_HEADER_BYTE];
+    shared.extend_from_slice(&1u32.to_le_bytes());
+    shared.push(MarshalOpcode::PyTwoTuple as u8);
+    shared.push((MarshalOpcode::PyOneTuple as u8) | SAVE_FLAG);
+    shared.push(MarshalOpcode::PyTwoTuple as u8);
+    shared.push(MarshalOpcode::PyOneInteger as u8);
+    shared.push(MarshalOpcode::PyZeroInteger as u8);
+    shared.push(MarshalOpcode::PyOneTuple as u8);
+    shared.push(MarshalOpcode::PySavedStreamElement as u8);
+    shared.push(1);
+    shared.extend_from_slice(&1u32.to_le_bytes());
+    let expected_sub = PyRep::Tuple(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)])]);
+    assert_eq!(
+        decode(&shared),
+        Ok(PyRep::Tuple(vec![
+            expected_sub.clone(),
+            PyRep::Tuple(vec![expected_sub]),
+        ]))
+    );
+
+    // Empty container has height 0 and is allowed at depth == MAX_RECURSION_DEPTH.
+    let mut empty_at_64 = vec![MARSHAL_HEADER_BYTE];
+    empty_at_64.extend_from_slice(&1u32.to_le_bytes());
+    empty_at_64.push(MarshalOpcode::PyTwoTuple as u8);
+    empty_at_64.push((MarshalOpcode::PyEmptyTuple as u8) | SAVE_FLAG);
+    empty_at_64.resize(empty_at_64.len() + (MAX_RECURSION_DEPTH - 1), MarshalOpcode::PyOneTuple as u8);
+    empty_at_64.push(MarshalOpcode::PySavedStreamElement as u8);
+    empty_at_64.push(1);
+    empty_at_64.extend_from_slice(&1u32.to_le_bytes());
+    assert!(decode(&empty_at_64).is_ok());
+
+    // Saved PySubStream carrying inner height 62 (`SubStream(62 tuples -> None)` => height 63)
+    // decodes cleanly when saved at depth 1 (1 + 63 = 64), and must be rejected when wrapped in
+    // one more container before referencing (`2 + 63 = 65 > 64`).
+    let mut deep_inner_stream = PyRep::None;
+    for _ in 0..62 {
+        deep_inner_stream = PyRep::Tuple(vec![deep_inner_stream]);
+    }
+    let inner_bytes = encode(&deep_inner_stream);
+    let mut sub_save_frame = vec![MARSHAL_HEADER_BYTE];
+    sub_save_frame.extend_from_slice(&1u32.to_le_bytes());
+    sub_save_frame.push(MarshalOpcode::PyTwoTuple as u8);
+    sub_save_frame.push((MarshalOpcode::PySubStream as u8) | SAVE_FLAG);
+    write_size_ex(&mut sub_save_frame, inner_bytes.len());
+    sub_save_frame.extend_from_slice(&inner_bytes);
+    sub_save_frame.push(MarshalOpcode::PyOneTuple as u8); // depth 1
+    sub_save_frame.push(MarshalOpcode::PySavedStreamElement as u8); // depth 2 + 63 = 65 > 64
+    sub_save_frame.push(1);
+    sub_save_frame.extend_from_slice(&1u32.to_le_bytes());
+    assert_eq!(
+        decode(&sub_save_frame),
+        Err(ProtoError::RecursionLimitExceeded)
+    );
+
+    // `SAVE_FLAG | PyObjectEx2` (`util.Row` fast path) and `SAVE_FLAG | PySavedStreamElement` chains
+    // must propagate subtree height and reject depth > MAX_RECURSION_DEPTH.
+    let mut deep_row_arg = PyRep::None;
+    for _ in 0..61 {
+        deep_row_arg = PyRep::Tuple(vec![deep_row_arg]);
+    }
+    let row_rep = PyRep::Object {
+        type_name: "util.Row".into(),
+        args: Box::new(deep_row_arg),
+    };
+    let row_encoded = encode(&row_rep);
+    let mut row_chain = vec![MARSHAL_HEADER_BYTE];
+    row_chain.extend_from_slice(&2u32.to_le_bytes());
+    row_chain.push(MarshalOpcode::PyTuple as u8);
+    row_chain.push(3);
+    row_chain.push(row_encoded[5] | SAVE_FLAG);
+    row_chain.extend_from_slice(&row_encoded[6..]); // slot 1 (wire height = 64)
+    row_chain.push((MarshalOpcode::PySavedStreamElement as u8) | SAVE_FLAG);
+    row_chain.push(1); // slot 2 copies slot 1's height at depth 1 (1 + 64 = 65 -> already rejected!)
+    row_chain.push(MarshalOpcode::PyOneTuple as u8);
+    row_chain.push(MarshalOpcode::PySavedStreamElement as u8);
+    row_chain.push(2);
+    row_chain.extend_from_slice(&1u32.to_le_bytes());
+    row_chain.extend_from_slice(&2u32.to_le_bytes());
+    assert_eq!(decode(&row_chain), Err(ProtoError::RecursionLimitExceeded));
+
+    // `PyPackedRow` with a saved 0-bit string-slot height chain must also reject amplification.
+    let packed_header = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("blue.DBRowDescriptor".into()),
+            PyRep::Tuple(vec![PyRep::Tuple(vec![PyRep::Tuple(vec![
+                PyRep::String("col".into()),
+                PyRep::Integer(130), // DBTYPE_WSTR (0-bit inline trailing column)
+            ])])]),
+        ])),
+        list: vec![],
+        dict: vec![],
+    };
+    let mut hdr_bytes = Vec::new();
+    encode_inner(&packed_header, &mut hdr_bytes);
+    let rle_zero = crate::dbrow::encode_rle(&[0x00]);
+    let mut packed_payload = vec![MARSHAL_HEADER_BYTE];
+    packed_payload.extend_from_slice(&1u32.to_le_bytes());
+    packed_payload.push(MarshalOpcode::PyTwoTuple as u8);
+    packed_payload.push((MarshalOpcode::PyOneTuple as u8) | SAVE_FLAG);
+    packed_payload.resize(packed_payload.len() + 61, MarshalOpcode::PyOneTuple as u8);
+    packed_payload.push(MarshalOpcode::PyNone as u8); // slot 1 height = 62 (max depth 63 ok)
+    packed_payload.push(MarshalOpcode::PyPackedRow as u8); // depth 1
+    packed_payload.extend_from_slice(&hdr_bytes);
+    write_size_ex(&mut packed_payload, rle_zero.len());
+    packed_payload.extend_from_slice(&rle_zero);
+    // 0-bit column value at depth 2 references height 62 => 2 + 62 = 64; wrap once more to get 65:
+    packed_payload.push(MarshalOpcode::PyOneTuple as u8); // depth 2
+    packed_payload.push(MarshalOpcode::PySavedStreamElement as u8); // depth 3 + 62 = 65 > 64!
+    packed_payload.push(1);
+    packed_payload.extend_from_slice(&1u32.to_le_bytes());
+    assert_eq!(
+        decode(&packed_payload),
+        Err(ProtoError::RecursionLimitExceeded)
+    );
+}
