@@ -314,7 +314,11 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
             if let Some(head) = remaining_queue.first_mut() {
                 head.started_at_unix = Some(effective_end_unix);
             }
-            snap.skill_queues.insert(char_id, remaining_queue);
+            if remaining_queue.is_empty() {
+                snap.skill_queues.remove(&char_id);
+            } else {
+                snap.skill_queues.insert(char_id, remaining_queue);
+            }
             if !history_to_append.is_empty() {
                 snap.skill_history
                     .entry(char_id)
@@ -653,7 +657,7 @@ pub fn handle(
                 if !is_add_to_end {
                     let now_ft = ctx.now_blueos_filetime_ticks();
                     ctx.db.with_mut_snapshot(|snap| {
-                        if let Some(old_q) = snap.skill_queues.insert(char_id, Vec::new()) {
+                        if let Some(old_q) = snap.skill_queues.remove(&char_id) {
                             let hist = snap.skill_history.entry(char_id).or_default();
                             for q in old_q {
                                 hist.push(SkillHistoryEntry {
@@ -841,7 +845,12 @@ pub fn handle(
 
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 if !is_add_to_end {
-                    if let Some(old_q) = snap.skill_queues.insert(char_id, built_queue) {
+                    let old_q_opt = if built_queue.is_empty() {
+                        snap.skill_queues.remove(&char_id)
+                    } else {
+                        snap.skill_queues.insert(char_id, built_queue)
+                    };
+                    if let Some(old_q) = old_q_opt {
                         let hist = snap.skill_history.entry(char_id).or_default();
                         for q in old_q {
                             hist.push(SkillHistoryEntry {
@@ -858,6 +867,8 @@ pub fn handle(
                     } else {
                         snap.paused_skill_queues.insert(char_id);
                     }
+                } else if built_queue.is_empty() {
+                    snap.skill_queues.remove(&char_id);
                 } else {
                     snap.skill_queues.insert(char_id, built_queue);
                 }
@@ -1040,6 +1051,7 @@ pub fn handle(
                     } else {
                         None
                     };
+                    let mut remove_empty_queue = false;
                     if let Some(queue) = snap.skill_queues.get_mut(&char_id) {
                         queue.retain_mut(|q| {
                             if q.type_id != skill_type_id {
@@ -1069,6 +1081,10 @@ pub fn handle(
                                 true
                             }
                         });
+                        remove_empty_queue = queue.is_empty();
+                    }
+                    if remove_empty_queue {
+                        snap.skill_queues.remove(&char_id);
                     }
                     if !snap.paused_skill_queues.contains(&char_id) {
                         if let Some(head) = snap.skill_queues.get_mut(&char_id).and_then(|q| q.first_mut()) {
@@ -1168,7 +1184,7 @@ pub fn handle(
                 } else {
                     None
                 };
-                let queue = snap.skill_queues.entry(char_id).or_default().clone();
+                let queue = snap.skill_queues.get(&char_id).cloned().unwrap_or_default();
                 let mut remaining_queue = Vec::new();
                 let mut history_to_append = Vec::new();
                 let skills_map = snap.skills.entry(char_id).or_default();
@@ -1267,7 +1283,11 @@ pub fn handle(
                         head.started_at_unix.get_or_insert(ctx.now_unix());
                     }
                 }
-                snap.skill_queues.insert(char_id, remaining_queue);
+                if remaining_queue.is_empty() {
+                    snap.skill_queues.remove(&char_id);
+                } else {
+                    snap.skill_queues.insert(char_id, remaining_queue);
+                }
                 let changed_skills = !history_to_append.is_empty();
                 if changed_skills {
                     snap.skill_history

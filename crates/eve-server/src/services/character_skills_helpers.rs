@@ -293,7 +293,7 @@ fn handle_apply_free_skill_points_to_queue(
         } else {
             None
         };
-        let queue = snap.skill_queues.entry(char_id).or_default().clone();
+        let queue = snap.skill_queues.get(&char_id).cloned().unwrap_or_default();
         let mut remaining_queue = Vec::new();
         let mut history_to_append = Vec::new();
         let mut changed_tids = Vec::new();
@@ -388,7 +388,11 @@ fn handle_apply_free_skill_points_to_queue(
                 head.started_at_unix.get_or_insert(now_unix);
             }
         }
-        snap.skill_queues.insert(char_id, remaining_queue);
+        if remaining_queue.is_empty() {
+            snap.skill_queues.remove(&char_id);
+        } else {
+            snap.skill_queues.insert(char_id, remaining_queue);
+        }
         if !history_to_append.is_empty() {
             snap.skill_history.entry(char_id).or_default().extend(history_to_append);
         }
@@ -585,6 +589,7 @@ fn handle_apply_free_skill_points_to_skills(
             } else {
                 None
             };
+            let mut remove_empty_queue = false;
             if let Some(queue) = snap.skill_queues.get_mut(&char_id) {
                 queue.retain_mut(|q| {
                     if q.type_id != tid {
@@ -614,6 +619,10 @@ fn handle_apply_free_skill_points_to_skills(
                         true
                     }
                 });
+                remove_empty_queue = queue.is_empty();
+            }
+            if remove_empty_queue {
+                snap.skill_queues.remove(&char_id);
             }
             snap.skill_history
                 .entry(char_id)

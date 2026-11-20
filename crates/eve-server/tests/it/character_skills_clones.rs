@@ -613,7 +613,7 @@ async fn test_ch2_skill_handling_and_prerequisites() {
                 },
             );
         }
-        snap.skill_queues.insert(char_id, Vec::new());
+        snap.skill_queues.remove(&char_id);
     });
 
     let prereq_fail = ctx
@@ -697,7 +697,7 @@ async fn test_ch2_skill_handling_and_prerequisites() {
         .expect("SaveSkillQueue empty");
     assert_eq!(empty_save, PyRep::List(vec![]));
     ctx.db.with_snapshot(|snap| {
-        assert!(snap.skill_queues[&char_id].is_empty());
+        assert!(!snap.skill_queues.contains_key(&char_id));
         assert!(snap.paused_skill_queues.contains(&char_id));
     });
 
@@ -1227,7 +1227,7 @@ async fn test_ch1_ch2_effective_attributes_catchup_and_2arg_free_sp() {
     );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.skills[&char_id][&3300].level, 2);
-        assert!(snap.skill_queues[&char_id].is_empty());
+        assert!(!snap.skill_queues.contains_key(&char_id));
     });
 
     let respec_rep = ctx

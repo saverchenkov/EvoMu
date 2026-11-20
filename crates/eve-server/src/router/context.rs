@@ -2375,7 +2375,11 @@ impl ServerContext {
                         head.started_at_unix = Some(now_unix);
                     }
                 }
-                snap.skill_queues.insert(char_id, remaining_queue);
+                if remaining_queue.is_empty() {
+                    snap.skill_queues.remove(&char_id);
+                } else {
+                    snap.skill_queues.insert(char_id, remaining_queue);
+                }
                 let level_completed = !history_to_append.is_empty();
                 if !history_to_append.is_empty() {
                     snap.skill_history.entry(char_id).or_default().extend(history_to_append);

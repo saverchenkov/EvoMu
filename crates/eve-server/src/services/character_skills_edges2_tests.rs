@@ -496,7 +496,7 @@ fn skill_queries_save_shapes_and_end_of_training_edge_cases() {
     .unwrap();
     assert_eq!(cleared, PyRep::List(vec![]));
     ctx.db.with_snapshot(|snap| {
-        assert!(snap.skill_queues[&char_id].is_empty());
+        assert!(!snap.skill_queues.contains_key(&char_id));
         assert!(snap.paused_skill_queues.contains(&char_id));
         assert!(snap.skill_history[&char_id].iter().any(|h| h.event_type_id == 38));
     });
@@ -1353,5 +1353,172 @@ fn skill_queue_requires_injected_and_published_skills_and_guards_catchup() {
     catch_up_skill_queue(&ctx, char_id);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.skills[&char_id][&sk_uninjected_pub].level, 1);
+        assert!(!snap.skill_queues.contains_key(&char_id));
     });
+}
+
+#[test]
+fn skill_queue_emptying_paths_remove_key_and_pass_sqlite_pre_roundtrip() {
+    let ctx = test_ctx();
+    let base_now = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        base_now,
+    )));
+    let char_id = 90_000_001_i64;
+    let st_id = 60_003_760_i64;
+    let skill_tid = 3300_u32; // Gunnery (rank 1, lvl 1 = 250 SP)
+    let kw = HashMap::new();
+    let mut sess = char_session(char_id, st_id);
+
+    let reset_queue = |ctx: &ServerContext, now_unix: u64, started_offset_secs: u64| {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.clone_grade = 2;
+                ch.skill_points = 0.0;
+                ch.free_skill_points = 10_000.0;
+            }
+            snap.paused_skill_queues.remove(&char_id);
+            snap.skills.entry(char_id).or_default().insert(
+                skill_tid,
+                TrainedSkillRecord {
+                    type_id: skill_tid,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
+            snap.skill_queues.insert(
+                char_id,
+                vec![SkillQueueEntry {
+                    type_id: skill_tid,
+                    target_level: 1,
+                    start_sp: 0.0,
+                    end_sp: 250.0,
+                    duration_seconds: 500.0,
+                    started_at_unix: Some(now_unix.saturating_sub(started_offset_secs)),
+                }],
+            );
+        });
+    };
+
+    let assert_empty_and_pre_clean = |ctx: &ServerContext, label: &str| {
+        ctx.db.with_snapshot(|snap| {
+            assert!(
+                !snap.skill_queues.contains_key(&char_id),
+                "{label}: snap.skill_queues must remove char_id instead of storing empty Vec"
+            );
+        });
+        let diffs = eve_testkit::pre_check::check_persist_reload_equivalence(&ctx.db)
+            .expect("SQLite PRE check");
+        assert!(
+            diffs.is_empty(),
+            "{label}: expected zero SQLite PRE diffs, got: {diffs:?}"
+        );
+    };
+
+    // 1. catch_up_skill_queue completing the final queued skill
+    reset_queue(&ctx, ctx.now_unix(), 3_600);
+    catch_up_skill_queue(&ctx, char_id);
+    assert_eq!(ctx.db.with_snapshot(|s| s.skills[&char_id][&skill_tid].level), 1);
+    assert_empty_and_pre_clean(&ctx, "catch_up_skill_queue");
+
+    // 2. SaveSkillQueue([]) clearing the queue
+    reset_queue(&ctx, ctx.now_unix(), 0);
+    handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveSkillQueue",
+        &[PyRep::List(vec![])],
+        &kw,
+    )
+    .unwrap()
+    .expect("SaveSkillQueue([])");
+    assert_empty_and_pre_clean(&ctx, "SaveSkillQueue([])");
+
+    // 3. 2-arg ApplyFreeSkillPoints(skill_tid, sp) completing the last queued skill
+    reset_queue(&ctx, ctx.now_unix(), 0);
+    handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ApplyFreeSkillPoints",
+        &[PyRep::Integer(i64::from(skill_tid)), PyRep::Real(500.0)],
+        &kw,
+    )
+    .unwrap()
+    .expect("2-arg ApplyFreeSkillPoints");
+    assert_eq!(ctx.db.with_snapshot(|s| s.skills[&char_id][&skill_tid].level), 1);
+    assert_empty_and_pre_clean(&ctx, "ApplyFreeSkillPoints(2-arg)");
+
+    // 4. 1-arg ApplyFreeSkillPoints(sp) completing the last queued skill (and no-op when absent)
+    reset_queue(&ctx, ctx.now_unix(), 0);
+    handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ApplyFreeSkillPoints",
+        &[PyRep::Real(500.0)],
+        &kw,
+    )
+    .unwrap()
+    .expect("1-arg ApplyFreeSkillPoints");
+    assert_eq!(ctx.db.with_snapshot(|s| s.skills[&char_id][&skill_tid].level), 1);
+    assert_empty_and_pre_clean(&ctx, "ApplyFreeSkillPoints(1-arg)");
+
+    handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ApplyFreeSkillPoints",
+        &[PyRep::Real(100.0)],
+        &kw,
+    )
+    .unwrap()
+    .expect("1-arg ApplyFreeSkillPoints on absent queue");
+    assert_empty_and_pre_clean(&ctx, "ApplyFreeSkillPoints(1-arg absent)");
+
+    // 5. ApplyFreeSkillPointsToQueue completing the last queued skill (and no-op when absent)
+    reset_queue(&ctx, ctx.now_unix(), 0);
+    handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ApplyFreeSkillPointsToQueue",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("ApplyFreeSkillPointsToQueue");
+    assert_eq!(ctx.db.with_snapshot(|s| s.skills[&char_id][&skill_tid].level), 1);
+    assert_empty_and_pre_clean(&ctx, "ApplyFreeSkillPointsToQueue");
+
+    handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ApplyFreeSkillPointsToQueue",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("ApplyFreeSkillPointsToQueue on absent queue");
+    assert_empty_and_pre_clean(&ctx, "ApplyFreeSkillPointsToQueue(absent)");
+
+    // 6. ApplyFreeSkillPointsToSkills completing the last queued skill
+    reset_queue(&ctx, ctx.now_unix(), 0);
+    handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ApplyFreeSkillPointsToSkills",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(i64::from(skill_tid)),
+            PyRep::Integer(1),
+        ])])],
+        &kw,
+    )
+    .unwrap()
+    .expect("ApplyFreeSkillPointsToSkills");
+    assert_eq!(ctx.db.with_snapshot(|s| s.skills[&char_id][&skill_tid].level), 1);
+    assert_empty_and_pre_clean(&ctx, "ApplyFreeSkillPointsToSkills");
 }
