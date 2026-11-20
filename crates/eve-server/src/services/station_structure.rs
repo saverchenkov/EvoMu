@@ -621,6 +621,12 @@ pub async fn handle(
             let _ = sys_handle.push_set_state(ship.item_id).await;
             crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(ctx, char_id, ship.item_id, 300_000_000);
 
+            let was_view_outside = is_structure
+                && ctx.is_space_ballpark_bootstrapped(
+                    session.session_id,
+                    char_id,
+                    ch.solar_system_id,
+                );
             let undock_spec = crate::router::SessionTransitionSpec::for_kind(
                 char_id,
                 crate::router::TransitionKind::Undock { solar_system_id: ch.solar_system_id },
@@ -628,12 +634,6 @@ pub async fn handle(
             )
             .with_apply_db(false);
             let _ = ctx.execute_session_transition_sync(Some(session), undock_spec);
-            let was_view_outside = is_structure
-                && ctx.is_space_ballpark_bootstrapped(
-                    session.session_id,
-                    char_id,
-                    ch.solar_system_id,
-                );
             if was_view_outside {
                 // View Outside -> Undock keeps the live client Park open without re-running
                 // AddBallpark/GetFormations, so SetState(ego=ship_id) delivers on Undock.

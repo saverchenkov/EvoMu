@@ -1048,6 +1048,7 @@ impl ServerContext {
                 || crate::services::serverops_cluster::is_downtime_active_in_db(self))
         {
             self.release_session_bindings(session.session_id);
+            self.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
             self.quasar_gateway.unsubscribe_session(session.session_id);
             if let Some(uid) = session.user_id {
                 let _ = self.db.release_online_lock(uid, session.session_id);
@@ -1080,6 +1081,9 @@ impl ServerContext {
                         .check_session_revoked(uid, session.session_id, self.now_unix())
                 {
                     self.release_session_bindings(session.session_id);
+                    self.clear_pending_structure_view_outside_set_state_for_session(
+                        session.session_id,
+                    );
                     self.quasar_gateway.unsubscribe_session(session.session_id);
                     if code == "MultiLoginBlocked" {
                         if !is_multi_login_blocker_call {
@@ -1123,7 +1127,23 @@ impl ServerContext {
             && bound_id.is_none()
             && (service == "machoNet" || session.user_id.is_some())
         {
+            let had_beyonce = self.has_bound_service(session.session_id, "beyonce");
             self.release_bound_objects_from_pyrep(session.session_id, &PyRep::List(args.to_vec()));
+            if had_beyonce
+                && !self.has_bound_service(session.session_id, "beyonce")
+                && session.character_id.is_some()
+                && session.station_id.is_none()
+                && session.structure_id.is_some()
+            {
+                if let Some(cid) = session.character_id {
+                    self.clear_space_ballpark_bootstrapped(cid);
+                    crate::services::space_destiny::reset_update_state_rate_limit(
+                        self,
+                        session.session_id,
+                        cid,
+                    );
+                }
+            }
             return Ok(PyRep::None);
         }
 
@@ -1648,6 +1668,11 @@ impl ServerContext {
 
         // Dispatch across the 12 domain modules in order
         if let Some(res) = box_fut(|| services::account_services::handle(self, session, effective_service, method, args, kwargs)).await {
+            if effective_service == "userSvc" && method == "UserLogOffCharacter" && res.is_ok() {
+                self.clear_pending_structure_view_outside_set_state_for_session(
+                    session.session_id,
+                );
+            }
             return res;
         }
         if let Some(res) = box_fut(|| services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(self, session, effective_service, method, args)).await {
@@ -1684,6 +1709,10 @@ impl ServerContext {
                 if let Some(uid) = session.user_id {
                     services::account_services::on_login(self, uid);
                 }
+            } else if (effective_service, method) == ("authentication", "Logout") && res.is_ok() {
+                self.clear_pending_structure_view_outside_set_state_for_session(
+                    session.session_id,
+                );
             }
             return res;
         }

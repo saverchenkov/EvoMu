@@ -10,33 +10,24 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::attr_ids;
 use glam::DVec3;
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 const UPDATE_STATE_COOLDOWN_TICKS: u64 = 5;
 const UPDATE_STATE_COOLDOWN_WALL: Duration = Duration::from_secs(5);
 
-/// Tracks one-shot non-destructive View Outside `SetState` requests per `(session_id, char_id)`
-/// so `macho_listener` snapshots `get_set_state(structure_id)` without mutating shared
-/// `Ballpark::observer_events[structure_id]` across concurrent viewers.
-static PENDING_STRUCTURE_VIEW_OUTSIDE_SET_STATE: LazyLock<Mutex<HashMap<(u64, i64), i64>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-pub(crate) fn take_pending_structure_set_state(session_id: u64, char_id: i64) -> Option<i64> {
-    PENDING_STRUCTURE_VIEW_OUTSIDE_SET_STATE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&(session_id, char_id))
+pub(crate) fn take_pending_structure_set_state(
+    ctx: &ServerContext,
+    session_id: u64,
+    char_id: i64,
+) -> Option<i64> {
+    ctx.take_pending_structure_view_outside_set_state(session_id, char_id)
 }
 
 /// Clears any per-session `beyonce.UpdateStateRequest` cooldown for `(session_id, char_id)` so a
 /// lag-resync or re-attachment immediately delivers a fresh `SetState` snapshot (`#1169`).
 pub(crate) fn reset_update_state_rate_limit(ctx: &ServerContext, session_id: u64, char_id: i64) {
     ctx.systems.clear_explicit_update_state_guard(session_id, char_id);
-    PENDING_STRUCTURE_VIEW_OUTSIDE_SET_STATE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&(session_id, char_id));
+    ctx.clear_pending_structure_view_outside_set_state(session_id, char_id);
 }
 
 pub use eve_db::EssReservePulseState;
@@ -879,24 +870,16 @@ async fn push_set_state_with_guard_and_bootstrap(
                     message: e,
                     client_error: None,
                 })?;
-            PENDING_STRUCTURE_VIEW_OUTSIDE_SET_STATE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&guard_key);
+            ctx.clear_pending_structure_view_outside_set_state(session.session_id, char_id);
         } else {
-            let mut pending = PENDING_STRUCTURE_VIEW_OUTSIDE_SET_STATE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if pending.len() > 4_096 {
-                pending.clear();
-            }
-            pending.insert(guard_key, observer_ball_id);
+            ctx.set_pending_structure_view_outside_set_state(
+                session.session_id,
+                char_id,
+                observer_ball_id,
+            );
         }
     } else if !queue_set_state {
-        PENDING_STRUCTURE_VIEW_OUTSIDE_SET_STATE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&guard_key);
+        ctx.clear_pending_structure_view_outside_set_state(session.session_id, char_id);
     }
     ctx.mark_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
     crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(

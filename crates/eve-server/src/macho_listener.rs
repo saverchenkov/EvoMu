@@ -1369,6 +1369,29 @@ impl TickRxSlot<'_> {
     }
 }
 
+/// Clears View Outside wire/stream/guard state when a pilot releases their last `beyonce`
+/// binding while still structure-docked (`Enter Hangar`, `#1448` / `#1461`).
+fn detach_structure_view_outside_on_beyonce_release(
+    ctx: &ServerContext,
+    session_id: u64,
+    char_id: Option<i64>,
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    sys_rx: &mut TickRxSlot<'_>,
+    subscribed_sys_id: &mut Option<u32>,
+) {
+    sys_rx.detach();
+    *subscribed_sys_id = None;
+    wire_state.leave_space();
+    ctx.systems
+        .clear_explicit_update_state_guards_for_session(session_id);
+    ctx.clear_pending_structure_view_outside_set_state_for_session(session_id);
+    if let Some(cid) = char_id {
+        ctx.clear_space_ballpark_bootstrapped(cid);
+        crate::services::space_destiny::reset_update_state_rate_limit(ctx, session_id, cid);
+    }
+    ctx.flight_recorder.record_wire_state(wire_state);
+}
+
 struct InternalCallReqWireRefs<'a> {
     client_id: u64,
     sys_rx: TickRxSlot<'a>,
@@ -1611,6 +1634,7 @@ async fn execute_call_req_wire_inner(
             }
         }
     }
+    let had_beyonce_before_rpc = ctx.has_bound_service(session.session_id, "beyonce");
     let rpc_res = crate::router::dispatch::with_active_rpc_call_id(
         call_id,
         ctx.dispatch_rpc(
@@ -1625,7 +1649,11 @@ async fn execute_call_req_wire_inner(
     )
     .await;
     let pending_structure_set_state = session.character_id.and_then(|cid| {
-        crate::services::space_destiny::take_pending_structure_set_state(session.session_id, cid)
+        crate::services::space_destiny::take_pending_structure_set_state(
+            ctx,
+            session.session_id,
+            cid,
+        )
     });
     if session_owns_char_notifications(ctx, session) {
         if let Some(cid) = session.character_id {
@@ -1662,6 +1690,22 @@ async fn execute_call_req_wire_inner(
             .any(|(ev, _)| ev == "OnSessionChanged")
     {
         ctx.sync_session(session);
+    }
+    if rpc_res.is_ok()
+        && had_beyonce_before_rpc
+        && !ctx.has_bound_service(session.session_id, "beyonce")
+        && session.character_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_some()
+    {
+        detach_structure_view_outside_on_beyonce_release(
+            ctx,
+            session.session_id,
+            session.character_id,
+            wire.wire_state,
+            &mut wire.sys_rx,
+            wire.subscribed_sys_id,
+        );
     }
 
     let owns_char_session = session_owns_char_notifications(ctx, session);
@@ -1781,6 +1825,7 @@ async fn execute_call_req_wire_inner(
         {
             ctx.systems
                 .clear_explicit_update_state_guards_for_session(session.session_id);
+            ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
         }
         if let Some(new_sys) = target_sys_id {
             wire.sys_rx.attach(ctx, new_sys);
@@ -1801,6 +1846,7 @@ async fn execute_call_req_wire_inner(
         if is_upwell_undock {
             ctx.systems
                 .clear_explicit_update_state_guards_for_session(session.session_id);
+            ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
         }
         // Drain any pre-bind 1Hz ticks buffered in `sys_rx` between `SelectCharacterID` /
         // `View Outside` and `beyonce.MachoBindObject` / `UpdateStateRequest` / Upwell `Undock`
@@ -2227,6 +2273,7 @@ async fn execute_call_req_wire_inner(
     if !is_in_space {
         ctx.systems
             .clear_explicit_update_state_guards_for_session(session.session_id);
+        ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
     }
     if (!is_in_space || post_rpc_charsel_pending)
         && wire.sys_rx.needs_detach(*wire.subscribed_sys_id)
@@ -2780,6 +2827,7 @@ async fn handle_safe_logoff_to_charsel<W: AsyncWriteExt + Unpin>(
     wire.wire_state.leave_space();
     ctx.systems
         .clear_explicit_update_state_guards_for_session(session.session_id);
+    ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
     // Drop the solar-system tick broadcast receiver immediately so `event_tx.receiver_count()`
     // decrements to 0 and LOD-0 solar-system hibernation is not blocked (`#1237` / `HP-10`).
     *wire.sys_rx = None;
@@ -2894,6 +2942,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
             self.0
                 .systems
                 .clear_explicit_update_state_guards_for_session(self.1);
+            self.0
+                .clear_pending_structure_view_outside_set_state_for_session(self.1);
         }
     }
     let _explicit_update_state_cleanup =
@@ -3378,6 +3428,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             wire_state.leave_space();
                             ctx.systems
                                 .clear_explicit_update_state_guards_for_session(session_id);
+                            ctx.clear_pending_structure_view_outside_set_state_for_session(
+                                session_id,
+                            );
                             ctx.flight_recorder.record_wire_state(&wire_state);
                             if let Some(new_sys) = target_sys_id {
                                 if sys_changed || structure_mode_changed {
@@ -3925,20 +3978,15 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     && session.station_id.is_none()
                     && session.structure_id.is_some()
                 {
-                    sys_rx = None;
-                    subscribed_sys_id = None;
-                    wire_state.leave_space();
-                    ctx.systems
-                        .clear_explicit_update_state_guards_for_session(session_id);
-                    if let Some(cid) = session.character_id {
-                        ctx.clear_space_ballpark_bootstrapped(cid);
-                        crate::services::space_destiny::reset_update_state_rate_limit(
-                            &ctx,
-                            session_id,
-                            cid,
-                        );
-                    }
-                    ctx.flight_recorder.record_wire_state(&wire_state);
+                    let mut sys_rx_slot = TickRxSlot::Optional(&mut sys_rx);
+                    detach_structure_view_outside_on_beyonce_release(
+                        &ctx,
+                        session_id,
+                        session.character_id,
+                        &mut wire_state,
+                        &mut sys_rx_slot,
+                        &mut subscribed_sys_id,
+                    );
                 }
                 if is_dedicated_release_notif {
                     continue;
@@ -4310,6 +4358,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     ctx.flight_recorder.remove_session_telemetry(session_id);
     ctx.systems
         .clear_explicit_update_state_guards_for_session(session_id);
+    ctx.clear_pending_structure_view_outside_set_state_for_session(session_id);
     ctx.cleanup_disconnected_client_session(&mut session).await;
     crate::lifecycle::set_open_sessions(ctx.db.online_session_count() as usize);
 
@@ -4740,6 +4789,7 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
         wire.wire_state.leave_space();
         ctx.systems
             .clear_explicit_update_state_guards_for_session(session.session_id);
+        ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
     }
     if !is_in_space {
         if wire.subscribed_sys_id.is_some() {

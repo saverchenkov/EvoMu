@@ -4106,6 +4106,15 @@ async fn test_1448_upwell_view_outside_and_ship_undock_without_post_beyonce_wire
     .await;
 
     // 3. Undock from View Outside via ship.Undock with ZERO post-undock beyonce calls!
+    let view_session_id = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("online session during View Outside")
+        .session_id;
+    assert!(
+        ctx.is_space_ballpark_bootstrapped(view_session_id, char_id, sys_id),
+        "View Outside must leave space_ballpark_bootstrapped marked before Undock"
+    );
     let (adv_rsp, _) = test_1386_call_rpc(
         &mut s,
         client_id,
@@ -4143,6 +4152,30 @@ async fn test_1448_upwell_view_outside_and_ship_undock_without_post_beyonce_wire
     assert!(undock_set_states[0].1.iter().any(|b| b.id == struct_id));
     assert!(undock_set_states[0].1.iter().any(|b| b.id == nearby_ball_id));
     assert_eq!(sys_handle.event_tx.receiver_count(), 1);
+    assert!(
+        ctx.is_space_ballpark_bootstrapped(view_session_id, char_id, sys_id),
+        "View Outside -> ship.Undock must keep space_ballpark_bootstrapped true (F-1461-01)"
+    );
+
+    // Follow-up beyonce.GetFormations after View Outside -> Undock must NOT replay SetState.
+    let (post_undock_form_rsp, post_undock_form_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        6,
+        "beyonce",
+        "GetFormations",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(post_undock_form_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        !post_undock_form_notifs
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "SetState")
+                || test_1386_packet_contains_ascii(&p.to_pyrep(), "DoDestinyUpdate")),
+        "follow-up beyonce.GetFormations after View Outside -> Undock must NOT replay SetState"
+    );
 
     // Subsequent 1Hz ticks deliver live updates observing ship_id.
     sys_handle
@@ -4162,7 +4195,7 @@ async fn test_1448_upwell_view_outside_and_ship_undock_without_post_beyonce_wire
         &mut s,
         client_id,
         user_id,
-        6,
+        7,
         "timeControl",
         "AdvanceClock",
         vec![PyRep::Integer(12)],
@@ -4173,7 +4206,7 @@ async fn test_1448_upwell_view_outside_and_ship_undock_without_post_beyonce_wire
         &mut s,
         client_id,
         user_id,
-        7,
+        8,
         "structureDocking",
         "Dock",
         vec![PyRep::Integer(struct_id)],
@@ -5102,4 +5135,174 @@ async fn test_1461_bound_machonet_beyonce_calls_init_and_cooldown_resync() {
             .any(|f| matches!(f, OutFrame::DoDestinyUpdate { has_set_state: true, .. })),
         "bound machoNet UpdateStateRequest after lag within cooldown must reset rate limit and emit SetState"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1461_enter_hangar_callreq_client_has_released_these_objects_detaches_view_outside() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let sys_id = 30_000_144_u32;
+    let char_id = 90_000_001_i64;
+    let struct_id = 1_040_001_461_301_i64;
+    let nearby_ball_id = 900_000_020_994_i64;
+    let (ship_id, sys_handle) =
+        setup_upwell_docked_pilot(&ctx, char_id, sys_id, struct_id, nearby_ball_id);
+
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) =
+        connect_and_authenticate(addr, "demo", "demo-secret").await;
+    let (sel_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
+
+    // 1. Enter View Outside via beyonce.MachoBindObject.
+    let (view_rsp, view_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        2,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(i64::from(sys_id)), PyRep::None],
+    )
+    .await;
+    assert_eq!(view_rsp.packet_type, MachoPacketType::CallRsp);
+    let mut view_states = Vec::new();
+    for pkt in &view_notifs {
+        collect_set_states_from_pyrep_tree(&pkt.payload, &mut view_states);
+    }
+    assert_eq!(view_states.len(), 1);
+    assert_eq!(view_states[0].0, Some(struct_id));
+    assert_eq!(sys_handle.event_tx.receiver_count(), 1);
+
+    let active_sid = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("online session")
+        .session_id;
+    let beyonce_bid = ctx
+        .bound_objects
+        .read()
+        .unwrap()
+        .values()
+        .find(|e| e.session_id == active_sid && e.service == "beyonce")
+        .map(|e| e.bound_id)
+        .expect("beyonce bound object exists");
+    assert!(ctx.is_space_ballpark_bootstrapped(active_sid, char_id, sys_id));
+
+    // 2. Client releases beyonce via CallReq("ClientHasReleasedTheseObjects") (NO OID- header!).
+    let (rel_rsp, rel_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        3,
+        "machoNet",
+        "ClientHasReleasedTheseObjects",
+        vec![ctx.bound_object_wire_rep(beyonce_bid)],
+    )
+    .await;
+    assert_eq!(rel_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        !rel_notifs
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "DoDestinyUpdate")),
+        "CallReq ClientHasReleasedTheseObjects must cleanly detach without flushing ticks"
+    );
+    assert_eq!(
+        sys_handle.event_tx.receiver_count(),
+        0,
+        "CallReq ClientHasReleasedTheseObjects on Enter Hangar must detach tick receiver"
+    );
+    assert!(!ctx.has_bound_service(active_sid, "beyonce"));
+    assert!(
+        !ctx.is_space_ballpark_bootstrapped(active_sid, char_id, sys_id),
+        "CallReq ClientHasReleasedTheseObjects on Enter Hangar must clear ballpark bootstrap"
+    );
+
+    // 3. Re-entering View Outside immediately within 5s cooldown must succeed cleanly,
+    //    and releasing again via CallReq followed by Hangar ship.Undock must defer SetState.
+    let (reenter_rsp, reenter_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        4,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(i64::from(sys_id)), PyRep::None],
+    )
+    .await;
+    assert_eq!(reenter_rsp.packet_type, MachoPacketType::CallRsp);
+    let mut reenter_states = Vec::new();
+    for pkt in &reenter_notifs {
+        collect_set_states_from_pyrep_tree(&pkt.payload, &mut reenter_states);
+    }
+    assert_eq!(reenter_states.len(), 1);
+    assert_eq!(reenter_states[0].0, Some(struct_id));
+
+    let beyonce_bid_2 = ctx
+        .bound_objects
+        .read()
+        .unwrap()
+        .values()
+        .find(|e| e.session_id == active_sid && e.service == "beyonce")
+        .map(|e| e.bound_id)
+        .expect("second beyonce bound object exists");
+    let (rel2_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        5,
+        "machoNet",
+        "ClientHasReleasedTheseObjects",
+        vec![PyRep::List(vec![ctx.bound_object_wire_rep(beyonce_bid_2)])],
+    )
+    .await;
+    assert_eq!(rel2_rsp.packet_type, MachoPacketType::CallRsp);
+    assert_eq!(sys_handle.event_tx.receiver_count(), 0);
+
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        6,
+        "timeControl",
+        "AdvanceClock",
+        vec![PyRep::Integer(12)],
+    )
+    .await;
+    let (undock_rsp, undock_notifs) =
+        test_1386_call_rpc(&mut s, client_id, user_id, 7, "ship", "Undock", Vec::new()).await;
+    assert_eq!(undock_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        !undock_notifs
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "SetState")),
+        "ship.Undock after CallReq Enter Hangar must defer SetState until post-OnAddBallpark MachoBindObject"
+    );
+
+    let (bind_rsp, bind_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        8,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(i64::from(sys_id)), PyRep::None],
+    )
+    .await;
+    assert_eq!(bind_rsp.packet_type, MachoPacketType::CallRsp);
+    let mut bind_states = Vec::new();
+    for pkt in &bind_notifs {
+        collect_set_states_from_pyrep_tree(&pkt.payload, &mut bind_states);
+    }
+    assert_eq!(bind_states.len(), 1);
+    assert_eq!(bind_states[0].0, Some(ship_id));
 }
