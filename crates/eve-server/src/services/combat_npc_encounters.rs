@@ -175,12 +175,58 @@ pub async fn step_encounter_wave_on_kill(
     }
 }
 
+/// Invoked from `npc_death_hook` when any NPC ball is destroyed in space by damage
+/// (`apply_damage_to_ball` / `step_combat_system`), emitting standing-change notifications
+/// to the killer's client socket in addition to DB updates (`feat:standings.standing-loss`).
+pub async fn handle_npc_destroyed_in_space_with_ctx(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    killed_ball_id: i64,
+    killer_char_id: Option<i64>,
+) {
+    handle_npc_destroyed_in_space_inner(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        &*ctx.combat_ephemeral,
+        Some(ctx),
+        solar_system_id,
+        killed_ball_id,
+        killer_char_id,
+    )
+    .await;
+}
+
 /// Invoked from `npc_death_hook` when any NPC ball is destroyed in space by damage (`apply_damage_to_ball` / `step_combat_system`).
 pub async fn handle_npc_destroyed_in_space(
     systems: &Arc<SystemRegistry>,
     db: &Arc<WorldRepository>,
     sde: &Arc<SdeRegistry>,
     combat_ephemeral: &dyn AnyRwLock<CombatRuntimeState>,
+    solar_system_id: SolarSystemId,
+    killed_ball_id: i64,
+    killer_char_id: Option<i64>,
+) {
+    handle_npc_destroyed_in_space_inner(
+        systems,
+        db,
+        sde,
+        combat_ephemeral,
+        None,
+        solar_system_id,
+        killed_ball_id,
+        killer_char_id,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_npc_destroyed_in_space_inner(
+    systems: &Arc<SystemRegistry>,
+    db: &Arc<WorldRepository>,
+    sde: &Arc<SdeRegistry>,
+    combat_ephemeral: &dyn AnyRwLock<CombatRuntimeState>,
+    notify_ctx: Option<&ServerContext>,
     solar_system_id: SolarSystemId,
     killed_ball_id: i64,
     killer_char_id: Option<i64>,
@@ -359,6 +405,7 @@ pub async fn handle_npc_destroyed_in_space(
         let drop_cls = npc.sleeper_wh_class.max(5);
         let base_bounty = npc.bounty_isk;
         let npc_type_id = npc.type_id;
+        let npc_faction_id = npc.faction_id;
         let should_credit_bounty = solar_system_id < 31_000_000
             && npc.archetype != "Sleeper"
             && eff_bounty > 0.0
@@ -415,6 +462,33 @@ pub async fn handle_npc_destroyed_in_space(
             with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
                 rt.destroyed_npc_cache.insert(killed_ball_id, npc);
             });
+        }
+        if killer > 0 {
+            let explicit_fid = (npc_faction_id > 0).then_some(npc_faction_id);
+            if let Some(ctx) = notify_ctx {
+                crate::services::agents_missions::agents_standings_arcs::apply_npc_kill_faction_standing_loss(
+                    ctx,
+                    solar_system_id,
+                    killer,
+                    npc_type_id,
+                    explicit_fid,
+                    None,
+                    now,
+                );
+            } else {
+                db.with_mut_snapshot(|snap| {
+                    let _ = crate::services::agents_missions::agents_standings_arcs::apply_npc_kill_faction_standing_loss_in_snap_sde(
+                        sde,
+                        snap,
+                        solar_system_id,
+                        killer,
+                        npc_type_id,
+                        explicit_fid,
+                        None,
+                        now,
+                    );
+                });
+            }
         }
         if drop_drifter_sleeper_loot && killer > 0 {
             let _ = crate::services::pve_exploration_sites::drop_sleeper_wreck_core(
@@ -971,6 +1045,22 @@ pub async fn populate_npc_wreck_on_turret_kill(
         killer_char_id,
     )
     .await;
+    if is_npc_entity && killer_char_id > 0 {
+        let explicit_fid = npc_opt
+            .as_ref()
+            .map(|n| n.faction_id)
+            .filter(|&f| f > 0)
+            .or_else(|| spawn_faction_id.filter(|&f| f > 0));
+        crate::services::agents_missions::agents_standings_arcs::apply_npc_kill_faction_standing_loss(
+            ctx,
+            solar_system_id,
+            killer_char_id,
+            npc_type_id,
+            explicit_fid,
+            None,
+            ctx.now_unix(),
+        );
+    }
     archetype
 }
 
@@ -1012,15 +1102,26 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
             .map(|(&k, _)| k)
             .or(npc.target_id)
             .and_then(|killer_id| {
+                let effective_killer_id =
+                    crate::services::agents_missions::agents_standings_arcs::resolve_runtime_killer_char_id(
+                        ctx,
+                        killer_id,
+                    );
                 ctx.db.with_snapshot(|s| {
-                    if s.characters.contains_key(&killer_id) {
-                        Some(killer_id)
-                    } else if let Some(ship) = s.items.get(&killer_id) {
+                    if s.characters.contains_key(&effective_killer_id) {
+                        Some(effective_killer_id)
+                    } else if let Some(ship) = s.get_any_item(effective_killer_id) {
                         if s.characters.contains_key(&ship.owner_id) {
                             Some(ship.owner_id)
                         } else {
                             None
                         }
+                    } else if let Some((&char_id, _)) = s
+                        .characters
+                        .iter()
+                        .find(|(_, c)| c.active_ship_id == effective_killer_id)
+                    {
+                        Some(char_id)
                     } else {
                         None
                     }
