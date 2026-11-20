@@ -275,10 +275,185 @@ pub fn with_pve_exploration_reg<R>(
     with_pve_exploration_reg_db(&ctx.db, ctx.now_unix(), f)
 }
 
-fn find_site_index_by_id_or_dungeon(sites: &[PveSiteInstance], site_id: &str) -> Option<usize> {
+/// Returns `true` when `site` defines a positive lifetime that has elapsed by `now`.
+pub(crate) fn is_site_expired(site: &PveSiteInstance, now: u64) -> bool {
+    site.lifetime_seconds > 0 && now >= site.created_unix.saturating_add(site.lifetime_seconds)
+}
+
+/// Returns `true` when `site` is expired itself or references an expired escalation entry.
+pub(crate) fn is_site_expired_in_reg(
+    reg: &PveExplorationRegistry,
+    site: &PveSiteInstance,
+    now: u64,
+) -> bool {
+    is_site_expired(site, now)
+        || site.expedition_instance_id.is_some_and(|inst_id| {
+            crate::services::pve_expeditions::linked_escalation_is_expired(reg, inst_id, now)
+        })
+}
+
+pub(crate) struct ExpiredSitePruneResult {
+    pub(crate) site_id: String,
+    pub(crate) solar_system_id: SolarSystemId,
+    pub(crate) drained_balls: Vec<(SolarSystemId, Vec<i64>)>,
+    pub(crate) escalation_cleanup: crate::services::pve_expeditions::PrunedEscalationsCleanup,
+}
+
+/// Marks an expired site cleared, drains its NPC balls, and prunes any expired linked escalation.
+pub(crate) fn expire_and_prune_site_in_reg(
+    reg: &mut PveExplorationRegistry,
+    solar_system_id: SolarSystemId,
+    target_site_id: &str,
+    now: u64,
+) -> Option<ExpiredSitePruneResult> {
+    let (exp_inst_id, drained_balls) = {
+        let sites = reg.sites_by_system.get_mut(&solar_system_id)?;
+        let site = find_site_by_canonical_id_mut(sites, target_site_id)?;
+        let exp_inst_id = site.expedition_instance_id;
+        site.cleared = true;
+        let balls: Vec<i64> = site.active_npc_ball_ids.drain(..).collect();
+        let drained = if balls.is_empty() {
+            Vec::new()
+        } else {
+            vec![(solar_system_id, balls)]
+        };
+        (exp_inst_id, drained)
+    };
+    let escalation_cleanup = exp_inst_id
+        .map(|inst_id| {
+            crate::services::pve_expeditions::prune_expired_escalation_for_instance_in_reg(
+                reg, inst_id, now,
+            )
+        })
+        .unwrap_or_default();
+    Some(ExpiredSitePruneResult {
+        site_id: target_site_id.to_string(),
+        solar_system_id,
+        drained_balls,
+        escalation_cleanup,
+    })
+}
+
+fn apply_expired_site_prune_in_db(
+    db: &eve_db::WorldRepository,
+    pruned: ExpiredSitePruneResult,
+) -> (
+    Vec<(
+        crate::services::pve_expeditions::CharacterId,
+        Vec<EscalatingPathEntry>,
+    )>,
+    Vec<(SolarSystemId, Vec<i64>)>,
+) {
+    let expired_chars: Vec<(
+        crate::services::pve_expeditions::CharacterId,
+        Vec<EscalatingPathEntry>,
+    )> = pruned
+        .escalation_cleanup
+        .expired_by_char
+        .iter()
+        .map(|(cid, entries, _)| (*cid, entries.clone()))
+        .collect();
+    db.with_mut_snapshot(|snap| {
+        if let Some(anoms) = snap.cosmic_anomalies.get_mut(&pruned.solar_system_id) {
+            for a in anoms
+                .iter_mut()
+                .filter(|a| a.anomaly_id == pruned.site_id && !a.cleared)
+            {
+                a.cleared = true;
+            }
+        }
+        if let Some(sigs) = snap.cosmic_signatures.get_mut(&pruned.solar_system_id) {
+            for s in sigs
+                .iter_mut()
+                .filter(|s| s.signature_id == pruned.site_id && !s.collapsed)
+            {
+                s.collapsed = true;
+            }
+        }
+    });
+    let combined = crate::services::pve_expeditions::merge_despawn_ball_batches(
+        pruned.escalation_cleanup.site_npc_batches,
+        pruned.drained_balls,
+    );
+    let removed_balls = crate::services::pve_expeditions::despawn_expired_escalations_in_db(
+        db,
+        &pruned.escalation_cleanup.expired_by_char,
+        combined,
+    );
+    (expired_chars, removed_balls)
+}
+
+pub(crate) async fn finalize_expired_site_prune_core(
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
+    pruned: ExpiredSitePruneResult,
+) -> Vec<(
+    crate::services::pve_expeditions::CharacterId,
+    Vec<EscalatingPathEntry>,
+)> {
+    let (expired_chars, removed_balls) = apply_expired_site_prune_in_db(db, pruned);
+    if !removed_balls.is_empty() {
+        crate::services::pve_expeditions::despawn_escalation_balls_in_loaded_systems(
+            systems,
+            removed_balls,
+        )
+        .await;
+    }
+    expired_chars
+}
+
+pub(crate) fn finalize_expired_site_prune_sync(
+    ctx: &ServerContext,
+    pruned: ExpiredSitePruneResult,
+) -> Vec<(
+    crate::services::pve_expeditions::CharacterId,
+    Vec<EscalatingPathEntry>,
+)> {
+    let (expired_chars, removed_balls) = apply_expired_site_prune_in_db(&ctx.db, pruned);
+    if !removed_balls.is_empty() {
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let systems = std::sync::Arc::clone(&ctx.systems);
+            rt.spawn(
+                crate::services::pve_expeditions::despawn_escalation_balls_in_loaded_systems(
+                    &systems,
+                    removed_balls,
+                ),
+            );
+        }
+    }
+    expired_chars
+}
+
+/// Persists expired-site pruning, despawns live balls, emits escalation change notices, and returns `SiteExpired`.
+pub(crate) async fn reject_expired_site_prune(
+    ctx: &ServerContext,
+    pruned: ExpiredSitePruneResult,
+) -> BridgeRpcError {
+    let expired_sid = pruned.site_id.clone();
+    let expired_chars = finalize_expired_site_prune_core(&ctx.db, &ctx.systems, pruned).await;
+    crate::services::pve_expeditions::emit_pruned_escalation_notifications(ctx, &expired_chars);
+    BridgeRpcError {
+        code: "SiteExpired".into(),
+        message: format!("PvE site {expired_sid} has expired"),
+        client_error: None,
+    }
+}
+
+fn find_site_index_by_id_or_dungeon(
+    sites: &[PveSiteInstance],
+    site_id: &str,
+    now: u64,
+) -> Option<usize> {
     sites
         .iter()
-        .position(|s| s.site_id == site_id)
+        .position(|s| !s.cleared && !is_site_expired(s, now) && s.site_id == site_id)
+        .or_else(|| sites.iter().position(|s| !s.cleared && s.site_id == site_id))
+        .or_else(|| sites.iter().position(|s| s.site_id == site_id))
+        .or_else(|| {
+            sites.iter().position(|s| {
+                !s.cleared && !is_site_expired(s, now) && s.dungeon_id.to_string() == site_id
+            })
+        })
         .or_else(|| {
             sites
                 .iter()
@@ -287,20 +462,34 @@ fn find_site_index_by_id_or_dungeon(sites: &[PveSiteInstance], site_id: &str) ->
         .or_else(|| sites.iter().position(|s| s.dungeon_id.to_string() == site_id))
 }
 
-/// Finds a site by exact `site_id`, preferring active (uncleared) matches on numeric `dungeon_id`.
+/// Finds a site by exact `site_id`, preferring active (uncleared, non-expired) matches on `site_id` or numeric `dungeon_id`.
 pub(crate) fn find_site_by_id_or_dungeon<'a>(
     sites: &'a [PveSiteInstance],
     site_id: &str,
+    now: u64,
 ) -> Option<&'a PveSiteInstance> {
-    find_site_index_by_id_or_dungeon(sites, site_id).map(|idx| &sites[idx])
+    find_site_index_by_id_or_dungeon(sites, site_id, now).map(|idx| &sites[idx])
 }
 
 /// Mutable lookup matching [`find_site_by_id_or_dungeon`].
 pub(crate) fn find_site_by_id_or_dungeon_mut<'a>(
     sites: &'a mut [PveSiteInstance],
     site_id: &str,
+    now: u64,
 ) -> Option<&'a mut PveSiteInstance> {
-    find_site_index_by_id_or_dungeon(sites, site_id).map(|idx| &mut sites[idx])
+    find_site_index_by_id_or_dungeon(sites, site_id, now).map(|idx| &mut sites[idx])
+}
+
+/// Matches strictly by canonical `site_id`, preferring uncleared entries over cleared ones.
+fn find_site_by_canonical_id_mut<'a>(
+    sites: &'a mut [PveSiteInstance],
+    site_id: &str,
+) -> Option<&'a mut PveSiteInstance> {
+    let idx = sites
+        .iter()
+        .position(|s| !s.cleared && s.site_id == site_id)
+        .or_else(|| sites.iter().position(|s| s.site_id == site_id))?;
+    Some(&mut sites[idx])
 }
 
 pub fn next_pve_seq(reg: &mut PveExplorationRegistry) -> i64 {
@@ -392,34 +581,72 @@ async fn handle_pve_site_npc_destruction_core_inner(
     drop_npc_wreck: bool,
 ) -> (Option<String>, Option<EscalatingPathEntry>, Option<EscalatingPathEntry>) {
     let now_unix = db.clock().now_unix_secs();
-    let site_info = with_pve_exploration_reg_db(db, now_unix, |reg| {
-        let sites = reg.sites_by_system.get_mut(&solar_system_id)?;
-        for site in sites.iter_mut() {
-            if site.cleared {
-                continue;
+    enum NpcKillLookupOutcome {
+        NotFound,
+        ExpiredSite(ExpiredSitePruneResult),
+        ActiveHit {
+            site_id: String,
+            dungeon_id: u32,
+            dungeon_name: String,
+            site_category: String,
+            ded_rating: Option<u8>,
+            wormhole_class: Option<u8>,
+            position: [f64; 3],
+            current_wave: u8,
+            total_waves: u8,
+            wave_cleared: bool,
+            was_wave_trigger: bool,
+            expedition_instance_id: Option<i64>,
+        },
+    }
+    let lookup = with_pve_exploration_reg_db(db, now_unix, |reg| {
+        let now = now_sec(reg);
+        let matched = reg.sites_by_system.get(&solar_system_id).and_then(|sites| {
+            for site in sites.iter() {
+                if site.cleared {
+                    continue;
+                }
+                if let Some(pos) = site.active_npc_ball_ids.iter().position(|&bid| bid == npc_ball_id) {
+                    return Some((site.site_id.clone(), is_site_expired_in_reg(reg, site, now), pos));
+                }
             }
-            if let Some(pos) = site.active_npc_ball_ids.iter().position(|&bid| bid == npc_ball_id) {
-                site.active_npc_ball_ids.remove(pos);
-                let wave_cleared = site.active_npc_ball_ids.is_empty();
-                return Some((
-                    site.site_id.clone(),
-                    site.dungeon_id,
-                    site.dungeon_name.clone(),
-                    site.site_category.clone(),
-                    site.ded_rating,
-                    site.wormhole_class,
-                    site.position,
-                    (site.current_wave, site.total_waves),
-                    wave_cleared,
-                    pos == 0,
-                    site.expedition_instance_id,
-                ));
-            }
+            None
+        });
+        let Some((matched_site_id, expired, pos)) = matched else {
+            return NpcKillLookupOutcome::NotFound;
+        };
+        if expired {
+            return match expire_and_prune_site_in_reg(reg, solar_system_id, &matched_site_id, now) {
+                Some(pruned) => NpcKillLookupOutcome::ExpiredSite(pruned),
+                None => NpcKillLookupOutcome::NotFound,
+            };
         }
-        None
+        let Some(site) = reg.sites_by_system.get_mut(&solar_system_id).and_then(|sites| {
+            sites
+                .iter_mut()
+                .find(|s| !s.cleared && s.site_id == matched_site_id)
+        }) else {
+            return NpcKillLookupOutcome::NotFound;
+        };
+        site.active_npc_ball_ids.remove(pos);
+        let wave_cleared = site.active_npc_ball_ids.is_empty();
+        NpcKillLookupOutcome::ActiveHit {
+            site_id: site.site_id.clone(),
+            dungeon_id: site.dungeon_id,
+            dungeon_name: site.dungeon_name.clone(),
+            site_category: site.site_category.clone(),
+            ded_rating: site.ded_rating,
+            wormhole_class: site.wormhole_class,
+            position: site.position,
+            current_wave: site.current_wave,
+            total_waves: site.total_waves,
+            wave_cleared,
+            was_wave_trigger: pos == 0,
+            expedition_instance_id: site.expedition_instance_id,
+        }
     });
 
-    let Some((
+    let (
         site_id,
         dungeon_id,
         dungeon_name,
@@ -431,8 +658,38 @@ async fn handle_pve_site_npc_destruction_core_inner(
         wave_cleared,
         was_wave_trigger,
         expedition_instance_id,
-    )) = site_info else {
-        return (None, None, None);
+    ) = match lookup {
+        NpcKillLookupOutcome::NotFound => return (None, None, None),
+        NpcKillLookupOutcome::ExpiredSite(pruned) => {
+            let _ = Box::pin(finalize_expired_site_prune_core(db, systems, pruned)).await;
+            return (None, None, None);
+        }
+        NpcKillLookupOutcome::ActiveHit {
+            site_id,
+            dungeon_id,
+            dungeon_name,
+            site_category,
+            ded_rating,
+            wormhole_class,
+            position,
+            current_wave,
+            total_waves,
+            wave_cleared,
+            was_wave_trigger,
+            expedition_instance_id,
+        } => (
+            site_id,
+            dungeon_id,
+            dungeon_name,
+            site_category,
+            ded_rating,
+            wormhole_class,
+            position,
+            (current_wave, total_waves),
+            wave_cleared,
+            was_wave_trigger,
+            expedition_instance_id,
+        ),
     };
 
     let sleeper_class = wh_class.filter(|_| site_category == "WormholeCombat");
@@ -528,12 +785,12 @@ async fn handle_pve_site_npc_destruction_core_inner(
 
         db.with_mut_snapshot(|snap| {
             if let Some(anoms) = snap.cosmic_anomalies.get_mut(&solar_system_id) {
-                if let Some(a) = anoms.iter_mut().find(|a| a.anomaly_id == site_id) {
+                if let Some(a) = anoms.iter_mut().find(|a| a.anomaly_id == site_id && !a.cleared) {
                     a.cleared = true;
                 }
             }
             if let Some(sigs) = snap.cosmic_signatures.get_mut(&solar_system_id) {
-                if let Some(s) = sigs.iter_mut().find(|s| s.signature_id == site_id) {
+                if let Some(s) = sigs.iter_mut().find(|s| s.signature_id == site_id && !s.collapsed) {
                     s.collapsed = true;
                 }
             }
@@ -812,40 +1069,97 @@ pub async fn advance_site_wave_or_complete(
     }
     ensure_system_pve_sites_seeded(ctx, solar_system_id).await;
 
-    let (current_balls, is_sleeper_cache_stabilized) = with_pve_exploration_reg(ctx, |reg| {
-        let sites = reg.sites_by_system.entry(solar_system_id).or_default();
-        let Some(site) = find_site_by_id_or_dungeon(sites, site_id) else {
+    enum AdvancePrecheck {
+        Ready {
+            canonical_site_id: String,
+            current_balls: Vec<i64>,
+            is_sleeper_cache_stabilized: bool,
+        },
+        Expired(ExpiredSitePruneResult),
+    }
+
+    let precheck = with_pve_exploration_reg(ctx, |reg| {
+        let now = now_sec(reg);
+        let matched = {
+            let Some(sites) = reg.sites_by_system.get(&solar_system_id) else {
+                return Err(BridgeRpcError {
+                    code: "SiteNotFound".into(),
+                    message: format!("PvE site {site_id} not found in system {solar_system_id}"),
+                    client_error: None,
+                });
+            };
+            let Some(site) = find_site_by_id_or_dungeon(sites, site_id, now) else {
+                return Err(BridgeRpcError {
+                    code: "SiteNotFound".into(),
+                    message: format!("PvE site {site_id} not found in system {solar_system_id}"),
+                    client_error: None,
+                });
+            };
+            if site.cleared {
+                return Err(BridgeRpcError {
+                    code: "SiteAlreadyCleared".into(),
+                    message: format!("PvE site {} is already cleared", site.site_id),
+                    client_error: None,
+                });
+            }
+            (
+                site.site_id.clone(),
+                is_site_expired_in_reg(reg, site, now),
+                matches!(site.site_category.as_str(), "Data" | "Relic" | "Ghost")
+                    && !site.hackable_can_ids.is_empty()
+                    && !site
+                        .hackable_can_ids
+                        .iter()
+                        .all(|&cid| reg.hacked_containers.contains(&(solar_system_id, cid))),
+                site.active_npc_ball_ids.clone(),
+                site.site_category == "SleeperCache" && site.sleeper_rift_stabilized,
+            )
+        };
+        let (
+            canonical_site_id,
+            expired,
+            has_unhacked_cans,
+            current_balls,
+            is_sleeper_cache_stabilized,
+        ) = matched;
+        if expired {
+            if let Some(pruned) =
+                expire_and_prune_site_in_reg(reg, solar_system_id, &canonical_site_id, now)
+            {
+                return Ok(AdvancePrecheck::Expired(pruned));
+            }
             return Err(BridgeRpcError {
                 code: "SiteNotFound".into(),
                 message: format!("PvE site {site_id} not found in system {solar_system_id}"),
                 client_error: None,
             });
-        };
-        if site.cleared {
-            return Err(BridgeRpcError {
-                code: "SiteAlreadyCleared".into(),
-                message: format!("PvE site {site_id} is already cleared"),
-                client_error: None,
-            });
         }
-        if matches!(site.site_category.as_str(), "Data" | "Relic" | "Ghost")
-            && !site.hackable_can_ids.is_empty()
-            && !site
-                .hackable_can_ids
-                .iter()
-                .all(|&cid| reg.hacked_containers.contains(&(solar_system_id, cid)))
-        {
+        if has_unhacked_cans {
             return Err(BridgeRpcError {
                 code: "SiteContainersUnhacked".into(),
-                message: format!("Cannot complete exploration site {site_id} while hackable containers remain unhacked"),
+                message: format!(
+                    "Cannot complete exploration site {canonical_site_id} while hackable containers remain unhacked"
+                ),
                 client_error: None,
             });
         }
-        Ok((
-            site.active_npc_ball_ids.clone(),
-            site.site_category == "SleeperCache" && site.sleeper_rift_stabilized,
-        ))
+        Ok(AdvancePrecheck::Ready {
+            canonical_site_id,
+            current_balls,
+            is_sleeper_cache_stabilized,
+        })
     })?;
+
+    let (canonical_site_id, current_balls, is_sleeper_cache_stabilized) = match precheck {
+        AdvancePrecheck::Expired(pruned) => {
+            return Err(reject_expired_site_prune(ctx, pruned).await);
+        }
+        AdvancePrecheck::Ready {
+            canonical_site_id,
+            current_balls,
+            is_sleeper_cache_stabilized,
+        } => (canonical_site_id, current_balls, is_sleeper_cache_stabilized),
+    };
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     if !is_sleeper_cache_stabilized {
@@ -853,14 +1167,106 @@ pub async fn advance_site_wave_or_complete(
             if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_some() {
                 return Err(BridgeRpcError {
                     code: "WaveNpcsRemaining".into(),
-                    message: format!("Cannot advance site {site_id}: wave NPC ball {bid} has not been destroyed"),
+                    message: format!("Cannot advance site {canonical_site_id}: wave NPC ball {bid} has not been destroyed"),
                     client_error: None,
                 });
             }
         }
     }
 
+    enum AdvanceCommitOutcome {
+        Expired(ExpiredSitePruneResult),
+        Committed {
+            canonical_site_id: String,
+            dungeon_id: u32,
+            dungeon_name: String,
+            site_category: String,
+            ded_rating: Option<u8>,
+            wh_class: Option<u8>,
+            pos: [f64; 3],
+            new_wave: u8,
+            total_waves: u8,
+            old_balls: Vec<i64>,
+            completed_now: bool,
+            exp_inst_id: Option<i64>,
+        },
+    }
+
+    let commit_outcome = with_pve_exploration_reg(ctx, |reg| {
+        let now = now_sec(reg);
+        let check = {
+            let Some(sites) = reg.sites_by_system.get(&solar_system_id) else {
+                return Err(BridgeRpcError {
+                    code: "SiteNotFound".into(),
+                    message: format!("PvE site {canonical_site_id} not found in system {solar_system_id}"),
+                    client_error: None,
+                });
+            };
+            let Some(site) = find_site_by_id_or_dungeon(sites, &canonical_site_id, now) else {
+                return Err(BridgeRpcError {
+                    code: "SiteNotFound".into(),
+                    message: format!("PvE site {canonical_site_id} not found in system {solar_system_id}"),
+                    client_error: None,
+                });
+            };
+            if site.cleared {
+                return Err(BridgeRpcError {
+                    code: "SiteAlreadyCleared".into(),
+                    message: format!("PvE site {} is already cleared", site.site_id),
+                    client_error: None,
+                });
+            }
+            (
+                site.site_id.clone(),
+                is_site_expired_in_reg(reg, site, now),
+            )
+        };
+        let (resolved_site_id, expired_now) = check;
+        if expired_now {
+            if let Some(pruned) =
+                expire_and_prune_site_in_reg(reg, solar_system_id, &resolved_site_id, now)
+            {
+                return Ok(AdvanceCommitOutcome::Expired(pruned));
+            }
+            return Err(BridgeRpcError {
+                code: "SiteNotFound".into(),
+                message: format!("PvE site {resolved_site_id} not found in system {solar_system_id}"),
+                client_error: None,
+            });
+        }
+        let sites = reg.sites_by_system.entry(solar_system_id).or_default();
+        let Some(site) = find_site_by_id_or_dungeon_mut(sites, &resolved_site_id, now) else {
+            return Err(BridgeRpcError {
+                code: "SiteNotFound".into(),
+                message: format!("PvE site {resolved_site_id} not found in system {solar_system_id}"),
+                client_error: None,
+            });
+        };
+        let old = std::mem::take(&mut site.active_npc_ball_ids);
+        let done = site.current_wave >= site.total_waves;
+        if done {
+            site.cleared = true;
+        } else {
+            site.current_wave += 1;
+        }
+        Ok(AdvanceCommitOutcome::Committed {
+            canonical_site_id: site.site_id.clone(),
+            dungeon_id: site.dungeon_id,
+            dungeon_name: site.dungeon_name.clone(),
+            site_category: site.site_category.clone(),
+            ded_rating: site.ded_rating,
+            wh_class: site.wormhole_class,
+            pos: site.position,
+            new_wave: site.current_wave,
+            total_waves: site.total_waves,
+            old_balls: old,
+            completed_now: done,
+            exp_inst_id: site.expedition_instance_id,
+        })
+    })?;
+
     let (
+        canonical_site_id,
         dungeon_id,
         dungeon_name,
         site_category,
@@ -872,36 +1278,38 @@ pub async fn advance_site_wave_or_complete(
         old_balls,
         completed_now,
         exp_inst_id,
-    ) = with_pve_exploration_reg(ctx, |reg| {
-        let sites = reg.sites_by_system.entry(solar_system_id).or_default();
-        let Some(site) = find_site_by_id_or_dungeon_mut(sites, site_id) else {
-            return Err(BridgeRpcError {
-                code: "SiteNotFound".into(),
-                message: format!("PvE site {site_id} not found in system {solar_system_id}"),
-                client_error: None,
-            });
-        };
-        let old = std::mem::take(&mut site.active_npc_ball_ids);
-        let done = site.current_wave >= site.total_waves;
-        if done {
-            site.cleared = true;
-        } else {
-            site.current_wave += 1;
+    ) = match commit_outcome {
+        AdvanceCommitOutcome::Expired(pruned) => {
+            return Err(reject_expired_site_prune(ctx, pruned).await);
         }
-        Ok((
-            site.dungeon_id,
-            site.dungeon_name.clone(),
-            site.site_category.clone(),
-            site.ded_rating,
-            site.wormhole_class,
-            site.position,
-            site.current_wave,
-            site.total_waves,
-            old,
-            done,
-            site.expedition_instance_id,
-        ))
-    })?;
+        AdvanceCommitOutcome::Committed {
+            canonical_site_id,
+            dungeon_id,
+            dungeon_name,
+            site_category,
+            ded_rating,
+            wh_class,
+            pos,
+            new_wave,
+            total_waves,
+            old_balls,
+            completed_now,
+            exp_inst_id,
+        } => (
+            canonical_site_id,
+            dungeon_id,
+            dungeon_name,
+            site_category,
+            ded_rating,
+            wh_class,
+            pos,
+            new_wave,
+            total_waves,
+            old_balls,
+            completed_now,
+            exp_inst_id,
+        ),
+    };
 
     for bid in old_balls {
         let _ = sys_handle.remove_ball(bid).await;
@@ -922,7 +1330,7 @@ pub async fn advance_site_wave_or_complete(
             if let Some(site) = reg
                 .sites_by_system
                 .get_mut(&solar_system_id)
-                .and_then(|l| l.iter_mut().find(|s| s.site_id == site_id || s.dungeon_id == dungeon_id))
+                .and_then(|l| find_site_by_canonical_id_mut(l, &canonical_site_id))
             {
                 site.active_npc_ball_ids = spawned_npc_ids.clone();
             }
@@ -958,7 +1366,7 @@ pub async fn advance_site_wave_or_complete(
                     &ctx.sde,
                     &ctx.combat_ephemeral,
                     solar_system_id,
-                    site_id,
+                    &canonical_site_id,
                     pos,
                 ).await;
                 crate::services::combat_crimewatch::flush_combat_runtime_to_db(ctx);
@@ -985,13 +1393,13 @@ pub async fn advance_site_wave_or_complete(
             let mut a_hit = false;
             let mut s_hit = false;
             if let Some(anoms) = snap.cosmic_anomalies.get_mut(&solar_system_id) {
-                if let Some(a) = anoms.iter_mut().find(|a| a.anomaly_id == site_id && !a.cleared) {
+                if let Some(a) = anoms.iter_mut().find(|a| a.anomaly_id == canonical_site_id && !a.cleared) {
                     a.cleared = true;
                     a_hit = true;
                 }
             }
             if let Some(sigs) = snap.cosmic_signatures.get_mut(&solar_system_id) {
-                if let Some(s) = sigs.iter_mut().find(|s| s.signature_id == site_id && !s.collapsed) {
+                if let Some(s) = sigs.iter_mut().find(|s| s.signature_id == canonical_site_id && !s.collapsed) {
                     s.collapsed = true;
                     s_hit = true;
                 }
@@ -999,16 +1407,16 @@ pub async fn advance_site_wave_or_complete(
             (a_hit, s_hit)
         });
         if was_anom {
-            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_anomaly_delta(ctx, solar_system_id, &[], &[site_id.to_string()]);
+            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_anomaly_delta(ctx, solar_system_id, &[], &[canonical_site_id.clone()]);
         }
         if was_sig {
-            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(ctx, solar_system_id, &[], &[site_id.to_string()]);
+            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(ctx, solar_system_id, &[], &[canonical_site_id.clone()]);
         }
 
         crate::router::notify_registry::push_typed_session_notification(
             session,
             crate::router::notify_registry::OnCosmicAnomalyRemoved {
-                site_id: site_id.to_string(),
+                site_id: canonical_site_id.clone(),
             },
         );
         ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(
@@ -1044,7 +1452,7 @@ pub async fn advance_site_wave_or_complete(
         .collect();
 
     Ok(PyRep::keyval([
-        ("siteID", PyRep::String(site_id.to_string())),
+        ("siteID", PyRep::String(canonical_site_id)),
         ("dungeonID", PyRep::Integer(dungeon_id as i64)),
         ("dungeonName", PyRep::String(dungeon_name)),
         ("currentWave", PyRep::Integer(new_wave as i64)),
@@ -1321,9 +1729,10 @@ fn handle_dungeon_ship_restrictions(
         }
     } else if let Some(sid) = arg0_str {
         let (mut matched_seeded, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
+            let now = now_sec(reg);
             let seeded = reg.seeded_systems.get(&sys_id).copied().unwrap_or(false);
             if let Some(sites) = reg.sites_by_system.get(&sys_id) {
-                if let Some(s) = find_site_by_id_or_dungeon(sites, sid) {
+                if let Some(s) = find_site_by_id_or_dungeon(sites, sid, now) {
                     if s.site_category == "SleeperCache" {
                         if let Some(tier) = sleeper_cache_tier_for_dungeon(s.dungeon_id) {
                             sleeper_tier_opt = Some((tier, s.dungeon_id, "Sleeper Cache"));
@@ -1519,7 +1928,14 @@ async fn handle_get_combat_anomaly_instances(
             let owned_exp_ids: std::collections::HashSet<i64> = reg
                 .escalations_by_char
                 .get(&char_id)
-                .map(|list| list.iter().map(|e| e.instance_id).collect())
+                .map(|list| {
+                    list.iter()
+                        .filter(|e| {
+                            !crate::services::pve_expeditions::is_escalation_entry_expired(e, now)
+                        })
+                        .map(|e| e.instance_id)
+                        .collect()
+                })
                 .unwrap_or_default();
             reg.sites_by_system
                 .get(&sys_id)
@@ -1532,8 +1948,7 @@ async fn handle_get_combat_anomaly_instances(
                                 && (s.site_category != "Expedition"
                                     || s.expedition_instance_id
                                         .is_some_and(|id| owned_exp_ids.contains(&id)))
-                                && (s.lifetime_seconds == 0
-                                    || now < s.created_unix.saturating_add(s.lifetime_seconds))
+                                && !is_site_expired_in_reg(reg, s, now)
                         })
                         .map(|s| {
                             combat_anomaly_keyval(
@@ -1628,6 +2043,25 @@ async fn handle_enter_combat_anomaly(
     res
 }
 
+fn find_site_id_by_gate_ball(
+    reg: &PveExplorationRegistry,
+    sys_id: SolarSystemId,
+    item_id: i64,
+) -> Option<String> {
+    let now = now_sec(reg);
+    reg.sites_by_system.get(&sys_id).and_then(|l| {
+        l.iter()
+            .find(|s| {
+                !s.cleared
+                    && !is_site_expired_in_reg(reg, s, now)
+                    && s.gate_ball_id == Some(item_id)
+            })
+            .or_else(|| l.iter().find(|s| !s.cleared && s.gate_ball_id == Some(item_id)))
+            .or_else(|| l.iter().find(|s| s.gate_ball_id == Some(item_id)))
+            .map(|s| s.site_id.clone())
+    })
+}
+
 async fn handle_activate_acceleration_gate(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1699,11 +2133,7 @@ async fn handle_activate_acceleration_gate(
         // Integer argument: a DED acceleration gate ball in the pilot's system resolves to its site;
         // any other gate item belongs to the in-space gate / mission handlers.
         let (mut gate_site, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
-            let found = reg.sites_by_system.get(&sys_id).and_then(|l| {
-                l.iter()
-                    .find(|s| s.gate_ball_id == Some(item_id))
-                    .map(|s| s.site_id.clone())
-            });
+            let found = find_site_id_by_gate_ball(reg, sys_id, item_id);
             let seeded = reg.seeded_systems.get(&sys_id).copied().unwrap_or(false);
             (found, seeded)
         });
@@ -1714,11 +2144,7 @@ async fn handle_activate_acceleration_gate(
         {
             Box::pin(ensure_system_pve_sites_seeded(ctx, sys_id)).await;
             gate_site = read_pve_exploration_reg(ctx, |reg| {
-                reg.sites_by_system.get(&sys_id).and_then(|l| {
-                    l.iter()
-                        .find(|s| s.gate_ball_id == Some(item_id))
-                        .map(|s| s.site_id.clone())
-                })
+                find_site_id_by_gate_ball(reg, sys_id, item_id)
             });
         }
         match gate_site {
@@ -1848,11 +2274,11 @@ async fn handle_activate_acceleration_gate(
         return Some(res);
     }
     let (site_exists, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
+        let now = now_sec(reg);
         (
-            reg.sites_by_system.get(&sys_id).is_some_and(|l| {
-                l.iter()
-                    .any(|s| s.site_id == site_id || s.dungeon_id.to_string() == site_id)
-            }),
+            reg.sites_by_system
+                .get(&sys_id)
+                .is_some_and(|l| find_site_by_id_or_dungeon(l, &site_id, now).is_some()),
             reg.seeded_systems.get(&sys_id).copied().unwrap_or(false),
         )
     });
@@ -1861,10 +2287,10 @@ async fn handle_activate_acceleration_gate(
             Box::pin(ensure_system_pve_sites_seeded(ctx, sys_id)).await;
         }
         let exists_after = read_pve_exploration_reg(ctx, |reg| {
-            reg.sites_by_system.get(&sys_id).is_some_and(|l| {
-                l.iter()
-                    .any(|s| s.site_id == site_id || s.dungeon_id.to_string() == site_id)
-            })
+            let now = now_sec(reg);
+            reg.sites_by_system
+                .get(&sys_id)
+                .is_some_and(|l| find_site_by_id_or_dungeon(l, &site_id, now).is_some())
         });
         if !exists_after {
             return Some(Err(rpc_msg_err(
@@ -1889,7 +2315,15 @@ async fn handle_get_dungeon_info(
     let (_, sys_id) = require_undocked_exploration_space(ctx, session, false)?;
     let site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
     read_pve_exploration_reg(ctx, |reg| {
-        let Some(site) = reg.sites_by_system.get(&sys_id).and_then(|l| l.iter().find(|s| s.site_id == site_id)) else {
+        let now = now_sec(reg);
+        let Some(site) = reg.sites_by_system.get(&sys_id).and_then(|l| {
+            l.iter()
+                .find(|s| {
+                    !s.cleared && !is_site_expired_in_reg(reg, s, now) && s.site_id == site_id
+                })
+                .or_else(|| l.iter().find(|s| !s.cleared && s.site_id == site_id))
+                .or_else(|| l.iter().find(|s| s.site_id == site_id))
+        }) else {
             return Err(BridgeRpcError {
                 code: "DungeonNotFound".into(),
                 message: format!("Dungeon site {site_id} not found"),

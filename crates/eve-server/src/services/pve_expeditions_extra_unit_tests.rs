@@ -947,4 +947,210 @@ mod w4_ops_pve_mut_extra_tests {
         assert!(e_empty.total_steps >= 1);
         assert!(e_empty.journal_text.contains("Guristas Scout Outpost"));
     }
+
+    #[tokio::test]
+    async fn test_expired_unpruned_expedition_guards_in_dungeons_entered_anomaly_entry_and_gate_advance()
+    {
+        let sys_id: SolarSystemId = 30_000_142;
+        let char_id = 94_207_462_i64;
+        let ship_id = 1_042_074_620_i64;
+        let (ctx, mut session) = make_ctx(sys_id, char_id, ship_id);
+        let clock = Arc::new(VirtualServerClock::with_fixed_base(1_800_100_000));
+        ctx.set_clock(clock.clone());
+        let base_now = 1_800_100_000_u64;
+
+        // 1. get_escalating_path_dungeons_entered must ignore expired unpruned entries while keeping active & timeless ones.
+        let expired_esc_id = 910_901_i64;
+        let active_esc_id = 910_902_i64;
+        let timeless_esc_id = 910_903_i64;
+        with_pve_exploration_reg(&ctx, |reg| {
+            reg.seeded_systems.insert(sys_id, true);
+            reg.escalations_by_char.insert(
+                char_id,
+                vec![
+                    EscalatingPathEntry {
+                        instance_id: expired_esc_id,
+                        character_id: char_id,
+                        source_dungeon_id: 1420,
+                        expedition_dungeon_id: 1421,
+                        expedition_name: "Expired Entry".into(),
+                        destination_solar_system_id: sys_id,
+                        step_index: 2,
+                        total_steps: 3,
+                        journal_text: String::new(),
+                        created_at_sec: base_now - 90_000,
+                        expires_at_sec: base_now - 10,
+                        dungeons_entered: vec![1420],
+                        journal_entry_template_id: 0,
+                    },
+                    EscalatingPathEntry {
+                        instance_id: active_esc_id,
+                        character_id: char_id,
+                        source_dungeon_id: 1430,
+                        expedition_dungeon_id: 1431,
+                        expedition_name: "Active Entry".into(),
+                        destination_solar_system_id: sys_id,
+                        step_index: 2,
+                        total_steps: 3,
+                        journal_text: String::new(),
+                        created_at_sec: base_now - 100,
+                        expires_at_sec: base_now + 86_300,
+                        dungeons_entered: vec![1430],
+                        journal_entry_template_id: 0,
+                    },
+                    EscalatingPathEntry {
+                        instance_id: timeless_esc_id,
+                        character_id: char_id,
+                        source_dungeon_id: 1440,
+                        expedition_dungeon_id: 1440,
+                        expedition_name: "Timeless Entry".into(),
+                        destination_solar_system_id: sys_id,
+                        step_index: 1,
+                        total_steps: 3,
+                        journal_text: String::new(),
+                        created_at_sec: base_now - 200_000,
+                        expires_at_sec: 0,
+                        dungeons_entered: vec![1440],
+                        journal_entry_template_id: 0,
+                    },
+                ],
+            );
+            let sites = reg.sites_by_system.entry(sys_id).or_default();
+            // Matching active CombatAnomaly sharing (sys_id, 1421) must not append to expired_esc_id.dungeons_entered.
+            sites.push(PveSiteInstance {
+                site_id: "ACTIVE-SHARE-1421".into(),
+                dungeon_id: 1421,
+                dungeon_name: "Active Sharing Anomaly".into(),
+                solar_system_id: sys_id,
+                site_category: "CombatAnomaly".into(),
+                position: [10_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                current_room: 1,
+                total_rooms: 1,
+                current_wave: 1,
+                total_waves: 1,
+                created_unix: base_now,
+                lifetime_seconds: 86_400,
+                ..Default::default()
+            });
+            sites.push(PveSiteInstance {
+                site_id: "CLEARED-ANOM-1462".into(),
+                dungeon_id: 1422,
+                solar_system_id: sys_id,
+                site_category: "CombatAnomaly".into(),
+                cleared: true,
+                created_unix: base_now,
+                lifetime_seconds: 86_400,
+                ..Default::default()
+            });
+            sites.push(PveSiteInstance {
+                site_id: format!("EXP-{expired_esc_id}-2"),
+                dungeon_id: 1421,
+                dungeon_name: "Expired Esc Site".into(),
+                solar_system_id: sys_id,
+                site_category: "Expedition".into(),
+                position: [15_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                current_room: 1,
+                total_rooms: 2,
+                current_wave: 1,
+                total_waves: 2,
+                cleared: false,
+                created_unix: base_now - 90_000,
+                lifetime_seconds: 86_390,
+                expedition_instance_id: Some(expired_esc_id),
+                ..Default::default()
+            });
+            // Expired SleeperCache site: validate_and_advance_pve_site_room must return SiteExpired before Sleeper/DED checks.
+            sites.push(PveSiteInstance {
+                site_id: "EXP-SLEEPER-1462".into(),
+                dungeon_id: 491_000,
+                dungeon_name: "Expired Sleeper Cache".into(),
+                solar_system_id: sys_id,
+                site_category: "SleeperCache".into(),
+                position: [20_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                current_room: 1,
+                total_rooms: 2,
+                current_wave: 1,
+                total_waves: 2,
+                sleeper_rift_stabilized: false,
+                sleeper_gas_cloud_active: true,
+                cleared: false,
+                created_unix: base_now - 10_000,
+                lifetime_seconds: 3_600,
+                ..Default::default()
+            });
+        });
+
+        let entered_ids: Vec<i64> = crate::services::pve_exploration::read_pve_exploration_reg(
+            &ctx,
+            |reg| {
+                get_escalating_path_dungeons_entered(reg, char_id)
+                    .into_iter()
+                    .filter_map(|v| match v {
+                        PyRep::Integer(i) => Some(i),
+                        _ => None,
+                    })
+                    .collect()
+            },
+        );
+        assert_eq!(entered_ids, vec![1430, 1440]);
+
+        // 2. Entering active anomaly does not mutate expired_esc_id.dungeons_entered.
+        let ok_enter = enter_combat_anomaly_site(&ctx, char_id, sys_id, "ACTIVE-SHARE-1421");
+        assert!(ok_enter.is_ok());
+        crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+            let exp = reg.escalations_by_char[&char_id]
+                .iter()
+                .find(|e| e.instance_id == expired_esc_id)
+                .unwrap();
+            assert_eq!(exp.dungeons_entered, vec![1420]);
+        });
+
+        // 3. Entering cleared or expired anomaly rejects and prunes expired state.
+        let cleared_err = enter_combat_anomaly_site(&ctx, char_id, sys_id, "CLEARED-ANOM-1462")
+            .expect_err("cleared site enter must fail");
+        assert_eq!(cleared_err.code, "SiteAlreadyCleared");
+
+        let expired_enter_err = enter_combat_anomaly_site(
+            &ctx,
+            char_id,
+            sys_id,
+            &format!("EXP-{expired_esc_id}-2"),
+        )
+        .expect_err("expired site enter must fail");
+        assert_eq!(expired_enter_err.code, "SiteExpired");
+        crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+            assert!(!reg.escalations_by_char[&char_id]
+                .iter()
+                .any(|e| e.instance_id == expired_esc_id));
+        });
+
+        // 4. Gate advance via validate_and_advance_pve_site_room rejects expired SleeperCache before ship/hazard checks.
+        let _ = ctx
+            .systems
+            .get_or_spawn(sys_id)
+            .spawn_ball_with_combat(
+                Ball {
+                    id: ship_id,
+                    type_id: 587,
+                    position: DVec3::new(20_000.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 350.0,
+                    inertia: 0.5,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                ctx.build_ship_combat_state(char_id, ship_id, 587),
+            )
+            .await;
+        let sleeper_err =
+            validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, "EXP-SLEEPER-1462")
+                .await
+                .expect_err("expired SleeperCache gate must fail with SiteExpired");
+        assert_eq!(sleeper_err.code, "SiteExpired");
+    }
 }

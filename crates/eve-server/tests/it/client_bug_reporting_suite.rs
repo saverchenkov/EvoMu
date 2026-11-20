@@ -10,7 +10,7 @@ use eve_machonet::{
 use eve_proto::PyRep;
 use eve_server::bug_reporting::{
     build_client_global_config, extract_text_files_from_zip, handle_bugs_http_request,
-    BugIncidentBundle,
+    is_benign_client_traceback, BugIncidentBundle,
 };
 use eve_server::flight_recorder::FlightRecorder;
 use eve_server::log_ring_buffer::{global_log_ring, LogRingBuffer};
@@ -777,6 +777,163 @@ fn test_sync_bugs_cli_dry_run_supports_both_crashes_and_f12_reports() {
     assert!(stdout.contains("[Client Crash] TypeError: 'NoneType' object is not subscriptable"));
     assert!(stdout.contains("[Bug Report][UI] Capacitor ring flickers"));
     assert!(stdout.contains("EBR-0001-ABCDEF"));
+    assert!(stdout.contains("Processed 2/2 incident file(s)"));
+
+    let _ = std::fs::remove_dir_all(temp_queue);
+    let _ = std::fs::remove_dir_all(temp_uploaded);
+}
+
+#[tokio::test]
+async fn test_alert_send_client_stack_trace_alert_suppresses_benign_and_preserves_telemetry() {
+    let ctx = ServerContext::new();
+    let temp_dir =
+        std::env::temp_dir().join(format!("evomu_test_alert_benign_{}", Uuid::new_v4()));
+    ctx.bug_reporting.set_queue_dir_override(Some(temp_dir.clone()));
+
+    let mut session = SessionState::new(203);
+    session.user_id = Some(1);
+    session.character_id = Some(90_000_001);
+    session.solar_system_id = Some(30_000_144);
+
+    let benign_market_stack_key = " \nCaught at:\n/opt/ccp/eve/packages/carbonui/uilib.py(708) Update\n \nThrown at:\n/opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n";
+    let benign_market_trace = "EXCEPTION #7 logged at 11/20/2026 05:46:24 : Info: AttributeError: 'NoneType' object has no attribute 'max'\n\nFormatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n\nThrown at:\n /opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\nEXCEPTION END";
+    let benign_minimap_trace = "Traceback (most recent call last):\n  File \"/opt/ccp/eve/packages/carbonui/graphs/minimap.py\", line 111, in _ResizeSlider\nAttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n";
+    let genuine_trace = "EXCEPTION #8 logged at 11/20/2026 05:47:00 : unhandled exception\n\nFormatted exception info:\nKeyError: 'price'\n\nThrown at:\n/opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\nEXCEPTION END";
+
+    assert!(is_benign_client_traceback(
+        benign_market_stack_key,
+        benign_market_trace,
+    ));
+    assert!(is_benign_client_traceback("", benign_minimap_trace));
+    assert!(!is_benign_client_traceback("", genuine_trace));
+
+    let calls: Vec<(i64, &str, &str)> = vec![
+        (0x5650_8076, benign_market_stack_key, benign_market_trace),
+        (0x20b2_0981_73b7_11e2, "minimap.py:111", benign_minimap_trace),
+        (0x1122_3344, "marketbase.py(3718) _OnResize", genuine_trace),
+    ];
+
+    for (hash, stack_key, trace) in calls {
+        let args = vec![
+            PyRep::Tuple(vec![PyRep::Integer(hash), PyRep::String(stack_key.into())]),
+            PyRep::String(trace.into()),
+            PyRep::String("B".into()),
+        ];
+        let res = eve_server::services::client_login::handle(
+            &ctx,
+            &mut session,
+            "alert",
+            "SendClientStackTraceAlert",
+            &args,
+            &HashMap::new(),
+            None,
+        )
+        .await;
+        assert!(res.is_some());
+        assert!(res.unwrap().is_ok());
+    }
+
+    // All three RPCs still update session alert telemetry even when queue persistence skips benign races.
+    let recorded_traces = ctx.db.with_snapshot(|snap| {
+        snap.cluster_and_runtime
+            .alert_client_traces
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .map_or(0, |arr| arr.len())
+    });
+    assert_eq!(recorded_traces, 3);
+
+    tokio::time::sleep(Duration::from_millis(1800)).await;
+
+    let entries = std::fs::read_dir(&temp_dir).expect("queue dir should exist for genuine alert");
+    let json_files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|x| x.path()))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    assert_eq!(
+        json_files.len(),
+        1,
+        "Only the genuine non-benign alert should be persisted to queue"
+    );
+    let parsed: BugIncidentBundle =
+        serde_json::from_str(&std::fs::read_to_string(&json_files[0]).unwrap()).unwrap();
+    assert_eq!(parsed.stack_hash, 0x1122_3344);
+    assert_eq!(parsed.trace, genuine_trace);
+
+    let _ = std::fs::remove_dir_all(temp_dir);
+}
+
+#[test]
+fn test_sync_bugs_cli_dry_run_suppresses_benign_ui_bundles() {
+    let run_id = Uuid::new_v4();
+    let temp_queue = std::env::temp_dir().join(format!("evomu_sync_benign_q_{run_id}"));
+    let temp_uploaded = std::env::temp_dir().join(format!("evomu_sync_benign_u_{run_id}"));
+    std::fs::create_dir_all(&temp_queue).unwrap();
+
+    let benign_bundle = json!({
+        "incident_id": "benign-uuid-1314",
+        "timestamp": "2026-11-20T05:46:24Z",
+        "timestamp_millis": 1795153584984u64,
+        "stack_hash": 1448116342i64,
+        "stack_key": " \nThrown at:\n/opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n",
+        "trace": "EXCEPTION #7 logged at 11/20/2026 05:46:24 : Info: AttributeError: 'NoneType' object has no attribute 'max'\n\nFormatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n\nThrown at:\n /opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\nEXCEPTION END\n",
+        "report_source": "exception",
+        "session": { "character_id": 90000001, "solar_system_name": "Jita" },
+        "flight_recorder": [{ "service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100 }],
+        "server_logs_before": [],
+        "server_logs_after": []
+    });
+    let genuine_bundle = json!({
+        "incident_id": "genuine-uuid-1",
+        "timestamp": "2026-11-20T05:47:00Z",
+        "timestamp_millis": 1795153620000u64,
+        "stack_hash": 0x11223344i64,
+        "stack_key": "marketbase.py(3718) _OnResize",
+        "trace": "Traceback (most recent call last):\n  File \"marketbase.py\", line 3718, in _OnResize\nKeyError: 'price'\n",
+        "report_source": "exception",
+        "session": { "character_id": 90000001, "solar_system_name": "Jita" },
+        "flight_recorder": [{ "service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100 }],
+        "server_logs_before": [],
+        "server_logs_after": []
+    });
+
+    std::fs::write(
+        temp_queue.join("1795153584984_0000000056508076_benignuu.json"),
+        benign_bundle.to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        temp_queue.join("1795153620000_0000000011223344_genuine1.json"),
+        genuine_bundle.to_string(),
+    )
+    .unwrap();
+
+    let script_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tools/sync_bugs_to_github.py");
+
+    let output = std::process::Command::new("python3")
+        .arg(&script_path)
+        .arg("--queue-dir")
+        .arg(&temp_queue)
+        .arg("--uploaded-dir")
+        .arg(&temp_uploaded)
+        .arg("--dry-run")
+        .output()
+        .expect("failed to execute python sync script");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Suppressing known benign client UI traceback"));
+    assert_eq!(stdout.matches("[dry-run] Would create issue with title:").count(), 1);
+    assert!(stdout.contains("KeyError: 'price'"));
     assert!(stdout.contains("Processed 2/2 incident file(s)"));
 
     let _ = std::fs::remove_dir_all(temp_queue);
