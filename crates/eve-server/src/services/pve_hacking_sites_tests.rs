@@ -1050,3 +1050,462 @@ async fn hacking_mgr_guards_reject_unauth_docked_invalid_target_and_no_game_with
             .is_some_and(|g| g.status == "InProgress")
     }));
 }
+
+fn hacking_test_sde_with_analyzers() -> Arc<SdeRegistry> {
+    let mut sde = (*shared_sde()).clone();
+    if !sde.types.contains_key(&22_586) {
+        if let Some(mut t) = sde.types.values().next().cloned() {
+            t.type_id = 22_586;
+            t.group_id = 538;
+            t.name = "Data Analyzer I".into();
+            t.published = true;
+            t.default_attributes.clear();
+            t.default_attributes.insert(1909, 60.0);
+            t.default_attributes.insert(1910, 30.0);
+            t.default_attributes.insert(1911, 2.0);
+            t.default_attributes.insert(54, 5_000.0);
+            sde.types.insert(22_586, t);
+        }
+    }
+    if !sde.types.contains_key(&22_588) {
+        if let Some(mut t) = sde.types.values().next().cloned() {
+            t.type_id = 22_588;
+            t.group_id = 538;
+            t.name = "Relic Analyzer I".into();
+            t.published = true;
+            t.default_attributes.clear();
+            t.default_attributes.insert(183, 13_278.0);
+            t.default_attributes.insert(1909, 40.0);
+            t.default_attributes.insert(1910, 20.0);
+            t.default_attributes.insert(1911, 2.0);
+            t.default_attributes.insert(54, 5_000.0);
+            sde.types.insert(22_588, t);
+        }
+    }
+    Arc::new(sde)
+}
+
+async fn setup_hacking_guard_context(
+    char_id: i64,
+    ship_id: i64,
+    analyzer_id: i64,
+    can_id: i64,
+    spawn_system: bool,
+) -> (ServerContext, SessionState, SolarSystemId) {
+    let sys_id: SolarSystemId = 30_000_142;
+    let sde = hacking_test_sde_with_analyzers();
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account(&format!("hk_guard_{char_id}"), "pw", char_id, "FailClosedPilot");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.item_positions.insert(can_id, [10_200.0, 0.0, 0.0]);
+        for (id, tid, loc, flag) in [
+            (ship_id, 587_u32, sys_id as i64, eve_db::InventoryFlag::None),
+            (analyzer_id, 22_586, ship_id, eve_db::InventoryFlag::MedSlot0),
+        ] {
+            snap.items.insert(
+                id,
+                eve_db::InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: loc,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_776_900_000)));
+    if spawn_system {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        for (ball_id, type_id, pos, radius) in [
+            (ship_id, 587_u32, DVec3::new(10_000.0, 0.0, 0.0), 30.0),
+            (can_id, 22_270_u32, DVec3::new(10_200.0, 0.0, 0.0), 100.0),
+        ] {
+            let _ = sys_handle
+                .spawn_ball(Ball {
+                    id: ball_id,
+                    type_id,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                })
+                .await;
+        }
+    }
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.insert(sys_id, true);
+        reg.sites_by_system.entry(sys_id).or_default().push(
+            crate::services::pve_exploration::PveSiteInstance {
+                site_id: format!("DATA_{sys_id}_{char_id}"),
+                dungeon_id: 2011,
+                dungeon_name: "Central Data Bank".into(),
+                solar_system_id: sys_id,
+                site_category: "Data".into(),
+                position: [10_200.0, 0.0, 0.0],
+                hackable_can_ids: vec![can_id],
+                ..Default::default()
+            },
+        );
+    });
+    let mut session = SessionState::new(790);
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+    (ctx, session, sys_id)
+}
+
+fn seed_vulnerable_active_board(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    char_id: i64,
+    can_id: i64,
+) {
+    with_pve_exploration_reg(ctx, |reg| {
+        let mut tiles = build_hacking_grid(can_id, false);
+        tiles[0].revealed = true;
+        tiles[1].revealed = true;
+        tiles[1].kind = HackingNodeKind::SystemCore;
+        tiles[1].coherence = 1;
+        tiles[1].strength = 1;
+        reg.hacking_games.insert(
+            (char_id, can_id),
+            HackingGameSession {
+                game_id: 99_910,
+                character_id: char_id,
+                solar_system_id: sys_id,
+                container_id: can_id,
+                site_id: format!("DATA_{sys_id}_{char_id}"),
+                is_relic: false,
+                is_ghost_site: false,
+                is_sleeper_cache_puzzle: false,
+                virus_coherence: 60,
+                max_virus_coherence: 60,
+                base_virus_strength: 30,
+                polymorphic_shield_charges: 0,
+                secondary_vector_target: None,
+                utilities: vec![
+                    Some(HackingUtilityKind::SelfRepair),
+                    Some(HackingUtilityKind::KernelRot),
+                ],
+                tiles,
+                status: "InProgress".into(),
+            },
+        );
+    });
+}
+
+fn assert_active_board_untouched(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    char_id: i64,
+    can_id: i64,
+) {
+    assert!(read_pve_exploration_reg(ctx, |reg| {
+        let game = &reg.hacking_games[&(char_id, can_id)];
+        game.status == "InProgress"
+            && game.tiles[1].coherence == 1
+            && game.utilities[0].is_some()
+            && game.utilities[1].is_some()
+            && !reg.hacked_containers.contains(&(sys_id, can_id))
+            && !reg.self_repair_turns.contains_key(&(char_id, can_id))
+    }));
+}
+
+async fn assert_all_midgame_mutators_fail_closed(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    can_id: i64,
+    expected_code: &str,
+) {
+    let kw = HashMap::new();
+    for (meth, args) in [
+        ("ClickedOnTile", vec![PyRep::Integer(can_id), PyRep::Integer(1)]),
+        (
+            "UsedUtilityElement",
+            vec![PyRep::Integer(can_id), PyRep::Integer(1), PyRep::Integer(1)],
+        ),
+        (
+            "UsedUtilityElementOnVirus",
+            vec![PyRep::Integer(can_id), PyRep::Integer(0)],
+        ),
+    ] {
+        let err = handle_pve_hacking(ctx, session, "hackingMgr", meth, &args, &kw)
+            .await
+            .expect("handled")
+            .expect_err(&format!("{meth} must fail closed with {expected_code}"));
+        assert_eq!(err.code, expected_code, "{meth} unexpected error code");
+        if expected_code != "AnalyzerModuleRequired" {
+            assert!(
+                err.client_error.is_some(),
+                "{meth} must return typed ClientError for {expected_code}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn midgame_hacking_fails_closed_when_system_actor_is_unloaded() {
+    let (char_id, ship_id, analyzer_id, can_id) =
+        (90_043_101, 1_043_000_101, 1_043_000_102, 1_043_900_101);
+    let (ctx, mut session, sys_id) =
+        setup_hacking_guard_context(char_id, ship_id, analyzer_id, can_id, false).await;
+    seed_vulnerable_active_board(&ctx, sys_id, char_id, can_id);
+
+    assert_all_midgame_mutators_fail_closed(&ctx, &mut session, can_id, "ShipNotInSpace").await;
+    assert_active_board_untouched(&ctx, sys_id, char_id, can_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn midgame_hacking_fails_closed_on_missing_ship_ball_missing_analyzer_and_no_active_ship() {
+    let (char_id, ship_id, analyzer_id, can_id) =
+        (90_043_201, 1_043_000_201, 1_043_000_202, 1_043_900_201);
+    let (ctx, mut session, sys_id) =
+        setup_hacking_guard_context(char_id, ship_id, analyzer_id, can_id, true).await;
+    let kw = HashMap::new();
+
+    // Start legitimately in space, then plant a 1-click SystemCore & utilities to verify fail-closed guards.
+    let started = handle_pve_hacking(
+        &ctx,
+        &mut session,
+        "hackingMgr",
+        "StartNewGameInstance",
+        &[PyRep::Integer(can_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("StartNewGameInstance succeeds");
+    assert_eq!(started.dict_get("status"), Some(&PyRep::String("InProgress".into())));
+    seed_vulnerable_active_board(&ctx, sys_id, char_id, can_id);
+
+    // 1. Ship ball despawned mid-hack -> ShipNotInSpace across all 3 mutators.
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(sys_handle.remove_ball(ship_id).await.is_some());
+    assert_all_midgame_mutators_fail_closed(&ctx, &mut session, can_id, "ShipNotInSpace").await;
+    assert_active_board_untouched(&ctx, sys_id, char_id, can_id);
+
+    // Re-spawn ship ball at in-range coordinates.
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    // 2. Unequipped/swapped/removed analyzer mid-hack -> AnalyzerModuleRequired
+    // (`resolve_fitted_analyzer_virus_stats` validates fitted slots 11..=34 in `snap.items`).
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mod_item) = snap.items.get_mut(&analyzer_id) {
+            mod_item.flag = eve_db::InventoryFlag::Cargo;
+        }
+    });
+    assert_all_midgame_mutators_fail_closed(&ctx, &mut session, can_id, "AnalyzerModuleRequired")
+        .await;
+    assert_active_board_untouched(&ctx, sys_id, char_id, can_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mod_item) = snap.items.get_mut(&analyzer_id) {
+            mod_item.flag = eve_db::InventoryFlag::MedSlot0;
+            mod_item.type_id = 22_588; // Relic Analyzer cannot satisfy an active Data hack
+        }
+    });
+    assert_all_midgame_mutators_fail_closed(&ctx, &mut session, can_id, "AnalyzerModuleRequired")
+        .await;
+    assert_active_board_untouched(&ctx, sys_id, char_id, can_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&analyzer_id);
+    });
+    assert_all_midgame_mutators_fail_closed(&ctx, &mut session, can_id, "AnalyzerModuleRequired")
+        .await;
+    assert_active_board_untouched(&ctx, sys_id, char_id, can_id);
+
+    // Restore valid Data Analyzer I.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            analyzer_id,
+            eve_db::InventoryItemRecord {
+                item_id: analyzer_id,
+                type_id: 22_586,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 3. NoActiveShip mid-hack (both explicit session.ship_id = Some(0) and session.ship_id = None with DB active_ship_id = 0).
+    session.ship_id = Some(0);
+    assert_all_midgame_mutators_fail_closed(&ctx, &mut session, can_id, "NoActiveShip").await;
+    assert_active_board_untouched(&ctx, sys_id, char_id, can_id);
+
+    session.ship_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = 0;
+        }
+    });
+    assert_all_midgame_mutators_fail_closed(&ctx, &mut session, can_id, "NoActiveShip").await;
+    assert_active_board_untouched(&ctx, sys_id, char_id, can_id);
+
+    // Restoring DB active_ship_id with session.ship_id = None resolves ship cleanly across read getters too.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
+    });
+    let vals = handle_pve_hacking(
+        &ctx,
+        &mut session,
+        "hackingMgr",
+        "values",
+        &[PyRep::Integer(can_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("values resolves active_ship_id when session.ship_id is None");
+    assert!(matches!(vals, PyRep::List(ref l) if l.len() == 24));
+    let prog = handle_pve_hacking(
+        &ctx,
+        &mut session,
+        "hackingMgr",
+        "GetMyHackProgress",
+        &[PyRep::Integer(can_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("GetMyHackProgress resolves active_ship_id when session.ship_id is None");
+    assert_eq!(prog.dict_get("status"), Some(&PyRep::String("InProgress".into())));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hacking_tile_coord_saturation_and_malformed_arg_rejections() {
+    // Overflow-safe saturating coordinate extraction for huge i64 coordinates.
+    assert_eq!(
+        extract_tile_index(Some(&PyRep::Tuple(vec![
+            PyRep::Integer(i64::MAX),
+            PyRep::Integer(i64::MAX),
+        ]))),
+        Some(23)
+    );
+    assert_eq!(
+        extract_tile_index(Some(&PyRep::List(vec![
+            PyRep::Integer(i64::MIN),
+            PyRep::Integer(i64::MIN),
+        ]))),
+        Some(0)
+    );
+    assert_eq!(
+        extract_tile_index(Some(&PyRep::Tuple(vec![
+            PyRep::Integer(0),
+            PyRep::Integer(i64::MAX),
+        ]))),
+        Some(23)
+    );
+    assert_eq!(extract_tile_index(Some(&PyRep::String("bad".into()))), None);
+
+    let (char_id, ship_id, analyzer_id, can_id) =
+        (90_043_301, 1_043_000_301, 1_043_000_302, 1_043_900_301);
+    let (ctx, mut session, sys_id) =
+        setup_hacking_guard_context(char_id, ship_id, analyzer_id, can_id, true).await;
+    seed_vulnerable_active_board(&ctx, sys_id, char_id, can_id);
+    let kw = HashMap::new();
+
+    for (meth, args, expected_code) in [
+        (
+            "ClickedOnTile",
+            vec![PyRep::String("bad_can".into()), PyRep::Integer(1)],
+            "TargetNotFound",
+        ),
+        (
+            "ClickedOnTile",
+            vec![PyRep::Integer(can_id), PyRep::String("bad_tile".into())],
+            "InvalidTileIndex",
+        ),
+        ("ClickedOnTile", vec![PyRep::None], "InvalidTileIndex"),
+        ("ClickedOnTile", vec![], "InvalidTileIndex"),
+        (
+            "UsedUtilityElement",
+            vec![
+                PyRep::String("bad_can".into()),
+                PyRep::Integer(0),
+                PyRep::Integer(1),
+            ],
+            "TargetNotFound",
+        ),
+        (
+            "UsedUtilityElement",
+            vec![
+                PyRep::Integer(can_id),
+                PyRep::String("bad_slot".into()),
+                PyRep::Integer(1),
+            ],
+            "UtilitySlotEmpty",
+        ),
+        (
+            "UsedUtilityElement",
+            vec![
+                PyRep::Integer(can_id),
+                PyRep::Integer(0),
+                PyRep::String("bad_tile".into()),
+            ],
+            "InvalidTileIndex",
+        ),
+        (
+            "UsedUtilityElement",
+            vec![PyRep::Integer(0), PyRep::String("bad_tile".into())],
+            "InvalidTileIndex",
+        ),
+        ("UsedUtilityElement", vec![], "UtilitySlotEmpty"),
+    ] {
+        let err = handle_pve_hacking(&ctx, &mut session, "hackingMgr", meth, &args, &kw)
+            .await
+            .expect("handled")
+            .expect_err(&format!("{meth} {args:?} must reject malformed args"));
+        assert_eq!(err.code, expected_code, "{meth} {args:?}");
+    }
+    assert_active_board_untouched(&ctx, sys_id, char_id, can_id);
+
+    // Valid 1-arg UsedUtilityElement([slot]) continues to work for virus-targeted utilities.
+    let rep = handle_pve_hacking(
+        &ctx,
+        &mut session,
+        "hackingMgr",
+        "UsedUtilityElement",
+        &[PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("1-arg UsedUtilityElement SelfRepair succeeds");
+    assert_eq!(rep.dict_get("usedSlot"), Some(&PyRep::Integer(0)));
+}

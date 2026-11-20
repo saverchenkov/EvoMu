@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use eve_db::{InventoryFlag, InventoryItemRecord};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -11,6 +13,7 @@ use eve_server::services::combat_crimewatch::with_mut_combat_runtime;
 use eve_server::services::fw_services::with_fw_runtime;
 use eve_server::services::insurgency_services::{with_insurgency_runtime, InsurgencyCampaign};
 use eve_server::services::pve_exploration::{with_pve_exploration_reg, HackingGameSession, HackingUtilityKind};
+use glam::DVec3;
 
 use crate::common;
 
@@ -387,8 +390,58 @@ async fn test_killrights_hacking_and_interference() {
         .unwrap_err();
     assert_eq!(rebuy_err.code, "KillRightAlreadyActivated");
 
-    // 2. Setup Hacking Minigame
+    // 2. Setup Hacking Minigame (spawn system/ship/container balls and fit Data Analyzer I)
+    let hack_sys_id = 30_000_142u32;
     let container_id = 1_870_000_123i64;
+    let ship_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&p1_char).map(|ch| ch.active_ship_id))
+        .unwrap_or(100_000_001);
+    let analyzer_id = 1_870_000_122i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = i64::from(hack_sys_id);
+            ship.flag = InventoryFlag::None;
+        }
+        snap.items.insert(
+            analyzer_id,
+            InventoryItemRecord {
+                item_id: analyzer_id,
+                type_id: 22_175, // Data Analyzer I
+                owner_id: p1_char,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(analyzer_id, true);
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(container_id, [1_000.0, 0.0, 0.0]);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let sys_handle = ctx.systems.get_or_spawn(hack_sys_id);
+    for (ball_id, type_id, pos, radius) in [
+        (ship_id, 587_u32, DVec3::ZERO, 40.0),
+        (container_id, 22_270_u32, DVec3::new(1_000.0, 0.0, 0.0), 100.0),
+    ] {
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: ball_id,
+                type_id,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
     with_pve_exploration_reg(&ctx, |reg| {
         reg.hacking_games.insert(
             (p1_char, container_id),
