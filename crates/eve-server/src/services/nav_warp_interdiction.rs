@@ -483,6 +483,13 @@ pub(crate) async fn validate_pre_warp_common(
     Ok(())
 }
 
+/// Client/server warp-exit deceleration skew tolerance (`4.0 s`), matching `#1001`
+/// (`space_warp_jump::evaluate_surface_perimeter` / `is_warp_finishing_within`) so V24
+/// `autopilot.py:559-562` (`AP_ApproachDestID` -> `CmdSetSpeedFraction` + `CmdFollowBall`)
+/// does not raise `ShipAlreadyInWarp` when client `_destiny.so` exits `DSTBALL_WARP`
+/// slightly ahead of the server's 1 Hz `WarpPhase::Decelerating` dropout (`#1439`).
+pub(crate) const WARP_EXIT_APPROACH_HORIZON_SECS: f64 = 4.0;
+
 /// Rejects mid-warp trajectory redirection once a ship has exited `WarpPhase::Aligning`.
 pub(crate) fn ensure_not_in_active_warp(mode: &MovementMode) -> Result<(), BridgeRpcError> {
     if matches!(
@@ -496,6 +503,28 @@ pub(crate) fn ensure_not_in_active_warp(mode: &MovementMode) -> Result<(), Bridg
         });
     }
     Ok(())
+}
+
+/// Checks active-warp eligibility for autopilot approach RPCs (`CmdSetSpeedFraction`,
+/// `CmdFollowBall`, `#1439`).
+///
+/// - When `allow_warp_exit_noop` is `true` and `ball` is inside the final `<= 4.0 s` of
+///   `WarpPhase::Decelerating` (`is_warp_finishing_within`), returns `Ok(true)` so the caller
+///   can reply as a pure no-op without mutating active warp state.
+/// - Otherwise delegates to [`ensure_not_in_active_warp`], returning `Ok(false)` when not in
+///   active warp (`Aligning` or any sub-warp mode) or `Err(ShipAlreadyInWarp)` during
+///   `Accelerating`, `Cruising`, or early `Decelerating` (`> 4.0 s` remaining).
+pub(crate) fn check_warp_exit_approach_or_reject(
+    ball: &eve_destiny::Ball,
+    allow_warp_exit_noop: bool,
+) -> Result<bool, BridgeRpcError> {
+    if allow_warp_exit_noop
+        && eve_destiny::physics::is_warp_finishing_within(ball, WARP_EXIT_APPROACH_HORIZON_SECS)
+    {
+        return Ok(true);
+    }
+    ensure_not_in_active_warp(&ball.mode)?;
+    Ok(false)
 }
 
 /// Shared warp-initiation side effects: clears jump/undock invulnerability timers,

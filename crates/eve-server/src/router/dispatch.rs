@@ -15,6 +15,10 @@ tokio::task_local! {
     static ACTIVE_RPC_CALL_ID: u64;
 }
 
+tokio::task_local! {
+    static SUPPRESS_QUASAR_SESSION_CHANGE: bool;
+}
+
 /// Runs `fut` with `call_id` bound for `rpc.slow` diagnostics.
 pub async fn with_active_rpc_call_id<F, R>(call_id: u64, fut: F) -> R
 where
@@ -23,9 +27,30 @@ where
     ACTIVE_RPC_CALL_ID.scope(call_id, Box::pin(fut)).await
 }
 
+/// Runs `fut` with `quasar_gateway.on_session_changed` suppressed inside `dispatch_rpc_inner`.
+///
+/// Used by `SafeLogoffTeardownGrace` read-only RPC dispatch (`#1434`) so a temporary cloned
+/// `SessionState` with `character_id = Some(grace_char_id)` never transiently re-attaches
+/// character tenancy on the live charsel `GatewaySubscriber` or drains `NoticeRoutingCache`.
+pub async fn with_quasar_session_change_suppressed<F, R>(fut: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    SUPPRESS_QUASAR_SESSION_CHANGE
+        .scope(true, Box::pin(fut))
+        .await
+}
+
 #[inline]
 fn current_rpc_call_id() -> u64 {
     ACTIVE_RPC_CALL_ID.try_with(|id| *id).unwrap_or(0)
+}
+
+#[inline]
+fn is_quasar_session_change_suppressed() -> bool {
+    SUPPRESS_QUASAR_SESSION_CHANGE
+        .try_with(|suppressed| *suppressed)
+        .unwrap_or(false)
 }
 
 #[inline(never)]
@@ -1088,7 +1113,9 @@ impl ServerContext {
             }
         }
         let now_unix = self.now_unix();
-        let _ = self.quasar_gateway.on_session_changed(session, now_unix);
+        if !is_quasar_session_change_suppressed() {
+            let _ = self.quasar_gateway.on_session_changed(session, now_unix);
+        }
 
         let bound_entry = if let Some(bid) = bound_id {
             match self.verify_bound_object(session, bid) {

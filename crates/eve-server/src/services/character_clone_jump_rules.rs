@@ -928,7 +928,11 @@ pub async fn activate_clone_vat_bay(
             client_error: None,
         });
     }
-    if sys.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+    if crate::services::inventory_fitting::fitting_module_cycles::is_ship_actively_cloaked(
+        ctx, sys, ship_id,
+    )
+    .await
+    {
         return Err(BridgeRpcError {
             code: "ShipCloaked".into(),
             message: "Cannot activate Clone Vat Bay while cloaked".into(),
@@ -1031,6 +1035,12 @@ pub async fn activate_clone_vat_bay(
     });
     consumed?;
 
+    let pre_undock_invuln_ticks = sys
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map_or(0, |cs| cs.undock_invulnerable_remaining_ticks);
     let _ = sys.remove_module_cycle(ship_id, module_id).await;
     if let Err(e) = sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
         ship_id,
@@ -1045,6 +1055,13 @@ pub async fn activate_clone_vat_bay(
     })
     .await
     {
+        if pre_undock_invuln_ticks > 0 {
+            let _ = sys
+                .modify_combat_state(ship_id, move |cs| {
+                    cs.undock_invulnerable_remaining_ticks = pre_undock_invuln_ticks;
+                })
+                .await;
+        }
         ctx.db.with_mut_snapshot(|s| {
             s.module_active_states.remove(&module_id);
             let mut st = load_clone_vat_bay_state(s);
@@ -1060,6 +1077,14 @@ pub async fn activate_clone_vat_bay(
         s.module_online_states.insert(module_id, true);
         s.module_active_states.insert(module_id);
     });
+    crate::services::inventory_fitting::fitting_module_cycles::commit_space_action_cloak_and_invuln_break(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        pre_undock_invuln_ticks,
+    )
+    .await;
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),

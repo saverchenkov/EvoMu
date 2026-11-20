@@ -27,7 +27,11 @@ pub async fn handle_cmd_return_bay(
         return Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None });
     };
 
-    let filter_drone_ids: Option<Vec<i64>> = match args.first().or_else(|| kwargs.get("droneIDs")) {
+    let raw_filter = match args.first() {
+        Some(PyRep::None) | None => kwargs.get("droneIDs"),
+        other => other,
+    };
+    let filter_drone_ids: Option<Vec<i64>> = match raw_filter {
         Some(PyRep::List(items) | PyRep::Tuple(items)) => {
             let v: Vec<i64> = items.iter().filter_map(|it| it.as_i64()).collect();
             if v.is_empty() { None } else { Some(v) }

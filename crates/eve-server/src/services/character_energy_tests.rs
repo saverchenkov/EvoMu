@@ -157,3 +157,93 @@ fn get_my_energy_state_rpc_is_read_pure() {
     assert_eq!(ctx.db.state_epoch(), epoch_before);
     assert_eq!(ctx.db.tx_commit_count(), commits_before);
 }
+
+#[test]
+fn consume_character_energy_emits_single_post_deduction_notif_and_is_pure_on_insufficient() {
+    let ctx = test_ctx();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
+    let cid = 90_099_002_i64;
+    let uninit_cid = 90_099_003_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            "energy_777".into(),
+            eve_db::AccountRecord {
+                user_id: 777,
+                username: "energy_777".into(),
+                password_token: "pw".into(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        let mut ch = snap
+            .characters
+            .values()
+            .next()
+            .cloned()
+            .expect("demo character");
+        ch.character_id = cid;
+        ch.user_id = 777;
+        snap.characters.insert(cid, ch);
+    });
+    ctx.db
+        .acquire_online_lock(777, 1777, Some(cid), true, ctx.now_unix())
+        .unwrap();
+
+    // Non-positive consume on uninitialized character is read-pure.
+    let e_noop = ctx.db.state_epoch();
+    let c_noop = ctx.db.tx_commit_count();
+    let noop = consume_character_energy(&ctx, uninit_cid, 0).expect("zero consume");
+    assert_eq!(noop.current_energy, DEFAULT_MAX_ENERGY);
+    assert_eq!(ctx.db.state_epoch(), e_noop);
+    assert_eq!(ctx.db.tx_commit_count(), c_noop);
+    assert!(ctx.drain_notifications_for_char(uninit_cid).is_empty());
+
+    // Set energy to 10, advance 60 min (+4 -> 14 CEQ), then fail consuming 30 CEQ without mutating or notifying.
+    let _ = set_character_energy(&ctx, cid, 10);
+    let _ = ctx.drain_notifications_for_char(cid);
+    ctx.clock().advance_secs(3_600);
+    let e_fail = ctx.db.state_epoch();
+    let c_fail = ctx.db.tx_commit_count();
+    let err = consume_character_energy(&ctx, cid, 30).unwrap_err();
+    assert_eq!(err.code, "InsufficientEnergy");
+    assert_eq!(ctx.db.state_epoch(), e_fail);
+    assert_eq!(ctx.db.tx_commit_count(), c_fail);
+    assert!(
+        ctx.drain_notifications_for_char(cid).is_empty(),
+        "failed InsufficientEnergy must not emit OnCharacterEnergyChanged"
+    );
+
+    // Advance 25 hours (full regen to 100 CEQ), read purely via GetMyEnergyState, then consume 30 -> 70 CEQ.
+    ctx.clock().advance_secs(90_000);
+    let mut sess = auth_session(777, cid, 98_000_001, 30_000_142);
+    let read_rep = handle(&ctx, &mut sess, "characterEnergyMgr", "GetMyEnergyState", &[])
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_rep.dict_get("currentEnergy"), Some(&PyRep::Integer(100)));
+    assert!(ctx.drain_notifications_for_char(cid).is_empty());
+
+    let after = consume_character_energy(&ctx, cid, 30).expect("consume 30 after regen");
+    assert_eq!(after.current_energy, 70);
+    let notifs = ctx.drain_notifications_for_char(cid);
+    let energy_notifs: Vec<_> = notifs
+        .iter()
+        .filter(|n| n.event == "OnCharacterEnergyChanged")
+        .collect();
+    assert_eq!(
+        energy_notifs.len(),
+        1,
+        "consume after elapsed regen must emit exactly one OnCharacterEnergyChanged (got {energy_notifs:?})"
+    );
+    assert_eq!(energy_notifs[0].args[0], PyRep::Integer(cid));
+    assert_eq!(
+        energy_notifs[0].args[1].dict_get("currentEnergy"),
+        Some(&PyRep::Integer(70))
+    );
+    assert_eq!(
+        energy_notifs[0].args[1].dict_get("maxEnergy"),
+        Some(&PyRep::Integer(100))
+    );
+}

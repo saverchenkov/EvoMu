@@ -714,9 +714,11 @@ async fn test_ch4_character_sheet_biography_and_notes() {
 
     // 5. Character sheet & Private Info & Neural Remap (feat:character.character-sheet)
     // Populate implants, jump clones, standings, kill rights, medals, and decorations so all 9 sections are verified non-empty
+    let medal_corp_id = 98_000_170_i64;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.standings.insert(1_000_035, 5.0);
+            ch.corporation_id = medal_corp_id;
         }
         snap.active_implants.entry(char_id).or_default().push(9899); // Ocular Filter - Basic
         snap.jump_clones.entry(char_id).or_default().push(eve_db::JumpCloneRecord {
@@ -736,11 +738,11 @@ async fn test_ch4_character_sheet_biography_and_notes() {
             },
         );
         snap.corporations.insert(
-            1_000_170,
+            medal_corp_id,
             { let mut __corp = eve_db::CorporationRecord::default();
-                __corp.corporation_id = 1_000_170;
-                __corp.name = "Republic University".into();
-                __corp.ticker = "RU".into();
+                __corp.corporation_id = medal_corp_id;
+                __corp.name = "Aura Medal Corp".into();
+                __corp.ticker = "AMC".into();
                 __corp.ceo_id = char_id;
                 __corp.alliance_id = None;
                 __corp.tax_rate = 0.11;
@@ -756,6 +758,7 @@ async fn test_ch4_character_sheet_biography_and_notes() {
                 __corp },
         );
     });
+    sess.corporation_id = Some(medal_corp_id);
     let medal_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -848,7 +851,7 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     );
     assert_eq!(
         sheet_kv.get("corporationID").and_then(|v| v.as_i64()),
-        Some(1_000_170)
+        Some(medal_corp_id)
     );
     assert_eq!(
         sheet_kv.get("raceID").and_then(|v| v.as_i64()),

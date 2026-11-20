@@ -1393,6 +1393,222 @@ async fn gh1144_mining_deactivate_after_tidi_anchoring_and_advancetime_avoids_24
     }
 }
 
+#[tokio::test]
+async fn test_mining_activation_respects_active_vs_gate_cloak_and_defers_gate_break() {
+    let ctx = make_ctx();
+    let char_id = 90_000_001;
+    let ship_id = 805_001;
+    let mod_id = 805_002;
+    let ast_id = 805_003;
+    let unlocked_ast_id = 805_004;
+    let sys_id = 30_000_142;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 32880,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 483,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+        snap.skills.entry(char_id).or_default().insert(
+            3386,
+            TrainedSkillRecord {
+                type_id: 3386,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        snap.asteroids.insert(
+            ast_id,
+            AsteroidRecord {
+                asteroid_id: ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230,
+                quantity: 1_000,
+                initial_quantity: 1_000,
+                position: (2_000.0, 0.0, 0.0),
+                radius: 100.0,
+            },
+        );
+        snap.asteroids.insert(
+            unlocked_ast_id,
+            AsteroidRecord {
+                asteroid_id: unlocked_ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230,
+                quantity: 1_000,
+                initial_quantity: 1_000,
+                position: (2_500.0, 0.0, 0.0),
+                radius: 100.0,
+            },
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball(Ball {
+            id: ast_id,
+            type_id: 1230,
+            position: DVec3::new(2_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 32880,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    sys.add_target_lock(
+        ship_id,
+        TargetLock {
+            target_id: ast_id,
+            lock_time_ms: 1000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(20_000.0),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Non-gate active cloak still rejects direct mining activation with CannotActivateWhileCloaked.
+    sys.set_combat_state(
+        ship_id,
+        CombatState {
+            is_cloaked: true,
+            gate_cloak_remaining_ticks: 0,
+            capacitor: 250.0,
+            max_capacitor: 250.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let active_err = activate(&ctx, char_id, ship_id, sys_id, mod_id, ast_id)
+        .await
+        .expect_err("non-gate active cloak must reject mining activation");
+    assert_eq!(active_err.code, MiningStopReason::Cloaked.code());
+
+    // Gate cloak allows check_requirements; failed handle_module_cycles (unlocked target) preserves gate cloak.
+    sys.set_combat_state(
+        ship_id,
+        CombatState {
+            is_cloaked: true,
+            gate_cloak_remaining_ticks: 30,
+            undock_invulnerable_remaining_ticks: 15,
+            capacitor: 250.0,
+            max_capacitor: 250.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let mut sess = eve_machonet::SessionState {
+        user_id: Some(90_000_001),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+    let unlocked_err = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(mod_id),
+            PyRep::String("activate".into()),
+            PyRep::Integer(unlocked_ast_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("unlocked asteroid under gate cloak must return TargetNotLocked, not ShipCloaked");
+    assert_eq!(unlocked_err.code, "TargetNotLocked");
+    let cs_err = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_err.is_cloaked);
+    assert_eq!(cs_err.gate_cloak_remaining_ticks, 30);
+    assert_eq!(cs_err.undock_invulnerable_remaining_ticks, 15);
+    assert!(active_cycles_for_ship(&ctx, ship_id).is_empty());
+    let err_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(!err_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+
+    // Valid gate-cloaked activation via handle_module_cycles commits cycle and breaks gate cloak on finish.
+    let ok = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(mod_id),
+            PyRep::String("activate".into()),
+            PyRep::Integer(ast_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("gate-cloaked mining laser activation via handle_module_cycles must succeed");
+    assert_eq!(ok.dict_get("moduleID").and_then(PyRep::as_i64), Some(mod_id));
+    assert_eq!(active_cycles_for_ship(&ctx, ship_id).len(), 1);
+    let cs_ok = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_ok.is_cloaked);
+    assert_eq!(cs_ok.gate_cloak_remaining_ticks, 0);
+    assert_eq!(cs_ok.undock_invulnerable_remaining_ticks, 0);
+    let ok_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(ok_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+}
+
 #[cfg(test)]
 #[path = "mining_cycle_extra_unit_tests.rs"]
 mod extra_unit_tests;
