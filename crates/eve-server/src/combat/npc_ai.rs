@@ -5,8 +5,10 @@
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord};
 use eve_destiny::{Ball, DamageVector, MovementMode};
+use eve_sde::{AttributeId, EffectId, SdeRegistry};
 use glam::DVec3;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 /// AI state machine for spawned NPC combat ships.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +216,543 @@ pub struct NpcSpawnManager {
     pub respawn_timers: HashMap<(u32, u32), u64>,
     /// Tracks Clone Soldier respawn cooldown per low-sec solar system: `system_id -> respawn_after_unix`.
     pub clone_soldier_respawn_timers: HashMap<u32, u64>,
+    /// Per-entity SDE combat profile & sub-tick weapon cooldown state (`#1396`).
+    runtime: HashMap<i64, NpcRuntimeCombatState>,
+}
+
+const ATTR_GFX_TURRET_ID: AttributeId = 245;
+const ATTR_ENTITY_FLY_RANGE: AttributeId = 416;
+const ATTR_MISSILE_DAMAGE_MULT: AttributeId = 212;
+const ATTR_MISSILE_EXP_DELAY_MS: AttributeId = 281;
+const ATTR_MISSILE_LAUNCH_DURATION_MS: AttributeId = 506;
+const ATTR_ENTITY_MISSILE_TYPE_ID: AttributeId = 507;
+const ATTR_ENTITY_CRUISE_SPEED: AttributeId = 508;
+const ATTR_OPTIMAL_SIG_RADIUS: AttributeId = 620;
+const ATTR_MISSILE_VELOCITY_MULT: AttributeId = 645;
+const ATTR_MISSILE_FLIGHT_TIME_MULT: AttributeId = 646;
+const ATTR_MISSILE_AOE_VELOCITY: AttributeId = 653;
+const ATTR_MISSILE_AOE_CLOUD_SIZE: AttributeId = 654;
+const ATTR_MISSILE_EXP_RADIUS_MULT: AttributeId = 858;
+const ATTR_MISSILE_EXP_VELOCITY_MULT: AttributeId = 859;
+const ATTR_MISSILE_NEVER_DOES_DAMAGE: AttributeId = 1075;
+const ATTR_MISSILE_AOE_DRF: AttributeId = 1353;
+const ATTR_NPC_MAX_COMBAT_ORBIT_RANGE: AttributeId = 2786;
+
+const EFF_MISSILE_LAUNCHING_FOR_ENTITY: EffectId = 569;
+const EFF_TARGET_DISINTEGRATOR_ATTACK: EffectId = 6995;
+const EFF_CHAIN_LIGHTNING: EffectId = 8037;
+
+static LOGGED_FALLBACK_NPC_TYPES: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn fallback_log_registry() -> &'static Mutex<HashSet<u32>> {
+    LOGGED_FALLBACK_NPC_TYPES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NpcWeaponKind {
+    Laser,
+    Hybrid,
+    Projectile,
+    Missile,
+    TriglavianBeam,
+    Vorton,
+}
+
+impl NpcWeaponKind {
+    pub(crate) fn fx_guid(self) -> &'static str {
+        match self {
+            Self::Laser => "effects.Laser",
+            Self::Hybrid => "effects.HybridFired",
+            Self::Projectile => "effects.ProjectileFired",
+            Self::Missile => "effects.MissileDeployment",
+            Self::TriglavianBeam => "effects.TriglavianBeam",
+            Self::Vorton => "effects.AttackMode",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NpcTurretProfile {
+    pub kind: NpcWeaponKind,
+    pub shot_damage: DamageVector,
+    pub cycle_duration_s: f64,
+    pub optimal_range: f64,
+    pub falloff_range: f64,
+    pub tracking_speed: f64,
+    pub signature_resolution: f64,
+}
+
+impl NpcTurretProfile {
+    pub(crate) fn max_effective_range(&self) -> f64 {
+        if self.falloff_range > 0.0 {
+            self.optimal_range + 3.0 * self.falloff_range
+        } else {
+            self.optimal_range
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NpcMissileProfile {
+    pub volley_damage: DamageVector,
+    pub cycle_duration_s: f64,
+    pub max_flight_range: f64,
+    pub explosion_radius: f64,
+    pub explosion_velocity: f64,
+    pub damage_reduction_factor: f64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NpcCombatProfile {
+    pub bounty_isk: f64,
+    pub max_velocity: f64,
+    pub cruise_velocity: f64,
+    pub orbit_range: f64,
+    pub engagement_optimal_range: f64,
+    pub total_nominal_dps: f64,
+    pub nominal_damage_vector: DamageVector,
+    pub turret: Option<NpcTurretProfile>,
+    pub missile: Option<NpcMissileProfile>,
+    pub is_synthetic_fallback: bool,
+}
+
+#[derive(Debug, Clone)]
+struct NpcRuntimeCombatState {
+    profile: NpcCombatProfile,
+    uses_synthetic_legacy: bool,
+    baseline_damage_vector: DamageVector,
+    baseline_optimal_range: f64,
+    turret_cooldown_s: f64,
+    missile_cooldown_s: f64,
+}
+
+fn damage_vector_approx_eq(a: DamageVector, b: DamageVector) -> bool {
+    (a.em - b.em).abs() < 1e-6
+        && (a.thermal - b.thermal).abs() < 1e-6
+        && (a.kinetic - b.kinetic).abs() < 1e-6
+        && (a.explosive - b.explosive).abs() < 1e-6
+}
+
+fn sum_damage_vectors(a: DamageVector, b: DamageVector) -> DamageVector {
+    DamageVector::new(
+        a.em + b.em,
+        a.thermal + b.thermal,
+        a.kinetic + b.kinetic,
+        a.explosive + b.explosive,
+    )
+}
+
+fn infer_turret_kind_from_damage(dmg: DamageVector) -> NpcWeaponKind {
+    if dmg.explosive > 0.0 && dmg.em <= 0.0 && (dmg.kinetic > 0.0 || dmg.thermal <= 0.0) {
+        NpcWeaponKind::Projectile
+    } else if dmg.em > 0.0 && dmg.kinetic <= 0.0 && dmg.explosive <= 0.0 {
+        NpcWeaponKind::Laser
+    } else if dmg.kinetic > 0.0 && dmg.thermal > 0.0 && dmg.em <= 0.0 && dmg.explosive <= 0.0 {
+        NpcWeaponKind::Hybrid
+    } else {
+        NpcWeaponKind::Laser
+    }
+}
+
+fn resolve_turret_kind(
+    sde: &SdeRegistry,
+    npc_type: &eve_sde::InvType,
+    shot_damage: DamageVector,
+    fallbacks: &mut Vec<&'static str>,
+) -> NpcWeaponKind {
+    if npc_type.effect_ids.contains(&EFF_TARGET_DISINTEGRATOR_ATTACK) {
+        return NpcWeaponKind::TriglavianBeam;
+    }
+    if npc_type.effect_ids.contains(&EFF_CHAIN_LIGHTNING) {
+        return NpcWeaponKind::Vorton;
+    }
+    if let Some(gfx_type_id) = npc_type
+        .default_attributes
+        .get(&ATTR_GFX_TURRET_ID)
+        .copied()
+        .filter(|&v| v > 0.0)
+        .map(|v| v as u32)
+    {
+        if let Some(gfx_group_id) = sde.types.get(&gfx_type_id).map(|g| g.group_id) {
+            match gfx_group_id {
+                1986 => return NpcWeaponKind::TriglavianBeam,
+                4060 => return NpcWeaponKind::Vorton,
+                53 | 54 | 464 => return NpcWeaponKind::Laser,
+                74 => return NpcWeaponKind::Hybrid,
+                55 => return NpcWeaponKind::Projectile,
+                _ => {}
+            }
+        }
+    }
+    fallbacks.push("gfxTurretID(245)");
+    infer_turret_kind_from_damage(shot_damage)
+}
+
+fn build_npc_turret_profile(
+    sde: &SdeRegistry,
+    npc_type: &eve_sde::InvType,
+    fallbacks: &mut Vec<&'static str>,
+) -> Option<NpcTurretProfile> {
+    let a = &npc_type.default_attributes;
+    let em = a.get(&eve_sde::attr_ids::EM_DAMAGE).copied().unwrap_or(0.0);
+    let th = a.get(&eve_sde::attr_ids::THERMAL_DAMAGE).copied().unwrap_or(0.0);
+    let kin = a.get(&eve_sde::attr_ids::KINETIC_DAMAGE).copied().unwrap_or(0.0);
+    let exp = a.get(&eve_sde::attr_ids::EXPLOSIVE_DAMAGE).copied().unwrap_or(0.0);
+    if em + th + kin + exp <= 0.0 {
+        return None;
+    }
+    let dmg_mult = match a.get(&eve_sde::attr_ids::DAMAGE_MULTIPLIER).copied() {
+        Some(m) if m <= 0.0 => return None,
+        Some(m) => m,
+        None => {
+            fallbacks.push("damageMultiplier(64)");
+            1.0
+        }
+    };
+    let shot_damage = DamageVector::new(em * dmg_mult, th * dmg_mult, kin * dmg_mult, exp * dmg_mult);
+    let cycle_ms = if let Some(ms) = a.get(&eve_sde::attr_ids::SPEED).copied().filter(|&v| v > 0.0) {
+        ms
+    } else if let Some(ms) = a.get(&eve_sde::attr_ids::DURATION).copied().filter(|&v| v > 0.0) {
+        ms
+    } else {
+        fallbacks.push("turretRateOfFire(51/73)");
+        3_000.0
+    };
+    let cycle_duration_s = (cycle_ms / 1000.0).max(0.5);
+
+    let opt_attr = a.get(&eve_sde::attr_ids::MAX_RANGE).copied();
+    let fall_attr = a.get(&eve_sde::attr_ids::FALLOFF).copied();
+    let falloff_range = if let Some(f) = fall_attr.filter(|&v| v >= 0.0) {
+        f
+    } else {
+        fallbacks.push("falloff(158)");
+        1_500.0
+    };
+    let optimal_range = if let Some(opt) = opt_attr.filter(|&v| v > 0.0) {
+        opt
+    } else if opt_attr == Some(0.0) && falloff_range > 0.0 {
+        0.0
+    } else {
+        fallbacks.push("maxRange(54)");
+        5_000.0
+    };
+
+    let raw_trk = a.get(&eve_sde::attr_ids::TRACKING_SPEED).copied().filter(|&v| v > 0.0);
+    let signature_resolution = if let Some(sr) = a
+        .get(&ATTR_OPTIMAL_SIG_RADIUS)
+        .copied()
+        .filter(|&v| v > 0.0)
+    {
+        sr
+    } else {
+        fallbacks.push("optimalSigRadius(620)");
+        if raw_trk.is_some_and(|trk| trk > 2.0) {
+            40_000.0
+        } else {
+            40.0
+        }
+    };
+    let tracking_speed = if let Some(trk) = raw_trk {
+        trk
+    } else {
+        fallbacks.push("trackingSpeed(160)");
+        if signature_resolution >= 10_000.0 {
+            1.0
+        } else {
+            0.05
+        }
+    };
+    let kind = resolve_turret_kind(sde, npc_type, shot_damage, fallbacks);
+    Some(NpcTurretProfile {
+        kind,
+        shot_damage,
+        cycle_duration_s,
+        optimal_range,
+        falloff_range,
+        tracking_speed,
+        signature_resolution,
+    })
+}
+
+fn build_npc_missile_profile(
+    sde: &SdeRegistry,
+    npc_type: &eve_sde::InvType,
+    fallbacks: &mut Vec<&'static str>,
+) -> Option<NpcMissileProfile> {
+    let a = &npc_type.default_attributes;
+    let missile_type_id = a
+        .get(&ATTR_ENTITY_MISSILE_TYPE_ID)
+        .copied()
+        .filter(|&v| v > 0.0)
+        .map(|v| v as u32)?;
+    let launch_dur_opt = a.get(&ATTR_MISSILE_LAUNCH_DURATION_MS).copied();
+    let has_missile_effect = npc_type.effect_ids.contains(&EFF_MISSILE_LAUNCHING_FOR_ENTITY);
+    if !has_missile_effect && launch_dur_opt.unwrap_or(0.0) <= 100.0 {
+        return None;
+    }
+    let Some(m_type) = sde.types.get(&missile_type_id) else {
+        fallbacks.push("entityMissileTypeID(507)");
+        return None;
+    };
+    let ma = &m_type.default_attributes;
+    if ma.get(&ATTR_MISSILE_NEVER_DOES_DAMAGE).is_some_and(|&v| v > 0.0) {
+        return None;
+    }
+    let dmg_mult = match a.get(&ATTR_MISSILE_DAMAGE_MULT).copied() {
+        Some(m) if m <= 0.0 => return None,
+        Some(m) => m,
+        None => {
+            fallbacks.push("missileDamageMultiplier(212)");
+            1.0
+        }
+    };
+    let m_em = ma.get(&eve_sde::attr_ids::EM_DAMAGE).copied().unwrap_or(0.0);
+    let m_th = ma.get(&eve_sde::attr_ids::THERMAL_DAMAGE).copied().unwrap_or(0.0);
+    let m_kin = ma.get(&eve_sde::attr_ids::KINETIC_DAMAGE).copied().unwrap_or(0.0);
+    let m_exp = ma.get(&eve_sde::attr_ids::EXPLOSIVE_DAMAGE).copied().unwrap_or(0.0);
+    if m_em + m_th + m_kin + m_exp <= 0.0 {
+        return None;
+    }
+    let volley_damage = DamageVector::new(
+        m_em * dmg_mult,
+        m_th * dmg_mult,
+        m_kin * dmg_mult,
+        m_exp * dmg_mult,
+    );
+    let cycle_ms = if let Some(ms) = launch_dur_opt.filter(|&v| v > 100.0) {
+        ms
+    } else {
+        fallbacks.push("missileLaunchDuration(506)");
+        20_000.0
+    };
+    let cycle_duration_s = (cycle_ms / 1000.0).max(0.5);
+
+    let m_vel = if let Some(v) = ma.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().filter(|&v| v > 0.0) {
+        v
+    } else {
+        fallbacks.push("missileMaxVelocity(37)");
+        3_000.0
+    };
+    let vel_mult = a.get(&ATTR_MISSILE_VELOCITY_MULT).copied().filter(|&v| v > 0.0).unwrap_or(1.0);
+    let m_flight_ms = if let Some(ms) = ma.get(&ATTR_MISSILE_EXP_DELAY_MS).copied().filter(|&v| v > 0.0) {
+        ms
+    } else {
+        fallbacks.push("missileFlightTime(281)");
+        5_000.0
+    };
+    let flight_mult = a.get(&ATTR_MISSILE_FLIGHT_TIME_MULT).copied().filter(|&v| v > 0.0).unwrap_or(1.0);
+    let max_flight_range = ((m_vel * vel_mult) * ((m_flight_ms / 1000.0) * flight_mult)).max(0.0);
+
+    let m_er = if let Some(er) = ma.get(&ATTR_MISSILE_AOE_CLOUD_SIZE).copied().filter(|&v| v > 0.0) {
+        er
+    } else {
+        fallbacks.push("aoeCloudSize(654)");
+        100.0
+    };
+    let er_mult = a.get(&ATTR_MISSILE_EXP_RADIUS_MULT).copied().filter(|&v| v > 0.0).unwrap_or(1.0);
+    let m_ev = if let Some(ev) = ma.get(&ATTR_MISSILE_AOE_VELOCITY).copied().filter(|&v| v > 0.0) {
+        ev
+    } else {
+        fallbacks.push("aoeVelocity(653)");
+        100.0
+    };
+    let ev_mult = a.get(&ATTR_MISSILE_EXP_VELOCITY_MULT).copied().filter(|&v| v > 0.0).unwrap_or(1.0);
+    let damage_reduction_factor = if let Some(drf) = ma.get(&ATTR_MISSILE_AOE_DRF).copied().filter(|&v| v > 0.0) {
+        drf
+    } else {
+        fallbacks.push("aoeDamageReductionFactor(1353)");
+        0.6
+    };
+
+    Some(NpcMissileProfile {
+        volley_damage,
+        cycle_duration_s,
+        max_flight_range,
+        explosion_radius: (m_er * er_mult).max(1.0),
+        explosion_velocity: (m_ev * ev_mult).max(1.0),
+        damage_reduction_factor,
+    })
+}
+
+/// Pure, side-effect-free SDE profile inspection for an NPC type (`#1396`).
+/// Returns the computed combat/movement profile alongside any missing attribute fallback labels.
+pub(crate) fn inspect_npc_sde_profile(
+    sde: &SdeRegistry,
+    type_id: u32,
+    bounty_isk_override: Option<f64>,
+    faction_id: u32,
+) -> (NpcCombatProfile, Vec<&'static str>) {
+    let mut fallbacks = Vec::new();
+    let Some(t) = sde.types.get(&type_id) else {
+        fallbacks.push("type_missing");
+        let bounty = bounty_isk_override.unwrap_or(25_000.0);
+        let dps = 40.0;
+        return (
+            NpcCombatProfile {
+                bounty_isk: bounty,
+                max_velocity: 320.0,
+                cruise_velocity: 320.0,
+                orbit_range: 5_000.0,
+                engagement_optimal_range: 8_000.0,
+                total_nominal_dps: dps,
+                nominal_damage_vector: faction_damage_vector(faction_id, dps),
+                turret: None,
+                missile: None,
+                is_synthetic_fallback: true,
+            },
+            fallbacks,
+        );
+    };
+    let a = &t.default_attributes;
+    let bounty = bounty_isk_override.unwrap_or_else(|| {
+        a.get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
+            .copied()
+            .unwrap_or(25_000.0)
+    });
+
+    if t.category_id != 11 {
+        let max_vel = a.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(320.0);
+        let cruise_vel = a.get(&ATTR_ENTITY_CRUISE_SPEED).copied().filter(|&v| v > 0.0).unwrap_or(max_vel);
+        let opt = 8_000.0_f64;
+        let orb = (opt * 0.75).clamp(2_500.0, 15_000.0);
+        let dps = (bounty / 500.0).clamp(20.0, 250.0);
+        return (
+            NpcCombatProfile {
+                bounty_isk: bounty,
+                max_velocity: max_vel,
+                cruise_velocity: cruise_vel,
+                orbit_range: orb,
+                engagement_optimal_range: opt,
+                total_nominal_dps: dps,
+                nominal_damage_vector: faction_damage_vector(faction_id, dps),
+                turret: None,
+                missile: None,
+                is_synthetic_fallback: true,
+            },
+            fallbacks,
+        );
+    }
+
+    let turret = build_npc_turret_profile(sde, t, &mut fallbacks);
+    let missile = build_npc_missile_profile(sde, t, &mut fallbacks);
+    let is_armed = turret.is_some() || missile.is_some();
+
+    let turret_dps_vec = turret
+        .as_ref()
+        .map(|w| w.shot_damage.scaled(1.0 / w.cycle_duration_s))
+        .unwrap_or_default();
+    let missile_dps_vec = missile
+        .as_ref()
+        .map(|m| m.volley_damage.scaled(1.0 / m.cycle_duration_s))
+        .unwrap_or_default();
+    let nominal_damage_vector = sum_damage_vectors(turret_dps_vec, missile_dps_vec);
+    let total_nominal_dps = nominal_damage_vector.total();
+
+    let fly_range_opt = a.get(&ATTR_ENTITY_FLY_RANGE).copied();
+    let npc_orbit_opt = a.get(&ATTR_NPC_MAX_COMBAT_ORBIT_RANGE).copied();
+    let cruise_opt = a.get(&ATTR_ENTITY_CRUISE_SPEED).copied().filter(|&v| v > 0.0);
+    let is_stationary_group = matches!(t.group_id, 99 | 319 | 335 | 383 | 495 | 4576);
+
+    let max_velocity = if let Some(v) = a.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().filter(|&v| v >= 0.0) {
+        v
+    } else if !is_armed || fly_range_opt == Some(0.0) || is_stationary_group {
+        0.0
+    } else if let Some(cv) = cruise_opt {
+        fallbacks.push("maxVelocity(37)");
+        cv
+    } else {
+        fallbacks.push("maxVelocity(37)");
+        320.0
+    };
+
+    let cruise_velocity = if max_velocity <= 0.0 {
+        0.0
+    } else if let Some(cv) = cruise_opt {
+        cv.min(max_velocity)
+    } else {
+        if is_armed {
+            fallbacks.push("entityCruiseSpeed(508)");
+        }
+        max_velocity
+    };
+
+    let engagement_optimal_range = turret
+        .as_ref()
+        .map(|w| {
+            if w.optimal_range > 0.0 {
+                w.optimal_range
+            } else {
+                w.max_effective_range()
+            }
+        })
+        .or_else(|| missile.as_ref().map(|m| m.max_flight_range))
+        .unwrap_or(0.0);
+
+    let orbit_range = if let Some(fly) = fly_range_opt.filter(|&v| v > 0.0) {
+        fly
+    } else if let Some(orb) = npc_orbit_opt.filter(|&v| v > 0.0) {
+        orb
+    } else if is_armed {
+        if max_velocity > 0.0 || fly_range_opt.is_none() {
+            fallbacks.push("entityFlyRange(416)");
+        }
+        (engagement_optimal_range * 0.75).clamp(2_500.0, 15_000.0)
+    } else {
+        0.0
+    };
+
+    (
+        NpcCombatProfile {
+            bounty_isk: bounty,
+            max_velocity,
+            cruise_velocity,
+            orbit_range,
+            engagement_optimal_range,
+            total_nominal_dps,
+            nominal_damage_vector,
+            turret,
+            missile,
+            is_synthetic_fallback: false,
+        },
+        fallbacks,
+    )
+}
+
+fn log_npc_fallbacks_once(type_id: u32, type_name: &str, fallbacks: &[&'static str]) {
+    if fallbacks.is_empty() {
+        return;
+    }
+    let set = LOGGED_FALLBACK_NPC_TYPES.get_or_init(|| Mutex::new(HashSet::new()));
+    let newly_inserted = set
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(type_id);
+    if newly_inserted {
+        tracing::warn!(
+            target: "npc_ai",
+            type_id,
+            npc_name = type_name,
+            missing_attrs = ?fallbacks,
+            "NPC type missing SDE combat/movement attribute(s); using fallback(s)"
+        );
+    }
+}
+
+pub(crate) fn resolve_npc_combat_profile(
+    sde: &SdeRegistry,
+    type_id: u32,
+    bounty_isk_override: Option<f64>,
+    faction_id: u32,
+) -> NpcCombatProfile {
+    let (profile, fallbacks) = inspect_npc_sde_profile(sde, type_id, bounty_isk_override, faction_id);
+    let type_name = sde
+        .types
+        .get(&type_id)
+        .map(|t| t.name.as_str())
+        .unwrap_or("<unknown>");
+    log_npc_fallbacks_once(type_id, type_name, &fallbacks);
+    profile
 }
 
 impl NpcSpawnManager {
@@ -261,23 +800,8 @@ impl NpcSpawnManager {
 
         for (idx, &npc_type_id) in spawn_group.npc_type_ids.iter().enumerate() {
             let ball_id = start_ball_id + idx as i64;
-            let (bounty, max_vel, opt_range, orb_range, base_dps) = ctx
-                .sde
-                .types
-                .get(&npc_type_id)
-                .map(|t| {
-                    let a = &t.default_attributes;
-                    let b = a
-                        .get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
-                        .copied()
-                        .unwrap_or(25_000.0);
-                    let v = a.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(320.0);
-                    let opt = a.get(&54).copied().unwrap_or(8_000.0);
-                    let orb = (opt * 0.75).clamp(2_500.0, 15_000.0);
-                    let dps = (b / 500.0).clamp(20.0, 250.0);
-                    (b, v, opt, orb, dps)
-                })
-                .unwrap_or((25_000.0, 320.0, 8_000.0, 5_000.0, 40.0));
+            let faction_id = spawn_group.faction_id;
+            let profile = resolve_npc_combat_profile(&ctx.sde, npc_type_id, None, faction_id);
 
             // Disperse ships slightly around spawn center
             let offset = DVec3::new(
@@ -287,27 +811,39 @@ impl NpcSpawnManager {
             );
             let entity_pos = spawn_pos + offset;
 
+            let sde_t = ctx.sde.types.get(&npc_type_id);
+            let ball_inertia = sde_t
+                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied())
+                .filter(|&a| a > 0.0)
+                .unwrap_or(2.5);
+            let ball_mass = sde_t
+                .map(|t| t.mass)
+                .filter(|&m| m > 0.0)
+                .unwrap_or(1_200_000.0);
+            let ball_radius = sde_t
+                .map(|t| t.radius)
+                .filter(|&r| r > 0.0)
+                .unwrap_or(45.0);
+
             let ball = Ball {
                 id: ball_id,
                 type_id: npc_type_id,
                 position: entity_pos,
                 velocity: DVec3::ZERO,
-                max_velocity: max_vel,
-                inertia: 2.5,
-                mass: 1_200_000.0,
-                radius: 45.0,
+                max_velocity: profile.max_velocity,
+                inertia: ball_inertia,
+                mass: ball_mass,
+                radius: ball_radius,
                 speed_fraction: 1.0,
                 mode: MovementMode::Stop,
             };
 
             let combat_state = ctx.build_type_combat_state(npc_type_id);
-            let faction_id = spawn_group.faction_id;
             let fac_owner = if faction_id > 0 {
                 faction_id as i64
             } else {
                 500_001
             };
-            let sde_t = ctx.sde.types.get(&npc_type_id);
             let npc_meta = eve_destiny::SlimItemMeta {
                 group_id: sde_t.map(|t| t.group_id).unwrap_or(546),
                 category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
@@ -324,8 +860,6 @@ impl NpcSpawnManager {
                 .spawn_ball_with_meta(ball, combat_state, npc_meta)
                 .await;
 
-            let damage_vector = faction_damage_vector(faction_id, base_dps);
-
             let entity = NpcCombatEntity {
                 ball_id,
                 type_id: npc_type_id,
@@ -334,11 +868,11 @@ impl NpcSpawnManager {
                 spawn_group_id,
                 spawn_pos: entity_pos,
                 target_id: None,
-                bounty_isk: bounty,
-                optimal_range: opt_range,
-                orbit_range: orb_range,
-                base_dps,
-                damage_vector,
+                bounty_isk: profile.bounty_isk,
+                optimal_range: profile.engagement_optimal_range,
+                orbit_range: profile.orbit_range,
+                base_dps: profile.total_nominal_dps,
+                damage_vector: profile.nominal_damage_vector,
                 last_attack_tick: 0,
                 has_shield_rep: true,
                 has_armor_rep: true,
@@ -370,9 +904,30 @@ impl NpcSpawnManager {
         )
         .await;
         for (ball_id, entity) in spawned_entities {
-            self.entities.insert(ball_id, entity);
+            self.insert_spawned_entity(&ctx.sde, ball_id, entity);
         }
         spawned_ball_ids
+    }
+
+    fn insert_spawned_entity(&mut self, sde: &SdeRegistry, ball_id: i64, entity: NpcCombatEntity) {
+        let profile = resolve_npc_combat_profile(
+            sde,
+            entity.type_id,
+            Some(entity.bounty_isk),
+            entity.faction_id,
+        );
+        self.runtime.insert(
+            ball_id,
+            NpcRuntimeCombatState {
+                uses_synthetic_legacy: profile.is_synthetic_fallback,
+                baseline_damage_vector: profile.nominal_damage_vector,
+                baseline_optimal_range: profile.engagement_optimal_range,
+                profile,
+                turret_cooldown_s: 0.0,
+                missile_cooldown_s: 0.0,
+            },
+        );
+        self.entities.insert(ball_id, entity);
     }
 
     pub(crate) fn plan_belt_rats_for_system(
@@ -758,7 +1313,7 @@ impl NpcSpawnManager {
         )
         .await;
         for (ball_id, entity) in all_entities {
-            self.entities.insert(ball_id, entity);
+            self.insert_spawned_entity(&ctx.sde, ball_id, entity);
         }
         all_spawned
     }
@@ -876,17 +1431,28 @@ impl NpcSpawnManager {
         ctx: &ServerContext,
         sys_id: u32,
         current_tick: u64,
-        _dt: f64,
+        dt: f64,
     ) {
         if self.entities.is_empty() {
             return;
         }
         let npc_ids: HashSet<i64> = self.entities.keys().copied().collect();
-        let (ball_positions, player_targets) = collect_ai_step_inputs(ctx, sys_id, &npc_ids);
-        let plan =
-            self.plan_ai_step_for_ids(None, &ball_positions, &player_targets, current_tick);
-        let destroyed_balls =
-            apply_ai_step_world_effects(ctx, sys_id, plan.mode_updates, plan.dmg_updates);
+        let (ball_kinematics, player_targets) = collect_ai_step_inputs(ctx, sys_id, &npc_ids);
+        let plan = self.plan_ai_step_for_ids(
+            None,
+            &ctx.sde,
+            &ball_kinematics,
+            &player_targets,
+            current_tick,
+            dt,
+        );
+        let destroyed_balls = apply_ai_step_world_effects(
+            ctx,
+            sys_id,
+            plan.mode_updates,
+            plan.dmg_actions,
+            &ball_kinematics,
+        );
         let now_unix = ctx.now_unix();
         let actions =
             self.apply_ai_step_cleanup(ctx, sys_id, plan.to_remove, destroyed_balls, now_unix);
@@ -896,13 +1462,18 @@ impl NpcSpawnManager {
     fn plan_ai_step_for_ids(
         &mut self,
         tracked_ids: Option<&HashSet<i64>>,
-        ball_positions: &HashMap<i64, DVec3>,
+        sde: &SdeRegistry,
+        ball_kinematics: &HashMap<i64, AiBallKinematics>,
         player_targets: &[(i64, DVec3, f64)],
         current_tick: u64,
+        dt: f64,
     ) -> AiStepPlan {
+        let step_dt = if dt.is_finite() && dt > 0.0 { dt } else { 1.0 };
+        self.runtime.retain(|id, _| self.entities.contains_key(id));
+
         let mut to_remove = Vec::new();
-        let mut mode_updates: Vec<(i64, MovementMode)> = Vec::new();
-        let mut dmg_updates: Vec<(i64, u32, i64, DamageVector)> = Vec::new();
+        let mut mode_updates: Vec<ModeUpdate> = Vec::new();
+        let mut dmg_actions: Vec<AiDamageAction> = Vec::new();
 
         for (&ball_id, entity) in self.entities.iter_mut() {
             if let Some(ids) = tracked_ids {
@@ -910,15 +1481,47 @@ impl NpcSpawnManager {
                     continue;
                 }
             }
-            let Some(&npc_pos) = ball_positions.get(&ball_id) else {
+            let Some(&npc_kin) = ball_kinematics.get(&ball_id) else {
                 to_remove.push(ball_id);
                 continue;
             };
+            let rt = self.runtime.entry(ball_id).or_insert_with(|| {
+                let profile = resolve_npc_combat_profile(
+                    sde,
+                    entity.type_id,
+                    Some(entity.bounty_isk),
+                    entity.faction_id,
+                );
+                let overridden = !damage_vector_approx_eq(entity.damage_vector, profile.nominal_damage_vector)
+                    || (entity.optimal_range - profile.engagement_optimal_range).abs() > 1e-3;
+                NpcRuntimeCombatState {
+                    uses_synthetic_legacy: profile.is_synthetic_fallback || overridden,
+                    baseline_damage_vector: profile.nominal_damage_vector,
+                    baseline_optimal_range: profile.engagement_optimal_range,
+                    profile,
+                    turret_cooldown_s: 0.0,
+                    missile_cooldown_s: 0.0,
+                }
+            });
+            if !rt.uses_synthetic_legacy
+                && (!damage_vector_approx_eq(entity.damage_vector, rt.baseline_damage_vector)
+                    || (entity.optimal_range - rt.baseline_optimal_range).abs() > 1e-3)
+            {
+                rt.uses_synthetic_legacy = true;
+            }
+            let uses_synthetic_legacy = rt.uses_synthetic_legacy;
+            let max_velocity = rt.profile.max_velocity;
+            let orbit_speed_fraction = if max_velocity > 0.0 {
+                (rt.profile.cruise_velocity / max_velocity).clamp(0.05, 1.0)
+            } else {
+                0.0
+            };
+            let chase_speed_fraction = if max_velocity > 0.0 { 1.0 } else { 0.0 };
 
             // Pick highest-threat candidate within 50 km (breaking ties by closest distance)
             let best_in_range = player_targets
                 .iter()
-                .map(|&(pid, pos, weight)| (pid, pos, (pos - npc_pos).length(), weight))
+                .map(|&(pid, pos, weight)| (pid, pos, (pos - npc_kin.position).length(), weight))
                 .filter(|&(_, _, dist, _)| dist <= 50_000.0)
                 .max_by(|a, b| {
                     a.3.partial_cmp(&b.3)
@@ -930,51 +1533,140 @@ impl NpcSpawnManager {
                 Some((target_id, _target_pos, dist, _)) => {
                     let target_changed = entity.target_id != Some(target_id);
                     entity.target_id = Some(target_id);
+                    let target_radius = ball_kinematics
+                        .get(&target_id)
+                        .map(|tk| tk.radius)
+                        .unwrap_or(0.0);
+                    let surface_dist = (dist - npc_kin.radius.max(0.0) - target_radius.max(0.0)).max(0.0);
+                    let in_orbit_band = dist <= entity.orbit_range * 1.4;
+                    let prev_state = entity.state;
 
-                    if dist > entity.orbit_range * 1.4 {
-                        // 1. Chase target
-                        if entity.state != NpcAiState::Chase || target_changed {
+                    if !in_orbit_band {
+                        // 1. Chase target at maxVelocity
+                        if prev_state != NpcAiState::Chase || target_changed {
                             entity.state = NpcAiState::Chase;
-                            mode_updates.push((
+                            mode_updates.push(ModeUpdate {
                                 ball_id,
-                                MovementMode::Follow {
+                                mode: MovementMode::Follow {
                                     target_id,
                                     range: entity.orbit_range,
                                 },
-                            ));
+                                speed_fraction: chase_speed_fraction,
+                            });
                         }
                     } else {
-                        // 2. Orbit target
-                        if (entity.state != NpcAiState::Orbit && entity.state != NpcAiState::Attack)
+                        // 2. Orbit target at entityCruiseSpeed
+                        if !matches!(prev_state, NpcAiState::Orbit | NpcAiState::Attack)
                             || target_changed
                         {
                             entity.state = NpcAiState::Orbit;
-                            mode_updates.push((
+                            mode_updates.push(ModeUpdate {
                                 ball_id,
-                                MovementMode::Orbit {
+                                mode: MovementMode::Orbit {
                                     target_id,
                                     range: entity.orbit_range,
                                 },
-                            ));
+                                speed_fraction: orbit_speed_fraction,
+                            });
                         }
+                    }
 
-                        // 3. Attack target
-                        if dist <= entity.optimal_range * 1.25 {
+                    // 3. Weapon engagement & ROF accumulator
+                    if uses_synthetic_legacy {
+                        rt.turret_cooldown_s = (rt.turret_cooldown_s - step_dt).max(0.0);
+                        rt.missile_cooldown_s = (rt.missile_cooldown_s - step_dt).max(0.0);
+                        if in_orbit_band && dist <= entity.optimal_range * 1.25 {
                             entity.state = NpcAiState::Attack;
                             if current_tick >= entity.last_attack_tick.saturating_add(2) {
                                 entity.last_attack_tick = current_tick;
-                                let dmg = entity.damage_vector.scaled(0.5);
-                                dmg_updates.push((ball_id, entity.type_id, target_id, dmg));
+                                dmg_actions.push(AiDamageAction::Synthetic {
+                                    attacker_id: ball_id,
+                                    npc_type_id: entity.type_id,
+                                    target_id,
+                                    dmg: entity.damage_vector.scaled(0.5),
+                                });
                             }
+                        }
+                    } else {
+                        let mut fired_or_in_range = false;
+
+                        if let Some(turret) = &rt.profile.turret {
+                            let max_r = turret.max_effective_range();
+                            if surface_dist <= max_r && turret.shot_damage.total() > 0.0 {
+                                fired_or_in_range = true;
+                                let mut shots = 0_u32;
+                                while rt.turret_cooldown_s <= 1e-9 && shots < 16 {
+                                    shots += 1;
+                                    rt.turret_cooldown_s += turret.cycle_duration_s;
+                                    entity.last_attack_tick = current_tick;
+                                    dmg_actions.push(AiDamageAction::Turret {
+                                        attacker_id: ball_id,
+                                        npc_type_id: entity.type_id,
+                                        target_id,
+                                        fx_guid: turret.kind.fx_guid(),
+                                        shot_damage: turret.shot_damage,
+                                        optimal_range: turret.optimal_range,
+                                        falloff_range: turret.falloff_range,
+                                        tracking_speed: turret.tracking_speed,
+                                        sig_resolution: turret.signature_resolution,
+                                        max_effective_range: max_r,
+                                    });
+                                }
+                                rt.turret_cooldown_s -= step_dt;
+                            } else {
+                                rt.turret_cooldown_s = (rt.turret_cooldown_s - step_dt).max(0.0);
+                            }
+                        }
+
+                        if let Some(missile) = &rt.profile.missile {
+                            if surface_dist <= missile.max_flight_range
+                                && missile.volley_damage.total() > 0.0
+                            {
+                                fired_or_in_range = true;
+                                let mut volleys = 0_u32;
+                                while rt.missile_cooldown_s <= 1e-9 && volleys < 16 {
+                                    volleys += 1;
+                                    rt.missile_cooldown_s += missile.cycle_duration_s;
+                                    entity.last_attack_tick = current_tick;
+                                    dmg_actions.push(AiDamageAction::Missile {
+                                        attacker_id: ball_id,
+                                        npc_type_id: entity.type_id,
+                                        target_id,
+                                        fx_guid: NpcWeaponKind::Missile.fx_guid(),
+                                        volley_damage: missile.volley_damage,
+                                        max_flight_range: missile.max_flight_range,
+                                        explosion_radius: missile.explosion_radius,
+                                        explosion_velocity: missile.explosion_velocity,
+                                        drf: missile.damage_reduction_factor,
+                                    });
+                                }
+                                rt.missile_cooldown_s -= step_dt;
+                            } else {
+                                rt.missile_cooldown_s = (rt.missile_cooldown_s - step_dt).max(0.0);
+                            }
+                        }
+
+                        if in_orbit_band {
+                            entity.state = if fired_or_in_range {
+                                NpcAiState::Attack
+                            } else {
+                                NpcAiState::Orbit
+                            };
                         }
                     }
                 }
                 _ => {
                     // No target within 50km: transition to Idle
+                    rt.turret_cooldown_s = (rt.turret_cooldown_s - step_dt).max(0.0);
+                    rt.missile_cooldown_s = (rt.missile_cooldown_s - step_dt).max(0.0);
                     if entity.state != NpcAiState::Idle {
                         entity.state = NpcAiState::Idle;
                         entity.target_id = None;
-                        mode_updates.push((ball_id, MovementMode::Stop));
+                        mode_updates.push(ModeUpdate {
+                            ball_id,
+                            mode: MovementMode::Stop,
+                            speed_fraction: 0.0,
+                        });
                     }
                 }
             }
@@ -983,7 +1675,7 @@ impl NpcSpawnManager {
         AiStepPlan {
             to_remove,
             mode_updates,
-            dmg_updates,
+            dmg_actions,
         }
     }
 
@@ -994,6 +1686,7 @@ impl NpcSpawnManager {
         npc_ball_id: i64,
         now_unix: u64,
     ) -> Option<(NpcCombatEntity, Option<u64>)> {
+        self.runtime.remove(&npc_ball_id);
         let entity = self.entities.remove(&npc_ball_id)?;
         let until = now_unix.saturating_add(1_200);
         let clone_soldier_until = if crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(
@@ -1088,10 +1781,55 @@ impl NpcSpawnManager {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AiBallKinematics {
+    position: DVec3,
+    radius: f64,
+    target_sig_radius: f64,
+}
+
+struct ModeUpdate {
+    ball_id: i64,
+    mode: MovementMode,
+    speed_fraction: f64,
+}
+
+enum AiDamageAction {
+    Turret {
+        attacker_id: i64,
+        npc_type_id: u32,
+        target_id: i64,
+        fx_guid: &'static str,
+        shot_damage: DamageVector,
+        optimal_range: f64,
+        falloff_range: f64,
+        tracking_speed: f64,
+        sig_resolution: f64,
+        max_effective_range: f64,
+    },
+    Missile {
+        attacker_id: i64,
+        npc_type_id: u32,
+        target_id: i64,
+        fx_guid: &'static str,
+        volley_damage: DamageVector,
+        max_flight_range: f64,
+        explosion_radius: f64,
+        explosion_velocity: f64,
+        drf: f64,
+    },
+    Synthetic {
+        attacker_id: i64,
+        npc_type_id: u32,
+        target_id: i64,
+        dmg: DamageVector,
+    },
+}
+
 struct AiStepPlan {
     to_remove: Vec<i64>,
-    mode_updates: Vec<(i64, MovementMode)>,
-    dmg_updates: Vec<(i64, u32, i64, DamageVector)>,
+    mode_updates: Vec<ModeUpdate>,
+    dmg_actions: Vec<AiDamageAction>,
 }
 
 struct AiCleanupActions {
@@ -1106,7 +1844,7 @@ pub(crate) fn step_system_npc_spawns_ai_sync(
     ctx: &ServerContext,
     sys_id: u32,
     current_tick: u64,
-    _dt: f64,
+    dt: f64,
 ) {
     let npc_ids: HashSet<i64> = {
         let spawns = ctx.npc_spawns.read().unwrap_or_else(|e| e.into_inner());
@@ -1118,7 +1856,7 @@ pub(crate) fn step_system_npc_spawns_ai_sync(
         }
         mgr.entities.keys().copied().collect()
     };
-    let (ball_positions, player_targets) = collect_ai_step_inputs(ctx, sys_id, &npc_ids);
+    let (ball_kinematics, player_targets) = collect_ai_step_inputs(ctx, sys_id, &npc_ids);
     let plan = {
         let mut spawns = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
         let Some(mgr) = spawns.get_mut(&sys_id) else {
@@ -1126,13 +1864,20 @@ pub(crate) fn step_system_npc_spawns_ai_sync(
         };
         mgr.plan_ai_step_for_ids(
             Some(&npc_ids),
-            &ball_positions,
+            &ctx.sde,
+            &ball_kinematics,
             &player_targets,
             current_tick,
+            dt,
         )
     };
-    let destroyed_balls =
-        apply_ai_step_world_effects(ctx, sys_id, plan.mode_updates, plan.dmg_updates);
+    let destroyed_balls = apply_ai_step_world_effects(
+        ctx,
+        sys_id,
+        plan.mode_updates,
+        plan.dmg_actions,
+        &ball_kinematics,
+    );
     let now_unix = ctx.now_unix();
     let actions = {
         let mut spawns = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
@@ -1153,20 +1898,27 @@ fn collect_ai_step_inputs(
     ctx: &ServerContext,
     sys_id: u32,
     npc_ids: &HashSet<i64>,
-) -> (HashMap<i64, DVec3>, Vec<(i64, DVec3, f64)>) {
+) -> (HashMap<i64, AiBallKinematics>, Vec<(i64, DVec3, f64)>) {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let (ball_positions, mut cand_targets): (
-        HashMap<i64, DVec3>,
-        Vec<(i64, u32, DVec3)>,
+    let (mut ball_kinematics, mut cand_targets): (
+        HashMap<i64, AiBallKinematics>,
+        Vec<(i64, u32, DVec3, f64, Option<f64>, Option<f64>)>,
     ) = {
         let bp = sys_handle
             .ballpark
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        let mut npc_pos = HashMap::with_capacity(npc_ids.len());
+        let mut kin_map = HashMap::with_capacity(npc_ids.len());
         for &nid in npc_ids {
             if let Some(b) = bp.balls.get(&nid) {
-                npc_pos.insert(nid, b.position);
+                kin_map.insert(
+                    nid,
+                    AiBallKinematics {
+                        position: b.position,
+                        radius: b.radius,
+                        target_sig_radius: 0.0,
+                    },
+                );
             }
         }
         let mut cands = Vec::new();
@@ -1191,15 +1943,60 @@ fn collect_ai_step_inputs(
                 .or_else(|| ctx.sde.types.get(&b.type_id).map(|t| t.category_id))
                 .unwrap_or(6);
             if matches!(cat_id, 6 | 18 | 65) {
-                cands.push((id, b.type_id, b.position));
+                let cs_opt = bp.combat_states.get(&id);
+                let cs_sig = cs_opt.map(|cs| cs.signature_radius).filter(|&s| s > 0.0);
+                let cs_base_sig = cs_opt.and_then(|cs| cs.base_signature_radius).filter(|&s| s > 0.0);
+                cands.push((
+                    id,
+                    b.type_id,
+                    b.position,
+                    b.radius,
+                    cs_sig,
+                    cs_base_sig,
+                ));
             }
         }
-        (npc_pos, cands)
+        (kin_map, cands)
     };
 
     if !cand_targets.is_empty() {
         crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            cand_targets.retain(|(id, _, _)| !rt.npc_entities.contains_key(id));
+            cand_targets.retain(|(id, _, _, _, _, _)| !rt.npc_entities.contains_key(id));
+        });
+    }
+
+    // Resolve effective target signature radius (with fit / MWD / TP bloom) outside ballpark & npc_spawns locks.
+    let mut target_sigs: HashMap<i64, f64> = HashMap::with_capacity(cand_targets.len());
+    for &(bid, type_id, pos, radius, cs_sig_opt, cs_base_sig_opt) in &cand_targets {
+        let raw_sde_sig = ctx
+            .sde
+            .types
+            .get(&type_id)
+            .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::SIGNATURE_RADIUS).copied())
+            .filter(|&v| v > 0.0)
+            .unwrap_or_else(|| radius.max(25.0));
+        let eff_sig = if let Some(cs_sig) = cs_sig_opt.filter(|_| cs_base_sig_opt.is_some()) {
+            cs_sig
+        } else {
+            let db_sig = ctx.effective_target_signature_radius(
+                bid,
+                cs_sig_opt.unwrap_or(raw_sde_sig),
+            );
+            if let Some(cs_sig) = cs_sig_opt {
+                if (cs_sig - raw_sde_sig).abs() > 1e-3 && (db_sig - raw_sde_sig).abs() <= 1e-3 {
+                    cs_sig
+                } else {
+                    db_sig
+                }
+            } else {
+                db_sig
+            }
+        };
+        target_sigs.insert(bid, eff_sig.max(1.0));
+        ball_kinematics.entry(bid).or_insert(AiBallKinematics {
+            position: pos,
+            radius,
+            target_sig_radius: eff_sig.max(1.0),
         });
     }
 
@@ -1226,13 +2023,8 @@ fn collect_ai_step_inputs(
             }
             cand_targets
                 .into_iter()
-                .map(|(bid, type_id, pos)| {
-                    let sig = ctx
-                        .sde
-                        .types
-                        .get(&type_id)
-                        .and_then(|t| t.default_attributes.get(&552).copied())
-                        .unwrap_or(40.0);
+                .map(|(bid, _type_id, pos, _, _, _)| {
+                    let sig = target_sigs.get(&bid).copied().unwrap_or(40.0);
                     let ewar = ewar_set.contains(&bid);
                     let logi = logi_set.contains(&bid);
                     // DERIVED: EWAR 1.5x, logistics 1.3x, and signature radius threat weight.
@@ -1244,20 +2036,34 @@ fn collect_ai_step_inputs(
         })
     };
 
-    (ball_positions, player_targets)
+    (ball_kinematics, player_targets)
+}
+
+fn combat_state_ratios(bp: &eve_destiny::Ballpark, tid: i64) -> (f64, f64, f64) {
+    bp.combat_states
+        .get(&tid)
+        .map(|cs| {
+            (
+                (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
+                (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
+                (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
+            )
+        })
+        .unwrap_or((0.0, 0.0, 0.0))
 }
 
 fn apply_ai_step_world_effects(
     ctx: &ServerContext,
     sys_id: u32,
-    mode_updates: Vec<(i64, MovementMode)>,
-    dmg_updates: Vec<(i64, u32, i64, DamageVector)>,
+    mode_updates: Vec<ModeUpdate>,
+    dmg_actions: Vec<AiDamageAction>,
+    ball_kinematics: &HashMap<i64, AiBallKinematics>,
 ) -> Vec<(i64, i64, Ball)> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let damaged_target_ids: Vec<i64> = dmg_updates.iter().map(|&(_, _, tid, _)| tid).collect();
+    let mut damaged_target_ids: Vec<i64> = Vec::with_capacity(dmg_actions.len());
     let mut destroyed_balls: Vec<(i64, i64, Ball)> = Vec::new();
-    let mut applied_hits: Vec<(i64, u32, i64, f64, f64, f64, f64)> = Vec::new();
-    if !mode_updates.is_empty() || !dmg_updates.is_empty() {
+    let mut applied_hits: Vec<(i64, u32, i64, f64, bool, f64, f64, f64)> = Vec::new();
+    if !mode_updates.is_empty() || !dmg_actions.is_empty() {
         let mut bp = sys_handle
             .ballpark
             .write()
@@ -1267,40 +2073,149 @@ fn apply_ai_step_world_effects(
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let st = &mut *st_guard;
-        for (bid, mode) in mode_updates {
-            let _ = bp.set_mode(bid, mode);
+        for upd in mode_updates {
+            let _ = bp.set_mode(upd.ball_id, upd.mode);
+            let _ = bp.set_speed_fraction(upd.ball_id, upd.speed_fraction);
         }
-        for (attacker_id, npc_type_id, tid, dmg) in dmg_updates {
-            if !bp.balls.contains_key(&attacker_id) {
-                continue;
-            }
+        for action in dmg_actions {
+            let (attacker_id, npc_type_id, tid, fx_guid, resolved_dmg, is_wrecking) = match action {
+                AiDamageAction::Synthetic {
+                    attacker_id,
+                    npc_type_id,
+                    target_id,
+                    dmg,
+                } => {
+                    if !bp.balls.contains_key(&attacker_id) || !bp.balls.contains_key(&target_id) {
+                        continue;
+                    }
+                    (attacker_id, npc_type_id, target_id, "effects.Laser", dmg, false)
+                }
+                AiDamageAction::Turret {
+                    attacker_id,
+                    npc_type_id,
+                    target_id,
+                    fx_guid,
+                    shot_damage,
+                    optimal_range,
+                    falloff_range,
+                    tracking_speed,
+                    sig_resolution,
+                    max_effective_range,
+                } => {
+                    let (Some(atk_ball), Some(tgt_ball)) =
+                        (bp.balls.get(&attacker_id), bp.balls.get(&target_id))
+                    else {
+                        continue;
+                    };
+                    let surface_dist = atk_ball.surface_distance(tgt_ball);
+                    if surface_dist > max_effective_range {
+                        continue;
+                    }
+                    let omega = crate::formulas::turret_angular_velocity(
+                        atk_ball.position,
+                        atk_ball.velocity,
+                        tgt_ball.position,
+                        tgt_ball.velocity,
+                    );
+                    let tracking_mult = bp
+                        .combat_states
+                        .get(&attacker_id)
+                        .map(|cs| cs.tracking_speed_multiplier)
+                        .filter(|&m| m > 0.0)
+                        .unwrap_or(1.0);
+                    let target_sig = ball_kinematics
+                        .get(&target_id)
+                        .map(|k| k.target_sig_radius)
+                        .filter(|&s| s > 0.0)
+                        .unwrap_or_else(|| tgt_ball.radius.max(25.0));
+                    let p_hit = crate::formulas::turret_chance_to_hit_with_res(
+                        omega,
+                        (tracking_speed * tracking_mult).max(1e-6),
+                        sig_resolution,
+                        target_sig,
+                        surface_dist,
+                        optimal_range,
+                        falloff_range,
+                    );
+                    let roll_u = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.5);
+                    let (dmg, wreck) =
+                        crate::formulas::turret_shot_damage(shot_damage, p_hit, roll_u);
+                    (attacker_id, npc_type_id, target_id, fx_guid, dmg, wreck)
+                }
+                AiDamageAction::Missile {
+                    attacker_id,
+                    npc_type_id,
+                    target_id,
+                    fx_guid,
+                    volley_damage,
+                    max_flight_range,
+                    explosion_radius,
+                    explosion_velocity,
+                    drf,
+                } => {
+                    let (Some(atk_ball), Some(tgt_ball)) =
+                        (bp.balls.get(&attacker_id), bp.balls.get(&target_id))
+                    else {
+                        continue;
+                    };
+                    if atk_ball.surface_distance(tgt_ball) > max_flight_range {
+                        continue;
+                    }
+                    let target_sig = ball_kinematics
+                        .get(&target_id)
+                        .map(|k| k.target_sig_radius)
+                        .filter(|&s| s > 0.0)
+                        .unwrap_or_else(|| tgt_ball.radius.max(25.0));
+                    let factor = crate::formulas::missile_damage_factor(
+                        target_sig,
+                        tgt_ball.velocity.length(),
+                        explosion_radius,
+                        explosion_velocity,
+                        drf,
+                    );
+                    (
+                        attacker_id,
+                        npc_type_id,
+                        target_id,
+                        fx_guid,
+                        volley_damage.scaled(factor),
+                        false,
+                    )
+                }
+            };
+
+            damaged_target_ids.push(tid);
             bp.emit_event(
                 Some(attacker_id),
                 eve_destiny::DestinyEvent::OnSpecialFX {
                     ball_id: attacker_id,
                     module_id: Some(tid),
-                    guid: "effects.Laser".to_string(),
+                    guid: fx_guid.to_string(),
                     is_active: true,
                 },
             );
-            if let Some((applied, destroyed, dead_ball_opt)) = bp.apply_damage_to_ball(tid, dmg) {
-                let (s_r, a_r, h_r) = bp
-                    .combat_states
-                    .get(&tid)
-                    .map(|cs| {
-                        (
-                            (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
-                            (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
-                            (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
-                        )
-                    })
-                    .unwrap_or((0.0, 0.0, 0.0));
-                applied_hits.push((attacker_id, npc_type_id, tid, applied, s_r, a_r, h_r));
-                if destroyed {
-                    if let Some(dead_ball) = dead_ball_opt {
-                        destroyed_balls.push((attacker_id, tid, dead_ball));
+            if resolved_dmg.total() > 0.0 {
+                if let Some((applied, destroyed, dead_ball_opt)) = bp.apply_damage_to_ball(tid, resolved_dmg) {
+                    let (s_r, a_r, h_r) = combat_state_ratios(&bp, tid);
+                    applied_hits.push((
+                        attacker_id,
+                        npc_type_id,
+                        tid,
+                        applied,
+                        is_wrecking,
+                        s_r,
+                        a_r,
+                        h_r,
+                    ));
+                    if destroyed {
+                        if let Some(dead_ball) = dead_ball_opt {
+                            destroyed_balls.push((attacker_id, tid, dead_ball));
+                        }
                     }
                 }
+            } else {
+                let (s_r, a_r, h_r) = combat_state_ratios(&bp, tid);
+                applied_hits.push((attacker_id, npc_type_id, tid, 0.0, false, s_r, a_r, h_r));
             }
         }
         let deact_guard = sys_handle
@@ -1324,7 +2239,7 @@ fn apply_ai_step_world_effects(
     }
 
     if !applied_hits.is_empty() {
-        for (attacker_id, npc_type_id, tid, applied, s_r, a_r, h_r) in applied_hits {
+        for (attacker_id, npc_type_id, tid, applied, is_wrecking, s_r, a_r, h_r) in applied_hits {
             let victim_char_opt = ctx.db.with_snapshot(|snap| {
                 snap.characters
                     .get(&tid)
@@ -1350,7 +2265,7 @@ fn apply_ai_step_world_effects(
                 tid,
                 npc_type_id,
                 applied,
-                false,
+                is_wrecking,
                 s_r,
                 a_r,
                 h_r,
