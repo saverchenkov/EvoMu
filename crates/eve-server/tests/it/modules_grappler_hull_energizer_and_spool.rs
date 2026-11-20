@@ -1,8 +1,8 @@
 //! Stasis grappler, emergency hull energizer, mutadaptive remote armor repairer and entropic
 //! disintegrator spool mechanics driven through `dogmaIM` with real system ticks.
 
-use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
-use eve_destiny::{Ball, MovementMode, SlimItemMeta, TargetLock};
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord, UpwellStructureRecord};
+use eve_destiny::{Ball, DestinyEvent, MovementMode, SlimItemMeta, TargetLock};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
@@ -334,4 +334,229 @@ async fn test_modules_grappler_ehe_mutadaptive_repairer_and_entropic_disintegrat
     sys_h.step_manual(4.5).await.unwrap();
     assert_eq!(eve_server::services::combat_weapons_spool::get_entropic_spool_multiplier(&ctx, archon_id, dis_mod_id), 1.0, "Capacitor dry must reset spool to 1.0");
     assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&dis_mod_id)), "Capacitor dry must deactivate module");
+}
+
+fn has_tether_dbuff_60_in_updates(updates: &PyRep, ship_id: i64) -> bool {
+    let PyRep::List(entries) = updates else { return false; };
+    entries.iter().any(|entry| {
+        let PyRep::Tuple(outer) = entry else { return false; };
+        let Some(PyRep::Tuple(inner)) = outer.get(1) else { return false; };
+        if inner.first().and_then(|v| v.as_str()) != Some("OnDbuffUpdated") {
+            return false;
+        }
+        let Some(PyRep::Tuple(args)) = inner.get(1) else { return false; };
+        if args.first() != Some(&PyRep::Integer(ship_id)) {
+            return false;
+        }
+        let Some(PyRep::List(dbuffs)) = args.get(1) else { return false; };
+        dbuffs.iter().any(|pair| {
+            matches!(pair, PyRep::Tuple(p) if p.first() == Some(&PyRep::Integer(60)))
+        })
+    })
+}
+
+#[tokio::test]
+async fn test_capital_mjfg_and_cloak_activation_in_tether_range_preserves_sync_order_and_blocks_tether_repair() {
+    let ctx = new_ctx();
+    let c1 = 90_000_001;
+    let sys_id = 30_004_759; // Null-sec (Capital MJFG disallows high-sec)
+    let station_id = 60_003_760;
+    let corp_id = ctx.db.get_character(c1).expect("character").corporation_id;
+    let structure_id = 1_049_147_101_i64;
+    let thanatos_id = 961_001_i64;
+    let cmjfg_id = 961_002_i64;
+
+    grant_type_skills(&ctx, c1, 23911); // Thanatos
+    grant_type_skills(&ctx, c1, 83485); // Capital Micro Jump Field Generator
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&c1) {
+            ch.clone_grade = 2;
+        }
+        snap.structures.insert(
+            structure_id,
+            UpwellStructureRecord {
+                structure_id,
+                solar_system_id: sys_id,
+                type_id: 35_832, // Astrahus
+                owner_corp_id: corp_id,
+                name: "Tether Regression Astrahus".to_string(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 10_000_000.0,
+                armor_hp: 10_000_000.0,
+                hull_hp: 10_000_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+
+    seed_item(&ctx, thanatos_id, 23911, c1, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, cmjfg_id, 83485, c1, station_id, InventoryFlag::Hangar, 1, true);
+
+    let mut sess = make_session(11, 1, c1, corp_id, Some(station_id), sys_id, Some(thanatos_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&c1) {
+            ch.active_ship_id = thanatos_id;
+        }
+    });
+    let _ = call_service(
+        &ctx,
+        &mut sess,
+        "invbroker",
+        "Add",
+        vec![PyRep::Integer(cmjfg_id), PyRep::Integer(thanatos_id), PyRep::Integer(InventoryFlag::MedSlot0 as i64)],
+        HashMap::new(),
+    )
+    .await
+    .expect("Thanatos must fit Capital MJFG");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(cmjfg_id, true);
+        if let Some(ch) = snap.characters.get_mut(&c1) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = thanatos_id;
+        }
+    });
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(thanatos_id);
+
+    spawn_ship_ball(&ctx, sys_id, thanatos_id, 23911, c1, 0.0).await;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h.get_set_state(thanatos_id).await.expect("register ship observer");
+
+    // Positive control: confirm this structure + position IS an active tether anchor.
+    eve_server::services::space_destiny::space_nav_travel::sync_tether(&ctx, c1, sys_id, thanatos_id).await;
+    assert!(
+        sys_h.get_combat_state(thanatos_id).await.unwrap().unwrap().is_tethered,
+        "Positive control: Thanatos inside Astrahus tether range must tether before activating Capital MJFG"
+    );
+    let _ = sys_h.drain_observer_updates(thanatos_id).await.expect("drain positive-control tether updates");
+
+    // Reset to untethered with partially damaged shield/armor/hull and partial cap before activating Capital MJFG.
+    let mut pre_cs = sys_h.get_combat_state(thanatos_id).await.unwrap().unwrap();
+    pre_cs.is_tethered = false;
+    pre_cs.undock_invulnerable_remaining_ticks = 0;
+    pre_cs.gate_cloak_remaining_ticks = 0;
+    pre_cs.shield_hp = pre_cs.max_shield_hp * 0.4;
+    pre_cs.armor_hp = pre_cs.max_armor_hp * 0.4;
+    pre_cs.structure_hp = pre_cs.max_structure_hp * 0.4;
+    pre_cs.capacitor = pre_cs.max_capacitor * 0.8;
+    let (pre_shield, pre_armor, pre_hull, pre_cap) = (
+        pre_cs.shield_hp,
+        pre_cs.armor_hp,
+        pre_cs.structure_hp,
+        pre_cs.capacitor,
+    );
+    let _ = sys_h.set_combat_state(thanatos_id, pre_cs).await;
+
+    let mut bcast_rx = sys_h.subscribe();
+    let _ = sys_h.drain_observer_updates(thanatos_id).await.expect("drain baseline");
+
+    let _ = call_service(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        vec![PyRep::Integer(cmjfg_id), PyRep::String("default".into())],
+        HashMap::new(),
+    )
+    .await
+    .expect("Capital MJFG activation inside tether range must succeed");
+
+    let cs_after = sys_h.get_combat_state(thanatos_id).await.unwrap().unwrap();
+    assert!(
+        (cs_after.shield_hp - pre_shield).abs() < 1e-6
+            && (cs_after.armor_hp - pre_armor).abs() < 1e-6
+            && (cs_after.structure_hp - pre_hull).abs() < 1e-6,
+        "Activating Capital MJFG in tether range must NOT grant a 25% tether HP repair: before=({pre_shield}, {pre_armor}, {pre_hull}), after=({}, {}, {})",
+        cs_after.shield_hp, cs_after.armor_hp, cs_after.structure_hp
+    );
+    assert!(
+        cs_after.capacitor < pre_cap,
+        "Activating Capital MJFG must deduct activation capacitor without a +25% tether cap refund: before={pre_cap}, after={}",
+        cs_after.capacitor
+    );
+    assert!(!cs_after.is_tethered, "Ship activating disallowTethering Capital MJFG must remain untethered");
+    assert_eq!(cs_after.mjfg_sig_multiplier, Some(2.5), "Capital MJFG sig multiplier must apply on activation sync");
+    assert!(cs_after.mjfg_spool_remaining_s > 0.0, "Capital MJFG spool timer must start on activation sync");
+
+    let (_tick, evs, updates) = sys_h.drain_observer_updates(thanatos_id).await.expect("drain after activate");
+    assert!(
+        !has_tether_dbuff_60_in_updates(&updates, thanatos_id),
+        "Activating Capital MJFG must NOT emit a spurious tether-on OnDbuffUpdated(60) in observer updates: {updates:?}"
+    );
+    let saw_dbuff_60_ev = evs.iter().any(|ev| {
+        matches!(ev, DestinyEvent::OnDbuffUpdated { ball_id, dbuffs } if *ball_id == thanatos_id && dbuffs.iter().any(|&(id, _, _)| id == 60))
+    });
+    assert!(!saw_dbuff_60_ev, "Observer DestinyEvents must NOT contain tether-on dbuff 60: {evs:?}");
+    while let Ok(tb) = bcast_rx.try_recv() {
+        let saw_bcast_60 = tb.events.iter().chain(tb.observer_events.get(&thanatos_id).into_iter().flatten()).any(|ev| {
+            matches!(ev, DestinyEvent::OnDbuffUpdated { ball_id, dbuffs } if *ball_id == thanatos_id && dbuffs.iter().any(|&(id, _, _)| id == 60))
+        });
+        assert!(!saw_bcast_60, "TickBroadcast must NOT contain spurious tether-on dbuff 60");
+    }
+
+    // Also verify group 330 Cloak activation runs snapshot/fit activation strictly before Call 1 sync_ship_cloak_and_mjfg_from_fitting.
+    let falcon_id = 961_003_i64;
+    let cloak_id = 961_004_i64;
+    grant_type_skills(&ctx, c1, 11957); // Falcon
+    grant_type_skills(&ctx, c1, 11578); // Covert Ops Cloaking Device II
+    seed_item(&ctx, falcon_id, 11957, c1, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, cloak_id, 11578, c1, station_id, InventoryFlag::Hangar, 1, true);
+    sess.station_id = Some(station_id);
+    sess.ship_id = Some(falcon_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&c1) {
+            ch.station_id = Some(station_id);
+            ch.active_ship_id = falcon_id;
+        }
+    });
+    let _ = call_service(
+        &ctx,
+        &mut sess,
+        "invbroker",
+        "Add",
+        vec![PyRep::Integer(cloak_id), PyRep::Integer(falcon_id), PyRep::Integer(InventoryFlag::HiSlot0 as i64)],
+        HashMap::new(),
+    )
+    .await
+    .expect("Falcon must fit Covert Ops Cloak");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(cloak_id, true);
+        if let Some(ch) = snap.characters.get_mut(&c1) {
+            ch.station_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = falcon_id;
+        }
+    });
+    sess.station_id = None;
+    sess.ship_id = Some(falcon_id);
+    spawn_ship_ball(&ctx, sys_id, falcon_id, 11957, c1, 500_000.0).await;
+    if let Ok(Some(mut fcs)) = sys_h.get_combat_state(falcon_id).await {
+        fcs.undock_invulnerable_remaining_ticks = 0;
+        fcs.gate_cloak_remaining_ticks = 0;
+        let _ = sys_h.set_combat_state(falcon_id, fcs).await;
+    }
+    let _ = call_service(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        vec![PyRep::Integer(cloak_id), PyRep::String("cloakingWarpSafe".into())],
+        HashMap::new(),
+    )
+    .await
+    .expect("Covert Ops Cloak activation must succeed");
+    let falcon_cs = sys_h.get_combat_state(falcon_id).await.unwrap().unwrap();
+    assert!(falcon_cs.is_cloaked && falcon_cs.is_covert_cloak, "Cloak activation must sync covert cloak state");
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&cloak_id)), "Cloak must be marked active in snapshot");
 }

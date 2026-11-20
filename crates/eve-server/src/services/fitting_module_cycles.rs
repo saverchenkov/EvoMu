@@ -1807,7 +1807,7 @@ async fn commit_cycle_to_actor_and_effects(
 
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn apply_post_activation_snapshot_and_fit_updates_sync(
+fn activate_post_cycle_snapshot_and_fit_sync(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
@@ -1815,10 +1815,9 @@ fn apply_post_activation_snapshot_and_fit_updates_sync(
     m: &eve_dogma::FittedModule,
     mod_type: &eve_sde::InvType,
     fit: &mut eve_dogma::ShipFittingEngine,
-    is_weapon: bool,
     is_overloaded: bool,
     params: &PreparedCycleParams,
-) {
+) -> bool {
     let m_params = [("typeID", m.type_id.to_string()), ("groupID", mod_type.group_id.to_string())];
     for ev in ["moduleActivate", "activateModule", "moduleActivated", "activateShipModule"] {
         crate::services::operations_manager_helpers::record_server_operation_event(ctx, char_id, ev, &m_params, 1);
@@ -1842,6 +1841,23 @@ fn apply_post_activation_snapshot_and_fit_updates_sync(
     });
     fit.pending_overload_modules.remove(&module_id);
     let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
+    slot_still_has_charge
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn finalize_post_activation_fit_updates_and_push_sync(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    mod_type: &eve_sde::InvType,
+    fit: &mut eve_dogma::ShipFittingEngine,
+    is_weapon: bool,
+    is_overloaded: bool,
+    slot_still_has_charge: bool,
+    params: &PreparedCycleParams,
+) {
     if is_cycle_gated_module_group(mod_type.group_id) || is_weapon || (params.repeat == 0 && params.reactivation_delay_s > 0.0) {
         let total_delay = if mod_type.group_id == 40 { params.duration_s.max(params.reactivation_delay_s) } else { params.duration_s + params.reactivation_delay_s };
         ctx.record_module_reactivation_delay(ship_id, module_id, total_delay);
@@ -1905,12 +1921,13 @@ async fn finalize_cycle_activation_and_response(
     if is_in_space {
         commit_space_action_cloak_and_invuln_break(ctx, sys, char_id, ship_id, pre_undock_invuln_ticks).await;
     }
+    let slot_still_has_charge = activate_post_cycle_snapshot_and_fit_sync(ctx, char_id, ship_id, module_id, m, mod_type, fit, is_overloaded, params);
     if mod_type.group_id == 330 || m.type_id == 83485 {
-        crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+        crate::router::box_fut(|| crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id)).await;
     }
-    apply_post_activation_snapshot_and_fit_updates_sync(ctx, char_id, ship_id, module_id, m, mod_type, fit, is_weapon, is_overloaded, params);
+    finalize_post_activation_fit_updates_and_push_sync(ctx, char_id, ship_id, module_id, mod_type, fit, is_weapon, is_overloaded, slot_still_has_charge, params);
     if mod_type.group_id == 330 || m.type_id == 83485 {
-        crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+        crate::router::box_fut(|| crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id)).await;
     }
     emit_module_activation_godma_notifications_sync(ctx, char_id, ship_id, module_id, m.type_id, mod_type.group_id, fit, target_id_opt, effect_name, params, kin.is_guided_missile);
     if params.cap_need > 0.0 || params.cap_booster_inject_amount > 0.0 || params.effective_max_capacitor.is_some() {
