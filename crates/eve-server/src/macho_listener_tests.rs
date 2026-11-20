@@ -5901,16 +5901,7 @@ async fn test_1477_quasar_hangar_tick_detach_plex_preserve_and_reenter_view_outs
         build_test_1477_ui_view_activated_event(&ctx, "structure"),
         ctx.now_unix(),
     );
-    let _ = test_1386_call_rpc(
-        &mut s,
-        client_id,
-        user_id,
-        7,
-        "timeControl",
-        "AdvanceClock",
-        vec![PyRep::Integer(12)],
-    )
-    .await;
+    ctx.advance_secs(12);
     let (undock_rsp, undock_notifs) =
         test_1386_call_rpc(&mut s, client_id, user_id, 8, "ship", "Undock", Vec::new()).await;
     assert_eq!(undock_rsp.packet_type, MachoPacketType::CallRsp);
