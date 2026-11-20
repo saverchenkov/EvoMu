@@ -3954,7 +3954,11 @@ fn build_call_args(
 
     if meth == "MachoResolveObject" {
         let tgt = match sit {
-            Situation::B => fix.b_ship_id,
+            Situation::B => match svc {
+                "keeper" => fix.other_sys_id as i64,
+                "planetMgr" => fix.e_planet_id,
+                _ => fix.b_ship_id,
+            },
             Situation::C => CORP_A_ID,
             Situation::E => fix.other_sys_id as i64,
             _ => NPC_STATION_ID,
@@ -4253,13 +4257,19 @@ fn build_call_args(
             } else {
                 own_corp
             })],
-            "GetCashBalance" | "GetTransactions" => vec![
+            "GetCashBalance" => vec![
                 PyRep::Integer(match sit {
                     Situation::B => CHAR_B_ID,
                     Situation::C => CORP_A_ID,
                     _ => own_char,
                 }),
                 PyRep::Integer(1000),
+            ],
+            "GetTransactions" => vec![
+                PyRep::Integer(1000),
+                PyRep::None,
+                PyRep::None,
+                PyRep::Bool(sit == Situation::C),
             ],
             _ => vec![PyRep::Integer(own_char)],
         },
@@ -4371,8 +4381,9 @@ fn build_call_args(
                 Situation::A | Situation::B | Situation::C => CHAR_B_ID,
                 _ => own_char,
             })],
-            "GetCharacterInfo" | "GetCharacterToSelect" | "DeleteCharacter"
-            | "PrepareCharacterForDelete" | "CancelCharacterDeletePrepare" => {
+            "GetCharacterInfo" | "GetCharactersToSelect" | "GetCharacterLockType"
+            | "DeleteCharacter" | "PrepareCharacterForDelete"
+            | "CancelCharacterDeletePrepare" => {
                 vec![PyRep::Integer(match sit {
                     Situation::B => CHAR_B_ID,
                     _ => own_char,
@@ -6367,7 +6378,18 @@ async fn evaluate_negative_call(
                 assert!(
                     !matches!(
                         err.code.as_str(),
-                        "CannotSelfDestructDocked" | "MustBeInSpace" | "MustBeUndocked" | "NotInSpace"
+                        "CannotSelfDestructDocked"
+                            | "CannotSelfDestructWhileDocked"
+                            | "MustBeInSpace"
+                            | "MustBeUndocked"
+                            | "NotInSpace"
+                            | "ShipDocked"
+                            | "CannotEjectWhileDocked"
+                            | "CantDoThatWhileDocked"
+                            | "CannotLinkWeaponsWhileDocked"
+                            | "CannotRepairModuleWhileDocked"
+                            | "CannotRepairNaniteWhileDocked"
+                            | "CantLaunchDronesWhileDocked"
                     ),
                     "stale/inaccurate allowlist in Situation {sit_label} for {svc}.{meth}: returned prerequisite error {}: {}",
                     err.code,
