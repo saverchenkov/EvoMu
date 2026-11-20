@@ -78,45 +78,71 @@ fn exact_float_arg(rep: &PyRep) -> Option<f64> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CrossSystemScanCode {
+    CrossSystemScanDenied,
+    AccessDenied,
+}
+
+impl CrossSystemScanCode {
+    fn into_remote_system_error(self, action: &str, req_sys: u32) -> BridgeRpcError {
+        let message = format!("Cannot {action} for remote solar system {req_sys}");
+        match self {
+            Self::CrossSystemScanDenied => BridgeRpcError {
+                code: "CrossSystemScanDenied".into(),
+                message,
+                client_error: None,
+            },
+            Self::AccessDenied => BridgeRpcError {
+                code: "AccessDenied".into(),
+                message,
+                client_error: None,
+            },
+        }
+    }
+}
+
 fn verify_scan_mgr_bound(
     session: &SessionState,
     char_id: i64,
     caller_sys: u32,
     bound_entry: Option<&BoundObjectEntry>,
     action: &str,
-    cross_system_code: &str,
+    cross_system_code: CrossSystemScanCode,
 ) -> Result<Option<u32>, BridgeRpcError> {
     let Some(b) = bound_entry else {
         return Ok(None);
     };
     let is_gm = session.has_gm_role();
     if b.character_id != char_id && !is_gm {
-        return Err(probe_rpc_err(
+        let msg = format!("Cannot {action}: scanMgr bound object belongs to another character");
+        return Err(BridgeRpcError::with_client_error(
             "AccessDenied",
-            format!("Cannot {action}: scanMgr bound object belongs to another character"),
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
         ));
     }
     if b.object_id < 0 {
-        return Err(probe_rpc_err(
+        let msg = format!("Invalid bound solar system {} for {action}", b.object_id);
+        return Err(BridgeRpcError::with_client_error(
             "InvalidSolarSystem",
-            format!("Invalid bound solar system {} for {action}", b.object_id),
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
         ));
     }
     if b.object_id == 0 {
         return Ok(None);
     }
     let Ok(req_sys) = u32::try_from(b.object_id) else {
-        return Err(probe_rpc_err(
+        let msg = format!("Invalid bound solar system {} for {action}", b.object_id);
+        return Err(BridgeRpcError::with_client_error(
             "InvalidSolarSystem",
-            format!("Invalid bound solar system {} for {action}", b.object_id),
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
         ));
     };
     if req_sys != caller_sys && !is_gm {
-        return Err(BridgeRpcError {
-            code: cross_system_code.into(),
-            message: format!("Cannot {action} for remote solar system {req_sys}"),
-            client_error: None,
-        });
+        return Err(cross_system_code.into_remote_system_error(action, req_sys));
     }
     Ok(Some(req_sys))
 }
@@ -127,12 +153,14 @@ fn parse_optional_sys_arg(
     caller_sys: u32,
     args: &[PyRep],
     action: &str,
-    cross_system_code: &str,
+    cross_system_code: CrossSystemScanCode,
 ) -> Result<Option<u32>, BridgeRpcError> {
     if args.len() > 1 {
-        return Err(probe_rpc_err(
+        let msg = format!("{action} accepts at most 1 argument");
+        return Err(BridgeRpcError::with_client_error(
             "InvalidArguments",
-            format!("{action} accepts at most 1 argument"),
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
         ));
     }
     let Some(arg) = args.first() else {
@@ -142,35 +170,39 @@ fn parse_optional_sys_arg(
         return Ok(None);
     }
     let Some(raw_sys) = exact_int_arg(arg) else {
-        return Err(probe_rpc_err(
+        let msg = format!("Invalid solar system argument for {action}");
+        return Err(BridgeRpcError::with_client_error(
             "InvalidSolarSystem",
-            format!("Invalid solar system argument for {action}"),
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
         ));
     };
     let Ok(req_sys) = u32::try_from(raw_sys) else {
-        return Err(probe_rpc_err(
+        let msg = format!("Invalid solar system {raw_sys} for {action}");
+        return Err(BridgeRpcError::with_client_error(
             "InvalidSolarSystem",
-            format!("Invalid solar system {raw_sys} for {action}"),
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
         ));
     };
     if req_sys == 0 {
-        return Err(probe_rpc_err(
+        let msg = format!("Invalid solar system 0 for {action}");
+        return Err(BridgeRpcError::with_client_error(
             "InvalidSolarSystem",
-            format!("Invalid solar system 0 for {action}"),
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
         ));
     }
     if req_sys != caller_sys {
         if !session.has_gm_role() {
-            return Err(BridgeRpcError {
-                code: cross_system_code.into(),
-                message: format!("Cannot {action} for remote solar system {req_sys}"),
-                client_error: None,
-            });
+            return Err(cross_system_code.into_remote_system_error(action, req_sys));
         }
         if !ctx.sde.solar_systems.is_empty() && !ctx.sde.solar_systems.contains_key(&req_sys) {
-            return Err(probe_rpc_err(
+            let msg = format!("Unknown solar system {req_sys} for {action}");
+            return Err(BridgeRpcError::with_client_error(
                 "InvalidSolarSystem",
-                format!("Unknown solar system {req_sys} for {action}"),
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
             ));
         }
     }
@@ -834,7 +866,7 @@ async fn handle_get_full_state(
         caller_sys,
         bound_entry,
         "query GetFullState",
-        "CrossSystemScanDenied",
+        CrossSystemScanCode::CrossSystemScanDenied,
     ) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
@@ -845,7 +877,7 @@ async fn handle_get_full_state(
         caller_sys,
         args,
         "GetFullState",
-        "CrossSystemScanDenied",
+        CrossSystemScanCode::CrossSystemScanDenied,
     ) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
@@ -856,9 +888,11 @@ async fn handle_get_full_state(
         caller_sys
     };
     if sys_id == 0 {
-        return Some(Err(probe_rpc_err(
+        let msg = "Session has no active solar system";
+        return Some(Err(BridgeRpcError::with_client_error(
             "NoSolarSystem",
-            "Session has no active solar system",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
     let now_unix = ctx.now_unix();
@@ -921,9 +955,11 @@ fn handle_qa_override_probe_expiry(
         }));
     }
     if args.len() > 1 {
-        return Some(Err(probe_rpc_err(
+        let msg = "scanMgr.QAOverrideProbeExpiry accepts at most 1 argument";
+        return Some(Err(BridgeRpcError::with_client_error(
             "InvalidArguments",
-            "scanMgr.QAOverrideProbeExpiry accepts at most 1 argument",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
     let secs = match args.first() {
@@ -931,9 +967,11 @@ fn handle_qa_override_probe_expiry(
         Some(arg) => match exact_float_arg(arg).filter(|v| v.is_finite() && *v > 0.0) {
             Some(v) => v.max(1.0),
             None => {
-                return Some(Err(probe_rpc_err(
+                let msg = "Invalid probe expiry override duration";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidArguments",
-                    "Invalid probe expiry override duration",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             }
         },
@@ -1031,9 +1069,11 @@ fn handle_set_activity_state(
     };
     let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
     if caller_sys == 0 {
-        return Some(Err(probe_rpc_err(
+        let msg = "Session has no active solar system";
+        return Some(Err(BridgeRpcError::with_client_error(
             "NoSolarSystem",
-            "Session has no active solar system",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
     let bound_sys = match verify_scan_mgr_bound(
@@ -1042,7 +1082,7 @@ fn handle_set_activity_state(
         caller_sys,
         bound_entry,
         "set probe activity state",
-        "AccessDenied",
+        CrossSystemScanCode::AccessDenied,
     ) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
@@ -1116,9 +1156,11 @@ fn handle_set_activity_state(
         }
         [] => return invalid_state_err("Missing scanner probe state argument".into()),
         _ => {
-            return Some(Err(probe_rpc_err(
+            let msg = "SetActivityState accepts 1 or 2 arguments";
+            return Some(Err(BridgeRpcError::with_client_error(
                 "InvalidArguments",
-                "SetActivityState accepts 1 or 2 arguments",
+                msg,
+                eve_proto::ClientError::CustomInfo(msg.into()),
             )));
         }
     }
@@ -1220,7 +1262,7 @@ async fn handle_get_system_scan_mgr(
         caller_sys,
         bound_entry,
         "query scan manager",
-        "AccessDenied",
+        CrossSystemScanCode::AccessDenied,
     ) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
@@ -1231,7 +1273,7 @@ async fn handle_get_system_scan_mgr(
         caller_sys,
         args,
         "query scan manager",
-        "AccessDenied",
+        CrossSystemScanCode::AccessDenied,
     ) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
@@ -1243,9 +1285,11 @@ async fn handle_get_system_scan_mgr(
         arg_sys.unwrap_or(caller_sys)
     };
     if sys_id == 0 {
-        return Some(Err(probe_rpc_err(
+        let msg = "Session has no active solar system";
+        return Some(Err(BridgeRpcError::with_client_error(
             "NoSolarSystem",
-            "Session has no active solar system",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
     let now_unix = ctx.now_unix();
@@ -1364,7 +1408,7 @@ async fn handle_get_anomalies(
         caller_sys,
         bound_entry,
         "query anomalies",
-        "AccessDenied",
+        CrossSystemScanCode::AccessDenied,
     ) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
@@ -1375,7 +1419,7 @@ async fn handle_get_anomalies(
         caller_sys,
         args,
         "query anomalies",
-        "AccessDenied",
+        CrossSystemScanCode::AccessDenied,
     ) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
@@ -1386,9 +1430,11 @@ async fn handle_get_anomalies(
         caller_sys
     };
     if sys_id == 0 {
-        return Some(Err(probe_rpc_err(
+        let msg = "Session has no active solar system";
+        return Some(Err(BridgeRpcError::with_client_error(
             "NoSolarSystem",
-            "Session has no active solar system",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
     let now_unix = ctx.now_unix();
@@ -1546,9 +1592,11 @@ async fn handle_request_scans(
         map.values().any(|p| p.owner_char_id == char_id && p.state >= 0)
     });
     if !has_any_tracked_probes && session.ship_id.is_none() {
-        return Some(Err(probe_rpc_err(
+        let msg = "Session has no active ship";
+        return Some(Err(BridgeRpcError::with_client_error(
             "NoActiveShip",
-            "Session has no active ship",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
     if !has_any_tracked_probes
@@ -1565,14 +1613,16 @@ async fn handle_request_scans(
         caller_sys,
         bound_entry,
         "request probe scans",
-        "AccessDenied",
+        CrossSystemScanCode::AccessDenied,
     ) {
         return Some(Err(e));
     }
     if args.len() > 2 {
-        return Some(Err(probe_rpc_err(
+        let msg = "RequestScans accepts at most 2 arguments";
+        return Some(Err(BridgeRpcError::with_client_error(
             "InvalidArguments",
-            "RequestScans accepts at most 2 arguments",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
     let invalid_probe_coords_err = || BridgeRpcError::user_error("InvalidProbeCoordinates");
@@ -1605,9 +1655,11 @@ async fn handle_request_scans(
             .values()
             .any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0);
         if !has_active_before {
-            return Some(Err(probe_rpc_err(
+            let msg = "No active scanner probes in space";
+            return Some(Err(BridgeRpcError::with_client_error(
                 "NoActiveProbes",
-                "No active scanner probes in space",
+                msg,
+                eve_proto::ClientError::CustomInfo(msg.into()),
             )));
         }
         if stage_probe_scan_updates(ctx, char_id, sys_id, args, override_range_step, &probe_map).is_none() {
@@ -1624,9 +1676,11 @@ async fn handle_request_scans(
             .any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
     });
     if !has_active_in_sys {
-        return Some(Err(probe_rpc_err(
+        let msg = "No active scanner probes in space";
+        return Some(Err(BridgeRpcError::with_client_error(
             "NoActiveProbes",
-            "No active scanner probes in space",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
 
@@ -2297,7 +2351,7 @@ async fn handle_recover_probes(
         caller_sys,
         bound_entry,
         "recover probes",
-        "AccessDenied",
+        CrossSystemScanCode::AccessDenied,
     ) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
@@ -2305,9 +2359,11 @@ async fn handle_recover_probes(
     let sys_id = bound_sys.unwrap_or(caller_sys);
 
     if args.len() > 1 {
-        return Some(Err(probe_rpc_err(
+        let msg = "RecoverProbes accepts at most 1 argument";
+        return Some(Err(BridgeRpcError::with_client_error(
             "InvalidArguments",
-            "RecoverProbes accepts at most 1 argument",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
     let mut target_probe_ids: Vec<i64> = Vec::new();
@@ -2317,9 +2373,11 @@ async fn handle_recover_probes(
         Some(PyRep::List(list) | PyRep::Tuple(list)) => {
             for item in list {
                 let Some(pid) = exact_int_arg(item).filter(|&v| v > 0) else {
-                    return Some(Err(probe_rpc_err(
+                    let msg = "Invalid probe ID in RecoverProbes list";
+                    return Some(Err(BridgeRpcError::with_client_error(
                         "InvalidArguments",
-                        "Invalid probe ID in RecoverProbes list",
+                        msg,
+                        eve_proto::ClientError::CustomInfo(msg.into()),
                     )));
                 };
                 target_probe_ids.push(pid);
@@ -2331,9 +2389,11 @@ async fn handle_recover_probes(
                     if let Some(p) = map.get(&pid) {
                         if p.owner_char_id != char_id || p.solar_system_id != sys_id || p.state <= 0
                         {
-                            return Some(Err(probe_rpc_err(
+                            let msg = format!("Scanner probe {pid} not found");
+                            return Some(Err(BridgeRpcError::with_client_error(
                                 "ProbeNotFound",
-                                format!("Scanner probe {pid} not found"),
+                                msg.clone(),
+                                eve_proto::ClientError::CustomInfo(msg),
                             )));
                         }
                     }
@@ -2342,9 +2402,11 @@ async fn handle_recover_probes(
         }
         Some(other) => {
             let Some(pid) = exact_int_arg(other).filter(|&v| v > 0) else {
-                return Some(Err(probe_rpc_err(
+                let msg = "Invalid probe ID argument for RecoverProbes";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidArguments",
-                    "Invalid probe ID argument for RecoverProbes",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             };
             let found_owned = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
@@ -2352,9 +2414,11 @@ async fn handle_recover_probes(
                     .is_some_and(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
             });
             if !found_owned {
-                return Some(Err(probe_rpc_err(
+                let msg = format!("Scanner probe {pid} not found");
+                return Some(Err(BridgeRpcError::with_client_error(
                     "ProbeNotFound",
-                    format!("Scanner probe {pid} not found"),
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
                 )));
             }
             target_probe_ids.push(pid);
@@ -2629,15 +2693,17 @@ async fn handle_reconnect_probes(
         caller_sys,
         bound_entry,
         "reconnect lost probes",
-        "AccessDenied",
+        CrossSystemScanCode::AccessDenied,
     ) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
     if !(args.is_empty() || matches!(args, [PyRep::None])) {
-        return Some(Err(probe_rpc_err(
+        let msg = "ReconnectToLostProbes does not accept arguments";
+        return Some(Err(BridgeRpcError::with_client_error(
             "InvalidArguments",
-            "ReconnectToLostProbes does not accept arguments",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
     // Unbound or synthetic `object_id <= 0` calls fall back to the caller's active solar system.
@@ -2731,15 +2797,17 @@ async fn handle_destroy_probe(
         caller_sys,
         bound_entry,
         "destroy scanner probe",
-        "AccessDenied",
+        CrossSystemScanCode::AccessDenied,
     ) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
     if args.len() > 1 {
-        return Some(Err(probe_rpc_err(
+        let msg = "DestroyProbe accepts at most 1 argument";
+        return Some(Err(BridgeRpcError::with_client_error(
             "InvalidArguments",
-            "DestroyProbe accepts at most 1 argument",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
     let target_pid = match args.first() {
@@ -2747,9 +2815,11 @@ async fn handle_destroy_probe(
         Some(arg) => match exact_int_arg(arg).filter(|&v| v > 0) {
             Some(pid) => Some(pid),
             None => {
-                return Some(Err(probe_rpc_err(
+                let msg = "Invalid probe ID argument for DestroyProbe";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidArguments",
-                    "Invalid probe ID argument for DestroyProbe",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             }
         },
@@ -2781,9 +2851,11 @@ async fn handle_destroy_probe(
         match check {
             ProbeTargetCheck::OwnedDestroyable | ProbeTargetCheck::OwnedCargoSentinel => {}
             ProbeTargetCheck::RejectNotFound => {
-                return Some(Err(probe_rpc_err(
+                let msg = format!("Scanner probe {pid} not found");
+                return Some(Err(BridgeRpcError::with_client_error(
                     "ProbeNotFound",
-                    format!("Scanner probe {pid} not found"),
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
                 )));
             }
             ProbeTargetCheck::NotInTracker => {
@@ -2800,9 +2872,11 @@ async fn handle_destroy_probe(
                     || u32::try_from(pid)
                         .is_ok_and(|id| ctx.sde.solar_systems.contains_key(&id));
                 if is_non_probe_entity {
-                    return Some(Err(probe_rpc_err(
+                    let msg = format!("Scanner probe {pid} not found");
+                    return Some(Err(BridgeRpcError::with_client_error(
                         "ProbeNotFound",
-                        format!("Scanner probe {pid} not found"),
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
                     )));
                 }
             }

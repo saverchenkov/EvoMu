@@ -1702,9 +1702,11 @@ fn handle_dungeon_ship_restrictions(
     };
 
     if args.len() != 1 {
-        return Some(Err(rpc_msg_err(
+        let msg = format!("{method} requires a single dungeon or site identifier argument");
+        return Some(Err(BridgeRpcError::with_client_error(
             "InvalidArguments",
-            format!("{method} requires a single dungeon or site identifier argument"),
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
         )));
     }
     let (arg0_int, arg0_str) = match args.first() {
@@ -1712,9 +1714,13 @@ fn handle_dungeon_ship_restrictions(
         Some(arg) => match arg.as_str() {
             Some(s) if !s.trim().is_empty() => (None, Some(s)),
             _ => {
-                return Some(Err(rpc_msg_err(
+                let msg = format!(
+                    "{method} requires a positive integer dungeonID or non-empty siteID"
+                );
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidArguments",
-                    format!("{method} requires a positive integer dungeonID or non-empty siteID"),
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
                 )));
             }
         },
@@ -1727,9 +1733,11 @@ fn handle_dungeon_ship_restrictions(
 
     if let Some(did) = arg0_int {
         if did <= 0 {
-            return Some(Err(rpc_msg_err(
+            let msg = format!("Invalid dungeon identifier {did}");
+            return Some(Err(BridgeRpcError::with_client_error(
                 "InvalidArguments",
-                format!("Invalid dungeon identifier {did}"),
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
             )));
         }
         if did > 10 {
@@ -1749,9 +1757,11 @@ fn handle_dungeon_ship_restrictions(
                 };
                 explicit_sde_dungeon = Some((did as u32, dname));
             } else {
-                return Some(Err(rpc_msg_err(
+                let msg = format!("Dungeon {did} not found");
+                return Some(Err(BridgeRpcError::with_client_error(
                     "DungeonNotFound",
-                    format!("Dungeon {did} not found"),
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
                 )));
             }
         } else {
@@ -1921,32 +1931,40 @@ async fn handle_get_combat_anomaly_instances(
 ) -> Result<PyRep, BridgeRpcError> {
     let (char_id, caller_sys) = require_undocked_exploration_space(ctx, session, true)?;
     if args.len() > 1 {
-        return Err(rpc_msg_err(
+        let msg = "GetCombatAnomalyInstances accepts at most one solarSystemID argument";
+        return Err(BridgeRpcError::with_client_error(
             "InvalidArguments",
-            "GetCombatAnomalyInstances accepts at most one solarSystemID argument",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         ));
     }
     let sys_id = match args.first() {
         None | Some(PyRep::None) => caller_sys,
         Some(PyRep::Integer(raw)) => {
             let Ok(id) = u32::try_from(*raw) else {
-                return Err(rpc_msg_err(
+                let msg = format!("Invalid solarSystemID {raw}");
+                return Err(BridgeRpcError::with_client_error(
                     "InvalidArguments",
-                    format!("Invalid solarSystemID {raw}"),
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
                 ));
             };
             if !ctx.sde.solar_systems.contains_key(&id) {
-                return Err(rpc_msg_err(
+                let msg = format!("Unknown solar system {id}");
+                return Err(BridgeRpcError::with_client_error(
                     "UnknownSolarSystem",
-                    format!("Unknown solar system {id}"),
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
                 ));
             }
             id
         }
         Some(_) => {
-            return Err(rpc_msg_err(
+            let msg = "solarSystemID must be an integer";
+            return Err(BridgeRpcError::with_client_error(
                 "InvalidArguments",
-                "solarSystemID must be an integer",
+                msg,
+                eve_proto::ClientError::CustomInfo(msg.into()),
             ));
         }
     };
@@ -2029,18 +2047,22 @@ async fn handle_enter_combat_anomaly(
 ) -> Result<PyRep, BridgeRpcError> {
     let (char_id, sys_id) = require_undocked_exploration_space(ctx, session, true)?;
     if args.len() > 2 {
-        return Err(rpc_msg_err(
+        let msg = "EnterCombatAnomaly accepts at most two arguments";
+        return Err(BridgeRpcError::with_client_error(
             "InvalidArguments",
-            "EnterCombatAnomaly accepts at most two arguments",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         ));
     }
     let advance_wave = match args.get(1) {
         None | Some(PyRep::None) => false,
         Some(PyRep::Bool(v)) => *v,
         Some(_) => {
-            return Err(rpc_msg_err(
+            let msg = "EnterCombatAnomaly second argument must be a boolean";
+            return Err(BridgeRpcError::with_client_error(
                 "InvalidArguments",
-                "EnterCombatAnomaly second argument must be a boolean",
+                msg,
+                eve_proto::ClientError::CustomInfo(msg.into()),
             ));
         }
     };
@@ -2051,7 +2073,12 @@ async fn handle_enter_combat_anomaly(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
     else {
-        return Err(rpc_msg_err("AnomalyNotFound", "Combat anomaly siteID is required"));
+        let msg = "Combat anomaly siteID is required";
+        return Err(BridgeRpcError::with_client_error(
+            "AnomalyNotFound",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        ));
     };
     if advance_wave {
         if let Some(ship_id) = session.ship_id {
@@ -2084,9 +2111,11 @@ async fn handle_enter_combat_anomaly(
                 .is_some_and(|sites| sites.iter().any(|s| s.site_id == site_id))
         });
         if !exists_after {
-            return Err(rpc_msg_err(
+            let msg = format!("Combat anomaly {site_id} not found in system {sys_id}");
+            return Err(BridgeRpcError::with_client_error(
                 "AnomalyNotFound",
-                format!("Combat anomaly {site_id} not found in system {sys_id}"),
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
             ));
         }
     }
@@ -2137,9 +2166,11 @@ async fn handle_activate_acceleration_gate(
         return Some(Err(e));
     }
     if args.len() > 2 {
-        return Some(Err(rpc_msg_err(
+        let msg = format!("{method} accepts at most two arguments");
+        return Some(Err(BridgeRpcError::with_client_error(
             "InvalidArguments",
-            format!("{method} accepts at most two arguments"),
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
         )));
     }
     let gate_ball_arg = match args.first() {
@@ -2361,11 +2392,13 @@ async fn handle_activate_acceleration_gate(
         if !inc_exists && !special_initialized {
             match naturally_seedable_incursion_dungeon_id(ctx, sys_id, &site_id) {
                 Some(5158) => {
-                    return Some(Err(rpc_msg_err(
+                    let msg = format!(
+                        "Mothership HQ site {site_id} is locked while Sansha influence > 0.0"
+                    );
+                    return Some(Err(BridgeRpcError::with_client_error(
                         "MothershipSiteLocked",
-                        format!(
-                            "Mothership HQ site {site_id} is locked while Sansha influence > 0.0"
-                        ),
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
                     )));
                 }
                 Some(_) => {
@@ -2406,9 +2439,11 @@ async fn handle_activate_acceleration_gate(
             }
         }
         if !inc_exists {
-            return Some(Err(rpc_msg_err(
+            let msg = format!("Incursion site {site_id} not found");
+            return Some(Err(BridgeRpcError::with_client_error(
                 "DungeonNotFound",
-                format!("Incursion site {site_id} not found"),
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
             )));
         }
         if !spawned_for_system {
@@ -2480,9 +2515,11 @@ async fn handle_activate_acceleration_gate(
                 .is_some_and(|l| find_site_by_id_or_dungeon(l, &site_id, now).is_some())
         });
         if !exists_after {
-            return Some(Err(rpc_msg_err(
+            let msg = format!("Dungeon site {site_id} not found");
+            return Some(Err(BridgeRpcError::with_client_error(
                 "DungeonNotFound",
-                format!("Dungeon site {site_id} not found"),
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
             )));
         }
     }
@@ -2501,9 +2538,11 @@ async fn handle_get_dungeon_info(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, sys_id) = require_undocked_exploration_space(ctx, session, false)?;
     if args.len() > 1 {
-        return Err(rpc_msg_err(
+        let msg = "GetDungeonInfo accepts a single siteID argument";
+        return Err(BridgeRpcError::with_client_error(
             "InvalidArguments",
-            "GetDungeonInfo accepts a single siteID argument",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         ));
     }
     let Some(site_id) = args
@@ -2571,7 +2610,14 @@ fn handle_get_escalating_path_dungeons_entered(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let invalid_err = || Err(rpc_msg_err("InvalidArguments", "Invalid escalation query arguments"));
+    let invalid_err = || {
+        let msg = "Invalid escalation query arguments";
+        Err(BridgeRpcError::with_client_error(
+            "InvalidArguments",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        ))
+    };
     let instance_filter = if service == "scanSvc" {
         if !args.is_empty() {
             return invalid_err();

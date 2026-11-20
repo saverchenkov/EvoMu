@@ -60,11 +60,22 @@ fn require_undocked_scanning_system(
 ) -> Result<(i64, u32), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(scan_rpc_err(docked_code, docked_msg));
+        return Err(BridgeRpcError::with_client_error(
+            docked_code,
+            docked_msg,
+            eve_proto::ClientError::CustomInfo(docked_msg.into()),
+        ));
     }
     let sys_id = match session.solar_system_id {
         Some(s) if s > 0 => s,
-        _ => return Err(scan_rpc_err("NoSolarSystem", "Session has no active solar system")),
+        _ => {
+            let msg = "Session has no active solar system";
+            return Err(BridgeRpcError::with_client_error(
+                "NoSolarSystem",
+                msg,
+                eve_proto::ClientError::CustomInfo(msg.into()),
+            ));
+        }
     };
     Ok((char_id, sys_id))
 }
@@ -76,7 +87,12 @@ fn require_undocked_scanning_ship(
 ) -> Result<(i64, u32), BridgeRpcError> {
     let (char_id, sys_id) = require_undocked_scanning_system(session, docked_code, docked_msg)?;
     if session.ship_id.is_none() {
-        return Err(scan_rpc_err("NoActiveShip", "Session has no active ship"));
+        let msg = "Session has no active ship";
+        return Err(BridgeRpcError::with_client_error(
+            "NoActiveShip",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        ));
     }
     Ok((char_id, sys_id))
 }
@@ -501,17 +517,21 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Err(e) => return Some(Err(e)),
             };
             if args.len() > 3 {
-                return Some(Err(scan_rpc_err(
+                let msg = "RequestScans accepts at most 3 arguments";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidArguments",
-                    "RequestScans accepts at most 3 arguments",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             }
             let (probe_positions_rep, scan_radius_meters, base_probe_strength) =
                 if matches!(args.first(), Some(PyRep::Real(_))) {
                     let Some(r) = exact_float_arg(&args[0]).filter(|v| v.is_finite() && *v > 0.0) else {
-                        return Some(Err(scan_rpc_err(
+                        let msg = "Invalid scan radius argument";
+                        return Some(Err(BridgeRpcError::with_client_error(
                             "InvalidProbeCoordinates",
-                            "Invalid scan radius argument",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
                         )));
                     };
                     let s = match args.get(1) {
@@ -519,18 +539,22 @@ pub(super) async fn handle_scanning_and_wormholes(
                         Some(a) => match exact_float_arg(a).filter(|v| v.is_finite() && *v > 0.0) {
                             Some(v) => v,
                             None => {
-                                return Some(Err(scan_rpc_err(
+                                let msg = "Invalid probe sensor strength argument";
+                                return Some(Err(BridgeRpcError::with_client_error(
                                     "InvalidProbeCoordinates",
-                                    "Invalid probe sensor strength argument",
+                                    msg,
+                                    eve_proto::ClientError::CustomInfo(msg.into()),
                                 )));
                             }
                         },
                     };
                     if let Some(pos_rep) = args.get(2).filter(|a| !matches!(a, PyRep::None)) {
                         if !matches!(pos_rep, PyRep::List(_) | PyRep::Tuple(_)) {
-                            return Some(Err(scan_rpc_err(
+                            let msg = "Probe coordinates must be a list or tuple";
+                            return Some(Err(BridgeRpcError::with_client_error(
                                 "InvalidProbeCoordinates",
-                                "Probe coordinates must be a list or tuple",
+                                msg,
+                                eve_proto::ClientError::CustomInfo(msg.into()),
                             )));
                         }
                     }
@@ -538,9 +562,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                 } else {
                     if let Some(first) = args.first().filter(|a| !matches!(a, PyRep::None)) {
                         if !matches!(first, PyRep::List(_) | PyRep::Tuple(_)) {
-                            return Some(Err(scan_rpc_err(
+                            let msg = "Invalid scan request target argument";
+                            return Some(Err(BridgeRpcError::with_client_error(
                                 "InvalidProbeCoordinates",
-                                "Invalid scan request target argument",
+                                msg,
+                                eve_proto::ClientError::CustomInfo(msg.into()),
                             )));
                         }
                     }
@@ -549,9 +575,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                         Some(a) => match exact_float_arg(a).filter(|v| v.is_finite() && *v > 0.0) {
                             Some(v) => v,
                             None => {
-                                return Some(Err(scan_rpc_err(
+                                let msg = "Invalid scan radius argument";
+                                return Some(Err(BridgeRpcError::with_client_error(
                                     "InvalidProbeCoordinates",
-                                    "Invalid scan radius argument",
+                                    msg,
+                                    eve_proto::ClientError::CustomInfo(msg.into()),
                                 )));
                             }
                         },
@@ -562,9 +590,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                         Some(a) => match exact_float_arg(a).filter(|v| v.is_finite() && *v > 0.0) {
                             Some(v) => v,
                             None => {
-                                return Some(Err(scan_rpc_err(
+                                let msg = "Invalid probe sensor strength argument";
+                                return Some(Err(BridgeRpcError::with_client_error(
                                     "InvalidProbeCoordinates",
-                                    "Invalid probe sensor strength argument",
+                                    msg,
+                                    eve_proto::ClientError::CustomInfo(msg.into()),
                                 )));
                             }
                         },
@@ -575,16 +605,20 @@ pub(super) async fn handle_scanning_and_wormholes(
             let mut probes = Vec::new();
             if let Some(rep) = probe_positions_rep.filter(|a| !matches!(a, PyRep::None)) {
                 let (PyRep::List(list) | PyRep::Tuple(list)) = rep else {
-                    return Some(Err(scan_rpc_err(
+                    let msg = "Probe coordinates must be a list or tuple";
+                    return Some(Err(BridgeRpcError::with_client_error(
                         "InvalidProbeCoordinates",
-                        "Probe coordinates must be a list or tuple",
+                        msg,
+                        eve_proto::ClientError::CustomInfo(msg.into()),
                     )));
                 };
                 for item in list {
                     let Some(coords) = validate_scan_probe_entry(item) else {
-                        return Some(Err(scan_rpc_err(
+                        let msg = "Probe coordinate entry must contain 3 finite numbers";
+                        return Some(Err(BridgeRpcError::with_client_error(
                             "InvalidProbeCoordinates",
-                            "Probe coordinate entry must contain 3 finite numbers",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
                         )));
                     };
                     probes.push(DVec3::new(coords[0], coords[1], coords[2]));
@@ -782,15 +816,19 @@ pub(super) async fn handle_scanning_and_wormholes(
                 return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotDscanInThisSystem)));
             }
             if session.ship_id.is_none() {
-                return Some(Err(scan_rpc_err(
+                let msg = "Directional scanner requires an active ship";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "NoActiveShip",
-                    "Directional scanner requires an active ship",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             }
             if args.len() > 5 {
-                return Some(Err(scan_rpc_err(
+                let msg = "Directional scan accepts at most 5 arguments";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidArgs",
-                    "Directional scan accepts at most 5 arguments",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             }
             let scan_angle = match args.first() {
@@ -800,9 +838,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                 {
                     Some(v) => v.clamp(5.0, 360.0),
                     None => {
-                        return Some(Err(scan_rpc_err(
+                        let msg = "Invalid directional scan angle";
+                        return Some(Err(BridgeRpcError::with_client_error(
                             "InvalidArgs",
-                            "Invalid directional scan angle",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
                         )));
                     }
                 },
@@ -813,9 +853,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Some(a) => match exact_float_arg(a).filter(|v| v.is_finite() && *v >= 0.0) {
                     Some(v) => v.clamp(0.0, max_scan_range),
                     None => {
-                        return Some(Err(scan_rpc_err(
+                        let msg = "Invalid directional scan range";
+                        return Some(Err(BridgeRpcError::with_client_error(
                             "InvalidArgs",
-                            "Invalid directional scan range",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
                         )));
                     }
                 },
@@ -824,9 +866,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Some([]) | None => {}
                 Some([dir_rep]) => {
                     if !matches!(dir_rep, PyRep::None) && validate_coords_triple(dir_rep).is_none() {
-                        return Some(Err(scan_rpc_err(
+                        let msg = "Invalid directional scan vector";
+                        return Some(Err(BridgeRpcError::with_client_error(
                             "InvalidArgs",
-                            "Invalid directional scan vector",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
                         )));
                     }
                 }
@@ -835,16 +879,20 @@ pub(super) async fn handle_scanning_and_wormholes(
                         .into_iter()
                         .any(|r| exact_float_arg(r).is_none_or(|v| !v.is_finite()))
                     {
-                        return Some(Err(scan_rpc_err(
+                        let msg = "Invalid directional scan vector components";
+                        return Some(Err(BridgeRpcError::with_client_error(
                             "InvalidArgs",
-                            "Invalid directional scan vector components",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
                         )));
                     }
                 }
                 Some(_) => {
-                    return Some(Err(scan_rpc_err(
+                    let msg = "Invalid directional scan arguments";
+                    return Some(Err(BridgeRpcError::with_client_error(
                         "InvalidArgs",
-                        "Invalid directional scan arguments",
+                        msg,
+                        eve_proto::ClientError::CustomInfo(msg.into()),
                     )));
                 }
             }
@@ -935,9 +983,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Err(e) => return Some(Err(e)),
             };
             if args.len() > 4 {
-                return Some(Err(scan_rpc_err(
+                let msg = "LaunchProbes accepts at most 4 arguments";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidArguments",
-                    "LaunchProbes accepts at most 4 arguments",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             }
             let max_probes = ctx.db.with_snapshot(|snap| {
@@ -953,9 +1003,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Some(a) => match exact_int_arg(a).filter(|&v| v > 0) {
                     Some(v) => v,
                     None => {
-                        return Some(Err(scan_rpc_err(
+                        let msg = "Invalid probe count requested";
+                        return Some(Err(BridgeRpcError::with_client_error(
                             "InvalidArguments",
-                            "Invalid probe count requested",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
                         )));
                     }
                 },
@@ -973,9 +1025,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Some(a) => match exact_int_arg(a) {
                     Some(v) => v,
                     None => {
-                        return Some(Err(scan_rpc_err(
+                        let msg = "Invalid probe formation ID";
+                        return Some(Err(BridgeRpcError::with_client_error(
                             "InvalidArguments",
-                            "Invalid probe formation ID",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
                         )));
                     }
                 },
@@ -990,9 +1044,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Some(rep) => match validate_coords_triple(rep) {
                     Some(c) => c,
                     None => {
-                        return Some(Err(scan_rpc_err(
+                        let msg = "Invalid LaunchProbes center coordinates";
+                        return Some(Err(BridgeRpcError::with_client_error(
                             "InvalidProbeCoordinates",
-                            "Invalid LaunchProbes center coordinates",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
                         )));
                     }
                 },
@@ -1012,16 +1068,20 @@ pub(super) async fn handle_scanning_and_wormholes(
             let mut custom_offsets: Vec<[f64; 3]> = Vec::new();
             if let Some(offsets_rep) = args.get(3).filter(|a| !matches!(a, PyRep::None)) {
                 let (PyRep::List(list) | PyRep::Tuple(list)) = offsets_rep else {
-                    return Some(Err(scan_rpc_err(
+                    let msg = "Invalid LaunchProbes custom offsets";
+                    return Some(Err(BridgeRpcError::with_client_error(
                         "InvalidProbeCoordinates",
-                        "Invalid LaunchProbes custom offsets",
+                        msg,
+                        eve_proto::ClientError::CustomInfo(msg.into()),
                     )));
                 };
                 for item in list {
                     let Some(coords) = validate_coords_triple(item) else {
-                        return Some(Err(scan_rpc_err(
+                        let msg = "Invalid LaunchProbes custom offset coordinates";
+                        return Some(Err(BridgeRpcError::with_client_error(
                             "InvalidProbeCoordinates",
-                            "Invalid LaunchProbes custom offset coordinates",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
                         )));
                     };
                     custom_offsets.push(coords);
@@ -1257,15 +1317,19 @@ pub(super) async fn handle_scanning_and_wormholes(
                 return Some(Err(e));
             }
             if args.is_empty() || args.len() > 2 {
-                return Some(Err(scan_rpc_err(
+                let msg = "ActivateAccelerationGate requires gate ID and optional dungeon ID";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidArguments",
-                    "ActivateAccelerationGate requires gate ID and optional dungeon ID",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             }
             let Some(gate_id) = exact_int_arg(&args[0]).filter(|&id| id > 0) else {
-                return Some(Err(scan_rpc_err(
+                let msg = "Invalid acceleration gate ID";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidGateID",
-                    "Invalid acceleration gate ID",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             };
             let override_dungeon_id = match args.get(1) {
@@ -1273,9 +1337,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Some(a) => match exact_int_arg(a).and_then(|v| u32::try_from(v).ok()) {
                     Some(v) if v > 0 => Some(v),
                     _ => {
-                        return Some(Err(scan_rpc_err(
+                        let msg = "Invalid dungeon override argument";
+                        return Some(Err(BridgeRpcError::with_client_error(
                             "InvalidArguments",
-                            "Invalid dungeon override argument",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
                         )));
                     }
                 },

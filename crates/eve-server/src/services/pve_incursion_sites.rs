@@ -1266,9 +1266,11 @@ fn handle_update_incursion_lp_log(
         Err(e) => return Some(Err(e)),
     };
     if args.len() > 1 {
-        return Some(Err(rpc_err(
+        let msg = "UpdateIncursionLPLog accepts at most one filter argument";
+        return Some(Err(BridgeRpcError::with_client_error(
             "InvalidArgument",
-            "UpdateIncursionLPLog accepts at most one filter argument",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
     let (site_filter, cid_filter) = match args.first() {
@@ -1278,24 +1280,30 @@ fn handle_update_incursion_lp_log(
                 .ok()
                 .filter(|id| ctx.sde.constellations.contains_key(id))
             else {
-                return Some(Err(rpc_err(
+                let msg = format!("Unknown incursion constellation {raw}");
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidConstellation",
-                    format!("Unknown incursion constellation {raw}"),
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
                 )));
             };
             (None, Some(cid))
         }
         Some(first) => {
             let Some(site) = first.as_str() else {
-                return Some(Err(rpc_err(
+                let msg = "Invalid incursion LP log filter argument";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidArgument",
-                    "Invalid incursion LP log filter argument",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             };
             if site.trim().is_empty() || site.len() > 128 {
-                return Some(Err(rpc_err(
+                let msg = "Invalid incursion site identifier";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "InvalidArgument",
-                    "Invalid incursion site identifier",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             }
             (Some(site.to_string()), None)
