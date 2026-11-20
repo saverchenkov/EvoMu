@@ -5389,7 +5389,7 @@ async fn test_stargate_post_spawn_rollback_preserves_origin_modules_charges_and_
     let slave_gun_id = ship_id + 12;
 
     let atk_char_id = 91_467_502_i64;
-    let atk_ship_id = 101_467_502_i64;
+    let atk_ship_id = 101_467_602_i64;
     let atk_scram_id = atk_ship_id + 10;
     let atk_gun_id = atk_ship_id + 11;
     let atk_slave_gun_id = atk_ship_id + 12;
@@ -5678,7 +5678,7 @@ async fn test_stargate_post_spawn_rollback_preserves_origin_modules_charges_and_
 
     // Negative control: untokenized `remove_ball` (`required_token == None`) still cleans DB states/charges.
     let neg_char_id = 91_467_503_i64;
-    let neg_ship_id = 101_467_503_i64;
+    let neg_ship_id = 101_467_703_i64;
     let neg_mod_id = neg_ship_id + 10;
     let neg_slave_id = neg_ship_id + 11;
     let _neg_sess = setup_nav_pilot(
