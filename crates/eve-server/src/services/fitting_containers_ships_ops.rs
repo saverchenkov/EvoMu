@@ -198,6 +198,24 @@ pub(crate) fn set_custom_item_flag_snap(
     }
 }
 
+pub(crate) fn apply_add_move_kv_side_effects_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    pending_alsc_take: Option<&(i64, AlscLogEntry)>,
+    item_ids: &[i64],
+    flag_opt: Option<u16>,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    if let Some((cid, entry)) = pending_alsc_take {
+        append_alsc_log_snap(snap, *cid, entry.clone(), now_unix)?;
+    }
+    for &id in item_ids {
+        if flag_opt.is_some() || custom_item_flag_snap(snap, id).is_some() {
+            set_custom_item_flag_snap(snap, id, flag_opt, now_unix)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_clear_charges(
     ctx: &ServerContext,
     session: &SessionState,

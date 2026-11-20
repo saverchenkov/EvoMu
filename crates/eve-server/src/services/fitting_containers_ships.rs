@@ -8,12 +8,12 @@ use super::*;
 use std::collections::HashSet;
 
 pub(crate) use super::fitting_containers_ships_ops::{
-    append_alsc_log_snap, clear_container_unlocks_snap, container_alsc_logs_snap,
-    container_config_snap, container_password_snap, custom_item_flag_snap,
-    is_container_unlocked_snap, set_alsc_item_locked_snap, set_container_config_snap,
-    set_container_password_snap, set_container_unlocked_snap, set_custom_item_flag_snap,
-    set_ship_access_config_snap, ship_access_config_snap, ship_password_snap, AlscLogEntry,
-    ShipAccessConfig,
+    append_alsc_log_snap, apply_add_move_kv_side_effects_in_snap, clear_container_unlocks_snap,
+    container_alsc_logs_snap, container_config_snap, container_password_snap,
+    custom_item_flag_snap, is_container_unlocked_snap, set_alsc_item_locked_snap,
+    set_container_config_snap, set_container_password_snap, set_container_unlocked_snap,
+    set_custom_item_flag_snap, set_ship_access_config_snap, ship_access_config_snap,
+    ship_password_snap, AlscLogEntry, ShipAccessConfig,
 };
 #[cfg(test)]
 pub(crate) use super::fitting_containers_ships_ops::{
@@ -782,9 +782,9 @@ pub(crate) fn record_ship_bay_unlock_for_ancestors_snap(
     src_loc: i64,
     src_flag_u16: u16,
     supplied_pw: Option<&str>,
-) {
+) -> Result<(), BridgeRpcError> {
     let Some(pw) = supplied_pw else {
-        return;
+        return Ok(());
     };
     let mut ship_ids = Vec::new();
     for (start, flag0) in [(dest_loc, dest_flag_u16), (src_loc, src_flag_u16)] {
@@ -803,14 +803,15 @@ pub(crate) fn record_ship_bay_unlock_for_ancestors_snap(
         }
     }
     if ship_ids.is_empty() {
-        return;
+        return Ok(());
     }
     let now_unix = ctx.now_unix_secs();
     for sid in ship_ids {
         if ship_password_snap(snap, sid).as_deref() == Some(pw) {
-            let _ = set_container_unlocked_snap(snap, sid, char_id, true, now_unix);
+            set_container_unlocked_snap(snap, sid, char_id, true, now_unix)?;
         }
     }
+    Ok(())
 }
 
 /// Validates container rules, ALSC locks/passwords, SMA (`flag 90`), and Fleet Hangar (`flag 155`) on item move.
@@ -933,11 +934,10 @@ fn validate_container_and_bay_move_impl(
         } else {
             0
         };
-        let need_src_pw = container_password_snap(snap, src_loc, 1)
-            .filter(|_| !is_container_unlocked_snap(snap, src_loc, char_id));
-        Some((src_loc, src_cont.flag as i64, src_cont.location_id, cont_corp, char_corp, src_grp, src_cont.owner_id, need_src_pw))
+        let src_has_pw = container_password_snap(snap, src_loc, 1).is_some();
+        Some((src_loc, src_cont.flag as i64, src_cont.location_id, cont_corp, char_corp, src_grp, src_cont.owner_id, src_has_pw))
     });
-    if let Some((src_loc, src_cont_flag, src_cont_station, cont_corp, char_corp, src_grp, src_cont_owner, need_src_pw)) = src_cont_info {
+    if let Some((src_loc, src_cont_flag, src_cont_station, cont_corp, char_corp, src_grp, src_cont_owner, src_has_pw)) = src_cont_info {
         if src_grp == crate::services::mobile_deployables::GROUP_CRAB_BEACON {
             crate::services::pve_crab_beacons::check_crab_loot_access(ctx, src_loc, char_id, false)?;
         }
@@ -946,18 +946,23 @@ fn validate_container_and_bay_move_impl(
                 return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may take items from this Mobile Depot".into(), client_error: None });
             }
         }
-        if let Some(req_pw) = need_src_pw {
-            let provided = supplied_pw.unwrap_or("");
-            if provided != req_pw {
-                return Err(BridgeRpcError {
-                    code: "ALSCPasswordNeededToOpen".into(),
-                    message: format!("Password required to take items from secure container {src_loc}"),
-                    client_error: None,
-                });
-            }
+        if matches!(src_grp, 340 | 448) || src_has_pw {
             let now_unix = ctx.now_unix_secs();
-            ctx.db.try_with_mut_snapshot(|snap| {
-                set_container_unlocked_snap(snap, src_loc, char_id, true, now_unix)
+            ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                if let Some(req_pw) = container_password_snap(snap, src_loc, 1) {
+                    if !is_container_unlocked_snap(snap, src_loc, char_id) {
+                        let provided = supplied_pw.unwrap_or("");
+                        if provided != req_pw {
+                            return Err(BridgeRpcError {
+                                code: "ALSCPasswordNeededToOpen".into(),
+                                message: format!("Password required to take items from secure container {src_loc}"),
+                                client_error: None,
+                            });
+                        }
+                        set_container_unlocked_snap(snap, src_loc, char_id, true, now_unix)?;
+                    }
+                }
+                Ok(())
             })?;
         }
         if src_grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
@@ -1129,62 +1134,52 @@ fn validate_container_and_bay_move_impl(
         Ok(None)
     })?;
 
-    if let Some((grp, _, _)) = snap_check {
+    if snap_check.is_some() {
         let now_unix = ctx.now_unix_secs();
-        let need_dest_pw_check = ctx.db.with_snapshot(|snap| {
+        ctx.db.try_with_mut_snapshot(|snap| -> Result<Result<(), BridgeRpcError>, BridgeRpcError> {
             let Some(req_pw) = container_password_snap(snap, new_loc, 1) else {
-                return false;
+                return Ok(Ok(()));
             };
-            if req_pw.is_empty() {
-                return false;
-            }
             let cfg = container_config_snap(snap, new_loc);
-            cfg.password_per_action || !is_container_unlocked_snap(snap, new_loc, char_id)
-        });
-        if need_dest_pw_check {
-            ctx.db.try_with_mut_snapshot(|snap| -> Result<Result<(), BridgeRpcError>, BridgeRpcError> {
-                let Some(req_pw) = container_password_snap(snap, new_loc, 1) else {
-                    return Ok(Ok(()));
-                };
-                let cfg = container_config_snap(snap, new_loc);
-                let need_check = cfg.password_per_action || !is_container_unlocked_snap(snap, new_loc, char_id);
-                if !req_pw.is_empty() && need_check {
-                    let provided = supplied_pw.unwrap_or("");
-                    let tid = snap.items.get(&new_loc).map(|i| i.type_id).unwrap_or(0);
-                    if provided != req_pw {
-                        append_alsc_log_snap(
-                            snap,
-                            new_loc,
-                            AlscLogEntry {
-                                timestamp_unix: now_unix,
-                                actor_id: char_id,
-                                action: "ALSCActionPasswordFailure".into(),
-                                item_id: new_loc,
-                                item_type_id: tid,
-                                quantity: 1,
-                            },
-                            now_unix,
-                        )?;
-                        return Ok(Err(BridgeRpcError { code: "ALSCPasswordNeededToOpen".into(), message: format!("Password required to access secure container {new_loc}"), client_error: None }));
-                    }
+            let need_check = cfg.password_per_action || !is_container_unlocked_snap(snap, new_loc, char_id);
+            if !req_pw.is_empty() && need_check {
+                let provided = supplied_pw.unwrap_or("");
+                let tid = snap.items.get(&new_loc).map(|i| i.type_id).unwrap_or(0);
+                if provided != req_pw {
                     append_alsc_log_snap(
                         snap,
                         new_loc,
                         AlscLogEntry {
                             timestamp_unix: now_unix,
                             actor_id: char_id,
-                            action: "ALSCActionPasswordSuccess".into(),
+                            action: "ALSCActionPasswordFailure".into(),
                             item_id: new_loc,
                             item_type_id: tid,
                             quantity: 1,
                         },
                         now_unix,
                     )?;
-                    set_container_unlocked_snap(snap, new_loc, char_id, true, now_unix)?;
+                    return Ok(Err(BridgeRpcError { code: "ALSCPasswordNeededToOpen".into(), message: format!("Password required to access secure container {new_loc}"), client_error: None }));
                 }
-                Ok(Ok(()))
-            })??;
-        }
+                append_alsc_log_snap(
+                    snap,
+                    new_loc,
+                    AlscLogEntry {
+                        timestamp_unix: now_unix,
+                        actor_id: char_id,
+                        action: "ALSCActionPasswordSuccess".into(),
+                        item_id: new_loc,
+                        item_type_id: tid,
+                        quantity: 1,
+                    },
+                    now_unix,
+                )?;
+                set_container_unlocked_snap(snap, new_loc, char_id, true, now_unix)?;
+            }
+            Ok(Ok(()))
+        })??;
+    }
+    if let Some((grp, _, _)) = snap_check {
         if grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
             crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, new_loc);
         }

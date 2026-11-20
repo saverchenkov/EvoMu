@@ -64,14 +64,14 @@ pub fn mark_hacking_container_unlocked(ctx: &ServerContext, char_id: i64, target
     }
     let now_unix = ctx.now_unix_secs();
     let _ = crate::services::station_structure::structure_lifecycle::record_structure_hack_reveal(ctx, char_id, target_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        let _ = crate::services::inventory_fitting::fitting_containers_ships::set_container_unlocked_snap(
+    if let Err(err) = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        crate::services::inventory_fitting::fitting_containers_ships::set_container_unlocked_snap(
             snap,
             target_id,
             char_id,
             true,
             now_unix,
-        );
+        )?;
         let locked_by_job = snap.is_item_locked_in_contract_or_job(target_id);
         if let Some(cont) = snap.items.get_mut(&target_id) {
             if !locked_by_job
@@ -81,7 +81,10 @@ pub fn mark_hacking_container_unlocked(ctx: &ServerContext, char_id: i64, target
                 cont.flag = InventoryFlag::None;
             }
         }
-    });
+        Ok(())
+    }) {
+        tracing::error!(error = %err.message, target_id, "mark_hacking_container_unlocked failed");
+    }
     let hub_sys = ctx.db.with_snapshot(|snap| {
         snap.structures.get(&target_id).and_then(|st| {
             if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {

@@ -1989,6 +1989,15 @@ async fn handle_invbroker_add(
                                     .get("password")
                                     .and_then(|v| v.as_str())
                                     .or_else(|| args.iter().find_map(|a| a.as_str()));
+                                let now_unix = ctx.now_unix_secs();
+                                let clear_ids = split_qty_opt.is_none().then_some(effective_item_id);
+                                fitting_containers_ships::apply_add_move_kv_side_effects_in_snap(
+                                    snap,
+                                    pending_alsc_take.as_ref(),
+                                    clear_ids.as_slice(),
+                                    None,
+                                    now_unix,
+                                )?;
                                 fitting_containers_ships::record_ship_bay_unlock_for_ancestors_snap(
                                     ctx,
                                     snap,
@@ -1998,7 +2007,7 @@ async fn handle_invbroker_add(
                                     orig_item.location_id,
                                     orig_item.flag as u16,
                                     supplied_pw,
-                                );
+                                )?;
                                 return Ok(AddTxOutcome::Merged {
                                     merged_item: merged_snapshot,
                                     prev_qty,
@@ -2148,6 +2157,17 @@ async fn handle_invbroker_add(
                     .get("password")
                     .and_then(|v| v.as_str())
                     .or_else(|| args.iter().find_map(|a| a.as_str()));
+                let now_unix = ctx.now_unix_secs();
+                let mut custom_flag_ids = Vec::with_capacity(1 + unfitted_charges.len());
+                custom_flag_ids.push(effective_item_id);
+                custom_flag_ids.extend(unfitted_charges.iter().map(|(_, post_c)| post_c.item_id));
+                fitting_containers_ships::apply_add_move_kv_side_effects_in_snap(
+                    snap,
+                    pending_alsc_take.as_ref(),
+                    &custom_flag_ids,
+                    matches!(flag_u16, 90 | 155).then_some(flag_u16),
+                    now_unix,
+                )?;
                 fitting_containers_ships::record_ship_bay_unlock_for_ancestors_snap(
                     ctx,
                     snap,
@@ -2157,7 +2177,7 @@ async fn handle_invbroker_add(
                     old_loc_id,
                     old_flag_id as u16,
                     supplied_pw,
-                );
+                )?;
 
                 Ok(AddTxOutcome::Moved {
                     updated,
@@ -2194,14 +2214,7 @@ async fn handle_invbroker_add(
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, orig_source_loc_id).await;
                     }
                     fitting_containers_ships::record_container_add_log(ctx, char_id, item_id, moved_tid, moved_qty, new_loc);
-                    if let Some((cid, entry)) = pending_alsc_take {
-                        let now_unix = ctx.now_unix_secs();
-                        if let Err(err) = ctx.db.try_with_mut_snapshot(|snap| {
-                            fitting_containers_ships::append_alsc_log_snap(snap, cid, entry, now_unix)
-                        }) {
-                            return Some(Err(err));
-                        }
-                    } else if orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
+                    if pending_alsc_take.is_none() && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
                         fitting_containers_ships::record_container_take_log(ctx, char_id, item_id, moved_tid, moved_qty, orig_source_loc_id);
                         crate::services::pve_dungeon_runtime::on_dungeon_item_looted(ctx, char_id, session.solar_system_id, orig_source_loc_id, moved_tid).await;
                     }
@@ -2377,52 +2390,6 @@ async fn handle_invbroker_add(
                                 updated.type_id,
                                 u64::try_from(updated.quantity).unwrap_or(0),
                             );
-                        }
-                    }
-                    let needs_flag_clear = !matches!(flag_u16, 90 | 155)
-                        && ctx.db.with_snapshot(|snap| {
-                            fitting_containers_ships::custom_item_flag_snap(snap, item_id).is_some()
-                                || unfitted_charges.iter().any(|(_, post_c)| {
-                                    fitting_containers_ships::custom_item_flag_snap(snap, post_c.item_id)
-                                        .is_some()
-                                })
-                        });
-                    if pending_alsc_take.is_some() || matches!(flag_u16, 90 | 155) || needs_flag_clear {
-                        let now_unix = ctx.now_unix_secs();
-                        if let Err(err) = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                            if let Some((cid, entry)) = pending_alsc_take {
-                                fitting_containers_ships::append_alsc_log_snap(
-                                    snap, cid, entry, now_unix,
-                                )?;
-                            }
-                            let flag_opt = matches!(flag_u16, 90 | 155).then_some(flag_u16);
-                            if flag_opt.is_some()
-                                || fitting_containers_ships::custom_item_flag_snap(snap, item_id)
-                                    .is_some()
-                            {
-                                fitting_containers_ships::set_custom_item_flag_snap(
-                                    snap, item_id, flag_opt, now_unix,
-                                )?;
-                            }
-                            for (_, post_c) in &unfitted_charges {
-                                if flag_opt.is_some()
-                                    || fitting_containers_ships::custom_item_flag_snap(
-                                        snap,
-                                        post_c.item_id,
-                                    )
-                                    .is_some()
-                                {
-                                    fitting_containers_ships::set_custom_item_flag_snap(
-                                        snap,
-                                        post_c.item_id,
-                                        flag_opt,
-                                        now_unix,
-                                    )?;
-                                }
-                            }
-                            Ok(())
-                        }) {
-                            return Some(Err(err));
                         }
                     }
                     if looted_foreign_jetcan {
