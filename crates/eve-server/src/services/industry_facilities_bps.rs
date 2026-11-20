@@ -1625,8 +1625,8 @@ pub fn handle_industry_facilities_bps(
                     });
                 if !session.has_gm_role() {
                     // NPC stations have no player-structure owner (`owner_id == None`), and
-                    // unowned/NPC-corp facilities (`!is_player_corp`) must never be mutable by
-                    // non-GM players regardless of session roles.
+                    // unowned/NPC-corp facilities must never be mutable by non-GM players
+                    // regardless of seeded CorporationRecord entries or session roles.
                     let Some(owner_corp_id) = owner_id else {
                         return Err(BridgeRpcError {
                             code: "FacilityPermissionDenied".into(),
@@ -1636,8 +1636,16 @@ pub fn handle_industry_facilities_bps(
                             client_error: None,
                         });
                     };
-                    let is_player_corp = (owner_corp_id >= 98_000_000
-                        && !ctx.sde.npc_corporations.contains_key(&owner_corp_id))
+                    if is_npc_corporation_id(ctx, owner_corp_id) {
+                        return Err(BridgeRpcError {
+                            code: "FacilityPermissionDenied".into(),
+                            message: format!(
+                                "Facility {facility_id} is owned by an NPC or invalid corporation (owner {owner_corp_id})"
+                            ),
+                            client_error: None,
+                        });
+                    }
+                    let is_player_corp = owner_corp_id >= 98_000_000
                         || snap
                             .corporations
                             .get(&owner_corp_id)

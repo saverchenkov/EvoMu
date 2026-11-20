@@ -2084,3 +2084,254 @@ async fn corp_gov_resolves_db_first_corp_id_over_stale_session() {
     .unwrap();
     assert_eq!(rs_rows(&divs).len(), 7);
 }
+
+#[tokio::test]
+async fn corp_gov_enforces_npc_corp_excluded_member_and_cross_corp_wallet_guards() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let corp_a = 98_700_401_i64;
+    let corp_b = 98_700_402_i64;
+    let npc_corp = 1_000_009_i64;
+    let ceo_a = 91_700_401_i64;
+    let excluded_a = 91_700_402_i64;
+    let cross_a = 91_700_403_i64;
+    let npc_char = 91_700_404_i64;
+    let gm_char = 91_700_405_i64;
+    let ad_a_id = 7_401_i64;
+    let ad_npc_id = 7_402_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ca = eve_db::CorporationRecord::default();
+        ca.corporation_id = corp_a;
+        ca.name = "GuardCorpA".into();
+        ca.ticker = "GCA".into();
+        ca.ceo_id = ceo_a;
+        ca.members = std::collections::HashSet::from([ceo_a, cross_a]);
+        ca.member_roles.insert(
+            excluded_a,
+            corp_roles::ROLE_DIRECTOR
+                | corp_roles::ROLE_ACCOUNTANT
+                | corp_roles::ROLE_PERSONNEL_MANAGER
+                | corp_roles::ROLE_DIPLOMAT,
+        );
+        ca.ensure_wallet_divisions();
+        ca.set_division_balance(1, IskCents::from_isk(5_000_000));
+        snap.corporations.insert(corp_a, ca);
+
+        let mut cb = eve_db::CorporationRecord::default();
+        cb.corporation_id = corp_b;
+        cb.name = "GuardCorpB".into();
+        cb.ticker = "GCB".into();
+        cb.ceo_id = cross_a;
+        cb.members = std::collections::HashSet::from([cross_a]);
+        cb.member_roles
+            .insert(cross_a, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT);
+        cb.ensure_wallet_divisions();
+        snap.corporations.insert(corp_b, cb);
+
+        let mut npc = eve_db::CorporationRecord::default();
+        npc.corporation_id = npc_corp;
+        npc.name = "SeededNpcCorp".into();
+        npc.ticker = "SNPC".into();
+        npc.ceo_id = npc_char;
+        npc.members = std::collections::HashSet::from([npc_char]);
+        npc.member_roles.insert(
+            npc_char,
+            corp_roles::ROLE_DIRECTOR
+                | corp_roles::ROLE_ACCOUNTANT
+                | corp_roles::ROLE_PERSONNEL_MANAGER
+                | corp_roles::ROLE_DIPLOMAT,
+        );
+        npc.ensure_wallet_divisions();
+        npc.set_division_balance(1, IskCents::from_isk(5_000_000));
+        snap.corporations.insert(npc_corp, npc);
+
+        for (cid, coid) in [
+            (ceo_a, corp_a),
+            (excluded_a, corp_a),
+            (cross_a, corp_a),
+            (npc_char, npc_corp),
+            (gm_char, corp_a),
+        ] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: coid,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let gov_a = snap.corp_governance.entry(corp_a).or_default();
+        gov_a.shares.insert(corp_a, 1_000);
+        gov_a.company_shares = 1_000;
+        let gov_npc = snap.corp_governance.entry(npc_corp).or_default();
+        gov_npc.shares.insert(npc_corp, 1_000);
+        gov_npc.company_shares = 1_000;
+
+        for (ad_id, cid, rec) in [(ad_a_id, corp_a, ceo_a), (ad_npc_id, npc_corp, npc_char)] {
+            snap.fleet_and_social_ops
+                .corp_recruitment_ads
+                .push(eve_db::CorpRecruitmentAd {
+                    ad_id,
+                    corp_id: cid,
+                    title: "Existing Ad".into(),
+                    description: "Desc".into(),
+                    type_mask: 1,
+                    recruiter_id: rec,
+                    recruiters: vec![rec],
+                    created_unix: 1_700_000_000,
+                    expiry_unix: 1_700_000_000 + 86_400,
+                    days: 1,
+                    lang_mask: 1,
+                });
+        }
+    });
+
+    // 1. GetWalletDivisionsInfo: rejects NPC corp, excluded member, and explicit cross-corp args[0]; allows GM.
+    let mut npc_sess = SessionState::new(91_744);
+    npc_sess.user_id = Some(744);
+    npc_sess.character_id = Some(npc_char);
+    npc_sess.corporation_id = Some(npc_corp);
+    npc_sess.corp_role = u64::MAX;
+    assert_eq!(
+        call_gov(
+            &ctx,
+            &mut npc_sess,
+            "account",
+            "GetWalletDivisionsInfo",
+            vec![PyRep::Integer(npc_corp)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    let mut excluded_sess = SessionState::new(91_742);
+    excluded_sess.user_id = Some(742);
+    excluded_sess.character_id = Some(excluded_a);
+    excluded_sess.corporation_id = Some(corp_a);
+    excluded_sess.corp_role = u64::MAX;
+    assert_eq!(
+        call_gov(
+            &ctx,
+            &mut excluded_sess,
+            "account",
+            "GetWalletDivisionsInfo",
+            vec![PyRep::Integer(corp_a)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    let mut cross_sess = SessionState::new(91_743);
+    cross_sess.user_id = Some(743);
+    cross_sess.character_id = Some(cross_a);
+    cross_sess.corporation_id = Some(corp_b);
+    cross_sess.corp_role = u64::MAX;
+    assert_eq!(
+        call_gov(
+            &ctx,
+            &mut cross_sess,
+            "account",
+            "GetWalletDivisionsInfo",
+            vec![PyRep::Integer(corp_b)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    let mut gm_sess = SessionState::new(91_745);
+    gm_sess.user_id = Some(745);
+    gm_sess.character_id = Some(gm_char);
+    gm_sess.corporation_id = Some(corp_a);
+    gm_sess.role |= eve_machonet::service_roles::ROLE_GMH;
+    let gm_divs = call_gov(
+        &ctx,
+        &mut gm_sess,
+        "account",
+        "GetWalletDivisionsInfo",
+        vec![PyRep::Integer(corp_b)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rs_rows(&gm_divs).len(), 7);
+
+    // 2. handle_corp_gov + PayoutDividend + recruitment ads + GetSharesByShareholder reject both NPC corp and excluded member.
+    for (label, sess, cid, ad_id, recipient) in [
+        ("npc_corp", &mut npc_sess, npc_corp, ad_npc_id, npc_char),
+        ("excluded_member", &mut excluded_sess, corp_a, ad_a_id, ceo_a),
+    ] {
+        for (svc, method, args, expected_code) in [
+            (
+                "corpRegistry",
+                "MoveCompanyShares",
+                vec![PyRep::Integer(cid), PyRep::Integer(recipient), PyRep::Integer(10)],
+                "CorpRoleDenied",
+            ),
+            (
+                "corpRegistry",
+                "UpdateTitle",
+                vec![PyRep::Integer(1), PyRep::String("Denied".into()), PyRep::Integer(0)],
+                "CorpRoleDenied",
+            ),
+            (
+                "corpRegistry",
+                "CreateLabel",
+                vec![PyRep::String("DeniedLabel".into()), PyRep::Integer(0x00FF00)],
+                "CorpRoleDenied",
+            ),
+            (
+                "corpRegistry",
+                "PayoutDividend",
+                vec![PyRep::Bool(false), PyRep::Real(100_000.0), PyRep::Integer(1)],
+                "CorpRoleDenied",
+            ),
+            (
+                "corpRecProxy",
+                "CreateRecruitmentAd",
+                vec![
+                    PyRep::String("Denied Ad".into()),
+                    PyRep::String("Should fail".into()),
+                    PyRep::Integer(1),
+                    PyRep::Integer(7),
+                ],
+                "CorpRoleDenied",
+            ),
+            (
+                "corpRecProxy",
+                "UpdateRecruitmentAd",
+                vec![
+                    PyRep::Integer(ad_id),
+                    PyRep::Integer(1),
+                    PyRep::String("Denied Update".into()),
+                    PyRep::String("Should fail".into()),
+                ],
+                "CorpRoleDenied",
+            ),
+            (
+                "corpRecProxy",
+                "DeleteRecruitmentAd",
+                vec![PyRep::Integer(ad_id)],
+                "CorpRoleDenied",
+            ),
+            (
+                "corpRegistry",
+                "GetSharesByShareholder",
+                vec![PyRep::Bool(true)],
+                "CrpAccessDenied",
+            ),
+        ] {
+            let err = call_gov(&ctx, sess, svc, method, args).await.unwrap_err();
+            assert_eq!(
+                err.code, expected_code,
+                "{label}: {svc}.{method} must fail with {expected_code}"
+            );
+        }
+    }
+}
