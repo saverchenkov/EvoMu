@@ -255,3 +255,249 @@ async fn escalation_expiry_pruning_despawns_runtime_instance_and_clears_bookmark
         None
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn escalation_expiry_and_step_advance_despawn_site_npc_balls_and_ignore_cleared_kills() {
+    let origin_sys: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_039_902;
+    let ship_id: i64 = 1_039_902;
+    let (ctx, _session) = setup_expedition_ctx(origin_sys, char_id, ship_id);
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_775_450_000));
+    ctx.set_clock(clock.clone());
+
+    let entry = create_escalation_expedition(
+        &ctx,
+        char_id,
+        origin_sys,
+        1420,
+        "Guristas Scout Outpost",
+        [0.0; 3],
+    )
+    .await
+    .expect("create_escalation_expedition");
+
+    let site_id_1 = format!("EXP-{}-{}", entry.instance_id, entry.step_index);
+    let npc_ids_1 = crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&entry.destination_solar_system_id)
+            .and_then(|sites| sites.iter().find(|s| s.site_id == site_id_1))
+            .map(|s| s.active_npc_ball_ids.clone())
+            .expect("spawned EXP site must exist")
+    });
+    assert!(
+        !npc_ids_1.is_empty(),
+        "spawn_expedition_site_instance_core must seed Wave 1 NPC balls"
+    );
+    let dest_handle = ctx
+        .systems
+        .get_handle(entry.destination_solar_system_id)
+        .expect("destination system must be loaded");
+    for &bid in &npc_ids_1 {
+        assert!(
+            dest_handle
+                .get_ball_snapshot(bid)
+                .await
+                .unwrap()
+                .is_some(),
+            "NPC ball {bid} must exist in ballpark before expiry"
+        );
+    }
+
+    // Seed a timeless (`expires_at_sec == 0`) escalation on an unloaded system and verify:
+    // (1) advancing clock does NOT prune timeless escalations,
+    // (2) unloaded systems with expired dummy instances are NOT materialized by `get_handle`.
+    let timeless_id = 9_999_001_i64;
+    let unloaded_sys: SolarSystemId = 30_000_001;
+    assert_ne!(unloaded_sys, entry.destination_solar_system_id);
+    assert!(ctx.systems.get_handle(unloaded_sys).is_none());
+    crate::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.escalations_by_char
+            .entry(char_id)
+            .or_default()
+            .push(EscalatingPathEntry {
+                instance_id: timeless_id,
+                character_id: char_id,
+                source_dungeon_id: 1420,
+                expedition_dungeon_id: 1420,
+                expedition_name: "Timeless Escalation".into(),
+                destination_solar_system_id: origin_sys,
+                step_index: 1,
+                total_steps: 2,
+                journal_text: "Timeless".into(),
+                created_at_sec: 1_775_450_000,
+                expires_at_sec: 0,
+                dungeons_entered: Vec::new(),
+                journal_entry_template_id: 0,
+            });
+        reg.escalations_by_char
+            .entry(char_id)
+            .or_default()
+            .push(EscalatingPathEntry {
+                instance_id: 9_999_002,
+                character_id: char_id,
+                source_dungeon_id: 1420,
+                expedition_dungeon_id: 1420,
+                expedition_name: "Unloaded Expired".into(),
+                destination_solar_system_id: unloaded_sys,
+                step_index: 1,
+                total_steps: 2,
+                journal_text: "Expired".into(),
+                created_at_sec: 1_775_450_000,
+                expires_at_sec: 1_775_450_100,
+                dungeons_entered: Vec::new(),
+                journal_entry_template_id: 0,
+            });
+        reg.sites_by_system
+            .entry(unloaded_sys)
+            .or_default()
+            .push(crate::services::pve_exploration::PveSiteInstance {
+                site_id: "EXP-9999002-1".into(),
+                dungeon_id: 1420,
+                solar_system_id: unloaded_sys,
+                active_npc_ball_ids: vec![888_001],
+                expedition_instance_id: Some(9_999_002),
+                ..Default::default()
+            });
+    });
+
+    clock.advance_secs(86_405);
+    let _ = get_my_escalating_path_details_rowset(&ctx, char_id);
+
+    crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+        let kept = &reg.escalations_by_char[&char_id];
+        assert!(
+            kept.iter().any(|e| e.instance_id == timeless_id),
+            "expires_at_sec == 0 timeless escalation must not be pruned"
+        );
+        assert!(
+            !kept.iter().any(|e| e.instance_id == entry.instance_id),
+            "expired escalation must be pruned"
+        );
+        let site = reg.sites_by_system[&entry.destination_solar_system_id]
+            .iter()
+            .find(|s| s.site_id == site_id_1)
+            .unwrap();
+        assert!(site.cleared);
+        assert!(
+            site.active_npc_ball_ids.is_empty(),
+            "expired site active_npc_ball_ids must be drained synchronously"
+        );
+    });
+    assert!(
+        ctx.systems.get_handle(unloaded_sys).is_none(),
+        "expiry cleanup must not wake unloaded systems via get_or_spawn"
+    );
+
+    // Wait briefly for spawned async ball-removal task on destination SystemHandle.
+    for _ in 0..200 {
+        let mut remaining = 0usize;
+        for &bid in &npc_ids_1 {
+            if dest_handle.get_ball_snapshot(bid).await.unwrap().is_some() {
+                remaining += 1;
+            }
+        }
+        if remaining == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    for &bid in &npc_ids_1 {
+        assert_eq!(
+            dest_handle.get_ball_snapshot(bid).await.unwrap(),
+            None,
+            "expired EXP site NPC ball {bid} must be removed from ballpark"
+        );
+    }
+
+    // Even if a cleared site still held an orphaned ball ID, kill processing must ignore it.
+    let sentinel_ball = npc_ids_1[0];
+    crate::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        let site = reg
+            .sites_by_system
+            .get_mut(&entry.destination_solar_system_id)
+            .and_then(|sites| sites.iter_mut().find(|s| s.site_id == site_id_1))
+            .unwrap();
+        site.active_npc_ball_ids.push(sentinel_ball);
+    });
+    let kill_res = crate::services::pve_exploration::handle_pve_site_npc_destruction_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        &ctx.mechanic_rng,
+        &*ctx.combat_ephemeral,
+        entry.destination_solar_system_id,
+        sentinel_ball,
+        char_id,
+        false,
+    )
+    .await;
+    assert!(kill_res.0.is_none() && kill_res.1.is_none() && kill_res.2.is_none());
+    crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+        let site = reg.sites_by_system[&entry.destination_solar_system_id]
+            .iter()
+            .find(|s| s.site_id == site_id_1)
+            .unwrap();
+        assert_eq!(site.current_wave, 1, "cleared site kill must not spawn wave 2");
+        assert_eq!(
+            site.active_npc_ball_ids,
+            vec![sentinel_ball],
+            "cleared site must be skipped before mutating active_npc_ball_ids"
+        );
+    });
+
+    // Direct advance_expedition_step_core before Wave 1 is killed must also clear step 1 and remove its NPCs.
+    let entry2 = create_escalation_expedition(
+        &ctx,
+        char_id,
+        origin_sys,
+        1420,
+        "Guristas Scout Outpost",
+        [0.0; 3],
+    )
+    .await
+    .expect("create second escalation");
+    let site_id_2_step1 = format!("EXP-{}-{}", entry2.instance_id, entry2.step_index);
+    let npc_ids_2 = crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system[&entry2.destination_solar_system_id]
+            .iter()
+            .find(|s| s.site_id == site_id_2_step1)
+            .map(|s| s.active_npc_ball_ids.clone())
+            .expect("step 1 EXP site must exist")
+    });
+    assert!(!npc_ids_2.is_empty());
+    let dest2_handle = ctx
+        .systems
+        .get_handle(entry2.destination_solar_system_id)
+        .expect("step 1 system loaded");
+    for &bid in &npc_ids_2 {
+        assert!(dest2_handle.get_ball_snapshot(bid).await.unwrap().is_some());
+    }
+
+    let advanced = advance_expedition_step_core(
+        &ctx.db,
+        &ctx.sde,
+        &ctx.systems,
+        char_id,
+        entry2.instance_id,
+    )
+    .await
+    .expect("advance_expedition_step_core")
+    .expect("step 2 entry");
+    assert_eq!(advanced.step_index, 2);
+
+    crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+        let old_site = reg.sites_by_system[&entry2.destination_solar_system_id]
+            .iter()
+            .find(|s| s.site_id == site_id_2_step1)
+            .unwrap();
+        assert!(old_site.cleared);
+        assert!(old_site.active_npc_ball_ids.is_empty());
+    });
+    for &bid in &npc_ids_2 {
+        assert_eq!(
+            dest2_handle.get_ball_snapshot(bid).await.unwrap(),
+            None,
+            "previous-step NPC ball {bid} must be removed synchronously during advance_expedition_step_core"
+        );
+    }
+}

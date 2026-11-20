@@ -439,6 +439,66 @@ fn collect_and_despawn_escalation_runtime_instances(
     })
 }
 
+fn merge_despawn_ball_batches(
+    primary: Vec<(SolarSystemId, Vec<i64>)>,
+    secondary: Vec<(SolarSystemId, Vec<i64>)>,
+) -> Vec<(SolarSystemId, Vec<i64>)> {
+    let mut merged: std::collections::BTreeMap<SolarSystemId, Vec<i64>> =
+        std::collections::BTreeMap::new();
+    for (sys_id, balls) in primary.into_iter().chain(secondary) {
+        if balls.is_empty() {
+            continue;
+        }
+        let bucket = merged.entry(sys_id).or_default();
+        for bid in balls {
+            if !bucket.contains(&bid) {
+                bucket.push(bid);
+            }
+        }
+    }
+    merged.into_iter().collect()
+}
+
+fn clear_and_drain_escalation_sites_in_reg(
+    reg: &mut PveExplorationRegistry,
+    site_ids: &[String],
+    inst_ids: &[i64],
+) -> Vec<(SolarSystemId, Vec<i64>)> {
+    let mut batches: std::collections::BTreeMap<SolarSystemId, Vec<i64>> =
+        std::collections::BTreeMap::new();
+    for sites in reg.sites_by_system.values_mut() {
+        for s in sites.iter_mut() {
+            let matches_site = site_ids.iter().any(|sid| sid == &s.site_id);
+            let matches_inst = s
+                .expedition_instance_id
+                .is_some_and(|iid| inst_ids.contains(&iid));
+            if matches_site || matches_inst {
+                s.cleared = true;
+                if !s.active_npc_ball_ids.is_empty() {
+                    batches
+                        .entry(s.solar_system_id)
+                        .or_default()
+                        .extend(s.active_npc_ball_ids.drain(..));
+                }
+            }
+        }
+    }
+    batches.into_iter().collect()
+}
+
+async fn despawn_escalation_balls_in_loaded_systems(
+    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
+    batches: Vec<(SolarSystemId, Vec<i64>)>,
+) {
+    for (sys_id, balls) in batches {
+        if let Some(sys_handle) = systems.get_handle(sys_id) {
+            for bid in balls {
+                let _ = sys_handle.remove_ball(bid).await;
+            }
+        }
+    }
+}
+
 pub async fn advance_expedition_step_core(
     db: &std::sync::Arc<eve_db::WorldRepository>,
     sde: &std::sync::Arc<eve_sde::SdeRegistry>,
@@ -450,66 +510,85 @@ pub async fn advance_expedition_step_core(
     let mut completed = false;
     let mut prev_runtime_target: Option<(SolarSystemId, u32)> = None;
     let mut remaining_active_targets: Vec<(SolarSystemId, u32)> = Vec::new();
+    let mut cleared_site_ids: Vec<String> = Vec::new();
+    let mut cleared_inst_ids: Vec<i64> = Vec::new();
 
-    crate::services::pve_exploration::with_pve_exploration_reg_db(db, db.clock().now_unix_secs(), |reg| {
-        let ts = now_sec(reg);
-        let Some(list) = reg.escalations_by_char.get_mut(&char_id) else {
-            return;
-        };
-        let Some(entry) = list.iter_mut().find(|e| e.instance_id == instance_id) else {
-            return;
-        };
+    let site_npc_batches = crate::services::pve_exploration::with_pve_exploration_reg_db(
+        db,
+        db.clock().now_unix_secs(),
+        |reg| {
+            let ts = now_sec(reg);
+            if let Some(list) = reg.escalations_by_char.get_mut(&char_id) {
+                if let Some(entry) = list.iter_mut().find(|e| e.instance_id == instance_id) {
+                    prev_runtime_target =
+                        Some((entry.destination_solar_system_id, entry.expedition_dungeon_id));
+                    cleared_site_ids.push(format!("EXP-{}-{}", entry.instance_id, entry.step_index));
+                    entry.dungeons_entered.push(entry.expedition_dungeon_id);
 
-        prev_runtime_target = Some((entry.destination_solar_system_id, entry.expedition_dungeon_id));
-        entry.dungeons_entered.push(entry.expedition_dungeon_id);
-
-        if entry.step_index < entry.total_steps {
-            entry.step_index += 1;
-            let next_dest = find_escalation_destination_system_sde(sde, entry.destination_solar_system_id);
-            entry.destination_solar_system_id = next_dest;
-            let chain = ops::resolve_sde_escalation_chain(sde, entry.source_dungeon_id, next_dest);
-            entry.expedition_dungeon_id = chain.dungeon_for_step(entry.step_index);
-            if let Some(d) = sde.dungeons.get(&entry.expedition_dungeon_id) {
-                entry.expedition_name = d.name.trim().to_string();
-            }
-            entry.expires_at_sec = ts + 86_400;
-            entry.journal_text = ops::format_escalation_journal_text(
-                sde,
-                &entry.expedition_name,
-                entry.step_index,
-                entry.total_steps,
-                entry.expedition_dungeon_id,
-                next_dest,
-            );
-            updated_entry = Some(entry.clone());
-        } else {
-            completed = true;
-            let mut done_entry = entry.clone();
-            done_entry.journal_text = format!(
-                "Expedition '{}' has been fully completed! All pirate overseers neutralized.",
-                done_entry.expedition_name
-            );
-            list.retain(|e| e.instance_id != instance_id);
-            updated_entry = Some(done_entry);
-        }
-        remaining_active_targets = list
-            .iter()
-            .filter(|e| e.expires_at_sec == 0 || e.expires_at_sec > ts)
-            .map(|e| (e.destination_solar_system_id, e.expedition_dungeon_id))
-            .collect();
-    });
-
-    if let Some((prev_sys, prev_did)) = prev_runtime_target {
-        if !remaining_active_targets.contains(&(prev_sys, prev_did)) {
-            for (sys_id, balls) in
-                collect_and_despawn_escalation_runtime_instances(db, char_id, &[(prev_sys, prev_did)])
-            {
-                let sys_handle = systems.get_or_spawn(sys_id);
-                for bid in balls {
-                    let _ = sys_handle.remove_ball(bid).await;
+                    if entry.step_index < entry.total_steps {
+                        entry.step_index += 1;
+                        let next_dest = find_escalation_destination_system_sde(
+                            sde,
+                            entry.destination_solar_system_id,
+                        );
+                        entry.destination_solar_system_id = next_dest;
+                        let chain = ops::resolve_sde_escalation_chain(
+                            sde,
+                            entry.source_dungeon_id,
+                            next_dest,
+                        );
+                        entry.expedition_dungeon_id = chain.dungeon_for_step(entry.step_index);
+                        if let Some(d) = sde.dungeons.get(&entry.expedition_dungeon_id) {
+                            entry.expedition_name = d.name.trim().to_string();
+                        }
+                        entry.expires_at_sec = ts + 86_400;
+                        entry.journal_text = ops::format_escalation_journal_text(
+                            sde,
+                            &entry.expedition_name,
+                            entry.step_index,
+                            entry.total_steps,
+                            entry.expedition_dungeon_id,
+                            next_dest,
+                        );
+                        updated_entry = Some(entry.clone());
+                    } else {
+                        completed = true;
+                        cleared_inst_ids.push(instance_id);
+                        let mut done_entry = entry.clone();
+                        done_entry.journal_text = format!(
+                            "Expedition '{}' has been fully completed! All pirate overseers neutralized.",
+                            done_entry.expedition_name
+                        );
+                        list.retain(|e| e.instance_id != instance_id);
+                        updated_entry = Some(done_entry);
+                    }
+                    remaining_active_targets = list
+                        .iter()
+                        .filter(|e| e.expires_at_sec == 0 || e.expires_at_sec > ts)
+                        .map(|e| (e.destination_solar_system_id, e.expedition_dungeon_id))
+                        .collect();
                 }
             }
+            if cleared_site_ids.is_empty() && cleared_inst_ids.is_empty() {
+                Vec::new()
+            } else {
+                clear_and_drain_escalation_sites_in_reg(reg, &cleared_site_ids, &cleared_inst_ids)
+            }
+        },
+    );
+
+    let runtime_balls = if let Some((prev_sys, prev_did)) = prev_runtime_target {
+        if !remaining_active_targets.contains(&(prev_sys, prev_did)) {
+            collect_and_despawn_escalation_runtime_instances(db, char_id, &[(prev_sys, prev_did)])
+        } else {
+            Vec::new()
         }
+    } else {
+        Vec::new()
+    };
+    let despawn_batches = merge_despawn_ball_batches(site_npc_batches, runtime_balls);
+    if !despawn_batches.is_empty() {
+        despawn_escalation_balls_in_loaded_systems(systems, despawn_batches).await;
     }
 
     if let Some(ref entry) = updated_entry {
@@ -745,21 +824,23 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
             let Some(list) = reg.escalations_by_char.get(&char_id) else {
                 return (false, Vec::new());
             };
-            let has_expired = list.iter().any(|e| now >= e.expires_at_sec);
+            let has_expired = list
+                .iter()
+                .any(|e| e.expires_at_sec > 0 && now >= e.expires_at_sec);
             if has_expired {
                 (true, Vec::new())
             } else {
                 (false, list.clone())
             }
         });
-    let (active_entries, expired_entries) = if has_expired {
+    let (active_entries, expired_entries, site_npc_despawn_batches) = if has_expired {
         crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
             let now = now_sec(reg);
             let mut expired = Vec::new();
             let active = if let Some(list) = reg.escalations_by_char.get_mut(&char_id) {
                 let mut kept = Vec::new();
                 for e in list.drain(..) {
-                    if now < e.expires_at_sec {
+                    if e.expires_at_sec == 0 || now < e.expires_at_sec {
                         kept.push(e);
                     } else {
                         expired.push(e);
@@ -770,20 +851,20 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
             } else {
                 Vec::new()
             };
-            for e in &expired {
-                let site_id = format!("EXP-{}-{}", e.instance_id, e.step_index);
-                if let Some(sites) = reg.sites_by_system.get_mut(&e.destination_solar_system_id) {
-                    for s in sites.iter_mut() {
-                        if s.site_id == site_id || s.expedition_instance_id == Some(e.instance_id) {
-                            s.cleared = true;
-                        }
-                    }
-                }
-            }
-            (active, expired)
+            let site_ids: Vec<String> = expired
+                .iter()
+                .map(|e| format!("EXP-{}-{}", e.instance_id, e.step_index))
+                .collect();
+            let inst_ids: Vec<i64> = expired.iter().map(|e| e.instance_id).collect();
+            let site_npc_batches = if site_ids.is_empty() && inst_ids.is_empty() {
+                Vec::new()
+            } else {
+                clear_and_drain_escalation_sites_in_reg(reg, &site_ids, &inst_ids)
+            };
+            (active, expired, site_npc_batches)
         })
     } else {
-        (active_readonly, Vec::new())
+        (active_readonly, Vec::new(), Vec::new())
     };
 
     if !expired_entries.is_empty() {
@@ -798,18 +879,14 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
             })
             .map(|e| (e.destination_solar_system_id, e.expedition_dungeon_id))
             .collect();
-        let removed_balls =
+        let runtime_balls =
             collect_and_despawn_escalation_runtime_instances(&ctx.db, char_id, &despawn_targets);
+        let removed_balls = merge_despawn_ball_batches(site_npc_despawn_batches, runtime_balls);
         if !removed_balls.is_empty() {
             if let Ok(rt) = tokio::runtime::Handle::try_current() {
                 let systems = std::sync::Arc::clone(&ctx.systems);
                 rt.spawn(async move {
-                    for (sys_id, balls) in removed_balls {
-                        let sys_handle = systems.get_or_spawn(sys_id);
-                        for bid in balls {
-                            let _ = sys_handle.remove_ball(bid).await;
-                        }
-                    }
+                    despawn_escalation_balls_in_loaded_systems(&systems, removed_balls).await;
                 });
             }
         }
@@ -931,10 +1008,10 @@ pub async fn validate_and_advance_pve_site_room(
     let mut site_id = raw_site_id.to_string();
     let (rating_to_check, sleeper_info, site_pos_opt, canonical_site_id) =
         crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
-            let site = reg.sites_by_system.get(&sys_id).and_then(|l| {
-                l.iter()
-                    .find(|s| s.site_id == site_id || s.dungeon_id.to_string() == site_id)
-            });
+            let site = reg
+                .sites_by_system
+                .get(&sys_id)
+                .and_then(|l| crate::services::pve_exploration::find_site_by_id_or_dungeon(l, &site_id));
             let r = site.and_then(|s| s.ded_rating);
             let s_info = site.and_then(|s| {
                 if s.site_category == "SleeperCache" {
