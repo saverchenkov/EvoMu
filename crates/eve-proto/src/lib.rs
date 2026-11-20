@@ -17,9 +17,10 @@ pub mod quasar;
 pub mod quasar_wire;
 
 pub use client_error::{
-    round_user_error_real_6dp, ClientError, IntoUserErrorArg, IskCents, UserErrorArg,
-    UserErrorKey, UserErrorPresentation, MACHONETERR_WRAPPEDEXCEPTION, UI_LABEL_GATE_CLOSED,
-    UI_LABEL_SHIP_TOO_LARGE, V24_PROGRAMMATIC_USER_ERROR_KEYS, V24_USER_ERROR_LABELS,
+    round_user_error_real_6dp, ClientError, IntoUserErrorArg, IskCents, ItemQty, ItemQtyError,
+    UserErrorArg, UserErrorKey, UserErrorPresentation, MACHONETERR_WRAPPEDEXCEPTION,
+    UI_LABEL_GATE_CLOSED, UI_LABEL_SHIP_TOO_LARGE, V24_PROGRAMMATIC_USER_ERROR_KEYS,
+    V24_USER_ERROR_LABELS,
 };
 
 pub use dbrow::{

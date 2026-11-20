@@ -74,6 +74,230 @@ impl IskCents {
     }
 }
 
+/// Validation or arithmetic error constructing or narrowing an [`ItemQty`] (`#1186`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ItemQtyError {
+    /// Signed quantity is `<= 0` (must be strictly positive).
+    NonPositive(i64),
+    /// Unsigned quantity is `0` (must be strictly positive).
+    Zero,
+    /// Unsigned quantity exceeds `i64::MAX`.
+    ExceedsMax(u64),
+    /// Quantity exceeds `i32::MAX` when narrowing to an inventory stack size.
+    ExceedsStackMax(i64),
+    /// Arithmetic operation (`checked_add` / `checked_mul`) or narrowing cast overflowed.
+    Overflow,
+}
+
+impl std::fmt::Display for ItemQtyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonPositive(q) => write!(f, "Quantity must be positive, got {q}"),
+            Self::Zero => f.write_str("Quantity must be positive, got 0"),
+            Self::ExceedsMax(q) => write!(f, "Quantity {q} exceeds maximum {}", i64::MAX),
+            Self::ExceedsStackMax(q) => {
+                write!(f, "Quantity {q} exceeds stack maximum {}", i32::MAX)
+            }
+            Self::Overflow => f.write_str("Quantity arithmetic overflow"),
+        }
+    }
+}
+
+impl std::error::Error for ItemQtyError {}
+
+impl ItemQtyError {
+    /// Maps this quantity validation error into a [`BridgeRpcError`] preserving `code`.
+    pub fn into_rpc_error(self, code: &str) -> BridgeRpcError {
+        let msg = self.to_string();
+        BridgeRpcError::with_client_error(code, msg.clone(), ClientError::CustomInfo(msg))
+    }
+}
+
+/// Checked positive item/commodity quantity (`1..=i64::MAX`, `#1186`).
+///
+/// Guarantees strict positivity on construction and provides checked arithmetic and narrowing
+/// conversions (`try_from_i64`, `try_from_u64`, `try_into_stack_i32`, `checked_add`,
+/// `checked_mul`) with zero `as` casts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "i64", into = "i64")]
+pub struct ItemQty(i64);
+
+impl ItemQty {
+    pub const MIN: Self = Self(1);
+    pub const ONE: Self = Self(1);
+    pub const STACK_MAX: Self = Self(2_147_483_647);
+    pub const MAX: Self = Self(i64::MAX);
+
+    /// Validates a strictly positive signed quantity (`1..=i64::MAX`).
+    pub const fn try_from_i64(qty: i64) -> Result<Self, ItemQtyError> {
+        if qty <= 0 {
+            Err(ItemQtyError::NonPositive(qty))
+        } else {
+            Ok(Self(qty))
+        }
+    }
+
+    /// Validates a strictly positive unsigned quantity (`1..=i64::MAX as u64`).
+    pub fn try_from_u64(qty: u64) -> Result<Self, ItemQtyError> {
+        if qty == 0 {
+            return Err(ItemQtyError::Zero);
+        }
+        i64::try_from(qty)
+            .map(Self)
+            .map_err(|_| ItemQtyError::ExceedsMax(qty))
+    }
+
+    /// Validates a strictly positive 32-bit signed stack quantity (`1..=i32::MAX`).
+    pub fn try_from_i32(qty: i32) -> Result<Self, ItemQtyError> {
+        Self::try_from_i64(i64::from(qty))
+    }
+
+    /// Validates a strictly positive 32-bit unsigned quantity (`1..=u32::MAX`).
+    pub fn try_from_u32(qty: u32) -> Result<Self, ItemQtyError> {
+        Self::try_from_u64(u64::from(qty))
+    }
+
+    /// Validates a strictly positive `usize` quantity (`1..=i64::MAX`).
+    pub fn try_from_usize(qty: usize) -> Result<Self, ItemQtyError> {
+        if qty == 0 {
+            return Err(ItemQtyError::Zero);
+        }
+        i64::try_from(qty).map(Self).map_err(|_| {
+            ItemQtyError::ExceedsMax(u64::try_from(qty).unwrap_or(u64::MAX))
+        })
+    }
+
+    /// Returns the underlying strictly positive `i64` quantity.
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+
+    /// Alias for [`Self::get`].
+    pub const fn as_i64(self) -> i64 {
+        self.0
+    }
+
+    /// Returns the underlying strictly positive quantity as `u64`.
+    pub fn as_u64(self) -> u64 {
+        u64::try_from(self.0).unwrap_or(1)
+    }
+
+    /// Narrows this quantity to an `InventoryItemRecord` stack `i32`, failing if `> i32::MAX`.
+    pub fn try_into_stack_i32(self) -> Result<i32, ItemQtyError> {
+        i32::try_from(self.0).map_err(|_| ItemQtyError::ExceedsStackMax(self.0))
+    }
+
+    /// Narrows this quantity to a `u32`, failing if `> u32::MAX`.
+    pub fn try_into_u32(self) -> Result<u32, ItemQtyError> {
+        u32::try_from(self.0).map_err(|_| ItemQtyError::Overflow)
+    }
+
+    /// Checked addition (`self + rhs`), failing with [`ItemQtyError::Overflow`] on overflow.
+    pub fn checked_add(self, rhs: Self) -> Result<Self, ItemQtyError> {
+        self.0
+            .checked_add(rhs.0)
+            .map(Self)
+            .ok_or(ItemQtyError::Overflow)
+    }
+
+    /// Checked subtraction returning `Some(self - rhs)` when `self > rhs`, or `None` if zero/underflow.
+    pub const fn checked_sub(self, rhs: Self) -> Option<Self> {
+        if self.0 <= rhs.0 {
+            None
+        } else {
+            Some(Self(self.0 - rhs.0))
+        }
+    }
+
+    /// Checked multiplication (`self * rhs`), failing with [`ItemQtyError::Overflow`] on overflow.
+    pub fn checked_mul(self, rhs: Self) -> Result<Self, ItemQtyError> {
+        self.0
+            .checked_mul(rhs.0)
+            .map(Self)
+            .ok_or(ItemQtyError::Overflow)
+    }
+
+    /// Checked multiplication against an unsigned multiplier (`self * factor`).
+    pub fn checked_mul_u64(self, factor: u64) -> Result<Self, ItemQtyError> {
+        let rhs = Self::try_from_u64(factor)?;
+        self.checked_mul(rhs)
+    }
+}
+
+impl std::fmt::Display for ItemQty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<i64> for ItemQty {
+    type Error = ItemQtyError;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        Self::try_from_i64(value)
+    }
+}
+
+impl TryFrom<u64> for ItemQty {
+    type Error = ItemQtyError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        Self::try_from_u64(value)
+    }
+}
+
+impl TryFrom<i32> for ItemQty {
+    type Error = ItemQtyError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        Self::try_from_i32(value)
+    }
+}
+
+impl TryFrom<u32> for ItemQty {
+    type Error = ItemQtyError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::try_from_u32(value)
+    }
+}
+
+impl TryFrom<usize> for ItemQty {
+    type Error = ItemQtyError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        Self::try_from_usize(value)
+    }
+}
+
+impl TryFrom<ItemQty> for i32 {
+    type Error = ItemQtyError;
+
+    fn try_from(qty: ItemQty) -> Result<Self, Self::Error> {
+        qty.try_into_stack_i32()
+    }
+}
+
+impl TryFrom<ItemQty> for u32 {
+    type Error = ItemQtyError;
+
+    fn try_from(qty: ItemQty) -> Result<Self, Self::Error> {
+        qty.try_into_u32()
+    }
+}
+
+impl From<ItemQty> for i64 {
+    fn from(qty: ItemQty) -> Self {
+        qty.0
+    }
+}
+
+impl From<ItemQty> for u64 {
+    fn from(qty: ItemQty) -> Self {
+        qty.as_u64()
+    }
+}
+
 /// Canonical V24 localization label constant for supercapital/large-ship docking refusal.
 pub const UI_LABEL_SHIP_TOO_LARGE: &str = "UI/Station/StationManagment/ShipTooLarge";
 
@@ -237,6 +461,12 @@ impl From<&str> for UserErrorArg {
 impl From<IskCents> for UserErrorArg {
     fn from(c: IskCents) -> Self {
         Self::IskCents(c)
+    }
+}
+
+impl From<ItemQty> for UserErrorArg {
+    fn from(qty: ItemQty) -> Self {
+        Self::Int(qty.as_i64())
     }
 }
 
@@ -1382,6 +1612,12 @@ impl BridgeRpcError {
         Self::from_client_error(ClientError::CustomInfo(info.into()))
     }
 
+    /// Constructs a typed `InvalidQuantity` error backed by [`ClientError::CustomInfo`].
+    pub fn invalid_quantity(message: impl Into<String>) -> Self {
+        let msg = message.into();
+        Self::with_client_error("InvalidQuantity", msg.clone(), ClientError::CustomInfo(msg))
+    }
+
     /// Constructs a typed non-modal [`ClientError::CustomNotify`] RPC toast error.
     pub fn custom_notify(notify: impl Into<String>) -> Self {
         Self::from_client_error(ClientError::CustomNotify(notify.into()))
@@ -2211,5 +2447,88 @@ mod tests {
                 Some(format!("{code}: stale station ship moniker").as_str())
             );
         }
+    }
+
+    #[test]
+    fn item_qty_checked_construction_arithmetic_narrowing_and_serde() {
+        assert_eq!(ItemQty::MIN.get(), 1);
+        assert_eq!(ItemQty::ONE.as_i64(), 1);
+        assert_eq!(ItemQty::STACK_MAX.get(), i64::from(i32::MAX));
+        assert_eq!(ItemQty::MAX.get(), i64::MAX);
+
+        assert_eq!(ItemQty::try_from_i64(0), Err(ItemQtyError::NonPositive(0)));
+        assert_eq!(ItemQty::try_from_i64(-7), Err(ItemQtyError::NonPositive(-7)));
+        assert_eq!(
+            ItemQty::try_from_i64(i64::MIN),
+            Err(ItemQtyError::NonPositive(i64::MIN))
+        );
+        assert_eq!(ItemQty::try_from_u64(0), Err(ItemQtyError::Zero));
+        let over_signed = u64::try_from(i64::MAX).unwrap() + 1;
+        assert_eq!(
+            ItemQty::try_from_u64(over_signed),
+            Err(ItemQtyError::ExceedsMax(over_signed))
+        );
+        assert_eq!(ItemQty::try_from_i32(0), Err(ItemQtyError::NonPositive(0)));
+        assert_eq!(ItemQty::try_from_u32(0), Err(ItemQtyError::Zero));
+        assert_eq!(ItemQty::try_from_usize(0), Err(ItemQtyError::Zero));
+
+        let stack_max = ItemQty::try_from_i32(i32::MAX).expect("i32::MAX valid");
+        assert_eq!(stack_max, ItemQty::STACK_MAX);
+        assert_eq!(stack_max.try_into_stack_i32(), Ok(i32::MAX));
+        assert_eq!(i32::try_from(stack_max), Ok(i32::MAX));
+
+        let above_stack = stack_max.checked_add(ItemQty::ONE).expect("i32::MAX + 1 fits i64");
+        assert_eq!(
+            above_stack.try_into_stack_i32(),
+            Err(ItemQtyError::ExceedsStackMax(i64::from(i32::MAX) + 1))
+        );
+
+        let u32_max_qty = ItemQty::try_from_u32(u32::MAX).expect("u32::MAX fits i64");
+        assert_eq!(u32_max_qty.try_into_u32(), Ok(u32::MAX));
+        let above_u32 = u32_max_qty.checked_add(ItemQty::ONE).unwrap();
+        assert_eq!(above_u32.try_into_u32(), Err(ItemQtyError::Overflow));
+
+        assert_eq!(
+            ItemQty::MAX.checked_add(ItemQty::ONE),
+            Err(ItemQtyError::Overflow)
+        );
+        let five = ItemQty::try_from(5_i64).unwrap();
+        let two = ItemQty::try_from(2_u64).unwrap();
+        assert_eq!(five.checked_sub(two), Some(ItemQty::try_from(3_i32).unwrap()));
+        assert_eq!(two.checked_sub(two), None);
+        assert_eq!(two.checked_sub(five), None);
+
+        assert_eq!(five.checked_mul(two), Ok(ItemQty::try_from(10_u32).unwrap()));
+        assert_eq!(
+            ItemQty::MAX.checked_mul(two),
+            Err(ItemQtyError::Overflow)
+        );
+        assert_eq!(five.checked_mul_u64(0), Err(ItemQtyError::Zero));
+        assert_eq!(five.checked_mul_u64(4), Ok(ItemQty::try_from(20_i64).unwrap()));
+        assert_eq!(u64::from(five), 5_u64);
+        assert_eq!(i64::from(five), 5_i64);
+        assert_eq!(five.to_string(), "5");
+        assert_eq!(UserErrorArg::from(five), UserErrorArg::Int(5));
+
+        let json = serde_json::to_string(&five).expect("serialize ItemQty");
+        assert_eq!(json, "5");
+        let rt: ItemQty = serde_json::from_str(&json).expect("deserialize ItemQty");
+        assert_eq!(rt, five);
+        assert!(serde_json::from_str::<ItemQty>("0").is_err());
+        assert!(serde_json::from_str::<ItemQty>("-3").is_err());
+
+        let custom_err = ItemQtyError::ExceedsStackMax(i64::from(i32::MAX) + 1)
+            .into_rpc_error("InvalidCommodityQuantity");
+        assert_eq!(custom_err.code, "InvalidCommodityQuantity");
+        assert!(matches!(
+            custom_err.client_error.as_deref(),
+            Some(ClientError::CustomInfo(_))
+        ));
+
+        let default_rpc = ItemQtyError::Zero.into_rpc_error("InvalidQuantity");
+        assert_eq!(default_rpc.code, "InvalidQuantity");
+        let helper_rpc = BridgeRpcError::invalid_quantity("bad qty");
+        assert_eq!(helper_rpc.code, "InvalidQuantity");
+        assert_eq!(helper_rpc.message, "bad qty");
     }
 }
