@@ -78,7 +78,7 @@ async fn anchor(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, name
 
 /// Triggers the lazy lifecycle sync through a real structure RPC and returns the record.
 async fn observe(ctx: &ServerContext, sess: &mut SessionState, id: i64) -> Option<UpwellStructureRecord> {
-    rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(id)]).await.expect("GetGuests");
+    rpc(ctx, sess, "structureDirectory", "GetStructures", &[]).await.expect("GetStructures");
     ctx.db.with_snapshot(|snap| snap.structures.get(&id).cloned())
 }
 
