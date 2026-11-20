@@ -4494,7 +4494,8 @@ async fn test_upwell_view_outside_and_undock_ballpark_lifecycle_gh1448() {
     assert_eq!(struct_undock_states.len(), 1);
     assert_eq!(struct_undock_states[0].0, Some(ship_id));
 
-    // 4. Dock again and undock directly from Hangar -> GetFormations -> MachoBindObject (no replay).
+    // 4. Dock again and undock from Hangar: zero SetState on Undock (#1448 FIX_FAILED),
+    // then GetFormations emits SetState(ego=ship_id) once -> MachoBindObject emits no replay.
     ctx.advance_secs(12);
     h.call_ok("structureDocking", None, "Dock", &[PyRep::Integer(struct_id)], &kw)
         .await;
@@ -4503,22 +4504,23 @@ async fn test_upwell_view_outside_and_undock_ballpark_lifecycle_gh1448() {
         .call_exchange("structureDocking", None, "Undock", &[], &kw)
         .await;
     assert!(hangar_undock_out.result.is_ok());
-    let hangar_undock_states = extract_set_states(&hangar_undock_out);
-    assert_eq!(
-        hangar_undock_states.len(),
-        1,
-        "Hangar -> structureDocking.Undock must emit SetState(ego=ship_id)"
+    assert!(
+        extract_set_states(&hangar_undock_out).is_empty(),
+        "Hangar -> structureDocking.Undock must NOT emit SetState prematurely before OnAddBallpark"
     );
-    assert_eq!(hangar_undock_states[0].0, Some(ship_id));
-    assert!(hangar_undock_states[0].1.iter().any(|b| b.id == struct_id));
-    assert!(hangar_undock_states[0].1.iter().any(|b| b.id == nearby_ball_id));
 
     let post_form_out = h.call_exchange("beyonce", None, "GetFormations", &[], &kw).await;
     assert!(post_form_out.result.is_ok());
-    assert!(
-        extract_set_states(&post_form_out).is_empty(),
-        "post-Upwell-Undock GetFormations must NOT emit duplicate SetState"
+    let post_form_states = extract_set_states(&post_form_out);
+    assert_eq!(
+        post_form_states.len(),
+        1,
+        "post-Hangar-Undock GetFormations must emit SetState(ego=ship_id) once"
     );
+    assert_eq!(post_form_states[0].0, Some(ship_id));
+    assert!(post_form_states[0].1.iter().any(|b| b.id == struct_id));
+    assert!(post_form_states[0].1.iter().any(|b| b.id == nearby_ball_id));
+
     let post_bind_out = h
         .call_exchange(
             "beyonce",
@@ -4531,6 +4533,235 @@ async fn test_upwell_view_outside_and_undock_ballpark_lifecycle_gh1448() {
     assert!(post_bind_out.result.is_ok());
     assert!(
         extract_set_states(&post_bind_out).is_empty(),
-        "post-Upwell-Undock MachoBindObject must NOT emit duplicate SetState"
+        "post-GetFormations MachoBindObject must NOT replay SetState"
     );
+}
+
+#[tokio::test]
+async fn test_upwell_cross_system_moveme_preserves_deferred_set_state_gh1461() {
+    use eve_testkit::client_harness::{ClientCallOutput, ClientWireFrameKind};
+
+    const PERIMETER_SYS: u32 = 30_000_144;
+    const DEST_NULL_SYS: u32 = 30_004_759;
+    const JITA_SYS: u32 = 30_000_142;
+
+    fn extract_set_states(out: &ClientCallOutput) -> Vec<(Option<i64>, Vec<eve_destiny::wire::DecodedBall>)> {
+        let mut found = Vec::new();
+        for frame in &out.frames {
+            let ClientWireFrameKind::DoDestinyUpdate { updates, .. } = &frame.kind else {
+                continue;
+            };
+            if let PyRep::List(items) = updates {
+                for item in items {
+                    if let PyRep::Tuple(pair) = item {
+                        if let Some(PyRep::Tuple(fa)) = pair.get(1) {
+                            if fa.first().and_then(|v| v.as_str()) == Some("SetState") {
+                                if let Some(PyRep::Tuple(args)) = fa.get(1) {
+                                    if let Some(kv) = args.first() {
+                                        let ego = kv.dict_get("ego").and_then(|v| v.as_i64());
+                                        let balls = match kv.dict_get("state") {
+                                            Some(PyRep::Bytes(b)) => eve_destiny::wire::decode_add_balls(b)
+                                                .map(|(_, _, balls)| balls)
+                                                .unwrap_or_default(),
+                                            _ => Vec::new(),
+                                        };
+                                        found.push((ego, balls));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    let ctx = crate::seasons_and_campaigns::fast_real_sde_ctx();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+
+    // Case A: Pilot in Upwell Hangar calls `/moveme 30004759`: must NOT treat as Upwell Undock;
+    // SetState waits until post-OnAddBallpark beyonce.MachoBindObject (#1067, #1461 F-1).
+    let struct_hangar: i64 = 1_040_001_461_501;
+    let cid_hangar: i64 = 99_146_101;
+    ctx.db
+        .provision_gm_account("gm_upwell_hangar", "pass", cid_hangar, "Upwell Hangar Moveme");
+    let mut ship_hangar = 0_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&cid_hangar).expect("cid_hangar");
+        let corp_id = ch.corporation_id;
+        ship_hangar = ch.active_ship_id;
+        ch.solar_system_id = PERIMETER_SYS;
+        ch.station_id = None;
+        ch.structure_id = Some(struct_hangar);
+        if let Some(item) = snap.items.get_mut(&ship_hangar) {
+            item.location_id = struct_hangar;
+            item.flag = eve_db::InventoryFlag::Hangar;
+        }
+        snap.structures.insert(
+            struct_hangar,
+            UpwellStructureRecord {
+                structure_id: struct_hangar,
+                type_id: 35832,
+                solar_system_id: PERIMETER_SYS,
+                owner_corp_id: corp_id,
+                name: "Perimeter Hangar Moveme Astrahus".into(),
+                position: [250_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 2_500_000.0,
+                armor_hp: 2_500_000.0,
+                hull_hp: 2_500_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+
+    let mut h_hangar = common::new_wire_harness(&ctx, 146_101);
+    h_hangar
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("gm_upwell_hangar".into()), PyRep::String("pass".into())],
+            &kw,
+        )
+        .await;
+    h_hangar
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid_hangar)], &kw)
+        .await;
+    ctx.advance_secs(12);
+
+    let moveme_hangar = h_hangar
+        .call_exchange(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/moveme {DEST_NULL_SYS}"))],
+            &kw,
+        )
+        .await;
+    assert!(moveme_hangar.result.is_ok(), "Hangar /moveme failed: {:?}", moveme_hangar.result);
+    assert_eq!(h_hangar.transport().inner.session.solar_system_id, Some(DEST_NULL_SYS));
+    assert_eq!(h_hangar.transport().inner.session.structure_id, None);
+    assert!(
+        extract_set_states(&moveme_hangar).is_empty(),
+        "Upwell Hangar cross-system /moveme must defer SetState until beyonce.MachoBindObject (#1067)"
+    );
+
+    let dest_null = ctx.systems.get_or_spawn(DEST_NULL_SYS);
+    dest_null.step_manual(1.0).await.unwrap();
+    let bind_null = h_hangar
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(DEST_NULL_SYS)), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert!(bind_null.result.is_ok());
+    let null_states = extract_set_states(&bind_null);
+    assert_eq!(null_states.len(), 1);
+    assert_eq!(null_states[0].0, Some(ship_hangar));
+    assert!(null_states[0].1.iter().any(|b| b.id == ship_hangar));
+
+    // Case B: Pilot in Upwell View Outside calls `/moveme 30000142`: prev_structure_view_outside is
+    // true, so WITHOUT F-1 gate `is_upwell_undock` would falsely fire and push premature SetState!
+    let struct_view: i64 = 1_040_001_461_502;
+    let cid_view: i64 = 99_146_102;
+    ctx.db
+        .provision_gm_account("gm_upwell_view", "pass", cid_view, "Upwell View Moveme");
+    let mut ship_view = 0_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&cid_view).expect("cid_view");
+        let corp_id = ch.corporation_id;
+        ship_view = ch.active_ship_id;
+        ch.solar_system_id = PERIMETER_SYS;
+        ch.station_id = None;
+        ch.structure_id = Some(struct_view);
+        if let Some(item) = snap.items.get_mut(&ship_view) {
+            item.location_id = struct_view;
+            item.flag = eve_db::InventoryFlag::Hangar;
+        }
+        snap.structures.insert(
+            struct_view,
+            UpwellStructureRecord {
+                structure_id: struct_view,
+                type_id: 35832,
+                solar_system_id: PERIMETER_SYS,
+                owner_corp_id: corp_id,
+                name: "Perimeter View Moveme Astrahus".into(),
+                position: [260_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 2_500_000.0,
+                armor_hp: 2_500_000.0,
+                hull_hp: 2_500_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+
+    let mut h_view = common::new_wire_harness(&ctx, 146_102);
+    h_view
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("gm_upwell_view".into()), PyRep::String("pass".into())],
+            &kw,
+        )
+        .await;
+    h_view
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid_view)], &kw)
+        .await;
+
+    let enter_view = h_view.call_exchange("beyonce", None, "GetFormations", &[], &kw).await;
+    assert_eq!(extract_set_states(&enter_view).len(), 1);
+    assert_eq!(extract_set_states(&enter_view)[0].0, Some(struct_view));
+    ctx.advance_secs(12);
+
+    let moveme_view = h_view
+        .call_exchange(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/moveme {JITA_SYS}"))],
+            &kw,
+        )
+        .await;
+    assert!(moveme_view.result.is_ok(), "View Outside /moveme failed: {:?}", moveme_view.result);
+    assert_eq!(h_view.transport().inner.session.solar_system_id, Some(JITA_SYS));
+    assert_eq!(h_view.transport().inner.session.structure_id, None);
+    assert!(
+        extract_set_states(&moveme_view).is_empty(),
+        "Upwell View Outside cross-system /moveme must NOT match is_upwell_undock or emit premature SetState (F-1)"
+    );
+
+    let dest_jita = ctx.systems.get_or_spawn(JITA_SYS);
+    dest_jita.step_manual(1.0).await.unwrap();
+    let bind_jita = h_view
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(JITA_SYS)), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert!(bind_jita.result.is_ok());
+    let jita_states = extract_set_states(&bind_jita);
+    assert_eq!(jita_states.len(), 1);
+    assert_eq!(jita_states[0].0, Some(ship_view));
+    assert!(jita_states[0].1.iter().any(|b| b.id == ship_view));
 }

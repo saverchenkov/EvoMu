@@ -289,27 +289,27 @@
   },
   "PVE-1": {
     "assessment": "PARTIAL",
-    "note": "Landed in b53ce3e65 (#1395): tools/import_wiki_pve.py + 17 passing unit tests in tools/tests/test_import_wiki_pve.py (dual >=85%/90% floors); awaiting parity_status Python-test or Rust hook closure."
+    "note": "CLOSED (#1395, b53ce3e65): tools/import_wiki_pve.py + 17 unit tests (>=85%/90% floors); contract gaps G1-G5 tracked in #1494 (Wave F2) and awaiting parity row hook."
   },
   "PVE-2": {
     "assessment": "NOT STARTED",
-    "note": "Active (#1396, 2 tracks, closes #1391): ordinary NPCs use static SDE weapon stats, turret/missile hit formulas, weapon FX, wreck_type_id, size-scaled loot, and zero invented EWAR abilities."
+    "note": "Active Wave F2 (#1396, 2 tracks): unified NPC factory/death path, SDE weapon stats & hit formulas, wreck_type_id, size-scaled loot, zero invented EWAR; prerequisite for #1398/#1399."
   },
   "PVE-3": {
-    "assessment": "NOT STARTED",
-    "note": "Active (#1397, 1 small track): destroying standing-bearing faction NPCs applies standing loss and derived ally/enemy shifts via apply_faction_standing_with_derived once per system per 10 minutes."
+    "assessment": "DONE",
+    "note": "CLOSED (#1397, d3d33f66d; follow-up #1452): faction NPC kills apply derived standing loss once per system/10m with notifications; feat:standings.standing-loss awaits gap-audit clear."
   },
   "PVE-4": {
     "assessment": "NOT STARTED",
-    "note": "Active (#1398, 2 tracks, needs #1395, after #1396): startup wiki-content loader for combat anomalies, rated/unrated complexes, expeditions, and chemical labs with hand-written test fixtures."
+    "note": "Paused during Foundation-First Wave F1/F2 (#1398): resumes after #1494+#1396 -> #1495+#1480 prerequisites land; loads anomalies, complexes, expeditions & chemical labs."
   },
   "PVE-5": {
     "assessment": "NOT STARTED",
-    "note": "Active (#1399, 2-3 tracks, needs #1395+#1398, after #1396): content-driven security/storyline waves and objectives plus record-driven courier, trade, and mining mission cargo/goods/ore."
+    "note": "Paused during Foundation-First Wave F1/F2 (#1399): resumes after #1398 + #1496 persisted typed Mission Instance land; drives security, storyline, courier, trade & mining missions."
   },
   "PVE-6": {
     "assessment": "NOT STARTED",
-    "note": "Active (#1400, 2-3 tracks, needs #1395+#1398, lowest priority): content-driven COSMOS chains/sites, epic arcs, Sleeper wormhole waves, incursion constellation layouts, and small site families."
+    "note": "Paused during Foundation-First Wave F1/F2 (#1400, lowest PvE priority): resumes after #1396 + #1398/#1495; COSMOS, epic arcs, Sleeper wormhole sites, incursions & small site families."
   },
   "Q-1": {
     "assessment": "DONE",

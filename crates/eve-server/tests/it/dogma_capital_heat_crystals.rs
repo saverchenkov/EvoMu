@@ -168,7 +168,11 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
     .await
     .expect("Fit third 200mm AutoCannon II");
 
-    // 1. Exercise all 7 weapon-grouping RPCs
+    // 1. Undock and exercise all 7 weapon-grouping RPCs
+    ctx.advance_secs(31);
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock before weapon-grouping RPCs");
     ctx.dispatch_rpc(
         &mut sess,
         "dogmaIM",
@@ -236,10 +240,6 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
     )
     .await
     .expect("DestroyWeaponBank");
-    ctx.advance_secs(31);
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock before LinkAllWeapons");
     ctx.dispatch_rpc(
         &mut sess,
         "dogmaIM",

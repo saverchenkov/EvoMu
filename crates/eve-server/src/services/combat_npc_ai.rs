@@ -172,6 +172,16 @@ pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static s
         return "Hauler";
     }
 
+    // 10b. Empire Gate / Station Sentry Guns (groups 99 Sentry Gun, 180 Protective Sentry Gun).
+    // Sleeper/Drifter/Zarzakh sentries are matched earlier, and 79_507 keeps its explicit
+    // CounterInsurgencySentry archetype; empire sentries must never fall through to "Pirate".
+    if npc_type_id != 79_507
+        && (matches!(group_id, 99 | 180)
+            || matches!(group_name, "Sentry Gun" | "Protective Sentry Gun"))
+    {
+        return "EmpireSentry";
+    }
+
     // 11. Navy / Faction Police / Faction
     if group_name.contains("Faction Drone")
         || group_name.contains("Navy")
@@ -1008,21 +1018,34 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             let is_insurgency_pirate = npc.archetype == "InsurgencyPirateRoamer";
             let is_insurgency_enforcer = npc.archetype == "InsurgencyEnforcer";
             let is_ci_sentry = npc.archetype == "CounterInsurgencySentry" || npc.type_id == 79_507;
+            let is_empire_sentry = (npc.archetype == "EmpireSentry"
+                || (npc.type_id != 79_507
+                    && ctx
+                        .sde
+                        .types
+                        .get(&npc.type_id)
+                        .is_some_and(|t| matches!(t.group_id, 99 | 180))))
+                && !matches!(
+                    npc.archetype.as_str(),
+                    "SleeperSentry" | "ZarzakhGateGun" | "CounterInsurgencySentry"
+                );
             let is_ambush_tackler = npc.archetype == "InsurgencyAmbushTackler";
             let is_ore_defender = npc.archetype == "InsurgencyAmbushOreDefender";
             let is_ore_rorqual = npc.type_id == 79_589 || npc.archetype == "InsurgencyOreRorqual";
             let is_outpost_defender = npc.archetype == "InsurgencyOutpostDefender";
-            let is_navy = matches!(
-                npc.archetype.as_str(),
-                "Navy" | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
-            ) || (matches!(npc.faction_id, 500001..=500004)
-                && !is_ci_sentry
-                && !is_insurgency_enforcer
-                && !matches!(npc.archetype.as_str(), "BeltRat" | "Pirate" | "FactionPolice" | "Police"));
-            let is_pirate = matches!(
-                npc.archetype.as_str(),
-                "BeltRat" | "Pirate" | "Officer" | "CloneSoldier" | "MorduCommander"
-            );
+            let is_navy = !is_empire_sentry
+                && (matches!(
+                    npc.archetype.as_str(),
+                    "Navy" | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
+                ) || (matches!(npc.faction_id, 500001..=500004)
+                    && !is_ci_sentry
+                    && !is_insurgency_enforcer
+                    && !matches!(npc.archetype.as_str(), "BeltRat" | "Pirate" | "FactionPolice" | "Police")));
+            let is_pirate = !is_empire_sentry
+                && matches!(
+                    npc.archetype.as_str(),
+                    "BeltRat" | "Pirate" | "Officer" | "CloneSoldier" | "MorduCommander"
+                );
             let is_homefront_hostile = matches!(
                 npc.archetype.as_str(),
                 "HomefrontHostile" | "HomefrontProtecteeTarget"
@@ -1053,8 +1076,10 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 }
 
                 if let Some(owner) = cand.owner.as_ref() {
-                    // Capsules (pods) are never engaged by Faction Police, Empire Navy, Insurgency Enforcers, or Counter-Insurgency Sentries
-                    if (is_police || is_navy || is_insurgency_enforcer || is_ci_sentry) && owner.is_capsule {
+                    // Capsules (pods) are never engaged by Faction Police, Empire Navy, Empire Sentry Guns, Insurgency Enforcers, or Counter-Insurgency Sentries
+                    if (is_police || is_navy || is_insurgency_enforcer || is_ci_sentry || is_empire_sentry)
+                        && owner.is_capsule
+                    {
                         continue;
                     }
                     let standing = owner
@@ -1106,7 +1131,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                         owner.pilot_is_pirate && !owner.has_disapproval_flag
                     } else if is_navy {
                         standing > -5.0 && !is_criminal
-                    } else if is_police {
+                    } else if is_police || is_empire_sentry {
                         !is_criminal && standing > -5.0
                     } else if is_edencom {
                         standing >= 0.0 && !is_criminal

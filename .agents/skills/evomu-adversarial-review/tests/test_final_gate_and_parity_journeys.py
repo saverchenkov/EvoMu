@@ -495,14 +495,23 @@ class TestFinalGateAndParityJourneys(unittest.TestCase):
         fake_ids = {f["id"] for f in aud.get("fake_done", [])}
         self.assertIn("feat:standings.standing-loss", fake_ids)
 
-        # Verify action_plan.md documents Phase PVE execution order and CC BY-SA / MIT licence boundary.
+        # Verify action_plan.md documents Phase PVE execution order, Foundation-First Wave, and CC BY-SA / MIT boundary.
         with open(os.path.join(SKILL_DIR, "references", "action_plan.md"), encoding="utf-8") as fh:
             plan_txt = fh.read()
         self.assertIn("## Phase PVE: PvE Content & NPC Combat (ACTIVE", plan_txt)
         self.assertIn("CC BY-SA", plan_txt)
         self.assertIn("gitignored", plan_txt)
+        self.assertIn("## Active Execution Priority: Foundation-First Wave", plan_txt)
+        self.assertIn("Wave F1 -> Wave F2", plan_txt)
+        self.assertIn("#1494` + `#1396` → `#1495` + `#1480` → `#1398` → `#1496` → `#1399` → `#1400`", plan_txt)
+        self.assertIn("#922", plan_txt)
+        self.assertIn("#1478`–`#1500", plan_txt)
 
-        # Verify status_table.py parses and renders Phase PVE (PVE-1..PVE-6).
+        # Verify status_table.py mirrors the Foundation-First Wave directive and parses Phase PVE (PVE-1..PVE-6).
+        prio_lines = "\n".join(status_table.active_priority_lines())
+        self.assertIn("Foundation-First Wave", prio_lines)
+        self.assertIn("Wave F1", prio_lines)
+        self.assertIn("Wave F2", prio_lines)
         phases, _titles = status_table.plan_structure()
         pve_phase = [ids for name, ids in phases if name.startswith("Phase PVE:")]
         self.assertEqual(pve_phase, [["PVE-1", "PVE-2", "PVE-3", "PVE-4", "PVE-5", "PVE-6"]])

@@ -391,3 +391,143 @@ async fn npc_mining_op_full_cycle_haul_and_destroyed_hauler_recovery() {
     assert!(step3.hauled_to_station);
     assert_eq!(director.hauler_cargo_units(&db, mining_id), 0);
 }
+
+#[tokio::test]
+async fn npc_mining_op_caps_clock_jump_and_preserves_belt_reserve() {
+    let (base_sde, db, _) = build_living_world_fixture();
+    let mut sde_mut = (*base_sde).clone();
+    let sys_id = 30_900_002_u32;
+    let belt1_id = 40_900_001_i64;
+    let belt2_id = 40_900_002_i64;
+    for (bid, idx, pos) in [
+        (belt1_id, 1_i32, DVec3::new(1.0e9, 0.0, 0.0)),
+        (belt2_id, 2_i32, DVec3::new(-1.0e9, 0.0, 0.0)),
+    ] {
+        sde_mut.insert_celestial(eve_sde::CelestialInfo {
+            celestial_id: bid,
+            solar_system_id: sys_id,
+            type_id: 15,
+            group_id: 9,
+            name: format!("Test Belt {idx}"),
+            radius: 1_500.0,
+            position: pos,
+            orbit_id: None,
+            orbit_index: None,
+            celestial_index: Some(idx),
+        });
+        let mut counts = std::collections::HashMap::new();
+        counts.insert(1230_u32, 12_u32);
+        Arc::make_mut(&mut sde_mut.asteroid_counts_by_belt).insert(bid, counts);
+    }
+    let sde = Arc::new(sde_mut);
+    let systems = Arc::new(SystemRegistry::with_sde_and_db(sde.clone(), db.clone()));
+    let handle = systems.get_or_spawn(sys_id);
+
+    // Seed both 12-rock belts, then deplete 9 of 12 rocks in Belt 1 so Belt 1 sits at its
+    // 3-rock reserve ((12 / 4).clamp(2, 5) == 3).
+    let initial_asts = handle.populate_asteroid_belt_entities().await.unwrap();
+    let belt1_asts: Vec<_> = initial_asts
+        .iter()
+        .filter(|a| a.belt_id == belt1_id)
+        .cloned()
+        .collect();
+    assert_eq!(belt1_asts.len(), 12);
+    for ast in belt1_asts.iter().take(9) {
+        let res = handle
+            .mine_asteroid_with_db_sync(ast.asteroid_id, ast.remaining_units, 0.0, true)
+            .await
+            .unwrap();
+        assert!(res.depleted);
+    }
+
+    let director = LivingWorldDirector::new();
+    let cid = 800_999_147_i64;
+    director.register_convoy(LivingWorldConvoy {
+        convoy_id: cid,
+        archetype: NpcArchetype::MiningOp,
+        ship_type_id: 32880,
+        origin_system_id: sys_id,
+        current_system_id: sys_id,
+        destination_system_id: sys_id,
+        destination_station_id: 60_900_002,
+        cargo_type_id: 1230,
+        cargo_quantity: 0,
+        lod_level: 1,
+        destroyed: false,
+    });
+
+    // Step 1 initializes mining timestamp without extraction.
+    let step1 = director
+        .step_npc_mining_op(cid, &systems, &db, &sde)
+        .await
+        .unwrap();
+    assert_eq!(step1.mined_units, 0);
+
+    // Advance by a huge +10,000s jump: extraction must cap to Venture 500 m3 hold (5,000 Veldspar)
+    // and select Belt 2 instead of draining Belt 1 below its 3-rock reserve.
+    db.clock().advance_secs(10_000);
+    let step2 = director
+        .step_npc_mining_op(cid, &systems, &db, &sde)
+        .await
+        .unwrap();
+    assert!(
+        step2.mined_units > 0 && step2.mined_units <= 5_000,
+        "single-tick mining must stay within Venture hold cap, got {}",
+        step2.mined_units
+    );
+
+    let after_asts = handle.populate_asteroid_belt_entities().await.unwrap();
+    let belt1_alive: Vec<_> = after_asts
+        .iter()
+        .filter(|a| a.belt_id == belt1_id && !a.depleted && a.remaining_units > 0)
+        .collect();
+    assert_eq!(belt1_alive.len(), 3, "Belt 1 reserve rocks must stay untouched");
+    for ast in &belt1_alive {
+        assert_eq!(ast.remaining_units, ast.initial_units);
+    }
+    let belt2_mined_any = after_asts
+        .iter()
+        .filter(|a| a.belt_id == belt2_id)
+        .any(|a| a.remaining_units < a.initial_units);
+    assert!(belt2_mined_any, "NPC miner should rotate to Belt 2");
+}
+
+#[tokio::test]
+async fn npc_mining_op_clamps_extraction_to_remaining_hold_capacity() {
+    let (sde, db, systems) = build_living_world_fixture();
+    let director = LivingWorldDirector::new();
+    let sys_id = 30_000_144_u32;
+    let cid = 800_999_148_i64;
+
+    let handle = systems.get_or_spawn(sys_id);
+    handle.populate_asteroid_belt_entities().await.unwrap();
+
+    // Fixture Venture has a 500 m3 hold (5,000 units of 0.1 m3 Veldspar).
+    // Pre-seeding 4,500 units leaves exact room for 500 units even when a 60s tick could yield 4,800.
+    director.register_convoy(LivingWorldConvoy {
+        convoy_id: cid,
+        archetype: NpcArchetype::MiningOp,
+        ship_type_id: 32880,
+        origin_system_id: sys_id,
+        current_system_id: sys_id,
+        destination_system_id: sys_id,
+        destination_station_id: 60_003_766,
+        cargo_type_id: 1230,
+        cargo_quantity: 4_500,
+        lod_level: 1,
+        destroyed: false,
+    });
+
+    let _ = director
+        .step_npc_mining_op(cid, &systems, &db, &sde)
+        .await
+        .unwrap();
+    db.clock().advance_secs(60);
+    let step = director
+        .step_npc_mining_op(cid, &systems, &db, &sde)
+        .await
+        .unwrap();
+    assert_eq!(step.mined_units, 500);
+    assert_eq!(step.convoy_cargo_units, 0);
+    assert_eq!(director.hauler_cargo_units(&db, cid), 5_000);
+}
