@@ -211,26 +211,22 @@ fn drain_pending_tick_batches_for_sys_with_watermark(
     (ep, effective_was_live)
 }
 
-#[derive(Clone, Copy)]
-enum SnapshotCutoff {
-    WatermarkSeq(u64),
-    MinTick(u64),
-}
-
 /// Drains queued `TickBroadcast` messages from `sys_rx`, discarding any message up to
-/// `cutoff` (already captured in a synchronous `SetState` / direct drain) and appending
-/// strictly newer batches for `observer_ids` to `post_batches`.
+/// `watermark_seq` (already captured in a synchronous `SetState` / direct drain) and
+/// appending strictly newer `> watermark_seq` batches for `observer_ids` to `post_batches`.
 ///
-/// Returns `true` if `TryRecvError::Lagged` broke continuity past `cutoff` or occurred
-/// after reading a post-cutoff tick (clearing `post_batches` so callers re-snapshot `SetState`).
+/// Returns `true` if `TryRecvError::Lagged` broke continuity at `watermark_seq + 1` or occurred
+/// after reading a post-watermark tick (clearing `post_batches` so callers re-snapshot `SetState`).
+/// Lag that only evicts `<= watermark_seq` ticks (with earliest retained broadcast at
+/// `1 <= broadcast_seq <= watermark_seq.saturating_add(1)`) preserves post-watermark batches (`false`).
 #[must_use]
-fn drain_sys_rx_after_snapshot(
+fn drain_sys_rx_discarding_up_to_seq(
     ctx: &ServerContext,
     sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
     sys_id: u32,
     observer_ids: &[i64],
     epoch: u32,
-    cutoff: SnapshotCutoff,
+    watermark_seq: u64,
     post_batches: &mut Vec<crate::outbound_sequencer::DestinyBatch>,
 ) -> bool {
     let mut saw_post_cutoff = false;
@@ -243,14 +239,9 @@ fn drain_sys_rx_after_snapshot(
                     continue;
                 }
                 if pending_lag {
-                    let gap_detected = match cutoff {
-                        SnapshotCutoff::WatermarkSeq(w) => {
-                            tick_out.broadcast_seq == 0
-                                || tick_out.broadcast_seq > w.saturating_add(1)
-                        }
-                        SnapshotCutoff::MinTick(t) => tick_out.tick > t.saturating_add(1),
-                    };
-                    if gap_detected {
+                    if tick_out.broadcast_seq == 0
+                        || tick_out.broadcast_seq > watermark_seq.saturating_add(1)
+                    {
                         post_batches.clear();
                         post_loss = true;
                         pending_lag = false;
@@ -258,11 +249,7 @@ fn drain_sys_rx_after_snapshot(
                     }
                     pending_lag = false;
                 }
-                let is_post = match cutoff {
-                    SnapshotCutoff::WatermarkSeq(w) => tick_out.broadcast_seq > w,
-                    SnapshotCutoff::MinTick(t) => tick_out.tick > t,
-                };
-                if is_post {
+                if tick_out.broadcast_seq > watermark_seq {
                     saw_post_cutoff = true;
                     if tick_out.solar_system_id == sys_id {
                         if let Some(batch) =
@@ -297,35 +284,6 @@ fn drain_sys_rx_after_snapshot(
     post_loss
 }
 
-/// Drains queued `TickBroadcast` messages from `sys_rx`, discarding any message up to
-/// `watermark_seq` (already captured in a synchronous `SetState` / direct drain) and
-/// appending strictly newer `> watermark_seq` batches for `observer_ids` to `post_batches`.
-///
-/// Returns `true` if `TryRecvError::Lagged` broke continuity at `watermark_seq + 1` or occurred
-/// after reading a post-watermark tick (clearing `post_batches` so callers re-snapshot `SetState`).
-/// Lag that only evicts `<= watermark_seq` ticks (with earliest retained broadcast at
-/// `1 <= broadcast_seq <= watermark_seq.saturating_add(1)`) preserves post-watermark batches (`false`).
-#[must_use]
-fn drain_sys_rx_discarding_up_to_seq(
-    ctx: &ServerContext,
-    sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
-    sys_id: u32,
-    observer_ids: &[i64],
-    epoch: u32,
-    watermark_seq: u64,
-    post_batches: &mut Vec<crate::outbound_sequencer::DestinyBatch>,
-) -> bool {
-    drain_sys_rx_after_snapshot(
-        ctx,
-        sys_rx,
-        sys_id,
-        observer_ids,
-        epoch,
-        SnapshotCutoff::WatermarkSeq(watermark_seq),
-        post_batches,
-    )
-}
-
 const MAX_SET_STATE_RESYNC_ATTEMPTS: usize = 3;
 
 struct ResyncedSetState {
@@ -335,29 +293,43 @@ struct ResyncedSetState {
     post_batches: Vec<crate::outbound_sequencer::DestinyBatch>,
 }
 
-/// Pushes a fresh `SetState` snapshot for `ship_id`, drains it with its `watermark_seq`,
-/// and catches up `sys_rx` while checking `drain_sys_rx_discarding_up_to_seq` continuity.
-/// Retries boundedly if `sys_rx` suffers post-watermark lag during the resync; leaves `wire_state`
-/// in `AwaitingSetState` (`on_broadcast_lagged()`) and returns `None` if retries exhaust.
-async fn resync_set_state_with_sys_rx(
+async fn resync_set_state_with_sys_rx_with_mode(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
     sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
     sys_id: u32,
-    ship_id: i64,
+    observer_ball_id: i64,
     observer_ids: &[i64],
     wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    shared_structure_observer: bool,
 ) -> Option<ResyncedSetState> {
     let ep = wire_state.current_epoch();
     for _ in 0..MAX_SET_STATE_RESYNC_ATTEMPTS {
-        let _ = sys_handle.push_set_state(ship_id).await;
-        let Ok((tick, events, updates_pyrep, watermark_seq)) =
-            sys_handle.drain_observer_updates_with_seq(ship_id).await
-        else {
-            wire_state.on_broadcast_lagged();
-            return None;
+        let (tick, events, updates_pyrep, watermark_seq) = if shared_structure_observer {
+            let Ok((tick, _state_kv, updates_pyrep, watermark_seq)) =
+                sys_handle.get_set_state_with_seq(observer_ball_id).await
+            else {
+                wire_state.on_broadcast_lagged();
+                return None;
+            };
+            (
+                tick,
+                vec![eve_destiny::DestinyEvent::SetState { observer_ball_id }],
+                updates_pyrep,
+                watermark_seq,
+            )
+        } else {
+            let _ = sys_handle.push_set_state(observer_ball_id).await;
+            let Ok(snapshot) = sys_handle
+                .drain_observer_updates_with_seq(observer_ball_id)
+                .await
+            else {
+                wire_state.on_broadcast_lagged();
+                return None;
+            };
+            sys_handle.record_warp_stops_from_events(&snapshot.1);
+            snapshot
         };
-        sys_handle.record_warp_stops_from_events(&events);
         let mut post_batches = Vec::new();
         if !drain_sys_rx_discarding_up_to_seq(
             ctx,
@@ -380,9 +352,36 @@ async fn resync_set_state_with_sys_rx(
     None
 }
 
-/// Non-destructively snapshots `SetState` for shared static structure observer `structure_id`
-/// without enqueueing into or draining `observer_events[structure_id]` (`#1461` F-2), so
-/// concurrent pilots viewing the same structure never steal each other's events or stall ticks.
+/// Pushes a fresh `SetState` snapshot for `ship_id`, drains it with its `watermark_seq`,
+/// and catches up `sys_rx` while checking `drain_sys_rx_discarding_up_to_seq` continuity.
+/// Retries boundedly if `sys_rx` suffers post-watermark lag during the resync; leaves `wire_state`
+/// in `AwaitingSetState` (`on_broadcast_lagged()`) and returns `None` if retries exhaust.
+async fn resync_set_state_with_sys_rx(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
+    sys_id: u32,
+    ship_id: i64,
+    observer_ids: &[i64],
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+) -> Option<ResyncedSetState> {
+    resync_set_state_with_sys_rx_with_mode(
+        ctx,
+        sys_handle,
+        sys_rx,
+        sys_id,
+        ship_id,
+        observer_ids,
+        wire_state,
+        false,
+    )
+    .await
+}
+
+/// Non-destructively snapshots `SetState` and `broadcast_seq` for shared static structure
+/// observer `structure_id` (`#1461` F-2, F-1461-04) without enqueueing into or draining
+/// `observer_events[structure_id]`, so concurrent pilots viewing the same structure never steal
+/// each other's events or drop/replay same-tick broadcasts.
 async fn resync_structure_set_state_with_sys_rx(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
@@ -392,37 +391,17 @@ async fn resync_structure_set_state_with_sys_rx(
     observer_ids: &[i64],
     wire_state: &mut crate::outbound_sequencer::SessionWireState,
 ) -> Option<ResyncedSetState> {
-    let ep = wire_state.current_epoch();
-    for _ in 0..MAX_SET_STATE_RESYNC_ATTEMPTS {
-        let _ = drain_sys_rx_discarding_lag(sys_rx);
-        let Ok((tick, _state_kv, updates_pyrep)) = sys_handle.get_set_state(structure_id).await
-        else {
-            wire_state.on_broadcast_lagged();
-            return None;
-        };
-        let events = vec![eve_destiny::DestinyEvent::SetState {
-            observer_ball_id: structure_id,
-        }];
-        let mut post_batches = Vec::new();
-        if !drain_sys_rx_after_snapshot(
-            ctx,
-            sys_rx,
-            sys_id,
-            observer_ids,
-            ep,
-            SnapshotCutoff::MinTick(tick),
-            &mut post_batches,
-        ) {
-            return Some(ResyncedSetState {
-                tick,
-                events,
-                updates_pyrep,
-                post_batches,
-            });
-        }
-    }
-    wire_state.on_broadcast_lagged();
-    None
+    resync_set_state_with_sys_rx_with_mode(
+        ctx,
+        sys_handle,
+        sys_rx,
+        sys_id,
+        structure_id,
+        observer_ids,
+        wire_state,
+        true,
+    )
+    .await
 }
 
 struct ShipSwapDestinySync {

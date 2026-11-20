@@ -5306,3 +5306,137 @@ async fn test_1461_enter_hangar_callreq_client_has_released_these_objects_detach
     assert_eq!(bind_states.len(), 1);
     assert_eq!(bind_states[0].0, Some(ship_id));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1461_resync_structure_set_state_same_tick_watermark_seq_prevents_replay_and_loss() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let sys_id = 30_000_144_u32;
+    let struct_id = 1_040_001_461_404_i64;
+    let char_id = 90_000_001_i64;
+    let nearby_ball_id = 900_000_021_404_i64;
+    let (_ship_id, sys_handle) =
+        setup_upwell_docked_pilot(&ctx, char_id, sys_id, struct_id, nearby_ball_id);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: nearby_ball_id,
+            type_id: 1230,
+            position: eve_destiny::DVec3::new(254_000.0, 0.0, 0.0),
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 120.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let mut sys_rx = sys_handle.subscribe();
+    let mut wire_state = crate::outbound_sequencer::SessionWireState::new(1, 1);
+
+    // Advance one full tick (`tick = 1`) and emit a second same-tick broadcast via
+    // `flush_peer_observer_updates` so `broadcast_seq` advances while `tick` stays unchanged.
+    let step1 = sys_handle.step_manual(1.0).await.unwrap();
+    assert!(
+        sys_handle
+            .emit_observer_destiny_event(
+                struct_id,
+                eve_destiny::DestinyEvent::OnSlimItemChange {
+                    ball_id: nearby_ball_id,
+                },
+            )
+            .await
+    );
+    let flushed_pre = sys_handle.flush_peer_observer_updates(None).await.unwrap();
+    assert!(flushed_pre >= 1);
+
+    // 1. Pre-snapshot same-tick broadcast buffered in `sys_rx` (`<= watermark_seq`) must be
+    //    discarded by `resync_structure_set_state_with_sys_rx` (zero duplicate replay).
+    let resynced = resync_structure_set_state_with_sys_rx(
+        &ctx,
+        &sys_handle,
+        &mut sys_rx,
+        sys_id,
+        struct_id,
+        &[struct_id],
+        &mut wire_state,
+    )
+    .await
+    .expect("structure SetState resync must succeed");
+    assert_eq!(resynced.tick, step1.tick);
+    assert!(
+        resynced.post_batches.is_empty(),
+        "same-tick pre-snapshot broadcast must not replay in post_batches"
+    );
+
+    // 2. When `broadcast_seq` advances on the SAME tick *after* `get_set_state_with_seq`,
+    //    `WatermarkSeq` retains the post-snapshot same-tick broadcast while still discarding any
+    //    `<= watermark_seq` broadcast at the same tick.
+    let (snap_tick, _kv, _updates, watermark_seq) =
+        sys_handle.get_set_state_with_seq(struct_id).await.unwrap();
+    assert_eq!(snap_tick, step1.tick);
+    assert!(
+        sys_handle
+            .emit_observer_destiny_event(
+                struct_id,
+                eve_destiny::DestinyEvent::OnSlimItemChange {
+                    ball_id: nearby_ball_id,
+                },
+            )
+            .await
+    );
+    let flushed_post = sys_handle.flush_peer_observer_updates(None).await.unwrap();
+    assert!(flushed_post >= 1);
+
+    let mut post_batches = Vec::new();
+    let post_loss = drain_sys_rx_discarding_up_to_seq(
+        &ctx,
+        &mut sys_rx,
+        sys_id,
+        &[struct_id],
+        wire_state.current_epoch(),
+        watermark_seq,
+        &mut post_batches,
+    );
+    assert!(!post_loss);
+    assert_eq!(
+        post_batches.len(),
+        1,
+        "post-snapshot same-tick broadcast (> watermark_seq) must not be dropped"
+    );
+    assert_eq!(post_batches[0].stamp, snap_tick as u32);
+
+    // 3. Pre-watermark lag across >256 same-tick broadcasts must also resolve without stalling or
+    //    replaying pre-snapshot events.
+    for _ in 0..270 {
+        assert!(
+            sys_handle
+                .emit_observer_destiny_event(
+                    struct_id,
+                    eve_destiny::DestinyEvent::OnSlimItemChange {
+                        ball_id: nearby_ball_id,
+                    },
+                )
+                .await
+        );
+        let _ = sys_handle.flush_peer_observer_updates(None).await.unwrap();
+    }
+    let lagged_resync = resync_structure_set_state_with_sys_rx(
+        &ctx,
+        &sys_handle,
+        &mut sys_rx,
+        sys_id,
+        struct_id,
+        &[struct_id],
+        &mut wire_state,
+    )
+    .await
+    .expect("structure SetState resync must recover from pre-watermark same-tick lag");
+    assert_eq!(lagged_resync.tick, snap_tick);
+    assert!(
+        lagged_resync.post_batches.is_empty(),
+        "lagged pre-watermark same-tick broadcasts must not replay"
+    );
+}
