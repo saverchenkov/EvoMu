@@ -4407,138 +4407,6 @@ fn build_call_args(
 // Single Authoritative Matrix & Regression Gate Test
 // ============================================================================
 
-/// Returns `true` if any persisted or runtime state owned by Target B (`CHAR_B_ID`,
-/// `USER_B_ID`, `CORP_B_ID`, `ALLIANCE_B_ID`, or B's seeded entities) — or global server
-/// config/clock — diverged from `base`.
-///
-/// Used for Situation `"b"` RPCs explicitly allowlisted with `"caller_scoped_mutation:"` so
-/// that mutations to the caller's own state (`CHAR_A_ID`) are permitted while Target B remains
-/// strictly invariant.
-fn target_b_state_mutated(
-    fix: &MatrixFixture,
-    base: &RuntimeBaseline,
-    cur_db: Option<&WorldTablesSnapshot>,
-    bound_dirty: bool,
-    space_dirty: bool,
-) -> bool {
-    // Global server config and virtual clock must never be mutated by a caller-scoped RPC.
-    if *fix
-        .ctx
-        .global_config_values
-        .read()
-        .expect("global_config_values")
-        != base.global_config_values
-        || fix.ctx.clock().now_unix_secs() != base.clock_unix
-    {
-        return true;
-    }
-
-    // Target B's warp/invuln runtime entries must remain invariant (acquire one lock at a time for lock-rank safety).
-    let b_ship_ids = [fix.b_ship_id, fix.b_space_ship_id];
-    let aw_dirty = {
-        let aw = fix.ctx.active_warps.lock().expect("active_warps");
-        b_ship_ids
-            .iter()
-            .any(|id| aw.get(id) != base.active_warps.get(id))
-    };
-    if aw_dirty {
-        return true;
-    }
-    let rw_dirty = {
-        let rw = fix.ctx.return_warps.lock().expect("return_warps");
-        b_ship_ids
-            .iter()
-            .any(|id| rw.contains(id) != base.return_warps.contains(id))
-    };
-    if rw_dirty {
-        return true;
-    }
-    let pw_dirty = {
-        let pw = fix
-            .ctx
-            .pending_warp_finished
-            .lock()
-            .expect("pending_warp_finished");
-        b_ship_ids
-            .iter()
-            .any(|id| pw.contains(id) != base.pending_warp_finished.contains(id))
-    };
-    if pw_dirty {
-        return true;
-    }
-    let inv_dirty = {
-        let inv = fix
-            .ctx
-            .location_change_invuln
-            .lock()
-            .expect("location_change_invuln");
-        [CHAR_B_ID, fix.b_ship_id, fix.b_space_ship_id]
-            .iter()
-            .any(|id| inv.get(id) != base.location_change_invuln.get(id))
-    };
-    if inv_dirty {
-        return true;
-    }
-
-    // Target B's bound object entries must remain invariant (no removal, overwrite, or new B binding).
-    if bound_dirty {
-        let cur_bounds = fix.ctx.bound_objects.read().expect("bound_objects");
-        for (&id, b_entry) in &base.bound_keys {
-            if b_entry.1 == USER_B_ID || b_entry.2 == CHAR_B_ID {
-                let unchanged = cur_bounds.get(&id).is_some_and(|e| {
-                    b_entry.0 == e.session_id
-                        && b_entry.1 == e.user_id
-                        && b_entry.2 == e.character_id
-                        && b_entry.3 == e.service
-                        && b_entry.4 == e.object_id
-                });
-                if !unchanged {
-                    return true;
-                }
-            }
-        }
-        for (&id, e) in cur_bounds.iter() {
-            if (e.user_id == USER_B_ID || e.character_id == CHAR_B_ID)
-                && !base.bound_keys.contains_key(&id)
-            {
-                return true;
-            }
-        }
-    }
-
-fn target_b_entity_ids(fix: &MatrixFixture) -> Vec<i64> {
-    [
-        CHAR_B_ID,
-        USER_B_ID as i64,
-        CORP_B_ID,
-        ALLIANCE_B_ID,
-        fix.b_ship_id,
-        fix.b_space_ship_id,
-        fix.b_cont_id,
-        fix.b_item_id,
-        fix.b_blueprint_id,
-        fix.b_pos_id,
-        fix.b_fleet_id,
-        fix.b_war_id,
-        fix.b_planet_id,
-        fix.b_order_id,
-        fix.b_contract_id,
-        fix.b_job_id,
-        fix.b_fitting_id,
-        fix.b_mail_id,
-        fix.b_bookmark_id,
-        fix.b_killmail_id,
-        fix.b_corp_project_id,
-        fix.b_petition_id,
-        CORP_B_OFFICE_ID,
-        CORP_B_OFFICE_ITEM_ID,
-        CORP_B_STRUCTURE_ID,
-    ]
-    .into_iter()
-    .filter(|&id| id > 0)
-    .collect()
-}
-
 fn text_mentions_any_id(raw: &str, ids: &[i64]) -> bool {
     let lower = raw.to_ascii_lowercase();
     if lower.contains("char_b") || lower.contains("corp_b") || lower.contains("alliance_b") {
@@ -4704,6 +4572,138 @@ fn note_or_json_b_slice(raw: Option<&String>, b_ids: &[i64]) -> Option<Value> {
         return json_b_slice_inner(&val, b_ids, &non_b_ids, true);
     }
     text_mentions_any_id(raw, b_ids).then(|| Value::String(raw.clone()))
+}
+
+/// Returns `true` if any persisted or runtime state owned by Target B (`CHAR_B_ID`,
+/// `USER_B_ID`, `CORP_B_ID`, `ALLIANCE_B_ID`, or B's seeded entities) — or global server
+/// config/clock — diverged from `base`.
+///
+/// Used for Situation `"b"` RPCs explicitly allowlisted with `"caller_scoped_mutation:"` so
+/// that mutations to the caller's own state (`CHAR_A_ID`) are permitted while Target B remains
+/// strictly invariant.
+fn target_b_state_mutated(
+    fix: &MatrixFixture,
+    base: &RuntimeBaseline,
+    cur_db: Option<&WorldTablesSnapshot>,
+    bound_dirty: bool,
+    space_dirty: bool,
+) -> bool {
+    // Global server config and virtual clock must never be mutated by a caller-scoped RPC.
+    if *fix
+        .ctx
+        .global_config_values
+        .read()
+        .expect("global_config_values")
+        != base.global_config_values
+        || fix.ctx.clock().now_unix_secs() != base.clock_unix
+    {
+        return true;
+    }
+
+    // Target B's warp/invuln runtime entries must remain invariant (acquire one lock at a time for lock-rank safety).
+    let b_ship_ids = [fix.b_ship_id, fix.b_space_ship_id];
+    let aw_dirty = {
+        let aw = fix.ctx.active_warps.lock().expect("active_warps");
+        b_ship_ids
+            .iter()
+            .any(|id| aw.get(id) != base.active_warps.get(id))
+    };
+    if aw_dirty {
+        return true;
+    }
+    let rw_dirty = {
+        let rw = fix.ctx.return_warps.lock().expect("return_warps");
+        b_ship_ids
+            .iter()
+            .any(|id| rw.contains(id) != base.return_warps.contains(id))
+    };
+    if rw_dirty {
+        return true;
+    }
+    let pw_dirty = {
+        let pw = fix
+            .ctx
+            .pending_warp_finished
+            .lock()
+            .expect("pending_warp_finished");
+        b_ship_ids
+            .iter()
+            .any(|id| pw.contains(id) != base.pending_warp_finished.contains(id))
+    };
+    if pw_dirty {
+        return true;
+    }
+    let inv_dirty = {
+        let inv = fix
+            .ctx
+            .location_change_invuln
+            .lock()
+            .expect("location_change_invuln");
+        [CHAR_B_ID, fix.b_ship_id, fix.b_space_ship_id]
+            .iter()
+            .any(|id| inv.get(id) != base.location_change_invuln.get(id))
+    };
+    if inv_dirty {
+        return true;
+    }
+
+    // Target B's bound object entries must remain invariant (no removal, overwrite, or new B binding).
+    if bound_dirty {
+        let cur_bounds = fix.ctx.bound_objects.read().expect("bound_objects");
+        for (&id, b_entry) in &base.bound_keys {
+            if b_entry.1 == USER_B_ID || b_entry.2 == CHAR_B_ID {
+                let unchanged = cur_bounds.get(&id).is_some_and(|e| {
+                    b_entry.0 == e.session_id
+                        && b_entry.1 == e.user_id
+                        && b_entry.2 == e.character_id
+                        && b_entry.3 == e.service
+                        && b_entry.4 == e.object_id
+                });
+                if !unchanged {
+                    return true;
+                }
+            }
+        }
+        for (&id, e) in cur_bounds.iter() {
+            if (e.user_id == USER_B_ID || e.character_id == CHAR_B_ID)
+                && !base.bound_keys.contains_key(&id)
+            {
+                return true;
+            }
+        }
+    }
+
+fn target_b_entity_ids(fix: &MatrixFixture) -> Vec<i64> {
+    [
+        CHAR_B_ID,
+        USER_B_ID as i64,
+        CORP_B_ID,
+        ALLIANCE_B_ID,
+        fix.b_ship_id,
+        fix.b_space_ship_id,
+        fix.b_cont_id,
+        fix.b_item_id,
+        fix.b_blueprint_id,
+        fix.b_pos_id,
+        fix.b_fleet_id,
+        fix.b_war_id,
+        fix.b_planet_id,
+        fix.b_order_id,
+        fix.b_contract_id,
+        fix.b_job_id,
+        fix.b_fitting_id,
+        fix.b_mail_id,
+        fix.b_bookmark_id,
+        fix.b_killmail_id,
+        fix.b_corp_project_id,
+        fix.b_petition_id,
+        CORP_B_OFFICE_ID,
+        CORP_B_OFFICE_ITEM_ID,
+        CORP_B_STRUCTURE_ID,
+    ]
+    .into_iter()
+    .filter(|&id| id > 0)
+    .collect()
 }
 
 fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRuntimeSig, b_ids: &[i64]) -> bool {
@@ -6344,36 +6344,6 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
             sc_fob_observatory_state.fob_combatants.iter(),
             |_, set| set.contains(&CHAR_B_ID),
         )
-        || sb_pvp_filament_state.queue.get(&CHAR_B_ID)
-            != sc_pvp_filament_state.queue.get(&CHAR_B_ID)
-        || sb_pvp_filament_state
-            .stats
-            .get(&CHAR_B_ID)
-            .map(|v| (v.0, v.1, v.2, v.3, v.4.to_bits()))
-            != sc_pvp_filament_state
-                .stats
-                .get(&CHAR_B_ID)
-                .map(|v| (v.0, v.1, v.2, v.3, v.4.to_bits()))
-        || sb_pvp_filament_state.queue_tickets.get(&CHAR_B_ID)
-            != sc_pvp_filament_state.queue_tickets.get(&CHAR_B_ID)
-        || sb_pvp_filament_state
-            .origin_positions
-            .get(&CHAR_B_ID)
-            .map(|p| [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()])
-            != sc_pvp_filament_state
-                .origin_positions
-                .get(&CHAR_B_ID)
-                .map(|p| [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()])
-        || filtered_entries_changed(
-            sb_tourney_state.ban_sessions.iter(),
-            sc_tourney_state.ban_sessions.iter(),
-            |_, v| v.contains(&CHAR_B_ID),
-        )
-        || filtered_entries_changed(
-            sb_deployable_state.deployables.iter(),
-            sc_deployable_state.deployables.iter(),
-            |_, d| b_entity_ids.contains(&d.owner_id) || d.deployed_fleet_id == Some(fix.b_fleet_id),
-        )
         || sb_superweapon_runtime
             .active_cycles
             .iter()
@@ -6394,6 +6364,399 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
                 .iter()
                 .filter(|w| b_entity_ids.contains(&w.ship_id))
                 .collect::<Vec<_>>()
+    {
+        return true;
+    }
+
+    let domain_scope = TargetBDomainScope {
+        b_fleet_id: fix.b_fleet_id,
+        b_contract_id: fix.b_contract_id,
+        b_petition_id: fix.b_petition_id,
+        b_entity_ids: &b_entity_ids,
+        b_item_ids: &b_item_ids,
+        b_struct_ids: &b_struct_ids,
+        b_all_ids: &b_all_ids,
+    };
+    let stores_before = TargetBStoreRefs {
+        pvp: sb_pvp_filament_state,
+        tourney: sb_tourney_state,
+        deployable: sb_deployable_state,
+        node_graph: sb_node_graph_state,
+        seasons: sb_seasons_and_campaigns,
+        quasar: sb_quasar_commerce,
+        fleet_ops: sb_fleet_and_social_ops,
+        cluster: sb_cluster_and_runtime,
+    };
+    let stores_after = TargetBStoreRefs {
+        pvp: sc_pvp_filament_state,
+        tourney: sc_tourney_state,
+        deployable: sc_deployable_state,
+        node_graph: sc_node_graph_state,
+        seasons: sc_seasons_and_campaigns,
+        quasar: sc_quasar_commerce,
+        fleet_ops: sc_fleet_and_social_ops,
+        cluster: sc_cluster_and_runtime,
+    };
+    target_b_sub_stores_mutated(&domain_scope, &stores_before, &stores_after)
+}
+
+struct TargetBDomainScope<'a> {
+    b_fleet_id: i64,
+    b_contract_id: i64,
+    b_petition_id: i64,
+    b_entity_ids: &'a [i64],
+    b_item_ids: &'a BTreeSet<i64>,
+    b_struct_ids: &'a BTreeSet<i64>,
+    b_all_ids: &'a [i64],
+}
+
+struct TargetBStoreRefs<'a> {
+    pvp: &'a eve_db::service_domains::PvpFilamentStore,
+    tourney: &'a eve_db::service_domains::TourneyStore,
+    deployable: &'a eve_db::service_domains::MobileDeployableRuntimeState,
+    node_graph: &'a eve_db::service_domains::NodeGraphAndProgressionStore,
+    seasons: &'a eve_db::service_domains::SeasonsAndCampaignsStore,
+    quasar: &'a eve_db::service_domains::QuasarCommerceStore,
+    fleet_ops: &'a eve_db::service_domains::FleetAndSocialOpsStore,
+    cluster: &'a eve_db::service_domains::ClusterAndRuntimeStore,
+}
+
+fn target_b_sub_stores_mutated(
+    scope: &TargetBDomainScope<'_>,
+    before: &TargetBStoreRefs<'_>,
+    after: &TargetBStoreRefs<'_>,
+) -> bool {
+    let TargetBDomainScope {
+        b_fleet_id,
+        b_contract_id,
+        b_petition_id,
+        b_entity_ids,
+        b_item_ids,
+        b_struct_ids,
+        b_all_ids,
+    } = *scope;
+
+    let (b_pvp_match_ids, b_pvp_ticket_ids) = {
+        let mut match_ids = BTreeSet::new();
+        let mut ticket_ids = BTreeSet::new();
+        let mut collect = |pvp: &eve_db::service_domains::PvpFilamentStore| {
+            for (&mid, m) in &pvp.active_matches {
+                if m.team_a.contains(&CHAR_B_ID)
+                    || m.team_b.contains(&CHAR_B_ID)
+                    || m.origin_systems.contains_key(&CHAR_B_ID)
+                    || m.winner_char_id == Some(CHAR_B_ID)
+                    || m.exited_pilots.contains(&CHAR_B_ID)
+                    || b_item_ids.contains(&m.end_gate_id)
+                {
+                    match_ids.insert(mid);
+                }
+            }
+            for (&mid, teams) in &pvp.match_teams {
+                if teams.iter().any(|t| t.contains(&CHAR_B_ID)) {
+                    match_ids.insert(mid);
+                }
+            }
+            for (&mid, eliminated) in &pvp.match_eliminated {
+                if eliminated.contains(&CHAR_B_ID) {
+                    match_ids.insert(mid);
+                }
+            }
+            if let Some(&tid) = pvp.queue_tickets.get(&CHAR_B_ID) {
+                ticket_ids.insert(tid);
+            }
+            for (&tid, &(cid, loc)) in &pvp.queue_refund_targets {
+                if cid == CHAR_B_ID || b_item_ids.contains(&loc) || b_item_ids.contains(&tid) {
+                    ticket_ids.insert(tid);
+                }
+            }
+        };
+        collect(before.pvp);
+        collect(after.pvp);
+        (match_ids, ticket_ids)
+    };
+    let pvp_b = |pvp: &eve_db::service_domains::PvpFilamentStore| {
+        let eve_db::service_domains::PvpFilamentStore {
+            queue,
+            stats,
+            event_stats,
+            events: _,
+            seeded_default_events: _,
+            active_matches,
+            match_teams,
+            match_eliminated,
+            match_arena_offsets,
+            match_filament_types,
+            hazard_ticks,
+            queue_refund_targets,
+            queue_tickets,
+            next_ticket_id: _,
+            origin_positions,
+            next_match_id: _,
+        } = pvp;
+        (
+            (
+                queue.get(&CHAR_B_ID).cloned(),
+                stats
+                    .get(&CHAR_B_ID)
+                    .map(|v| (v.0, v.1, v.2, v.3, v.4.to_bits())),
+                event_stats
+                    .iter()
+                    .filter_map(|(&eid, m)| {
+                        m.get(&CHAR_B_ID)
+                            .map(|v| (eid, (v.0, v.1, v.2, v.3, v.4.to_bits())))
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+                active_matches
+                    .iter()
+                    .filter(|(&mid, m)| {
+                        b_pvp_match_ids.contains(&mid)
+                            || m.team_a.contains(&CHAR_B_ID)
+                            || m.team_b.contains(&CHAR_B_ID)
+                            || m.origin_systems.contains_key(&CHAR_B_ID)
+                            || m.winner_char_id == Some(CHAR_B_ID)
+                            || m.exited_pilots.contains(&CHAR_B_ID)
+                            || b_item_ids.contains(&m.end_gate_id)
+                    })
+                    .map(|(&mid, m)| (mid, m.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+                match_teams
+                    .iter()
+                    .filter(|(&mid, teams)| {
+                        b_pvp_match_ids.contains(&mid)
+                            || teams.iter().any(|t| t.contains(&CHAR_B_ID))
+                    })
+                    .map(|(&mid, teams)| (mid, teams.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+                match_eliminated
+                    .iter()
+                    .filter(|(&mid, set)| {
+                        b_pvp_match_ids.contains(&mid) || set.contains(&CHAR_B_ID)
+                    })
+                    .map(|(&mid, set)| (mid, set.iter().copied().collect::<BTreeSet<_>>()))
+                    .collect::<BTreeMap<_, _>>(),
+            ),
+            (
+                match_arena_offsets
+                    .iter()
+                    .filter(|(&mid, _)| b_pvp_match_ids.contains(&mid))
+                    .map(|(&mid, p)| (mid, [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()]))
+                    .collect::<BTreeMap<_, _>>(),
+                match_filament_types
+                    .iter()
+                    .filter(|(&mid, _)| b_pvp_match_ids.contains(&mid))
+                    .map(|(&mid, &tid)| (mid, tid))
+                    .collect::<BTreeMap<_, _>>(),
+                hazard_ticks
+                    .iter()
+                    .filter(|(&sid, _)| b_item_ids.contains(&sid))
+                    .map(|(&sid, &t)| (sid, t))
+                    .collect::<BTreeMap<_, _>>(),
+                queue_refund_targets
+                    .iter()
+                    .filter(|(&tid, &(cid, loc))| {
+                        cid == CHAR_B_ID
+                            || b_item_ids.contains(&loc)
+                            || b_item_ids.contains(&tid)
+                            || b_pvp_ticket_ids.contains(&tid)
+                    })
+                    .map(|(&tid, &val)| (tid, val))
+                    .collect::<BTreeMap<_, _>>(),
+                queue_tickets.get(&CHAR_B_ID).copied(),
+                origin_positions
+                    .get(&CHAR_B_ID)
+                    .map(|p| [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()]),
+            ),
+        )
+    };
+
+    let tourney_match_involves_b = |m: &eve_db::service_domains::TourneyMatch| {
+        m.red_team_id == CORP_B_ID
+            || m.red_team_id == ALLIANCE_B_ID
+            || m.blue_team_id == CORP_B_ID
+            || m.blue_team_id == ALLIANCE_B_ID
+            || m.red_fleet_boss_id == Some(CHAR_B_ID)
+            || m.blue_fleet_boss_id == Some(CHAR_B_ID)
+            || m.red_fleet_id == Some(b_fleet_id)
+            || m.blue_fleet_id == Some(b_fleet_id)
+            || m.red_players
+                .iter()
+                .any(|p| p.character_id == CHAR_B_ID || b_item_ids.contains(&p.ship_id))
+            || m.blue_players
+                .iter()
+                .any(|p| p.character_id == CHAR_B_ID || b_item_ids.contains(&p.ship_id))
+            || m.referees.contains(&CHAR_B_ID)
+            || m.pilot_errors.contains_key(&CHAR_B_ID)
+            || m.teleported_teams.contains(&CORP_B_ID)
+            || m.teleported_teams.contains(&ALLIANCE_B_ID)
+            || m.returned_teams.contains(&CORP_B_ID)
+            || m.returned_teams.contains(&ALLIANCE_B_ID)
+            || m.beacon_ids.iter().any(|id| b_item_ids.contains(id))
+    };
+    let b_tourney_match_ids: BTreeSet<i64> = {
+        let mut match_ids = BTreeSet::new();
+        let mut collect = |tr: &eve_db::service_domains::TourneyStore| {
+            for (&mid, m) in &tr.matches {
+                if tourney_match_involves_b(m) {
+                    match_ids.insert(mid);
+                }
+            }
+        };
+        collect(before.tourney);
+        collect(after.tourney);
+        match_ids
+    };
+    let tourney_b = |tr: &eve_db::service_domains::TourneyStore| {
+        let eve_db::service_domains::TourneyStore {
+            matches,
+            active_match_id,
+            ban_sessions,
+            tournaments,
+            arena_systems,
+        } = tr;
+        (
+            matches
+                .iter()
+                .filter(|(&mid, m)| {
+                    b_tourney_match_ids.contains(&mid) || tourney_match_involves_b(m)
+                })
+                .map(|(&mid, m)| (mid, m.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            (*active_match_id).filter(|mid| b_tourney_match_ids.contains(mid)),
+            ban_sessions
+                .iter()
+                .filter(|(&k, v)| {
+                    (k >= 1_000_000 && b_tourney_match_ids.contains(&(k / 1_000_000)))
+                        || v.contains(&CHAR_B_ID)
+                })
+                .map(|(&k, v)| (k, v.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            tournaments
+                .iter()
+                .filter(|(_, s)| text_mentions_any_id(s, b_all_ids))
+                .map(|(&k, s)| (k, s.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            arena_systems
+                .iter()
+                .filter(|(_, sys)| {
+                    sys.combat_beacons.iter().any(|id| b_item_ids.contains(id))
+                        || sys.warp_bubbles.iter().any(|id| b_item_ids.contains(id))
+                })
+                .map(|(&k, sys)| (k, sys.clone()))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    };
+
+    let b_dep_ids: BTreeSet<i64> = {
+        let mut ids = BTreeSet::new();
+        let mut collect = |dep: &eve_db::service_domains::MobileDeployableRuntimeState| {
+            for (&id, d) in &dep.deployables {
+                if b_item_ids.contains(&id)
+                    || b_entity_ids.contains(&d.owner_id)
+                    || d.deployed_fleet_id == Some(b_fleet_id)
+                {
+                    ids.insert(id);
+                }
+            }
+        };
+        collect(before.deployable);
+        collect(after.deployable);
+        ids
+    };
+    let deployables_b = |dep: &eve_db::service_domains::MobileDeployableRuntimeState| {
+        let eve_db::service_domains::MobileDeployableRuntimeState {
+            deployables,
+            damaged_items,
+            observatory_pings_done,
+            cloak_activated_unix,
+            mmju_spools,
+            siphon_last_cycle_unix,
+            pending_decloak_notifications,
+        } = dep;
+        let is_b_dep_or_item = |id: i64| b_item_ids.contains(&id) || b_dep_ids.contains(&id);
+        (
+            deployables
+                .iter()
+                .filter(|(&id, d)| {
+                    b_dep_ids.contains(&id)
+                        || b_entity_ids.contains(&d.owner_id)
+                        || d.deployed_fleet_id == Some(b_fleet_id)
+                })
+                .map(|(&id, d)| (id, d.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            damaged_items
+                .iter()
+                .filter(|(&id, _)| is_b_dep_or_item(id))
+                .map(|(&id, d)| {
+                    (
+                        id,
+                        (
+                            d.shield_hp.to_bits(),
+                            d.max_shield_hp.to_bits(),
+                            d.armor_hp.to_bits(),
+                            d.max_armor_hp.to_bits(),
+                            d.structure_hp.to_bits(),
+                            d.max_structure_hp.to_bits(),
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+            observatory_pings_done
+                .iter()
+                .filter(|(&id, _)| is_b_dep_or_item(id))
+                .map(|(&id, &n)| (id, n))
+                .collect::<BTreeMap<_, _>>(),
+            cloak_activated_unix
+                .iter()
+                .filter(|(&id, _)| is_b_dep_or_item(id))
+                .map(|(&id, &ts)| (id, ts))
+                .collect::<BTreeMap<_, _>>(),
+            mmju_spools
+                .iter()
+                .filter(|(&k, sp)| {
+                    is_b_dep_or_item(k)
+                        || sp.char_id == CHAR_B_ID
+                        || is_b_dep_or_item(sp.ship_id)
+                        || is_b_dep_or_item(sp.unit_id)
+                })
+                .map(|(&k, sp)| {
+                    (
+                        k,
+                        (
+                            sp.ship_id,
+                            sp.char_id,
+                            sp.unit_id,
+                            sp.solar_system_id,
+                            sp.started_unix,
+                            sp.complete_at_unix,
+                            [
+                                sp.direction[0].to_bits(),
+                                sp.direction[1].to_bits(),
+                                sp.direction[2].to_bits(),
+                            ],
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+            siphon_last_cycle_unix
+                .iter()
+                .filter(|(&id, _)| is_b_dep_or_item(id))
+                .map(|(&id, &ts)| (id, ts))
+                .collect::<BTreeMap<_, _>>(),
+            pending_decloak_notifications
+                .iter()
+                .filter(|n| {
+                    n.char_id == CHAR_B_ID
+                        || is_b_dep_or_item(n.ship_id)
+                        || is_b_dep_or_item(n.module_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    if pvp_b(before.pvp) != pvp_b(after.pvp)
+        || tourney_b(before.tourney) != tourney_b(after.tourney)
+        || deployables_b(before.deployable) != deployables_b(after.deployable)
     {
         return true;
     }
@@ -6427,27 +6790,114 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         )
     };
     let quasar_b = |qc: &eve_db::service_domains::QuasarCommerceStore| {
+        let eve_db::service_domains::QuasarCommerceStore {
+            payment_tokens,
+            payment_receipts,
+            payment_schedules,
+            plex_tx_logs,
+            nes_store_catalog: _,
+            nes_store_offer_tags: _,
+            plex_invoices: _,
+            cosmetics_market,
+            orchestrator: _,
+            failed_fulfillments,
+            targeted_offers,
+            acl_registry,
+            lp_asset_ops_completed: _,
+        } = qc;
+        let char_b_u32 = u32::try_from(CHAR_B_ID).ok();
         (
-            qc.payment_tokens
+            payment_tokens
                 .iter()
                 .filter(|r| r.user_id == USER_B_ID)
                 .cloned()
                 .collect::<Vec<_>>(),
-            qc.payment_receipts
+            payment_receipts
                 .iter()
                 .filter(|r| r.user_id == USER_B_ID)
                 .cloned()
                 .collect::<Vec<_>>(),
-            qc.payment_schedules
+            payment_schedules
                 .iter()
                 .filter(|r| r.user_id == USER_B_ID)
                 .cloned()
                 .collect::<Vec<_>>(),
-            qc.plex_tx_logs
+            plex_tx_logs
                 .iter()
                 .filter(|r| r.user_id == USER_B_ID)
                 .cloned()
                 .collect::<Vec<_>>(),
+            cosmetics_market
+                .as_ref()
+                .map(|cm| {
+                    let eve_db::service_domains::CosmeticsMarketData {
+                        component_listings: _,
+                        skin_listings,
+                        transactions,
+                        next_seq: _,
+                    } = cm;
+                    let listings = skin_listings
+                        .iter()
+                        .filter(|(_, l)| {
+                            Some(l.seller_id) == char_b_u32
+                                || match l.target {
+                                    eve_db::service_domains::ListingTargetRecord::Public => false,
+                                    eve_db::service_domains::ListingTargetRecord::Corporation(id) => {
+                                        i64::try_from(id).ok() == Some(CORP_B_ID)
+                                    }
+                                    eve_db::service_domains::ListingTargetRecord::Alliance(id) => {
+                                        i64::try_from(id).ok() == Some(ALLIANCE_B_ID)
+                                    }
+                                    eve_db::service_domains::ListingTargetRecord::Character(id) => {
+                                        i64::try_from(id).ok() == Some(CHAR_B_ID)
+                                    }
+                                }
+                        })
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<BTreeMap<_, _>>();
+                    let txs = transactions
+                        .iter()
+                        .filter(|(_, tx)| {
+                            char_b_u32.is_some()
+                                && (tx.buyer_id == char_b_u32 || tx.seller_id == char_b_u32)
+                        })
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<BTreeMap<_, _>>();
+                    (listings, txs)
+                })
+                .unwrap_or_default(),
+            failed_fulfillments
+                .iter()
+                .filter(|r| r.user_id == USER_B_ID)
+                .cloned()
+                .collect::<Vec<_>>(),
+            targeted_offers
+                .iter()
+                .filter(|(k, r)| {
+                    r.user_id == USER_B_ID || text_mentions_any_id(k, &[USER_B_ID as i64])
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            acl_registry
+                .as_ref()
+                .map(|acls| {
+                    acls.iter()
+                        .filter(|r| {
+                            r.characters
+                                .iter()
+                                .any(|&(id, _)| i64::try_from(id).ok() == Some(CHAR_B_ID))
+                                || r.corporations
+                                    .iter()
+                                    .any(|&(id, _)| i64::try_from(id).ok() == Some(CORP_B_ID))
+                                || r.alliances
+                                    .iter()
+                                    .any(|&(id, _)| i64::try_from(id).ok() == Some(ALLIANCE_B_ID))
+                                || text_mentions_any_id(&r.name, b_all_ids)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
         )
     };
     let fleet_ops_b = |fo: &eve_db::service_domains::FleetAndSocialOpsStore| {
@@ -6458,24 +6908,31 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
                         .map(|(k, v)| (k.clone(), serde_json::to_value(v).ok()))
                         .collect::<BTreeMap<_, _>>()
                 }),
-                fo.fleet_stored_formations
-                    .get(&fix.b_fleet_id)
-                    .map(|&(l, x, y)| (l, x.to_bits(), y.to_bits())),
+                [CHAR_B_ID, b_fleet_id]
+                    .into_iter()
+                    .filter_map(|id| {
+                        fo.fleet_stored_formations
+                            .get(&id)
+                            .map(|&(l, x, y)| (id, (l, x.to_bits(), y.to_bits())))
+                    })
+                    .collect::<BTreeMap<_, _>>(),
                 fo.fleet_adverts
-                    .get(&fix.b_fleet_id)
+                    .get(&b_fleet_id)
                     .and_then(|v| serde_json::to_value(v).ok()),
                 fo.fleet_join_requests
                     .iter()
-                    .filter(|(&fid, set)| fid == fix.b_fleet_id || set.contains(&CHAR_B_ID))
+                    .filter(|(&fid, set)| fid == b_fleet_id || set.contains(&CHAR_B_ID))
                     .map(|(&k, v)| (k, v.iter().copied().collect::<BTreeSet<_>>()))
                     .collect::<BTreeMap<_, _>>(),
                 fo.fleet_watchlist
                     .iter()
-                    .filter(|(&fid, set)| fid == fix.b_fleet_id || set.contains(&CHAR_B_ID))
+                    .filter(|(&cid, set)| {
+                        cid == CHAR_B_ID || cid == b_fleet_id || set.contains(&CHAR_B_ID)
+                    })
                     .map(|(&k, v)| (k, v.iter().copied().collect::<BTreeSet<_>>()))
                     .collect::<BTreeMap<_, _>>(),
-                fo.fleet_voice_enabled.get(&fix.b_fleet_id).copied(),
-                fo.fleet_loot_logging.get(&fix.b_fleet_id).copied(),
+                fo.fleet_voice_enabled.get(&b_fleet_id).copied(),
+                fo.fleet_loot_logging.get(&b_fleet_id).copied(),
                 fo.corp_recruitment_ads
                     .iter()
                     .filter(|ad| ad.corp_id == CORP_B_ID || ad.recruiter_id == CHAR_B_ID)
@@ -6491,11 +6948,11 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
                             || t.reporter_corp_id == CORP_B_ID
                             || t.reported_entity_id == CHAR_B_ID
                             || t.reported_entity_id == CORP_B_ID
-                            || t.report_id == fix.b_petition_id
+                            || t.report_id == b_petition_id
                     })
                     .filter_map(|t| serde_json::to_value(t).ok())
                     .collect::<Vec<_>>(),
-                fo.contract_deposits.get(&fix.b_contract_id).copied(),
+                fo.contract_deposits.get(&b_contract_id).copied(),
                 fo.delayed_rewards.get(&CHAR_B_ID).map(|m| {
                     m.iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
@@ -6532,59 +6989,193 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         )
     };
     let cluster_b = |cl: &eve_db::service_domains::ClusterAndRuntimeStore| {
+        let eve_db::service_domains::ClusterAndRuntimeStore {
+            cluster_misc_state,
+            clone_vat_bay_state,
+            structure_defense,
+            alliance_sov_cfg,
+            load_service_state: _,
+            active_sessions,
+            session_registry,
+            cluster_node_table: _,
+            cluster_admin_broadcasts: _,
+            cluster_service_states: _,
+            cluster_attacks: _,
+            external_queue_events: _,
+            cluster_downtime_state: _,
+            macho_client_code_hash: _,
+            macho_global_config: _,
+            user_sessions,
+            gm_audit_log: _,
+            alert_bean_counts: _,
+            alert_log_modes: _,
+            alert_client_traces: _,
+            alert_proxy_traces: _,
+            alert_group_bean_bytes: _,
+            browser_lockdown_policy: _,
+            localization_qa_wrap_users,
+            client_stat_logger_strings: _,
+            blacklisted_planets: _,
+            portraits,
+            paperdoll_states,
+            char_system_visits,
+            module_reload_until_unix,
+            auto_reloaded_event,
+            warp_vector_cooldown_until,
+            ship_clone_offers,
+            mct_slots,
+            account_resculpt_tokens,
+            resculpt_pending,
+            char_cohorts,
+            user_cohorts,
+            character_locks,
+            omega_downgraded,
+            server_runtime_json,
+        } = cl;
+        let eve_db::service_domains::CloneVatBayState { active_by_ship } = clone_vat_bay_state;
+        let misc_b = cluster_misc_state
+            .as_ref()
+            .map(|misc| {
+                let eve_db::service_domains::PersistedClusterMiscState {
+                    persisted_shipcaster_state: _,
+                    char_settings,
+                    landing_pads,
+                    launchers,
+                    starter_launchers,
+                    used_starter_shipcaster_chars,
+                    offered_load_slots,
+                    char_energy,
+                    target_cooldowns,
+                    target_charges,
+                    zarzakh_toll_quotes,
+                    zarzakh_horizon_siege: _,
+                } = misc;
+                (
+                    char_settings.get(&CHAR_B_ID).cloned(),
+                    used_starter_shipcaster_chars.contains(&CHAR_B_ID),
+                    offered_load_slots.get(&CHAR_B_ID).cloned(),
+                    char_energy.get(&CHAR_B_ID).cloned(),
+                    target_cooldowns
+                        .iter()
+                        .filter(|(&pid, _)| b_item_ids.contains(&pid))
+                        .map(|(&k, &v)| (k, v))
+                        .collect::<BTreeMap<_, _>>(),
+                    target_charges
+                        .iter()
+                        .filter(|(&pid, _)| b_item_ids.contains(&pid))
+                        .map(|(&k, &v)| (k, v))
+                        .collect::<BTreeMap<_, _>>(),
+                    zarzakh_toll_quotes.get(&CHAR_B_ID).cloned(),
+                    landing_pads
+                        .iter()
+                        .filter(|p| b_item_ids.contains(&p.item_id))
+                        .map(|p| (p.item_id, p.clone()))
+                        .collect::<BTreeMap<_, _>>(),
+                    launchers
+                        .iter()
+                        .filter(|l| b_item_ids.contains(&l.item_id))
+                        .map(|l| (l.item_id, l.clone()))
+                        .collect::<BTreeMap<_, _>>(),
+                    starter_launchers
+                        .iter()
+                        .filter(|s| b_item_ids.contains(&s.item_id))
+                        .map(|s| (s.item_id, s.clone()))
+                        .collect::<BTreeMap<_, _>>(),
+                )
+            })
+            .unwrap_or_default();
         (
-            b_struct_ids
-                .iter()
-                .filter_map(|&sid| cl.structure_defense.get(&sid).map(|v| (sid, v.clone())))
-                .collect::<BTreeMap<_, _>>(),
-            cl.alliance_sov_cfg.get(&ALLIANCE_B_ID).cloned(),
-            cl.active_sessions
-                .iter()
-                .copied()
-                .filter(|id| b_entity_ids.contains(id))
-                .collect::<Vec<_>>(),
-            cl.session_registry
-                .iter()
-                .filter(|(k, v)| {
-                    text_mentions_any_id(k, &b_entity_ids)
-                        || json_mentions_any_id(v, &b_entity_ids)
-                })
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<BTreeMap<_, _>>(),
-            cl.portraits
-                .iter()
-                .filter(|(k, _)| text_mentions_any_id(k, &b_entity_ids))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<BTreeMap<_, _>>(),
-            cl.paperdoll_states.get(&CHAR_B_ID).cloned(),
-            cl.char_system_visits.get(&CHAR_B_ID).cloned(),
-            b_item_ids
-                .iter()
-                .filter_map(|&id| cl.module_reload_until_unix.get(&id).map(|&u| (id, u)))
-                .collect::<BTreeMap<_, _>>(),
-            b_item_ids
-                .iter()
-                .filter_map(|&id| cl.ship_clone_offers.get(&id).map(|&v| (id, v)))
-                .collect::<BTreeMap<_, _>>(),
-            cl.warp_vector_cooldown_until.get(&CHAR_B_ID).copied(),
-            cl.mct_slots.get(&USER_B_ID).cloned(),
-            cl.account_resculpt_tokens
-                .iter()
-                .filter(|(k, _)| text_mentions_any_id(k, &b_entity_ids))
-                .map(|(k, &v)| (k.clone(), v))
-                .collect::<BTreeMap<_, _>>(),
+            (
+                b_struct_ids
+                    .iter()
+                    .filter_map(|&sid| structure_defense.get(&sid).map(|v| (sid, v.clone())))
+                    .collect::<BTreeMap<_, _>>(),
+                alliance_sov_cfg.get(&ALLIANCE_B_ID).cloned(),
+                active_sessions
+                    .iter()
+                    .copied()
+                    .filter(|id| b_entity_ids.contains(id))
+                    .collect::<Vec<_>>(),
+                session_registry
+                    .iter()
+                    .filter(|(k, v)| {
+                        text_mentions_any_id(k, b_entity_ids)
+                            || json_mentions_any_id(v, b_entity_ids)
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+                portraits
+                    .iter()
+                    .filter(|(k, _)| text_mentions_any_id(k, b_entity_ids))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+                paperdoll_states.get(&CHAR_B_ID).cloned(),
+            ),
+            (
+                char_system_visits.get(&CHAR_B_ID).cloned(),
+                b_item_ids
+                    .iter()
+                    .filter_map(|&id| module_reload_until_unix.get(&id).map(|&u| (id, u)))
+                    .collect::<BTreeMap<_, _>>(),
+                b_item_ids
+                    .iter()
+                    .filter_map(|&id| ship_clone_offers.get(&id).map(|&v| (id, v)))
+                    .collect::<BTreeMap<_, _>>(),
+                warp_vector_cooldown_until.get(&CHAR_B_ID).copied(),
+                mct_slots.get(&USER_B_ID).cloned(),
+                account_resculpt_tokens
+                    .iter()
+                    .filter(|(k, _)| text_mentions_any_id(k, b_entity_ids))
+                    .map(|(k, &v)| (k.clone(), v))
+                    .collect::<BTreeMap<_, _>>(),
+            ),
+            (
+                misc_b,
+                active_by_ship
+                    .iter()
+                    .filter(|(&sid, &(mid, _))| {
+                        b_item_ids.contains(&sid) || b_item_ids.contains(&mid)
+                    })
+                    .map(|(&k, &v)| (k, v))
+                    .collect::<BTreeMap<_, _>>(),
+                auto_reloaded_event
+                    .iter()
+                    .filter(|(&mid, (linked, _, _))| {
+                        b_item_ids.contains(&mid) || linked.iter().any(|tid| b_item_ids.contains(tid))
+                    })
+                    .map(|(&mid, (linked, ammo, ms))| (mid, (linked.clone(), *ammo, ms.to_bits())))
+                    .collect::<BTreeMap<_, _>>(),
+                resculpt_pending.contains(&CHAR_B_ID),
+                char_cohorts.get(&CHAR_B_ID).cloned(),
+                user_cohorts.get(&USER_B_ID).cloned(),
+            ),
+            (
+                character_locks.get(&CHAR_B_ID).cloned(),
+                omega_downgraded.contains(&USER_B_ID),
+                [USER_B_ID as i64, CHAR_B_ID]
+                    .into_iter()
+                    .filter_map(|id| {
+                        localization_qa_wrap_users.get(&id).map(|&v| (id, v))
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+                user_sessions
+                    .iter()
+                    .filter(|v| {
+                        v.get("user_id").and_then(Value::as_u64) == Some(USER_B_ID)
+                            || v.get("character_id").and_then(Value::as_i64) == Some(CHAR_B_ID)
+                            || json_mentions_any_id(v, b_all_ids)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                note_or_json_b_slice(server_runtime_json.as_ref(), b_all_ids),
+            ),
         )
     };
-    if node_b(sb_node_graph_state) != node_b(sc_node_graph_state)
-        || seasons_b(sb_seasons_and_campaigns) != seasons_b(sc_seasons_and_campaigns)
-        || quasar_b(sb_quasar_commerce) != quasar_b(sc_quasar_commerce)
-        || fleet_ops_b(sb_fleet_and_social_ops) != fleet_ops_b(sc_fleet_and_social_ops)
-        || cluster_b(sb_cluster_and_runtime) != cluster_b(sc_cluster_and_runtime)
-    {
-        return true;
-    }
-
-    false
+    node_b(before.node_graph) != node_b(after.node_graph)
+        || seasons_b(before.seasons) != seasons_b(after.seasons)
+        || quasar_b(before.quasar) != quasar_b(after.quasar)
+        || fleet_ops_b(before.fleet_ops) != fleet_ops_b(after.fleet_ops)
+        || cluster_b(before.cluster) != cluster_b(after.cluster)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6929,4 +7520,471 @@ async fn rpc_negative_test_matrix_and_ratchet() {
             baseline_ratchet.len()
         );
     }
+}
+
+#[test]
+fn target_b_subfield_detectors_catch_target_b_and_ignore_actor_a() {
+    use eve_db::service_domains::{
+        CharacterEnergyState, ClusterAndRuntimeStore, CosmeticTransactionRecord, CosmeticsMarketData,
+        FailedFulfillmentRecord, FleetAndSocialOpsStore, ListingTargetRecord, MmjuSpoolEntry,
+        MobileDeployableRuntimeState, NodeGraphAndProgressionStore, OfferedLoadSlot,
+        PendingDecloakNotice, PendingZarzakhTollQuote, PersistedClusterMiscState,
+        PersistedDamageRecord, PvpArenaMatchInstance, PvpFilamentStore, QuasarAclRecord,
+        QuasarCommerceStore, SeasonsAndCampaignsStore, SkinListingRecord, TargetedOfferAdminRecord,
+        TourneyMatch, TourneyPilot, TourneyStore,
+    };
+
+    #[derive(Clone, Default)]
+    struct OwnedStores {
+        pvp: PvpFilamentStore,
+        tourney: TourneyStore,
+        deployable: MobileDeployableRuntimeState,
+        node_graph: NodeGraphAndProgressionStore,
+        seasons: SeasonsAndCampaignsStore,
+        quasar: QuasarCommerceStore,
+        fleet_ops: FleetAndSocialOpsStore,
+        cluster: ClusterAndRuntimeStore,
+    }
+    impl OwnedStores {
+        fn as_refs(&self) -> TargetBStoreRefs<'_> {
+            TargetBStoreRefs {
+                pvp: &self.pvp,
+                tourney: &self.tourney,
+                deployable: &self.deployable,
+                node_graph: &self.node_graph,
+                seasons: &self.seasons,
+                quasar: &self.quasar,
+                fleet_ops: &self.fleet_ops,
+                cluster: &self.cluster,
+            }
+        }
+    }
+
+    let b_fleet_id = 777_002;
+    let b_contract_id = 888_002;
+    let b_petition_id = 999_002;
+    let b_ship_id = 1_500_002;
+    let b_mod_id = 1_500_012;
+    let a_ship_id = 1_500_001;
+    let a_mod_id = 1_500_011;
+
+    let b_entity_ids = vec![
+        CHAR_B_ID,
+        USER_B_ID as i64,
+        CORP_B_ID,
+        ALLIANCE_B_ID,
+        b_ship_id,
+        b_fleet_id,
+        b_contract_id,
+        b_petition_id,
+        CORP_B_STRUCTURE_ID,
+    ];
+    let b_struct_ids: BTreeSet<i64> = [CORP_B_STRUCTURE_ID].into_iter().collect();
+    let b_item_ids: BTreeSet<i64> = b_entity_ids
+        .iter()
+        .copied()
+        .chain([b_mod_id])
+        .collect();
+    let b_all_ids: Vec<i64> = b_item_ids
+        .iter()
+        .copied()
+        .filter(|&id| id >= 100_000)
+        .collect();
+    let scope = TargetBDomainScope {
+        b_fleet_id,
+        b_contract_id,
+        b_petition_id,
+        b_entity_ids: &b_entity_ids,
+        b_item_ids: &b_item_ids,
+        b_struct_ids: &b_struct_ids,
+        b_all_ids: &b_all_ids,
+    };
+
+    let check_case = |base: &OwnedStores, mutate: &dyn Fn(&mut OwnedStores)| -> bool {
+        let mut after = base.clone();
+        mutate(&mut after);
+        target_b_sub_stores_mutated(&scope, &base.as_refs(), &after.as_refs())
+    };
+    let assert_b = |label: &str, base: &OwnedStores, mutate: &dyn Fn(&mut OwnedStores)| {
+        assert!(check_case(base, mutate), "Target B mutation missed: {label}");
+    };
+    let assert_a = |label: &str, base: &OwnedStores, mutate: &dyn Fn(&mut OwnedStores)| {
+        assert!(!check_case(base, mutate), "Actor A/global false positive: {label}");
+    };
+
+    let mut base = OwnedStores::default();
+    base.tourney.matches.insert(
+        21,
+        TourneyMatch {
+            match_id: 21,
+            red_players: vec![TourneyPilot {
+                character_id: CHAR_B_ID,
+                ship_id: b_ship_id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    base.tourney.matches.insert(
+        22,
+        TourneyMatch {
+            match_id: 22,
+            red_players: vec![TourneyPilot {
+                character_id: CHAR_A_ID,
+                ship_id: a_ship_id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    base.cluster.server_runtime_json = Some(
+        serde_json::json!({
+            "actors": [
+                {"character_id": CHAR_A_ID, "counter": 1},
+                {"character_id": CHAR_B_ID, "counter": 1}
+            ]
+        })
+        .to_string(),
+    );
+
+    // 1. fleet_ops: char_id keying on fleet_stored_formations & fleet_watchlist
+    assert_b("fleet_stored_formations by CHAR_B_ID", &base, &|s| {
+        s.fleet_ops.fleet_stored_formations.insert(CHAR_B_ID, (1, 10.0, 20.0));
+    });
+    assert_a("fleet_stored_formations by CHAR_A_ID", &base, &|s| {
+        s.fleet_ops.fleet_stored_formations.insert(CHAR_A_ID, (1, 10.0, 20.0));
+    });
+    assert_b("fleet_watchlist watcher CHAR_B_ID", &base, &|s| {
+        s.fleet_ops
+            .fleet_watchlist
+            .insert(CHAR_B_ID, [CHAR_A_ID].into_iter().collect());
+    });
+    assert_b("fleet_watchlist watched CHAR_B_ID", &base, &|s| {
+        s.fleet_ops
+            .fleet_watchlist
+            .insert(CHAR_A_ID, [CHAR_B_ID].into_iter().collect());
+    });
+    assert_a("fleet_watchlist Actor A/C", &base, &|s| {
+        s.fleet_ops
+            .fleet_watchlist
+            .insert(CHAR_A_ID, [CHAR_C_ID].into_iter().collect());
+    });
+
+    // 2. cluster_misc_state & ClusterAndRuntimeStore sub-fields
+    assert_b("cluster_misc_state.char_settings", &base, &|s| {
+        s.cluster
+            .cluster_misc_state
+            .get_or_insert_with(PersistedClusterMiscState::default)
+            .char_settings
+            .entry(CHAR_B_ID)
+            .or_default()
+            .insert("k".into(), PyRep::Integer(1));
+    });
+    assert_a("cluster_misc_state.char_settings A", &base, &|s| {
+        s.cluster
+            .cluster_misc_state
+            .get_or_insert_with(PersistedClusterMiscState::default)
+            .char_settings
+            .entry(CHAR_A_ID)
+            .or_default()
+            .insert("k".into(), PyRep::Integer(1));
+    });
+    assert_b("cluster_misc_state.char_energy", &base, &|s| {
+        s.cluster
+            .cluster_misc_state
+            .get_or_insert_with(PersistedClusterMiscState::default)
+            .char_energy
+            .insert(CHAR_B_ID, CharacterEnergyState { current_energy: 50, ..Default::default() });
+    });
+    assert_a("cluster_misc_state.char_energy A", &base, &|s| {
+        s.cluster
+            .cluster_misc_state
+            .get_or_insert_with(PersistedClusterMiscState::default)
+            .char_energy
+            .insert(CHAR_A_ID, CharacterEnergyState { current_energy: 50, ..Default::default() });
+    });
+    assert_b("cluster_misc_state.used_starter_shipcaster_chars", &base, &|s| {
+        s.cluster
+            .cluster_misc_state
+            .get_or_insert_with(PersistedClusterMiscState::default)
+            .used_starter_shipcaster_chars
+            .insert(CHAR_B_ID);
+    });
+    assert_b("cluster_misc_state.offered_load_slots", &base, &|s| {
+        s.cluster
+            .cluster_misc_state
+            .get_or_insert_with(PersistedClusterMiscState::default)
+            .offered_load_slots
+            .insert(CHAR_B_ID, OfferedLoadSlot { slot_key: "b".into(), ..Default::default() });
+    });
+    assert_b("cluster_misc_state.zarzakh_toll_quotes", &base, &|s| {
+        s.cluster
+            .cluster_misc_state
+            .get_or_insert_with(PersistedClusterMiscState::default)
+            .zarzakh_toll_quotes
+            .insert(CHAR_B_ID, PendingZarzakhTollQuote { ship_id: b_ship_id, ..Default::default() });
+    });
+    assert_b("cluster_misc_state.target_cooldowns", &base, &|s| {
+        s.cluster
+            .cluster_misc_state
+            .get_or_insert_with(PersistedClusterMiscState::default)
+            .target_cooldowns
+            .insert(CORP_B_STRUCTURE_ID, 42);
+    });
+    assert_b("cluster_misc_state.target_charges", &base, &|s| {
+        s.cluster
+            .cluster_misc_state
+            .get_or_insert_with(PersistedClusterMiscState::default)
+            .target_charges
+            .insert(CORP_B_STRUCTURE_ID, 2);
+    });
+    assert_a("cluster_misc_state A/global", &base, &|s| {
+        let m = s
+            .cluster
+            .cluster_misc_state
+            .get_or_insert_with(PersistedClusterMiscState::default);
+        m.used_starter_shipcaster_chars.insert(CHAR_A_ID);
+        m.target_cooldowns.insert(a_ship_id, 42);
+        m.target_charges.insert(a_ship_id, 2);
+        m.persisted_shipcaster_state = true;
+    });
+    assert_b("clone_vat_bay_state.active_by_ship", &base, &|s| {
+        s.cluster.clone_vat_bay_state.active_by_ship.insert(b_ship_id, (b_mod_id, 999));
+    });
+    assert_a("clone_vat_bay_state.active_by_ship A", &base, &|s| {
+        s.cluster.clone_vat_bay_state.active_by_ship.insert(a_ship_id, (a_mod_id, 999));
+    });
+    assert_b("auto_reloaded_event", &base, &|s| {
+        s.cluster.auto_reloaded_event.insert(b_mod_id, (vec![], 218, 1000.0));
+    });
+    assert_a("auto_reloaded_event A", &base, &|s| {
+        s.cluster.auto_reloaded_event.insert(a_mod_id, (vec![], 218, 1000.0));
+    });
+    assert_b("resculpt_pending", &base, &|s| {
+        s.cluster.resculpt_pending.insert(CHAR_B_ID);
+    });
+    assert_b("char_cohorts", &base, &|s| {
+        s.cluster.char_cohorts.insert(CHAR_B_ID, vec!["beta".into()]);
+    });
+    assert_b("user_cohorts", &base, &|s| {
+        s.cluster.user_cohorts.insert(USER_B_ID, vec!["beta".into()]);
+    });
+    assert_b("character_locks", &base, &|s| {
+        s.cluster.character_locks.insert(CHAR_B_ID, "gm".into());
+    });
+    assert_b("omega_downgraded", &base, &|s| {
+        s.cluster.omega_downgraded.insert(USER_B_ID);
+    });
+    assert_b("localization_qa_wrap_users by USER_B_ID", &base, &|s| {
+        s.cluster.localization_qa_wrap_users.insert(USER_B_ID as i64, true);
+    });
+    assert_a("cluster misc user/char flags A", &base, &|s| {
+        s.cluster.resculpt_pending.insert(CHAR_A_ID);
+        s.cluster.char_cohorts.insert(CHAR_A_ID, vec!["alpha".into()]);
+        s.cluster.user_cohorts.insert(USER_A_ID, vec!["alpha".into()]);
+        s.cluster.character_locks.insert(CHAR_A_ID, "gm".into());
+        s.cluster.omega_downgraded.insert(USER_A_ID);
+        s.cluster.localization_qa_wrap_users.insert(USER_A_ID as i64, true);
+    });
+    assert_b("user_sessions", &base, &|s| {
+        s.cluster
+            .user_sessions
+            .push(serde_json::json!({"user_id": USER_B_ID, "character_id": CHAR_B_ID}));
+    });
+    assert_a("user_sessions A", &base, &|s| {
+        s.cluster
+            .user_sessions
+            .push(serde_json::json!({"user_id": USER_A_ID, "character_id": CHAR_A_ID}));
+    });
+    assert_b("server_runtime_json B changed", &base, &|s| {
+        s.cluster.server_runtime_json = Some(
+            serde_json::json!({
+                "actors": [
+                    {"character_id": CHAR_A_ID, "counter": 1},
+                    {"character_id": CHAR_B_ID, "counter": 2}
+                ]
+            })
+            .to_string(),
+        );
+    });
+    assert_a("server_runtime_json only A changed", &base, &|s| {
+        s.cluster.server_runtime_json = Some(
+            serde_json::json!({
+                "actors": [
+                    {"character_id": CHAR_A_ID, "counter": 2},
+                    {"character_id": CHAR_B_ID, "counter": 1}
+                ]
+            })
+            .to_string(),
+        );
+    });
+
+    // 3. QuasarCommerceStore sub-fields
+    assert_b("cosmetics_market skin_listings seller B", &base, &|s| {
+        let cm = s.quasar.cosmetics_market.get_or_insert_with(CosmeticsMarketData::default);
+        cm.skin_listings.insert(
+            "l-b".into(),
+            SkinListingRecord { seller_id: CHAR_B_ID as u32, ..Default::default() },
+        );
+    });
+    assert_b("cosmetics_market skin_listings target corp B", &base, &|s| {
+        let cm = s.quasar.cosmetics_market.get_or_insert_with(CosmeticsMarketData::default);
+        cm.skin_listings.insert(
+            "l-corp".into(),
+            SkinListingRecord {
+                seller_id: CHAR_A_ID as u32,
+                target: ListingTargetRecord::Corporation(CORP_B_ID as u64),
+                ..Default::default()
+            },
+        );
+    });
+    assert_b("cosmetics_market transactions buyer B", &base, &|s| {
+        let cm = s.quasar.cosmetics_market.get_or_insert_with(CosmeticsMarketData::default);
+        cm.transactions.insert(
+            "tx-b".into(),
+            CosmeticTransactionRecord { buyer_id: Some(CHAR_B_ID as u32), ..Default::default() },
+        );
+    });
+    assert_a("cosmetics_market A/global", &base, &|s| {
+        let cm = s.quasar.cosmetics_market.get_or_insert_with(CosmeticsMarketData::default);
+        cm.next_seq = 55;
+        cm.skin_listings.insert(
+            "l-a".into(),
+            SkinListingRecord {
+                seller_id: CHAR_A_ID as u32,
+                target: ListingTargetRecord::Public,
+                ..Default::default()
+            },
+        );
+        cm.transactions.insert(
+            "tx-a".into(),
+            CosmeticTransactionRecord { buyer_id: Some(CHAR_A_ID as u32), ..Default::default() },
+        );
+    });
+    assert_b("failed_fulfillments", &base, &|s| {
+        s.quasar.failed_fulfillments.push(FailedFulfillmentRecord {
+            id: 1,
+            user_id: USER_B_ID,
+            ..Default::default()
+        });
+    });
+    assert_b("targeted_offers", &base, &|s| {
+        s.quasar.targeted_offers.insert(
+            format!("{USER_B_ID}:offer"),
+            TargetedOfferAdminRecord { user_id: USER_B_ID, ..Default::default() },
+        );
+    });
+    assert_b("acl_registry", &base, &|s| {
+        s.quasar.acl_registry = Some(vec![QuasarAclRecord {
+            acl_id: 10,
+            characters: vec![(CHAR_B_ID as u64, 1)],
+            ..Default::default()
+        }]);
+    });
+    assert_a("quasar A/global", &base, &|s| {
+        s.quasar.failed_fulfillments.push(FailedFulfillmentRecord {
+            id: 2,
+            user_id: USER_A_ID,
+            ..Default::default()
+        });
+        s.quasar.targeted_offers.insert(
+            format!("{USER_A_ID}:offer"),
+            TargetedOfferAdminRecord { user_id: USER_A_ID, ..Default::default() },
+        );
+        s.quasar.acl_registry = Some(vec![QuasarAclRecord {
+            acl_id: 11,
+            characters: vec![(CHAR_A_ID as u64, 1)],
+            ..Default::default()
+        }]);
+    });
+
+    // 4. PvpFilamentStore / TourneyStore / MobileDeployableRuntimeState sub-fields
+    assert_b("pvp event_stats", &base, &|s| {
+        s.pvp.event_stats.entry(7).or_default().insert(CHAR_B_ID, (1, 0, 0, 0, 1.0));
+    });
+    assert_b("pvp active_matches/match_teams/match_eliminated", &base, &|s| {
+        s.pvp.active_matches.insert(
+            11,
+            PvpArenaMatchInstance {
+                match_id: 11,
+                team_a: vec![CHAR_B_ID],
+                ..Default::default()
+            },
+        );
+        s.pvp.match_teams.insert(11, vec![vec![CHAR_B_ID]]);
+        s.pvp.match_eliminated.insert(11, [CHAR_B_ID].into_iter().collect());
+    });
+    assert_b("pvp queue_refund_targets", &base, &|s| {
+        s.pvp.queue_refund_targets.insert(55, (CHAR_B_ID, b_ship_id));
+    });
+    assert_a("pvp A", &base, &|s| {
+        s.pvp.event_stats.entry(7).or_default().insert(CHAR_A_ID, (1, 0, 0, 0, 1.0));
+        s.pvp.active_matches.insert(
+            12,
+            PvpArenaMatchInstance {
+                match_id: 12,
+                team_a: vec![CHAR_A_ID],
+                ..Default::default()
+            },
+        );
+        s.pvp.match_teams.insert(12, vec![vec![CHAR_A_ID]]);
+        s.pvp.match_eliminated.insert(12, [CHAR_A_ID].into_iter().collect());
+        s.pvp.queue_refund_targets.insert(56, (CHAR_A_ID, a_ship_id));
+    });
+    assert_b("tourney.matches status change", &base, &|s| {
+        s.tourney.matches.get_mut(&21).unwrap().red_score = 5;
+    });
+    assert_b("tourney.ban_sessions scoped to Target B match", &base, &|s| {
+        s.tourney.ban_sessions.insert(21_000_001, vec![587]);
+    });
+    assert_a("tourney A match + ban_sessions", &base, &|s| {
+        s.tourney.matches.get_mut(&22).unwrap().red_score = 5;
+        s.tourney.ban_sessions.insert(22_000_001, vec![587]);
+    });
+    assert_b("deployable damaged_items", &base, &|s| {
+        s.deployable.damaged_items.insert(
+            b_ship_id,
+            PersistedDamageRecord { shield_hp: 50.0, ..Default::default() },
+        );
+    });
+    assert_b("deployable cloak_activated_unix", &base, &|s| {
+        s.deployable.cloak_activated_unix.insert(b_ship_id, 123);
+    });
+    assert_b("deployable mmju_spools", &base, &|s| {
+        s.deployable.mmju_spools.insert(
+            b_ship_id,
+            MmjuSpoolEntry {
+                char_id: CHAR_B_ID,
+                ship_id: b_ship_id,
+                ..Default::default()
+            },
+        );
+    });
+    assert_b("deployable pending_decloak_notifications", &base, &|s| {
+        s.deployable.pending_decloak_notifications.push(PendingDecloakNotice {
+            char_id: CHAR_B_ID,
+            ship_id: b_ship_id,
+            module_id: b_mod_id,
+        });
+    });
+    assert_a("deployable A", &base, &|s| {
+        s.deployable.damaged_items.insert(
+            a_ship_id,
+            PersistedDamageRecord { shield_hp: 50.0, ..Default::default() },
+        );
+        s.deployable.cloak_activated_unix.insert(a_ship_id, 123);
+        s.deployable.mmju_spools.insert(
+            a_ship_id,
+            MmjuSpoolEntry {
+                char_id: CHAR_A_ID,
+                ship_id: a_ship_id,
+                ..Default::default()
+            },
+        );
+        s.deployable.pending_decloak_notifications.push(PendingDecloakNotice {
+            char_id: CHAR_A_ID,
+            ship_id: a_ship_id,
+            module_id: a_mod_id,
+        });
+    });
 }
