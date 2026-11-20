@@ -14,6 +14,7 @@
     {"id": "setup_skill_3302", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3302 5"}},
     {"id": "setup_skill_11084", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 11084 5"}},
     {"id": "setup_skill_25863", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 25863 5"}},
+    {"id": "setup_skill_26252", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 26252 5"}},
     {"id": "setup_skill_3318", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3318 5"}},
     {"id": "setup_skill_3413", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3413 5"}},
     {"id": "setup_skill_3417", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3417 5"}},
@@ -58,6 +59,9 @@
     {"id": "setup_fit_gun1", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 2889"}},
     {"id": "setup_fit_gun2", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 2889"}},
     {"id": "setup_fit_salvager", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 25861"}},
+    {"id": "setup_fit_rig1", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 31089"}},
+    {"id": "setup_fit_rig2", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 31089"}},
+    {"id": "setup_fit_rig3", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 31089"}},
     {"id": "setup_fit_gyro", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 519"}},
     {"id": "setup_fit_sse", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 3829"}},
     {"id": "setup_load_ammo", "setup": true, "action": {"type": "slash_command", "command": "/load 90000001 185 400"}},
@@ -205,7 +209,7 @@
       "id": "wait_salvage_cycle",
       "action": {"type": "wait", "wait_ms": 12000, "strict_wait": true},
       "wait_until": {
-        "timeout_ms": 35000,
+        "timeout_ms": 65000,
         "poll_interval_ms": 1000,
         "checks": {
           "state_checks": [
@@ -314,6 +318,16 @@
       "id": "tc_self_destruct_detonate",
       "time_control": true,
       "action": {"type": "advance_server_time", "seconds": 125},
+      "wait_until": {
+        "timeout_ms": 10000,
+        "poll_interval_ms": 500,
+        "checks": {
+          "state_checks": [
+            {"field": "session.shipid", "changed": true},
+            {"field": "wallet_isk", "delta": 0.0, "tolerance": 0.01}
+          ]
+        }
+      },
       "checks": {
         "state_checks": [
           {"field": "session.shipid", "changed": true},

@@ -57,8 +57,12 @@ class CombatAftermathScenarioTests(unittest.TestCase):
         self.assertIn("OnItemChange", loot_chk["notification_received"])
         self.assertTrue(loot_chk["ui_delta_without_relog"])
 
+        setup_cmds = [s["action"].get("command", "") for s in scenario.get("steps", []) if s.get("setup")]
+        self.assertGreaterEqual(setup_cmds.count("/fit 90000001 31089"), 3)
+
         salv_step = by_id["wait_salvage_cycle"]
         self.assertIn("wait_until", salv_step)
+        self.assertGreaterEqual(salv_step["wait_until"]["timeout_ms"], 60000)
         self.assertTrue(salv_step["checks"]["ui_delta_without_relog"])
 
         ins_chk = by_id["confirm_platinum_insurance"]["checks"]
@@ -69,6 +73,7 @@ class CombatAftermathScenarioTests(unittest.TestCase):
         self.assertIn("ship.SelfDestruct", sd_chk["rpc_sent"])
         self.assertTrue(sd_chk["expect_modal_absent"])
 
+        self.assertIn("wait_until", by_id["tc_self_destruct_detonate"])
         det_chk = by_id["tc_self_destruct_detonate"]["checks"]
         self.assertIn({"field": "session.shipid", "changed": True}, det_chk["state_checks"])
         self.assertIn({"field": "wallet_isk", "delta": 0.0, "tolerance": 0.01}, det_chk["state_checks"])

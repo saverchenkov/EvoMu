@@ -257,7 +257,7 @@ def _wait_view_settled(sm, timeout_sec=10.0):
     _sleep_ms(100)
 
 
-def _sync_quasar_gateway(sm, char_id=None):
+def _sync_quasar_gateway(sm, char_id=None, raise_on_error=False):
     try:
         pgw = sm.GetService("publicGatewaySvc")
         sess = getattr(__builtin__, "session", None)
@@ -284,6 +284,8 @@ def _sync_quasar_gateway(sm, char_id=None):
                 try:
                     tok = sm.RemoteSvc("userSvc").GetUserToken()
                 except Exception:
+                    if raise_on_error:
+                        raise
                     tok = None
                 if tok and hasattr(pgw, "set_auth_token"):
                     pgw.set_auth_token(tok)
@@ -306,6 +308,8 @@ def _sync_quasar_gateway(sm, char_id=None):
                 gw._evomu_dev_cid = char_id
         return pgw
     except Exception:
+        if raise_on_error:
+            raise
         return None
 
 
@@ -502,7 +506,7 @@ def _snapshot_ship_fitted_item_ids(sm, ship_id):
     return fitted_ids
 
 
-def _wait_session_attr(attr, expected, timeout_sec=5.0, raise_on_timeout=False):
+def _wait_session_attr(attr, expected, timeout_sec=5.0, raise_on_timeout=True):
     deadline = time.time() + float(timeout_sec)
     cur = None
     busy = False
@@ -893,14 +897,12 @@ def _undock_ship(sm, allow_time_control=True):
         _ensure_warp_signal_tracker(sm)
         return
     if allow_time_control:
-        try:
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
-        except Exception:
-            pass
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
     else:
         _wait_session_timer_clear(max_wait_sec=12.0)
     _sleep_ms(600)
     sm.RemoteSvc("ship").Undock()
+    undocked_ok = False
     deadline = time.time() + (16.0 if not allow_time_control else 10.0)
     while time.time() < deadline:
         sess = getattr(__builtin__, "session", None)
@@ -911,13 +913,21 @@ def _undock_ship(sm, allow_time_control=True):
             and not getattr(sess, "mutating", 0)
             and getattr(sess, "changing", None) is None
         ):
+            undocked_ok = True
             break
         _sleep_ms(100)
+    if not undocked_ok:
+        sess = getattr(__builtin__, "session", None)
+        raise RuntimeError(
+            "Timed out waiting for undock (solarsystemid=%r, stationid=%r, structureid=%r)"
+            % (
+                getattr(sess, "solarsystemid", None) if sess is not None else None,
+                getattr(sess, "stationid", None) if sess is not None else None,
+                getattr(sess, "structureid", None) if sess is not None else None,
+            )
+        )
     if allow_time_control:
-        try:
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
-        except Exception:
-            pass
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
     _ensure_view(sm, "inflight")
     _ensure_warp_signal_tracker(sm)
 
@@ -932,10 +942,7 @@ def _dock_station(sm, station_id=60003760, allow_time_control=True):
         _wait_warp_fx_settled(sm, timeout_sec=6.0, allow_time_control=allow_time_control)
     _wait_view_settled(sm)
     if allow_time_control:
-        try:
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
-        except Exception:
-            pass
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
     else:
         _wait_session_timer_clear(max_wait_sec=12.0)
     sm.RemoteSvc("stationSvc").Dock(station_id)
@@ -962,10 +969,7 @@ def _dock_station(sm, station_id=60003760, allow_time_control=True):
             )
         )
     if allow_time_control:
-        try:
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
-        except Exception:
-            pass
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
     _ensure_view(sm, "hangar")
 
 
@@ -997,14 +1001,15 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
         sm.RemoteSvc("timeControl").ClearSessionTimer()
         sm.RemoteSvc("structureDocking").Undock(int(getattr(sess, "structureid")))
         _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
+    sess = getattr(__builtin__, "session", None)
     if getattr(sess, "solarsystemid", None) and not getattr(sess, "stationid", None):
         _sleep_sim_ms(1200)
     _wait_warp_fx_settled(sm, timeout_sec=35.0)
-    try:
-        beyonce, _ = sm.RemoteSvc("beyonce").MachoBindObject(target_system, None)
+    sess = getattr(__builtin__, "session", None)
+    cur_stop_sys = int(getattr(sess, "solarsystemid", 0) or getattr(sess, "solarsystemid2", 0) or 0) if sess is not None else 0
+    if cur_stop_sys and not getattr(sess, "stationid", None) and not getattr(sess, "structureid", None):
+        beyonce, _ = sm.RemoteSvc("beyonce").MachoBindObject(cur_stop_sys, None)
         beyonce.CmdStop()
-    except Exception:
-        pass
     _advance_clock(sm, ipc, 12)
     _sleep_sim_ms(1200)
     _sleep_ms(1200)
@@ -1012,7 +1017,7 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
     try:
         sm.RemoteSvc("stationSvc").Dock(target_station)
     except Exception:
-        _try_slash(sm, "/tr %d" % target_station)
+        sm.RemoteSvc("slash").SlashCmd("/tr %d" % target_station)
         _wait_session_attr("solarsystemid2", target_system, timeout_sec=3.0, raise_on_timeout=True)
         _wait_view_settled(sm)
         _advance_clock(sm, ipc, 12)
@@ -1078,15 +1083,26 @@ def _cleanup_corp_structures(sm, ipc=None, structure_ids=None):
             try:
                 sm.RemoteSvc("structureDeployment").Unanchor(sid)
             except Exception:
-                _try_slash(sm, "/structure state %d 110" % sid)
+                sm.RemoteSvc("slash").SlashCmd("/structure state %d 110" % sid)
                 sm.RemoteSvc("structureDeployment").Unanchor(sid)
-            _try_slash(sm, "/upwelltimer %d" % sid)
+            sm.RemoteSvc("slash").SlashCmd("/upwelltimer %d" % sid)
             _advance_clock(sm, ipc, 5)
         except Exception as exc:
             errors.append("structure %d cleanup: %s" % (sid, exc))
     if ids:
         try:
-            sm.RemoteSvc("structureDirectory").GetMyCorporationStructures()
+            rem_structs = sm.RemoteSvc("structureDirectory").GetMyCorporationStructures()
+            rem_ids = []
+            if isinstance(rem_structs, dict):
+                rem_ids = [int(k) for k in rem_structs.keys()]
+            elif isinstance(rem_structs, (list, tuple)):
+                rem_ids = [
+                    int(_get_field(row, "structureID", _get_field(row, "itemID", 0)) or 0)
+                    for row in rem_structs
+                ]
+                rem_ids = [x for x in rem_ids if x]
+            if rem_ids:
+                errors.append("remaining active corp structures after cleanup: %r" % (rem_ids,))
         except Exception as exc:
             errors.append("GetMyCorporationStructures verify: %s" % exc)
     if errors:
@@ -1127,10 +1143,7 @@ def _ensure_home_ship(sm, target_ship_id, ipc=None):
         sm.RemoteSvc("ship").Board(target_sid)
     except Exception:
         _advance_clock(sm, ipc, 12)
-        try:
-            sm.RemoteSvc("ship").AssembleShip([target_sid])
-        except Exception:
-            pass
+        sm.RemoteSvc("ship").AssembleShip([target_sid])
         sm.RemoteSvc("timeControl").ClearSessionTimer()
         sm.RemoteSvc("ship").Board(target_sid)
     _wait_session_attr("shipid", target_sid, timeout_sec=3.0, raise_on_timeout=True)
@@ -1242,7 +1255,7 @@ def _reset_baseline_state(sm, ipc, baseline, char_id=None):
         _run_step("leave_faction_warfare", _leave_fw)
 
     if target_char:
-        _run_step("sync_quasar_gateway", lambda: _sync_quasar_gateway(sm, target_char))
+        _run_step("sync_quasar_gateway", lambda: _sync_quasar_gateway(sm, target_char, raise_on_error=True))
 
     if errors:
         raise RuntimeError("Baseline state reset failed: %s" % "; ".join(errors))

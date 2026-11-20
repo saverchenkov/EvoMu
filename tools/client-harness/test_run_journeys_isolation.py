@@ -1313,6 +1313,38 @@ class RunJourneysIsolationTests(unittest.TestCase):
         self.assertFalse(outcomes_c2["fleet"]["bridge_verified"])
         self.assertIn("client2 unavailable", outcomes_c2["fleet"]["traceback"])
 
+        # Real IPC {"ok": False} error reply and invalid/missing char2_id also fail closed (BF-02)
+        class _ErrDictC2IPC(_FakeIPC):
+            def request(self, payload):
+                if payload.get("cmd") == "ensure_client2_ready":
+                    return {"ok": False, "error": "client2 unavailable"}
+                return super(_ErrDictC2IPC, self).request(payload)
+
+        outcomes_c2_dict, _, _ = self._run_driver_subset(["fleet"], ipc_override=_ErrDictC2IPC())
+        self.assertFalse(outcomes_c2_dict["fleet"]["passed"])
+        self.assertFalse(outcomes_c2_dict["fleet"]["bridge_verified"])
+        self.assertIn("client2 unavailable", outcomes_c2_dict["fleet"]["traceback"])
+
+        class _BadCidC2IPC(_FakeIPC):
+            def request(self, payload):
+                if payload.get("cmd") == "ensure_client2_ready":
+                    return {"ok": True}
+                return super(_BadCidC2IPC, self).request(payload)
+
+        outcomes_c2_bad, _, _ = self._run_driver_subset(["fleet"], ipc_override=_BadCidC2IPC())
+        self.assertFalse(outcomes_c2_bad["fleet"]["passed"])
+        self.assertIn("invalid char2_id", outcomes_c2_bad["fleet"]["traceback"])
+
+        class _ErrFleetCmdIPC(_FakeIPC):
+            def request(self, payload):
+                if payload.get("cmd") == "c2_accept_fleet":
+                    return {"ok": False, "error": "fleet invite failed"}
+                return super(_ErrFleetCmdIPC, self).request(payload)
+
+        outcomes_c2_cmd, _, _ = self._run_driver_subset(["fleet"], ipc_override=_ErrFleetCmdIPC())
+        self.assertFalse(outcomes_c2_cmd["fleet"]["passed"])
+        self.assertIn("fleet invite failed", outcomes_c2_cmd["fleet"]["traceback"])
+
     def test_reset_baseline_state_resets_fw_targets_fittings_and_propagates_errors(self):
         import evomu_inclient_helpers as hlp
 
@@ -1378,6 +1410,53 @@ class RunJourneysIsolationTests(unittest.TestCase):
             self.assertIn("fleet stuck", str(ctx_fl.exception))
             state.fail_methods.pop("fleetMgr.LeaveFleet")
             sess.fleetid = None
+
+            # Quasar sync failure during _reset_baseline_state propagates instead of returning None
+            sm.GetService("publicGatewaySvc").publicGateway._evomu_dev_uid = -1
+            state.fail_methods["userSvc.GetUserToken"] = RuntimeError("quasar token failed")
+            with self.assertRaises(RuntimeError) as ctx_qs:
+                hlp._reset_baseline_state(sm, ipc, baseline)
+            self.assertIn("sync_quasar_gateway", str(ctx_qs.exception))
+            self.assertIn("quasar token failed", str(ctx_qs.exception))
+            state.fail_methods.pop("userSvc.GetUserToken")
+
+            # _cleanup_corp_structures fails if GetMyCorporationStructures still shows active structures
+            sess.corpid = 98000099
+            state.structures[1090000888] = {
+                "structureID": 1090000888,
+                "corporationID": 98000099,
+                "ownerCorpID": 98000099,
+                "state": "ShieldVulnerable",
+            }
+            state.fail_methods["slash.SlashCmd"] = RuntimeError("upwelltimer refused")
+            with self.assertRaises(RuntimeError) as ctx_st:
+                hlp._cleanup_corp_structures(sm, ipc=ipc, structure_ids=[1090000888])
+            self.assertIn("upwelltimer refused", str(ctx_st.exception))
+            self.assertIn("remaining active corp structures", str(ctx_st.exception))
+            state.fail_methods.pop("slash.SlashCmd")
+            state.structures.clear()
+            sess.corpid = 1000167
+
+            # _wait_session_attr defaults raise_on_timeout=True and _undock_ship fails closed on timeout
+            with mock.patch.object(hlp.time, "time", side_effect=[0.0, 0.01, 1.0]):
+                with self.assertRaises(RuntimeError):
+                    hlp._wait_session_attr("solarsystemid2", 39999999, timeout_sec=0.05)
+            sess.stationid = 60003760
+            sess.solarsystemid = None
+            t_now = [0.0]
+
+            def _tick_clock():
+                t_now[0] += 6.0
+                return t_now[0]
+
+            with (
+                mock.patch.object(hlp.time, "time", side_effect=_tick_clock),
+                mock.patch.object(hlp, "_wait_view_settled", return_value=None),
+                mock.patch.object(state, "handle_rpc", return_value=True),
+            ):
+                with self.assertRaises(RuntimeError) as ctx_ud:
+                    hlp._undock_ship(sm)
+                self.assertIn("Timed out waiting for undock", str(ctx_ud.exception))
 
         # Post-reset failure inside _execute_all_journeys fails the journey rather than swallowing
         outcomes_fw, _, _ = self._run_driver_subset(
