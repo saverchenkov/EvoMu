@@ -198,6 +198,36 @@ fn verify_corp_industry_job_read_access(
     Ok(())
 }
 
+/// Returns `true` when `char_id` is an active member of player corporation `target_corp_id`
+/// and holds CEO status or any role bit in `required_roles` from authoritative DB state.
+#[allow(clippy::too_many_arguments)]
+fn has_corp_monitor_access(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    target_corp_id: i64,
+    location_id: Option<i64>,
+    required_roles: u64,
+    now_unix: u64,
+) -> bool {
+    if is_npc_corporation(ctx, target_corp_id) {
+        return false;
+    }
+    if caller_corp_id_db_first(snap, session, char_id) != target_corp_id {
+        return false;
+    }
+    let Some(corp) = snap.corporations.get(&target_corp_id) else {
+        return false;
+    };
+    if corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id) {
+        return false;
+    }
+    let (is_ceo, caller_roles) =
+        snap.effective_corp_roles_at(target_corp_id, char_id, location_id, 0, now_unix);
+    is_ceo || (caller_roles & required_roles) != 0
+}
+
 /// Computes a read-only effective job and pause-metadata view at `now_unix` without mutating
 /// snapshot state, projecting service-offline pauses and service-online resumptions.
 fn effective_industry_job_view(
@@ -1263,7 +1293,7 @@ pub(crate) fn handle_industry_job_queries(
             }
             let job_arg = &args[0];
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let char_corp = caller_corp_id_db_first(snap, session, char_id);
                 let input_loc = job_arg.dict_get("inputLocation");
                 let explicit_loc = job_arg
                     .dict_get("inputLocationID")
@@ -1366,29 +1396,26 @@ pub(crate) fn handle_industry_job_queries(
                     });
                 };
 
-                if owner_id != char_id {
-                    let is_corp = owner_id == char_corp && char_corp >= 2_000_000;
-                    let (is_ceo, caller_roles) = snap.effective_corp_roles_at(
-                        char_corp,
-                        char_id,
-                        None,
-                        session.corp_role,
-                        ctx.now_unix(),
-                    );
+                if owner_id != char_id && !session.has_gm_role() {
                     let div_bits = if (116..=122).contains(&flag_id) {
                         let div_idx = (flag_id as u16) - 116;
                         (1u64 << (13 + div_idx)) | (1u64 << (20 + div_idx))
                     } else {
                         0
                     };
-                    let has_role = session.has_gm_role()
-                        || is_ceo
-                        || (caller_roles
-                            & (eve_db::corp_roles::ROLE_DIRECTOR
-                                | eve_db::corp_roles::ROLE_FACTORY_MANAGER
-                                | div_bits)
-                            != 0);
-                    if !is_corp || !has_role {
+                    let required_roles = eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                        | div_bits;
+                    if !has_corp_monitor_access(
+                        ctx,
+                        snap,
+                        session,
+                        char_id,
+                        owner_id,
+                        Some(location_id).filter(|&id| id > 0),
+                        required_roles,
+                        ctx.now_unix(),
+                    ) {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: format!(
@@ -1497,20 +1524,28 @@ pub(crate) fn handle_industry_job_queries(
                     return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found"), client_error: None });
                 };
                 let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
-                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                if j.installer_id != char_id {
-                    let (is_ceo, caller_roles) = snap.effective_corp_roles_at(
-                        char_corp,
-                        char_id,
-                        None,
-                        session.corp_role,
-                        ctx.now_unix(),
-                    );
-                    let has_role = is_ceo
-                        || (caller_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER) != 0);
-                    let is_corp_job = meta.use_corp && meta.owner_id == char_corp && char_corp >= 2_000_000;
-                    if !is_corp_job || !has_role {
-                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: format!("Industry job {job_id} does not belong to character {char_id} or caller lacks Director/Factory Manager role"), client_error: None });
+                if j.installer_id != char_id && !session.has_gm_role() {
+                    let required_roles = eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_FACTORY_MANAGER;
+                    let allowed = meta.use_corp
+                        && has_corp_monitor_access(
+                            ctx,
+                            snap,
+                            session,
+                            char_id,
+                            meta.owner_id,
+                            Some(j.facility_id).filter(|&id| id > 0),
+                            required_roles,
+                            ctx.now_unix(),
+                        );
+                    if !allowed {
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message: format!(
+                                "Industry job {job_id} does not belong to character {char_id} or caller lacks Director/Factory Manager role"
+                            ),
+                            client_error: None,
+                        });
                     }
                 }
                 let nid = -8_950_000_000_000_i64 - char_id;
