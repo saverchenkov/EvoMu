@@ -27,7 +27,7 @@ use crate::services::industry_pi::{
 };
 use eve_db::{IndustryJobRecord, InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
@@ -55,6 +55,16 @@ pub(super) fn blueprint_activity_product_qty_per_run(
         .unwrap_or_else(|| u64::from(bp.product_quantity.max(1)))
 }
 
+fn bounded_f64_to_pos_u64(val: f64) -> u64 {
+    if val.is_nan() || val <= 1.0 {
+        1
+    } else if val >= (u64::MAX as f64) {
+        u64::MAX
+    } else {
+        val as u64
+    }
+}
+
 /// Computes checked `i64` material consumption for manufacturing/reactions, rejecting overflow or non-positive totals.
 fn checked_industry_material_qty(
     runs: u32,
@@ -76,22 +86,9 @@ fn checked_industry_material_qty(
         message: format!("Material requirement overflow for type {type_id} over {runs} runs"),
         client_error: None,
     })?;
-    if req_u64 == 0 {
-        return Err(BridgeRpcError {
-            code: "InvalidIndustryJobParameters".into(),
-            message: format!(
-                "Material requirement for type {type_id} over {runs} runs must be positive"
-            ),
-            client_error: None,
-        });
-    }
-    i64::try_from(req_u64).map_err(|_| BridgeRpcError {
-        code: "InvalidIndustryJobParameters".into(),
-        message: format!(
-            "Material requirement {req_u64} for type {type_id} exceeds representable bounds"
-        ),
-        client_error: None,
-    })
+    ItemQty::try_from_u64(req_u64)
+        .map(ItemQty::as_i64)
+        .map_err(|e| e.into_rpc_error("InvalidIndustryJobParameters"))
 }
 
 /// Validates checked `i64` production output quantity for manufacturing (`1`) or reactions (`9`).
@@ -101,18 +98,10 @@ pub(super) fn checked_production_output_qty(
     runs: u32,
 ) -> Result<i64, BridgeRpcError> {
     let per_run = blueprint_activity_product_qty_per_run(bp, activity_id);
-    u64::from(runs)
-        .checked_mul(per_run)
-        .and_then(|total| i64::try_from(total).ok())
-        .filter(|&total| total > 0)
-        .ok_or_else(|| BridgeRpcError {
-            code: "InvalidIndustryJobParameters".into(),
-            message: format!(
-                "Output product quantity overflow for blueprint {} over {runs} runs",
-                bp.blueprint_type_id
-            ),
-            client_error: None,
-        })
+    ItemQty::try_from_u32(runs)
+        .and_then(|r| r.checked_mul_u64(per_run))
+        .map(ItemQty::as_i64)
+        .map_err(|e| e.into_rpc_error("InvalidIndustryJobParameters"))
 }
 
 pub fn handle_industry_jobs(
@@ -157,7 +146,7 @@ pub fn handle_industry_jobs(
                 .or_else(|| lookup_first("decryptorID"))
                 .and_then(|v| v.as_i64())
                 .filter(|&id| id > 0)
-                .map(|id| id as TypeId);
+                .and_then(|id| TypeId::try_from(id).ok());
             let explicit_use_corp: Option<bool> = lookup_first("useCorp")
                 .or_else(|| lookup_first("isCorpJob"))
                 .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0)));
@@ -240,7 +229,7 @@ pub fn handle_industry_jobs(
 
             let resolved_bp_type_id = raw_bp_type_id.filter(|&id| id > 0).or_else(|| {
                 explicit_bp_item_id.and_then(|iid| {
-                    ctx.db.with_snapshot(|snap| snap.items.get(&iid).map(|it| it.type_id as i64))
+                    ctx.db.with_snapshot(|snap| snap.items.get(&iid).map(|it| i64::from(it.type_id)))
                 })
             });
             let Some(raw_bp_tid) = resolved_bp_type_id else {
@@ -666,9 +655,9 @@ pub fn handle_industry_jobs(
                 let enc_lvl = skill_lvl(21791).max(skill_lvl(23121)).max(skill_lvl(3408));
 
                 let max_slots = match activity_id {
-                    1 => 1 + (mass_prod_lvl as usize) + (adv_mass_prod_lvl as usize),
-                    9 => 1 + (mass_react_lvl as usize) + (adv_mass_react_lvl as usize),
-                    _ => 1 + (lab_op_lvl as usize) + (adv_lab_op_lvl as usize),
+                    1 => 1 + usize::from(mass_prod_lvl) + usize::from(adv_mass_prod_lvl),
+                    9 => 1 + usize::from(mass_react_lvl) + usize::from(adv_mass_react_lvl),
+                    _ => 1 + usize::from(lab_op_lvl) + usize::from(adv_lab_op_lvl),
                 };
                 let active_slots_used = snap
                     .industry_jobs
@@ -726,7 +715,7 @@ pub fn handle_industry_jobs(
                     if !(116..=122).contains(&flag_num) {
                         return false;
                     }
-                    let div_idx = (flag_num - 116) as usize;
+                    let div_idx = usize::from(flag_num - 116);
                     let req = if is_container {
                         eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx]
                     } else {
@@ -965,12 +954,20 @@ pub fn handle_industry_jobs(
                 let me_level = bp_rec
                     .dynamic_attributes
                     .get(&ATTR_BLUEPRINT_ME)
-                    .map(|v| (*v as i64).clamp(0, 10) as u8)
+                    .and_then(|&v| {
+                        v.is_finite()
+                            .then(|| u8::try_from((v as i64).clamp(0, 10)).ok())
+                            .flatten()
+                    })
                     .unwrap_or(0);
                 let te_level = bp_rec
                     .dynamic_attributes
                     .get(&ATTR_BLUEPRINT_TE)
-                    .map(|v| (*v as i64).clamp(0, 20) as u8)
+                    .and_then(|&v| {
+                        v.is_finite()
+                            .then(|| u8::try_from((v as i64).clamp(0, 20)).ok())
+                            .flatten()
+                    })
                     .unwrap_or(0);
 
                 let (dec_prob_mult, dec_me_mod, dec_te_mod, dec_runs_mod) =
@@ -981,12 +978,20 @@ pub fn handle_industry_jobs(
                     };
 
                 let (product_type_id, base_inv_runs): (TypeId, i32) = if activity_id == 8 {
-                    bp.activities
+                    match bp
+                        .activities
                         .get("invention")
                         .or_else(|| bp.activities.get("8"))
                         .and_then(|a| a.products.first())
-                        .map(|p| (p.type_id, i32::try_from(p.quantity.max(1)).unwrap_or(i32::MAX)))
-                        .unwrap_or((11372, 1))
+                    {
+                        Some(p) => {
+                            let inv_runs = ItemQty::try_from_u64(p.quantity.max(1))
+                                .and_then(ItemQty::try_into_stack_i32)
+                                .map_err(|e| e.into_rpc_error("InvalidIndustryJobParameters"))?;
+                            (p.type_id, inv_runs)
+                        }
+                        None => (11372, 1),
+                    }
                 } else if activity_id == 9 {
                     let r_prod = bp
                         .activities
@@ -1044,18 +1049,17 @@ pub fn handle_industry_jobs(
                     3 | 4 => {
                         const LVL_SECS: [u64; 10] = [105, 250, 595, 1_414, 3_360, 8_000, 19_000, 45_255, 107_700, 256_000];
                         let (cur_lvl, base_sec, skill_mult) = if activity_id == 4 {
-                            (me_level as usize, bp.research_me_time_sec.max(1) as f64, me_skill_mult)
+                            (usize::from(me_level), bp.research_me_time_sec.max(1) as f64, me_skill_mult)
                         } else {
-                            ((te_level / 2) as usize, bp.research_te_time_sec.max(1) as f64, te_skill_mult)
+                            (usize::from(te_level / 2), bp.research_te_time_sec.max(1) as f64, te_skill_mult)
                         };
-                        let raw_sum: u64 = LVL_SECS[cur_lvl.min(10)..(cur_lvl + runs as usize).min(10)].iter().sum();
-                        ((raw_sum as f64) * (base_sec / 105.0) * skill_mult * eff_time_mod).round().max(1.0) as u64
+                        let runs_step = usize::try_from(runs).unwrap_or(10);
+                        let raw_sum: u64 = LVL_SECS[cur_lvl.min(10)..cur_lvl.saturating_add(runs_step).min(10)].iter().sum();
+                        bounded_f64_to_pos_u64(((raw_sum as f64) * (base_sec / 105.0) * skill_mult * eff_time_mod).round())
                     }
-                    5 => (((bp.copy_time_sec.max(1) as f64) * copy_skill_mult * eff_time_mod)
-                        .round()
-                        .max(1.0) as u64)
+                    5 => bounded_f64_to_pos_u64(((bp.copy_time_sec.max(1) as f64) * copy_skill_mult * eff_time_mod).round())
                         .saturating_mul(u64::from(total_copy_runs)),
-                    8 => (((bp.invention_time_sec.max(1) as f64) * eff_time_mod).round().max(1.0) as u64)
+                    8 => bounded_f64_to_pos_u64(((bp.invention_time_sec.max(1) as f64) * eff_time_mod).round())
                         .saturating_mul(u64::from(runs)),
                     9 => {
                         let base_react_sec = bp
@@ -1074,7 +1078,7 @@ pub fn handle_industry_jobs(
                                 client_error: None,
                             });
                         }
-                        (per_run_raw.round().max(1.0) as u64)
+                        bounded_f64_to_pos_u64(per_run_raw.round())
                             .checked_mul(u64::from(runs))
                             .ok_or_else(|| BridgeRpcError {
                                 code: "InvalidIndustryJobParameters".into(),
@@ -1193,9 +1197,9 @@ pub fn handle_industry_jobs(
                 );
 
                 let research_step = if activity_id == 4 {
-                    me_level as usize
+                    usize::from(me_level)
                 } else if activity_id == 3 {
-                    (te_level / 2) as usize
+                    usize::from(te_level / 2)
                 } else {
                     0
                 };
@@ -1354,13 +1358,8 @@ pub fn handle_industry_jobs(
                 }
                 let mut consumed_materials: Vec<(TypeId, i64)> = Vec::new();
                 let mut consume_material = |snap: &mut eve_db::WorldStateSnapshot, mat_tid: TypeId, req_qty: i64, err_code: &str| -> Result<(), BridgeRpcError> {
-                    if req_qty <= 0 {
-                        return Err(BridgeRpcError {
-                            code: "InvalidIndustryJobParameters".into(),
-                            message: format!("Material requirement for type {mat_tid} must be positive (got {req_qty})"),
-                            client_error: None,
-                        });
-                    }
+                    let req_item_qty = ItemQty::try_from_i64(req_qty)
+                        .map_err(|e| e.into_rpc_error("InvalidIndustryJobParameters"))?;
                     let mut matching_stacks: Vec<(bool, i64, i32)> = snap.items.values().filter(|i| {
                         let loc_ok = input_container_id.map_or(i.location_id == station_id || i.location_id == bp_rec.location_id, |cid| i.location_id == cid);
                         let flag_ok = explicit_input_flag.map_or(true, |ef| input_is_non_office_container || i.flag == ef);
@@ -1371,10 +1370,10 @@ pub fn handle_industry_jobs(
                         .iter()
                         .try_fold(0_i64, |acc, &(_, _, q)| acc.checked_add(i64::from(q)))
                         .unwrap_or(i64::MAX);
-                    if total_avail < req_qty {
-                        return Err(BridgeRpcError { code: err_code.into(), message: format!("Missing {req_qty}x material type {mat_tid} at {station_id}"), client_error: None });
+                    if total_avail < req_item_qty.as_i64() {
+                        return Err(BridgeRpcError { code: err_code.into(), message: format!("Missing {req_item_qty}x material type {mat_tid} at {station_id}"), client_error: None });
                     }
-                    let mut rem = req_qty;
+                    let mut rem = req_item_qty.as_i64();
                     for (_, mid, _) in matching_stacks {
                         if rem <= 0 {
                             break;
@@ -1383,14 +1382,12 @@ pub fn handle_industry_jobs(
                             continue;
                         };
                         let take_i64 = i64::from(m_avail).min(rem);
-                        let take = i32::try_from(take_i64).map_err(|_| BridgeRpcError {
-                            code: "InvalidIndustryJobParameters".into(),
-                            message: format!("Material stack take {take_i64} exceeds stack bounds for type {mat_tid}"),
-                            client_error: None,
-                        })?;
-                        if take <= 0 {
+                        if take_i64 <= 0 {
                             continue;
                         }
+                        let take = ItemQty::try_from_i64(take_i64)
+                            .and_then(ItemQty::try_into_stack_i32)
+                            .map_err(|e| e.into_rpc_error("InvalidIndustryJobParameters"))?;
                         let mut mat_opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
                         mat_opts.expected_owner_id = m_owner;
                         // Corp hangar division roles were already verified by `has_corp_div_take` (which respects `session.corp_role`).
@@ -1640,7 +1637,7 @@ pub fn handle_industry_jobs(
                     bp_iid = split_id;
                 }
 
-                let licensed_runs = if activity_id == 8 && cost_meta.invented_runs > 0 { Some(cost_meta.invented_runs as u32) } else if activity_id == 5 { Some(copy_licensed_runs) } else { None };
+                let licensed_runs = if activity_id == 8 && cost_meta.invented_runs > 0 { u32::try_from(cost_meta.invented_runs).ok() } else if activity_id == 5 { Some(copy_licensed_runs) } else { None };
                 snap.industry_jobs.insert(jid, IndustryJobRecord {
                     job_id: jid, installer_id: char_id, facility_id: station_id, blueprint_item_id: bp_iid,
                     blueprint_type_id: bp_type_id, activity_id, runs, product_type_id, status: "Active".into(),
@@ -1703,16 +1700,16 @@ pub fn handle_industry_jobs(
                         wallet_corp_div,
                         post_wallet_balance,
                     );
-                    emit_industry_job(ctx, char_id, cost_meta.owner_id, job_id, bp_iid, 1, runs as i64);
+                    emit_industry_job(ctx, char_id, cost_meta.owner_id, job_id, bp_iid, 1, i64::from(runs));
                     crate::services::notify_emitters_character_services::emit_industry_materials_consumed(ctx, char_id, job_id, station_id, docked_id, cost_meta.owner_id, cost_meta.use_corp, eff_in_flag, in_cid, &cost_meta.consumed_materials);
                     Some(Ok(PyRep::keyval([
                         ("jobID", PyRep::Integer(job_id)), ("ownerID", PyRep::Integer(cost_meta.owner_id)),
                         ("blueprintID", PyRep::Integer(bp_iid)), ("blueprintItemID", PyRep::Integer(bp_iid)),
-                        ("blueprintTypeID", PyRep::Integer(bp_type_id as i64)), ("facilityID", PyRep::Integer(station_id)),
-                        ("activityID", PyRep::Integer(activity_id as i64)), ("runs", PyRep::Integer(runs as i64)),
-                        ("productTypeID", PyRep::Integer(product_type_id as i64)), ("inventedRuns", PyRep::Integer(cost_meta.invented_runs as i64)),
+                        ("blueprintTypeID", PyRep::Integer(i64::from(bp_type_id))), ("facilityID", PyRep::Integer(station_id)),
+                        ("activityID", PyRep::Integer(i64::from(activity_id))), ("runs", PyRep::Integer(i64::from(runs))),
+                        ("productTypeID", PyRep::Integer(i64::from(product_type_id))), ("inventedRuns", PyRep::Integer(i64::from(cost_meta.invented_runs))),
                         ("inventedME", PyRep::Real(cost_meta.invented_me)), ("inventedTE", PyRep::Real(cost_meta.invented_te)),
-                        ("durationSeconds", PyRep::Integer(duration_sec as i64)), ("tritaniumRequired", PyRep::Integer(trit_req)),
+                        ("durationSeconds", PyRep::Integer(i64::try_from(duration_sec).unwrap_or(i64::MAX))), ("tritaniumRequired", PyRep::Integer(trit_req)),
                         ("inventionProbability", PyRep::Real(inv_prob)), ("probability", PyRep::Real(inv_prob)),
                         ("estimatedItemValue", PyRep::Real(cost_meta.eiv_isk)), ("estimatedItemValueISK", PyRep::Real(cost_meta.eiv_isk)),
                         ("systemCostIndex", PyRep::Real(cost_meta.system_cost_index)), ("structureCostModifier", PyRep::Real(cost_meta.structure_cost_modifier)),
@@ -1746,4 +1743,40 @@ mod industry_jobs_cov_unit_tests;
 #[cfg(test)]
 #[path = "industry_jobs_edges2_tests.rs"]
 mod industry_jobs_edges2_tests;
+
+#[cfg(test)]
+mod qty_tests {
+    use super::*;
+    use eve_sde::SdeRegistry;
+
+    #[test]
+    fn checked_industry_qty_helpers_enforce_item_qty_bounds() {
+        let sde = SdeRegistry::with_canonical_seed();
+        let mut bp = sde
+            .blueprints
+            .values()
+            .next()
+            .cloned()
+            .expect("canonical seed blueprint");
+        bp.activities.clear();
+        bp.product_quantity = 3_000;
+
+        let zero_err = checked_production_output_qty(&bp, 1, 0).unwrap_err();
+        assert_eq!(zero_err.code, "InvalidIndustryJobParameters");
+
+        let large_ok = checked_production_output_qty(&bp, 1, 1_000_000).unwrap();
+        assert_eq!(large_ok, 3_000_000_000);
+
+        bp.product_quantity = u32::MAX;
+        let overflow_err = checked_production_output_qty(&bp, 1, u32::MAX).unwrap_err();
+        assert_eq!(overflow_err.code, "InvalidIndustryJobParameters");
+
+        let mat_zero_err = checked_industry_material_qty(0, 10, 0, 0.0, 0.0, 34).unwrap_err();
+        assert_eq!(mat_zero_err.code, "InvalidIndustryJobParameters");
+
+        assert_eq!(bounded_f64_to_pos_u64(f64::NAN), 1);
+        assert_eq!(bounded_f64_to_pos_u64(-10.0), 1);
+        assert_eq!(bounded_f64_to_pos_u64(f64::INFINITY), u64::MAX);
+    }
+}
 
