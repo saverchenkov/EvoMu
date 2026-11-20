@@ -74,10 +74,340 @@ pub(crate) fn target_lock_cap_rpc_error(
     )
 }
 
+fn is_npc_corporation_id(ctx: &ServerContext, corp_id: i64) -> bool {
+    corp_id <= 0
+        || (1_000_000..2_000_000).contains(&corp_id)
+        || ctx.sde.npc_corporations.contains_key(&corp_id)
+}
+
+fn is_on_grid_visible_ball(
+    ctx: &ServerContext,
+    session: &SessionState,
+    target_ball_id: i64,
+    expected_sys_id: u32,
+) -> bool {
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return false;
+    }
+    let Some(caller_sys) = session.solar_system_id else {
+        return false;
+    };
+    if caller_sys != expected_sys_id {
+        return false;
+    }
+    let Some(caller_ship) = session.ship_id else {
+        return false;
+    };
+    let Some(sys) = ctx.systems.get_handle(caller_sys) else {
+        return false;
+    };
+    let view = sys.view();
+    if view.is_ball_cloaked(target_ball_id) || view.is_gate_cloaked(target_ball_id) {
+        return false;
+    }
+    let (Some(caller_pos), Some(target_pos)) = (
+        view.ball_position(caller_ship),
+        view.ball_position(target_ball_id),
+    ) else {
+        return false;
+    };
+    match (
+        view.bubble_id_for_ball(caller_ship),
+        view.bubble_id_for_ball(target_ball_id),
+    ) {
+        (Some(caller_bubble), Some(target_bubble)) => caller_bubble == target_bubble,
+        _ => (caller_pos - target_pos).length() <= eve_destiny::BUBBLE_RADIUS_METERS,
+    }
+}
+
+fn authorize_item_info_access(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    item: &eve_db::InventoryItemRecord,
+    allow_on_grid: bool,
+) -> Result<(), BridgeRpcError> {
+    if session.has_gm_role()
+        || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
+    {
+        return Ok(());
+    }
+    if item.owner_id == char_id {
+        return Ok(());
+    }
+    let authorized_in_db = ctx.db.with_snapshot(|snap| {
+        // 1. Item nested inside caller's own ship, container, or hangar asset.
+        let mut cur_loc = item.location_id;
+        for _ in 0..8 {
+            if (60_000_000..=69_999_999).contains(&cur_loc)
+                || cur_loc >= 1_000_000_000_000
+                || cur_loc <= 0
+            {
+                break;
+            }
+            let Some(parent) = snap.items.get(&cur_loc) else {
+                break;
+            };
+            if parent.owner_id == char_id {
+                return true;
+            }
+            if parent.location_id == cur_loc {
+                break;
+            }
+            cur_loc = parent.location_id;
+        }
+
+        // 2. Player-corporation item accessible via DB-authoritative corp/hangar roles (never NPC corp).
+        let caller_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        if caller_corp > 0
+            && item.owner_id == caller_corp
+            && !is_npc_corporation_id(ctx, caller_corp)
+        {
+            let is_valid_member = snap.corporations.get(&caller_corp).is_some_and(|corp| {
+                corp.ceo_id == char_id
+                    || corp.members.contains(&char_id)
+                    || (corp.members.is_empty()
+                        && (corp.member_roles.contains_key(&char_id)
+                            || snap.corp_role_assignments.contains_key(&(caller_corp, char_id))))
+            });
+            if is_valid_member {
+                let (mut root_loc, mut root_flag) = (item.location_id, item.flag);
+                for _ in 0..8 {
+                    if (60_000_000..=69_999_999).contains(&root_loc)
+                        || root_loc >= 1_000_000_000_000
+                    {
+                        break;
+                    }
+                    let Some(parent) = snap.items.get(&root_loc) else {
+                        break;
+                    };
+                    if parent.owner_id != caller_corp {
+                        break;
+                    }
+                    if parent.type_id == 27 {
+                        root_loc = parent.location_id;
+                        break;
+                    }
+                    if parent.location_id == root_loc {
+                        break;
+                    }
+                    root_loc = parent.location_id;
+                    root_flag = parent.flag;
+                }
+                if let Some(gov) = snap.corp_governance.get(&caller_corp) {
+                    if let Some((&st_id, _)) =
+                        gov.offices.iter().find(|(_, &oid)| oid == root_loc)
+                    {
+                        root_loc = st_id;
+                    }
+                }
+                let (is_ceo, role_mask) = snap.effective_corp_roles_at(
+                    caller_corp,
+                    char_id,
+                    Some(root_loc),
+                    0,
+                    ctx.now_unix(),
+                );
+                if is_ceo
+                    || eve_db::corp_roles::has_role(
+                        role_mask,
+                        eve_db::corp_roles::ROLE_DIRECTOR,
+                    )
+                {
+                    return true;
+                }
+                let flag_num = root_flag as i64;
+                if (116..=122).contains(&flag_num) {
+                    let div_idx = (flag_num - 116) as usize;
+                    let div_roles = eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[div_idx]
+                        | eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[div_idx]
+                        | eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx];
+                    return (role_mask & div_roles) != 0;
+                }
+                if matches!(
+                    root_flag,
+                    InventoryFlag::Deliveries
+                        | InventoryFlag::CorpDeliveries
+                        | InventoryFlag::CapsuleerDeliveries
+                ) {
+                    let deliveries_roles = eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY
+                        | eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE
+                        | eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE
+                        | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                        | eve_db::corp_roles::ROLE_TRADER;
+                    return (role_mask & deliveries_roles) != 0;
+                }
+                if snap
+                    .structures
+                    .get(&root_loc)
+                    .is_some_and(|st| st.owner_corp_id == caller_corp)
+                {
+                    let is_structure_equipment_flag =
+                        matches!(flag_num, 11..=34 | 92..=94 | 158..=171 | 180)
+                            || matches!(
+                                root_flag,
+                                InventoryFlag::SpecializedAmmoHold
+                                    | InventoryFlag::QuantumCoreRoom
+                            );
+                    if is_structure_equipment_flag {
+                        let equip_roles = eve_db::corp_roles::ROLE_STATION_MANAGER
+                            | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
+                        if (role_mask & equip_roles) != 0 {
+                            return true;
+                        }
+                    }
+                    if matches!(
+                        root_flag,
+                        InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay
+                    ) {
+                        let fuel_roles = eve_db::corp_roles::ROLE_STATION_MANAGER
+                            | eve_db::corp_roles::ROLE_STARBASE_CARETAKER
+                            | eve_db::corp_roles::ROLE_STARBASE_OPERATOR
+                            | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
+                        if (role_mask & fuel_roles) != 0 {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    });
+    if authorized_in_db {
+        return Ok(());
+    }
+
+    // 3. Undocked caller in the same solar system inspecting a visible, uncloaked on-grid ball.
+    if allow_on_grid {
+        if let Ok(item_sys_id) = u32::try_from(item.location_id) {
+            if is_on_grid_visible_ball(ctx, session, item.item_id, item_sys_id) {
+                return Ok(());
+            }
+        }
+    }
+
+    Err(BridgeRpcError {
+        code: "AccessDenied".into(),
+        message: format!("Not authorized to inspect item {}", item.item_id),
+        client_error: None,
+    })
+}
+
+fn validate_link_all_weapons_preconditions(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    ship_id: i64,
+) -> Result<(), BridgeRpcError> {
+    if ship_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "ShipOwnershipViolation".into(),
+            message: format!("Ship {ship_id} is not owned by {char_id}"),
+            client_error: None,
+        });
+    }
+    let ship_check = ctx.db.with_snapshot(|snap| {
+        let Some(ship) = snap.items.get(&ship_id) else {
+            return Err(BridgeRpcError {
+                code: "ShipOwnershipViolation".into(),
+                message: format!("Ship {ship_id} is not owned by {char_id}"),
+                client_error: None,
+            });
+        };
+        if ship.owner_id != char_id {
+            return Err(BridgeRpcError {
+                code: "ShipOwnershipViolation".into(),
+                message: format!("Ship {ship_id} is not owned by {char_id}"),
+                client_error: None,
+            });
+        }
+        let db_docked = snap
+            .characters
+            .get(&char_id)
+            .is_some_and(|ch| ch.station_id.is_some() || ch.structure_id.is_some());
+        let db_active_ship_id = snap
+            .characters
+            .get(&char_id)
+            .map(|ch| ch.active_ship_id)
+            .filter(|&id| id > 0);
+        let mut counts_by_type: HashMap<u32, usize> = HashMap::new();
+        for item in snap.items.values() {
+            if item.location_id == ship_id && matches!(item.flag as u16, 27..=34) {
+                if let Some(ty) = ctx.sde.types.get(&item.type_id) {
+                    if ty.effect_ids.contains(&42)
+                        || ty.effect_ids.contains(&40)
+                        || ty.default_attributes.contains_key(&604)
+                    {
+                        *counts_by_type.entry(item.type_id).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let has_linkable_pair = counts_by_type.values().any(|&n| n >= 2);
+        Ok((ship.location_id, db_docked, db_active_ship_id, has_linkable_pair))
+    })?;
+    let (ship_loc_id, db_docked, db_active_ship_id, has_linkable_pair) = ship_check;
+
+    if session.station_id.is_some() || session.structure_id.is_some() || db_docked {
+        return Err(BridgeRpcError {
+            code: "CannotLinkWeaponsWhileDocked".into(),
+            message: "Weapons can only be linked while undocked in space".into(),
+            client_error: None,
+        });
+    }
+    let Some(sys_id) = session.solar_system_id else {
+        return Err(BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Weapons can only be linked while undocked in space".into(),
+            client_error: None,
+        });
+    };
+    if ship_loc_id != i64::from(sys_id) {
+        return Err(BridgeRpcError {
+            code: "CannotLinkWeaponsWhileDocked".into(),
+            message: format!("Ship {ship_id} must be in space in solar system {sys_id}"),
+            client_error: None,
+        });
+    }
+    if session.ship_id != Some(ship_id) || db_active_ship_id != Some(ship_id) {
+        return Err(BridgeRpcError {
+            code: "ShipNotActive".into(),
+            message: format!("Ship {ship_id} is not the caller's active ship"),
+            client_error: None,
+        });
+    }
+    if let Some(sys) = ctx.systems.get_handle(sys_id) {
+        let view = sys.view();
+        if view.is_ball_cloaked(ship_id) || view.is_gate_cloaked(ship_id) {
+            return Err(BridgeRpcError {
+                code: "CannotLinkWeaponsWhileCloaked".into(),
+                message: "Cannot link weapons while cloaked".into(),
+                client_error: None,
+            });
+        }
+    }
+    if !has_linkable_pair {
+        return Err(BridgeRpcError {
+            code: "InvalidWeaponGroup".into(),
+            message: "At least two identical fitted weapons are required to form a weapon group"
+                .into(),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
 fn handle_item_get_info(
     ctx: &ServerContext,
+    session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
     let subloc_tuple = match args.first() {
         Some(PyRep::Tuple(parts)) if parts.len() == 3 => {
             match (parts[0].as_i64(), parts[1].as_i64(), parts[2].as_i64()) {
@@ -128,6 +458,40 @@ fn handle_item_get_info(
     } else {
         None
     };
+
+    // Enforce item ownership / player-corp hangar role / on-grid visibility / GM role before disclosure.
+    if let Some((_, loc_id, _, _)) = subloc_key_opt.as_ref() {
+        let loc_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(loc_id).cloned());
+        if let Some(ref loc_item) = loc_item_opt {
+            authorize_item_info_access(ctx, session, char_id, loc_item, false)?;
+        } else if !(session.has_gm_role()
+            || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0)
+        {
+            return Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: format!("Not authorized to inspect sublocation {loc_id}"),
+                client_error: None,
+            });
+        }
+        if let Some(ref charge_item) = item_opt {
+            authorize_item_info_access(ctx, session, char_id, charge_item, false)?;
+        }
+    } else if let Some(ref item) = item_opt {
+        authorize_item_info_access(ctx, session, char_id, item, true)?;
+    } else if let Some(ref sd) = space_drone_opt {
+        let is_gm = session.has_gm_role()
+            || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
+        if !is_gm
+            && sd.owner_char_id != char_id
+            && !is_on_grid_visible_ball(ctx, session, sd.ball_id, sd.solar_system_id)
+        {
+            return Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: format!("Not authorized to inspect drone {}", sd.ball_id),
+                client_error: None,
+            });
+        }
+    }
 
     let (type_id, owner_id, dyn_attrs, location_id, qty, singleton) = if let Some(ref item) = item_opt {
         (
@@ -828,16 +1192,16 @@ pub(crate) async fn handle_dogma_im(
         }
 
         ("dogmaIM", "ItemGetInfo") => {
-            Some(handle_item_get_info(ctx, args))
+            Some(handle_item_get_info(ctx, session, args))
         }
         ("invbroker", "GetItemInfo") => {
-            Some(handle_item_get_info(ctx, args))
+            Some(handle_item_get_info(ctx, session, args))
         }
         ("invbroker", "GetDynamicItemInfo") => {
-            Some(handle_item_get_info(ctx, args))
+            Some(handle_item_get_info(ctx, session, args))
         }
         ("dogmaIM", "GetDynamicItemInfo") => {
-            Some(handle_item_get_info(ctx, args))
+            Some(handle_item_get_info(ctx, session, args))
         }
 
         ("dogmaIM", "DestroyFitting") => {
@@ -1642,6 +2006,9 @@ pub(crate) async fn handle_dogma_im(
                 Ok(v) => v.or(session.ship_id).unwrap_or(0),
                 Err(e) => return Some(Err(e)),
             };
+            if let Err(e) = validate_link_all_weapons_preconditions(ctx, session, char_id, ship_id) {
+                return Some(Err(e));
+            }
             let res = crate::services::combat_crimewatch::combat_weapons::handle_link_all_weapons(ctx, char_id, ship_id);
             Some(res)
         }

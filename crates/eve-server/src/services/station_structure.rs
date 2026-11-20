@@ -628,6 +628,18 @@ pub async fn handle(
             )
             .with_apply_db(false);
             let _ = ctx.execute_session_transition_sync(Some(session), undock_spec);
+            if is_structure {
+                // Upwell undock already pushed SetState(ship_id); View Outside does not
+                // re-call beyonce, while Hangar -> Undock calls GetFormations afterward and
+                // must not trigger a duplicate SetState.
+                ctx.mark_space_ballpark_bootstrapped(
+                    session.session_id,
+                    char_id,
+                    ch.solar_system_id,
+                );
+            } else {
+                ctx.clear_space_ballpark_bootstrapped(char_id);
+            }
             if let Ok(Some(cs)) = sys_handle.get_combat_state(ship.item_id).await {
                 let _ = ctx.notify_ship_capacitor_change(
                     char_id,
@@ -1058,6 +1070,7 @@ pub async fn handle(
                             ship_id,
                         );
                     }
+                    ctx.clear_space_ballpark_bootstrapped(char_id);
                     ctx.quasar_gateway.on_session_changed(session, now_unix);
                     Some(Ok(PyRep::keyval([
                         ("locationID", PyRep::Integer(dock_id)),

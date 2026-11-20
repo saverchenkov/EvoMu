@@ -25,10 +25,7 @@ pub fn resolve_cross_system_wormhole_polarization(
     use eve_proto::PyRep;
     let (_, char_id) = ServerContext::require_character(session).ok()?;
     let bid = args.first().and_then(|a| a.as_i64()).filter(|&b| b >= 40_000_000)?;
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now_unix = ctx.now_unix();
     let exp_unix_opt = ctx.db.with_snapshot(|snap| {
         for (&psys, list) in &snap.cosmic_signatures {
             if let Some(s) = list.iter().find(|s| {
