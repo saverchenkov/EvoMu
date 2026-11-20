@@ -239,46 +239,6 @@ impl SpecialSiteRpcErrorCode {
     }
 }
 
-type ConfirmedSpecialSiteBallMap = std::collections::HashMap<
-    u64,
-    (
-        std::sync::Weak<crate::system_actor::SystemRegistry>,
-        std::collections::HashSet<(SolarSystemId, i64)>,
-    ),
->;
-
-static CONFIRMED_SPECIAL_SITE_BALLS: std::sync::OnceLock<
-    std::sync::Mutex<ConfirmedSpecialSiteBallMap>,
-> = std::sync::OnceLock::new();
-
-fn confirmed_special_site_balls() -> &'static std::sync::Mutex<ConfirmedSpecialSiteBallMap> {
-    CONFIRMED_SPECIAL_SITE_BALLS
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-fn mark_special_site_ball_spawned(ctx: &ServerContext, sys_id: SolarSystemId, ball_id: i64) {
-    let mut map = confirmed_special_site_balls()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    map.retain(|_, (weak, _)| weak.strong_count() > 0);
-    let (_, set) = map
-        .entry(ctx.instance_id)
-        .or_insert_with(|| (Arc::downgrade(&ctx.systems), std::collections::HashSet::new()));
-    set.insert((sys_id, ball_id));
-}
-
-fn is_special_site_ball_confirmed_spawned(
-    ctx: &ServerContext,
-    sys_id: SolarSystemId,
-    ball_id: i64,
-) -> bool {
-    confirmed_special_site_balls()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&ctx.instance_id)
-        .is_some_and(|(_, set)| set.contains(&(sys_id, ball_id)))
-}
-
 pub(crate) fn next_spec_seq(reg: &mut PveSpecialSitesRegistry) -> i64 {
     reg.next_seq += 1;
     reg.next_seq
@@ -734,9 +694,9 @@ async fn spawn_special_site_balls(
         if bid <= 0 {
             continue;
         }
-        if !ctx.systems.claim_special_site_ball(sys_id, bid) {
+        let Some(spawn_guard) = ctx.systems.begin_special_site_ball_spawn(sys_id, bid).await else {
             continue;
-        }
+        };
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         let snapshot = sys_handle.get_ball_snapshot(bid).await.map_err(|err| {
             SpecialSiteRpcErrorCode::BallparkSpawnFailed.build(format!(
@@ -758,7 +718,7 @@ async fn spawn_special_site_balls(
                 ))
             })?;
         }
-        mark_special_site_ball_spawned(ctx, sys_id, bid);
+        spawn_guard.confirm();
     }
     Ok(())
 }
@@ -877,7 +837,7 @@ async fn verify_triglavian_npc_ball_cleared(
     npc_ball_id: i64,
     role: &str,
 ) -> Result<(), BridgeRpcError> {
-    if npc_ball_id <= 0 || !is_special_site_ball_confirmed_spawned(ctx, sys_id, npc_ball_id) {
+    if npc_ball_id <= 0 || !ctx.systems.is_special_site_ball_spawned(sys_id, npc_ball_id) {
         return Err(SpecialSiteRpcErrorCode::SiteNotSpawned.build(format!(
             "Triglavian site {role} NPC {npc_ball_id} has not been spawned in system {sys_id}"
         )));
@@ -984,7 +944,14 @@ pub async fn complete_special_dungeon_instance(
             });
             if let Some(next_room) = next_to_spawn {
                 for (&bid, &tid) in next_room.npc_ball_ids.iter().zip(&next_room.npc_type_ids) {
-                    ctx.systems.claim_special_site_ball(caller_sys, bid);
+                    if bid <= 0 {
+                        continue;
+                    }
+                    let Some(spawn_guard) =
+                        ctx.systems.begin_special_site_ball_spawn(caller_sys, bid).await
+                    else {
+                        continue;
+                    };
                     let cs = build_special_site_npc_combat_state(&ctx.sde, tid);
                     match sys_handle
                         .spawn_ball_with_combat(
@@ -993,7 +960,7 @@ pub async fn complete_special_dungeon_instance(
                         )
                         .await
                     {
-                        Ok(_) => mark_special_site_ball_spawned(ctx, caller_sys, bid),
+                        Ok(_) => spawn_guard.confirm(),
                         Err(err) => tracing::warn!(
                             system_id = caller_sys,
                             ball_id = bid,
@@ -1002,27 +969,28 @@ pub async fn complete_special_dungeon_instance(
                         ),
                     }
                 }
-                if next_room.beacon_ball_id != 0 {
-                    ctx.systems.claim_special_site_ball(caller_sys, next_room.beacon_ball_id);
-                    match sys_handle
-                        .spawn_ball(make_site_npc_ball(
-                            next_room.beacon_ball_id,
-                            42_538,
-                            DVec3::new(12_000.0, 0.0, 0.0),
-                        ))
+                if next_room.beacon_ball_id > 0 {
+                    if let Some(spawn_guard) = ctx
+                        .systems
+                        .begin_special_site_ball_spawn(caller_sys, next_room.beacon_ball_id)
                         .await
                     {
-                        Ok(_) => mark_special_site_ball_spawned(
-                            ctx,
-                            caller_sys,
-                            next_room.beacon_ball_id,
-                        ),
-                        Err(err) => tracing::warn!(
-                            system_id = caller_sys,
-                            ball_id = next_room.beacon_ball_id,
-                            error = %err,
-                            "Failed spawning Drifter Hive room beacon ball"
-                        ),
+                        match sys_handle
+                            .spawn_ball(make_site_npc_ball(
+                                next_room.beacon_ball_id,
+                                42_538,
+                                DVec3::new(12_000.0, 0.0, 0.0),
+                            ))
+                            .await
+                        {
+                            Ok(_) => spawn_guard.confirm(),
+                            Err(err) => tracing::warn!(
+                                system_id = caller_sys,
+                                ball_id = next_room.beacon_ball_id,
+                                error = %err,
+                                "Failed spawning Drifter Hive room beacon ball"
+                            ),
+                        }
                     }
                 }
             }
