@@ -487,38 +487,174 @@ fn combat_anomaly_instances_readonly(
     by_dungeon
 }
 
+fn deterministic_mining_instance_id(did: u32, sys_id: SolarSystemId) -> i64 {
+    registry_instance_id(&format!("DNG-{did}-{sys_id}"))
+}
+
+fn mining_site_matches_target(
+    did: u32,
+    sys_id: SolarSystemId,
+    target_iid: Option<i64>,
+    target_did: Option<u32>,
+) -> bool {
+    let synthetic_iid = deterministic_mining_instance_id(did, sys_id);
+    if let Some(tid_did) = target_did {
+        tid_did == did && (target_iid.is_none() || target_iid == Some(synthetic_iid))
+    } else {
+        target_iid == Some(synthetic_iid)
+    }
+}
+
+fn is_system_mining_seeded(snap: &eve_db::WorldStateSnapshot, sys_id: SolarSystemId) -> bool {
+    snap.cosmic_anomalies
+        .get(&sys_id)
+        .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "OreAnomaly"))
+        || snap.cosmic_signatures.get(&sys_id).is_some_and(|list| {
+            list.iter()
+                .any(|s| matches!(s.sig_group.as_str(), "OreAnomaly" | "Ore" | "Gas"))
+        })
+}
+
+fn system_wormhole_class_opt(sde: &SdeRegistry, sys: &eve_sde::SolarSystem) -> Option<u8> {
+    sys.wormhole_class_id
+        .or_else(|| {
+            sde.constellations
+                .get(&sys.constellation_id)
+                .and_then(|c| c.wormhole_class_id)
+        })
+        .or_else(|| {
+            sde.regions
+                .get(&sys.region_id)
+                .and_then(|r| r.wormhole_class_id)
+        })
+        .map(|c| c as u8)
+}
+
+fn is_wormhole_mining_system(
+    sde: &SdeRegistry,
+    sys_id: SolarSystemId,
+    sys: &eve_sde::SolarSystem,
+) -> (bool, Option<u8>) {
+    let wh_class_opt = system_wormhole_class_opt(sde, sys);
+    let is_wh = (31_000_000..32_000_000).contains(&sys_id)
+        || wh_class_opt.is_some_and(|c| matches!(c, 1..=6 | 12..=18));
+    (is_wh, wh_class_opt)
+}
+
+/// Returns deterministic ore anomaly dungeon IDs guaranteed by `seed_system_mining_sites_from_sde`
+/// in `sys_id` (known-space cosmic ore, Pochven ore, C1-C4 WH ore, and `Shattered Debris Field`
+/// in shattered WHs; excludes random C5/C6 4-of-10 pools so unseeded reads stay accurate).
+fn deterministic_unseeded_ore_anomaly_dungeons(
+    sde: &SdeRegistry,
+    sys_id: SolarSystemId,
+) -> Vec<u32> {
+    use crate::services::mining_sites::{
+        resolve_wormhole_ore_site_with_dungeon, wormhole_ore_sites_for_class, SiteKind,
+        WORMHOLE_ORE_SITES,
+    };
+    let Some(sys) = sde.solar_systems.get(&sys_id) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for def in COSMIC_ORE_SITES
+        .iter()
+        .filter(|d| d.kind == SiteKind::Anomaly && d.band.matches_system(sys))
+    {
+        if let Ok(site) = resolve_ore_site(sde, def) {
+            if site.asteroids.iter().all(|a| sde.types.contains_key(&a.type_id)) {
+                out.push(site.dungeon_id);
+            }
+        }
+    }
+    if sys.region_id == 10_000_070 {
+        const POCHVEN_SPECIAL_ORE_DUNGEONS: [u32; 5] = [8987, 8988, 8989, 8990, 8991];
+        let primary_did =
+            POCHVEN_SPECIAL_ORE_DUNGEONS[(sys_id as usize) % POCHVEN_SPECIAL_ORE_DUNGEONS.len()];
+        for did in [primary_did, 8974] {
+            if sde.dungeons.contains_key(&did)
+                && sde.dungeon_asteroids.get(&did).is_some_and(|v| {
+                    !v.is_empty() && v.iter().all(|e| sde.types.contains_key(&e.type_id))
+                })
+            {
+                out.push(did);
+            }
+        }
+    }
+    let (is_wh, wh_class_opt) = is_wormhole_mining_system(sde, sys_id, sys);
+    if is_wh {
+        let wh_c = wh_class_opt.unwrap_or(3);
+        let is_shattered = matches!(wh_c, 12..=18)
+            || sde
+                .celestials_in_system_slice(sys_id)
+                .iter()
+                .any(|c| c.type_id == 30889);
+        let wh_candidates: Vec<_> = if (1..=6).contains(&wh_c) && is_shattered {
+            let lo = wh_c.saturating_sub(1).max(1);
+            let hi = (wh_c + 1).min(6);
+            WORMHOLE_ORE_SITES
+                .iter()
+                .filter(|d| {
+                    (d.wh_class_min <= hi && d.wh_class_max >= lo)
+                        || d.dungeon_name == "Shattered Debris Field"
+                })
+                .collect()
+        } else {
+            wormhole_ore_sites_for_class(wh_c)
+        };
+        let deterministic_candidates: Vec<_> = if wh_candidates.len() <= 4 {
+            wh_candidates
+        } else if is_shattered {
+            wh_candidates
+                .into_iter()
+                .filter(|d| d.dungeon_name == "Shattered Debris Field")
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for def in deterministic_candidates {
+            if let Ok((wh_did, _)) = resolve_wormhole_ore_site_with_dungeon(sde, def) {
+                out.push(wh_did);
+            }
+        }
+    }
+    out
+}
+
+fn unseeded_ice_belt_dungeon_for_system(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+) -> Option<u32> {
+    let regional_did = if crate::services::mining_sites::is_designated_ice_system(sys_id) {
+        crate::services::mining_sites::resolve_regional_ice_belt(&ctx.sde, sys_id)
+            .and_then(|res| res.ok())
+            .filter(|site| {
+                site.asteroids
+                    .iter()
+                    .all(|a| ctx.sde.types.contains_key(&a.type_id))
+            })
+            .map(|site| site.dungeon_id)
+    } else {
+        None
+    };
+    regional_did.or_else(|| ice_belt_dungeon_for_system(ctx, sys_id))
+}
+
 /// Reads SDE ore anomaly instances for `sys_id` strictly read-only without mutating DB state.
 fn ore_anomaly_instances_readonly(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
 ) -> BTreeMap<u32, Vec<i64>> {
-    let already_seeded = ctx.db.with_snapshot(|snap| {
-        snap.cosmic_anomalies
-            .get(&sys_id)
-            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "OreAnomaly"))
-            || snap.cosmic_signatures.get(&sys_id).is_some_and(|list| {
-                list.iter()
-                    .any(|s| matches!(s.sig_group.as_str(), "OreAnomaly" | "Ore" | "Gas"))
-            })
-    });
+    let already_seeded = ctx
+        .db
+        .with_snapshot(|snap| is_system_mining_seeded(snap, sys_id));
     if already_seeded {
         return anomaly_instances(ctx, sys_id, "OreAnomaly");
     }
-    let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
-        return BTreeMap::new();
-    };
     let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
-    for def in COSMIC_ORE_SITES
-        .iter()
-        .filter(|d| d.kind == crate::services::mining_sites::SiteKind::Anomaly && d.band.matches_system(sys))
-    {
-        if let Ok(site) = resolve_ore_site(&ctx.sde, def) {
-            if site.asteroids.iter().all(|a| ctx.sde.types.contains_key(&a.type_id)) {
-                out.entry(site.dungeon_id)
-                    .or_default()
-                    .push(registry_instance_id(&format!("DNG-{}-{sys_id}", site.dungeon_id)));
-            }
-        }
+    for did in deterministic_unseeded_ore_anomaly_dungeons(&ctx.sde, sys_id) {
+        out.entry(did)
+            .or_default()
+            .push(deterministic_mining_instance_id(did, sys_id));
     }
     out
 }
@@ -537,18 +673,10 @@ fn ice_belt_instances_readonly(
         return anomaly_instances(ctx, sys_id, ICE_BELT_ANOMALY_TYPE);
     }
     let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
-    let regional_did = if crate::services::mining_sites::is_designated_ice_system(sys_id) {
-        crate::services::mining_sites::resolve_regional_ice_belt(&ctx.sde, sys_id)
-            .and_then(|res| res.ok())
-            .filter(|site| site.asteroids.iter().all(|a| ctx.sde.types.contains_key(&a.type_id)))
-            .map(|site| site.dungeon_id)
-    } else {
-        None
-    };
-    if let Some(did) = regional_did.or_else(|| ice_belt_dungeon_for_system(ctx, sys_id)) {
+    if let Some(did) = unseeded_ice_belt_dungeon_for_system(ctx, sys_id) {
         out.entry(did)
             .or_default()
-            .push(registry_instance_id(&format!("DNG-{did}-{sys_id}")));
+            .push(deterministic_mining_instance_id(did, sys_id));
     }
     out
 }
@@ -656,20 +784,21 @@ fn resolve_warp_target_readonly(
     let mut mining_seeded = false;
     if resolved_pos.is_none() {
         resolved_pos = ctx.db.with_snapshot(|snap| {
-            mining_seeded = snap
-                .cosmic_anomalies
-                .get(&sys_id)
-                .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "OreAnomaly"))
-                || snap.cosmic_signatures.get(&sys_id).is_some_and(|list| {
-                    list.iter()
-                        .any(|s| matches!(s.sig_group.as_str(), "OreAnomaly" | "Ore" | "Gas"))
-                });
+            mining_seeded = is_system_mining_seeded(snap, sys_id);
             for a in snap.cosmic_anomalies.get(&sys_id).into_iter().flatten() {
                 if a.cleared {
                     continue;
                 }
                 if let Some((did, iid)) = parse_dng_site_id(&a.anomaly_id) {
-                    if Some(iid) == target_iid || (target_iid.is_none() && Some(did) == target_did) {
+                    let is_docked_mining =
+                        matches!(a.anomaly_type.as_str(), "OreAnomaly" | ICE_BELT_ANOMALY_TYPE);
+                    let matches_synthetic_iid = is_docked_mining
+                        && target_iid == Some(deterministic_mining_instance_id(did, sys_id))
+                        && (target_did.is_none() || target_did == Some(did));
+                    if Some(iid) == target_iid
+                        || matches_synthetic_iid
+                        || (target_iid.is_none() && Some(did) == target_did)
+                    {
                         return Some(glam::DVec3::from_array(a.position));
                     }
                 }
@@ -756,9 +885,16 @@ pub(crate) fn unseeded_pve_signature_specs(
     ]
 }
 
-/// Returns `(needs_pve_seed, needs_mining_seed, unscanned_signature)` if `(target_iid, target_did)`
-/// matches unseeded combat/ore anomalies (requiring seeding before warp) or unseeded probe-required
-/// signatures (which fail with `SignatureNotScanned` without seeding DB).
+struct UnseededSeedNeeds {
+    need_pve: bool,
+    need_mining: bool,
+    need_ice: bool,
+    unscanned_sig: bool,
+}
+
+/// Returns seeding requirements if `(target_iid, target_did)` matches unseeded combat/ore/ice
+/// anomalies (requiring seeding before warp) or unseeded probe-required signatures (which fail
+/// with `SignatureNotScanned` without seeding DB).
 fn matching_unseeded_seed_needs(
     ctx: &ServerContext,
     char_id: i64,
@@ -767,7 +903,7 @@ fn matching_unseeded_seed_needs(
     target_did: Option<u32>,
     pve_seeded: bool,
     mining_seeded: bool,
-) -> (bool, bool, bool) {
+) -> UnseededSeedNeeds {
     let mut need_pve = false;
     let mut unscanned_sig = false;
     if !pve_seeded {
@@ -796,127 +932,51 @@ fn matching_unseeded_seed_needs(
         }
     }
     let mut need_mining = false;
-    if !unscanned_sig && target_iid.is_none() {
-        if let (Some(did), Some(sys)) = (target_did, ctx.sde.solar_systems.get(&sys_id)) {
+    let mut need_ice = false;
+    if !unscanned_sig {
+        if let Some(sys) = ctx.sde.solar_systems.get(&sys_id) {
             if !mining_seeded {
-                use crate::services::mining_sites::{
-                    resolve_wormhole_gas_site, resolve_wormhole_ore_site_with_dungeon,
-                    wormhole_ore_sites_for_class, SiteKind, WORMHOLE_GAS_SITES,
-                    WORMHOLE_ORE_SITES,
-                };
-                let region = crate::services::mining_sites::region_name(&ctx.sde, sys_id);
-                need_mining = COSMIC_ORE_SITES
-                    .iter()
-                    .filter(|d| d.kind == SiteKind::Anomaly && d.band.matches_system(sys))
-                    .filter_map(|d| resolve_ore_site(&ctx.sde, d).ok())
-                    .any(|s| s.dungeon_id == did);
-                if !need_mining && sys.region_id == 10_000_070 {
-                    const POCHVEN_SPECIAL_ORE_DUNGEONS: [u32; 5] = [8987, 8988, 8989, 8990, 8991];
-                    let primary_did = POCHVEN_SPECIAL_ORE_DUNGEONS
-                        [(sys_id as usize) % POCHVEN_SPECIAL_ORE_DUNGEONS.len()];
-                    need_mining = [primary_did, 8974].into_iter().any(|p_did| {
-                        p_did == did
-                            && ctx.sde.dungeons.contains_key(&p_did)
-                            && ctx.sde.dungeon_asteroids.get(&p_did).is_some_and(|v| {
-                                !v.is_empty() && v.iter().all(|e| ctx.sde.types.contains_key(&e.type_id))
-                            })
-                    });
-                }
-                let wh_class_opt = sys
-                    .wormhole_class_id
-                    .or_else(|| {
-                        ctx.sde
-                            .constellations
-                            .get(&sys.constellation_id)
-                            .and_then(|c| c.wormhole_class_id)
-                    })
-                    .or_else(|| {
-                        ctx.sde
-                            .regions
-                            .get(&sys.region_id)
-                            .and_then(|r| r.wormhole_class_id)
-                    })
-                    .map(|c| c as u8);
-                let is_wh = (31_000_000..32_000_000).contains(&sys_id)
-                    || wh_class_opt.is_some_and(|c| matches!(c, 1..=6 | 12..=18));
-                if !need_mining && is_wh {
-                    let wh_c = wh_class_opt.unwrap_or(3);
-                    let is_shattered = matches!(wh_c, 12..=18)
-                        || ctx
-                            .sde
-                            .celestials_in_system_slice(sys_id)
+                need_mining = deterministic_unseeded_ore_anomaly_dungeons(&ctx.sde, sys_id)
+                    .into_iter()
+                    .any(|did| mining_site_matches_target(did, sys_id, target_iid, target_did));
+
+                if !need_mining && !need_pve && target_iid.is_none() {
+                    if let Some(did) = target_did {
+                        use crate::services::mining_sites::{
+                            resolve_wormhole_gas_site, SiteKind, WORMHOLE_GAS_SITES,
+                        };
+                        let region = crate::services::mining_sites::region_name(&ctx.sde, sys_id);
+                        let (is_wh, _) = is_wormhole_mining_system(&ctx.sde, sys_id, sys);
+                        let matches_mining_sig = COSMIC_ORE_SITES
                             .iter()
-                            .any(|c| c.type_id == 30889);
-                    let wh_candidates: Vec<_> = if (1..=6).contains(&wh_c) && is_shattered {
-                        let lo = wh_c.saturating_sub(1).max(1);
-                        let hi = (wh_c + 1).min(6);
-                        WORMHOLE_ORE_SITES
-                            .iter()
-                            .filter(|d| {
-                                (d.wh_class_min <= hi && d.wh_class_max >= lo)
-                                    || d.dungeon_name == "Shattered Debris Field"
-                            })
-                            .collect()
-                    } else {
-                        wormhole_ore_sites_for_class(wh_c)
-                    };
-                    // Only unseeded WH ore sites deterministically guaranteed by
-                    // `sample_wormhole_ore_sites_for_system` can trigger lazy seeding on warp;
-                    // non-deterministic pools (e.g. C5/C6 4-of-10 draws) must stay read-pure.
-                    let deterministic_candidates: Vec<_> = if wh_candidates.len() <= 4 {
-                        wh_candidates
-                    } else if is_shattered {
-                        wh_candidates
-                            .into_iter()
-                            .filter(|d| d.dungeon_name == "Shattered Debris Field")
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    need_mining = deterministic_candidates
-                        .into_iter()
-                        .filter_map(|def| resolve_wormhole_ore_site_with_dungeon(&ctx.sde, def).ok())
-                        .any(|(wh_did, _)| wh_did == did);
-                }
-                if !need_mining && !need_pve {
-                    let matches_mining_sig = COSMIC_ORE_SITES
-                        .iter()
-                        .filter(|d| d.kind == SiteKind::Signature && d.band.matches_system(sys))
-                        .filter_map(|d| resolve_ore_site(&ctx.sde, d).ok())
-                        .any(|s| s.dungeon_id == did)
-                        || GAS_SITES
-                            .iter()
-                            .find(|d| {
-                                d.band.matches_system(sys)
-                                    && region.is_some_and(|r| d.region_names.contains(&r))
-                            })
-                            .and_then(|d| resolve_gas_site(&ctx.sde, d).ok())
-                            .is_some_and(|s| s.dungeon_id == did)
-                        || (is_wh
-                            && WORMHOLE_GAS_SITES
-                                .first()
-                                .and_then(|wh_def| resolve_wormhole_gas_site(&ctx.sde, wh_def).ok())
-                                .is_some_and(|(wh_gas_did, _)| wh_gas_did == did));
-                    if matches_mining_sig {
-                        unscanned_sig = true;
+                            .filter(|d| d.kind == SiteKind::Signature && d.band.matches_system(sys))
+                            .filter_map(|d| resolve_ore_site(&ctx.sde, d).ok())
+                            .any(|s| s.dungeon_id == did)
+                            || GAS_SITES
+                                .iter()
+                                .find(|d| {
+                                    d.band.matches_system(sys)
+                                        && region.is_some_and(|r| d.region_names.contains(&r))
+                                })
+                                .and_then(|d| resolve_gas_site(&ctx.sde, d).ok())
+                                .is_some_and(|s| s.dungeon_id == did)
+                            || (is_wh
+                                && WORMHOLE_GAS_SITES
+                                    .first()
+                                    .and_then(|wh_def| resolve_wormhole_gas_site(&ctx.sde, wh_def).ok())
+                                    .is_some_and(|(wh_gas_did, _)| wh_gas_did == did));
+                        if matches_mining_sig {
+                            unscanned_sig = true;
+                        }
                     }
                 }
             }
-            if !need_mining
-                && !unscanned_sig
-                && crate::services::mining_sites::is_designated_ice_system(sys_id)
-            {
-                if let Some(Ok(ice_site)) =
-                    crate::services::mining_sites::resolve_regional_ice_belt(&ctx.sde, sys_id)
-                {
-                    if ice_site.dungeon_id == did
-                        && ice_site
-                            .asteroids
-                            .iter()
-                            .all(|a| ctx.sde.types.contains_key(&a.type_id))
-                    {
+
+            if !need_mining && !unscanned_sig {
+                if let Some(ice_did) = unseeded_ice_belt_dungeon_for_system(ctx, sys_id) {
+                    if mining_site_matches_target(ice_did, sys_id, target_iid, target_did) {
                         let now = ctx.now_unix_secs();
-                        need_mining = ctx.db.with_snapshot(|snap| {
+                        need_ice = ctx.db.with_snapshot(|snap| {
                             let list = snap
                                 .cosmic_anomalies
                                 .get(&sys_id)
@@ -928,6 +988,7 @@ fn matching_unseeded_seed_needs(
                                 .iter()
                                 .any(|a| a.anomaly_type == ICE_BELT_ANOMALY_TYPE && !a.cleared);
                             let ready_to_respawn = !has_uncleared
+                                && crate::services::mining_sites::is_designated_ice_system(sys_id)
                                 && list.iter().any(|a| {
                                     a.anomaly_type == ICE_BELT_ANOMALY_TYPE
                                         && a.cleared
@@ -940,70 +1001,78 @@ fn matching_unseeded_seed_needs(
                     }
                 }
             }
-            if !need_mining && !unscanned_sig {
-                let matching_sov_defs: Vec<(u32, u64)> =
-                    crate::services::mining_sites::SOV_PROSPECTING_DEPOSITS
-                        .iter()
-                        .filter_map(|def| {
-                            let site = resolve_ore_site(&ctx.sde, &def.site).ok()?;
-                            if site.dungeon_id == did
-                                && site
-                                    .asteroids
-                                    .iter()
-                                    .all(|a| ctx.sde.types.contains_key(&a.type_id))
-                            {
-                                Some((def.upgrade_type_id, def.respawn_seconds))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                if !matching_sov_defs.is_empty() {
-                    let now = ctx.now_unix();
-                    need_mining = ctx.db.with_snapshot(|snap| {
-                        let list = snap
-                            .cosmic_anomalies
-                            .get(&sys_id)
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]);
-                        let has_uncleared =
-                            list.iter().any(|a| a.anomaly_type == "SovOre" && !a.cleared);
-                        if has_uncleared {
-                            return false;
-                        }
-                        let matching_installed_respawn = snap
-                            .structures
-                            .values()
-                            .filter(|s| s.solar_system_id == sys_id)
-                            .find_map(|s| {
-                                snap.items.values().find_map(|it| {
-                                    if it.location_id == s.structure_id
-                                        && it.flag == eve_db::InventoryFlag::SubSystemSlot0
-                                    {
-                                        matching_sov_defs
-                                            .iter()
-                                            .find(|(up_tid, _)| *up_tid == it.type_id)
-                                            .map(|(_, respawn_secs)| *respawn_secs)
-                                    } else {
-                                        None
-                                    }
-                                })
-                            });
-                        matching_installed_respawn.is_some_and(|respawn_secs| {
-                            list.iter().any(|a| {
-                                a.anomaly_type == "SovOre"
-                                    && a.cleared
-                                    && now
-                                        >= a.created_unix
-                                            .saturating_add(a.lifetime_seconds.max(respawn_secs))
+
+            if !need_mining && !need_ice && !unscanned_sig && target_iid.is_none() {
+                if let Some(did) = target_did {
+                    let matching_sov_defs: Vec<(u32, u64)> =
+                        crate::services::mining_sites::SOV_PROSPECTING_DEPOSITS
+                            .iter()
+                            .filter_map(|def| {
+                                let site = resolve_ore_site(&ctx.sde, &def.site).ok()?;
+                                if site.dungeon_id == did
+                                    && site
+                                        .asteroids
+                                        .iter()
+                                        .all(|a| ctx.sde.types.contains_key(&a.type_id))
+                                {
+                                    Some((def.upgrade_type_id, def.respawn_seconds))
+                                } else {
+                                    None
+                                }
                             })
-                        })
-                    });
+                            .collect();
+                    if !matching_sov_defs.is_empty() {
+                        let now = ctx.now_unix();
+                        need_mining = ctx.db.with_snapshot(|snap| {
+                            let list = snap
+                                .cosmic_anomalies
+                                .get(&sys_id)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
+                            let has_uncleared =
+                                list.iter().any(|a| a.anomaly_type == "SovOre" && !a.cleared);
+                            if has_uncleared {
+                                return false;
+                            }
+                            let matching_installed_respawn = snap
+                                .structures
+                                .values()
+                                .filter(|s| s.solar_system_id == sys_id)
+                                .find_map(|s| {
+                                    snap.items.values().find_map(|it| {
+                                        if it.location_id == s.structure_id
+                                            && it.flag == eve_db::InventoryFlag::SubSystemSlot0
+                                        {
+                                            matching_sov_defs
+                                                .iter()
+                                                .find(|(up_tid, _)| *up_tid == it.type_id)
+                                                .map(|(_, respawn_secs)| *respawn_secs)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                });
+                            matching_installed_respawn.is_some_and(|respawn_secs| {
+                                list.iter().any(|a| {
+                                    a.anomaly_type == "SovOre"
+                                        && a.cleared
+                                        && now
+                                            >= a.created_unix
+                                                .saturating_add(a.lifetime_seconds.max(respawn_secs))
+                                })
+                            })
+                        });
+                    }
                 }
             }
         }
     }
-    (need_pve, need_mining, unscanned_sig)
+    UnseededSeedNeeds {
+        need_pve,
+        need_mining,
+        need_ice,
+        unscanned_sig,
+    }
 }
 
 // DERIVED: V24 client SDE `dungeons.fsdbinary` stores numeric `archetypeID` on each dungeon but does not
@@ -1650,7 +1719,7 @@ pub async fn handle(
         }
 
         if resolved_pos.is_none() {
-            let (need_pve, need_mining, unscanned_unseeded) = matching_unseeded_seed_needs(
+            let needs = matching_unseeded_seed_needs(
                 ctx,
                 char_id,
                 sys_id,
@@ -1659,14 +1728,14 @@ pub async fn handle(
                 pve_seeded,
                 mining_seeded,
             );
-            if unscanned_unseeded {
+            if needs.unscanned_sig {
                 return Some(Err(BridgeRpcError {
                     code: "SignatureNotScanned".into(),
                     message: "Cosmic signature must be probe-scanned to 100% before warping".into(),
                     client_error: None,
                 }));
             }
-            if !need_pve && !need_mining {
+            if !needs.need_pve && !needs.need_mining && !needs.need_ice {
                 return Some(Err(rpc_msg_err(
                     "SiteNotFound",
                     format!("Target content site ({target_iid:?}, {target_did:?}) not found in system {sys_id}"),
@@ -1702,11 +1771,14 @@ pub async fn handle(
             {
                 return Some(Err(e));
             }
-            if need_pve {
+            if needs.need_pve {
                 Box::pin(ensure_system_pve_sites_seeded(ctx, sys_id)).await;
             }
-            if need_mining {
+            if needs.need_mining {
                 Box::pin(seed_system_mining_sites_from_sde(ctx, sys_id)).await;
+            }
+            if needs.need_ice {
+                seed_system_ice_belt_from_sde(ctx, sys_id);
             }
             let (re_pos, re_unscanned, _, _) =
                 resolve_warp_target_readonly(ctx, char_id, sys_id, target_iid, target_did);
