@@ -1543,11 +1543,11 @@ pub async fn destroy_specialized_npc_with_hint(
     let sde_bounty = |tid: u32| -> f64 {
         ctx.sde.types.get(&tid).and_then(|t| t.default_attributes.get(&481).copied()).unwrap_or(0.0)
     };
-    let (archetype, bounty_isk, tag_drop_opt, npc_type_id, faction_id, custom_loot) = match npc_opt {
-        Some(n) => (n.archetype, n.bounty_isk, n.tag_drop_type_id, Some(n.type_id), n.faction_id, n.custom_cargo_loot),
+    let (archetype, bounty_isk, tag_drop_opt, npc_type_id, faction_id, custom_loot, npc_item_owner_opt) = match npc_opt {
+        Some(n) => (n.archetype, n.bounty_isk, n.tag_drop_type_id, Some(n.type_id), n.faction_id, n.custom_cargo_loot, None),
         None => {
             if let Some(ref conv) = convoy_opt {
-                ("Hauler".to_string(), sde_bounty(conv.ship_type_id), None, Some(conv.ship_type_id), 500_001, Some((conv.cargo_type_id, conv.cargo_quantity as i64)))
+                ("Hauler".to_string(), sde_bounty(conv.ship_type_id), None, Some(conv.ship_type_id), 500_001, Some((conv.cargo_type_id, conv.cargo_quantity as i64)), None)
             } else if mining_hauler_convoy.is_some() {
                 let tid = ball_opt.as_ref().map(|b| b.type_id).or_else(|| hint.map(|(t, _)| t)).unwrap_or(648);
                 let cargo = ctx.db.with_mut_snapshot(|snap| {
@@ -1555,14 +1555,18 @@ pub async fn destroy_specialized_npc_with_hint(
                     if let Some((id, _, _)) = found { snap.items.remove(&id); }
                     found.map(|(_, t, q)| (t, q))
                 });
-                ("Hauler".to_string(), sde_bounty(tid), None, Some(tid), 500_001, cargo)
+                ("Hauler".to_string(), sde_bounty(tid), None, Some(tid), 500_001, cargo, None)
             } else {
+                let item_info = ctx.db.with_snapshot(|snap| {
+                    snap.get_any_item(npc_ball_id)
+                        .map(|i| (i.type_id, (i.owner_id > 0).then_some(i.owner_id)))
+                });
                 let tid = ball_opt
                     .as_ref()
                     .map(|b| b.type_id)
                     .or_else(|| hint.map(|(t, _)| t))
-                    .or_else(|| ctx.db.with_snapshot(|snap| snap.items.get(&npc_ball_id).map(|i| i.type_id)));
-                ("BeltRat".to_string(), tid.map(sde_bounty).unwrap_or(0.0), None, tid, 0, None)
+                    .or_else(|| item_info.map(|(t, _)| t));
+                ("BeltRat".to_string(), tid.map(sde_bounty).unwrap_or(0.0), None, tid, 0, None, item_info.and_then(|(_, o)| o))
             }
         }
     };
@@ -1616,7 +1620,20 @@ pub async fn destroy_specialized_npc_with_hint(
         killer_char_id,
         effective_bounty,
     );
-    if killer_char_id > 0 { crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(ctx, killer_char_id, &["DamageNPCShips", "DestroyNPCShips"], 1, Some(solar_system_id as i64)); }
+    if killer_char_id > 0 {
+        if let Some(tid) = npc_type_id {
+            let _ = crate::services::agents_missions::agents_standings_arcs::apply_npc_kill_faction_standing_loss(
+                ctx,
+                solar_system_id,
+                killer_char_id,
+                tid,
+                (faction_id > 0).then_some(faction_id),
+                npc_item_owner_opt,
+                ctx.now_unix(),
+            );
+        }
+        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(ctx, killer_char_id, &["DamageNPCShips", "DestroyNPCShips"], 1, Some(solar_system_id as i64));
+    }
 
     let wreck_type_id = if archetype == "Sleeper" {
         30495 // Sleeper Large Intermediate Wreck (`attr 901 = -15.0`)
