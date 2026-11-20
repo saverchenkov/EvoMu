@@ -3,10 +3,10 @@
     {
       "id": "regression_and_critical_ui",
       "title": "Critical Live-Client Regressions (Skills, PLEX Store, Warp Animation, Slash, Quasar)",
-      "description": "Execute end-to-end verification of high-risk V24.01 UI & Quasar flows with real state deltas: (1) Open Character Sheet & Skill Plans panel, verify Quasar personal skill plans load without TimeoutException, create and delete a personal skill plan, inject/queue a skill, and execute complete_skills verifying SP/trained level increase live; (2) Open PLEX Vault & New Eden Store (aurumStoreView), verify BalanceRequest succeeds cleanly and redeem/inspect an offer; (3) Test valid & invalid GM slash commands (/, /heal, /giveskill 3300 1, invalid /badcmd) verifying FetchRemoteCommandList ('/' returns SlashError reason 'Commands: [...]') and graceful UnknownSlashCommand {'reason': ...} formatting without KeyError; (4) Open SKINR / Structure Browser ('open_window' 'paint_tool' or 'structurebrowser') in space/dock verifying cosmetics/structure UI loads cleanly without TimeoutException; (5) Undock into space, initiate a real-time warp_to (>150 km) WITHOUT clock-skip, and verify ball.mode==3, effects.Warping tunnel FX, and smooth deceleration.",
+      "description": "Execute end-to-end verification of high-risk V24.01 UI & Quasar flows with real state deltas: (1) Open Character Sheet & Skill Plans panel, verify Quasar personal skill plans load without TimeoutException, create and delete a personal skill plan, inject/queue a skill, and execute complete_skills verifying SP/trained level increase live; (2) Open PLEX Vault & New Eden Store (aurumStoreView), verify BalanceRequest succeeds cleanly and redeem/inspect an offer; (3) Test valid & invalid GM slash commands (/, /heal, /giveskill 3300 1, invalid /badcmd) verifying FetchRemoteCommandList ('/' returns SlashError reason 'Commands: [...]') and graceful UnknownSlashCommand {'reason': ...} formatting without KeyError; (4) Open SKINR / Structure Browser ('open_window' 'skinr' or 'structurebrowser') in space/dock verifying cosmetics/structure UI loads cleanly without TimeoutException; (5) Undock into space, initiate a real-time warp_to (>150 km) WITHOUT clock-skip, and verify ball.mode==3, effects.Warping tunnel FX, and smooth deceleration.",
       "goals": [
         "Checkpoint 1 (Skills & Plans): Open Skills & Skill Plans, create then delete a personal skill plan, queue a skill and run complete_skills verifying skills_state.total_sp increases live.",
-        "Checkpoint 2 (Quasar Store & Cosmetics): Open PLEX Vault / New Eden Store (aurumStoreView) verifying BalanceRequest succeeds without timeout, and open SKINR / Structure Browser ('open_window' 'paint_tool' or 'structurebrowser') cleanly.",
+        "Checkpoint 2 (Quasar Store & Cosmetics): Open PLEX Vault / New Eden Store (aurumStoreView) verifying BalanceRequest succeeds without timeout, and open SKINR / Structure Browser ('open_window' 'skinr' or 'structurebrowser') cleanly.",
         "Checkpoint 3 (Slash & Realtime Warp): Execute slash commands (/, /heal, invalid /badcmd check), then undock and initiate real-time warp_to (>150 km) verifying saw_mode3 and saw_fx_warping."
       ],
       "rotate_after_steps": 45,
@@ -63,7 +63,7 @@
     {
       "id": "social_corp_fleet_and_sovereignty",
       "title": "Corporation, Fleet, Mail/Chat Comms, SKINR & Agency",
-      "description": "Verify social, organizational, and communication workflows cleanly: (1) Corporation ('corporation'): create/inspect player corp, open Members, Roles, Wallets, and Projects/Goals tab verifying Quasar corp goals respond without timeout; (2) Fleet ('fleet'): Form Fleet, inspect Fleet Composition & Advert/Finder, and when undocked verify Fleet Broadcasts (while docked verify clean FleetCannotDoInStation handling without hang); (3) Mail & Chat Comms ('mail' / chatchannel): compose an EVEMail via type_text (recipient/subject/body) and send, plus type_text a chat message in local/corp chat ending with '\\n' verifying delivery without error; (4) Agency ('agency') & Structure Browser / SKINR ('structurebrowser' / 'paint_tool'): switch tabs across Encounters, Exploration, Resource Harvesting, and Daily Goals cleanly.",
+      "description": "Verify social, organizational, and communication workflows cleanly: (1) Corporation ('corporation'): create/inspect player corp, open Members, Roles, Wallets, and Projects/Goals tab verifying Quasar corp goals respond without timeout; (2) Fleet ('fleet'): Form Fleet, inspect Fleet Composition & Advert/Finder, and when undocked verify Fleet Broadcasts (while docked verify clean FleetCannotDoInStation handling without hang); (3) Mail & Chat Comms ('mail' / chatchannel): compose an EVEMail via type_text (recipient/subject/body) and send, plus type_text a chat message in local/corp chat ending with '\\n' verifying delivery without error; (4) Agency ('agency') & Structure Browser / SKINR ('structurebrowser' / 'skinr'): switch tabs across Encounters, Exploration, Resource Harvesting, and Daily Goals cleanly.",
       "goals": [
         "Checkpoint 1 (Corp & Quasar Goals): Open Corporation window (create a corp if in NPC starter corp), inspect Wallets/Members, and verify Quasar Corporation Projects/Goals load cleanly.",
         "Checkpoint 2 (Mail & Chat Composition): Open Mail ('mail'), compose and send a self-addressed test EVEMail using type_text, and send a local/corp chat line via type_text ('...\\n') verifying message appears.",
@@ -144,7 +144,7 @@
       "feature_id": "quasar.cosmetics.structure_states",
       "persona": "regression_and_critical_ui",
       "title": "Structure Cosmetics / SKINR & Structure Browser UI Navigation",
-      "acceptance": "Open SKINR / Structure Browser ('open_window' 'paint_tool' or 'structurebrowser') cleanly without TimeoutException."
+      "acceptance": "Open SKINR / Structure Browser ('open_window' 'skinr' or 'structurebrowser') cleanly without TimeoutException."
     },
     {
       "feature_id": "ui.inventory.hangar_and_cargo_ops",
