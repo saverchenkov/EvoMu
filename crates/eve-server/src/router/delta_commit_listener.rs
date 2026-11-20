@@ -539,53 +539,73 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                 now_ft,
             )
         };
-        let rec_opt = matching.iter().rfind(|r| r.char_id == cid);
-        match (rec_opt, queues.as_mut()) {
-            (Some(rec), Some(queues)) => {
+        let latest_rec_opt = matching.iter().rfind(|r| r.char_id == cid);
+        let exact_rec_opt = matching
+            .iter()
+            .rev()
+            .find(|r| r.char_id == cid && (r.balance - manual_bal).abs() < 1e-6);
+        match (exact_rec_opt, latest_rec_opt, queues.as_mut()) {
+            (Some(exact), _, Some(queues)) => {
+                let queue = queues.entry(cid).or_default();
+                if let Some(pos) = queue.iter().position(|n| n.seq_id == exact.seq_id) {
+                    emitted.push(queue[pos].clone());
+                } else {
+                    // `exact.seq_id` was already drained to live listeners: do not re-push
+                    // duplicates onto the queue or live stream.
+                    emitted.push(make_notif());
+                }
+            }
+            (None, Some(rec), Some(queues)) => {
                 let queue = queues.entry(cid).or_default();
                 if let Some(pos) = queue.iter().position(|n| n.seq_id == rec.seq_id) {
-                    if (rec.balance - manual_bal).abs() < 1e-6 {
-                        emitted.push(queue[pos].clone());
-                    } else {
-                        let notif = make_notif();
-                        insert_before_pos_with_cap(queue, pos, notif.clone());
-                        // Do not re-broadcast stale pre-settlement balance on `notify_tx`
-                        // after `rec.seq_id` (`B_final`) was already sent at commit time.
-                        emitted.push(notif);
-                    }
-                    continue;
+                    let notif = make_notif();
+                    insert_before_pos_with_cap(queue, pos, notif.clone());
+                    // Do not re-broadcast stale pre-settlement balance on `notify_tx`
+                    // after `rec.seq_id` (`B_final`) was already sent at commit time.
+                    emitted.push(notif);
+                } else {
+                    // `rec.seq_id` was already drained to live listeners: do not re-push
+                    // duplicates or stale intermediate balances onto the live stream.
+                    emitted.push(make_notif());
                 }
-                // `rec.seq_id` was already drained to live listeners: do not re-push
-                // duplicates or stale intermediate balances onto the live stream.
-                emitted.push(make_notif());
             }
-            (None, Some(queues)) => {
+            (None, None, Some(queues)) => {
                 let notif = make_notif();
                 push_pending_notification_capped(queues.entry(cid).or_default(), notif.clone());
                 let _ = ctx.notify_tx.send((cid, notif.clone()));
                 emitted.push(notif);
             }
-            (Some(rec), None) => {
-                if let Some(existing) =
-                    find_staged_notification_by_seq(&*ctx.pending_notifications, rec.seq_id)
-                {
-                    if (rec.balance - manual_bal).abs() < 1e-6 {
-                        emitted.push(existing);
+            (Some(_), _, None) => {
+                if let Some(existing) = matching.iter().rev().find_map(|r| {
+                    if r.char_id == cid && (r.balance - manual_bal).abs() < 1e-6 {
+                        find_staged_notification_by_seq(&*ctx.pending_notifications, r.seq_id)
                     } else {
-                        let notif = make_notif();
-                        insert_before_staged_seq_or_stage(
-                            &*ctx.pending_notifications,
-                            &ctx.notify_tx,
-                            rec.seq_id,
-                            &notif,
-                        );
-                        emitted.push(notif);
+                        None
                     }
+                }) {
+                    emitted.push(existing);
+                } else {
+                    // Exact balance for this staged scope was already flushed or drained.
+                    emitted.push(make_notif());
+                }
+            }
+            (None, Some(rec), None) => {
+                if find_staged_notification_by_seq(&*ctx.pending_notifications, rec.seq_id)
+                    .is_some()
+                {
+                    let notif = make_notif();
+                    insert_before_staged_seq_or_stage(
+                        &*ctx.pending_notifications,
+                        &ctx.notify_tx,
+                        rec.seq_id,
+                        &notif,
+                    );
+                    emitted.push(notif);
                 } else {
                     emitted.push(make_notif());
                 }
             }
-            (None, None) => {
+            (None, None, None) => {
                 let notif = make_notif();
                 let _ = try_stage_dispatch_notification(
                     Some(&*ctx.pending_notifications),

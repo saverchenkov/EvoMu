@@ -4460,7 +4460,7 @@ pub async fn on_homefront_entity_destroyed_core(
         return None;
     };
     let sys_h = systems.get_or_spawn(sys_id);
-    let account_changes = Vec::new();
+    let mut account_changes = Vec::new();
     match post {
         PostKillAction::None => {}
         PostKillAction::SpawnRaidHauler {
@@ -4514,7 +4514,15 @@ pub async fn on_homefront_entity_destroyed_core(
             }
         }
         PostKillAction::SettleComplete(inst_id) => {
-            let _ = settle_homefront_completion_atomic_db(db, sde, systems, inst_id, None);
+            if let Ok((_, _, _, emitted)) =
+                settle_homefront_completion_atomic_db(db, sde, systems, inst_id, None)
+            {
+                for (payout, new_balance, _) in emitted {
+                    if payout.eligible && payout.isk_cents.raw_cents() > 0 {
+                        account_changes.push((payout.character_id, new_balance.to_wire_f64()));
+                    }
+                }
+            }
         }
         PostKillAction::SettleFail(inst_id, balls) => {
             despawn_homefront_balls_db(systems, sys_id, inst_id, &balls);

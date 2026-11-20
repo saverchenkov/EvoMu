@@ -769,6 +769,152 @@ async fn commit_listener_regression_bf01_bf02_bf03_bf04_matrix() {
     });
     let _ = ctx.drain_notifications_for_char(pilot_id);
 
+    // BF-01(a): Special-site/Homefront completion via `on_special_site_npc_destroyed_core`
+    // followed by `ctx.notify_account_change` emits exactly one `OnAccountChange` per online pilot.
+    let sys_id: u32 = 30_000_142;
+    let hf_pilot = 90_091_001_i64;
+    let hf_ship_id = 1_091_000_001_i64;
+    ctx.db
+        .provision_gm_account("hf_bf01a_pilot", "pw", hf_pilot, "HfBf01a");
+    let hf_uid = ctx.db.with_snapshot(|s| s.characters[&hf_pilot].user_id);
+    ctx.db
+        .acquire_online_lock(hf_uid, 704, Some(hf_pilot), true, now)
+        .expect("hf online lock");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&hf_pilot) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.fleet_id = None;
+            ch.active_ship_id = hf_ship_id;
+            ch.balance = eve_db::IskCents::from_isk(100_000);
+        }
+        snap.items.insert(
+            hf_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: hf_ship_id,
+                type_id: 587,
+                owner_id: hf_pilot,
+                location_id: i64::from(sys_id),
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(hf_pilot);
+    let ss = crate::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(
+        &ctx,
+        sys_id,
+        10_367,
+    )
+    .expect("spawn Homefront Suspicious Signal");
+    let relay_bid = match ss.progress {
+        crate::services::pve_homefront_sites::HomefrontArchetypeProgress::SuspiciousSignal {
+            relay_ball_id,
+            ..
+        } => relay_ball_id,
+        ref other => panic!("expected SuspiciousSignal progress, got {other:?}"),
+    };
+    let _ = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .spawn_ball(eve_destiny::Ball {
+            id: hf_ship_id,
+            type_id: 587,
+            position: ss.site_position + glam::DVec3::new(400.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1.0e6,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let mut hf_sess = eve_machonet::SessionState::new(hf_uid);
+    hf_sess.user_id = Some(hf_uid);
+    hf_sess.character_id = Some(hf_pilot);
+    hf_sess.solar_system_id = Some(sys_id);
+    hf_sess.ship_id = Some(hf_ship_id);
+    crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+        &ctx,
+        &hf_sess,
+        ss.instance_id,
+    )
+    .await
+    .expect("hf pilot enters gate");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&ss.instance_id) {
+            if let Some(c) = rec.contributions.get_mut(&hf_pilot) {
+                c.damage_dealt = 2_000.0;
+            }
+            if let eve_db::service_domains::pve_sites::HomefrontProgressRecord::SuspiciousSignal {
+                arrays_hacked,
+                vulnerability_window_secs,
+                ..
+            } = &mut rec.progress
+            {
+                *arrays_hacked = [true; 3];
+                *vulnerability_window_secs = 90;
+            }
+        }
+    });
+    let mut hf_rx = ctx.notify_tx.subscribe();
+    let acct_changes = crate::services::pve_special_sites::on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_id,
+        relay_bid,
+        Some(hf_pilot),
+    )
+    .await;
+    assert_eq!(acct_changes.len(), 1);
+    assert_eq!(acct_changes[0].0, hf_pilot);
+    let expected_hf_bal = acct_changes[0].1;
+    assert!(expected_hf_bal > 100_000.0);
+    for (cid, bal) in acct_changes {
+        let _ = ctx.notify_account_change(cid, "cash", cid, bal);
+    }
+    fn drain_owned_changes(
+        ctx: &ServerContext,
+        cid: i64,
+    ) -> Vec<(String, i64, f64, String)> {
+        ctx.drain_notifications_for_char(cid)
+            .iter()
+            .filter_map(|n| {
+                account_change_summary(n)
+                    .map(|(k, owner, bal, idt)| (k, owner, bal, idt.to_string()))
+            })
+            .collect()
+    }
+    fn recv_owned_changes(
+        rx: &mut tokio::sync::broadcast::Receiver<(i64, PendingMachoNotification)>,
+        cid: i64,
+    ) -> Vec<(String, i64, f64, String)> {
+        let mut out = Vec::new();
+        while let Ok((target_cid, notif)) = rx.try_recv() {
+            if target_cid == cid {
+                if let Some((k, owner, bal, idt)) = account_change_summary(&notif) {
+                    out.push((k, owner, bal, idt.to_string()));
+                }
+            }
+        }
+        out
+    }
+
+    assert_eq!(
+        drain_owned_changes(&ctx, hf_pilot),
+        vec![("cash".to_string(), hf_pilot, expected_hf_bal, "charid".to_string())]
+    );
+    assert_eq!(
+        recv_owned_changes(&mut hf_rx, hf_pilot),
+        vec![("cash".to_string(), hf_pilot, expected_hf_bal, "charid".to_string())]
+    );
+
     // BF-01(b): Intervening non-wallet commit before legacy notify must still deduplicate.
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&pilot_id).expect("pilot").balance = eve_db::IskCents::from_isk(80_000);
@@ -868,6 +1014,88 @@ async fn commit_listener_regression_bf01_bf02_bf03_bf04_matrix() {
     assert_eq!(
         task_b_out,
         vec![("cash".to_string(), pilot_id, 95_000.0, "charid")]
+    );
+
+    // BF-03(3): Sequential same-wallet commits (B1 then B2) followed by legacy emits for B1 and B2
+    // must deduplicate across ALL records in matching (both unstaged and staged paths).
+    while rx.try_recv().is_ok() {}
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+            eve_db::IskCents::from_isk(96_000);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+            eve_db::IskCents::from_isk(97_000);
+    });
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 96_000.0);
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 97_000.0);
+    assert_eq!(
+        drain_owned_changes(&ctx, pilot_id),
+        vec![
+            ("cash".to_string(), pilot_id, 96_000.0, "charid".to_string()),
+            ("cash".to_string(), pilot_id, 97_000.0, "charid".to_string()),
+        ]
+    );
+    assert_eq!(
+        recv_owned_changes(&mut rx, pilot_id),
+        vec![
+            ("cash".to_string(), pilot_id, 96_000.0, "charid".to_string()),
+            ("cash".to_string(), pilot_id, 97_000.0, "charid".to_string()),
+        ]
+    );
+
+    // Also cover unstaged B1 drained before B2 commits, followed by late legacy emits for B1 and B2.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+            eve_db::IskCents::from_isk(98_000);
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    while rx.try_recv().is_ok() {}
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+            eve_db::IskCents::from_isk(99_000);
+    });
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 98_000.0);
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 99_000.0);
+    assert_eq!(
+        drain_owned_changes(&ctx, pilot_id),
+        vec![("cash".to_string(), pilot_id, 99_000.0, "charid".to_string())]
+    );
+    assert_eq!(
+        recv_owned_changes(&mut rx, pilot_id),
+        vec![("cash".to_string(), pilot_id, 99_000.0, "charid".to_string())]
+    );
+
+    // Staged two-commit scope [B1, B2] + legacy emits for B1 and B2 must flush 1 copy each.
+    while rx.try_recv().is_ok() {}
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+                eve_db::IskCents::from_isk(101_000);
+        });
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+                eve_db::IskCents::from_isk(102_000);
+        });
+        let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 101_000.0);
+        let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 102_000.0);
+        assert!(rx.try_recv().is_err(), "staged emits stay buffered until flush");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    assert_eq!(
+        drain_owned_changes(&ctx, pilot_id),
+        vec![
+            ("cash".to_string(), pilot_id, 101_000.0, "charid".to_string()),
+            ("cash".to_string(), pilot_id, 102_000.0, "charid".to_string()),
+        ]
+    );
+    assert_eq!(
+        recv_owned_changes(&mut rx, pilot_id),
+        vec![
+            ("cash".to_string(), pilot_id, 101_000.0, "charid".to_string()),
+            ("cash".to_string(), pilot_id, 102_000.0, "charid".to_string()),
+        ]
     );
 
     // BF-04: Folding legacy character PLEX with unchanged vault balance still emits OnAccountChange("plex").
