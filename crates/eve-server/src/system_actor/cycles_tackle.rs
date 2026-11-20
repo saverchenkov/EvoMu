@@ -1116,12 +1116,38 @@ fn overload_speed_multiplier_for_cycle(
     let (Some(sde), Some(mt), Some(proj)) = (sde_opt.as_ref(), mt_opt, fit_projection) else {
         return raw_mult;
     };
+    if !sde.attributes.get(&20).is_none_or(|a| !a.stackable) {
+        return raw_mult;
+    }
     let Some(stance_tid) = proj.active_stance_type_id else {
         return raw_mult;
     };
     let Some(stance_type) = sde.types.get(&stance_tid) else {
         return raw_mult;
     };
+    let stance_source = eve_dogma::DogmaItemState {
+        item_id: 0,
+        type_id: stance_tid,
+        group_id: Some(stance_type.group_id),
+        category_id: Some(stance_type.category_id),
+        base_attributes: HashMap::new(),
+        modifiers: Vec::new(),
+        skill_levels: HashMap::new(),
+    };
+    let module_source = eve_dogma::DogmaItemState {
+        item_id: 0,
+        type_id: mt.type_id,
+        group_id: Some(mt.group_id),
+        category_id: Some(mt.category_id),
+        base_attributes: HashMap::new(),
+        modifiers: Vec::new(),
+        skill_levels: HashMap::new(),
+    };
+    if eve_dogma::source_is_stacking_exempt(&stance_source, sde)
+        || eve_dogma::source_is_stacking_exempt(&module_source, sde)
+    {
+        return raw_mult;
+    }
     let req_skills: Vec<u32> = [182u16, 183, 184, 1285, 1289, 1290]
         .iter()
         .filter_map(|aid| mt.default_attributes.get(aid).copied())
@@ -1157,9 +1183,13 @@ fn overload_speed_multiplier_for_cycle(
             let Some(&val) = stance_type.default_attributes.get(&m.modifying_attribute_id) else {
                 continue;
             };
+            // Only post-group stacking-penalized operators (`PostMul` 4, `PostDiv` 5,
+            // `PostPercent` 6) share Dogma's `post_deltas` stacking bucket with
+            // `overloadSelfSpeedBonus` (`PostPercent` 6); `PreMul`/`PreDiv` (`0 | 1`)
+            // run in a separate pre-group pass and never stack-penalize against it (#1444).
             let delta = match m.operator {
-                0 | 4 => val - 1.0,
-                1 | 5 if val.abs() > 1e-12 => (1.0 / val) - 1.0,
+                4 => val - 1.0,
+                5 if val.abs() > 1e-12 => (1.0 / val) - 1.0,
                 6 => val / 100.0,
                 _ => continue,
             };
