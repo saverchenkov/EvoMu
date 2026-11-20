@@ -636,3 +636,189 @@ async fn on_dungeon_npc_killed_guards_unfired_triggers_and_owner_fallback_recipi
     assert!(owner_notes.iter().any(|n| n.event == "OnDungeonCompleted"));
     assert!(owner_notes.iter().any(|n| n.event == "OnProgressionTaskCompleted"));
 }
+
+#[test]
+fn resolve_deadspace_or_escalation_enforces_probe_scan_expedition_owner_and_drifter_hive_id() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let owner_char: i64 = 90_020_301;
+    let other_char: i64 = 90_020_302;
+    let ctx = make_ctx(sys_id, owner_char);
+    let ded_pos = [14_000_000.0, 250.0, -500.0];
+    let exp_pos = [18_000_000.0, -100.0, 750.0];
+    let hive_beacon_id = 1_898_701_110_i64;
+
+    // 1. Seed a probe_required DED combat signature, a private escalation site, an owned
+    //    DungeonRuntimeInstance, and an active Drifter Hive in `sys_id`.
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(
+            957_001,
+            sample_instance(957_001, 4_203, sys_id, owner_char, false),
+        );
+    });
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.escalations_by_char
+            .entry(owner_char)
+            .or_default()
+            .push(crate::services::pve_exploration::EscalatingPathEntry {
+                instance_id: 77_801,
+                character_id: owner_char,
+                source_dungeon_id: 4_200,
+                expedition_dungeon_id: 4_202,
+                expedition_name: "Private Escalation".into(),
+                destination_solar_system_id: sys_id,
+                step_index: 1,
+                total_steps: 4,
+                journal_text: String::new(),
+                created_at_sec: 1_775_100_000,
+                expires_at_sec: 1_775_186_400,
+                dungeons_entered: Vec::new(),
+                journal_entry_template_id: 0,
+            });
+        reg.sites_by_system.entry(sys_id).or_default().extend([
+            PveSiteInstance {
+                site_id: "DED-SIG-1".into(),
+                solar_system_id: sys_id,
+                site_category: "CombatSignature".into(),
+                dungeon_id: 4_201,
+                dungeon_name: "Unscanned DED 4/10".into(),
+                position: ded_pos,
+                probe_required: true,
+                signal_strength: 0.25,
+                cleared: false,
+                ..Default::default()
+            },
+            PveSiteInstance {
+                site_id: "EXP-77801-1".into(),
+                solar_system_id: sys_id,
+                site_category: "Expedition".into(),
+                dungeon_id: 4_202,
+                dungeon_name: "Private Escalation".into(),
+                position: exp_pos,
+                probe_required: false,
+                signal_strength: 1.0,
+                expedition_instance_id: Some(77_801),
+                cleared: false,
+                ..Default::default()
+            },
+        ]);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures
+            .entry(sys_id)
+            .or_default()
+            .push(CosmicSignatureRecord {
+                signature_id: "DED-SIG-1".into(),
+                solar_system_id: sys_id,
+                sig_group: "Combat Site".into(),
+                type_name: "Unscanned DED 4/10".into(),
+                position: ded_pos,
+                signal_strength: 0.25,
+                collapsed: false,
+                ..Default::default()
+            });
+    });
+    crate::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.drifter_hives.insert(
+            sys_id,
+            crate::services::pve_special_sites::DrifterHiveRecord {
+                site_id: "HIVE-TEST-1".into(),
+                dungeon_id: 7_011,
+                dungeon_name: "Vidette".into(),
+                solar_system_id: sys_id,
+                element_type_id: 34_575,
+                element_name: "Antikythera".into(),
+                current_room: 1,
+                total_rooms: 3,
+                warden_npc_ball_id: 1_898_701_130,
+                cleared: false,
+                rooms: vec![crate::services::pve_special_sites::DrifterHiveRoom {
+                    room_index: 1,
+                    room_name: "Perimeter".into(),
+                    npc_ball_ids: Vec::new(),
+                    npc_type_ids: Vec::new(),
+                    beacon_ball_id: hive_beacon_id,
+                    cleared: false,
+                    destroyed_npc_ball_ids: Vec::new(),
+                }],
+            },
+        );
+    });
+
+    // 2. Unscanned probe_required DED site is denied before 100% scan, then allowed ONLY for the scanning pilot.
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(&ctx, owner_char, sys_id, "dungeon", 4_201, None)
+            .unwrap(),
+        None
+    );
+    ctx.record_character_scan_progress(owner_char, sys_id, "DED-SIG-1", 1.0);
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(&ctx, owner_char, sys_id, "dungeon", 4_201, None)
+            .unwrap(),
+        Some(DVec3::from_array(ded_pos))
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(&ctx, other_char, sys_id, "dungeon", 4_201, None)
+            .unwrap(),
+        None
+    );
+
+    // 3. Private escalation site is denied to non-owners and resolved for the owning pilot.
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(&ctx, other_char, sys_id, "dungeon", 4_202, None)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(&ctx, owner_char, sys_id, "dungeon", 4_202, None)
+            .unwrap(),
+        Some(DVec3::from_array(exp_pos))
+    );
+
+    // 4. Owned DungeonRuntimeInstance is denied to non-owners and resolved for the owning pilot.
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(&ctx, other_char, sys_id, "dungeon", 957_001, None)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(&ctx, owner_char, sys_id, "dungeon", 957_001, None)
+            .unwrap(),
+        Some(DVec3::new(1_000_000.0, 0.0, 0.0))
+    );
+
+    // 5. Drifter Hive refuses unrelated target_id and resolves only on explicit dungeon_id / beacon / site_id match.
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(&ctx, owner_char, sys_id, "dungeon", 999_999, None)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(&ctx, owner_char, sys_id, "dungeon", 7_011, None)
+            .unwrap(),
+        Some(DVec3::new(10_000.0, 0.0, 0.0))
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            owner_char,
+            sys_id,
+            "location",
+            hive_beacon_id,
+            None,
+        )
+        .unwrap(),
+        Some(DVec3::new(10_000.0, 0.0, 0.0))
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            owner_char,
+            sys_id,
+            "dungeon",
+            0,
+            Some("HIVE-TEST-1"),
+        )
+        .unwrap(),
+        Some(DVec3::new(10_000.0, 0.0, 0.0))
+    );
+}
