@@ -705,6 +705,15 @@ fn seed_comprehensive_world(ctx: &ServerContext) {
                 ..Default::default()
             },
         );
+        snap.pve_special_sites.interference_by_system.insert(
+            SYSTEM_ID,
+            eve_db::SystemInterferenceRecord {
+                solar_system_id: SYSTEM_ID,
+                interference_level: 0.15,
+                band: 1,
+                last_updated_sec: now,
+            },
+        );
     });
 }
 

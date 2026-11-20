@@ -686,6 +686,20 @@ async fn test_rpc_survey_interference_drones_qa_and_filaments() {
     let claim = rpc(&ctx, &mut s1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(2801)]).await;
     assert_eq!(claim, PyRep::Bool(true));
 
+    let cold_bands = rpc(&ctx, &mut s1, "solarsystemInterferenceMgr", "GetAllInterferenceBands", &[]).await;
+    assert!(!format!("{cold_bands:?}").contains("30000142"), "cold GetAllInterferenceBands must not fabricate untracked systems");
+    let now_u = ctx.now_unix();
+    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.interference_by_system.insert(
+            JITA,
+            eve_db::SystemInterferenceRecord {
+                solar_system_id: JITA,
+                interference_level: 0.10,
+                band: 1,
+                last_updated_sec: now_u,
+            },
+        );
+    });
     let bands = rpc(&ctx, &mut s1, "solarsystemInterferenceMgr", "GetAllInterferenceBands", &[]).await;
     assert!(format!("{bands:?}").contains("30000142"));
 
