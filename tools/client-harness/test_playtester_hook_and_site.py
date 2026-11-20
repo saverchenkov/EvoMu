@@ -518,6 +518,75 @@ class TestHookSlashSpawnBallparkPoll(unittest.TestCase):
         self.assertTrue(wnd.destroyed)
         self.assertEqual(closed_views, ["ship_skinr"])
 
+    def test_open_and_close_paint_tool_alias_targets_ship_skinr(self):
+        hook = _load_hook_with_py2_stubs()
+        view_state = {"name": "hangar"}
+        cmd_calls = []
+        closed_views = []
+
+        def open_ship_skinr():
+            cmd_calls.append("OpenShipSKINRWindow")
+            view_state["name"] = "ship_skinr"
+
+        def close_sec_view(name):
+            closed_views.append(name)
+            if name == "ship_skinr":
+                view_state["name"] = "hangar"
+
+        fake_vs = types.SimpleNamespace(
+            GetCurrentViewInfo=lambda: types.SimpleNamespace(name=view_state["name"]),
+            CloseSecondaryView=close_sec_view,
+        )
+        fake_sm = mock.Mock()
+        fake_sm.services = {"viewState": fake_vs}
+        fake_sm.GetService.side_effect = lambda name: fake_vs if name == "viewState" else mock.Mock()
+        fake_cmd = types.SimpleNamespace(OpenShipSKINRWindow=open_ship_skinr)
+        fake_uicore = types.SimpleNamespace(
+            cmd=fake_cmd,
+            registry=types.SimpleNamespace(GetWindows=lambda: []),
+            layer=None,
+            dockablePanelManager=None,
+        )
+
+        with mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_is_visible", return_value=True), \
+             mock.patch.object(hook, "_close_neocom_panels_if_outside"), \
+             mock.patch.object(hook, "_close_utilmenu_if_outside"), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside"), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_get_state_snapshot", side_effect=lambda _sm=None: {
+                 "open_windows": [],
+                 "modals": [],
+                 "ui": {},
+                 "space": {},
+                 "skills_state": {},
+                 "wallet_state": {},
+                 "active_view": view_state["name"],
+             }), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore):
+            open_res = hook._execute_action(
+                fake_sm,
+                {"type": "open_neocom", "target": "paint_tool", "require_window_open": True, "wait_ms": 0},
+            )
+            self.assertTrue(open_res.get("ok"), open_res)
+            self.assertEqual(cmd_calls, ["OpenShipSKINRWindow"])
+            self.assertEqual(view_state["name"], "ship_skinr")
+
+            close_res = hook._execute_action(
+                fake_sm,
+                {"type": "close_window", "target": "paint_tool", "wait_ms": 0},
+            )
+            self.assertTrue(close_res.get("ok"), close_res)
+            self.assertEqual(closed_views, ["ship_skinr"])
+            self.assertEqual(view_state["name"], "hangar")
+
+            open_ship_skinr()
+            cleanup_res = hook._cleanup_utility_windows(fake_sm)
+            self.assertEqual(cleanup_res.get("closed_secondary_view"), "ship_skinr")
+            self.assertEqual(view_state["name"], "hangar")
+
     def test_type_text_handles_non_cp1252_unicode_and_command_newline_submit(self):
         hook = _load_hook_with_py2_stubs()
         recorded = {"values": [], "submitted": []}
