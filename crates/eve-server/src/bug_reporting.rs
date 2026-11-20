@@ -588,11 +588,24 @@ impl BugIncidentBundle {
 }
 
 /// Dispatches asynchronous incident capture with a trailing log collection window.
+///
+/// Known benign CCP V24 client-only UI layout tracebacks are logged and skipped
+/// from `.evomu-bugs/queue/` persistence so they do not generate noisy GitHub issues,
+/// while preserving upstream RPC responses and session alert telemetry.
 pub fn schedule_incident_capture(
     mut bundle: BugIncidentBundle,
     queue_dir: Option<PathBuf>,
     trailing_duration: Option<Duration>,
 ) {
+    if is_benign_client_traceback(&bundle.stack_key, &bundle.trace) {
+        info!(
+            incident_id = %bundle.incident_id,
+            stack_hash = bundle.stack_hash,
+            "Suppressing known benign client UI traceback from bug report queue"
+        );
+        return;
+    }
+
     let qdir = queue_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_BUG_QUEUE_DIR));
     let trailing = trailing_duration.unwrap_or(DEFAULT_TRAILING_CAPTURE_DURATION);
     let incident_millis = bundle.timestamp_millis;
@@ -651,6 +664,205 @@ fn fnv1a_i64(input: &str) -> i64 {
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash as i64
+}
+
+struct BenignClientTracebackRule {
+    file_stem: &'static str,
+    func_name: &'static str,
+    error_substr: &'static str,
+}
+
+const BENIGN_CLIENT_TRACEBACK_RULES: &[BenignClientTracebackRule] = &[
+    BenignClientTracebackRule {
+        file_stem: "marketbase",
+        func_name: "_OnResize",
+        error_substr: "'NoneType' object has no attribute 'max'",
+    },
+    BenignClientTracebackRule {
+        file_stem: "minimap",
+        func_name: "_ResizeSlider",
+        error_substr: "'MapSlider' object has no attribute 'minimumWidth'",
+    },
+];
+
+const CLIENT_FRAME_WRAPPER_STEMS: &[&str] = &[
+    "moniker",
+    "machonettransport",
+    "servicecallgpcs",
+    "gpcs",
+    "retry",
+    "__init__",
+    "evomu_site",
+    "evomu_playtester_hook",
+    "logmodule",
+    "log",
+    "bluepyimpl",
+];
+
+fn extract_python_file_stem(path: &str) -> Option<&str> {
+    let base = path.trim().rsplit(['/', '\\']).next()?;
+    let dot = base.rfind('.')?;
+    let stem = &base[..dot];
+    let ext = &base[dot + 1..];
+    if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return None;
+    }
+    if ext.len() >= 2
+        && ext.is_char_boundary(2)
+        && ext[..2].eq_ignore_ascii_case("py")
+        && ext[2..].bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        Some(stem)
+    } else {
+        None
+    }
+}
+
+fn parse_leading_ident(s: &str) -> Option<&str> {
+    let trimmed = s.trim_start();
+    let end = trimmed
+        .char_indices()
+        .find(|&(_, ch)| !ch.is_ascii_alphanumeric() && ch != '_')
+        .map(|(idx, _)| idx)
+        .unwrap_or(trimmed.len());
+    if end == 0 {
+        return None;
+    }
+    let tail = &trimmed[end..];
+    if tail.is_empty() || tail.starts_with(char::is_whitespace) {
+        Some(&trimmed[..end])
+    } else {
+        None
+    }
+}
+
+fn parse_traceback_frame_line(raw_line: &str) -> Option<(&str, &str)> {
+    let mut line = raw_line.trim();
+    if let Some(stripped) = line.strip_prefix("<pre>") {
+        line = stripped.trim();
+    }
+    if line.is_empty() {
+        return None;
+    }
+
+    // Standard Python traceback frame: `File ".../minimap.py", line 111, in _ResizeSlider`
+    if let Some(after_file) = line.strip_prefix("File ") {
+        let trimmed = after_file.trim_start();
+        let quote = trimmed.as_bytes().first().copied()?;
+        if quote == b'"' || quote == b'\'' {
+            let inner = &trimmed[1..];
+            if let Some((path_part, after_quote)) = inner.split_once(quote as char) {
+                let stem = extract_python_file_stem(path_part)?;
+                let after_comma = after_quote.trim_start().strip_prefix(',')?.trim_start();
+                let after_line = after_comma.strip_prefix("line ")?.trim_start();
+                let (digits, after_digits) = after_line.split_once(',')?;
+                let digits = digits.trim();
+                if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                let after_in = after_digits.trim_start().strip_prefix("in ")?.trim_start();
+                let func = parse_leading_ident(after_in)?;
+                return Some((stem, func));
+            }
+        }
+        return None;
+    }
+
+    // EVE alert frame: `/path/marketbase.py(3718) _OnResize`
+    if let Some((before_paren, after_open)) = line.rsplit_once('(') {
+        if !before_paren.contains("args=") {
+            if let Some(stem) = extract_python_file_stem(before_paren) {
+                if let Some((digits, after_close)) = after_open.split_once(')') {
+                    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                        if let Some(func) = parse_leading_ident(after_close) {
+                            return Some((stem, func));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Summary location frame: `marketbase.py:3718 in _OnResize`
+    if let Some((path_part, after_colon)) = line.rsplit_once(':') {
+        if !path_part.contains("args=") {
+            if let Some(stem) = extract_python_file_stem(path_part) {
+                let digits_end = after_colon
+                    .bytes()
+                    .take_while(|b| b.is_ascii_digit())
+                    .count();
+                if digits_end > 0 {
+                    let after_digits = &after_colon[digits_end..];
+                    if after_digits.starts_with(char::is_whitespace) {
+                        if let Some(after_in) = after_digits.trim_start().strip_prefix("in ") {
+                            if let Some(func) = parse_leading_ident(after_in) {
+                                return Some((stem, func));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_leaf_frame(text: &str) -> Option<(&str, &str)> {
+    let mut frames: Vec<(&str, &str)> = Vec::new();
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed == "CALLSTACK:"
+            || trimmed.starts_with("Thread Locals:")
+            || trimmed.starts_with("EXCEPTION END")
+        {
+            break;
+        }
+        if let Some(frame) = parse_traceback_frame_line(trimmed) {
+            frames.push(frame);
+        }
+    }
+    if frames.is_empty() {
+        for raw_line in text.lines() {
+            if let Some(frame) = parse_traceback_frame_line(raw_line) {
+                frames.push(frame);
+            }
+        }
+    }
+    let last = *frames.last()?;
+    for &(stem, func) in frames.iter().rev() {
+        if !CLIENT_FRAME_WRAPPER_STEMS
+            .iter()
+            .any(|w| stem.eq_ignore_ascii_case(w))
+        {
+            return Some((stem, func));
+        }
+    }
+    Some(last)
+}
+
+fn contains_server_fault_marker(text: &str) -> bool {
+    text.contains("InternalError")
+        || text.contains("DatabasePersistenceError")
+        || text.contains("ServerException")
+        || text.contains("GenericInternalServerError")
+}
+
+/// Returns `true` when `(stack_key, trace)` matches a known benign CCP V24
+/// client-only UI layout race that does not indicate a server or gameplay bug.
+pub fn is_benign_client_traceback(stack_key: &str, trace: &str) -> bool {
+    if contains_server_fault_marker(stack_key) || contains_server_fault_marker(trace) {
+        return false;
+    }
+    let leaf = extract_leaf_frame(trace).or_else(|| extract_leaf_frame(stack_key));
+    let Some((stem, func)) = leaf else {
+        return false;
+    };
+    BENIGN_CLIENT_TRACEBACK_RULES.iter().any(|rule| {
+        stem.eq_ignore_ascii_case(rule.file_stem)
+            && func == rule.func_name
+            && (trace.contains(rule.error_substr) || stack_key.contains(rule.error_substr))
+    })
 }
 
 /// Returns `true` when `line` represents a server `InternalError` or

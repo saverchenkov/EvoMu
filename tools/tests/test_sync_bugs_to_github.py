@@ -1035,6 +1035,242 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
         self.assertNotIn("environment", labels)
         self.assertNotIn("[Environment]", title)
 
+    def test_gh1455_benign_client_tracebacks_suppressed_with_negative_cases(self) -> None:
+        market_alert_bundle = _make_crash_bundle(
+            stack_hash=1448116342,
+            stack_key=(
+                " \nCaught at:\n"
+                "/Users/buildagentA/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/packages/carbonui/uilib.py(708) Update\n"
+                " \nThrown at:\n"
+                "/Users/buildagentA/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n"
+            ),
+            trace=(
+                "EXCEPTION #7 logged at 11/20/2026 05:46:24 : Info: AttributeError: 'NoneType' object has no attribute 'max' \n\n"
+                "Formatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n\n"
+                "Thrown at:\n"
+                " /Users/buildagentA/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/packages/carbonui/primitives/base.py(2097) UpdateAlignment\n"
+                " /Users/buildagentA/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n"
+                "        absHeight = 555\n"
+                "Thread Locals:  session was <Session>\n"
+                "Stackhash: 1448116342\n"
+                "EXCEPTION END\n"
+            ),
+            flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+        )
+        self.assertTrue(sync_mod.is_benign_client_traceback_bundle(market_alert_bundle))
+
+        minimap_py_trace = (
+            "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n"
+            "log.LogException args=() kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "/Users/buildagentA/eve/packages/carbonui/graphs/minimap.py", line 100, in UpdateAlignment\n'
+            '  File "/Users/buildagentA/eve/packages/carbonui/graphs/minimap.py", line 111, in _ResizeSlider\n'
+            "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n\n"
+            "CALLSTACK:\n"
+            '  File "/Users/buildagentA/eve/packages/carbonui/uilib.py", line 708, in Update\n'
+        )
+        minimap_manual_bundle = {
+            "report_source": "f12_manual",
+            "stack_hash": 2541493741815843466,
+            "stack_key": "playtester:market / carbonui.graphs.minimap:client_exception",
+            "trace": minimap_py_trace,
+            "manual_report": {
+                "report_key": "playtester_step57954_23453317bfcfca8a",
+                "category_id": "market / carbonui.graphs.minimap",
+                "title": "[Bug Report] AttributeError: 'MapSlider' object has no attribute 'minimumWidth'",
+            },
+            "flight_recorder": [{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+            "session": {"character_id": 90000001},
+        }
+        self.assertTrue(sync_mod.is_benign_client_traceback_bundle(minimap_manual_bundle))
+        self.assertTrue(
+            sync_mod.is_benign_client_traceback(
+                "<pre>/app/client/packages/carbonui/graphs/minimap.pyj(111) _ResizeSlider\n"
+                "Formatted exception info: AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n"
+                "EXCEPTION END\n",
+                "",
+            )
+        )
+
+        # Negative cases that must NOT be suppressed.
+        negative_cases = [
+            _make_crash_bundle(
+                stack_hash=101,
+                trace='Traceback (most recent call last):\n  File "marketbase.py", line 3718, in _OnResize\nKeyError: "max"',
+                flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+            ),
+            _make_crash_bundle(
+                stack_hash=102,
+                trace='Traceback (most recent call last):\n  File "marketbase.py", line 3718, in LoadOrders\nAttributeError: \'NoneType\' object has no attribute \'max\'',
+                flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+            ),
+            _make_crash_bundle(
+                stack_hash=103,
+                trace='Traceback (most recent call last):\n  File "other_marketbase.py", line 3718, in _OnResize\nAttributeError: \'NoneType\' object has no attribute \'max\'',
+                flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+            ),
+            _make_crash_bundle(
+                stack_hash=104,
+                trace=(
+                    "Traceback (most recent call last):\n"
+                    '  File "marketbase.py", line 3718, in _OnResize\n'
+                    '  File "market_orders.py", line 99, in ApplyFilter\n'
+                    "AttributeError: 'NoneType' object has no attribute 'max'\n"
+                ),
+                flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+            ),
+            _make_crash_bundle(
+                stack_hash=105,
+                trace=(
+                    "Traceback (most recent call last):\n"
+                    '  File "marketbase.py", line 3718, in _OnResize\n'
+                    "RuntimeError: ServerException: 'NoneType' object has no attribute 'max'\n"
+                ),
+                flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+            ),
+            {
+                "report_source": "f12_manual",
+                "stack_hash": 106,
+                "stack_key": "f12:ui:Market broken",
+                "trace": "",
+                "manual_report": {
+                    "report_key": "EBR-9999-ABCDEF",
+                    "category_id": "UI",
+                    "title": "Market window unresponsive",
+                    "description": "Buttons stopped responding.",
+                    "client_logs_tail": [
+                        '  File "minimap.py", line 111, in _ResizeSlider',
+                        "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'",
+                    ],
+                },
+                "session": {"character_id": 90000001},
+            },
+        ]
+        for idx, neg in enumerate(negative_cases):
+            self.assertFalse(sync_mod.is_benign_client_traceback_bundle(neg), f"negative case {idx} suppressed")
+
+        # Direct create_or_update_issue suppresses benign bundle with zero gh calls.
+        fake_gh = FakeGitHubCLI()
+        with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+            sync_mod.subprocess, "run", side_effect=fake_gh
+        ):
+            self.assertIsNone(sync_mod.create_or_update_issue("saverchenkov/EvoMu", market_alert_bundle, dry_run=False))
+        self.assertEqual(len(fake_gh.created_issues), 0)
+        self.assertEqual(len(fake_gh.comments), 0)
+
+        # main() archives benign bundles + attachments while still filing the single genuine crash.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            qdir = Path(tmpdir) / "queue"
+            udir = Path(tmpdir) / "uploaded"
+            qdir.mkdir()
+            att_dir = qdir / "attachments" / "playtester_step57954_23453317bfcfca8a"
+            att_dir.mkdir(parents=True)
+            (att_dir / "shot.png").write_bytes(b"png")
+            (qdir / "01_market_benign.json").write_text(json.dumps(market_alert_bundle), encoding="utf-8")
+            (qdir / "02_minimap_benign.json").write_text(json.dumps(minimap_manual_bundle), encoding="utf-8")
+            (qdir / "03_genuine.json").write_text(json.dumps(negative_cases[0]), encoding="utf-8")
+
+            fake_batch_gh = FakeGitHubCLI()
+            buf = io.StringIO()
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=fake_batch_gh
+            ), contextlib.redirect_stdout(buf):
+                rc = sync_mod.main(["--queue-dir", str(qdir), "--uploaded-dir", str(udir)])
+            out = buf.getvalue()
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(fake_batch_gh.created_issues), 1)
+            self.assertIn("KeyError", fake_batch_gh.created_issues[0]["title"])
+            self.assertIn("Processed 3/3 incident file(s).", out)
+            self.assertEqual(list(qdir.glob("*.json")), [])
+            self.assertTrue((udir / "01_market_benign.json").exists())
+            self.assertTrue((udir / "02_minimap_benign.json").exists())
+            self.assertTrue((udir / "03_genuine.json").exists())
+            self.assertTrue((udir / "attachments" / "playtester_step57954_23453317bfcfca8a" / "shot.png").exists())
+
+    def test_gh1455_hash_alignment_deduplicates_against_legacy_client_hash_1314(self) -> None:
+        market_1314_trace = (
+            "EXCEPTION #7 logged at 11/20/2026 05:46:24 : Info: AttributeError: 'NoneType' object has no attribute 'max' \n\n"
+            "Formatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n\n"
+            "Thrown at:\n"
+            " /Users/buildagentA/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n"
+            "EXCEPTION END\n"
+        )
+        market_1314_bundle = _make_crash_bundle(
+            stack_hash=1448116342,  # 0x0000000056508076
+            stack_key="marketbase.py(3718) _OnResize",
+            trace=market_1314_trace,
+            flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+        )
+        canonical_market_hash = sync_mod._effective_bundle_hash(market_1314_bundle)
+        self.assertEqual(canonical_market_hash & 0xFFFFFFFFFFFFFFFF, 0xB5206B0747A727CE)
+        # Canonicalization must NOT destroy raw client `stack_hash` in the bundle dict.
+        self.assertEqual(market_1314_bundle["stack_hash"], 1448116342)
+        self.assertEqual(
+            sync_mod._legacy_client_stack_hashes(market_1314_bundle, effective_hash=canonical_market_hash),
+            [1448116342],
+        )
+
+        # Non-benign bundle with legacy `#1314` client hash format (`0x0000000056508076` in GitHub issue body)
+        # must still resolve to that existing closed issue rather than opening a duplicate.
+        non_benign_client_bundle = _make_crash_bundle(
+            stack_hash=1448116342,  # 0x0000000056508076
+            stack_key="marketbase.py(3725) RefreshOrders",
+            trace=(
+                "Formatted exception info:\n"
+                "KeyError: 'orders'\n\n"
+                "Thrown at:\n"
+                "/app/eve/client/script/ui/shared/market/marketbase.py(3725) RefreshOrders\n"
+                "EXCEPTION END\n"
+            ),
+            flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+        )
+        fake_gh = FakeGitHubCLI()
+        fake_gh.created_issues.append(
+            {
+                "number": 1314,
+                "title": "[Client Crash] KeyError: 'orders'",
+                "labels": ["bug", "client-crash"],
+                "body": "**Signature Hash:** `0x0000000056508076` (or `1448116342`) | **Occurrences Captured:** `1`",
+                "state": "CLOSED",
+                "url": "https://github.com/saverchenkov/EvoMu/issues/1314",
+            }
+        )
+        with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+            sync_mod.subprocess, "run", side_effect=fake_gh
+        ):
+            issue_id = sync_mod.create_or_update_issue(
+                "saverchenkov/EvoMu",
+                non_benign_client_bundle,
+                occurrences=1,
+                dry_run=False,
+            )
+        self.assertEqual(issue_id, 1314)
+        self.assertEqual(len(fake_gh.created_issues), 1)
+        self.assertEqual(fake_gh.reopened, [1314])
+        self.assertEqual(len(fake_gh.comments), 1)
+
+        # When creating a fresh canonical issue, preserve Client Stack Hash in markdown while avoiding
+        # false collisions across unrelated bugs that share a synthetic client hash.
+        fresh_gh = FakeGitHubCLI()
+        bundle_x = _make_crash_bundle(
+            stack_hash=1448116342,
+            trace='Traceback (most recent call last):\n  File "alpha.py", line 10, in Foo\nValueError: alpha failed\n',
+            flight_recorder=[{"service": "alpha", "method": "Get", "status": "OK", "duration_micros": 100}],
+        )
+        bundle_y = _make_crash_bundle(
+            stack_hash=1448116342,
+            trace='Traceback (most recent call last):\n  File "beta.py", line 20, in Bar\nTypeError: beta failed\n',
+            flight_recorder=[{"service": "beta", "method": "Get", "status": "OK", "duration_micros": 100}],
+        )
+        with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+            sync_mod.subprocess, "run", side_effect=fresh_gh
+        ):
+            id_x = sync_mod.create_or_update_issue("saverchenkov/EvoMu", bundle_x, dry_run=False)
+            id_y = sync_mod.create_or_update_issue("saverchenkov/EvoMu", bundle_y, dry_run=False)
+        self.assertNotEqual(id_x, id_y)
+        self.assertEqual(len(fresh_gh.created_issues), 2)
+        self.assertIn("**Client Stack Hash:** `0x0000000056508076`", fresh_gh.created_issues[0]["body"])
+
 
 if __name__ == "__main__":
     unittest.main()
