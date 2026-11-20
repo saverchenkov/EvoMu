@@ -1612,6 +1612,58 @@ async fn npc_ai_on_special_fx_guids_and_movement_cruise_fraction() {
             assert!((tb.speed_fraction - (1_000.0 / 1_500.0)).abs() < 1e-6);
         }
     }
+
+    // Move back to 20 km -> Orbit -> Chase must emit exactly one Follow and one SetSpeedFraction(1.0) (BF-R2-03)
+    {
+        sys_handle.ballpark.write().unwrap().pending_events.clear();
+    }
+    sys_handle
+        .set_ball_position(target_bid, follower_pos + DVec3::new(20_000.0, 0.0, 0.0))
+        .await;
+    mgr.step_ai_sync(&ctx, sys_id, 3, 1.0);
+    assert_eq!(mgr.entities[&follower_bid].state, NpcAiState::Chase);
+    {
+        let bp = sys_handle.ballpark.read().unwrap();
+        let b = &bp.balls[&follower_bid];
+        assert!((b.speed_fraction - 1.0).abs() < 1e-6);
+        assert!(matches!(
+            b.mode,
+            MovementMode::Follow { target_id, range }
+                if target_id == target_bid && (range - 3_625.0).abs() < 1e-6
+        ));
+        let follow_count = bp
+            .pending_events
+            .iter()
+            .filter(|ev| matches!(
+                ev,
+                eve_destiny::DestinyEvent::Follow { ball_id, target_id, .. }
+                    if *ball_id == follower_bid && *target_id == target_bid
+            ))
+            .count();
+        let sf_fractions: Vec<f64> = bp
+            .pending_events
+            .iter()
+            .filter_map(|ev| match ev {
+                eve_destiny::DestinyEvent::SetSpeedFraction { ball_id, fraction }
+                    if *ball_id == follower_bid =>
+                {
+                    Some(*fraction)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(follow_count, 1, "Orbit -> Chase must emit exactly one Follow event");
+        assert_eq!(
+            sf_fractions.len(),
+            1,
+            "Orbit -> Chase must emit exactly one SetSpeedFraction event, got {sf_fractions:?}"
+        );
+        assert!(
+            (sf_fractions[0] - 1.0).abs() < 1e-6,
+            "Orbit -> Chase SetSpeedFraction must be 1.0, got {:?}",
+            sf_fractions[0]
+        );
+    }
 }
 
 #[test]
@@ -1934,4 +1986,177 @@ async fn npc_ai_stationary_armed_npc_has_zero_orbit_range_and_no_speed_churn() {
         movement_churn.is_empty(),
         "stationary armed NPC must emit zero Follow/Orbit/Stop/SetSpeedFraction churn, got {movement_churn:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn npc_ai_killing_blow_on_special_fx_retains_wire_meta_across_next_tick_encode() {
+    // (#1396 BF-R2-02) When an NPC shot destroys its target, remove_ball_state_only prunes
+    // bp.special_fx_meta immediately, yet next-tick encode_destiny_event for both pending_events
+    // and observer_events must preserve full V24 OnSpecialFX metadata until emit_tick + 1 expires.
+    let cases = [
+        (16_936_u32, 500_012_u32, "effects.Laser", false),
+        (16_984_u32, 500_010_u32, "effects.MissileDeployment", true),
+    ];
+
+    for (idx, &(npc_type_id, faction_id, expected_guid, is_missile)) in cases.iter().enumerate() {
+        let mut ctx = test_ctx().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+        let sys_id = 30_000_142_u32;
+        let sg_id = 998_700 + idx as u32;
+        Arc::make_mut(&mut ctx.sde).npc_spawn_groups.insert(
+            sg_id,
+            eve_sde::NpcSpawnGroupInfo {
+                spawn_group_id: sg_id,
+                faction_id,
+                ship_class: 2,
+                group_id: 550,
+                group_name: format!("Lethal FX {npc_type_id}"),
+                npc_type_ids: vec![npc_type_id],
+            },
+        );
+        let mut mgr = NpcSpawnManager::new();
+        let spawned = mgr.spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO).await.unwrap();
+        let npc_bid = spawned[0];
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let npc_pos = sys_handle
+            .get_ball_snapshot(npc_bid)
+            .await
+            .unwrap()
+            .unwrap()
+            .1
+            .position;
+
+        let observer_bid = 900_700_100 + idx as i64;
+        sys_handle.try_spawn_ball_with_combat(
+            make_target_ball(
+                observer_bid,
+                587,
+                npc_pos + DVec3::new(80_000.0, 0.0, 0.0),
+                DVec3::ZERO,
+                37.0,
+            ),
+            make_sponge_combat_state(1e6, 400.0),
+        );
+        let target_bid = 900_700_200 + idx as i64;
+        let mut fragile_cs = make_sponge_combat_state(0.1, 400.0);
+        fragile_cs.max_armor_hp = 0.1;
+        fragile_cs.armor_hp = 0.1;
+        fragile_cs.max_structure_hp = 0.1;
+        fragile_cs.structure_hp = 0.1;
+        sys_handle.try_spawn_ball_with_combat(
+            make_target_ball(
+                target_bid,
+                587,
+                npc_pos + DVec3::new(1_000.0, 0.0, 0.0),
+                DVec3::ZERO,
+                37.0,
+            ),
+            fragile_cs,
+        );
+        let emit_tick = {
+            let mut bp = sys_handle.ballpark.write().unwrap();
+            bp.register_observer(observer_bid);
+            let _ = bp.drain_all_observer_events();
+            bp.pending_events.clear();
+            bp.current_tick
+        };
+
+        mgr.step_ai_sync(&ctx, sys_id, emit_tick, 1.0);
+
+        {
+            let bp = sys_handle.ballpark.read().unwrap();
+            assert!(
+                !bp.balls.contains_key(&target_bid),
+                "target {target_bid} must be destroyed by lethal NPC shot ({npc_type_id})"
+            );
+            assert!(
+                !bp.special_fx_meta
+                    .values()
+                    .any(|m| m.target_id == Some(target_bid)),
+                "special_fx_meta must still be pruned when target is destroyed"
+            );
+        }
+
+        // Next simulation tick (emit_tick + 1): matches cluster_tick.rs encoding tick N's queued FX on tick N + 1.
+        let (pending_after_step, obs_after_step) = {
+            let mut bp = sys_handle.ballpark.write().unwrap();
+            let pending = bp.step(1.0);
+            assert_eq!(bp.current_tick, emit_tick + 1);
+            let obs = bp.drain_observer_events(observer_bid);
+            (pending, obs)
+        };
+
+        let bp_guard = sys_handle.ballpark.read().unwrap();
+        let stamp = bp_guard.current_tick as u32;
+        for (source_label, ev_list) in [
+            ("pending_events", &pending_after_step),
+            ("observer_events", &obs_after_step),
+        ] {
+            let fx_ev = ev_list
+                .iter()
+                .find(|ev| matches!(
+                    ev,
+                    eve_destiny::DestinyEvent::OnSpecialFX { ball_id, guid, is_active: true, .. }
+                        if *ball_id == npc_bid && guid == expected_guid
+                ))
+                .unwrap_or_else(|| panic!("{source_label} missing killing-blow OnSpecialFX for {npc_type_id}: {ev_list:?}"));
+            let wire = eve_destiny::wire::encode_destiny_event(stamp, fx_ev, Some(&bp_guard));
+            let eve_proto::PyRep::Tuple(top) = &wire else {
+                panic!("expected DestinyUpdate tuple");
+            };
+            let eve_proto::PyRep::Tuple(act) = &top[1] else {
+                panic!("expected action tuple");
+            };
+            assert_eq!(act[0], eve_proto::PyRep::String("OnSpecialFX".into()));
+            let eve_proto::PyRep::Tuple(args) = &act[1] else {
+                panic!("expected 14-arg OnSpecialFX tuple");
+            };
+            assert_eq!(args.len(), 14);
+            assert_eq!(args[0], eve_proto::PyRep::Integer(npc_bid));
+            assert_eq!(args[1], eve_proto::PyRep::None);
+            assert_eq!(
+                args[3],
+                eve_proto::PyRep::Integer(target_bid),
+                "{source_label} killing-blow OnSpecialFX lost targetID for {npc_type_id}"
+            );
+            if is_missile {
+                assert_eq!(args[2], eve_proto::PyRep::None);
+                assert!(matches!(args[4], eve_proto::PyRep::Integer(t) if t > 0));
+            } else {
+                assert!(matches!(args[2], eve_proto::PyRep::Integer(t) if t > 0));
+                assert_eq!(args[4], eve_proto::PyRep::None);
+            }
+            assert_eq!(args[5], eve_proto::PyRep::String(expected_guid.into()));
+            assert_eq!(args[6], eve_proto::PyRep::Bool(true));
+            assert!(matches!(args[9], eve_proto::PyRep::Real(d) if d > 0.0));
+            assert_eq!(args[10], eve_proto::PyRep::Integer(1));
+        }
+        let sample_fx = obs_after_step
+            .iter()
+            .find(|ev| matches!(ev, eve_destiny::DestinyEvent::OnSpecialFX { ball_id, .. } if *ball_id == npc_bid))
+            .unwrap()
+            .clone();
+        drop(bp_guard);
+
+        // Advancing to emit_tick + 2 must expire the deferred pruned FX metadata.
+        {
+            let mut bp = sys_handle.ballpark.write().unwrap();
+            let _ = bp.step(1.0);
+            assert_eq!(bp.current_tick, emit_tick + 2);
+            let expired_wire = eve_destiny::wire::encode_destiny_event(
+                bp.current_tick as u32,
+                &sample_fx,
+                Some(&bp),
+            );
+            let eve_proto::PyRep::Tuple(top) = &expired_wire else {
+                panic!("expected DestinyUpdate tuple");
+            };
+            let eve_proto::PyRep::Tuple(act) = &top[1] else {
+                panic!("expected action tuple");
+            };
+            let eve_proto::PyRep::Tuple(args) = &act[1] else {
+                panic!("expected 14-arg tuple");
+            };
+            assert_eq!(args[3], eve_proto::PyRep::None, "deferred pruned FX metadata must expire at emit_tick + 2");
+        }
+    }
 }

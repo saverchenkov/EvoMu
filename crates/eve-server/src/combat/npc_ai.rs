@@ -1215,7 +1215,18 @@ impl NpcSpawnManager {
                 && !crate::services::combat_crimewatch::combat_legacy_ess::is_sleeper_or_drifter_npc_group(g.group_id)
                 && !matches!(
                     g.group_id,
-                    182 | 279 | 286 | 297 | 298 | 301 | 383 | 495 | 520 | 522 | 523 | 527 | 533 | 534
+                    279   // LCO Drone
+                    | 286 // Minor Threat
+                    | 297 // Convoy
+                    | 298 // Convoy Drone
+                    | 383 // Destructible Sentry Gun
+                    | 495 // Deadspace Overseer's Sentry
+                    | 520 // Storyline Frigate
+                    | 522 // Storyline Cruiser
+                    | 523 // Storyline Battleship
+                    | 527 // Storyline Mission Frigate
+                    | 533 // Storyline Mission Cruiser
+                    | 534 // Storyline Mission Battleship
                 )
         };
         let regional_keyword = match reg_faction {
@@ -2373,6 +2384,14 @@ fn apply_ai_step_world_effects(
             .unwrap_or_else(|e| e.into_inner());
         let st = &mut *st_guard;
         for upd in mode_updates {
+            if matches!(upd.mode, MovementMode::Follow { .. })
+                && upd.speed_fraction > 0.0
+                && !bp.is_immobile_structure_or_static(upd.ball_id)
+            {
+                if let Some(b) = bp.balls.get_mut(&upd.ball_id) {
+                    b.speed_fraction = upd.speed_fraction.clamp(0.0, 1.0);
+                }
+            }
             let _ = bp.set_mode(upd.ball_id, upd.mode);
             let needs_speed_update = bp
                 .balls
@@ -2560,7 +2579,7 @@ fn apply_ai_step_world_effects(
             };
 
             damaged_target_ids.push(tid);
-            bp.special_fx_meta.insert(
+            bp.insert_special_fx_meta(
                 (attacker_id, None, fx_guid.clone()),
                 eve_destiny::SpecialFxWireMeta {
                     module_type_id,
