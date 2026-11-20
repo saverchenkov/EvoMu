@@ -904,7 +904,7 @@ pub fn build_specialized_npc_components(
                         }
                     }),
                 "Sleeper" | "PochvenHypnosianSleeper" => 500_021,
-                "RogueDrone" => 500_008,
+                "RogueDrone" => 500_025,
                 "EDENCOM" => 500_027,
                 "Drifter" => 500_024,
                 "Triglavian" => 500_026,

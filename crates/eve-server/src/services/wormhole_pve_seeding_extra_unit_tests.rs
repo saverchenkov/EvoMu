@@ -191,7 +191,7 @@ fn build_specialized_npc_components_archetype_faction_damage_and_ewar_matrix() {
     for (arch, sp_grp, exp_faction, exp_dmg_total) in [
         ("Navy", 500_004_u32, 500_004_u32, 100.0),
         ("Police", 999_u32, 500_001_u32, 100.0),
-        ("RogueDrone", 0, 500_008, 100.0),
+        ("RogueDrone", 0, 500_025, 100.0),
         ("EDENCOM", 0, 500_027, 120.0),
         ("Triglavian", 0, 500_026, 150.0),
         ("Drifter", 0, 500_024, 200.0),
