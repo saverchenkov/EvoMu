@@ -2071,27 +2071,19 @@ def _is_stale_ship_dogma_key_error(exc, controller=None, initial_ship_ids=None):
         return False
 
     dl = _resolve_fitting_dogma_location(controller)
-    if dl is not None:
-        dogma_items = getattr(dl, "dogmaItems", None)
-        if dogma_items is not None and hasattr(dogma_items, "__contains__"):
-            try:
-                if missing_key in dogma_items:
-                    return False
-            except Exception:
-                pass
+    dogma_items = getattr(dl, "dogmaItems", None) if dl is not None else None
+    if dl is None or dogma_items is None or not hasattr(dogma_items, "__contains__"):
+        return False
+    try:
+        if missing_key in dogma_items:
+            return False
+    except Exception:
+        return False
 
     ctrl_ship = _fitting_controller_ship_id(controller)
     dl_ship = _dogma_location_current_ship_id(dl)
-    disembarking_ship = (
-        _as_positive_ship_id(getattr(dl, "shipIDBeingDisembarked", None))
-        if dl is not None
-        else None
-    )
-    embarking_ship = (
-        _as_positive_ship_id(getattr(dl, "shipIDBeingEmbarked", None))
-        if dl is not None
-        else None
-    )
+    disembarking_ship = _as_positive_ship_id(getattr(dl, "shipIDBeingDisembarked", None))
+    embarking_ship = _as_positive_ship_id(getattr(dl, "shipIDBeingEmbarked", None))
     sess = getattr(__builtin__, "session", None)
     sess_ship = _as_positive_ship_id(getattr(sess, "shipid", None)) if sess is not None else None
 
@@ -2104,15 +2096,14 @@ def _is_stale_ship_dogma_key_error(exc, controller=None, initial_ship_ids=None):
         return False
 
     is_switching = False
-    if dl is not None:
-        is_sw_fn = getattr(dl, "IsSwitchingShips", None)
-        if callable(is_sw_fn):
-            try:
-                is_switching = bool(is_sw_fn())
-            except Exception:
-                is_switching = False
-        if disembarking_ship is not None or embarking_ship is not None:
-            is_switching = True
+    is_sw_fn = getattr(dl, "IsSwitchingShips", None)
+    if callable(is_sw_fn):
+        try:
+            is_switching = bool(is_sw_fn())
+        except Exception:
+            is_switching = False
+    if disembarking_ship is not None or embarking_ship is not None:
+        is_switching = True
 
     if is_switching:
         return True
@@ -2166,50 +2157,52 @@ def _install_fitting_active_ship_guard():
         and (isinstance(fsvc_cls, type) or hasattr(fsvc_cls, "__bases__"))
     ):
         orig_get = getattr(fsvc_cls, "GetFittingDictForActiveShip", None)
-        if callable(orig_get) and not getattr(orig_get, "_evomu_camera_guard", False):
-            def _wrapped_get_fitting_dict_for_active_ship(self, *args, **kwargs):
-                eve_cfg = getattr(fsvc_mod, "eveCfg", None)
-                active_ship = None
-                if eve_cfg is not None and callable(getattr(eve_cfg, "GetActiveShip", None)):
-                    active_ship = eve_cfg.GetActiveShip()
-                else:
-                    sess = getattr(__builtin__, "session", None)
-                    active_ship = getattr(sess, "shipid", None)
-                if active_ship is None:
-                    raise RuntimeError("No active ship")
-                return orig_get(self, *args, **kwargs)
+        if callable(orig_get):
+            if not getattr(orig_get, "_evomu_camera_guard", False):
+                def _wrapped_get_fitting_dict_for_active_ship(self, *args, **kwargs):
+                    eve_cfg = getattr(fsvc_mod, "eveCfg", None)
+                    active_ship = None
+                    if eve_cfg is not None and callable(getattr(eve_cfg, "GetActiveShip", None)):
+                        active_ship = eve_cfg.GetActiveShip()
+                    else:
+                        sess = getattr(__builtin__, "session", None)
+                        active_ship = getattr(sess, "shipid", None)
+                    if active_ship is None:
+                        raise RuntimeError("No active ship")
+                    return orig_get(self, *args, **kwargs)
 
-            _wrapped_get_fitting_dict_for_active_ship._evomu_camera_guard = True
-            fsvc_cls.GetFittingDictForActiveShip = _wrapped_get_fitting_dict_for_active_ship
-        _HOOKED_CAMERA_GUARD_TARGETS.add("fittingSvc")
-        changed = True
+                _wrapped_get_fitting_dict_for_active_ship._evomu_camera_guard = True
+                fsvc_cls.GetFittingDictForActiveShip = _wrapped_get_fitting_dict_for_active_ship
+                changed = True
+            _HOOKED_CAMERA_GUARD_TARGETS.add("fittingSvc")
 
     fw_mod = sys.modules.get("shipfitting.fittingWarnings")
     if fw_mod is not None and "fittingWarnings" not in _HOOKED_CAMERA_GUARD_TARGETS:
         orig_eval = getattr(fw_mod, "EvaluateFit", None)
-        if callable(orig_eval) and not getattr(orig_eval, "_evomu_camera_guard", False):
-            def _wrapped_evaluate_fit(fittingController):
-                initial_ship_ids = _snapshot_fitting_ship_ids(fittingController)
-                try:
-                    return orig_eval(fittingController)
-                except IndexError as exc:
-                    sess = getattr(__builtin__, "session", None)
-                    if getattr(sess, "shipid", None) is None or "None" in str(exc):
-                        return None
-                    raise
-                except KeyError as exc:
-                    if _is_stale_ship_dogma_key_error(
-                        exc,
-                        controller=fittingController,
-                        initial_ship_ids=initial_ship_ids,
-                    ):
-                        return None
-                    raise
+        if callable(orig_eval):
+            if not getattr(orig_eval, "_evomu_camera_guard", False):
+                def _wrapped_evaluate_fit(fittingController):
+                    initial_ship_ids = _snapshot_fitting_ship_ids(fittingController)
+                    try:
+                        return orig_eval(fittingController)
+                    except IndexError as exc:
+                        sess = getattr(__builtin__, "session", None)
+                        if getattr(sess, "shipid", None) is None or "None" in str(exc):
+                            return None
+                        raise
+                    except KeyError as exc:
+                        if _is_stale_ship_dogma_key_error(
+                            exc,
+                            controller=fittingController,
+                            initial_ship_ids=initial_ship_ids,
+                        ):
+                            return None
+                        raise
 
-            _wrapped_evaluate_fit._evomu_camera_guard = True
-            fw_mod.EvaluateFit = _wrapped_evaluate_fit
-        _HOOKED_CAMERA_GUARD_TARGETS.add("fittingWarnings")
-        changed = True
+                _wrapped_evaluate_fit._evomu_camera_guard = True
+                fw_mod.EvaluateFit = _wrapped_evaluate_fit
+                changed = True
+            _HOOKED_CAMERA_GUARD_TARGETS.add("fittingWarnings")
 
     wic_mod = sys.modules.get("eve.client.script.ui.shared.fittingScreen.warningIconCont")
     wic_cls = getattr(wic_mod, "WarningIconCont", None) if wic_mod is not None else None
@@ -2219,35 +2212,36 @@ def _install_fitting_active_ship_guard():
         and (isinstance(wic_cls, type) or hasattr(wic_cls, "__bases__"))
     ):
         orig_thread = getattr(wic_cls, "_WarningIconCont__UpdateIcon_thread", None)
-        if callable(orig_thread) and not getattr(orig_thread, "_evomu_camera_guard", False):
-            orig_thread_func = getattr(orig_thread, "__func__", orig_thread)
+        if callable(orig_thread):
+            if not getattr(orig_thread, "_evomu_camera_guard", False):
+                orig_thread_func = getattr(orig_thread, "__func__", orig_thread)
 
-            def _wrapped_update_icon_thread(self):
-                if getattr(self, "destroyed", False):
-                    return None
-                controller = getattr(self, "fittingController", None)
-                initial_ship_ids = _snapshot_fitting_ship_ids(controller)
-                try:
-                    return orig_thread_func(self)
-                except IndexError as exc:
-                    sess = getattr(__builtin__, "session", None)
-                    if getattr(sess, "shipid", None) is None or "None" in str(exc):
+                def _wrapped_update_icon_thread(self):
+                    if getattr(self, "destroyed", False):
                         return None
-                    raise
-                except KeyError as exc:
-                    live_controller = getattr(self, "fittingController", None) or controller
-                    if _is_stale_ship_dogma_key_error(
-                        exc,
-                        controller=live_controller,
-                        initial_ship_ids=initial_ship_ids,
-                    ):
-                        return None
-                    raise
+                    controller = getattr(self, "fittingController", None)
+                    initial_ship_ids = _snapshot_fitting_ship_ids(controller)
+                    try:
+                        return orig_thread_func(self)
+                    except IndexError as exc:
+                        sess = getattr(__builtin__, "session", None)
+                        if getattr(sess, "shipid", None) is None or "None" in str(exc):
+                            return None
+                        raise
+                    except KeyError as exc:
+                        live_controller = getattr(self, "fittingController", None) or controller
+                        if _is_stale_ship_dogma_key_error(
+                            exc,
+                            controller=live_controller,
+                            initial_ship_ids=initial_ship_ids,
+                        ):
+                            return None
+                        raise
 
-            _wrapped_update_icon_thread._evomu_camera_guard = True
-            wic_cls._WarningIconCont__UpdateIcon_thread = _wrapped_update_icon_thread
-        _HOOKED_CAMERA_GUARD_TARGETS.add("warningIconCont")
-        changed = True
+                _wrapped_update_icon_thread._evomu_camera_guard = True
+                wic_cls._WarningIconCont__UpdateIcon_thread = _wrapped_update_icon_thread
+                changed = True
+            _HOOKED_CAMERA_GUARD_TARGETS.add("warningIconCont")
 
     if _wrap_cls_methods_table(
         "statsPanel",

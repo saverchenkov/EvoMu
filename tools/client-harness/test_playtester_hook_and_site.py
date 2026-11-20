@@ -5168,6 +5168,190 @@ class TestFittingShipSwapStaleKeyErrorGuard(unittest.TestCase):
             self.assertIsNone(hook.find_module(mod_name))
             self.assertEqual(scheduled, [self.site._install_fitting_active_ship_guard])
 
+    def test_1443_partially_initialized_fitting_modules_not_marked_until_callable_wrapped(self):
+        old_ship = 1897898652
+        new_ship = 1896955150
+        dl, ctrl = self._make_fake_dogma_and_controller(old_ship, new_ship)
+        builtins.session = types.SimpleNamespace(shipid=old_ship, stationid=60003760)
+
+        scheduled = []
+        sys.modules["uthread"] = types.SimpleNamespace(new=lambda fn: scheduled.append(fn))
+        hook = self.site._EvomuMetaHook()
+
+        # 1) Top-level import of fittingWarnings schedules the deferred uthread callback.
+        self.assertIsNone(hook.find_module("shipfitting.fittingWarnings"))
+        self.assertEqual(scheduled, [self.site._install_fitting_active_ship_guard])
+
+        # 2) Simulate partially-initialized modules in sys.modules BEFORE their callables
+        #    are bound (e.g. during nested top-level imports inside each module).
+        fw_mod = types.ModuleType("shipfitting.fittingWarnings")
+        sys.modules["shipfitting.fittingWarnings"] = fw_mod
+
+        fsvc_mod = types.ModuleType("eve.client.script.environment.fittingSvc")
+
+        class FakeFittingSvc(object):
+            pass
+
+        fsvc_mod.fittingSvc = FakeFittingSvc
+        sys.modules["eve.client.script.environment.fittingSvc"] = fsvc_mod
+
+        wic_mod = types.ModuleType("eve.client.script.ui.shared.fittingScreen.warningIconCont")
+
+        class PartialWarningIconCont(object):
+            def __init__(self, controller):
+                self.fittingController = controller
+                self.destroyed = False
+
+        wic_mod.WarningIconCont = PartialWarningIconCont
+        sys.modules["eve.client.script.ui.shared.fittingScreen.warningIconCont"] = wic_mod
+
+        # Nested import triggers _EvomuMetaHook.find_module -> _install_fitting_active_ship_guard.
+        self.assertIsNone(hook.find_module("shipfitting.someNestedDependency"))
+        self.assertFalse(self.site._install_fitting_active_ship_guard())
+        self.assertNotIn("fittingWarnings", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertNotIn("fittingSvc", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertNotIn("warningIconCont", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        # 3) Module initialization completes and binds EvaluateFit / methods.
+        def raw_evaluate_fit(_controller):
+            dl.shipIDBeingDisembarked = old_ship
+            dl.shipIDBeingEmbarked = new_ship
+            builtins.session.shipid = new_ship
+            dl.dogmaItems.pop(old_ship, None)
+            raise KeyError(old_ship)
+
+        def raw_get_fitting_dict(self):
+            return {"ship": builtins.session.shipid}
+
+        def raw_update_icon_thread(self):
+            dl.shipIDBeingDisembarked = old_ship
+            dl.shipIDBeingEmbarked = new_ship
+            builtins.session.shipid = new_ship
+            dl.dogmaItems.pop(old_ship, None)
+            raise KeyError(old_ship)
+
+        fw_mod.EvaluateFit = raw_evaluate_fit
+        FakeFittingSvc.GetFittingDictForActiveShip = raw_get_fitting_dict
+        PartialWarningIconCont._WarningIconCont__UpdateIcon_thread = raw_update_icon_thread
+
+        # 4) Execute the deferred uthread callback scheduled in step 1.
+        self.assertTrue(scheduled[0]())
+        self.assertIn("fittingWarnings", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertIn("fittingSvc", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertIn("warningIconCont", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertTrue(getattr(fw_mod.EvaluateFit, "_evomu_camera_guard", False))
+        self.assertTrue(
+            getattr(FakeFittingSvc.GetFittingDictForActiveShip, "_evomu_camera_guard", False)
+        )
+        self.assertTrue(
+            getattr(
+                PartialWarningIconCont._WarningIconCont__UpdateIcon_thread,
+                "_evomu_camera_guard",
+                False,
+            )
+        )
+
+        # Wrapped EvaluateFit and WarningIconCont suppress stale-ship KeyError cleanly.
+        self.assertIsNone(fw_mod.EvaluateFit(ctrl))
+        dl.dogmaItems = {old_ship: object()}
+        dl.shipIDBeingDisembarked = None
+        dl.shipIDBeingEmbarked = None
+        builtins.session.shipid = old_ship
+        wic = PartialWarningIconCont(ctrl)
+        self.assertIsNone(wic._WarningIconCont__UpdateIcon_thread())
+
+        # Wrapped fittingSvc.GetFittingDictForActiveShip rejects missing active ship.
+        builtins.session.shipid = None
+        with self.assertRaises(RuntimeError):
+            FakeFittingSvc().GetFittingDictForActiveShip()
+
+        # Already-wrapped callables are recorded without double-wrapping or reporting changed=True.
+        wrapped_eval = fw_mod.EvaluateFit
+        self.site._HOOKED_CAMERA_GUARD_TARGETS.discard("fittingWarnings")
+        self.assertFalse(self.site._install_fitting_active_ship_guard())
+        self.assertIn("fittingWarnings", self.site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertIs(fw_mod.EvaluateFit, wrapped_eval)
+
+    def test_1443_stale_ship_keyerror_fails_closed_when_dogma_location_or_items_missing(self):
+        old_ship = 1897898652
+        new_ship = 1896955150
+        dl, ctrl = self._make_fake_dogma_and_controller(old_ship, new_ship)
+        builtins.session = types.SimpleNamespace(shipid=new_ship, stationid=60003760)
+        if hasattr(builtins, "sm"):
+            delattr(builtins, "sm")
+
+        class BrokenContainer(object):
+            def __contains__(self, _key):
+                raise RuntimeError("dogmaItems lookup failed")
+
+        # 1) dogmaLocation is None -> fail closed (False).
+        ctrl.dogmaLocation = None
+        self.assertFalse(
+            self.site._is_stale_ship_dogma_key_error(
+                KeyError(old_ship),
+                controller=ctrl,
+                initial_ship_ids=set([old_ship]),
+            )
+        )
+
+        # 2) dogmaItems is None -> fail closed (False) even when ship swap flags are set.
+        ctrl.dogmaLocation = dl
+        dl.shipIDBeingDisembarked = old_ship
+        dl.shipIDBeingEmbarked = new_ship
+        dl.dogmaItems = None
+        self.assertFalse(
+            self.site._is_stale_ship_dogma_key_error(
+                KeyError(old_ship),
+                controller=ctrl,
+                initial_ship_ids=set([old_ship]),
+            )
+        )
+
+        # 3) dogmaItems without __contains__ or raising in __contains__ -> fail closed (False).
+        for bad_items in (object(), BrokenContainer()):
+            dl.dogmaItems = bad_items
+            self.assertFalse(
+                self.site._is_stale_ship_dogma_key_error(
+                    KeyError(old_ship),
+                    controller=ctrl,
+                    initial_ship_ids=set([old_ship]),
+                )
+            )
+
+        # 4) End-to-end wrappers MUST re-raise KeyError when dogmaLocation or dogmaItems is None.
+        def raise_old_ship(*_args, **_kwargs):
+            raise KeyError(old_ship)
+
+        fw_mod, WarningIconCont, StatsPanel, DronePanel = self._register_fitting_modules(
+            eval_fn=raise_old_ship,
+            icon_fn=raise_old_ship,
+            stats_fn=raise_old_ship,
+            stats_drone_fn=raise_old_ship,
+            drone_panel_fn=raise_old_ship,
+        )
+        dp = DronePanel(ctrl)
+        sp = StatsPanel(ctrl, drone_panel=dp)
+        wic = WarningIconCont(ctrl)
+        targets = (
+            ("EvaluateFit", lambda: fw_mod.EvaluateFit(ctrl)),
+            ("WarningIconCont", lambda: wic._WarningIconCont__UpdateIcon_thread()),
+            ("StatsPanel.UpdateStats", lambda: sp.UpdateStats()),
+            ("DronePanel.UpdateDroneStats", lambda: dp.UpdateDroneStats()),
+        )
+
+        ctrl.dogmaLocation = None
+        for label, fn in targets:
+            with self.subTest(case="dogmaLocation_none", target=label):
+                with self.assertRaises(KeyError):
+                    fn()
+
+        ctrl.dogmaLocation = dl
+        dl.dogmaItems = None
+        for label, fn in targets:
+            with self.subTest(case="dogmaItems_none", target=label):
+                with self.assertRaises(KeyError):
+                    fn()
+
 
 if __name__ == "__main__":
     unittest.main()
