@@ -138,6 +138,23 @@ async fn ensure_dock_state(ctx: &ServerContext, sess: &mut SessionState, want_do
     }
 }
 
+fn ensure_required_skills(
+    skills: &mut HashMap<u32, eve_db::TrainedSkillRecord>,
+    required: impl IntoIterator<Item = (u32, u8)>,
+) {
+    for (req_tid, req_lvl) in required {
+        let rec = skills.entry(req_tid).or_insert(eve_db::TrainedSkillRecord {
+            type_id: req_tid,
+            level: 5,
+            skill_points: 256_000.0,
+        });
+        if rec.level < req_lvl {
+            rec.level = req_lvl.max(5);
+            rec.skill_points = rec.skill_points.max(256_000.0);
+        }
+    }
+}
+
 async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, cat_id: i64, op_id: i64) {
     let defs = get_operation_defs(&ctx.sde);
     rpc(ctx, sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(op_id), PyRep::Integer(i64::from(JITA_SYS)), PyRep::Integer(cat_id)]).await.unwrap();
@@ -177,9 +194,13 @@ async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionStat
                 ctx.db.with_mut_snapshot(|s| {
                     if let Some(sid) = sess.ship_id { s.items.retain(|_, it| !(it.location_id == sid && matches!(it.flag as i64, 11..=34 | 92..=94))); }
                     let sk = s.skills.entry(char_id).or_default();
-                    for (tid, _) in ctx.sde.required_skills_for_type(mtid).into_iter().chain(ctx.sde.required_skills_for_type(587)) {
-                        sk.entry(tid).or_insert(eve_db::TrainedSkillRecord { type_id: tid, level: 5, skill_points: 256_000.0 });
-                    }
+                    ensure_required_skills(
+                        sk,
+                        ctx.sde
+                            .required_skills_for_type(mtid)
+                            .into_iter()
+                            .chain(ctx.sde.required_skills_for_type(587)),
+                    );
                 });
                 let mut sid = sess.ship_id.unwrap();
                 ctx.invalidate_ship_fitting(sid);
@@ -267,14 +288,13 @@ async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionStat
                 let mid = ctx.db.with_mut_snapshot(|s| {
                     s.items.retain(|_, it| !(it.location_id == sid && it.flag == InventoryFlag::MedSlot0));
                     let sk = s.skills.entry(char_id).or_default();
-                    for (req_tid, _) in ctx
-                        .sde
-                        .required_skills_for_type(mtid)
-                        .into_iter()
-                        .chain(charge_tid.into_iter().flat_map(|ctid| ctx.sde.required_skills_for_type(ctid)))
-                    {
-                        sk.entry(req_tid).or_insert(eve_db::TrainedSkillRecord { type_id: req_tid, level: 5, skill_points: 256_000.0 });
-                    }
+                    ensure_required_skills(
+                        sk,
+                        ctx.sde
+                            .required_skills_for_type(mtid)
+                            .into_iter()
+                            .chain(charge_tid.into_iter().flat_map(|ctid| ctx.sde.required_skills_for_type(ctid))),
+                    );
                     s.next_entity_id += 1;
                     let id = s.next_entity_id;
                     s.items.insert(id, InventoryItemRecord { item_id: id, type_id: mtid, owner_id: char_id, location_id: sid, flag: InventoryFlag::MedSlot0, quantity: 1, singleton: true, version: 1, ..Default::default() });
@@ -766,4 +786,49 @@ async fn test_structure_directory_accessible_structures_and_services() {
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "GetMyCharacterStructures", &[]).await.unwrap(), PyRep::Dict(vec![]));
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(i64::from(JITA_SYS))]).await.unwrap(), PyRep::List(vec![]));
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(ST_HUB), PyRep::Integer(ST_PRIVATE)])]).await.unwrap(), PyRep::List(vec![]));
+}
+
+#[test]
+fn test_ensure_required_skills_upgrades_starter_skills_below_required_level() {
+    let mut skills = HashMap::from([
+        (
+            3_300,
+            eve_db::TrainedSkillRecord {
+                type_id: 3_300,
+                level: 1,
+                skill_points: 250.0,
+            },
+        ),
+        (
+            3_327,
+            eve_db::TrainedSkillRecord {
+                type_id: 3_327,
+                level: 4,
+                skill_points: 45_255.0,
+            },
+        ),
+        (
+            3_426,
+            eve_db::TrainedSkillRecord {
+                type_id: 3_426,
+                level: 5,
+                skill_points: 512_000.0,
+            },
+        ),
+    ]);
+
+    ensure_required_skills(&mut skills, [(3_300, 3), (3_327, 3), (3_426, 5), (3_436, 2)]);
+
+    // Existing bloodline starter skill below required level is upgraded.
+    assert_eq!(skills[&3_300].level, 5);
+    assert_eq!(skills[&3_300].skill_points, 256_000.0);
+    // Already-sufficient skill is preserved without mutating level or SP.
+    assert_eq!(skills[&3_327].level, 4);
+    assert_eq!(skills[&3_327].skill_points, 45_255.0);
+    // Higher-SP rank-2+ skill at level 5 is not downgraded.
+    assert_eq!(skills[&3_426].level, 5);
+    assert_eq!(skills[&3_426].skill_points, 512_000.0);
+    // Missing required skill is inserted at level 5.
+    assert_eq!(skills[&3_436].level, 5);
+    assert_eq!(skills[&3_436].skill_points, 256_000.0);
 }
