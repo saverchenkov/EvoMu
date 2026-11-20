@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use eve_db::durable_domain_types::{
+    PersistedAggressionRecord, PersistedCombatCrimewatchState, PersistedCrimeWatchState,
+};
+use eve_db::snapshot_ext::WorldStateSnapshot;
 use eve_db::types::{FleetMemberRecord, FleetRole, KillmailRecord};
 use eve_db::{
     service_roles, AllianceRecord, BookmarkRecord, CharacterRecord, CorpProjectRecord,
@@ -14,10 +18,14 @@ use eve_db::{
     SavedFittingRecord, TrainedSkillRecord, UpwellStructureRecord, WarRecord, WorldRepository,
     WorldTablesSnapshot,
 };
-use eve_destiny::{Ball, BallId, CombatState, WarpBubbleMgr};
+use eve_destiny::{Ball, BallId, CombatState, TargetLock, WarpBubbleMgr};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
+use eve_server::esi::runtime_state::{
+    EsiCalendarEvent, EsiContactEntry, EsiContactNotification, EsiCorpHistoryEntry, EsiMailLabel,
+    EsiMailMeta, EsiRuntimeState,
+};
 use eve_server::router::{BoundObjectEntry, ServerContext};
 use eve_server::services::industry_pi::industry_facilities_bps::{
     save_job_cost_meta, IndustryJobCostMeta,
@@ -1374,6 +1382,57 @@ struct MatrixFixture {
     b_bounds: Vec<(String, u64)>,
 }
 
+fn target_locks_sigs(
+    locks: &BTreeMap<BallId, Vec<TargetLock>>,
+) -> BTreeMap<BallId, Vec<(BallId, u64, u64, bool, Option<u64>)>> {
+    locks
+        .iter()
+        .map(|(&locker, list)| {
+            let sigs = list
+                .iter()
+                .map(|l| {
+                    (
+                        l.target_id,
+                        l.lock_time_ms.to_bits(),
+                        l.remaining_lock_ms.to_bits(),
+                        l.locked,
+                        l.max_range_m.map(f64::to_bits),
+                    )
+                })
+                .collect();
+            (locker, sigs)
+        })
+        .collect()
+}
+
+fn target_locks_b_sigs(
+    locks: &BTreeMap<BallId, Vec<TargetLock>>,
+    b_balls: &[BallId],
+) -> BTreeMap<BallId, Vec<(BallId, u64, u64, bool, Option<u64>)>> {
+    locks
+        .iter()
+        .filter(|(locker, list)| {
+            b_balls.contains(locker) || list.iter().any(|l| b_balls.contains(&l.target_id))
+        })
+        .map(|(&locker, list)| {
+            let sigs = list
+                .iter()
+                .filter(|l| b_balls.contains(&locker) || b_balls.contains(&l.target_id))
+                .map(|l| {
+                    (
+                        l.target_id,
+                        l.lock_time_ms.to_bits(),
+                        l.remaining_lock_ms.to_bits(),
+                        l.locked,
+                        l.max_range_m.map(f64::to_bits),
+                    )
+                })
+                .collect();
+            (locker, sigs)
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 struct BallparkCheckSnapshot {
     sys_id: SolarSystemId,
@@ -1381,8 +1440,634 @@ struct BallparkCheckSnapshot {
     combat_keys: Vec<(BallId, [u64; 4], [bool; 3], i32, i32, u32)>,
     combat_states: BTreeMap<BallId, CombatState>,
     warp_bubbles: WarpBubbleMgr,
-    target_locks_len: usize,
+    target_locks: BTreeMap<BallId, Vec<TargetLock>>,
     current_tick: u64,
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+struct EsiRuntimeSig {
+    deleted_mails: BTreeSet<(i64, i64)>,
+    mail_meta: BTreeMap<(i64, i64), (bool, Vec<i64>)>,
+    mail_labels: BTreeMap<i64, Vec<(i64, String, String)>>,
+    mail_lists: BTreeMap<i64, Vec<(i64, String)>>,
+    char_contacts: BTreeMap<i64, Vec<(i64, String, u64, bool, bool, Vec<i64>)>>,
+    char_contact_labels: BTreeMap<i64, Vec<(i64, String)>>,
+    corp_contacts: BTreeMap<i64, Vec<(i64, String, u64, bool, bool, Vec<i64>)>>,
+    corp_contact_labels: BTreeMap<i64, Vec<(i64, String)>>,
+    alliance_contacts: BTreeMap<i64, Vec<(i64, String, u64, bool, bool, Vec<i64>)>>,
+    alliance_contact_labels: BTreeMap<i64, Vec<(i64, String)>>,
+    calendar_events: BTreeMap<i64, (i64, u64, String, String, i64, i64, i64, String, String, Vec<i64>)>,
+    calendar_responses: BTreeMap<(i64, i64), String>,
+    contact_notifications: BTreeMap<i64, Vec<(i64, i64, u64, u64, String)>>,
+    char_corp_history: BTreeMap<i64, Vec<(i64, i64, u64, bool)>>,
+    char_titles: BTreeMap<i64, Vec<(i64, String)>>,
+    fleet_motd: BTreeMap<i64, String>,
+    fleet_wing_names: BTreeMap<(i64, i64), String>,
+    fleet_squads: BTreeMap<(i64, i64), (i64, String)>,
+    fleet_member_meta: BTreeMap<(i64, i64), (String, i64, i64)>,
+    war_allies: BTreeMap<i64, Vec<Value>>,
+    custom_item_names: BTreeMap<i64, String>,
+}
+
+#[derive(Clone)]
+struct EsiRuntimeBaseline {
+    sig: EsiRuntimeSig,
+    deleted_mails: HashSet<(i64, i64)>,
+    mail_meta: HashMap<(i64, i64), EsiMailMeta>,
+    mail_labels: HashMap<i64, Vec<EsiMailLabel>>,
+    mail_lists: HashMap<i64, Vec<(i64, String)>>,
+    char_contacts: HashMap<i64, Vec<EsiContactEntry>>,
+    char_contact_labels: HashMap<i64, Vec<(i64, String)>>,
+    corp_contacts: HashMap<i64, Vec<EsiContactEntry>>,
+    corp_contact_labels: HashMap<i64, Vec<(i64, String)>>,
+    alliance_contacts: HashMap<i64, Vec<EsiContactEntry>>,
+    alliance_contact_labels: HashMap<i64, Vec<(i64, String)>>,
+    calendar_events: HashMap<i64, EsiCalendarEvent>,
+    calendar_responses: HashMap<(i64, i64), String>,
+    contact_notifications: HashMap<i64, Vec<EsiContactNotification>>,
+    char_corp_history: HashMap<i64, Vec<EsiCorpHistoryEntry>>,
+    char_titles: HashMap<i64, Vec<(i64, String)>>,
+    fleet_motd: HashMap<i64, String>,
+    fleet_wing_names: HashMap<(i64, i64), String>,
+    fleet_squads: HashMap<(i64, i64), (i64, String)>,
+    fleet_member_meta: HashMap<(i64, i64), (String, i64, i64)>,
+    war_allies: HashMap<i64, Vec<Value>>,
+    custom_item_names: HashMap<i64, String>,
+}
+
+fn contact_sig(c: &EsiContactEntry) -> (i64, String, u64, bool, bool, Vec<i64>) {
+    (
+        c.contact_id,
+        c.contact_type.clone(),
+        c.standing.to_bits(),
+        c.is_watched,
+        c.is_blocked,
+        c.label_ids.clone(),
+    )
+}
+
+fn capture_esi_sig(esi: &EsiRuntimeState) -> EsiRuntimeSig {
+    // Acquire and drop one RANK_LEAF lock at a time.
+    let deleted_mails = { esi.deleted_mails.read().expect("esi.deleted_mails").iter().copied().collect() };
+    let mail_meta = {
+        esi.mail_meta
+            .read()
+            .expect("esi.mail_meta")
+            .iter()
+            .map(|(&k, v)| (k, (v.is_read, v.labels.clone())))
+            .collect()
+    };
+    let mail_labels = {
+        esi.mail_labels
+            .read()
+            .expect("esi.mail_labels")
+            .iter()
+            .map(|(&k, vs)| {
+                (
+                    k,
+                    vs.iter()
+                        .map(|l| (l.label_id, l.name.clone(), l.color.clone()))
+                        .collect(),
+                )
+            })
+            .collect()
+    };
+    let mail_lists = { esi.mail_lists.read().expect("esi.mail_lists").iter().map(|(&k, v)| (k, v.clone())).collect() };
+    let char_contacts = {
+        esi.char_contacts
+            .read()
+            .expect("esi.char_contacts")
+            .iter()
+            .map(|(&k, vs)| (k, vs.iter().map(contact_sig).collect()))
+            .collect()
+    };
+    let char_contact_labels = {
+        esi.char_contact_labels
+            .read()
+            .expect("esi.char_contact_labels")
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    };
+    let corp_contacts = {
+        esi.corp_contacts
+            .read()
+            .expect("esi.corp_contacts")
+            .iter()
+            .map(|(&k, vs)| (k, vs.iter().map(contact_sig).collect()))
+            .collect()
+    };
+    let corp_contact_labels = {
+        esi.corp_contact_labels
+            .read()
+            .expect("esi.corp_contact_labels")
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    };
+    let alliance_contacts = {
+        esi.alliance_contacts
+            .read()
+            .expect("esi.alliance_contacts")
+            .iter()
+            .map(|(&k, vs)| (k, vs.iter().map(contact_sig).collect()))
+            .collect()
+    };
+    let alliance_contact_labels = {
+        esi.alliance_contact_labels
+            .read()
+            .expect("esi.alliance_contact_labels")
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    };
+    let calendar_events = {
+        esi.calendar_events
+            .read()
+            .expect("esi.calendar_events")
+            .iter()
+            .map(|(&k, e)| {
+                (
+                    k,
+                    (
+                        e.event_id,
+                        e.event_date_unix,
+                        e.title.clone(),
+                        e.text.clone(),
+                        e.duration_minutes,
+                        e.importance,
+                        e.owner_id,
+                        e.owner_name.clone(),
+                        e.owner_type.clone(),
+                        e.attendees.clone(),
+                    ),
+                )
+            })
+            .collect()
+    };
+    let calendar_responses = {
+        esi.calendar_responses
+            .read()
+            .expect("esi.calendar_responses")
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    };
+    let contact_notifications = {
+        esi.contact_notifications
+            .read()
+            .expect("esi.contact_notifications")
+            .iter()
+            .map(|(&k, vs)| {
+                (
+                    k,
+                    vs.iter()
+                        .map(|n| {
+                            (
+                                n.notification_id,
+                                n.sender_character_id,
+                                n.send_date_unix,
+                                n.standing_level.to_bits(),
+                                n.message.clone(),
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    };
+    let char_corp_history = {
+        esi.char_corp_history
+            .read()
+            .expect("esi.char_corp_history")
+            .iter()
+            .map(|(&k, vs)| {
+                (
+                    k,
+                    vs.iter()
+                        .map(|h| (h.record_id, h.corporation_id, h.start_date_unix, h.is_deleted))
+                        .collect(),
+                )
+            })
+            .collect()
+    };
+    let char_titles = {
+        esi.char_titles
+            .read()
+            .expect("esi.char_titles")
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    };
+    let fleet_motd = { esi.fleet_motd.read().expect("esi.fleet_motd").iter().map(|(&k, v)| (k, v.clone())).collect() };
+    let fleet_wing_names = {
+        esi.fleet_wing_names
+            .read()
+            .expect("esi.fleet_wing_names")
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    };
+    let fleet_squads = {
+        esi.fleet_squads
+            .read()
+            .expect("esi.fleet_squads")
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    };
+    let fleet_member_meta = {
+        esi.fleet_member_meta
+            .read()
+            .expect("esi.fleet_member_meta")
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    };
+    let war_allies = {
+        esi.war_allies
+            .read()
+            .expect("esi.war_allies")
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    };
+    let custom_item_names = {
+        esi.custom_item_names
+            .read()
+            .expect("esi.custom_item_names")
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    };
+    EsiRuntimeSig {
+        deleted_mails,
+        mail_meta,
+        mail_labels,
+        mail_lists,
+        char_contacts,
+        char_contact_labels,
+        corp_contacts,
+        corp_contact_labels,
+        alliance_contacts,
+        alliance_contact_labels,
+        calendar_events,
+        calendar_responses,
+        contact_notifications,
+        char_corp_history,
+        char_titles,
+        fleet_motd,
+        fleet_wing_names,
+        fleet_squads,
+        fleet_member_meta,
+        war_allies,
+        custom_item_names,
+    }
+}
+
+fn capture_esi_baseline(esi: &EsiRuntimeState) -> EsiRuntimeBaseline {
+    let sig = capture_esi_sig(esi);
+    let deleted_mails = { esi.deleted_mails.read().expect("esi.deleted_mails").clone() };
+    let mail_meta = { esi.mail_meta.read().expect("esi.mail_meta").clone() };
+    let mail_labels = { esi.mail_labels.read().expect("esi.mail_labels").clone() };
+    let mail_lists = { esi.mail_lists.read().expect("esi.mail_lists").clone() };
+    let char_contacts = { esi.char_contacts.read().expect("esi.char_contacts").clone() };
+    let char_contact_labels = { esi.char_contact_labels.read().expect("esi.char_contact_labels").clone() };
+    let corp_contacts = { esi.corp_contacts.read().expect("esi.corp_contacts").clone() };
+    let corp_contact_labels = { esi.corp_contact_labels.read().expect("esi.corp_contact_labels").clone() };
+    let alliance_contacts = { esi.alliance_contacts.read().expect("esi.alliance_contacts").clone() };
+    let alliance_contact_labels = { esi.alliance_contact_labels.read().expect("esi.alliance_contact_labels").clone() };
+    let calendar_events = { esi.calendar_events.read().expect("esi.calendar_events").clone() };
+    let calendar_responses = { esi.calendar_responses.read().expect("esi.calendar_responses").clone() };
+    let contact_notifications = { esi.contact_notifications.read().expect("esi.contact_notifications").clone() };
+    let char_corp_history = { esi.char_corp_history.read().expect("esi.char_corp_history").clone() };
+    let char_titles = { esi.char_titles.read().expect("esi.char_titles").clone() };
+    let fleet_motd = { esi.fleet_motd.read().expect("esi.fleet_motd").clone() };
+    let fleet_wing_names = { esi.fleet_wing_names.read().expect("esi.fleet_wing_names").clone() };
+    let fleet_squads = { esi.fleet_squads.read().expect("esi.fleet_squads").clone() };
+    let fleet_member_meta = { esi.fleet_member_meta.read().expect("esi.fleet_member_meta").clone() };
+    let war_allies = { esi.war_allies.read().expect("esi.war_allies").clone() };
+    let custom_item_names = { esi.custom_item_names.read().expect("esi.custom_item_names").clone() };
+    EsiRuntimeBaseline {
+        sig,
+        deleted_mails,
+        mail_meta,
+        mail_labels,
+        mail_lists,
+        char_contacts,
+        char_contact_labels,
+        corp_contacts,
+        corp_contact_labels,
+        alliance_contacts,
+        alliance_contact_labels,
+        calendar_events,
+        calendar_responses,
+        contact_notifications,
+        char_corp_history,
+        char_titles,
+        fleet_motd,
+        fleet_wing_names,
+        fleet_squads,
+        fleet_member_meta,
+        war_allies,
+        custom_item_names,
+    }
+}
+
+fn restore_esi_runtime(esi: &EsiRuntimeState, base: &EsiRuntimeBaseline) {
+    *esi.deleted_mails.write().expect("esi.deleted_mails") = base.deleted_mails.clone();
+    *esi.mail_meta.write().expect("esi.mail_meta") = base.mail_meta.clone();
+    *esi.mail_labels.write().expect("esi.mail_labels") = base.mail_labels.clone();
+    *esi.mail_lists.write().expect("esi.mail_lists") = base.mail_lists.clone();
+    *esi.char_contacts.write().expect("esi.char_contacts") = base.char_contacts.clone();
+    *esi.char_contact_labels.write().expect("esi.char_contact_labels") = base.char_contact_labels.clone();
+    *esi.corp_contacts.write().expect("esi.corp_contacts") = base.corp_contacts.clone();
+    *esi.corp_contact_labels.write().expect("esi.corp_contact_labels") = base.corp_contact_labels.clone();
+    *esi.alliance_contacts.write().expect("esi.alliance_contacts") = base.alliance_contacts.clone();
+    *esi.alliance_contact_labels.write().expect("esi.alliance_contact_labels") = base.alliance_contact_labels.clone();
+    *esi.calendar_events.write().expect("esi.calendar_events") = base.calendar_events.clone();
+    *esi.calendar_responses.write().expect("esi.calendar_responses") = base.calendar_responses.clone();
+    *esi.contact_notifications.write().expect("esi.contact_notifications") = base.contact_notifications.clone();
+    *esi.char_corp_history.write().expect("esi.char_corp_history") = base.char_corp_history.clone();
+    *esi.char_titles.write().expect("esi.char_titles") = base.char_titles.clone();
+    *esi.fleet_motd.write().expect("esi.fleet_motd") = base.fleet_motd.clone();
+    *esi.fleet_wing_names.write().expect("esi.fleet_wing_names") = base.fleet_wing_names.clone();
+    *esi.fleet_squads.write().expect("esi.fleet_squads") = base.fleet_squads.clone();
+    *esi.fleet_member_meta.write().expect("esi.fleet_member_meta") = base.fleet_member_meta.clone();
+    *esi.war_allies.write().expect("esi.war_allies") = base.war_allies.clone();
+    *esi.custom_item_names.write().expect("esi.custom_item_names") = base.custom_item_names.clone();
+}
+
+/// Excludes strictly passive caller-presence broadcasts sent to Jita bystanders
+/// (`CHAR_B_ID`) when `CHAR_A_ID` logs off or undocks from shared Jita 4-4; Target B's
+/// own local-chat membership is still enforced directly via `WorldStateSnapshot.chat_channels`.
+fn is_passive_caller_presence_notification(event: &str, args: &[PyRep]) -> bool {
+    match event {
+        "OnChannelLeft" => {
+            matches!(args, [PyRep::String(ch)] if ch.starts_with("solarsystemid2:"))
+                || matches!(args, [PyRep::Bytes(ch)] if ch.starts_with(b"solarsystemid2:"))
+        }
+        "OnCharNoLongerInStation" => matches!(
+            args,
+            [PyRep::Tuple(xs)] if matches!(xs.first(), Some(PyRep::Integer(cid)) if *cid == CHAR_A_ID)
+        ),
+        _ => false,
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+struct TargetBRuntimeSlice {
+    ship_fitting_keys_present: BTreeSet<i64>,
+    ship_fit_revs: BTreeMap<i64, eve_dogma::FitRev>,
+    brain_version: Option<i64>,
+    weapon_cycles: BTreeMap<i64, (Option<u64>, u32, Option<i64>)>,
+    projected_ewar_lens: BTreeMap<i64, usize>,
+    projected_ewar_sources: BTreeMap<i64, i64>,
+    active_ewar_starts: BTreeMap<(i64, i64), usize>,
+    mining_cycles_present: BTreeSet<i64>,
+    module_cooldowns: BTreeMap<(i64, i64, u32), (u64, u64, Option<u32>, u64)>,
+    scanner_probes: BTreeSet<i64>,
+    tactical_entries: (usize, usize, usize, usize, usize),
+    pending_notifications_b_sigs: Vec<(String, String)>,
+    combat_runtime_b: CombatRuntimeBSig,
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+struct CombatRuntimeBSig {
+    duel_challenges: BTreeMap<(i64, i64), u64>,
+    corp_aggression: Option<bool>,
+    disapproval_flag: Option<u64>,
+    safety_level: Option<String>,
+    limited_engagements: BTreeMap<(i64, i64), u64>,
+    npc_timer: Option<u64>,
+    timer_states: Option<(i64, i64, i64, i64, i64)>,
+    timer_triggered: Option<[u64; 5]>,
+    sec_txs_len: usize,
+    detailed_killmail_ids: BTreeSet<i64>,
+    bounty_pools: BTreeMap<i64, u64>,
+    bounty_claims: BTreeMap<i64, u64>,
+    self_destruct_ships: BTreeMap<i64, (u64, u64)>,
+    self_destruct_gens: BTreeMap<i64, u64>,
+    drones_count: usize,
+    drone_miners_count: usize,
+    behavior_debug_b: bool,
+    authorized_storage_b: bool,
+    entropic_spools: BTreeMap<(i64, i64), String>,
+    active_breacher_dots: BTreeMap<i64, String>,
+    in_flight_missiles: BTreeMap<i64, String>,
+}
+
+fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
+    let b_ships = [fix.b_ship_id, fix.b_space_ship_id, CORP_B_STRUCTURE_ID, fix.b_pos_id];
+    let b_owners = [CHAR_B_ID, CORP_B_ID, ALLIANCE_B_ID];
+    eve_server::services::combat_crimewatch::with_combat_runtime(&fix.ctx, |rt| CombatRuntimeBSig {
+        duel_challenges: rt
+            .duel_challenges
+            .iter()
+            .filter(|(&(a, b), _)| a == CHAR_B_ID || b == CHAR_B_ID)
+            .map(|(&k, &v)| (k, v))
+            .collect(),
+        corp_aggression: rt.corp_aggression_settings.get(&CORP_B_ID).copied(),
+        disapproval_flag: rt.disapproval_flags.get(&CHAR_B_ID).copied(),
+        safety_level: rt.safety_levels.get(&CHAR_B_ID).map(|s| format!("{s:?}")),
+        limited_engagements: rt
+            .limited_engagements
+            .iter()
+            .flat_map(|(&k1, inner)| {
+                inner.iter().filter_map(move |(&k2, &v)| {
+                    (k1 == CHAR_B_ID || k2 == CHAR_B_ID).then_some(((k1, k2), v))
+                })
+            })
+            .collect(),
+        npc_timer: rt.npc_timers.get(&CHAR_B_ID).copied(),
+        timer_states: rt.crimewatch_timer_states.get(&CHAR_B_ID).copied(),
+        timer_triggered: rt.crimewatch_timer_triggered_at.get(&CHAR_B_ID).copied(),
+        sec_txs_len: rt.sec_status_transactions.get(&CHAR_B_ID).map_or(0, Vec::len),
+        detailed_killmail_ids: rt
+            .detailed_killmails
+            .iter()
+            .filter(|(&kid, km)| {
+                kid == fix.b_killmail_id
+                    || km.victim_character_id == CHAR_B_ID
+                    || km.victim_corporation_id == CORP_B_ID
+            })
+            .map(|(&kid, _)| kid)
+            .collect(),
+        bounty_pools: b_owners
+            .iter()
+            .filter_map(|&id| rt.player_bounty_pool.get(&id).map(|v| (id, v.to_bits())))
+            .collect(),
+        bounty_claims: b_owners
+            .iter()
+            .filter_map(|&id| rt.bounty_hunter_claimed.get(&id).map(|v| (id, v.to_bits())))
+            .collect(),
+        self_destruct_ships: b_ships
+            .iter()
+            .filter_map(|&sid| {
+                rt.self_destruct_countdowns
+                    .get(&sid)
+                    .map(|sd| (sid, (sd.started_unix, sd.detonate_at_unix)))
+            })
+            .collect(),
+        self_destruct_gens: b_ships
+            .iter()
+            .filter_map(|&sid| rt.self_destruct_generations.get(&sid).map(|&g| (sid, g)))
+            .collect(),
+        drones_count: rt
+            .active_drones_in_space
+            .values()
+            .filter(|d| d.owner_char_id == CHAR_B_ID || b_ships.contains(&d.parent_ship_id))
+            .count(),
+        drone_miners_count: rt
+            .active_drone_miners
+            .values()
+            .filter(|m| m.owner_char_id == CHAR_B_ID || b_ships.contains(&m.ship_id))
+            .count(),
+        behavior_debug_b: b_ships.iter().any(|s| rt.behavior_debugging_active.contains(s))
+            || rt.behavior_debugging_active.contains(&CHAR_B_ID),
+        authorized_storage_b: rt
+            .authorized_shipping_storage
+            .iter()
+            .any(|&(cid, oid)| cid == CHAR_B_ID || oid == CORP_B_ID),
+        entropic_spools: rt
+            .entropic_spools
+            .iter()
+            .filter(|(&(s, t), _)| b_ships.contains(&s) || b_ships.contains(&t))
+            .map(|(&k, v)| (k, format!("{v:?}")))
+            .collect(),
+        active_breacher_dots: rt
+            .active_breacher_dots
+            .iter()
+            .filter(|(&tid, d)| {
+                b_ships.contains(&tid) || d.source_char_id == CHAR_B_ID || b_ships.contains(&d.source_ship_id)
+            })
+            .map(|(&k, v)| (k, format!("{v:?}")))
+            .collect(),
+        in_flight_missiles: rt
+            .in_flight_missiles
+            .iter()
+            .filter(|(_, m)| {
+                m.attacker_char_id == CHAR_B_ID
+                    || b_ships.contains(&m.attacker_ship_id)
+                    || b_ships.contains(&m.target_ball_id)
+            })
+            .map(|(&k, v)| (k, format!("{v:?}")))
+            .collect(),
+    })
+}
+
+fn capture_target_b_runtime(fix: &MatrixFixture) -> TargetBRuntimeSlice {
+    let b_ships = [fix.b_ship_id, fix.b_space_ship_id, CORP_B_STRUCTURE_ID, fix.b_pos_id];
+    let ship_fitting_keys_present = {
+        let sf = fix.ctx.ship_fittings.read().expect("ship_fittings");
+        b_ships.iter().copied().filter(|id| sf.contains_key(id)).collect()
+    };
+    let ship_fit_revs = {
+        let sr = fix.ctx.ship_fit_revs.read().expect("ship_fit_revs");
+        b_ships.iter().filter_map(|&id| sr.get(&id).map(|&r| (id, r))).collect()
+    };
+    let brain_version = {
+        fix.ctx.brain_versions.read().expect("brain_versions").get(&CHAR_B_ID).copied()
+    };
+    let weapon_cycles = {
+        let wc = fix.ctx.weapon_cycle_state.read().expect("weapon_cycle_state");
+        b_ships.iter().filter_map(|&id| wc.get(&id).cloned().map(|v| (id, v))).collect()
+    };
+    let projected_ewar_lens = {
+        let pe = fix.ctx.projected_ewar.read().expect("projected_ewar");
+        b_ships.iter().filter_map(|&id| pe.get(&id).map(|v| (id, v.len()))).collect()
+    };
+    let projected_ewar_sources = {
+        let ps = fix.ctx.projected_ewar_sources.read().expect("projected_ewar_sources");
+        ps.iter()
+            .filter(|&(&m, &s)| b_ships.contains(&m) || b_ships.contains(&s))
+            .map(|(&k, &v)| (k, v))
+            .collect()
+    };
+    let active_ewar_starts = {
+        let ae = fix.ctx.active_ewar_starts.read().expect("active_ewar_starts");
+        ae.iter()
+            .filter(|(&(s, t), _)| b_ships.contains(&s) || b_ships.contains(&t))
+            .map(|(&k, v)| (k, v.len()))
+            .collect()
+    };
+    let mining_cycles_present = {
+        let mc = fix.ctx.mining_cycles.read().expect("mining_cycles");
+        mc.iter()
+            .filter(|(_, c)| c.char_id == CHAR_B_ID || b_ships.contains(&c.ship_id))
+            .map(|(&mid, _)| mid)
+            .collect()
+    };
+    let module_cooldowns = {
+        let cd = fix.ctx.module_reactivation_cooldowns.read().expect("module_cooldowns");
+        cd.iter()
+            .filter(|(&(sid, _, _), _)| b_ships.contains(&sid))
+            .map(|(&k, v)| {
+                (
+                    k,
+                    (
+                        v.recorded_unix_f64.to_bits(),
+                        v.delay_s.to_bits(),
+                        v.solar_system_id,
+                        v.recorded_sys_sim_s.to_bits(),
+                    ),
+                )
+            })
+            .collect()
+    };
+    let scanner_probes = {
+        let sp = fix.ctx.active_scanner_probes.read().expect("scanner_probes");
+        sp.iter()
+            .filter(|(_, p)| p.owner_char_id == CHAR_B_ID || b_ships.contains(&p.ship_id))
+            .map(|(&pid, _)| pid)
+            .collect()
+    };
+    let tactical_entries = {
+        let ts = fix.ctx.tactical_state.read().expect("tactical_state");
+        (
+            ts.remote_assistance.iter().filter(|(&(_, sid), _)| b_ships.contains(&sid)).count(),
+            ts.lance_caster_lock_until.iter().filter(|(&(_, sid), _)| b_ships.contains(&sid)).count(),
+            ts.lance_victim_debuff_until.iter().filter(|(&(_, sid), _)| b_ships.contains(&sid)).count(),
+            ts.entosis_active_links
+                .iter()
+                .filter(|(&(_, sid), l)| {
+                    b_ships.contains(&sid) || l.char_id == CHAR_B_ID || b_ships.contains(&l.target_id)
+                })
+                .count(),
+            ts.entosis_target_cycles.iter().filter(|(&(_, sid, tid), _)| b_ships.contains(&sid) || b_ships.contains(&tid)).count(),
+        )
+    };
+    let pending_notifications_b_sigs = {
+        fix.ctx
+            .pending_notifications
+            .read()
+            .expect("pending_notifications")
+            .get(&CHAR_B_ID)
+            .map(|notifs| {
+                notifs
+                    .iter()
+                    .filter(|n| !is_passive_caller_presence_notification(&n.event, &n.args))
+                    .map(|n| (n.event.clone(), format!("{:?}", n.args)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let combat_runtime_b = capture_combat_runtime_b(fix);
+    TargetBRuntimeSlice {
+        ship_fitting_keys_present,
+        ship_fit_revs,
+        brain_version,
+        weapon_cycles,
+        projected_ewar_lens,
+        projected_ewar_sources,
+        active_ewar_starts,
+        mining_cycles_present,
+        module_cooldowns,
+        scanner_probes,
+        tactical_entries,
+        pending_notifications_b_sigs,
+        combat_runtime_b,
+    }
 }
 
 #[derive(Clone)]
@@ -1398,6 +2083,14 @@ struct RuntimeBaseline {
     ephemeral_counts: [usize; 8],
     clock_unix: u64,
     ballparks: Vec<BallparkCheckSnapshot>,
+    esi: EsiRuntimeBaseline,
+    crimewatch_b_state: Option<PersistedCrimeWatchState>,
+    crimewatch_aggressions: BTreeMap<(i64, i64), PersistedAggressionRecord>,
+    crimewatch_pending_despawns: Vec<(u32, i64, u64)>,
+    crimewatch_states_len: usize,
+    trashed_mails: BTreeSet<(i64, i64)>,
+    b_fleet_has_extras: bool,
+    target_b_runtime: TargetBRuntimeSlice,
 }
 
 fn combat_sig(cs: &CombatState) -> ([u64; 4], [bool; 3], i32, i32, u32) {
@@ -1432,7 +2125,7 @@ fn capture_ballpark_snapshot(ctx: &ServerContext, sys_id: SolarSystemId) -> Ball
         combat_keys,
         combat_states: bp.combat_states.clone(),
         warp_bubbles: bp.warp_bubble_mgr.clone(),
-        target_locks_len: bp.target_locks.len(),
+        target_locks: bp.target_locks.clone(),
         current_tick: bp.current_tick,
     }
 }
@@ -1510,6 +2203,26 @@ fn capture_runtime_baseline(fix: &MatrixFixture) -> RuntimeBaseline {
         capture_ballpark_snapshot(&fix.ctx, SYS_JITA),
         capture_ballpark_snapshot(&fix.ctx, fix.other_sys_id),
     ];
+    let esi = capture_esi_baseline(&fix.ctx.esi_state);
+    let crimewatch_b_state = fix.ctx.crimewatch.state_of(CHAR_B_ID);
+    let (crimewatch_states_len, crimewatch_aggressions, crimewatch_pending_despawns) = {
+        let cw = fix.ctx.crimewatch.read().expect("crimewatch");
+        (
+            cw.states.len(),
+            cw.aggression_mgr
+                .records
+                .iter()
+                .map(|(&k, v)| (k, v.clone()))
+                .collect(),
+            cw.pending_concord_despawns.clone(),
+        )
+    };
+    let trashed_mails: BTreeSet<(i64, i64)> =
+        eve_server::services::fleet_social::get_trashed_mails(&fix.ctx)
+            .into_iter()
+            .collect();
+    let b_fleet_has_extras = fix.ctx.has_fleet_extras_for(fix.b_fleet_id);
+    let target_b_runtime = capture_target_b_runtime(fix);
     RuntimeBaseline {
         db,
         bound_keys,
@@ -1522,6 +2235,14 @@ fn capture_runtime_baseline(fix: &MatrixFixture) -> RuntimeBaseline {
         ephemeral_counts,
         clock_unix,
         ballparks,
+        esi,
+        crimewatch_b_state,
+        crimewatch_aggressions,
+        crimewatch_pending_despawns,
+        crimewatch_states_len,
+        trashed_mails,
+        b_fleet_has_extras,
+        target_b_runtime,
     }
 }
 
@@ -1566,6 +2287,28 @@ fn check_runtime_changed(
     let counts = current_ephemeral_counts(&fix.ctx);
     let eph_dirty = counts != base.ephemeral_counts;
     let clock_dirty = fix.ctx.clock().now_unix_secs() != base.clock_unix;
+    let esi_dirty = capture_esi_sig(&fix.ctx.esi_state) != base.esi.sig;
+    let cw_dirty = fix.ctx.crimewatch.state_of(CHAR_B_ID) != base.crimewatch_b_state || {
+        let cw = fix.ctx.crimewatch.read().expect("crimewatch");
+        let aggrs: BTreeMap<(i64, i64), PersistedAggressionRecord> = cw
+            .aggression_mgr
+            .records
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
+        cw.states.len() != base.crimewatch_states_len
+            || aggrs != base.crimewatch_aggressions
+            || cw.pending_concord_despawns != base.crimewatch_pending_despawns
+    };
+    let social_trashed_dirty = {
+        let cur: BTreeSet<(i64, i64)> =
+            eve_server::services::fleet_social::get_trashed_mails(&fix.ctx)
+                .into_iter()
+                .collect();
+        cur != base.trashed_mails
+    };
+    let fleet_extras_dirty = fix.ctx.has_fleet_extras_for(fix.b_fleet_id) != base.b_fleet_has_extras;
+    let target_b_rt_dirty = capture_target_b_runtime(fix) != base.target_b_runtime;
 
     let mut space_dirty = false;
     for bp_base in &base.ballparks {
@@ -1588,7 +2331,7 @@ fn check_runtime_changed(
         if bp.balls != bp_base.balls
             || cur_combat_changed
             || bp.warp_bubble_mgr != bp_base.warp_bubbles
-            || bp.target_locks.len() != bp_base.target_locks_len
+            || target_locks_sigs(&bp.target_locks) != target_locks_sigs(&bp_base.target_locks)
             || bp.current_tick != bp_base.current_tick
         {
             space_dirty = true;
@@ -1597,7 +2340,17 @@ fn check_runtime_changed(
     }
 
     (
-        bound_dirty || warps_dirty || config_dirty || eph_dirty || clock_dirty || space_dirty,
+        bound_dirty
+            || warps_dirty
+            || config_dirty
+            || eph_dirty
+            || clock_dirty
+            || esi_dirty
+            || cw_dirty
+            || social_trashed_dirty
+            || fleet_extras_dirty
+            || target_b_rt_dirty
+            || space_dirty,
         bound_dirty,
         space_dirty,
     )
@@ -1612,7 +2365,10 @@ async fn restore_world_state(
 ) {
     if db_dirty {
         fix.ctx.db.restore(&base.db).expect("restore DB snapshot");
+        eve_server::services::combat_crimewatch::sync_combat_runtime_from_db(&fix.ctx);
     }
+    eve_server::services::fleet_social::hydrate_social_state_from_db(&fix.ctx);
+    restore_esi_runtime(&fix.ctx.esi_state, &base.esi);
     if bound_dirty {
         *fix.ctx.bound_objects.write().expect("bound_objects") = base.bound_entries.clone();
     }
@@ -1694,7 +2450,7 @@ async fn restore_world_state(
                 bp.balls = bp_base.balls.clone();
                 bp.combat_states = bp_base.combat_states.clone();
                 bp.warp_bubble_mgr = bp_base.warp_bubbles.clone();
-                bp.target_locks.clear();
+                bp.target_locks = bp_base.target_locks.clone();
                 bp.pending_events.clear();
                 bp.observer_events.clear();
                 bp.scheduled_observer_events.clear();
@@ -3739,9 +4495,204 @@ fn target_b_state_mutated(
         }
     }
 
-    // Target B's in-space entities (ship, Upwell structure, POS tower) must remain invariant.
+fn target_b_entity_ids(fix: &MatrixFixture) -> Vec<i64> {
+    [
+        CHAR_B_ID,
+        USER_B_ID as i64,
+        CORP_B_ID,
+        ALLIANCE_B_ID,
+        fix.b_ship_id,
+        fix.b_space_ship_id,
+        fix.b_cont_id,
+        fix.b_item_id,
+        fix.b_blueprint_id,
+        fix.b_pos_id,
+        fix.b_fleet_id,
+        fix.b_war_id,
+        fix.b_planet_id,
+        fix.b_order_id,
+        fix.b_contract_id,
+        fix.b_job_id,
+        fix.b_fitting_id,
+        fix.b_mail_id,
+        fix.b_bookmark_id,
+        fix.b_killmail_id,
+        fix.b_corp_project_id,
+        fix.b_petition_id,
+        CORP_B_OFFICE_ID,
+        CORP_B_OFFICE_ITEM_ID,
+        CORP_B_STRUCTURE_ID,
+    ]
+    .into_iter()
+    .filter(|&id| id > 0)
+    .collect()
+}
+
+fn text_mentions_any_id(raw: &str, ids: &[i64]) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("char_b") || lower.contains("corp_b") || lower.contains("alliance_b") {
+        return true;
+    }
+    raw.split(|c: char| !c.is_ascii_digit())
+        .filter(|tok| tok.len() >= 6)
+        .filter_map(|tok| tok.parse::<i64>().ok())
+        .any(|n| ids.contains(&n))
+}
+
+fn json_mentions_any_id(val: &Value, ids: &[i64]) -> bool {
+    match val {
+        Value::Number(n) => {
+            n.as_i64().is_some_and(|i| ids.contains(&i))
+                || n.as_u64()
+                    .and_then(|u| i64::try_from(u).ok())
+                    .is_some_and(|i| ids.contains(&i))
+        }
+        Value::String(s) => text_mentions_any_id(s, ids),
+        Value::Array(arr) => arr.iter().any(|v| json_mentions_any_id(v, ids)),
+        Value::Object(obj) => obj
+            .iter()
+            .any(|(k, v)| text_mentions_any_id(k, ids) || json_mentions_any_id(v, ids)),
+        Value::Null | Value::Bool(_) => false,
+    }
+}
+
+fn struct_ext_b_slice(raw: Option<&String>, b_ids: &[i64]) -> Option<Value> {
+    let raw = raw?;
+    let val: Value = serde_json::from_str(raw).ok()?;
+    let Value::Object(map) = val else {
+        return json_mentions_any_id(&val, b_ids).then_some(val);
+    };
+    let mut out = serde_json::Map::new();
+    for (field, fval) in map {
+        match fval {
+            Value::Object(inner) => {
+                let kept: serde_json::Map<String, Value> = inner
+                    .into_iter()
+                    .filter(|(k, v)| text_mentions_any_id(k, b_ids) || json_mentions_any_id(v, b_ids))
+                    .collect();
+                if !kept.is_empty() {
+                    out.insert(field, Value::Object(kept));
+                }
+            }
+            Value::Array(items) => {
+                let kept: Vec<Value> = items
+                    .into_iter()
+                    .filter(|v| json_mentions_any_id(v, b_ids))
+                    .collect();
+                if !kept.is_empty() {
+                    out.insert(field, Value::Array(kept));
+                }
+            }
+            other => {
+                if json_mentions_any_id(&other, b_ids) {
+                    out.insert(field, other);
+                }
+            }
+        }
+    }
+    Some(Value::Object(out))
+}
+
+fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRuntimeSig, b_ids: &[i64]) -> bool {
+    let b_del_before: BTreeSet<(i64, i64)> = base
+        .deleted_mails
+        .iter()
+        .copied()
+        .filter(|&(cid, mid)| cid == CHAR_B_ID || mid == fix.b_mail_id)
+        .collect();
+    let b_del_after: BTreeSet<(i64, i64)> = cur
+        .deleted_mails
+        .iter()
+        .copied()
+        .filter(|&(cid, mid)| cid == CHAR_B_ID || mid == fix.b_mail_id)
+        .collect();
+    if b_del_before != b_del_after {
+        return true;
+    }
+    let meta_b = |m: &BTreeMap<(i64, i64), (bool, Vec<i64>)>| -> BTreeMap<(i64, i64), (bool, Vec<i64>)> {
+        m.iter()
+            .filter(|(&(cid, mid), _)| cid == CHAR_B_ID || mid == fix.b_mail_id)
+            .map(|(&k, v)| (k, v.clone()))
+            .collect()
+    };
+    if meta_b(&base.mail_meta) != meta_b(&cur.mail_meta)
+        || base.mail_labels.get(&CHAR_B_ID) != cur.mail_labels.get(&CHAR_B_ID)
+        || base.mail_lists.get(&CHAR_B_ID) != cur.mail_lists.get(&CHAR_B_ID)
+        || base.char_contacts.get(&CHAR_B_ID) != cur.char_contacts.get(&CHAR_B_ID)
+        || base.char_contact_labels.get(&CHAR_B_ID) != cur.char_contact_labels.get(&CHAR_B_ID)
+        || base.corp_contacts.get(&CORP_B_ID) != cur.corp_contacts.get(&CORP_B_ID)
+        || base.corp_contact_labels.get(&CORP_B_ID) != cur.corp_contact_labels.get(&CORP_B_ID)
+        || base.alliance_contacts.get(&ALLIANCE_B_ID) != cur.alliance_contacts.get(&ALLIANCE_B_ID)
+        || base.alliance_contact_labels.get(&ALLIANCE_B_ID)
+            != cur.alliance_contact_labels.get(&ALLIANCE_B_ID)
+        || base.contact_notifications.get(&CHAR_B_ID) != cur.contact_notifications.get(&CHAR_B_ID)
+        || base.char_corp_history.get(&CHAR_B_ID) != cur.char_corp_history.get(&CHAR_B_ID)
+        || base.char_titles.get(&CHAR_B_ID) != cur.char_titles.get(&CHAR_B_ID)
+        || base.fleet_motd.get(&fix.b_fleet_id) != cur.fleet_motd.get(&fix.b_fleet_id)
+        || base.war_allies.get(&fix.b_war_id) != cur.war_allies.get(&fix.b_war_id)
+    {
+        return true;
+    }
+    let cal_ev_b = |m: &BTreeMap<i64, (i64, u64, String, String, i64, i64, i64, String, String, Vec<i64>)>| {
+        m.iter()
+            .filter(|(_, ev)| {
+                ev.6 == CHAR_B_ID
+                    || ev.6 == CORP_B_ID
+                    || ev.6 == ALLIANCE_B_ID
+                    || ev.9.contains(&CHAR_B_ID)
+            })
+            .map(|(&k, v)| (k, v.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let b_ev_before = cal_ev_b(&base.calendar_events);
+    let b_ev_after = cal_ev_b(&cur.calendar_events);
+    if b_ev_before != b_ev_after {
+        return true;
+    }
+    let cal_resp_b = |m: &BTreeMap<(i64, i64), String>| {
+        m.iter()
+            .filter(|(&(eid, cid), _)| {
+                cid == CHAR_B_ID || b_ev_before.contains_key(&eid) || b_ev_after.contains_key(&eid)
+            })
+            .map(|(&k, v)| (k, v.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    if cal_resp_b(&base.calendar_responses) != cal_resp_b(&cur.calendar_responses) {
+        return true;
+    }
+    let fleet_wings_b = |m: &BTreeMap<(i64, i64), String>| {
+        m.iter()
+            .filter(|(&(fid, _), _)| fid == fix.b_fleet_id)
+            .map(|(&k, v)| (k, v.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let fleet_squads_b = |m: &BTreeMap<(i64, i64), (i64, String)>| {
+        m.iter()
+            .filter(|(&(fid, _), _)| fid == fix.b_fleet_id)
+            .map(|(&k, v)| (k, v.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let fleet_members_b = |m: &BTreeMap<(i64, i64), (String, i64, i64)>| {
+        m.iter()
+            .filter(|(&(fid, cid), _)| fid == fix.b_fleet_id || cid == CHAR_B_ID)
+            .map(|(&k, v)| (k, v.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    if fleet_wings_b(&base.fleet_wing_names) != fleet_wings_b(&cur.fleet_wing_names)
+        || fleet_squads_b(&base.fleet_squads) != fleet_squads_b(&cur.fleet_squads)
+        || fleet_members_b(&base.fleet_member_meta) != fleet_members_b(&cur.fleet_member_meta)
+    {
+        return true;
+    }
+    b_ids
+        .iter()
+        .any(|id| base.custom_item_names.get(id) != cur.custom_item_names.get(id))
+}
+
+    // Target B's in-space entities (ship, Upwell structure, POS tower) and target locks must remain invariant.
+    let b_entity_ids = target_b_entity_ids(fix);
+    let b_balls = [fix.b_space_ship_id, CORP_B_STRUCTURE_ID, fix.b_pos_id];
     if space_dirty {
-        let b_balls = [fix.b_space_ship_id, CORP_B_STRUCTURE_ID, fix.b_pos_id];
         for bp_base in &base.ballparks {
             let sys = fix.ctx.systems.get_or_spawn(bp_base.sys_id);
             let bp = sys.ballpark.read().expect("ballpark");
@@ -3755,7 +4706,69 @@ fn target_b_state_mutated(
                     return true;
                 }
             }
+            if target_locks_b_sigs(&bp.target_locks, &b_balls)
+                != target_locks_b_sigs(&bp_base.target_locks, &b_balls)
+            {
+                return true;
+            }
         }
+    }
+
+    // Target B runtime maps (crimewatch, esi_state, social trashed mails, fleet extras, combat/tactical).
+    if fix.ctx.crimewatch.state_of(CHAR_B_ID) != base.crimewatch_b_state {
+        return true;
+    }
+    let cw_b_dirty = {
+        let cw = fix.ctx.crimewatch.read().expect("crimewatch");
+        let b_aggr_before: BTreeMap<(i64, i64), &PersistedAggressionRecord> = base
+            .crimewatch_aggressions
+            .iter()
+            .filter(|(&(a, v), _)| a == CHAR_B_ID || v == CHAR_B_ID)
+            .map(|(&k, r)| (k, r))
+            .collect();
+        let b_aggr_after: BTreeMap<(i64, i64), &PersistedAggressionRecord> = cw
+            .aggression_mgr
+            .records
+            .iter()
+            .filter(|(&(a, v), _)| a == CHAR_B_ID || v == CHAR_B_ID)
+            .map(|(&k, r)| (k, r))
+            .collect();
+        let b_despawns_before: Vec<_> = base
+            .crimewatch_pending_despawns
+            .iter()
+            .filter(|&&(_, cid, _)| cid == CHAR_B_ID)
+            .collect();
+        let b_despawns_after: Vec<_> = cw
+            .pending_concord_despawns
+            .iter()
+            .filter(|&&(_, cid, _)| cid == CHAR_B_ID)
+            .collect();
+        b_aggr_before != b_aggr_after || b_despawns_before != b_despawns_after
+    };
+    if cw_b_dirty {
+        return true;
+    }
+    let cur_esi = capture_esi_sig(&fix.ctx.esi_state);
+    if esi_target_b_mutated(fix, &base.esi.sig, &cur_esi, &b_entity_ids) {
+        return true;
+    }
+    let cur_trashed_b: BTreeSet<(i64, i64)> =
+        eve_server::services::fleet_social::get_trashed_mails(&fix.ctx)
+            .into_iter()
+            .filter(|&(cid, _)| cid == CHAR_B_ID)
+            .collect();
+    let base_trashed_b: BTreeSet<(i64, i64)> = base
+        .trashed_mails
+        .iter()
+        .copied()
+        .filter(|&(cid, _)| cid == CHAR_B_ID)
+        .collect();
+    let cur_tbrt = capture_target_b_runtime(fix);
+    if cur_trashed_b != base_trashed_b
+        || fix.ctx.has_fleet_extras_for(fix.b_fleet_id) != base.b_fleet_has_extras
+        || cur_tbrt != base.target_b_runtime
+    {
+        return true;
     }
 
     let Some(cur_tables) = cur_db else {
@@ -3763,6 +4776,354 @@ fn target_b_state_mutated(
     };
     let b = &base.db.snapshot;
     let c = &cur_tables.snapshot;
+    // Exhaustively destructure every field of `WorldStateSnapshot` (matching `snapshot_ext.rs`)
+    // so new snapshot fields cannot be silently omitted from Target B invariance checks.
+    let WorldStateSnapshot {
+        next_entity_id: _,
+        wal_seq: _,
+        markets_seeded: _,
+        service_state_blobs: ref sb_service_state_blobs,
+        sessions: ref sb_sessions,
+        accounts: _,
+        characters: _,
+        skills: _,
+        skill_queues: _,
+        jump_clones: _,
+        active_implants: _,
+        items: ref sb_items,
+        transient_items: _,
+        transient_item_attributes: _,
+        saved_fittings: _,
+        market_orders: ref sb_market_orders,
+        wallet_journal: ref sb_wallet_journal,
+        contracts: _,
+        industry_jobs: _,
+        planetary_colonies: _,
+        active_missions: ref sb_active_missions,
+        mission_tally: ref sb_mission_tally,
+        standing_transactions: _,
+        npe_progress: _,
+        bookmarks: ref sb_bookmarks,
+        mails: ref sb_mails,
+        fleets: ref sb_fleets,
+        corporations: _,
+        quasar_state_blobs: ref sb_quasar_state_blobs,
+        alliances: _,
+        wars: _,
+        corp_projects: ref sb_corp_projects,
+        killmails: ref sb_killmails,
+        kill_rights: ref sb_kill_rights,
+        structures: ref sb_structures,
+        system_states: ref sb_system_states,
+        committed_idempotency_keys: ref sb_committed_idempotency_keys,
+        licensed_skins: _,
+        applied_ship_skins: _,
+        chat_channels: ref sb_chat_channels,
+        cosmic_signatures: _,
+        read_mails: _,
+        deleted_mails: _,
+        mail_labels: _,
+        mail_assigned_labels: _,
+        bookmark_folders: ref sb_bookmark_folders,
+        wh_polarizations: ref sb_wh_polarizations,
+        mining_ledger: ref sb_mining_ledger,
+        module_online_states: _,
+        module_active_states: _,
+        module_active_charges: _,
+        ship_fit_inputs: _,
+        weapon_banks: _,
+        asteroids: _,
+        moon_extractions: ref sb_moon_extractions,
+        auto_moon_miners: ref sb_auto_moon_miners,
+        observer_mining_ledger: ref sb_observer_mining_ledger,
+        owner_notes: _,
+        paused_skill_queues: _,
+        cosmic_anomalies: _,
+        sov_prospecting_levels: _,
+        last_mission_decline_times: ref sb_last_mission_decline_times,
+        character_last_jump_unix: ref sb_character_last_jump_unix,
+        character_cspa_charges: ref sb_character_cspa_charges,
+        mail_timestamps: ref sb_mail_timestamps,
+        character_login_stats: ref sb_character_login_stats,
+        item_custom_names: ref sb_item_custom_names,
+        item_positions: _,
+        structure_vulnerability_windows: _,
+        skill_history: _,
+        character_doll_info: _,
+        system_jump_events: _,
+        system_kill_events: _,
+        incursions: _,
+        sov_campaign_scores: _,
+        fw_character_stats: _,
+        fw_corp_enlisted_on: ref sb_fw_corp_enlisted_on,
+        fw_system_occupations: _,
+        fw_wars: ref sb_fw_wars,
+        war_lifecycle_meta: _,
+        killmail_details: _,
+        station_office_rental_costs: _,
+        alliance_lifecycle_meta: _,
+        corp_hangar_divisions: _,
+        structure_esi_timer_meta: _,
+        corp_alliance_history: _,
+        corp_container_logs: ref sb_corp_container_logs,
+        corp_medals: _,
+        corp_issued_medals: _,
+        corp_member_limits: _,
+        corp_titles: _,
+        corp_member_titles: _,
+        corp_role_assignments: _,
+        corp_role_history: _,
+        corp_shareholders: _,
+        starbase_settings: _,
+        corp_project_contributors: ref sb_corp_project_contributors,
+        char_research_agents: _,
+        char_medals: _,
+        char_scoped_roles: _,
+        loyalty_store_offers: _,
+        wallet_journal_timestamps: ref sb_wallet_journal_timestamps,
+        char_wallet_transactions: _,
+        corp_wallet_journals: _,
+        corp_wallet_transactions: _,
+        market_order_meta: ref sb_market_order_meta,
+        market_history: _,
+        planetary_colony_layouts: _,
+        corp_customs_offices: _,
+        wallet_journal_meta: ref sb_wallet_journal_meta,
+        market_transactions: ref sb_market_transactions,
+        account_plex_vault: _,
+        corp_vote_cases: ref sb_corp_vote_cases,
+        corp_vote_ballots: ref sb_corp_vote_ballots,
+        orbital_provision_types: _,
+        corp_lp_balances: _,
+        char_lp_logs: _,
+        next_alliance_id: _,
+        next_corporation_id: _,
+        next_notification_id: _,
+        next_report_id: _,
+        trashed_mails: _,
+        mailing_lists: ref sb_mailing_lists,
+        calendar_events: ref sb_calendar_events,
+        char_contacts: ref sb_char_contacts,
+        char_contact_notifications: ref sb_char_contact_notifications,
+        char_contact_labels: ref sb_char_contact_labels,
+        corp_contacts: ref sb_corp_contacts,
+        corp_contact_labels: ref sb_corp_contact_labels,
+        alliance_contacts: ref sb_alliance_contacts,
+        alliance_contact_labels: ref sb_alliance_contact_labels,
+        char_notes: ref sb_char_notes,
+        bookmark_subfolders: ref sb_bookmark_subfolders,
+        bookmark_subfolder_parents: ref sb_bookmark_subfolder_parents,
+        bookmark_expiries: ref sb_bookmark_expiries,
+        bookmark_folder_acls: ref sb_bookmark_folder_acls,
+        access_groups: ref sb_access_groups,
+        bookmark_folder_known_by: ref sb_bookmark_folder_known_by,
+        chat_channel_acl: ref sb_chat_channel_acl,
+        corp_governance: _,
+        employment_history: _,
+        alliance_war_state: ref sb_alliance_war_state,
+        war_state: ref sb_war_state,
+        fw_runtime: ref sb_fw_runtime,
+        sov_runtime: ref sb_sov_runtime,
+        insurgency_runtime: ref sb_insurgency_runtime,
+        crimewatch_states: _,
+        crimewatch_aggressions: ref sb_crimewatch_aggressions,
+        combat_crimewatch_state: ref sb_combat_crimewatch_state,
+        zarzakh_gate_locks: ref sb_zarzakh_gate_locks,
+        structure_docking_acl_denied: _,
+        sp6_lifecycle: ref sb_sp6_lifecycle,
+        pve_special_sites: ref sb_pve_special_sites,
+        crab_beacons: ref sb_crab_beacons,
+        abyssal_state: ref sb_abyssal_state,
+        dungeon_runtime: _,
+        dungeon_editor: ref sb_dungeon_editor,
+        fob_observatory_state: ref sb_fob_observatory_state,
+        mining_and_ess_state: _,
+        pvp_filament_state: ref sb_pvp_filament_state,
+        tourney_state: ref sb_tourney_state,
+        deployable_state: ref sb_deployable_state,
+        superweapon_runtime: ref sb_superweapon_runtime,
+        insurgency_complex_ops: _,
+        node_graph_state: ref sb_node_graph_state,
+        seasons_and_campaigns: ref sb_seasons_and_campaigns,
+        quasar_commerce: ref sb_quasar_commerce,
+        fleet_and_social_ops: ref sb_fleet_and_social_ops,
+        cluster_and_runtime: ref sb_cluster_and_runtime,
+        entity_kv: _,
+        insurance_contracts: _,
+    } = *b;
+    let WorldStateSnapshot {
+        next_entity_id: _,
+        wal_seq: _,
+        markets_seeded: _,
+        service_state_blobs: ref sc_service_state_blobs,
+        sessions: ref sc_sessions,
+        accounts: _,
+        characters: _,
+        skills: _,
+        skill_queues: _,
+        jump_clones: _,
+        active_implants: _,
+        items: ref sc_items,
+        transient_items: _,
+        transient_item_attributes: _,
+        saved_fittings: _,
+        market_orders: ref sc_market_orders,
+        wallet_journal: ref sc_wallet_journal,
+        contracts: _,
+        industry_jobs: _,
+        planetary_colonies: _,
+        active_missions: ref sc_active_missions,
+        mission_tally: ref sc_mission_tally,
+        standing_transactions: _,
+        npe_progress: _,
+        bookmarks: ref sc_bookmarks,
+        mails: ref sc_mails,
+        fleets: ref sc_fleets,
+        corporations: _,
+        quasar_state_blobs: ref sc_quasar_state_blobs,
+        alliances: _,
+        wars: _,
+        corp_projects: ref sc_corp_projects,
+        killmails: ref sc_killmails,
+        kill_rights: ref sc_kill_rights,
+        structures: ref sc_structures,
+        system_states: ref sc_system_states,
+        committed_idempotency_keys: ref sc_committed_idempotency_keys,
+        licensed_skins: _,
+        applied_ship_skins: _,
+        chat_channels: ref sc_chat_channels,
+        cosmic_signatures: _,
+        read_mails: _,
+        deleted_mails: _,
+        mail_labels: _,
+        mail_assigned_labels: _,
+        bookmark_folders: ref sc_bookmark_folders,
+        wh_polarizations: ref sc_wh_polarizations,
+        mining_ledger: ref sc_mining_ledger,
+        module_online_states: _,
+        module_active_states: _,
+        module_active_charges: _,
+        ship_fit_inputs: _,
+        weapon_banks: _,
+        asteroids: _,
+        moon_extractions: ref sc_moon_extractions,
+        auto_moon_miners: ref sc_auto_moon_miners,
+        observer_mining_ledger: ref sc_observer_mining_ledger,
+        owner_notes: _,
+        paused_skill_queues: _,
+        cosmic_anomalies: _,
+        sov_prospecting_levels: _,
+        last_mission_decline_times: ref sc_last_mission_decline_times,
+        character_last_jump_unix: ref sc_character_last_jump_unix,
+        character_cspa_charges: ref sc_character_cspa_charges,
+        mail_timestamps: ref sc_mail_timestamps,
+        character_login_stats: ref sc_character_login_stats,
+        item_custom_names: ref sc_item_custom_names,
+        item_positions: _,
+        structure_vulnerability_windows: _,
+        skill_history: _,
+        character_doll_info: _,
+        system_jump_events: _,
+        system_kill_events: _,
+        incursions: _,
+        sov_campaign_scores: _,
+        fw_character_stats: _,
+        fw_corp_enlisted_on: ref sc_fw_corp_enlisted_on,
+        fw_system_occupations: _,
+        fw_wars: ref sc_fw_wars,
+        war_lifecycle_meta: _,
+        killmail_details: _,
+        station_office_rental_costs: _,
+        alliance_lifecycle_meta: _,
+        corp_hangar_divisions: _,
+        structure_esi_timer_meta: _,
+        corp_alliance_history: _,
+        corp_container_logs: ref sc_corp_container_logs,
+        corp_medals: _,
+        corp_issued_medals: _,
+        corp_member_limits: _,
+        corp_titles: _,
+        corp_member_titles: _,
+        corp_role_assignments: _,
+        corp_role_history: _,
+        corp_shareholders: _,
+        starbase_settings: _,
+        corp_project_contributors: ref sc_corp_project_contributors,
+        char_research_agents: _,
+        char_medals: _,
+        char_scoped_roles: _,
+        loyalty_store_offers: _,
+        wallet_journal_timestamps: ref sc_wallet_journal_timestamps,
+        char_wallet_transactions: _,
+        corp_wallet_journals: _,
+        corp_wallet_transactions: _,
+        market_order_meta: ref sc_market_order_meta,
+        market_history: _,
+        planetary_colony_layouts: _,
+        corp_customs_offices: _,
+        wallet_journal_meta: ref sc_wallet_journal_meta,
+        market_transactions: ref sc_market_transactions,
+        account_plex_vault: _,
+        corp_vote_cases: ref sc_corp_vote_cases,
+        corp_vote_ballots: ref sc_corp_vote_ballots,
+        orbital_provision_types: _,
+        corp_lp_balances: _,
+        char_lp_logs: _,
+        next_alliance_id: _,
+        next_corporation_id: _,
+        next_notification_id: _,
+        next_report_id: _,
+        trashed_mails: _,
+        mailing_lists: ref sc_mailing_lists,
+        calendar_events: ref sc_calendar_events,
+        char_contacts: ref sc_char_contacts,
+        char_contact_notifications: ref sc_char_contact_notifications,
+        char_contact_labels: ref sc_char_contact_labels,
+        corp_contacts: ref sc_corp_contacts,
+        corp_contact_labels: ref sc_corp_contact_labels,
+        alliance_contacts: ref sc_alliance_contacts,
+        alliance_contact_labels: ref sc_alliance_contact_labels,
+        char_notes: ref sc_char_notes,
+        bookmark_subfolders: ref sc_bookmark_subfolders,
+        bookmark_subfolder_parents: ref sc_bookmark_subfolder_parents,
+        bookmark_expiries: ref sc_bookmark_expiries,
+        bookmark_folder_acls: ref sc_bookmark_folder_acls,
+        access_groups: ref sc_access_groups,
+        bookmark_folder_known_by: ref sc_bookmark_folder_known_by,
+        chat_channel_acl: ref sc_chat_channel_acl,
+        corp_governance: _,
+        employment_history: _,
+        alliance_war_state: ref sc_alliance_war_state,
+        war_state: ref sc_war_state,
+        fw_runtime: ref sc_fw_runtime,
+        sov_runtime: ref sc_sov_runtime,
+        insurgency_runtime: ref sc_insurgency_runtime,
+        crimewatch_states: _,
+        crimewatch_aggressions: ref sc_crimewatch_aggressions,
+        combat_crimewatch_state: ref sc_combat_crimewatch_state,
+        zarzakh_gate_locks: ref sc_zarzakh_gate_locks,
+        structure_docking_acl_denied: _,
+        sp6_lifecycle: ref sc_sp6_lifecycle,
+        pve_special_sites: ref sc_pve_special_sites,
+        crab_beacons: ref sc_crab_beacons,
+        abyssal_state: ref sc_abyssal_state,
+        dungeon_runtime: _,
+        dungeon_editor: ref sc_dungeon_editor,
+        fob_observatory_state: ref sc_fob_observatory_state,
+        mining_and_ess_state: _,
+        pvp_filament_state: ref sc_pvp_filament_state,
+        tourney_state: ref sc_tourney_state,
+        deployable_state: ref sc_deployable_state,
+        superweapon_runtime: ref sc_superweapon_runtime,
+        insurgency_complex_ops: _,
+        node_graph_state: ref sc_node_graph_state,
+        seasons_and_campaigns: ref sc_seasons_and_campaigns,
+        quasar_commerce: ref sc_quasar_commerce,
+        fleet_and_social_ops: ref sc_fleet_and_social_ops,
+        cluster_and_runtime: ref sc_cluster_and_runtime,
+        entity_kv: _,
+        insurance_contracts: _,
+    } = *c;
 
     // 1. Direct Character B / Account B / Corp B / Alliance B keyed tables.
     if b.accounts.get("neg_b") != c.accounts.get("neg_b")
@@ -3921,24 +5282,7 @@ fn target_b_state_mutated(
         before != after
     }
 
-    let b_entity_ids = [
-        CHAR_B_ID,
-        USER_B_ID as i64,
-        CORP_B_ID,
-        ALLIANCE_B_ID,
-        fix.b_ship_id,
-        fix.b_space_ship_id,
-        fix.b_cont_id,
-        fix.b_item_id,
-        fix.b_blueprint_id,
-        fix.b_pos_id,
-        fix.b_fleet_id,
-        fix.b_war_id,
-        fix.b_planet_id,
-        CORP_B_OFFICE_ID,
-        CORP_B_OFFICE_ITEM_ID,
-        CORP_B_STRUCTURE_ID,
-    ];
+    // Use full `b_entity_ids` (including order/contract/job/fitting/mail/bookmark/killmail/project/petition IDs).
     if filtered_entries_changed(b.saved_fittings.iter(), c.saved_fittings.iter(), |&id, f| {
         id == fix.b_fitting_id || f.owner_id == CHAR_B_ID || f.owner_id == CORP_B_ID
     }) || filtered_entries_changed(b.market_orders.iter(), c.market_orders.iter(), |&id, o| {
@@ -4013,10 +5357,29 @@ fn target_b_state_mutated(
         return true;
     }
 
-    // Mail / wallet journal / mail state sets for Target B.
-    let b_mail_before = b.mails.iter().find(|m| m.message_id == fix.b_mail_id);
-    let b_mail_after = c.mails.iter().find(|m| m.message_id == fix.b_mail_id);
-    if b_mail_before != b_mail_after {
+    // Mail / wallet journal / mail state sets / timestamps for Target B.
+    let mail_is_b = |m: &&MailRecord| {
+        m.message_id == fix.b_mail_id
+            || m.recipient_id == CHAR_B_ID
+            || m.sender_id == CHAR_B_ID
+            || m.recipient_id == CORP_B_ID
+            || m.recipient_id == ALLIANCE_B_ID
+            || m.recipient_id == fix.b_mail_id
+    };
+    let b_mails_before: Vec<_> = sb_mails.iter().filter(mail_is_b).collect();
+    let b_mails_after: Vec<_> = sc_mails.iter().filter(mail_is_b).collect();
+    if b_mails_before != b_mails_after {
+        return true;
+    }
+    let mut b_mail_ids: BTreeSet<i64> = [fix.b_mail_id].into_iter().collect();
+    for m in b_mails_before.iter().chain(b_mails_after.iter()) {
+        b_mail_ids.insert(m.message_id);
+    }
+    if filtered_entries_changed(
+        sb_mail_timestamps.iter(),
+        sc_mail_timestamps.iter(),
+        |id, _| b_mail_ids.contains(id),
+    ) {
         return true;
     }
     let b_read_before: BTreeSet<(i64, i64)> = b
@@ -4061,17 +5424,881 @@ fn target_b_state_mutated(
     {
         return true;
     }
-    let b_journal_before: Vec<_> = b
-        .wallet_journal
+    let b_journal_before: Vec<_> = sb_wallet_journal
         .iter()
         .filter(|e| e.character_id == CHAR_B_ID || e.character_id == CORP_B_ID)
         .collect();
-    let b_journal_after: Vec<_> = c
-        .wallet_journal
+    let b_journal_after: Vec<_> = sc_wallet_journal
         .iter()
         .filter(|e| e.character_id == CHAR_B_ID || e.character_id == CORP_B_ID)
         .collect();
     if b_journal_before != b_journal_after {
+        return true;
+    }
+    let b_journal_ids: BTreeSet<i64> = b_journal_before
+        .iter()
+        .chain(b_journal_after.iter())
+        .map(|e| e.entry_id)
+        .collect();
+    if filtered_entries_changed(
+        sb_wallet_journal_timestamps.iter(),
+        sc_wallet_journal_timestamps.iter(),
+        |id, _| b_journal_ids.contains(id),
+    ) || filtered_entries_changed(
+        sb_wallet_journal_meta.iter(),
+        sc_wallet_journal_meta.iter(),
+        |id, m| {
+            b_journal_ids.contains(id)
+                || m.first_party_id == CHAR_B_ID
+                || m.first_party_id == CORP_B_ID
+                || m.first_party_id == ALLIANCE_B_ID
+                || m.second_party_id == CHAR_B_ID
+                || m.second_party_id == CORP_B_ID
+                || m.second_party_id == ALLIANCE_B_ID
+        },
+    ) {
+        return true;
+    }
+
+    // 4. Exhaustive remaining Target B snapshot tables & sub-stores (verified via compiler destructuring).
+    if sb_item_custom_names.get(&-7_700_001) != sc_item_custom_names.get(&-7_700_001)
+        && struct_ext_b_slice(sb_item_custom_names.get(&-7_700_001), &b_entity_ids)
+            != struct_ext_b_slice(sc_item_custom_names.get(&-7_700_001), &b_entity_ids)
+    {
+        return true;
+    }
+    let b_item_ids: BTreeSet<i64> = sb_items
+        .iter()
+        .chain(sc_items.iter())
+        .filter(|(_, it)| {
+            it.owner_id == CHAR_B_ID
+                || it.owner_id == CORP_B_ID
+                || b_entity_ids.contains(&it.item_id)
+                || b_entity_ids.contains(&it.location_id)
+        })
+        .map(|(&id, _)| id)
+        .chain(b_entity_ids.iter().copied())
+        .collect();
+    if filtered_entries_changed(
+        sb_item_custom_names.iter(),
+        sc_item_custom_names.iter(),
+        |id, _| b_item_ids.contains(id),
+    ) {
+        return true;
+    }
+    if filtered_entries_changed(
+        sb_service_state_blobs.iter(),
+        sc_service_state_blobs.iter(),
+        |k, v| text_mentions_any_id(k, &b_entity_ids) || text_mentions_any_id(v, &b_entity_ids),
+    ) || filtered_entries_changed(
+        sb_quasar_state_blobs.iter(),
+        sc_quasar_state_blobs.iter(),
+        |k, v| text_mentions_any_id(k, &b_entity_ids) || text_mentions_any_id(v, &b_entity_ids),
+    ) {
+        return true;
+    }
+    if filtered_entries_changed(sb_sessions.iter(), sc_sessions.iter(), |_, s| {
+        s.user_id == USER_B_ID || s.character_id == Some(CHAR_B_ID)
+    }) || filtered_entries_changed(
+        sb_active_missions.iter(),
+        sc_active_missions.iter(),
+        |(cid, _), rec| *cid == CHAR_B_ID || rec.character_id == CHAR_B_ID,
+    ) || sb_mission_tally.get(&CHAR_B_ID) != sc_mission_tally.get(&CHAR_B_ID)
+        || sb_last_mission_decline_times.get(&CHAR_B_ID)
+            != sc_last_mission_decline_times.get(&CHAR_B_ID)
+        || sb_character_last_jump_unix.get(&CHAR_B_ID)
+            != sc_character_last_jump_unix.get(&CHAR_B_ID)
+        || sb_character_cspa_charges.get(&CHAR_B_ID) != sc_character_cspa_charges.get(&CHAR_B_ID)
+        || sb_character_login_stats.get(&CHAR_B_ID) != sc_character_login_stats.get(&CHAR_B_ID)
+        || sb_fw_corp_enlisted_on.get(&CORP_B_ID) != sc_fw_corp_enlisted_on.get(&CORP_B_ID)
+        || sb_zarzakh_gate_locks.get(&CHAR_B_ID) != sc_zarzakh_gate_locks.get(&CHAR_B_ID)
+    {
+        return true;
+    }
+    if filtered_entries_changed(sb_fleets.iter(), sc_fleets.iter(), |&fid, f| {
+        fid == fix.b_fleet_id
+            || f.boss_id == CHAR_B_ID
+            || f.members.contains(&CHAR_B_ID)
+            || f.invites.contains(&CHAR_B_ID)
+    }) || filtered_entries_changed(sb_killmails.iter(), sc_killmails.iter(), |&kid, km| {
+        kid == fix.b_killmail_id
+            || km.victim_character_id == CHAR_B_ID
+            || km.attacker_character_id == CHAR_B_ID
+            || km.victim_corp_id == CORP_B_ID
+            || km.attacker_corp_id == CORP_B_ID
+    }) || filtered_entries_changed(sb_kill_rights.iter(), sc_kill_rights.iter(), |_, kr| {
+        kr.owner_id == CHAR_B_ID || kr.target_id == CHAR_B_ID
+    }) {
+        return true;
+    }
+
+    // Chat channels & ACLs touching Target B; normalize shared local-chat (`solarsystemid2:*`)
+    // memberships to ignore the caller (`CHAR_A_ID`) joining/leaving while still verifying every
+    // Target B channel field and Target B membership.
+    let mut b_chan_keys: BTreeSet<String> = BTreeSet::new();
+    for (k, ch) in sb_chat_channels.iter().chain(sc_chat_channels.iter()) {
+        if ch.owner_id == Some(CHAR_B_ID)
+            || ch.owner_id == Some(CORP_B_ID)
+            || ch.owner_id == Some(ALLIANCE_B_ID)
+            || ch.members.contains(&CHAR_B_ID)
+            || ch.operators.contains(&CHAR_B_ID)
+        {
+            b_chan_keys.insert(k.clone());
+        }
+    }
+    let [b_chans_before, b_chans_after] = [sb_chat_channels, sc_chat_channels].map(|channels| {
+        channels
+            .iter()
+            .filter(|(k, _)| b_chan_keys.contains(*k))
+            .map(|(k, ch)| {
+                let mut norm = ch.clone();
+                if k.starts_with("solarsystemid2:")
+                    && !matches!(
+                        norm.owner_id,
+                        Some(CHAR_B_ID) | Some(CORP_B_ID) | Some(ALLIANCE_B_ID)
+                    )
+                {
+                    norm.members.remove(&CHAR_A_ID);
+                }
+                (k.clone(), norm)
+            })
+            .collect::<BTreeMap<_, _>>()
+    });
+    if b_chans_before != b_chans_after
+        || filtered_entries_changed(
+            sb_chat_channel_acl.iter(),
+            sc_chat_channel_acl.iter(),
+            |k, acl| {
+                b_chan_keys.contains(k)
+                    || acl.allow_list.contains(&CHAR_B_ID)
+                    || acl.deny_list.contains(&CHAR_B_ID)
+                    || acl.muted_until.contains_key(&CHAR_B_ID)
+            },
+        )
+    {
+        return true;
+    }
+
+    // Bookmark folders, subfolders, expiries, folder ACLs, access groups, and known-by state.
+    let mut b_bm_ids: BTreeSet<i64> = [fix.b_bookmark_id].into_iter().collect();
+    for (&id, bm) in sb_bookmarks.iter().chain(sc_bookmarks.iter()) {
+        if id == fix.b_bookmark_id || bm.owner_id == CHAR_B_ID || bm.owner_id == CORP_B_ID {
+            b_bm_ids.insert(id);
+        }
+    }
+    let mut b_folder_ids: BTreeSet<i64> = BTreeSet::new();
+    let mut b_group_ids: BTreeSet<i64> = BTreeSet::new();
+    for (&fid, f) in sb_bookmark_folders.iter().chain(sc_bookmark_folders.iter()) {
+        if f.owner_id == CHAR_B_ID
+            || f.owner_id == CORP_B_ID
+            || f.corporation_id == Some(CORP_B_ID)
+        {
+            b_folder_ids.insert(fid);
+            if let Some(g) = f.admin_group_id {
+                b_group_ids.insert(g);
+            }
+            if let Some(g) = f.manage_group_id {
+                b_group_ids.insert(g);
+            }
+            if let Some(g) = f.use_group_id {
+                b_group_ids.insert(g);
+            }
+            if let Some(g) = f.view_group_id {
+                b_group_ids.insert(g);
+            }
+        }
+    }
+    if filtered_entries_changed(
+        sb_bookmark_folders.iter(),
+        sc_bookmark_folders.iter(),
+        |id, _| b_folder_ids.contains(id),
+    ) || filtered_entries_changed(
+        sb_bookmark_subfolders.iter(),
+        sc_bookmark_subfolders.iter(),
+        |bm_id, fid| b_bm_ids.contains(bm_id) || b_folder_ids.contains(fid),
+    ) || filtered_entries_changed(
+        sb_bookmark_subfolder_parents.iter(),
+        sc_bookmark_subfolder_parents.iter(),
+        |child, parent| b_folder_ids.contains(child) || b_folder_ids.contains(parent),
+    ) || filtered_entries_changed(
+        sb_bookmark_expiries.iter(),
+        sc_bookmark_expiries.iter(),
+        |id, _| b_bm_ids.contains(id),
+    ) || filtered_entries_changed(
+        sb_bookmark_folder_acls.iter(),
+        sc_bookmark_folder_acls.iter(),
+        |fid, members| {
+            b_folder_ids.contains(fid)
+                || members.contains(&CHAR_B_ID)
+                || members.contains(&CORP_B_ID)
+                || members.contains(&ALLIANCE_B_ID)
+        },
+    ) || filtered_entries_changed(sb_access_groups.iter(), sc_access_groups.iter(), |gid, members| {
+        b_group_ids.contains(gid)
+            || members.contains(&CHAR_B_ID)
+            || members.contains(&CORP_B_ID)
+            || members.contains(&ALLIANCE_B_ID)
+    }) || filtered_entries_changed(
+        sb_bookmark_folder_known_by.iter(),
+        sc_bookmark_folder_known_by.iter(),
+        |(fid, cid), _| *cid == CHAR_B_ID || b_folder_ids.contains(fid),
+    ) {
+        return true;
+    }
+
+    // Calendar, mailing lists, contacts, notes, and social records for Target B.
+    if filtered_entries_changed(sb_mailing_lists.iter(), sc_mailing_lists.iter(), |_, ml| {
+        ml.owner_id == CHAR_B_ID
+            || ml.owner_id == CORP_B_ID
+            || ml.owner_id == ALLIANCE_B_ID
+            || ml.members.contains_key(&CHAR_B_ID)
+            || ml.entity_access.contains_key(&CHAR_B_ID)
+            || ml.entity_access.contains_key(&CORP_B_ID)
+    }) || filtered_entries_changed(sb_calendar_events.iter(), sc_calendar_events.iter(), |_, ev| {
+        ev.owner_id == CHAR_B_ID
+            || ev.owner_id == CORP_B_ID
+            || ev.owner_id == ALLIANCE_B_ID
+            || ev.creator_id == CHAR_B_ID
+            || ev.responses.contains_key(&CHAR_B_ID)
+    }) || sb_char_contacts.get(&CHAR_B_ID).map(|v| {
+        v.iter()
+            .map(|c| (c.contact_id, &c.contact_type, c.standing.to_bits(), c.is_watched, c.is_blocked, &c.label_ids))
+            .collect::<Vec<_>>()
+    }) != sc_char_contacts.get(&CHAR_B_ID).map(|v| {
+        v.iter()
+            .map(|c| (c.contact_id, &c.contact_type, c.standing.to_bits(), c.is_watched, c.is_blocked, &c.label_ids))
+            .collect::<Vec<_>>()
+    }) || sb_char_contact_labels.get(&CHAR_B_ID) != sc_char_contact_labels.get(&CHAR_B_ID)
+        || sb_char_contact_notifications.get(&CHAR_B_ID).map(|v| {
+            v.iter()
+                .map(|n| (n.notification_id, n.sender_character_id, n.send_date_unix, n.standing_level.to_bits(), &n.message))
+                .collect::<Vec<_>>()
+        }) != sc_char_contact_notifications.get(&CHAR_B_ID).map(|v| {
+            v.iter()
+                .map(|n| (n.notification_id, n.sender_character_id, n.send_date_unix, n.standing_level.to_bits(), &n.message))
+                .collect::<Vec<_>>()
+        })
+        || sb_corp_contacts.get(&CORP_B_ID).map(|v| {
+            v.iter()
+                .map(|c| (c.contact_id, &c.contact_type, c.standing.to_bits(), c.is_watched, c.is_blocked, &c.label_ids))
+                .collect::<Vec<_>>()
+        }) != sc_corp_contacts.get(&CORP_B_ID).map(|v| {
+            v.iter()
+                .map(|c| (c.contact_id, &c.contact_type, c.standing.to_bits(), c.is_watched, c.is_blocked, &c.label_ids))
+                .collect::<Vec<_>>()
+        })
+        || sb_corp_contact_labels.get(&CORP_B_ID) != sc_corp_contact_labels.get(&CORP_B_ID)
+        || sb_alliance_contacts.get(&ALLIANCE_B_ID).map(|v| {
+            v.iter()
+                .map(|c| (c.contact_id, &c.contact_type, c.standing.to_bits(), c.is_watched, c.is_blocked, &c.label_ids))
+                .collect::<Vec<_>>()
+        }) != sc_alliance_contacts.get(&ALLIANCE_B_ID).map(|v| {
+            v.iter()
+                .map(|c| (c.contact_id, &c.contact_type, c.standing.to_bits(), c.is_watched, c.is_blocked, &c.label_ids))
+                .collect::<Vec<_>>()
+        })
+        || sb_alliance_contact_labels.get(&ALLIANCE_B_ID)
+            != sc_alliance_contact_labels.get(&ALLIANCE_B_ID)
+        || filtered_entries_changed(sb_char_notes.iter(), sc_char_notes.iter(), |(owner, _), _| {
+            *owner == CHAR_B_ID
+        })
+    {
+        return true;
+    }
+
+    // Mining ledger, moon extractions, observers, corp container logs, project contributors, market meta/txs, corp votes.
+    let b_mining_before: Vec<_> = sb_mining_ledger.iter().filter(|r| r.character_id == CHAR_B_ID).collect();
+    let b_mining_after: Vec<_> = sc_mining_ledger.iter().filter(|r| r.character_id == CHAR_B_ID).collect();
+    let mut b_struct_ids: BTreeSet<i64> = [CORP_B_STRUCTURE_ID, fix.b_pos_id].into_iter().collect();
+    for (&sid, st) in sb_structures.iter().chain(sc_structures.iter()) {
+        if st.owner_corp_id == CORP_B_ID {
+            b_struct_ids.insert(sid);
+        }
+    }
+    let mut b_order_ids: BTreeSet<i64> = [fix.b_order_id].into_iter().collect();
+    for (&oid, o) in sb_market_orders.iter().chain(sc_market_orders.iter()) {
+        if o.owner_id == CHAR_B_ID || o.owner_id == CORP_B_ID {
+            b_order_ids.insert(oid);
+        }
+    }
+    let mut b_proj_ids: BTreeSet<i64> = [fix.b_corp_project_id].into_iter().collect();
+    for (&pid, p) in sb_corp_projects.iter().chain(sc_corp_projects.iter()) {
+        if p.corporation_id == CORP_B_ID {
+            b_proj_ids.insert(pid);
+        }
+    }
+    let mut b_vote_case_ids: BTreeSet<i64> = BTreeSet::new();
+    for (&cid, vc) in sb_corp_vote_cases.iter().chain(sc_corp_vote_cases.iter()) {
+        if vc.corporation_id == CORP_B_ID {
+            b_vote_case_ids.insert(cid);
+        }
+    }
+    if b_mining_before != b_mining_after
+        || filtered_entries_changed(sb_moon_extractions.iter(), sc_moon_extractions.iter(), |id, _| {
+            b_struct_ids.contains(id)
+        })
+        || filtered_entries_changed(sb_auto_moon_miners.iter(), sc_auto_moon_miners.iter(), |id, _| {
+            b_struct_ids.contains(id)
+        })
+        || filtered_entries_changed(
+            sb_observer_mining_ledger.iter(),
+            sc_observer_mining_ledger.iter(),
+            |obs_id, recs| {
+                b_struct_ids.contains(obs_id)
+                    || recs
+                        .iter()
+                        .any(|r| r.character_id == CHAR_B_ID || r.recorded_corporation_id == CORP_B_ID)
+            },
+        )
+        || sb_corp_container_logs.get(&CORP_B_ID) != sc_corp_container_logs.get(&CORP_B_ID)
+        || filtered_entries_changed(
+            sb_corp_container_logs.iter(),
+            sc_corp_container_logs.iter(),
+            |&cid, logs| {
+                cid == CORP_B_ID
+                    || logs
+                        .iter()
+                        .any(|l| l.character_id == CHAR_B_ID || l.container_id == fix.b_cont_id)
+            },
+        )
+        || filtered_entries_changed(
+            sb_corp_project_contributors.iter(),
+            sc_corp_project_contributors.iter(),
+            |pid, entries| {
+                b_proj_ids.contains(pid) || entries.iter().any(|e| e.character_id == CHAR_B_ID)
+            },
+        )
+        || filtered_entries_changed(sb_market_order_meta.iter(), sc_market_order_meta.iter(), |oid, m| {
+            b_order_ids.contains(oid) || m.issued_by == Some(CHAR_B_ID)
+        })
+        || filtered_entries_changed(
+            sb_market_transactions.iter(),
+            sc_market_transactions.iter(),
+            |_, tx| {
+                tx.buyer_id == CHAR_B_ID
+                    || tx.buyer_id == CORP_B_ID
+                    || tx.seller_id == CHAR_B_ID
+                    || tx.seller_id == CORP_B_ID
+            },
+        )
+        || filtered_entries_changed(sb_corp_vote_cases.iter(), sc_corp_vote_cases.iter(), |_, vc| {
+            vc.corporation_id == CORP_B_ID
+        })
+        || filtered_entries_changed(
+            sb_corp_vote_ballots.iter(),
+            sc_corp_vote_ballots.iter(),
+            |(case_id, voter_id), _| *voter_id == CHAR_B_ID || b_vote_case_ids.contains(case_id),
+        )
+    {
+        return true;
+    }
+
+    // Idempotency, wormhole polarizations, system ESS/sov attribution, war/alliance/fw/sov/insurgency Target B state.
+    let b_system_slice = |sys: &eve_db::SystemDynamicState| {
+        (
+            sys.ess_linked_character_id == Some(CHAR_B_ID),
+            sys.ess_main_bank_contributors.get(&CHAR_B_ID).copied(),
+            sys.sov_alliance_id == Some(ALLIANCE_B_ID),
+        )
+    };
+    let sys_b_before: BTreeMap<_, _> = sb_system_states
+        .iter()
+        .map(|(&sid, s)| (sid, b_system_slice(s)))
+        .collect();
+    let sys_b_after: BTreeMap<_, _> = sc_system_states
+        .iter()
+        .map(|(&sid, s)| (sid, b_system_slice(s)))
+        .collect();
+    let fw_wars_b_before: Vec<_> = sb_fw_wars
+        .iter()
+        .filter(|&&(a, b_id)| a == CORP_B_ID || a == ALLIANCE_B_ID || b_id == CORP_B_ID || b_id == ALLIANCE_B_ID)
+        .collect();
+    let fw_wars_b_after: Vec<_> = sc_fw_wars
+        .iter()
+        .filter(|&&(a, b_id)| a == CORP_B_ID || a == ALLIANCE_B_ID || b_id == CORP_B_ID || b_id == ALLIANCE_B_ID)
+        .collect();
+    let idem_b_before: BTreeSet<_> = sb_committed_idempotency_keys
+        .iter()
+        .filter(|(cid, _)| *cid == CHAR_B_ID || *cid == USER_B_ID as i64)
+        .collect();
+    let idem_b_after: BTreeSet<_> = sc_committed_idempotency_keys
+        .iter()
+        .filter(|(cid, _)| *cid == CHAR_B_ID || *cid == USER_B_ID as i64)
+        .collect();
+    if sys_b_before != sys_b_after
+        || fw_wars_b_before != fw_wars_b_after
+        || idem_b_before != idem_b_after
+        || filtered_entries_changed(
+            sb_wh_polarizations.iter(),
+            sc_wh_polarizations.iter(),
+            |&(_, cid), _| cid == CHAR_B_ID,
+        )
+        || sb_alliance_war_state.alliances.get(&ALLIANCE_B_ID)
+            != sc_alliance_war_state.alliances.get(&ALLIANCE_B_ID)
+        || sb_war_state.wars.get(&fix.b_war_id) != sc_war_state.wars.get(&fix.b_war_id)
+        || sb_war_state.blocked_mutual_invites.get(&CHAR_B_ID)
+            != sc_war_state.blocked_mutual_invites.get(&CHAR_B_ID)
+        || sb_war_state.blocked_mutual_invites.get(&CORP_B_ID)
+            != sc_war_state.blocked_mutual_invites.get(&CORP_B_ID)
+        || filtered_entries_changed(
+            sb_war_state.mutual_invites.iter(),
+            sc_war_state.mutual_invites.iter(),
+            |&(a, b_id), _| b_entity_ids.contains(&a) || b_entity_ids.contains(&b_id),
+        )
+        || filtered_entries_changed(
+            sb_war_state.ally_expires_unix.iter(),
+            sc_war_state.ally_expires_unix.iter(),
+            |&(wid, id), _| wid == fix.b_war_id || b_entity_ids.contains(&id),
+        )
+        || sb_war_state
+            .negotiations
+            .iter()
+            .filter(|n| n.war_id == fix.b_war_id || n.from_corp == CORP_B_ID)
+            .collect::<Vec<_>>()
+            != sc_war_state
+                .negotiations
+                .iter()
+                .filter(|n| n.war_id == fix.b_war_id || n.from_corp == CORP_B_ID)
+                .collect::<Vec<_>>()
+        || sb_war_state
+            .peace_treaties
+            .iter()
+            .filter(|p| p.war_id == fix.b_war_id || p.corp_a == CORP_B_ID || p.corp_b == CORP_B_ID)
+            .collect::<Vec<_>>()
+            != sc_war_state
+                .peace_treaties
+                .iter()
+                .filter(|p| p.war_id == fix.b_war_id || p.corp_a == CORP_B_ID || p.corp_b == CORP_B_ID)
+                .collect::<Vec<_>>()
+    {
+        return true;
+    }
+
+    // FW runtime, Sov runtime, and Insurgency runtime entries mentioning Target B.
+    let fw_part_b = |m: &HashMap<i64, Vec<i64>>| -> BTreeMap<i64, bool> {
+        m.iter()
+            .filter_map(|(&k, ps)| ps.contains(&CHAR_B_ID).then_some((k, true)))
+            .collect()
+    };
+    let sov_b_slice = |s: &eve_db::durable_domain_types::PersistedSovState| {
+        (
+            b_struct_ids
+                .iter()
+                .filter_map(|&id| s.sov_hubs.get(&id).map(|v| (id, v.clone())))
+                .collect::<BTreeMap<_, _>>(),
+            s.mercenary_dens
+                .iter()
+                .filter(|(_, d)| d.owner_char_id == CHAR_B_ID || d.planet_id == fix.b_planet_id)
+                .map(|(&k, v)| (k, v.clone()))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    };
+    let ins_b_slice = |i: &eve_db::durable_domain_types::PersistedInsurgencyState| {
+        i.campaign_contributions
+            .iter()
+            .map(|(&cid, v)| {
+                (
+                    cid,
+                    v.iter()
+                        .filter(|&&(ch, _, _)| ch == CHAR_B_ID)
+                        .copied()
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    if fw_part_b(&sb_fw_runtime.battlefield_participants)
+        != fw_part_b(&sc_fw_runtime.battlefield_participants)
+        || sov_b_slice(sb_sov_runtime) != sov_b_slice(sc_sov_runtime)
+        || ins_b_slice(sb_insurgency_runtime) != ins_b_slice(sc_insurgency_runtime)
+    {
+        return true;
+    }
+
+    // Crimewatch aggressions & combat_crimewatch_state for Target B.
+    let cw_slice = |cw: &PersistedCombatCrimewatchState| {
+        (
+            cw.sec_status_transactions
+                .get(&CHAR_B_ID)
+                .map(|v| {
+                    v.iter()
+                        .map(|t| {
+                            (
+                                t.timestamp_unix,
+                                t.old_sec.to_bits(),
+                                t.new_sec.to_bits(),
+                                t.reason.clone(),
+                                t.event_type_id,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            cw.safety_levels.get(&CHAR_B_ID).copied(),
+            cw.drone_settings.get(&CHAR_B_ID).copied(),
+            cw.limited_engagements
+                .iter()
+                .flat_map(|(&a, inner)| {
+                    inner.iter().filter_map(move |(&b_id, &u)| {
+                        (a == CHAR_B_ID || b_id == CHAR_B_ID).then_some(((a, b_id), u))
+                    })
+                })
+                .collect::<BTreeMap<_, _>>(),
+            cw.npc_timers.get(&CHAR_B_ID).copied(),
+            cw.disapproval_flags.get(&CHAR_B_ID).copied(),
+            cw.duel_challenges
+                .iter()
+                .filter(|(&(a, b_id), _)| a == CHAR_B_ID || b_id == CHAR_B_ID)
+                .map(|(&k, &v)| (k, v))
+                .collect::<BTreeMap<_, _>>(),
+            cw.corp_aggression_settings.get(&CORP_B_ID).copied(),
+            [CHAR_B_ID, CORP_B_ID, ALLIANCE_B_ID]
+                .into_iter()
+                .filter_map(|id| cw.player_bounty_pool.get(&id).map(|v| (id, v.to_bits())))
+                .collect::<BTreeMap<_, _>>(),
+            [CHAR_B_ID, CORP_B_ID, ALLIANCE_B_ID]
+                .into_iter()
+                .filter_map(|id| cw.bounty_hunter_claimed.get(&id).map(|v| (id, v.to_bits())))
+                .collect::<BTreeMap<_, _>>(),
+            cw.detailed_killmails
+                .iter()
+                .filter(|(&kid, km)| {
+                    kid == fix.b_killmail_id
+                        || km.victim_character_id == CHAR_B_ID
+                        || km.victim_corporation_id == CORP_B_ID
+                })
+                .map(|(&kid, km)| {
+                    (
+                        kid,
+                        (
+                            km.kill_time_unix,
+                            km.victim_character_id,
+                            km.attackers.len(),
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+        )
+    };
+    if filtered_entries_changed(
+        sb_crimewatch_aggressions.iter(),
+        sc_crimewatch_aggressions.iter(),
+        |&(a, v), _| a == CHAR_B_ID || v == CHAR_B_ID,
+    ) || cw_slice(sb_combat_crimewatch_state) != cw_slice(sc_combat_crimewatch_state)
+    {
+        return true;
+    }
+
+    // SP6 lifecycle, PvE sites, CRAB beacons, Abyssal, Dungeon editor, FOB, PvP, Tourney, Deployables, Superweapons.
+    if sb_sp6_lifecycle.safe_logoffs.get(&CHAR_B_ID) != sc_sp6_lifecycle.safe_logoffs.get(&CHAR_B_ID)
+        || sb_sp6_lifecycle.pvp_timers_until.get(&CHAR_B_ID)
+            != sc_sp6_lifecycle.pvp_timers_until.get(&CHAR_B_ID)
+        || sb_sp6_lifecycle.npc_timers_until.get(&CHAR_B_ID)
+            != sc_sp6_lifecycle.npc_timers_until.get(&CHAR_B_ID)
+        || sb_sp6_lifecycle.weapon_timers_until.get(&CHAR_B_ID)
+            != sc_sp6_lifecycle.weapon_timers_until.get(&CHAR_B_ID)
+        || sb_sp6_lifecycle.criminal_timers_until.get(&CHAR_B_ID)
+            != sc_sp6_lifecycle.criminal_timers_until.get(&CHAR_B_ID)
+        || sb_sp6_lifecycle.abyssal_sessions.get(&CHAR_B_ID)
+            != sc_sp6_lifecycle.abyssal_sessions.get(&CHAR_B_ID)
+        || b_entity_ids.iter().any(|id| {
+            sb_sp6_lifecycle.disconnected_ships.get(id) != sc_sp6_lifecycle.disconnected_ships.get(id)
+                || sb_sp6_lifecycle.self_destructs.get(id) != sc_sp6_lifecycle.self_destructs.get(id)
+                || sb_sp6_lifecycle.ship_combat_hp.get(id) != sc_sp6_lifecycle.ship_combat_hp.get(id)
+                || sb_sp6_lifecycle.space_object_meta.get(id)
+                    != sc_sp6_lifecycle.space_object_meta.get(id)
+                || sb_sp6_lifecycle.item_velocities.get(id) != sc_sp6_lifecycle.item_velocities.get(id)
+        })
+        || filtered_entries_changed(
+            sb_sp6_lifecycle.active_scanner_probes.iter(),
+            sc_sp6_lifecycle.active_scanner_probes.iter(),
+            |_, p| p.owner_char_id == CHAR_B_ID || b_entity_ids.contains(&p.ship_id),
+        )
+        || (sb_sp6_lifecycle.server_runtime_json != sc_sp6_lifecycle.server_runtime_json
+            && (sb_sp6_lifecycle
+                .server_runtime_json
+                .as_deref()
+                .is_some_and(|s| text_mentions_any_id(s, &b_entity_ids))
+                || sc_sp6_lifecycle
+                    .server_runtime_json
+                    .as_deref()
+                    .is_some_and(|s| text_mentions_any_id(s, &b_entity_ids))))
+    {
+        return true;
+    }
+    if sb_pve_special_sites.incursion_lp_logs.get(&CHAR_B_ID)
+        != sc_pve_special_sites.incursion_lp_logs.get(&CHAR_B_ID)
+        || filtered_entries_changed(
+            sb_crab_beacons.beacons.iter(),
+            sc_crab_beacons.beacons.iter(),
+            |_, bc| {
+                bc.deployer_char_id == CHAR_B_ID
+                    || bc.linked_char_id == Some(CHAR_B_ID)
+                    || bc.linked_ship_id.is_some_and(|s| b_entity_ids.contains(&s))
+            },
+        )
+        || filtered_entries_changed(
+            sb_abyssal_state.pockets.iter(),
+            sc_abyssal_state.pockets.iter(),
+            |_, p| p.character_id == CHAR_B_ID || b_entity_ids.contains(&p.ship_id),
+        )
+        || filtered_entries_changed(
+            sb_abyssal_state.traces.iter(),
+            sc_abyssal_state.traces.iter(),
+            |_, t| t.char_id == CHAR_B_ID,
+        )
+        || filtered_entries_changed(
+            sb_abyssal_state.void_space_sessions.iter(),
+            sc_abyssal_state.void_space_sessions.iter(),
+            |_, v| v.char_id == CHAR_B_ID || b_entity_ids.contains(&v.ship_id),
+        )
+        || b_entity_ids.iter().any(|id| {
+            sb_abyssal_state.deathzone_active_ships.contains(id)
+                != sc_abyssal_state.deathzone_active_ships.contains(id)
+        })
+        || sb_dungeon_editor.active_editors.get(&CHAR_B_ID)
+            != sc_dungeon_editor.active_editors.get(&CHAR_B_ID)
+        || filtered_entries_changed(
+            sb_fob_observatory_state.fob_combatants.iter(),
+            sc_fob_observatory_state.fob_combatants.iter(),
+            |_, set| set.contains(&CHAR_B_ID),
+        )
+        || sb_pvp_filament_state.queue.get(&CHAR_B_ID)
+            != sc_pvp_filament_state.queue.get(&CHAR_B_ID)
+        || sb_pvp_filament_state
+            .stats
+            .get(&CHAR_B_ID)
+            .map(|v| (v.0, v.1, v.2, v.3, v.4.to_bits()))
+            != sc_pvp_filament_state
+                .stats
+                .get(&CHAR_B_ID)
+                .map(|v| (v.0, v.1, v.2, v.3, v.4.to_bits()))
+        || sb_pvp_filament_state.queue_tickets.get(&CHAR_B_ID)
+            != sc_pvp_filament_state.queue_tickets.get(&CHAR_B_ID)
+        || sb_pvp_filament_state
+            .origin_positions
+            .get(&CHAR_B_ID)
+            .map(|p| [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()])
+            != sc_pvp_filament_state
+                .origin_positions
+                .get(&CHAR_B_ID)
+                .map(|p| [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()])
+        || filtered_entries_changed(
+            sb_tourney_state.ban_sessions.iter(),
+            sc_tourney_state.ban_sessions.iter(),
+            |_, v| v.contains(&CHAR_B_ID),
+        )
+        || filtered_entries_changed(
+            sb_deployable_state.deployables.iter(),
+            sc_deployable_state.deployables.iter(),
+            |_, d| b_entity_ids.contains(&d.owner_id) || d.deployed_fleet_id == Some(fix.b_fleet_id),
+        )
+        || sb_superweapon_runtime
+            .active_cycles
+            .iter()
+            .filter(|c| c.char_id == CHAR_B_ID || b_entity_ids.contains(&c.ship_id))
+            .collect::<Vec<_>>()
+            != sc_superweapon_runtime
+                .active_cycles
+                .iter()
+                .filter(|c| c.char_id == CHAR_B_ID || b_entity_ids.contains(&c.ship_id))
+                .collect::<Vec<_>>()
+        || sb_superweapon_runtime
+            .warp_suppressions
+            .iter()
+            .filter(|w| b_entity_ids.contains(&w.ship_id))
+            .collect::<Vec<_>>()
+            != sc_superweapon_runtime
+                .warp_suppressions
+                .iter()
+                .filter(|w| b_entity_ids.contains(&w.ship_id))
+                .collect::<Vec<_>>()
+    {
+        return true;
+    }
+
+    // Node graphs, seasons/campaigns, quasar commerce, fleet_and_social_ops, and cluster_and_runtime.
+    let node_b = |ng: &eve_db::service_domains::NodeGraphAndProgressionStore| {
+        (
+            ng.air_npe_runners.get(&CHAR_B_ID).cloned(),
+            ng.client_node_graphs.get(&CHAR_B_ID).cloned(),
+            ng.node_graph_blackboards
+                .iter()
+                .filter(|(&(cid, _), _)| cid == CHAR_B_ID)
+                .map(|(&k, v)| (k, v.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            ng.expert_systems.get(&CHAR_B_ID).cloned(),
+            ng.certificates.get(&CHAR_B_ID).cloned(),
+        )
+    };
+    let seasons_b = |sc: &eve_db::service_domains::SeasonsAndCampaignsStore| {
+        (
+            sc.season_states.get(&CHAR_B_ID).cloned(),
+            sc.active_seasons.get(&CHAR_B_ID).copied(),
+            sc.hacking_wins.get(&CHAR_B_ID).copied(),
+            sc.milestone_playtime.get(&CHAR_B_ID).cloned(),
+            sc.login_campaign_enrollments.get(&CHAR_B_ID).copied(),
+            sc.auto_injected_rewards.get(&CHAR_B_ID).cloned(),
+            sc.login_reward_expiry.get(&CHAR_B_ID).copied(),
+            sc.project_discovery_players.get(&CHAR_B_ID).cloned(),
+            sc.character_activities.get(&CHAR_B_ID).cloned(),
+            sc.fast_checkout_states.get(&USER_B_ID).cloned(),
+        )
+    };
+    let quasar_b = |qc: &eve_db::service_domains::QuasarCommerceStore| {
+        (
+            qc.payment_tokens
+                .iter()
+                .filter(|r| r.user_id == USER_B_ID)
+                .cloned()
+                .collect::<Vec<_>>(),
+            qc.payment_receipts
+                .iter()
+                .filter(|r| r.user_id == USER_B_ID)
+                .cloned()
+                .collect::<Vec<_>>(),
+            qc.payment_schedules
+                .iter()
+                .filter(|r| r.user_id == USER_B_ID)
+                .cloned()
+                .collect::<Vec<_>>(),
+            qc.plex_tx_logs
+                .iter()
+                .filter(|r| r.user_id == USER_B_ID)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
+    let fleet_ops_b = |fo: &eve_db::service_domains::FleetAndSocialOpsStore| {
+        (
+            (
+                fo.fleet_saved_setups.get(&CHAR_B_ID).map(|m| {
+                    m.iter()
+                        .map(|(k, v)| (k.clone(), serde_json::to_value(v).ok()))
+                        .collect::<BTreeMap<_, _>>()
+                }),
+                fo.fleet_stored_formations
+                    .get(&fix.b_fleet_id)
+                    .map(|&(l, x, y)| (l, x.to_bits(), y.to_bits())),
+                fo.fleet_adverts
+                    .get(&fix.b_fleet_id)
+                    .and_then(|v| serde_json::to_value(v).ok()),
+                fo.fleet_join_requests
+                    .iter()
+                    .filter(|(&fid, set)| fid == fix.b_fleet_id || set.contains(&CHAR_B_ID))
+                    .map(|(&k, v)| (k, v.iter().copied().collect::<BTreeSet<_>>()))
+                    .collect::<BTreeMap<_, _>>(),
+                fo.fleet_watchlist
+                    .iter()
+                    .filter(|(&fid, set)| fid == fix.b_fleet_id || set.contains(&CHAR_B_ID))
+                    .map(|(&k, v)| (k, v.iter().copied().collect::<BTreeSet<_>>()))
+                    .collect::<BTreeMap<_, _>>(),
+                fo.fleet_voice_enabled.get(&fix.b_fleet_id).copied(),
+                fo.fleet_loot_logging.get(&fix.b_fleet_id).copied(),
+                fo.corp_recruitment_ads
+                    .iter()
+                    .filter(|ad| ad.corp_id == CORP_B_ID || ad.recruiter_id == CHAR_B_ID)
+                    .filter_map(|ad| serde_json::to_value(ad).ok())
+                    .collect::<Vec<_>>(),
+                fo.corp_allow_war.get(&CORP_B_ID).copied(),
+            ),
+            (
+                fo.ingamereport_tickets
+                    .iter()
+                    .filter(|t| {
+                        t.reporter_char_id == CHAR_B_ID
+                            || t.reporter_corp_id == CORP_B_ID
+                            || t.reported_entity_id == CHAR_B_ID
+                            || t.reported_entity_id == CORP_B_ID
+                            || t.report_id == fix.b_petition_id
+                    })
+                    .filter_map(|t| serde_json::to_value(t).ok())
+                    .collect::<Vec<_>>(),
+                fo.contract_deposits.get(&fix.b_contract_id).copied(),
+                fo.delayed_rewards.get(&CHAR_B_ID).map(|m| {
+                    m.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<BTreeMap<_, _>>()
+                }),
+                fo.agent_char_disabled_missions
+                    .get(&CHAR_B_ID)
+                    .map(|s| s.iter().copied().collect::<BTreeSet<_>>()),
+                fo.wh_local_witnesses
+                    .iter()
+                    .filter(|(_, set)| set.contains(&CHAR_B_ID))
+                    .map(|(k, _)| k.clone())
+                    .collect::<BTreeSet<_>>(),
+                fo.hypernet_subs
+                    .iter()
+                    .filter(|(_, ids)| ids.contains(&CHAR_B_ID))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+                fo.agent_replay_ts
+                    .iter()
+                    .filter(|(&(cid, _), _)| cid == CHAR_B_ID)
+                    .map(|(&k, &v)| (k, v))
+                    .collect::<BTreeMap<_, _>>(),
+                fo.signal_tracker_subs
+                    .iter()
+                    .filter(|(_, ids)| ids.contains(&CHAR_B_ID))
+                    .map(|(&k, v)| (k, v.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+                fo.pending_probe_scans
+                    .iter()
+                    .filter(|(cid, _, _, _, _, _)| *cid == CHAR_B_ID)
+                    .count(),
+            ),
+        )
+    };
+    let cluster_b = |cl: &eve_db::service_domains::ClusterAndRuntimeStore| {
+        (
+            b_struct_ids
+                .iter()
+                .filter_map(|&sid| cl.structure_defense.get(&sid).map(|v| (sid, v.clone())))
+                .collect::<BTreeMap<_, _>>(),
+            cl.alliance_sov_cfg.get(&ALLIANCE_B_ID).cloned(),
+            cl.active_sessions
+                .iter()
+                .copied()
+                .filter(|id| b_entity_ids.contains(id))
+                .collect::<Vec<_>>(),
+            cl.session_registry
+                .iter()
+                .filter(|(k, v)| {
+                    text_mentions_any_id(k, &b_entity_ids)
+                        || json_mentions_any_id(v, &b_entity_ids)
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            cl.portraits
+                .iter()
+                .filter(|(k, _)| text_mentions_any_id(k, &b_entity_ids))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            cl.paperdoll_states.get(&CHAR_B_ID).cloned(),
+            cl.char_system_visits.get(&CHAR_B_ID).cloned(),
+            b_item_ids
+                .iter()
+                .filter_map(|&id| cl.module_reload_until_unix.get(&id).map(|&u| (id, u)))
+                .collect::<BTreeMap<_, _>>(),
+            b_item_ids
+                .iter()
+                .filter_map(|&id| cl.ship_clone_offers.get(&id).map(|&v| (id, v)))
+                .collect::<BTreeMap<_, _>>(),
+            cl.warp_vector_cooldown_until.get(&CHAR_B_ID).copied(),
+            cl.mct_slots.get(&USER_B_ID).cloned(),
+            cl.account_resculpt_tokens
+                .iter()
+                .filter(|(k, _)| text_mentions_any_id(k, &b_entity_ids))
+                .map(|(k, &v)| (k.clone(), v))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    };
+    if node_b(sb_node_graph_state) != node_b(sc_node_graph_state)
+        || seasons_b(sb_seasons_and_campaigns) != seasons_b(sc_seasons_and_campaigns)
+        || quasar_b(sb_quasar_commerce) != quasar_b(sc_quasar_commerce)
+        || fleet_ops_b(sb_fleet_and_social_ops) != fleet_ops_b(sc_fleet_and_social_ops)
+        || cluster_b(sb_cluster_and_runtime) != cluster_b(sc_cluster_and_runtime)
+    {
         return true;
     }
 
@@ -4119,6 +6346,36 @@ async fn evaluate_negative_call(
         check_runtime_changed(fix, runtime_baseline);
     let world_mutated = db_dirty || runtime_dirty;
 
+    if is_allowlisted {
+        if let Err(err) = &out.result {
+            if matches!(sit, Situation::E | Situation::F) {
+                assert!(
+                    !matches!(
+                        err.code.as_str(),
+                        "MustBeDocked"
+                            | "NotDocked"
+                            | "NotInStation"
+                            | "CharacterMustBeDocked"
+                            | "MustBeDockedAtTargetStation"
+                            | "CannotUseWhileInSpace"
+                    ),
+                    "stale/inaccurate allowlist in Situation {sit_label} for {svc}.{meth}: returned prerequisite error {}: {}",
+                    err.code,
+                    err.message
+                );
+            } else if matches!(sit, Situation::C | Situation::D) {
+                assert!(
+                    !matches!(
+                        err.code.as_str(),
+                        "CannotSelfDestructDocked" | "MustBeInSpace" | "MustBeUndocked" | "NotInSpace"
+                    ),
+                    "stale/inaccurate allowlist in Situation {sit_label} for {svc}.{meth}: returned prerequisite error {}: {}",
+                    err.code,
+                    err.message
+                );
+            }
+        }
+    }
     if !is_allowlisted && out.result.is_ok() {
         observed.insert(MatrixViolation {
             situation: sit_label.to_string(),
