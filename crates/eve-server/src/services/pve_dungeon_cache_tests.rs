@@ -1861,6 +1861,7 @@ async fn docked_pochven_and_wormhole_ore_anomaly_reads_match_seeded_counts_witho
 async fn docked_synthetic_ore_and_ice_instance_ids_warp_before_and_after_seeding() {
     use crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde;
 
+    const SITE_NOT_FOUND_ERR: &str = "SiteNotFound";
     let sde = shared_sde();
     let kw = HashMap::new();
     let designated_ice_sys: SolarSystemId = 30_000_180;
@@ -2138,7 +2139,7 @@ async fn docked_synthetic_ore_and_ice_instance_ids_warp_before_and_after_seeding
             .await
             .expect("handled")
             .unwrap_err();
-            assert_eq!(err.code, "SiteNotFound");
+            assert_eq!(err.code, SITE_NOT_FOUND_ERR);
         }
         assert_eq!(ctx.db.state_epoch(), e0);
         assert_eq!(ctx.db.tx_commit_count(), c0);
