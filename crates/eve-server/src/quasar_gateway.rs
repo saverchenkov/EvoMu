@@ -523,6 +523,8 @@ pub type QuasarHandlerFn = Arc<
 >;
 pub type MachoNotifySink =
     Arc<dyn Fn(crate::router::NotificationTarget, &str, &str, Vec<PyRep>) + Send + Sync>;
+/// Callback invoked when a client publishes `eve_public.app.eveonline.generic_ui.view.Activated`.
+pub type UiViewActivatedSink = Arc<dyn Fn(&SessionState, &str) + Send + Sync>;
 
 #[cfg(any(test, feature = "demo-seed"))]
 pub type QuasarTapHookFn = fn(
@@ -586,6 +588,7 @@ pub struct PublicGatewayRouter {
     pub next_notice_seq: AtomicU64,
     pub pending_notices: Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
     pub macho_notify_sink: Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
+    pub ui_view_activated_sink: Arc<RankedRwLock<Option<UiViewActivatedSink>, RANK_LEAF>>,
     pub free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
     pub has_persisted_free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
     /// Shared HTTP/CDN (`EsiServer`) listen port, aliased with `ServerContext::esi_port`.
@@ -697,6 +700,7 @@ impl PublicGatewayRouter {
             next_notice_seq: AtomicU64::new(1),
             pending_notices: Arc::new(RwLock::new(Vec::new())),
             macho_notify_sink: Arc::new(RankedRwLock::new(None)),
+            ui_view_activated_sink: Arc::new(RankedRwLock::new(None)),
             free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             has_persisted_free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             esi_port: Arc::new(AtomicU16::new(DEFAULT_CDN_HTTP_PORT)),
@@ -1778,6 +1782,27 @@ impl PublicGatewayRouter {
                     now_unix,
                 );
             });
+            if QuasarDescriptorRegistry::normalize_type_name(&payload.type_url)
+                == "eve_public.app.eveonline.generic_ui.view.Activated"
+            {
+                if let Ok(msg) = self.descriptors.decode_dynamic_or_wire(
+                    "eve_public.app.eveonline.generic_ui.view.Activated",
+                    &payload.value,
+                ) {
+                    if let Some(DynamicValue::String(view_name)) = msg.get(1) {
+                        let sink_opt = self
+                            .ui_view_activated_sink
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
+                        if let Some(sink) = sink_opt {
+                            isolate_side_effect("quasar_gateway.ui_view_activated_sink", || {
+                                sink(session, view_name.as_str());
+                            });
+                        }
+                    }
+                }
+            }
             for (scope, notice_payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
                 let _ = self.publish_notice_isolated(
                     scope,

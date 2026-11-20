@@ -1348,9 +1348,24 @@ impl TickRxSlot<'_> {
     }
 }
 
-/// Clears View Outside wire/stream/guard state when a pilot releases their last `beyonce`
-/// binding while still structure-docked (`Enter Hangar`, `#1448` / `#1461`).
-fn detach_structure_view_outside_on_beyonce_release(
+/// Returns `true` when `session` is docked in an Upwell structure (`station_id.is_none()`,
+/// `structure_id.is_some()`) and `space_ballpark_bootstrapped` is still marked active for this
+/// `(session_id, char_id, solar_system_id)`.
+fn is_structure_view_outside_bootstrapped(ctx: &ServerContext, session: &SessionState) -> bool {
+    session.station_id.is_none()
+        && session.structure_id.is_some()
+        && session
+            .character_id
+            .zip(session.solar_system_id)
+            .is_some_and(|(cid, sys_id)| {
+                ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
+            })
+}
+
+/// Clears View Outside wire/stream/guard state for `session_id` without pruning `"beyonce"`
+/// bindings (shared by docked release reconciliation and post-`Undock` reconciliation where
+/// `station_structure::handle` already minted a fresh post-undock `"beyonce"` object).
+fn detach_structure_view_outside_wire_state(
     ctx: &ServerContext,
     session_id: u64,
     char_id: Option<i64>,
@@ -1365,10 +1380,69 @@ fn detach_structure_view_outside_on_beyonce_release(
         .clear_explicit_update_state_guards_for_session(session_id);
     ctx.clear_pending_structure_view_outside_set_state_for_session(session_id);
     if let Some(cid) = char_id {
-        ctx.clear_space_ballpark_bootstrapped(cid);
+        ctx.clear_space_ballpark_bootstrapped_for_session(session_id, cid);
         crate::services::space_destiny::reset_update_state_rate_limit(ctx, session_id, cid);
     }
     ctx.flight_recorder.record_wire_state(wire_state);
+}
+
+/// Clears View Outside wire/stream/guard state when a pilot releases their last `beyonce`
+/// binding while still structure-docked (`Enter Hangar`, `#1448` / `#1461`).
+fn detach_structure_view_outside_on_beyonce_release(
+    ctx: &ServerContext,
+    session_id: u64,
+    char_id: Option<i64>,
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    sys_rx: &mut TickRxSlot<'_>,
+    subscribed_sys_id: &mut Option<u32>,
+) {
+    detach_structure_view_outside_wire_state(
+        ctx,
+        session_id,
+        char_id,
+        wire_state,
+        sys_rx,
+        subscribed_sys_id,
+    );
+    ctx.prune_bound_service_without_notify(session_id, "beyonce");
+}
+
+#[cfg(test)]
+type PreUndockDispatchHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+static PRE_UNDOCK_DISPATCH_HOOKS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<(u64, i64), PreUndockDispatchHook>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn set_pre_undock_dispatch_hook_for_test(
+    ctx: &ServerContext,
+    char_id: i64,
+    hook: Option<PreUndockDispatchHook>,
+) {
+    let map = PRE_UNDOCK_DISPATCH_HOOKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    match hook {
+        Some(h) => {
+            guard.insert((ctx.instance_id, char_id), h);
+        }
+        None => {
+            guard.remove(&(ctx.instance_id, char_id));
+        }
+    }
+}
+
+#[cfg(test)]
+fn run_pre_undock_dispatch_hook_for_test(ctx: &ServerContext, char_id: i64) {
+    let hook = PRE_UNDOCK_DISPATCH_HOOKS.get().and_then(|map| {
+        map.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(ctx.instance_id, char_id))
+    });
+    if let Some(h) = hook {
+        h();
+    }
 }
 
 struct InternalCallReqWireRefs<'a> {
@@ -1559,7 +1633,6 @@ async fn execute_call_req_wire_inner(
     call_kwargs: &HashMap<String, PyRep>,
 ) -> CallReqWireOutcome {
     let call_started_at = std::time::Instant::now();
-    let was_live_before_rpc = wire.wire_state.destiny.is_live();
     let call_id = match (req_dest, req_source) {
         (
             MachoAddress::Node { call_id, .. }
@@ -1585,6 +1658,28 @@ async fn execute_call_req_wire_inner(
             }
         }
     }
+    // Reconcile stale structure View Outside stream state cleared asynchronously (e.g. Quasar
+    // `generic_ui.view.Activated("hangar")` arriving before CCP's 30s-delayed `OID-`, #1477)
+    // BEFORE evaluating `was_live_before_rpc`, dispatching `ship.Undock`, or computing `is_upwell_undock`.
+    let stream_active_pre_rpc = !matches!(wire.wire_state.destiny, DestinyStream::Detached)
+        || wire.subscribed_sys_id.is_some();
+    if stream_active_pre_rpc
+        && session.character_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_some()
+        && session.solar_system_id.is_some()
+        && !is_structure_view_outside_bootstrapped(ctx, session)
+    {
+        detach_structure_view_outside_on_beyonce_release(
+            ctx,
+            session.session_id,
+            session.character_id,
+            wire.wire_state,
+            &mut wire.sys_rx,
+            wire.subscribed_sys_id,
+        );
+    }
+    let was_live_before_rpc = wire.wire_state.destiny.is_live();
     let prev_session = session.clone();
     let owned_bound_service =
         bound_id.and_then(|bid| ctx.owned_bound_service_for_metrics(session, bid));
@@ -1614,6 +1709,15 @@ async fn execute_call_req_wire_inner(
         }
     }
     let had_beyonce_before_rpc = ctx.has_bound_service(session.session_id, "beyonce");
+    #[cfg(test)]
+    if matches!(
+        (effective_service, method),
+        ("ship" | "structureDocking" | "stationSvc", "Undock")
+    ) {
+        if let Some(cid) = session.character_id {
+            run_pre_undock_dispatch_hook_for_test(ctx, cid);
+        }
+    }
     let rpc_res = crate::router::dispatch::with_active_rpc_call_id(
         call_id,
         ctx.dispatch_rpc(
@@ -1693,6 +1797,39 @@ async fn execute_call_req_wire_inner(
     }
 
     let owns_char_session = session_owns_char_notifications(ctx, session);
+    // Reconcile mid-RPC Upwell `Undock` races where Quasar `Activated("hangar")` cleared
+    // `space_ballpark_bootstrapped` after pre-RPC reconciliation and before
+    // `station_structure::handle` checked `was_view_outside`, detaching stale docked wire/stream
+    // state without pruning `station_structure`'s freshly bound post-undock `beyonce` object.
+    let post_rpc_stream_active = !matches!(wire.wire_state.destiny, DestinyStream::Detached)
+        || wire.subscribed_sys_id.is_some();
+    if rpc_res.is_ok()
+        && owns_char_session
+        && post_rpc_stream_active
+        && matches!(
+            (effective_service, method),
+            ("ship" | "structureDocking" | "stationSvc", "Undock")
+        )
+        && prev_session.station_id.is_none()
+        && prev_session.structure_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_none()
+        && session
+            .character_id
+            .zip(session.solar_system_id)
+            .is_some_and(|(cid, sys_id)| {
+                !ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
+            })
+    {
+        detach_structure_view_outside_wire_state(
+            ctx,
+            session.session_id,
+            session.character_id,
+            wire.wire_state,
+            &mut wire.sys_rx,
+            wire.subscribed_sys_id,
+        );
+    }
     let prev_stream_active = !matches!(wire.wire_state.destiny, DestinyStream::Detached)
         || wire.subscribed_sys_id.is_some();
     let prev_undocked_space = prev_session.character_id.is_some()
@@ -3147,6 +3284,26 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     wire_state.destiny,
                     crate::outbound_sequencer::DestinyStream::Detached
                 ) => {
+                // If structure View Outside was cleared asynchronously (e.g. Quasar
+                // `generic_ui.view.Activated("hangar")` before 30s-delayed `OID-`, #1477),
+                // detach the stale live stream immediately instead of emitting structure ticks.
+                if session.character_id.is_some()
+                    && session.station_id.is_none()
+                    && session.structure_id.is_some()
+                    && session.solar_system_id.is_some()
+                    && !is_structure_view_outside_bootstrapped(&ctx, &session)
+                {
+                    let mut sys_rx_slot = TickRxSlot::Optional(&mut sys_rx);
+                    detach_structure_view_outside_on_beyonce_release(
+                        &ctx,
+                        session_id,
+                        session.character_id,
+                        &mut wire_state,
+                        &mut sys_rx_slot,
+                        &mut subscribed_sys_id,
+                    );
+                    continue;
+                }
                 // Guard against emitting stale space ticks (or pod TerminalExplosion/RemoveBall)
                 // after an out-of-band DeathRespawn has already transitioned the session in DB
                 // (#1010) or after SafeLogoff cleared online_lock.character_id (#1360), before
@@ -3345,7 +3502,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             && session.structure_id.is_some()
                             && prev_session.station_id.is_none()
                             && prev_session.structure_id == session.structure_id
-                            && prev_session.solar_system_id == session.solar_system_id;
+                            && prev_session.solar_system_id == session.solar_system_id
+                            && is_structure_view_outside_bootstrapped(&ctx, &session);
                         let is_in_space = !charsel_transition
                             && session.character_id.is_some()
                             && session.station_id.is_none()
@@ -4760,7 +4918,8 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
         && session.structure_id.is_some()
         && prev_session.station_id.is_none()
         && prev_session.structure_id == session.structure_id
-        && prev_session.solar_system_id == session.solar_system_id;
+        && prev_session.solar_system_id == session.solar_system_id
+        && is_structure_view_outside_bootstrapped(ctx, session);
     let is_in_space = session.character_id.is_some()
         && session.station_id.is_none()
         && session.solar_system_id.is_some()

@@ -912,6 +912,180 @@ async fn request_scans_evaluates_probe_strength_and_deviation_via_dogma_and_expe
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_activity_state_blocks_sentinel_resurrection_and_foreign_probes() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let kw = HashMap::new();
+    let bound = BoundObjectEntry {
+        bound_id: 950,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("scanMgr:{sys_id}"),
+        ref_id: 950,
+    };
+
+    let active_pid = 890_700_001_i64;
+    let cargo_sentinel_pid = 890_700_002_i64;
+    let lost_sentinel_pid = 890_700_003_i64;
+    let foreign_pid = 890_700_004_i64;
+    let other_sys_pid = 890_700_005_i64;
+    let nonexistent_pid = 890_700_999_i64;
+
+    let now_unix = ctx.now_unix();
+    let make_probe = |probe_id: i64, owner_char_id: i64, probe_sys: u32, state: i32| ActiveScannerProbe {
+        probe_id,
+        probe_type_id: 30_013,
+        owner_char_id,
+        ship_id: if owner_char_id == char_id { ship_id } else { 100_000_099 },
+        launcher_module_id: 0,
+        solar_system_id: probe_sys,
+        position: [1_000.0, 0.0, 0.0],
+        destination: [1_000.0, 0.0, 0.0],
+        range_step: 4,
+        scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+        base_sensor_strength: 40.0,
+        max_flight_time_s: 60.0,
+        launched_at_unix: if state < 0 { 1 } else { now_unix },
+        state,
+        warp_end_ft: None,
+    };
+
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap();
+        map.insert(active_pid, make_probe(active_pid, char_id, sys_id, PROBE_STATE_IDLE));
+        map.insert(cargo_sentinel_pid, make_probe(cargo_sentinel_pid, char_id, sys_id, -1));
+        map.insert(lost_sentinel_pid, make_probe(lost_sentinel_pid, char_id, sys_id, -2));
+        map.insert(foreign_pid, make_probe(foreign_pid, 2_199_002, sys_id, PROBE_STATE_IDLE));
+        map.insert(other_sys_pid, make_probe(other_sys_pid, char_id, 30_000_144, PROBE_STATE_IDLE));
+    }
+
+    let cargo_probe_qty = || -> i64 {
+        ctx.db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .filter(|it| {
+                    it.owner_id == char_id
+                        && it.location_id == ship_id
+                        && it.flag == InventoryFlag::Cargo
+                        && it.type_id == 30_013
+                })
+                .map(|it| i64::from(it.quantity))
+                .sum()
+        })
+    };
+    let baseline_qty = cargo_probe_qty();
+
+    // 1. Bulk SetActivityState updates active probe only and leaves -1/-2 sentinels untouched.
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(PROBE_STATE_SCANNING as i64)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("bulk SetActivityState");
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        assert_eq!(map.get(&active_pid).map(|p| p.state), Some(PROBE_STATE_SCANNING));
+        assert_eq!(map.get(&cargo_sentinel_pid).map(|p| p.state), Some(-1));
+        assert_eq!(map.get(&lost_sentinel_pid).map(|p| p.state), Some(-2));
+        assert_eq!(map.get(&foreign_pid).map(|p| p.state), Some(PROBE_STATE_IDLE));
+        assert_eq!(map.get(&other_sys_pid).map(|p| p.state), Some(PROBE_STATE_IDLE));
+    }
+
+    // 2. Explicit 2-arg, list, and dict forms targeting sentinel, foreign, wrong-system, or unknown probes fail atomically with ProbeNotFound.
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+    for bad_args in [
+        vec![PyRep::Integer(cargo_sentinel_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        vec![PyRep::Integer(lost_sentinel_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        vec![PyRep::Integer(foreign_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        vec![PyRep::Integer(other_sys_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        vec![PyRep::Integer(nonexistent_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        vec![
+            PyRep::List(vec![PyRep::Integer(active_pid), PyRep::Integer(cargo_sentinel_pid)]),
+            PyRep::Integer(PROBE_STATE_IDLE as i64),
+        ],
+        vec![
+            PyRep::List(vec![PyRep::Integer(active_pid), PyRep::Integer(foreign_pid)]),
+            PyRep::Integer(PROBE_STATE_IDLE as i64),
+        ],
+        vec![PyRep::Dict(vec![(
+            PyRep::Integer(cargo_sentinel_pid),
+            PyRep::Integer(PROBE_STATE_IDLE as i64),
+        )])],
+        vec![PyRep::Dict(vec![(
+            PyRep::Integer(foreign_pid),
+            PyRep::Integer(PROBE_STATE_IDLE as i64),
+        )])],
+        vec![PyRep::Dict(vec![
+            (PyRep::Integer(active_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)),
+            (PyRep::Integer(other_sys_pid), PyRep::Integer(PROBE_STATE_IDLE as i64)),
+        ])],
+    ] {
+        let err = handle_scan_and_wormhole_extras(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "scanMgr",
+            "SetActivityState",
+            &bad_args,
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect_err("invalid SetActivityState probe target must fail");
+        assert_eq!(err.code, "ProbeNotFound", "args={bad_args:?}");
+    }
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+    assert_eq!(
+        ctx.active_scanner_probes.read().unwrap().get(&active_pid).map(|p| p.state),
+        Some(PROBE_STATE_SCANNING),
+        "failed multi-probe SetActivityState must not partially mutate valid probe"
+    );
+
+    // 3. Subsequent RecoverProbes / GetSystemScanMgr expiry returns active_pid (+1) once, never minting from sentinels;
+    //    re-running SetActivityState(1) + RecoverProbes() afterward cannot mint another probe.
+    handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "RecoverProbes", &[], &kw)
+        .await
+        .unwrap()
+        .expect("bulk RecoverProbes");
+    assert_eq!(cargo_probe_qty(), baseline_qty + 1);
+
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(PROBE_STATE_IDLE as i64)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("bulk SetActivityState after recovery");
+    handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetSystemScanMgr", &[], &kw)
+        .await
+        .unwrap()
+        .expect("GetSystemScanMgr after recovery");
+    assert_eq!(
+        cargo_probe_qty(),
+        baseline_qty + 1,
+        "repeated SetActivityState(1) + expiry/recovery must never resurrect sentinels or mint extra probes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_scanning_read_purity_and_docked_guards() {
     let (ctx, mut sess) = make_scan_ctx_and_session();
     let kw = HashMap::new();
@@ -959,10 +1133,17 @@ async fn probe_scanning_read_purity_and_docked_guards() {
     assert_eq!(ctx.db.state_epoch(), e0);
     assert_eq!(ctx.db.tx_commit_count(), c0);
 
-    // Undocked readout seeds once, then repeats are strictly read-pure
+    // Undocked GetAnomalies and GetFullState remain strictly read-pure on an unseeded system;
+    // GetSystemScanMgr seeds once when undocked with an active ship, then repeats are strictly read-pure.
     assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetAnomalies", &[], &kw).await.unwrap().is_ok());
+    assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetFullState", &[], &kw).await.unwrap().is_ok());
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, None, "scanMgr", "GetSystemScanMgr", &[], &kw).await.unwrap().is_ok());
     let e1 = ctx.db.state_epoch();
     let c1 = ctx.db.tx_commit_count();
+    assert!(e1 > e0 && c1 > c0, "GetSystemScanMgr undocked with active ship seeds unseeded system once");
     assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetAnomalies", &[], &kw).await.unwrap().is_ok());
     assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetFullState", &[], &kw).await.unwrap().is_ok());
     assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, None, "scanMgr", "GetSystemScanMgr", &[], &kw).await.unwrap().is_ok());
@@ -1514,4 +1695,776 @@ async fn docked_expired_signatures_and_pochven_and_scan_inhibitor_persist() {
         Some((target_dest, 2)),
         "scan-inhibited RequestScans early return must still persist moved probe state"
     );
+}
+
+#[tokio::test]
+async fn scan_mgr_negative_guards_and_read_purity_across_probes_and_getters() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let kw = HashMap::new();
+
+    // Seed an active probe owned by caller AND an overdue probe that pre-check errors must NOT expire/mutate.
+    let active_pid = 880_001_i64;
+    let overdue_pid = 880_002_i64;
+    let now_unix = ctx.now_unix();
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap();
+        map.insert(
+            active_pid,
+            ActiveScannerProbe {
+                probe_id: active_pid,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [0.0; 3],
+                destination: [0.0; 3],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 3_600.0,
+                launched_at_unix: now_unix,
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+        map.insert(
+            overdue_pid,
+            ActiveScannerProbe {
+                probe_id: overdue_pid,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [1_000.0, 0.0, 0.0],
+                destination: [1_000.0, 0.0, 0.0],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 10.0,
+                launched_at_unix: now_unix.saturating_sub(1_000),
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+        map.insert(
+            890_500_009,
+            ActiveScannerProbe {
+                probe_id: 890_500_009,
+                probe_type_id: 30_013,
+                owner_char_id: 2_199_002,
+                ship_id: 100_000_099,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [2_000.0, 0.0, 0.0],
+                destination: [2_000.0, 0.0, 0.0],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 3_600.0,
+                launched_at_unix: now_unix,
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+    }
+
+    let foreign_bound = BoundObjectEntry {
+        bound_id: 901,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: 2_199_002,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("scanMgr:{sys_id}"),
+        ref_id: 901,
+    };
+    let own_bound = BoundObjectEntry {
+        character_id: char_id,
+        ..foreign_bound.clone()
+    };
+
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    // 1. Unseeded read getters (GetAnomalies, GetFullState) return default data transiently without mutating DB or expiring probes.
+    let PyRep::List(anom_rows) = handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&own_bound), "scanMgr", "GetAnomalies", &[], &kw)
+        .await
+        .unwrap()
+        .expect("undocked GetAnomalies")
+    else {
+        panic!("expected anomalies list");
+    };
+    assert!(!anom_rows.is_empty(), "transient anomaly readout should include system ore anomaly");
+    let PyRep::Tuple(full_parts) = handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&own_bound), "scanMgr", "GetFullState", &[], &kw)
+        .await
+        .unwrap()
+        .expect("undocked GetFullState")
+    else {
+        panic!("expected GetFullState 4-tuple");
+    };
+    assert_eq!(full_parts.len(), 4);
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 2. Foreign bound entry and invalid/foreign scalar arguments fail BEFORE mutating DB or expiring overdue probe.
+    let foreign_char_arg = PyRep::Integer(2_199_002);
+    let foreign_corp_arg = PyRep::Integer(98_099_001);
+    let foreign_station_arg = PyRep::Integer(60_003_761);
+    let neg_cases: Vec<(Option<&BoundObjectEntry>, &str, Vec<PyRep>)> = vec![
+        (Some(&foreign_bound), "GetSystemScanMgr", vec![]),
+        (Some(&foreign_bound), "GetAnomalies", vec![]),
+        (Some(&foreign_bound), "GetFullState", vec![]),
+        (Some(&foreign_bound), "RequestScans", vec![]),
+        (Some(&foreign_bound), "RecoverProbes", vec![]),
+        (Some(&foreign_bound), "ReconnectToLostProbes", vec![]),
+        (Some(&foreign_bound), "DestroyProbe", vec![]),
+        (Some(&foreign_bound), "SetActivityState", vec![PyRep::Integer(1)]),
+        (None, "GetSystemScanMgr", vec![foreign_char_arg.clone()]),
+        (None, "GetAnomalies", vec![foreign_corp_arg.clone()]),
+        (None, "GetFullState", vec![foreign_station_arg.clone()]),
+        (None, "GetAnomalies", vec![PyRep::Bool(true)]),
+        (None, "GetFullState", vec![PyRep::Integer(sys_id as i64), PyRep::Integer(1)]),
+        (None, "SetActivityState", vec![]),
+        (None, "SetActivityState", vec![PyRep::Bool(true)]),
+        (None, "SetActivityState", vec![PyRep::List(vec![PyRep::Bool(true)]), PyRep::Integer(1)]),
+        (None, "SetActivityState", vec![foreign_char_arg.clone()]),
+        (Some(&own_bound), "RequestScans", vec![foreign_station_arg.clone()]),
+        (Some(&own_bound), "RequestScans", vec![PyRep::Dict(vec![(PyRep::Integer(999_999_999), PyRep::keyval([("rangeStep", PyRep::Integer(2))]))])]),
+        (Some(&own_bound), "RecoverProbes", vec![foreign_station_arg.clone()]),
+        (Some(&own_bound), "RecoverProbes", vec![PyRep::Bool(true)]),
+        (Some(&own_bound), "ReconnectToLostProbes", vec![foreign_station_arg]),
+        (Some(&own_bound), "DestroyProbe", vec![PyRep::Integer(char_id)]),
+        (Some(&own_bound), "DestroyProbe", vec![PyRep::Integer(890_500_009)]),
+        (Some(&own_bound), "DestroyProbe", vec![PyRep::Bool(true)]),
+    ];
+    for (bound_opt, meth, args) in neg_cases {
+        let err = handle_scan_and_wormhole_extras(&ctx, &mut sess, bound_opt, "scanMgr", meth, &args, &kw)
+            .await
+            .expect("handled")
+            .expect_err("negative scanMgr probe must fail");
+        assert!(!err.code.is_empty(), "{meth} {args:?} produced empty error code");
+    }
+    assert_eq!(ctx.db.state_epoch(), e0, "negative probes must not mutate DB");
+    assert_eq!(ctx.db.tx_commit_count(), c0, "negative probes must not commit DB tx");
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        assert!(map.contains_key(&overdue_pid), "rejected calls must not expire overdue probe early");
+        assert_eq!(map.get(&active_pid).map(|p| p.state), Some(PROBE_STATE_IDLE));
+    }
+
+    // 3. Docked SetActivityState rejects NotInSpace without mutating probe state or DB.
+    let mut docked = sess.clone();
+    docked.station_id = Some(60_003_760);
+    let docked_err = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut docked,
+        Some(&own_bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(PROBE_STATE_INACTIVE as i64)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(docked_err.code, "NotInSpace");
+    assert_eq!(
+        ctx.active_scanner_probes.read().unwrap().get(&active_pid).map(|p| p.state),
+        Some(PROBE_STATE_IDLE)
+    );
+    assert_eq!(ctx.db.state_epoch(), e0);
+
+    // 4. Legitimate targeted DestroyProbe succeeds on owned active probe.
+    let destroyed = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "DestroyProbe",
+        &[PyRep::Integer(active_pid)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("owned DestroyProbe succeeds");
+    assert_eq!(destroyed.dict_get("destroyedCount"), Some(&PyRep::Integer(1)));
+    assert!(!ctx.active_scanner_probes.read().unwrap().contains_key(&active_pid));
+}
+
+#[tokio::test]
+async fn recover_and_destroy_probe_guards_and_range_step_clamping() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let char_id = 90_000_001;
+    let foreign_char = 2_199_002;
+    let sys_id = 30_000_142;
+    let other_sys = 30_000_144;
+    let ship_id = 100_000_001;
+    let kw = HashMap::new();
+    let now_unix = ctx.now_unix();
+
+    let own_bound = BoundObjectEntry {
+        bound_id: 951,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("scanMgr:{sys_id}"),
+        ref_id: 951,
+    };
+
+    let active_pid = 890_601_001_i64;
+    let overdue_pid = 890_601_002_i64;
+    let inactive_pid = 890_601_003_i64;
+    let other_sys_pid = 890_601_004_i64;
+    let foreign_pid = 890_601_005_i64;
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap();
+        let mk = |pid: i64, owner: i64, s_id: u32, st: i32, max_t: f64, launched: u64| {
+            ActiveScannerProbe {
+                probe_id: pid,
+                probe_type_id: 30_013,
+                owner_char_id: owner,
+                ship_id,
+                launcher_module_id: 0,
+                solar_system_id: s_id,
+                position: [1_000.0, 0.0, 0.0],
+                destination: [1_000.0, 0.0, 0.0],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: max_t,
+                launched_at_unix: launched,
+                state: st,
+                warp_end_ft: None,
+            }
+        };
+        map.insert(active_pid, mk(active_pid, char_id, sys_id, PROBE_STATE_IDLE, 3_600.0, now_unix));
+        map.insert(
+            overdue_pid,
+            mk(overdue_pid, char_id, sys_id, PROBE_STATE_IDLE, 10.0, now_unix.saturating_sub(1_000)),
+        );
+        map.insert(inactive_pid, mk(inactive_pid, char_id, sys_id, 0, 3_600.0, now_unix));
+        map.insert(other_sys_pid, mk(other_sys_pid, char_id, other_sys, PROBE_STATE_IDLE, 3_600.0, now_unix));
+        map.insert(foreign_pid, mk(foreign_pid, foreign_char, sys_id, PROBE_STATE_IDLE, 3_600.0, now_unix));
+    }
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    // 1. Explicit RecoverProbes([]) is a read-pure no-op (does NOT recover probes or expire overdue probes).
+    let empty_rec = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "RecoverProbes",
+        &[PyRep::List(vec![])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("RecoverProbes([]) must succeed as no-op");
+    assert_eq!(empty_rec.dict_get("recoveredCount"), Some(&PyRep::Integer(0)));
+    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&active_pid));
+    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&overdue_pid));
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 2. RecoverProbes rejects foreign, wrong-system, or inactive probe IDs before expiring overdue probes.
+    for bad_recover in [
+        vec![PyRep::List(vec![PyRep::Integer(foreign_pid)])],
+        vec![PyRep::List(vec![PyRep::Integer(other_sys_pid)])],
+        vec![PyRep::List(vec![PyRep::Integer(inactive_pid)])],
+        vec![PyRep::Integer(inactive_pid)],
+    ] {
+        let err = handle_scan_and_wormhole_extras(
+            &ctx,
+            &mut sess,
+            Some(&own_bound),
+            "scanMgr",
+            "RecoverProbes",
+            &bad_recover,
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect_err("foreign/wrong-system/inactive RecoverProbes must fail with ProbeNotFound");
+        assert_eq!(err.code, "ProbeNotFound");
+    }
+    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&overdue_pid));
+    assert_eq!(ctx.db.state_epoch(), e0);
+
+    // 3. P2 clamping: large rangeStep i64 values clamp without overflowing i32.
+    let mut max_kw = HashMap::new();
+    max_kw.insert("rangeStep".into(), PyRep::Integer(i64::MAX));
+    let _ = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "RequestScans",
+        &[PyRep::None],
+        &max_kw,
+    )
+    .await
+    .unwrap()
+    .expect("RequestScans clamps i64::MAX rangeStep to 8");
+    assert_eq!(ctx.active_scanner_probes.read().unwrap().get(&active_pid).map(|p| p.range_step), Some(8));
+
+    let mut min_kw = HashMap::new();
+    min_kw.insert("rangeStep".into(), PyRep::Integer(i64::MIN));
+    let _ = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "RequestScans",
+        &[PyRep::None],
+        &min_kw,
+    )
+    .await
+    .unwrap()
+    .expect("RequestScans clamps i64::MIN rangeStep to 1");
+    assert_eq!(ctx.active_scanner_probes.read().unwrap().get(&active_pid).map(|p| p.range_step), Some(1));
+
+    for (key, val) in [("scanRangeAU", f64::MAX), ("scanRange", f64::MAX)] {
+        let huge_dict = PyRep::Dict(vec![(
+            PyRep::Integer(active_pid),
+            PyRep::keyval([(key, PyRep::Real(val))]),
+        )]);
+        let _ = handle_scan_and_wormhole_extras(
+            &ctx,
+            &mut sess,
+            Some(&own_bound),
+            "scanMgr",
+            "RequestScans",
+            &[huge_dict],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("RequestScans clamps finite f64::MAX radius to step 8 without overflowing");
+        assert_eq!(
+            ctx.active_scanner_probes.read().unwrap().get(&active_pid).map(|p| p.range_step),
+            Some(8)
+        );
+    }
+
+    // 4. DestroyProbe rejects wrong-system probe, leaves cargo sentinel (-1) as no-op, and spares other-system probes on bulk destroy.
+    let sentinel_pid = 890_601_006_i64;
+    ctx.active_scanner_probes.write().unwrap().insert(
+        sentinel_pid,
+        ActiveScannerProbe {
+            probe_id: sentinel_pid,
+            probe_type_id: 30_013,
+            owner_char_id: char_id,
+            ship_id,
+            launcher_module_id: 0,
+            solar_system_id: sys_id,
+            position: [0.0; 3],
+            destination: [0.0; 3],
+            range_step: 4,
+            scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+            base_sensor_strength: 40.0,
+            max_flight_time_s: 3_600.0,
+            launched_at_unix: now_unix,
+            state: -1,
+            warp_end_ft: None,
+        },
+    );
+    let sentinel_res = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "DestroyProbe",
+        &[PyRep::Integer(sentinel_pid)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("in-cargo sentinel probe (-1) DestroyProbe is idempotent no-op");
+    assert_eq!(sentinel_res.dict_get("destroyedCount"), Some(&PyRep::Integer(0)));
+    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&sentinel_pid));
+
+    let sys_err = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "DestroyProbe",
+        &[PyRep::Integer(other_sys_pid)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("wrong-system DestroyProbe must fail with ProbeNotFound");
+    assert_eq!(sys_err.code, "ProbeNotFound");
+
+    let bulk_dest = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "DestroyProbe",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("bulk DestroyProbe succeeds for current system");
+    assert_eq!(bulk_dest.dict_get("destroyedCount"), Some(&PyRep::Integer(2)));
+    assert!(
+        ctx.active_scanner_probes.read().unwrap().contains_key(&other_sys_pid),
+        "bulk DestroyProbe in sys_id must preserve probes in other systems"
+    );
+    assert!(
+        ctx.active_scanner_probes.read().unwrap().contains_key(&sentinel_pid),
+        "bulk DestroyProbe must preserve negative-state cargo sentinels"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_activity_state_enforces_8_probe_cap_across_relaunch_per_probe_and_bulk() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let char_id = 90_000_001_i64;
+    ctx.db
+        .acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let launcher_id = 710_951_i64;
+    let charge_id = 710_952_i64;
+
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            launcher_id,
+            InventoryItemRecord {
+                item_id: launcher_id,
+                type_id: 17_938,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 30_013,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 16,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let bound = BoundObjectEntry {
+        bound_id: 960,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("scanMgr:{sys_id}"),
+        ref_id: 960,
+    };
+    let kw = HashMap::new();
+    let mut launch_kw = HashMap::new();
+    launch_kw.insert("probeCount".into(), PyRep::Integer(8));
+
+    // 1. Launch 8 probes -> SetActivityState(0) -> relaunch 8 more probes.
+    activate_scan_probe_launcher(
+        &ctx,
+        &sess,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        launcher_id,
+        17_938,
+        InventoryFlag::HiSlot0 as u16,
+        "useMissiles",
+        None,
+        &launch_kw,
+    )
+    .await
+    .expect("first 8-probe launch");
+
+    let mut wave1_ids: Vec<i64> = ctx
+        .active_scanner_probes
+        .read()
+        .unwrap()
+        .values()
+        .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+        .map(|p| p.probe_id)
+        .collect();
+    wave1_ids.sort_unstable();
+    assert_eq!(wave1_ids.len(), 8);
+
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(i64::from(PROBE_STATE_INACTIVE))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("deactivate wave 1");
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        assert!(wave1_ids.iter().all(|id| map[id].state == PROBE_STATE_INACTIVE));
+    }
+
+    activate_scan_probe_launcher(
+        &ctx,
+        &sess,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        launcher_id,
+        17_938,
+        InventoryFlag::HiSlot0 as u16,
+        "useMissiles",
+        None,
+        &launch_kw,
+    )
+    .await
+    .expect("second 8-probe launch while wave 1 is inactive");
+
+    let mut wave2_ids: Vec<i64> = ctx
+        .active_scanner_probes
+        .read()
+        .unwrap()
+        .values()
+        .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+        .map(|p| p.probe_id)
+        .collect();
+    wave2_ids.sort_unstable();
+    assert_eq!(wave2_ids.len(), 8);
+
+    // Unrelated active probe in another system must not count toward sys_id's 8-probe cap.
+    let other_sys_pid = 890_800_999_i64;
+    ctx.active_scanner_probes.write().unwrap().insert(
+        other_sys_pid,
+        ActiveScannerProbe {
+            probe_id: other_sys_pid,
+            probe_type_id: 30_013,
+            owner_char_id: char_id,
+            ship_id,
+            launcher_module_id: launcher_id,
+            solar_system_id: 30_000_144,
+            position: [0.0; 3],
+            destination: [0.0; 3],
+            range_step: 4,
+            scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+            base_sensor_strength: 40.0,
+            max_flight_time_s: 3_600.0,
+            launched_at_unix: ctx.now_unix(),
+            state: PROBE_STATE_IDLE,
+            warp_end_ft: None,
+        },
+    );
+
+    let active_in_sys = || -> usize {
+        ctx.active_scanner_probes
+            .read()
+            .unwrap()
+            .values()
+            .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+            .count()
+    };
+
+    // 2. Per-probe reactivation exceeding 8 active probes rejects atomically with MaxProbesLaunched.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let c0 = ctx.db.tx_commit_count();
+    for bad_args in [
+        vec![PyRep::Integer(wave1_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_IDLE))],
+        vec![
+            PyRep::List(vec![PyRep::Integer(wave1_ids[0]), PyRep::Integer(wave1_ids[1])]),
+            PyRep::Integer(i64::from(PROBE_STATE_IDLE)),
+        ],
+        vec![PyRep::Dict(vec![
+            (PyRep::Integer(wave2_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_SCANNING))),
+            (PyRep::Integer(wave1_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_IDLE))),
+        ])],
+    ] {
+        let err = handle_scan_and_wormhole_extras(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "scanMgr",
+            "SetActivityState",
+            &bad_args,
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect_err("reactivating >8 probes must reject with MaxProbesLaunched");
+        assert_eq!(err.code, "MaxProbesLaunched");
+    }
+    assert_eq!(ctx.db.tx_commit_count(), c0, "rejected SetActivityState must not write DB");
+    assert!(
+        ctx.drain_notifications_for_char(char_id).is_empty(),
+        "rejected SetActivityState must not emit OnProbeStateChanged"
+    );
+    assert_eq!(active_in_sys(), 8);
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        assert_eq!(map[&wave2_ids[0]].state, PROBE_STATE_IDLE, "failed dict must not partially mutate wave2");
+        assert_eq!(map[&wave1_ids[0]].state, PROBE_STATE_INACTIVE);
+    }
+
+    // Per-probe 1-for-1 swap keeping projected active count at 8 succeeds atomically.
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Dict(vec![
+            (PyRep::Integer(wave2_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_INACTIVE))),
+            (PyRep::Integer(wave1_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_IDLE))),
+        ])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("atomic 1-for-1 probe swap stays within 8-probe cap");
+    assert_eq!(active_in_sys(), 8);
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Dict(vec![
+            (PyRep::Integer(wave1_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_INACTIVE))),
+            (PyRep::Integer(wave2_ids[0]), PyRep::Integer(i64::from(PROBE_STATE_IDLE))),
+        ])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("swap back succeeds");
+
+    // 3. Bulk SetActivityState(>0) when 8 are active updates already-active probes and leaves inactive probes at 0.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(i64::from(PROBE_STATE_SCANNING))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("bulk SetActivityState(4) succeeds with 8-probe cap");
+    assert_eq!(active_in_sys(), 8);
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        assert!(wave2_ids.iter().all(|id| map[id].state == PROBE_STATE_SCANNING));
+        assert!(wave1_ids.iter().all(|id| map[id].state == PROBE_STATE_INACTIVE));
+    }
+
+    // 4. Deactivate 3 active probes (5 active, 11 inactive) -> bulk SetActivityState(1) reactivates
+    //    only the lowest 3 inactive probes by probe_id so total active count remains capped at 8.
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[
+            PyRep::List(wave2_ids[..3].iter().copied().map(PyRep::Integer).collect()),
+            PyRep::Integer(i64::from(PROBE_STATE_INACTIVE)),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("deactivate 3 probes");
+    assert_eq!(active_in_sys(), 5);
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(i64::from(PROBE_STATE_IDLE))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("bulk SetActivityState(1) caps reactivations to 3 remaining slots");
+    assert_eq!(active_in_sys(), 8, "bulk reactivation must never exceed 8 active probes");
+
+    let mut all_inactive_before: Vec<i64> = wave1_ids
+        .iter()
+        .copied()
+        .chain(wave2_ids[..3].iter().copied())
+        .collect();
+    all_inactive_before.sort_unstable();
+    let expected_reactivated = &all_inactive_before[..3];
+    let expected_still_inactive = &all_inactive_before[3..];
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        for pid in &wave2_ids[3..] {
+            assert_eq!(map[pid].state, PROBE_STATE_IDLE);
+        }
+        for pid in expected_reactivated {
+            assert_eq!(map[pid].state, PROBE_STATE_IDLE);
+        }
+        for pid in expected_still_inactive {
+            assert_eq!(map[pid].state, PROBE_STATE_INACTIVE);
+        }
+        assert_eq!(map[&other_sys_pid].state, PROBE_STATE_IDLE);
+    }
+    let state_notifs: Vec<i64> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnProbeStateChanged")
+        .filter_map(|n| n.args.first().and_then(|v| v.as_i64()))
+        .collect();
+    assert_eq!(state_notifs.len(), 8, "5 updated + 3 reactivated = 8 OnProbeStateChanged events");
+    for pid in expected_still_inactive {
+        assert!(!state_notifs.contains(pid), "capped probe {pid} must not emit OnProbeStateChanged");
+    }
 }

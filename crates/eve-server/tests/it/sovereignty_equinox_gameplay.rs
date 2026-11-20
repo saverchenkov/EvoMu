@@ -1582,7 +1582,7 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     assert_eq!(rep_ok.dict_get("denEnabled"), Some(&PyRep::Bool(true)));
 
     ctx.db.with_mut_snapshot(|snap| {
-        for idx in 0..8i64 {
+        for idx in 0..24i64 {
             snap.items.insert(
                 994_000 + idx,
                 InventoryItemRecord {
@@ -1637,7 +1637,7 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     let dropped_stacks = ctx.db.with_snapshot(|snap| {
         snap.items.values().filter(|i| i.type_id == TYPE_INFOMORPH_DECRYPTION_KEY && i.quantity > 0 && i.location_id != den_id).count()
     });
-    assert!((1..=7).contains(&dropped_stacks));
+    assert!((1..=23).contains(&dropped_stacks));
 }
 
 }

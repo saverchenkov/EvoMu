@@ -701,6 +701,15 @@ pub fn handle_orders_escrow(
                     &parsed_items,
                 )
             }) {
+                if e.code == "CantRepackageDamagedItem" {
+                    let count = e.message.parse::<i64>().unwrap_or(1).max(1);
+                    crate::services::notify_emitters_skills_trade_godma::emit_sell_repackage_errors(
+                        ctx,
+                        char_id,
+                        "CantRepackageDamagedItem",
+                        count,
+                    );
+                }
                 return Some(Err(e));
             }
             super::sweep_and_notify_expired(ctx);
@@ -844,12 +853,21 @@ pub fn handle_orders_escrow(
                         .market_orders
                         .values()
                         .filter(|o| {
-                            let struct_ok = o.station_id == station_id
+                            let struct_ok = if o.station_id == station_id
                                 || !snap.structures.contains_key(&o.station_id)
-                                || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                            {
+                                true
+                            } else if type_id == crate::services::market_contracts::PLEX_TYPE_ID {
+                                crate::services::structure_profile_services::check_upwell_market_access_and_rate(
                                     ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
                                 )
-                                .is_ok();
+                                .is_ok()
+                            } else {
+                                crate::services::market_trading::is_structure_market_online(
+                                    snap,
+                                    o.station_id,
+                                )
+                            };
                             let in_scope = if type_id == crate::services::market_contracts::PLEX_TYPE_ID {
                                 true
                             } else {
