@@ -35,6 +35,7 @@ pub(crate) use cluster_tick::sweep_expired_cosmic_anomalies_and_signatures;
 pub use cluster_tick_downtime::{
     cleanup_npc_wrecks_and_reset_missions_on_downtime, clear_safe_logoff,
     disconnect_safe_logoff_sessions, recover_scanner_probes_on_downtime,
+    spawn_mission_wave_on_pocket_entry_for_mission_if_needed,
     spawn_mission_wave_on_pocket_entry_if_needed,
 };
 pub use drone_return::{

@@ -249,7 +249,7 @@ fn resolve_fw_or_special_warp_target_all_site_types_and_filters() {
         None
     );
 
-    // Drifter hive active -> (10_000, 0, 0), cleared -> None
+    // Drifter hive active -> requires explicit dungeon_id / site_id match (bogus ID returns None), cleared -> None
     with_pve_special_reg(&ctx, |reg| {
         reg.drifter_hives.insert(
             sys_id,
@@ -270,13 +270,21 @@ fn resolve_fw_or_special_warp_target_all_site_types_and_filters() {
     });
     assert_eq!(
         resolve_fw_or_special_warp_target(&ctx, sys_id, 999_999, None),
+        None
+    );
+    assert_eq!(
+        resolve_fw_or_special_warp_target(&ctx, sys_id, 7001, None),
+        Some(DVec3::new(10_000.0, 0.0, 0.0))
+    );
+    assert_eq!(
+        resolve_fw_or_special_warp_target(&ctx, sys_id, 0, Some("HIVE-1")),
         Some(DVec3::new(10_000.0, 0.0, 0.0))
     );
     with_pve_special_reg(&ctx, |reg| {
         reg.drifter_hives.get_mut(&sys_id).unwrap().cleared = true;
     });
     assert_eq!(
-        resolve_fw_or_special_warp_target(&ctx, sys_id, 999_999, None),
+        resolve_fw_or_special_warp_target(&ctx, sys_id, 7001, Some("HIVE-1")),
         None
     );
 }
