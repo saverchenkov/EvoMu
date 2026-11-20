@@ -2452,3 +2452,775 @@ async fn mission_pocket_wave_respawn_is_scoped_to_warped_mission_and_preserves_n
         );
     });
 }
+
+#[tokio::test]
+async fn agent_fleet_warp_zero_warped_skips_wave_and_partial_warped_runs_hooks_only_for_warped() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_fc = 90_000_201_i64;
+    let char_wing = 90_000_202_i64;
+    let ship_fc = 952_100_001_i64;
+    let ship_wing = 952_100_002_i64;
+    let fleet_id = 777_950_i64;
+    let mission_id = 95_201_u32;
+    let bm_id = 952_200_001_i64;
+    let kw = HashMap::new();
+
+    let agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.solar_system_id == Some(sys_id))
+        .expect("system must have SDE agent");
+    let start_pos = glam::DVec3::new(1_000_000.0, 0.0, 0.0);
+    let pocket_pos = glam::DVec3::new(10_000_000.0, 0.0, 0.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_fc);
+        let template_ch = snap.characters.values().next().unwrap().clone();
+        let template_acc = snap.accounts.values().next().unwrap().clone();
+        for (idx, (cid, sid)) in [(char_fc, ship_fc), (char_wing, ship_wing)].into_iter().enumerate() {
+            let uid = 952_001 + idx as u64;
+            let mut acc = template_acc.clone();
+            acc.user_id = uid;
+            acc.username = format!("fleet_warp_user_{idx}");
+            snap.accounts.insert(acc.username.clone(), acc);
+            snap.items.insert(
+                sid,
+                eve_db::InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: sys_id as i64,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            let mut ch = snap.characters.get(&cid).cloned().unwrap_or_else(|| template_ch.clone());
+            ch.character_id = cid;
+            ch.user_id = uid;
+            ch.active_ship_id = sid;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            snap.characters.insert(cid, ch);
+        }
+        snap.bookmarks.insert(
+            bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_id,
+                owner_id: char_fc,
+                solar_system_id: sys_id,
+                label: "Pocket Objective".into(),
+                x: pocket_pos.x,
+                y: pocket_pos.y,
+                z: pocket_pos.z,
+                item_id: None,
+                memo: "Mission Pocket".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.active_missions.insert(
+            (char_fc, mission_id),
+            ActiveMissionRecord {
+                character_id: char_fc,
+                mission_id,
+                agent_id: agent.agent_id,
+                solar_system_id: sys_id,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 2,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: Some(bm_id),
+            },
+        );
+        let mut member_details = HashMap::new();
+        member_details.insert(
+            char_fc,
+            eve_db::FleetMemberRecord {
+                character_id: char_fc,
+                role: eve_db::FleetRole::FleetCommander,
+                takes_fleet_warp: true,
+                ..Default::default()
+            },
+        );
+        member_details.insert(
+            char_wing,
+            eve_db::FleetMemberRecord {
+                character_id: char_wing,
+                role: eve_db::FleetRole::SquadMember,
+                takes_fleet_warp: true,
+                ..Default::default()
+            },
+        );
+        snap.fleets.insert(
+            fleet_id,
+            eve_db::FleetRecord {
+                fleet_id,
+                boss_id: char_fc,
+                members: vec![char_fc, char_wing],
+                member_details,
+                ..Default::default()
+            },
+        );
+    });
+
+    crate::services::pve_dungeon_runtime::with_dungeon_runtime_store(&ctx, |store| {
+        for (inst_id, owner) in [(958_201_i64, char_fc), (958_202_i64, char_wing)] {
+            store.instances.insert(
+                inst_id,
+                eve_db::DungeonRuntimeInstance {
+                    instance_id: inst_id,
+                    dungeon_id: 9_821,
+                    dungeon_name: "Fleet Pocket Exit".into(),
+                    category: "Combat".into(),
+                    archetype: "Deadspace".into(),
+                    solar_system_id: sys_id,
+                    owner_char_id: owner,
+                    base_position: start_pos.to_array(),
+                    disallow_mwd: false,
+                    entry_gate_ball_id: None,
+                    entry_gate_pos: None,
+                    entry_gate_locked: false,
+                    current_room_index: 0,
+                    rooms: vec![eve_db::DungeonRuntimeRoom {
+                        room_index: 0,
+                        room_id: 9_821_00,
+                        room_name: "Entry".into(),
+                        position: start_pos.to_array(),
+                        gate_destination_pos: start_pos.to_array(),
+                        gated: false,
+                        disallow_mwd: None,
+                        gate_ball_id: None,
+                        gate_locked: false,
+                        objects: Vec::new(),
+                        npc_groups: Vec::new(),
+                        triggers: Vec::new(),
+                        spawned: false,
+                        cleared: false,
+                    }],
+                    completed: false,
+                    despawned: false,
+                    active_objective_id: 0,
+                    last_completed_task_id: None,
+                    completed_task_ids: Vec::new(),
+                    created_unix: ctx.now_unix(),
+                },
+            );
+        }
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (sid, offset) in [
+        (ship_fc, glam::DVec3::ZERO),
+        (ship_wing, glam::DVec3::new(1_000.0, 0.0, 0.0)),
+    ] {
+        let mut cs = eve_destiny::CombatState::default();
+        cs.capacitor = 0.0;
+        sys_handle
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: sid,
+                    type_id: 587,
+                    position: start_pos + offset,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                cs,
+            )
+            .await
+            .unwrap();
+    }
+
+    let now = ctx.now_unix();
+    for (idx, (cid, sid)) in [(char_fc, ship_fc), (char_wing, ship_wing)].into_iter().enumerate() {
+        ctx.db
+            .acquire_online_lock(952_001 + idx as u64, 952_500 + idx as u64, Some(cid), true, now)
+            .expect("online lock");
+        crate::services::space_destiny::grant_location_change_invulnerability(&ctx, cid, now + 60);
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
+            st.safe_logoffs.insert(
+                cid,
+                eve_db::SafeLogoffEntry {
+                    char_id: cid,
+                    ship_id: sid,
+                    solar_system_id: sys_id,
+                    started_unix: now,
+                    complete_at_unix: now + 30,
+                    completed: false,
+                },
+            );
+        });
+    }
+    let _ = ctx.drain_notifications_for_char(char_fc);
+    let _ = ctx.drain_notifications_for_char(char_wing);
+
+    let mut sess = docked_session(char_fc, sys_id, None);
+    sess.ship_id = Some(ship_fc);
+    sess.fleet_id = Some(fleet_id);
+
+    // 1. Both ships have 0 GJ cap -> 0 ships warp -> returns false, no wave spawned, hooks skipped.
+    let res_zero = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String("dungeon".into()),
+            PyRep::Integer(0),
+            PyRep::Real(0.0),
+            PyRep::Bool(true),
+            PyRep::Integer(agent.agent_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_zero, PyRep::Bool(false));
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.active_missions[&(char_fc, mission_id)].spawned_npc_ball_ids.is_empty());
+        assert!(snap.sp6_lifecycle.safe_logoffs.contains_key(&char_fc));
+        assert!(snap.sp6_lifecycle.safe_logoffs.contains_key(&char_wing));
+    });
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_fc, ctx.now_unix()));
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_wing, ctx.now_unix()));
+
+    // 2. Restore wingmate capacitor only -> FC skipped, wingmate warps -> wave spawns and ONLY
+    //    warped wingmate runs `on_warp_initiated_hooks` & `on_warp_start_leave_dungeon_if_needed`.
+    sys_handle.set_capacitor(ship_wing, 250.0).await.unwrap();
+    let res_partial = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String("dungeon".into()),
+            PyRep::Integer(0),
+            PyRep::Real(0.0),
+            PyRep::Bool(true),
+            PyRep::Integer(agent.agent_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_partial, PyRep::Bool(true));
+
+    let (_, fc_b) = sys_handle.get_ball_snapshot(ship_fc).await.unwrap().unwrap();
+    let (_, wing_b) = sys_handle.get_ball_snapshot(ship_wing).await.unwrap().unwrap();
+    assert!(matches!(fc_b.mode, eve_destiny::MovementMode::Stop));
+    assert!(matches!(wing_b.mode, eve_destiny::MovementMode::Warp { .. }));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.active_missions[&(char_fc, mission_id)].spawned_npc_ball_ids.len(), 2);
+        assert!(snap.sp6_lifecycle.safe_logoffs.contains_key(&char_fc));
+        assert!(!snap.sp6_lifecycle.safe_logoffs.contains_key(&char_wing));
+    });
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_fc, ctx.now_unix()));
+    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_wing, ctx.now_unix()));
+
+    let fc_notes = ctx.drain_notifications_for_char(char_fc);
+    let wing_notes = ctx.drain_notifications_for_char(char_wing);
+    assert!(!fc_notes.iter().any(|n| n.event == "OnExitingDungeon"));
+    assert!(wing_notes.iter().any(|n| n.event == "OnExitingDungeon"));
+}
+
+#[tokio::test]
+async fn courier_legacy_mission_id_warps_to_destination_station_and_explicit_secondary_fallback() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_301_i64;
+    let ship_id = 953_100_001_i64;
+    let mission_id = 96_301_u32;
+    let auto_bm_id = 953_200_001_i64;
+    let sec_bm_id = 953_200_002_i64;
+    let kw = HashMap::new();
+
+    let mut agents_in_sys: Vec<_> = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.solar_system_id == Some(sys_id)
+                && a.station_id
+                    .is_some_and(|st_id| ctx.sde.stations.contains_key(&st_id))
+        })
+        .collect();
+    agents_in_sys.sort_by_key(|a| a.agent_id);
+    let agent = agents_in_sys
+        .into_iter()
+        .next()
+        .expect("system must have SDE station agent");
+    let origin_st = agent.station_id.unwrap();
+    let mut stations_in_sys: Vec<_> = ctx
+        .sde
+        .stations
+        .values()
+        .filter(|st| st.solar_system_id == sys_id && st.station_id != origin_st)
+        .collect();
+    stations_in_sys.sort_by_key(|st| st.station_id);
+    let dest_st = stations_in_sys
+        .iter()
+        .copied()
+        .next()
+        .expect("destination station in system");
+    let alt_st = stations_in_sys
+        .into_iter()
+        .find(|st| {
+            st.station_id != dest_st.station_id
+                && st.position.distance(dest_st.position) > 500_000.0
+        })
+        .expect("alternate distinct station in system");
+
+    let start_pos = glam::DVec3::new(2_000_000_000.0, 2_000_000_000.0, 0.0);
+    let auto_bm_pos = start_pos + glam::DVec3::new(0.0, 800_000.0, 0.0);
+    let now = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        let template_ch = snap.characters.values().next().unwrap().clone();
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut ch = snap.characters.get(&char_id).cloned().unwrap_or_else(|| template_ch);
+        ch.character_id = char_id;
+        ch.active_ship_id = ship_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.characters.insert(char_id, ch);
+
+        snap.bookmarks.insert(
+            auto_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: auto_bm_id,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "Auto Courier Pocket".into(),
+                x: auto_bm_pos.x,
+                y: auto_bm_pos.y,
+                z: auto_bm_pos.z,
+                item_id: None,
+                memo: "Mission Pocket Destination".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            sec_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: sec_bm_id,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "Secondary Dropoff".into(),
+                x: alt_st.position.x,
+                y: alt_st.position.y,
+                z: alt_st.position.z,
+                item_id: Some(alt_st.station_id),
+                memo: "Mission Pocket Secondary".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.active_missions.insert(
+            (char_id, mission_id),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id,
+                agent_id: agent.agent_id,
+                solar_system_id: sys_id,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: Some(auto_bm_id),
+            },
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &MissionTimingAndCargoMeta {
+                mission_id,
+                agent_id: agent.agent_id,
+                offered_at_unix: now,
+                offer_expiry_unix: now + 86_400,
+                accepted_at_unix: Some(now),
+                accept_expiry_unix: Some(now + 604_800),
+                bonus_expiry_unix: Some(now + 3_600),
+                completed_at_unix: None,
+                required_delivery_type_id: Some(34),
+                required_delivery_qty: 20,
+                granted_courier_item_id: None,
+                granted_courier_qty: 0,
+                is_anomic_burner: false,
+                chosen_branch: None,
+                destination_station_id: Some(dest_st.station_id),
+                origin_station_id: Some(origin_st),
+                offered_level: Some(1),
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: start_pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    let mut sess = docked_session(char_id, sys_id, None);
+    sess.ship_id = Some(ship_id);
+
+    // 1. Legacy WarpToLocation("objective.destination", mission_id) must warp to
+    //    meta.destination_station_id rather than auto-created non-station m.bookmark_id.
+    let res_legacy = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String("objective.destination".into()),
+            PyRep::Integer(i64::from(mission_id)),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_legacy, PyRep::Bool(true));
+    let (_, b1) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    match b1.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(
+                destination.distance(dest_st.position) < 100_000.0,
+                "legacy courier mission_id must warp to dest_st ({:?}), got {destination:?}",
+                dest_st.position
+            );
+        }
+        other => panic!("expected Warp to dest_st, got {other:?}"),
+    }
+
+    // 2. Explicit ordinal 1 selecting a valid station bookmark short-circuits ahead of dest_sid.
+    let _ = sys_handle
+        .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+        .await;
+    sys_handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.max_capacitor = 10_000.0;
+            cs.capacitor = 10_000.0;
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let res_sec = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String("objective.destination".into()),
+            PyRep::Integer(1),
+            PyRep::Real(0.0),
+            PyRep::Bool(false),
+            PyRep::Integer(agent.agent_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_sec, PyRep::Bool(true));
+    let (_, b2) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    match b2.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(
+                destination.distance(alt_st.position) < 100_000.0,
+                "explicit station bookmark must warp to alt_st ({:?}), got {destination:?}",
+                alt_st.position
+            );
+        }
+        other => panic!("expected Warp to alt_st, got {other:?}"),
+    }
+
+    // 3. Non-station secondary bookmark falls through cleanly to dest_st.
+    let _ = sys_handle
+        .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+        .await;
+    sys_handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.max_capacitor = 10_000.0;
+            cs.capacitor = 10_000.0;
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmarks.get_mut(&sec_bm_id).unwrap().item_id = None;
+    });
+    let res_non_station = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String("objective.destination".into()),
+            PyRep::Integer(1),
+            PyRep::Real(0.0),
+            PyRep::Bool(false),
+            PyRep::Integer(agent.agent_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_non_station, PyRep::Bool(true));
+    let (_, b3) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    match b3.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(destination.distance(dest_st.position) < 100_000.0);
+        }
+        other => panic!("expected fallback Warp to dest_st, got {other:?}"),
+    }
+
+    // 4. Expired secondary station bookmark also falls through cleanly to dest_st.
+    let _ = sys_handle
+        .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+        .await;
+    sys_handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.max_capacitor = 10_000.0;
+            cs.capacitor = 10_000.0;
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmarks.get_mut(&sec_bm_id).unwrap().item_id = Some(alt_st.station_id);
+        snap.bookmark_expiries.insert(sec_bm_id, now.saturating_sub(1));
+    });
+    let res_expired = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String("objective.destination".into()),
+            PyRep::Integer(1),
+            PyRep::Real(0.0),
+            PyRep::Bool(false),
+            PyRep::Integer(agent.agent_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_expired, PyRep::Bool(true));
+    let (_, b4) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    match b4.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(destination.distance(dest_st.position) < 100_000.0);
+        }
+        other => panic!("expected expired fallback Warp to dest_st, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn find_accepted_mission_ordinal_precedes_small_mission_id_under_agent_selector() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_401_i64;
+    let ship_id = 954_100_001_i64;
+    let mission_id = 1_u32;
+    let bm0_id = 954_200_001_i64;
+    let bm1_id = 954_200_002_i64;
+    let kw = HashMap::new();
+
+    let agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.solar_system_id == Some(sys_id))
+        .expect("system must have SDE agent");
+    let start_pos = glam::DVec3::new(0.0, 0.0, 0.0);
+    let bm0_pos = glam::DVec3::new(0.0, 600_000.0, 0.0);
+    let bm1_pos = glam::DVec3::new(0.0, 0.0, 900_000.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        let template_ch = snap.characters.values().next().unwrap().clone();
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut ch = snap.characters.get(&char_id).cloned().unwrap_or_else(|| template_ch);
+        ch.character_id = char_id;
+        ch.active_ship_id = ship_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.characters.insert(char_id, ch);
+
+        for (bmid, pos, label) in [
+            (bm0_id, bm0_pos, "Pocket 0"),
+            (bm1_id, bm1_pos, "Pocket 1"),
+        ] {
+            snap.bookmarks.insert(
+                bmid,
+                eve_db::BookmarkRecord {
+                    bookmark_id: bmid,
+                    owner_id: char_id,
+                    solar_system_id: sys_id,
+                    label: label.into(),
+                    x: pos.x,
+                    y: pos.y,
+                    z: pos.z,
+                    item_id: None,
+                    memo: "Mission Pocket".into(),
+                    folder_id: None,
+                    is_shared: false,
+                },
+            );
+        }
+        snap.active_missions.insert(
+            (char_id, mission_id),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id,
+                agent_id: agent.agent_id,
+                solar_system_id: sys_id,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: Some(bm0_id),
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: start_pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    let mut sess = docked_session(char_id, sys_id, None);
+    sess.ship_id = Some(ship_id);
+    let bound = bound_agent(char_id, agent.agent_id);
+
+    // Both unbound referringAgentID and bound agent moniker with mission_id == 1 (< 64) and
+    // loc == 1 must resolve ordinal bookmark #1 (bm1_pos), not m.bookmark_id (bm0_pos).
+    let res_ref = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String("dungeon".into()),
+            PyRep::Integer(1),
+            PyRep::Real(0.0),
+            PyRep::Bool(false),
+            PyRep::Integer(agent.agent_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_ref, PyRep::Bool(true));
+    let (_, b_ref) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    match b_ref.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(destination.distance(bm1_pos) < 1.0);
+        }
+        other => panic!("expected Warp to bm1, got {other:?}"),
+    }
+
+    let _ = sys_handle
+        .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+        .await;
+    let res_bound = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String("dungeon".into()),
+            PyRep::Integer(1),
+            PyRep::Real(0.0),
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_bound, PyRep::Bool(true));
+    let (_, b_bound) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    match b_bound.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(destination.distance(bm1_pos) < 1.0);
+        }
+        other => panic!("expected Warp to bm1 via bound agent, got {other:?}"),
+    }
+}

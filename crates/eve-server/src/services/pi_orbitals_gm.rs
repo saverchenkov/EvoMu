@@ -6,7 +6,7 @@ use crate::router::ServerContext;
 pub use crate::services::industry_pi::pi_helpers::*;
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, ItemQtyError, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
@@ -132,22 +132,42 @@ pub fn handle_pi_orbitals_gm(
                     client_error: None,
                 }));
             };
-            let (pin_id, type_id, qty) = if args.len() >= 4 {
+            let (pin_id, type_id_raw, qty_raw) = if args.len() >= 4 {
                 (
                     args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
-                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId,
-                    args.get(3).and_then(|a| a.as_i64()).unwrap_or(0),
+                    args.get(2).and_then(|a| a.as_i64()),
+                    args.get(3).and_then(|a| a.as_i64()),
                 )
             } else {
                 (
                     0,
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId,
-                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(0),
+                    args.get(1).and_then(|a| a.as_i64()),
+                    args.get(2).and_then(|a| a.as_i64()),
                 )
             };
-            ctx.db.with_mut_snapshot(|snap| {
+            let Some(type_id) = type_id_raw.and_then(|v| TypeId::try_from(v).ok()).filter(|&t| t > 0) else {
+                return Some(Err(BridgeRpcError::invalid_quantity(
+                    "planetMgr.GMAddCommodity requires positive commodity typeID",
+                )));
+            };
+            let qty = match ItemQty::try_from_i64(qty_raw.unwrap_or(0)) {
+                Ok(q) => q,
+                Err(e) => return Some(Err(e.into_rpc_error("InvalidQuantity"))),
+            };
+            let stack_delta = match qty.try_into_stack_i32() {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e.into_rpc_error("InvalidQuantity"))),
+            };
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
-                    *col.extracted_commodities.entry(type_id).or_insert(0) += qty.max(0) as u64;
+                    let next_ext = col
+                        .extracted_commodities
+                        .get(&type_id)
+                        .copied()
+                        .unwrap_or(0)
+                        .checked_add(qty.as_u64())
+                        .ok_or_else(|| ItemQtyError::Overflow.into_rpc_error("InvalidQuantity"))?;
+                    col.extracted_commodities.insert(type_id, next_ext);
                     let cc_lvl = col.command_center_level;
                     let mut net = load_pi_network(snap, char_id, planet_id, cc_lvl);
                     let target = if pin_id > 0 {
@@ -156,14 +176,24 @@ pub fn handle_pi_orbitals_gm(
                         net.pins.first_mut()
                     };
                     if let Some(p) = target {
-                        *p.contents.entry(type_id).or_insert(0) += qty.max(0) as u64;
+                        let next_content = p
+                            .contents
+                            .get(&type_id)
+                            .copied()
+                            .unwrap_or(0)
+                            .checked_add(qty.as_u64())
+                            .ok_or_else(|| ItemQtyError::Overflow.into_rpc_error("InvalidQuantity"))?;
+                        p.contents.insert(type_id, next_content);
                         save_pi_network(snap, char_id, planet_id, &net);
                     }
                 }
                 let loc_id = if pin_id > 0 { pin_id } else { planet_id };
                 let existing = snap.items.values_mut().find(|it| it.owner_id == char_id && it.location_id == loc_id && it.type_id == type_id);
                 if let Some(it) = existing {
-                    it.quantity = it.quantity.saturating_add(qty as i32);
+                    it.quantity = it
+                        .quantity
+                        .checked_add(stack_delta)
+                        .ok_or_else(|| ItemQtyError::Overflow.into_rpc_error("InvalidQuantity"))?;
                     it.version += 1;
                 } else {
                     snap.next_entity_id += 1;
@@ -174,7 +204,7 @@ pub fn handle_pi_orbitals_gm(
                         owner_id: char_id,
                         location_id: loc_id,
                         flag: InventoryFlag::None,
-                        quantity: qty as i32,
+                        quantity: stack_delta,
                         singleton: false,
                         version: 1,
                         dynamic_attributes: HashMap::new(),
@@ -184,8 +214,12 @@ pub fn handle_pi_orbitals_gm(
                         blueprint_runs_remaining: None,
                     });
                 }
+                Ok::<(), BridgeRpcError>(())
             });
-            Some(Ok(PyRep::Bool(true)))
+            match res {
+                Ok(()) => Some(Ok(PyRep::Bool(true))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("planetMgr", "GMConvertCommandCenter") => {
@@ -210,13 +244,27 @@ pub fn handle_pi_orbitals_gm(
             };
             let (target_type_id, new_level) = if args.len() >= 3 {
                 (
-                    args.get(1).and_then(|a| a.as_i64()).map(|v| v as TypeId),
-                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(5) as u8,
+                    args.get(1)
+                        .and_then(|a| a.as_i64())
+                        .and_then(|v| TypeId::try_from(v).ok()),
+                    u8::try_from(
+                        args.get(2)
+                            .and_then(|a| a.as_i64())
+                            .unwrap_or(5)
+                            .clamp(0, i64::from(u8::MAX)),
+                    )
+                    .unwrap_or(5),
                 )
             } else {
                 (
                     None,
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(5) as u8,
+                    u8::try_from(
+                        args.get(1)
+                            .and_then(|a| a.as_i64())
+                            .unwrap_or(5)
+                            .clamp(0, i64::from(u8::MAX)),
+                    )
+                    .unwrap_or(5),
                 )
             };
             let ok = ctx.db.with_mut_snapshot(|snap| {
@@ -260,8 +308,19 @@ pub fn handle_pi_orbitals_gm(
                 }));
             };
             let pin_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let res_tid = args.get(2).and_then(|a| a.as_i64()).unwrap_or(2268) as TypeId;
-            let heads_cnt = args.get(3).and_then(|a| a.as_i64()).unwrap_or(3) as u8;
+            let res_tid = args
+                .get(2)
+                .and_then(|a| a.as_i64())
+                .and_then(|v| TypeId::try_from(v).ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(2268);
+            let heads_cnt = u8::try_from(
+                args.get(3)
+                    .and_then(|a| a.as_i64())
+                    .unwrap_or(3)
+                    .clamp(0, i64::from(u8::MAX)),
+            )
+            .unwrap_or(3);
             let now_unix = ctx.now_unix();
             let ok = ctx.db.with_mut_snapshot(|snap| {
                 let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
@@ -363,11 +422,11 @@ pub fn handle_pi_orbitals_gm(
             };
             let (theta, phi) = parse_theta_phi(theta_rep, phi_rep);
             let (pins_count, report_dict) = ctx.db.with_snapshot(|snap| {
-                let p_cnt = snap.planetary_colonies.get(&(char_id, planet_id)).map(|c| c.pins_count as i64).unwrap_or(0);
+                let p_cnt = snap.planetary_colonies.get(&(char_id, planet_id)).map(|c| i64::from(c.pins_count)).unwrap_or(0);
                 let p0_res = crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id);
                 let mut dist: Vec<(PyRep, PyRep)> = p0_res.into_iter().map(|tid| {
                     let richness = compute_planet_resource_density(ctx, snap, planet_id, tid, theta, phi);
-                    (PyRep::Integer(tid as i64), PyRep::Real(richness))
+                    (PyRep::Integer(i64::from(tid)), PyRep::Real(richness))
                 }).collect();
                 dist.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
                 (p_cnt, PyRep::Dict(dist))
@@ -401,7 +460,7 @@ pub fn handle_pi_orbitals_gm(
                 }));
             };
             let rep = ctx.db.with_snapshot(|snap| {
-                let count = snap.planetary_colonies.keys().filter(|(cid, _)| *cid == char_id).count() as i64;
+                let count = i64::try_from(snap.planetary_colonies.keys().filter(|(cid, _)| *cid == char_id).count()).unwrap_or(i64::MAX);
                 let col = snap.planetary_colonies.get(&(char_id, planet_id));
                 let cc_lvl = col.map(|c| c.command_center_level).unwrap_or(0);
                 let net = load_pi_network(snap, char_id, planet_id, cc_lvl);
@@ -409,7 +468,7 @@ pub fn handle_pi_orbitals_gm(
                 PyRep::keyval([
                     ("colonyCount", PyRep::Integer(count)),
                     ("planetID", PyRep::Integer(planet_id)),
-                    ("lastTick", PyRep::Integer(col.map(|c| c.last_extracted_unix as i64).unwrap_or(0))),
+                    ("lastTick", PyRep::Integer(col.and_then(|c| i64::try_from(c.last_extracted_unix).ok()).unwrap_or(0))),
                     ("pins", PyRep::List(pins_rep)),
                     ("links", PyRep::List(links_rep)),
                     ("routes", PyRep::List(routes_rep)),
@@ -443,7 +502,7 @@ pub fn handle_pi_orbitals_gm(
             };
             let duration_hours = duration_opt.and_then(|a| a.as_i64()).unwrap_or(24);
             let rep = ctx.db.with_mut_snapshot(|snap| {
-                let count = snap.planetary_colonies.keys().filter(|(cid, _)| *cid == char_id).count() as i64;
+                let count = i64::try_from(snap.planetary_colonies.keys().filter(|(cid, _)| *cid == char_id).count()).unwrap_or(i64::MAX);
                 let col = snap.planetary_colonies.get(&(char_id, planet_id));
                 let cc_lvl = col.map(|c| c.command_center_level).unwrap_or(0);
                 let net = load_pi_network(snap, char_id, planet_id, cc_lvl);
@@ -455,11 +514,11 @@ pub fn handle_pi_orbitals_gm(
                     .map(|p| {
                         PyRep::keyval([
                             ("pinID", PyRep::Integer(p.pin_id)),
-                            ("typeID", PyRep::Integer(p.type_id as i64)),
-                            ("headCount", PyRep::Integer(p.extractor_head_count as i64)),
-                            ("cycleTimeSeconds", PyRep::Integer(p.extractor_cycle_seconds as i64)),
-                            ("resourceTypeID", PyRep::Integer(p.extractor_resource_type_id.unwrap_or(2268) as i64)),
-                            ("installedUnix", PyRep::Integer(p.program_install_unix as i64)),
+                            ("typeID", PyRep::Integer(i64::from(p.type_id))),
+                            ("headCount", PyRep::Integer(i64::from(p.extractor_head_count))),
+                            ("cycleTimeSeconds", PyRep::Integer(i64::try_from(p.extractor_cycle_seconds).unwrap_or(i64::MAX))),
+                            ("resourceTypeID", PyRep::Integer(i64::from(p.extractor_resource_type_id.unwrap_or(2268)))),
+                            ("installedUnix", PyRep::Integer(i64::try_from(p.program_install_unix).unwrap_or(i64::MAX))),
                         ])
                     })
                     .collect();
@@ -496,7 +555,7 @@ pub fn handle_pi_orbitals_gm(
                 .get(arg_offset)
                 .and_then(|a| a.as_i64())
                 .filter(|&v| v > 0)
-                .map(|v| v as TypeId);
+                .and_then(|v| TypeId::try_from(v).ok());
             let (lat, lon) = parse_theta_phi(args.get(arg_offset + 1), args.get(arg_offset + 2));
             let radius = args
                 .get(arg_offset + 3)
@@ -557,7 +616,7 @@ pub fn handle_pi_orbitals_gm(
             let res_tid_arg = res_arg
                 .and_then(|a| a.as_i64())
                 .filter(|&v| v > 0)
-                .map(|v| v as TypeId);
+                .and_then(|v| TypeId::try_from(v).ok());
             let res = ctx.db.with_snapshot(|snap| {
                 let (planet_id, _sys_id, resource_type_id) = resolve_gm_planet_and_resource(
                     ctx,
@@ -578,7 +637,7 @@ pub fn handle_pi_orbitals_gm(
             match res {
                 Ok((data, planet_id, resource_type_id)) => Some(Ok(PyRep::keyval([
                     ("planetID", PyRep::Integer(planet_id)),
-                    ("resourceTypeID", PyRep::Integer(resource_type_id as i64)),
+                    ("resourceTypeID", PyRep::Integer(i64::from(resource_type_id))),
                     ("data", PyRep::Bytes(data)),
                     ("numBands", PyRep::Integer(3)),
                 ]))),
@@ -593,4 +652,134 @@ pub fn handle_pi_orbitals_gm(
 #[cfg(test)]
 #[path = "pi_orbitals_gm_tests.rs"]
 mod pi_orbitals_gm_tests;
+
+#[cfg(test)]
+mod qty_tests {
+    use super::*;
+    use crate::router::ServerContext;
+    use eve_db::{InventoryFlag, InventoryItemRecord, PlanetaryColonyRecord, WorldRepository};
+    use eve_sde::SdeRegistry;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn gm_add_commodity_rejects_invalid_qty_and_rolls_back_stack_overflow() {
+        let sde = Arc::new(SdeRegistry::with_canonical_seed());
+        let db = Arc::new(WorldRepository::with_demo_seed());
+        let ctx = ServerContext::with_sde_and_repository(sde, db);
+        let char_id = 90_000_001;
+        let planet_id = 40_009_082;
+        let pin_id = 501;
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.planetary_colonies.insert(
+                (char_id, planet_id),
+                PlanetaryColonyRecord {
+                    planet_id,
+                    owner_id: char_id,
+                    solar_system_id: 30_000_142,
+                    command_center_level: 1,
+                    pins_count: 1,
+                    extracted_commodities: HashMap::new(),
+                    last_extracted_unix: 1000,
+                },
+            );
+            let net = PiColonyNetworkState {
+                cpu_max: 7057.0,
+                pg_max: 9000.0,
+                pins: vec![PiPinState {
+                    pin_id,
+                    type_id: 2254,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            save_pi_network(snap, char_id, planet_id, &net);
+            snap.items.insert(
+                939_801,
+                InventoryItemRecord {
+                    item_id: 939_801,
+                    type_id: 2268,
+                    owner_id: char_id,
+                    location_id: pin_id,
+                    flag: InventoryFlag::None,
+                    quantity: i32::MAX - 3,
+                    ..Default::default()
+                },
+            );
+        });
+
+        let mut gm = SessionState {
+            user_id: Some(1),
+            character_id: Some(char_id),
+            role: eve_db::service_roles::ROLE_GMH,
+            ..Default::default()
+        };
+        let kw = HashMap::new();
+
+        for bad_qty in [0_i64, -5, i64::from(i32::MAX) + 1] {
+            let err = handle_pi_orbitals_gm(
+                &ctx,
+                &mut gm,
+                "planetMgr",
+                "GMAddCommodity",
+                &[
+                    PyRep::Integer(planet_id),
+                    PyRep::Integer(pin_id),
+                    PyRep::Integer(2268),
+                    PyRep::Integer(bad_qty),
+                ],
+                &kw,
+                None,
+            )
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(err.code, "InvalidQuantity");
+        }
+
+        let wrapped_tid = i64::from(u32::MAX) + 2269;
+        let tid_err = handle_pi_orbitals_gm(
+            &ctx,
+            &mut gm,
+            "planetMgr",
+            "GMAddCommodity",
+            &[
+                PyRep::Integer(planet_id),
+                PyRep::Integer(pin_id),
+                PyRep::Integer(wrapped_tid),
+                PyRep::Integer(5),
+            ],
+            &kw,
+            None,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(tid_err.code, "InvalidQuantity");
+
+        let overflow_err = handle_pi_orbitals_gm(
+            &ctx,
+            &mut gm,
+            "planetMgr",
+            "GMAddCommodity",
+            &[
+                PyRep::Integer(planet_id),
+                PyRep::Integer(pin_id),
+                PyRep::Integer(2268),
+                PyRep::Integer(10),
+            ],
+            &kw,
+            None,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(overflow_err.code, "InvalidQuantity");
+
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items.get(&939_801).map(|i| i.quantity), Some(i32::MAX - 3));
+            assert!(snap.planetary_colonies[&(char_id, planet_id)]
+                .extracted_commodities
+                .is_empty());
+        });
+    }
+}
 

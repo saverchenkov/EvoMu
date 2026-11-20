@@ -629,10 +629,21 @@ async fn test_live_fleet_boss_handover_formations_and_tagging() {
         assert_eq!(got.dict_get("formationName").and_then(|v| v.as_str()), Some(shape));
 
         ctx.dispatch_rpc(&mut fc.sess, "fleetObjectHandler", Some(f_oid), "FleetWarp", &[PyRep::Real(dest_pos.x), PyRep::Real(dest_pos.y), PyRep::Real(dest_pos.z), PyRep::Real(10_000.0)], &HashMap::new(), None).await.expect("FleetWarp");
-        for _ in 0..20 {
+        let fleet_ships = [fc.ship_id, sc.ship_id, m1.ship_id, m2.ship_id];
+        for _ in 0..30 {
             sys.step_manual(5.0).await.unwrap();
             ctx.clock().advance_secs(5);
-            if !matches!(sys.get_ball_snapshot(fc.ship_id).await.unwrap().unwrap().1.mode, eve_destiny::MovementMode::Warp { .. }) {
+            let mut all_landed = true;
+            for &sh in &fleet_ships {
+                if matches!(
+                    sys.get_ball_snapshot(sh).await.unwrap().unwrap().1.mode,
+                    eve_destiny::MovementMode::Warp { .. }
+                ) {
+                    all_landed = false;
+                    break;
+                }
+            }
+            if all_landed {
                 break;
             }
         }

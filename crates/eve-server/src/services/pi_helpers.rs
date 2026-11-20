@@ -8,7 +8,7 @@ use crate::services::industry_pi::{
     extractor_overlap_factor, list_sde_planet_p0_resources, pi_schematic_recipe,
 };
 use eve_db::{IskCents, PlanetaryColonyRecord, WorldStateSnapshot};
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, ItemQtyError, PyRep};
 use eve_sde::TypeId;
 use std::collections::{BTreeMap, HashMap};
 
@@ -397,16 +397,16 @@ pub fn load_pi_network(
                 type_id: p.type_id,
                 latitude: p.latitude,
                 longitude: p.longitude,
-                schematic_id: p.schematic_id.map(|s| s as u32),
+                schematic_id: p.schematic_id.and_then(|s| u32::try_from(s).ok()),
                 program_install_unix: p.install_time_unix.unwrap_or(0),
                 expiry_time_unix: p.expiry_time_unix,
-                contents: p.contents.iter().map(|c| (c.type_id, c.amount.max(0) as u64)).collect(),
+                contents: p.contents.iter().map(|c| (c.type_id, u64::try_from(c.amount).unwrap_or(0))).collect(),
                 ..Default::default()
             }).collect(),
             links: layout.links.iter().map(|l| PiLinkState {
                 source_pin_id: l.source_pin_id,
                 dest_pin_id: l.destination_pin_id,
-                level: l.link_level as u8,
+                level: u8::try_from(l.link_level.clamp(0, i64::from(u8::MAX))).unwrap_or(0),
                 ..Default::default()
             }).collect(),
             routes: layout.routes.iter().map(|r| {
@@ -417,7 +417,7 @@ pub fn load_pi_network(
                     route_id: r.route_id,
                     path,
                     commodity_type_id: r.content_type_id,
-                    quantity: r.quantity.max(0) as u32,
+                    quantity: u32::try_from(r.quantity.clamp(0, i64::from(u32::MAX))).unwrap_or(0),
                 }
             }).collect(),
             ..Default::default()
@@ -435,7 +435,7 @@ pub fn load_pi_network(
         for lpin in &layout.pins {
             if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == lpin.pin_id) {
                 for c in &lpin.contents {
-                    pin.contents.entry(c.type_id).or_insert(c.amount.max(0) as u64);
+                    pin.contents.entry(c.type_id).or_insert_with(|| u64::try_from(c.amount).unwrap_or(0));
                 }
             }
         }
@@ -495,7 +495,7 @@ pub fn save_pi_network(
                     .iter()
                     .map(|(&tid, &amt)| eve_db::PlanetaryPinContentRecord {
                         type_id: tid,
-                        amount: amt as i64,
+                        amount: i64::try_from(amt).unwrap_or(i64::MAX),
                     })
                     .collect(),
             })
@@ -534,20 +534,20 @@ pub fn save_pi_network(
 
 pub fn format_pi_pins_links(net: &PiColonyNetworkState) -> (Vec<PyRep>, Vec<PyRep>, Vec<PyRep>) {
     let pins_rep = net.pins.iter().map(|p| PyRep::keyval([
-        ("pinID", PyRep::Integer(p.pin_id)), ("typeID", PyRep::Integer(p.type_id as i64)),
+        ("pinID", PyRep::Integer(p.pin_id)), ("typeID", PyRep::Integer(i64::from(p.type_id))),
         ("latitude", PyRep::Real(p.latitude)), ("longitude", PyRep::Real(p.longitude)),
         ("cpuUsage", PyRep::Real(p.cpu_usage)), ("powergridUsage", PyRep::Real(p.pg_usage)),
-        ("schematicID", PyRep::Integer(p.schematic_id.unwrap_or(0) as i64)), ("headCount", PyRep::Integer(p.extractor_head_count as i64)),
+        ("schematicID", PyRep::Integer(i64::from(p.schematic_id.unwrap_or(0)))), ("headCount", PyRep::Integer(i64::from(p.extractor_head_count))),
     ])).collect();
     let links_rep = net.links.iter().map(|l| PyRep::keyval([
         ("endpoint1", PyRep::Integer(l.source_pin_id)), ("endpoint2", PyRep::Integer(l.dest_pin_id)),
         ("sourcePinID", PyRep::Integer(l.source_pin_id)), ("destPinID", PyRep::Integer(l.dest_pin_id)),
-        ("level", PyRep::Integer(l.level as i64)), ("lengthKm", PyRep::Real(l.length_km)),
+        ("level", PyRep::Integer(i64::from(l.level))), ("lengthKm", PyRep::Real(l.length_km)),
         ("cpuUsage", PyRep::Real(l.cpu_usage)), ("powergridUsage", PyRep::Real(l.pg_usage)), ("bandwidth", PyRep::Real(l.bandwidth)),
     ])).collect();
     let routes_rep = net.routes.iter().map(|r| PyRep::keyval([
-        ("routeID", PyRep::Integer(r.route_id)), ("commodityTypeID", PyRep::Integer(r.commodity_type_id as i64)),
-        ("quantity", PyRep::Integer(r.quantity as i64)), ("path", PyRep::List(r.path.iter().map(|&id| PyRep::Integer(id)).collect())),
+        ("routeID", PyRep::Integer(r.route_id)), ("commodityTypeID", PyRep::Integer(i64::from(r.commodity_type_id))),
+        ("quantity", PyRep::Integer(i64::from(r.quantity))), ("path", PyRep::List(r.path.iter().map(|&id| PyRep::Integer(id)).collect())),
     ])).collect();
     (pins_rep, links_rep, routes_rep)
 }
@@ -562,7 +562,8 @@ pub fn queue_pi_notification(
     now_unix: u64,
 ) {
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let notif_id = -(7_900_000_000_000 + (type_id as i64) * 100_000_000 + ((pin_id.abs() ^ (now_unix as i64)) & 0x03FF_FFFF));
+    let now_unix_i64 = i64::try_from(now_unix).unwrap_or(i64::MAX);
+    let notif_id = -(7_900_000_000_000 + i64::from(type_id) * 100_000_000 + ((pin_id.abs() ^ now_unix_i64) & 0x03FF_FFFF));
     let data_str = format!("{event}:{planet_id}:{pin_id}");
     if let Ok(mut recs) = ctx.notification_records.write() {
         if recs.iter().any(|r| r.receiver_id == recipient_char_id && r.notification_id == notif_id && !r.deleted) {
@@ -575,7 +576,7 @@ pub fn queue_pi_notification(
             sender_id: recipient_char_id,
             receiver_id: recipient_char_id,
             processed: false,
-            created: now_unix as i64,
+            created: now_unix_i64,
             data: data_str,
             deleted: false,
             interacted: false,
@@ -604,13 +605,24 @@ pub fn queue_pi_notification(
     }
 }
 
+fn bounded_f64_to_u64(val: f64) -> u64 {
+    if val.is_nan() || val <= 0.0 {
+        0
+    } else if val >= (u64::MAX as f64) {
+        u64::MAX
+    } else {
+        val as u64
+    }
+}
+
 /// Sums commodity quantities stored across all pins in a colony network.
 pub fn sum_pi_pin_contents(pins: &[PiPinState]) -> HashMap<TypeId, u64> {
     let mut pin_totals: HashMap<TypeId, u64> = HashMap::new();
     for p in pins {
         for (&tid, &amt) in &p.contents {
             if amt > 0 {
-                *pin_totals.entry(tid).or_insert(0) += amt;
+                let slot = pin_totals.entry(tid).or_insert(0);
+                *slot = slot.saturating_add(amt);
             }
         }
     }
@@ -706,7 +718,7 @@ pub(crate) fn advance_colony_simulation_detailed(
                     .copied()
                     .unwrap_or(0.0),
             );
-            let heads = u64::from(pin.extractor_head_count.clamp(1, 10));
+            let heads = u32::from(pin.extractor_head_count.clamp(1, 10));
             let overlap = extractor_overlap_factor(&pin.extractor_heads, pin.extractor_head_radius.max(0.02));
             let valid_route = net
                 .routes
@@ -721,12 +733,12 @@ pub(crate) fn advance_colony_simulation_detailed(
                 .unwrap_or(pin.pin_id);
             let p0_vol_per_unit = ctx.sde.types.get(&p0_tid).map(|t| t.volume.max(0.01)).unwrap_or(0.38);
             let cycle_scale = (cyc_secs as f64) / CANONICAL_EXTRACTOR_CYCLE_SECS;
-            let min_batch = ((10.0 * cycle_scale).round() as u64).max(1);
+            let min_batch = bounded_f64_to_u64((10.0 * cycle_scale).round()).max(1);
             let mut pin_batch_total = 0_u64;
             for c in 0..cycles {
                 let cycle_pos = prior_depl_cycles + ((prev_completed + c) as f64) * cycle_scale;
                 let decay = (-0.015 * cycle_pos).exp();
-                let batch = ((1_000.0 * (heads as f64) * overlap * cycle_scale * decay).round() as u64).max(min_batch);
+                let batch = bounded_f64_to_u64((1_000.0 * f64::from(heads) * overlap * cycle_scale * decay).round()).max(min_batch);
                 pin_batch_total = pin_batch_total.saturating_add(batch);
             }
             if pin_batch_total > 0 {
@@ -740,13 +752,16 @@ pub(crate) fn advance_colony_simulation_detailed(
             let cap_m3 = pin_storage_capacity_m3(&ctx.sde, target_pin.type_id);
             let cur_vol = pin_contents_volume_m3(&ctx.sde, target_pin);
             let avail_m3 = (cap_m3 - cur_vol).max(0.0);
-            let max_units = (avail_m3 / unit_vol).floor() as u64;
+            let max_units = bounded_f64_to_u64((avail_m3 / unit_vol).floor());
             let actual_deposit = batch.min(max_units);
             if actual_deposit > 0 {
-                *target_pin.contents.entry(p0_tid).or_insert(0) += actual_deposit;
-                *col.extracted_commodities.entry(p0_tid).or_insert(0) += actual_deposit;
-                *extracted_by_type.entry(p0_tid).or_insert(0) += actual_deposit;
-                extracted_total += actual_deposit;
+                let pin_slot = target_pin.contents.entry(p0_tid).or_insert(0);
+                *pin_slot = pin_slot.saturating_add(actual_deposit);
+                let col_slot = col.extracted_commodities.entry(p0_tid).or_insert(0);
+                *col_slot = col_slot.saturating_add(actual_deposit);
+                let by_type_slot = extracted_by_type.entry(p0_tid).or_insert(0);
+                *by_type_slot = by_type_slot.saturating_add(actual_deposit);
+                extracted_total = extracted_total.saturating_add(actual_deposit);
             }
             let new_vol = pin_contents_volume_m3(&ctx.sde, target_pin);
             if new_vol + unit_vol > cap_m3 || (batch > 0 && actual_deposit < batch) {
@@ -875,11 +890,13 @@ pub(crate) fn advance_colony_simulation_detailed(
             }
 
             // Output is only minted when inputs have been deducted from connected pins
-            *col.extracted_commodities.entry(out_tid).or_insert(0) += out_qty;
+            let col_out = col.extracted_commodities.entry(out_tid).or_insert(0);
+            *col_out = col_out.saturating_add(out_qty);
             if let Some(dst_p) = net.pins.iter_mut().find(|p| p.pin_id == out_target_pin_id) {
-                *dst_p.contents.entry(out_tid).or_insert(0) += out_qty;
+                let dst_out = dst_p.contents.entry(out_tid).or_insert(0);
+                *dst_out = dst_out.saturating_add(out_qty);
             }
-            processed_total += out_qty;
+            processed_total = processed_total.saturating_add(out_qty);
             cycles_ran += 1;
         }
         net.pins[pin_idx].last_cycle_unix = Some(if stalled {
@@ -1137,7 +1154,7 @@ pub fn save_orbital_settings(snap: &mut eve_db::WorldStateSnapshot, planet_or_or
         })
         .or_else(|| {
             snap.items.get(&planet_id).or_else(|| snap.items.get(&planet_or_orbital_id))
-                .and_then(|it| if (30_000_000..=33_000_000).contains(&it.location_id) { Some(it.location_id as u32) } else { None })
+                .and_then(|it| u32::try_from(it.location_id).ok().filter(|id| (30_000_000..=33_000_000).contains(id)))
         })
         .or_else(|| {
             snap.characters.values().find(|c| c.corporation_id == settings.owner_corp_id).map(|c| c.solar_system_id)
@@ -1273,13 +1290,13 @@ pub fn upgrade_command_center_logic(
 
     let col_mut = snap.planetary_colonies.get_mut(&(char_id, planet_id)).expect("colony exists");
     col_mut.command_center_level = target_level;
-    col_mut.pins_count = (target_level as u32) + 1;
+    col_mut.pins_count = u32::from(target_level) + 1;
     let new_pins = col_mut.pins_count;
 
     Ok(PyRep::keyval([
         ("planetID", PyRep::Integer(planet_id)),
-        ("commandCenterLevel", PyRep::Integer(target_level as i64)),
-        ("pinsCount", PyRep::Integer(new_pins as i64)),
+        ("commandCenterLevel", PyRep::Integer(i64::from(target_level))),
+        ("pinsCount", PyRep::Integer(i64::from(new_pins))),
         ("upgradeCostISK", PyRep::Real(upgrade_cost_isk)),
         ("cpuMax", PyRep::Real(new_cpu_max)),
         ("powergridMax", PyRep::Real(new_pg_max)),
@@ -1335,13 +1352,8 @@ pub fn plan_pi_import_consumptions(
     station_id_opt: Option<i64>,
     structure_id_opt: Option<i64>,
 ) -> Result<Vec<(i64, i32)>, BridgeRpcError> {
-    if qty == 0 {
-        return Err(BridgeRpcError {
-            code: "InvalidCommodityQuantity".into(),
-            message: "Commodity import quantity must be greater than zero".into(),
-            client_error: None,
-        });
-    }
+    let total_qty = ItemQty::try_from_u64(qty)
+        .map_err(|e| e.into_rpc_error("InvalidCommodityQuantity"))?;
 
     let opts = eve_db::ConsumeExactOptions::for_character_commodity(char_id);
     let mut matching_item_ids: Vec<i64> = Vec::new();
@@ -1416,7 +1428,7 @@ pub fn plan_pi_import_consumptions(
     }
 
     let mut plan = Vec::with_capacity(matching_item_ids.len());
-    let mut remaining = qty;
+    let mut remaining = total_qty.as_u64();
     for iid in matching_item_ids {
         if remaining == 0 {
             break;
@@ -1424,18 +1436,13 @@ pub fn plan_pi_import_consumptions(
         let Some(avail_i32) = snap.items.get(&iid).map(|it| it.quantity) else {
             continue;
         };
-        if avail_i32 <= 0 {
+        let Ok(avail_qty) = ItemQty::try_from_i32(avail_i32) else {
             continue;
-        }
-        let avail_u64 = u64::try_from(avail_i32).unwrap_or(0);
-        let take_u64 = avail_u64.min(remaining);
-        let take = i32::try_from(take_u64).map_err(|_| BridgeRpcError {
-            code: "InvalidCommodityQuantity".into(),
-            message: format!(
-                "Import stack slice {take_u64} exceeds maximum i32 stack size"
-            ),
-            client_error: None,
-        })?;
+        };
+        let take_u64 = avail_qty.as_u64().min(remaining);
+        let take = ItemQty::try_from_u64(take_u64)
+            .and_then(ItemQty::try_into_stack_i32)
+            .map_err(|e| e.into_rpc_error("InvalidCommodityQuantity"))?;
         plan.push((iid, take));
         remaining -= take_u64;
     }
@@ -1506,18 +1513,11 @@ pub fn parse_pi_commodities_map(rep: &PyRep) -> Result<BTreeMap<TypeId, u64>, Br
             message: format!("Commodity type ID {tid_raw} out of range"),
             client_error: None,
         })?;
-        if qty_raw <= 0 {
-            return Err(BridgeRpcError {
-                code: "InvalidCommodityQuantity".into(),
-                message: format!("Commodity quantity must be positive, got {qty_raw}"),
-                client_error: None,
-            });
-        }
+        let qty = ItemQty::try_from_i64(qty_raw)
+            .map_err(|e| e.into_rpc_error("InvalidCommodityQuantity"))?;
         let slot = map.entry(tid).or_insert(0);
-        *slot = slot.checked_add(qty_raw as u64).ok_or_else(|| BridgeRpcError {
-            code: "InvalidCommodityQuantity".into(),
-            message: "Commodity quantity overflow".into(),
-            client_error: None,
+        *slot = slot.checked_add(qty.as_u64()).ok_or_else(|| {
+            ItemQtyError::Overflow.into_rpc_error("InvalidCommodityQuantity")
         })?;
         Ok(())
     };
@@ -1659,7 +1659,7 @@ pub fn user_transfer_commodities_logic(
             (qty as f64) * unit_vol
         })
         .sum();
-    let cooldown_secs = (300.0_f64 + 0.03_f64 * total_transfer_vol_m3 * 60.0_f64).round() as u64;
+    let cooldown_secs = bounded_f64_to_u64((300.0_f64 + 0.03_f64 * total_transfer_vol_m3 * 60.0_f64).round());
     let now_unix = ctx.now_unix();
 
     // Verify every hop in path exists and link bandwidth accommodates volume
@@ -1735,4 +1735,103 @@ pub fn user_transfer_commodities_logic(
 #[cfg(test)]
 #[path = "pi_helpers_tests.rs"]
 mod pi_helpers_tests;
+
+#[cfg(test)]
+mod qty_tests {
+    use super::*;
+    use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
+
+    #[test]
+    fn pi_commodity_parsing_and_import_planning_enforce_item_qty_bounds() {
+        let bad_zero = PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(0))]);
+        assert_eq!(
+            parse_pi_commodities_map(&bad_zero).unwrap_err().code,
+            "InvalidCommodityQuantity"
+        );
+        let bad_neg = PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(-2))]);
+        assert_eq!(
+            parse_pi_commodities_map(&bad_neg).unwrap_err().code,
+            "InvalidCommodityQuantity"
+        );
+        let bad_tid = PyRep::Dict(vec![(PyRep::Integer(-1), PyRep::Integer(5))]);
+        assert_eq!(
+            parse_pi_commodities_map(&bad_tid).unwrap_err().code,
+            "InvalidCommodity"
+        );
+
+        let db = WorldRepository::with_demo_seed();
+        let over_signed_max = u64::try_from(i64::MAX).unwrap() + 1;
+        db.with_snapshot(|snap| {
+            assert_eq!(
+                plan_pi_import_consumptions(snap, 90_000_001, 40_009_082, 44, 0, None, None, None)
+                    .unwrap_err()
+                    .code,
+                "InvalidCommodityQuantity"
+            );
+            assert_eq!(
+                plan_pi_import_consumptions(
+                    snap,
+                    90_000_001,
+                    40_009_082,
+                    44,
+                    over_signed_max,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap_err()
+                .code,
+                "InvalidCommodityQuantity"
+            );
+        });
+
+        let db_multi = WorldRepository::with_demo_seed();
+        let char_id = 90_000_001_i64;
+        let planet_id = 40_009_082_i64;
+        db_multi.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                939_701,
+                InventoryItemRecord {
+                    item_id: 939_701,
+                    type_id: 44,
+                    owner_id: char_id,
+                    location_id: planet_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1_500_000_000,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                939_702,
+                InventoryItemRecord {
+                    item_id: 939_702,
+                    type_id: 44,
+                    owner_id: char_id,
+                    location_id: planet_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1_500_000_000,
+                    ..Default::default()
+                },
+            );
+        });
+        db_multi.with_snapshot(|snap| {
+            let plan = plan_pi_import_consumptions(
+                snap,
+                char_id,
+                planet_id,
+                44,
+                2_500_000_000,
+                None,
+                None,
+                None,
+            )
+            .expect("multi-stack plan above i32::MAX");
+            assert_eq!(plan, vec![(939_701, 1_500_000_000), (939_702, 1_000_000_000)]);
+        });
+
+        assert_eq!(bounded_f64_to_u64(-5.0), 0);
+        assert_eq!(bounded_f64_to_u64(f64::NAN), 0);
+        assert_eq!(bounded_f64_to_u64(f64::INFINITY), u64::MAX);
+    }
+}
 
