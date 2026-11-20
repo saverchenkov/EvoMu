@@ -289,9 +289,18 @@ async fn ships_mastery_leave_ship_corvette_mastery_killmarks_repair_simulation_t
     .expect("LeaveShip ok");
     assert!(matches!(pod_res, PyRep::Integer(id) if id > 0));
 
-    // Remove the Rifter from station so CreateNewbieShip issues a free corvette
+    // Remove the Rifter from station and grant Spaceship Command I (3327) so CreateNewbieShip
+    // issues a free corvette (#1433).
     ctx.db.with_mut_snapshot(|s| {
         s.items.remove(&ship_id);
+        s.skills.entry(char_id).or_default().insert(
+            3327,
+            eve_db::TrainedSkillRecord {
+                type_id: 3327,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
     });
     let corvette_res = handle_ships_mastery_and_fitting_ext(
         &ctx,
@@ -1708,7 +1717,7 @@ async fn create_newbie_ship_guards_structure_control_saved_ship_and_corvette_ski
     sess.ship_id = Some(structure_id);
 
     // 1. Controlling a docked Upwell structure rejects CreateNewbieShip with ControllingStructure
-    //    (both 2-arg V24 call and 0-arg call) without orphaning active_pilot_by_structure (HF1411-P1-02).
+    //    (both 2-arg V24 call and 0-arg call) without orphaning active_pilot_by_structure (HF1411-P1-02 / HF1417-P1-02).
     let ctrl_err = handle_ships_mastery_and_fitting_ext(
         &ctx,
         &mut sess,
@@ -1720,8 +1729,22 @@ async fn create_newbie_ship_guards_structure_control_saved_ship_and_corvette_ski
     )
     .await
     .expect("handled")
-    .expect_err("controlling structure must reject CreateNewbieShip");
+    .expect_err("controlling structure must reject 2-arg CreateNewbieShip");
     assert_eq!(ctrl_err.code, "ControllingStructure");
+    assert_eq!(sess.ship_id, Some(structure_id));
+    let ctrl_0arg_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("controlling structure must reject 0-arg CreateNewbieShip");
+    assert_eq!(ctrl_0arg_err.code, "ControllingStructure");
     assert_eq!(sess.ship_id, Some(structure_id));
     ctx.db.with_snapshot(|s| {
         assert_eq!(
@@ -1813,5 +1836,155 @@ async fn create_newbie_ship_guards_structure_control_saved_ship_and_corvette_ski
         spawned_instead.dict_get("typeID").and_then(PyRep::as_i64),
         Some(601)
     );
+    assert_eq!(sess.ship_id, Some(spawned_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_newbie_ship_spawn_enforces_racial_corvette_skill_prerequisites() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_501_501_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let rifter_id = 96_501_510_i64;
+    let hangar_ibis_id = 96_501_511_i64;
+    let capsule_id = 96_501_512_i64;
+    let claim_key = -8_800_000_i64 - char_id;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ch = s.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.race_id = 1; // Caldari -> Ibis (601, requires Spaceship Command I / 3327)
+        ch.name = "UntrainedCorvettePilot".into();
+        ch.corporation_id = 98_000_001;
+        ch.solar_system_id = sys_id;
+        ch.station_id = Some(station_id);
+        ch.structure_id = None;
+        ch.active_ship_id = rifter_id;
+        s.characters.insert(char_id, ch);
+        // Deliberately leave `s.skills` empty for `char_id` (missing Spaceship Command I / 3327).
+        s.skills.remove(&char_id);
+
+        for (item_id, type_id) in [
+            (rifter_id, 587_u32),
+            (hangar_ibis_id, 601_u32),
+            (capsule_id, 670_u32),
+        ] {
+            s.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut sess = SessionState::new(9_433);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(98_000_001);
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = Some(station_id);
+    sess.ship_id = Some(rifter_id);
+
+    // 1. V24 2-arg call by an untrained pilot with an existing Hangar corvette:
+    //    `find_boardable_corvette_in_hangar` skips `hangar_ibis_id` AND the spawn fallback must
+    //    also reject with `ShipHasSkillPrerequisites` instead of leaving `rifter_id` or spawning
+    //    a duplicate corvette (+ Civilian Miner + Tritanium) (#1433 / HF1417-P1-01).
+    let items_before = ctx.db.with_snapshot(|s| s.items.len());
+    let err_2arg = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(rifter_id), PyRep::Integer(station_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("untrained pilot must not spawn duplicate racial corvette on 2-arg call");
+    assert_eq!(err_2arg.code, "ShipHasSkillPrerequisites");
+    assert_eq!(sess.ship_id, Some(rifter_id));
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items.len(), items_before);
+        assert_eq!(
+            s.characters.get(&char_id).map(|c| c.active_ship_id),
+            Some(rifter_id)
+        );
+        assert!(!s.item_custom_names.contains_key(&claim_key));
+    });
+
+    // 2. Legacy 0-arg call from a capsule with no corvette in station must likewise reject with
+    //    `ShipHasSkillPrerequisites` without spawning or writing a cooldown timestamp.
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.remove(&hangar_ibis_id);
+        s.characters.get_mut(&char_id).unwrap().active_ship_id = capsule_id;
+    });
+    sess.ship_id = Some(capsule_id);
+    let items_before_0arg = ctx.db.with_snapshot(|s| s.items.len());
+    let err_0arg = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("untrained pilot in capsule must hit ShipHasSkillPrerequisites on 0-arg spawn");
+    assert_eq!(err_0arg.code, "ShipHasSkillPrerequisites");
+    assert_eq!(sess.ship_id, Some(capsule_id));
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items.len(), items_before_0arg);
+        assert_eq!(
+            s.characters.get(&char_id).map(|c| c.active_ship_id),
+            Some(capsule_id)
+        );
+        assert!(!s.item_custom_names.contains_key(&claim_key));
+    });
+
+    // 3. Once Spaceship Command I (3327) is trained, spawning the racial Ibis (601) succeeds.
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.entry(char_id).or_default().insert(
+            3327,
+            eve_db::TrainedSkillRecord {
+                type_id: 3327,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
+    let spawned = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("trained pilot with Spaceship Command I must spawn racial corvette");
+    let spawned_id = spawned
+        .dict_get("shipID")
+        .and_then(PyRep::as_i64)
+        .expect("spawned corvette shipID");
+    assert_eq!(spawned.dict_get("typeID").and_then(PyRep::as_i64), Some(601));
     assert_eq!(sess.ship_id, Some(spawned_id));
 }
