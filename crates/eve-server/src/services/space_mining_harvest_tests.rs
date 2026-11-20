@@ -240,6 +240,14 @@ async fn ice_belt_respawn_lifecycle_seeds_clears_waits_and_respawns_after_delay(
         ice.anomaly_id.clone()
     });
 
+    // Idle ticks while an active ice belt has asteroids remaining must not open a write transaction.
+    let active_epoch = ctx.db.state_epoch();
+    let active_commits = ctx.db.tx_commit_count();
+    tick_ice_belt_respawn_sync(&ctx, ice_sys);
+    tick_all_ice_belt_respawns_sync(&ctx);
+    assert_eq!(ctx.db.state_epoch(), active_epoch);
+    assert_eq!(ctx.db.tx_commit_count(), active_commits);
+
     // Deplete all asteroids in that system and verify anomaly marks cleared + signature collapsed
     ctx.db.with_mut_snapshot(|snap| {
         for ast in snap.asteroids.values_mut() {
@@ -264,8 +272,14 @@ async fn ice_belt_respawn_lifecycle_seeds_clears_waits_and_respawns_after_delay(
         assert!(sig.collapsed);
     });
 
-    // Before 4h elapses, calling tick_all_ice_belt_respawns_sync does not respawn
+    // Before 4h elapses, calling tick_all_ice_belt_respawns_sync or tick_ice_belt_respawn_sync
+    // does not respawn or open a write transaction.
+    let cooldown_epoch = ctx.db.state_epoch();
+    let cooldown_commits = ctx.db.tx_commit_count();
     tick_all_ice_belt_respawns_sync(&ctx);
+    tick_ice_belt_respawn_sync(&ctx, ice_sys);
+    assert_eq!(ctx.db.state_epoch(), cooldown_epoch);
+    assert_eq!(ctx.db.tx_commit_count(), cooldown_commits);
     ctx.db.with_snapshot(|snap| {
         assert!(snap.cosmic_anomalies[&ice_sys].iter().all(|a| a.cleared));
     });
