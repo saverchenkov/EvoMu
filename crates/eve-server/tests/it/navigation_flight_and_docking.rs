@@ -4765,3 +4765,243 @@ async fn test_upwell_cross_system_moveme_preserves_deferred_set_state_gh1461() {
     assert_eq!(jita_states[0].0, Some(ship_view));
     assert!(jita_states[0].1.iter().any(|b| b.id == ship_view));
 }
+
+#[tokio::test]
+async fn test_upwell_view_outside_redock_plex_exit_hangar_undock_gh1477() {
+    use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue, EvePublicEvent, GoogleAny};
+    use eve_testkit::client_harness::{ClientCallOutput, ClientWireFrameKind};
+
+    const PERIMETER_SYS: u32 = 30_000_144;
+    let struct_id: i64 = 1_040_001_477_500;
+    let nearby_ball_id: i64 = 900_000_147_500;
+
+    fn extract_set_states(
+        out: &ClientCallOutput,
+    ) -> Vec<(Option<i64>, Vec<eve_destiny::wire::DecodedBall>)> {
+        let mut found = Vec::new();
+        for frame in &out.frames {
+            let ClientWireFrameKind::DoDestinyUpdate { updates, .. } = &frame.kind else {
+                continue;
+            };
+            if let PyRep::List(items) = updates {
+                for item in items {
+                    if let PyRep::Tuple(pair) = item {
+                        if let Some(PyRep::Tuple(fa)) = pair.get(1) {
+                            if fa.first().and_then(|v| v.as_str()) == Some("SetState") {
+                                if let Some(PyRep::Tuple(args)) = fa.get(1) {
+                                    if let Some(kv) = args.first() {
+                                        let ego = kv.dict_get("ego").and_then(|v| v.as_i64());
+                                        let balls = match kv.dict_get("state") {
+                                            Some(PyRep::Bytes(b)) => {
+                                                eve_destiny::wire::decode_add_balls(b)
+                                                    .map(|(_, _, balls)| balls)
+                                                    .unwrap_or_default()
+                                            }
+                                            _ => Vec::new(),
+                                        };
+                                        found.push((ego, balls));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    fn publish_quasar_view(ctx: &ServerContext, user_id: u64, char_id: i64, view_name: &str) {
+        let mut msg =
+            DynamicQuasarMessage::new("eve_public.app.eveonline.generic_ui.view.Activated");
+        msg.set(1, DynamicValue::String(view_name.to_string()));
+        let value = ctx.quasar_gateway.descriptors.encode_dynamic(&msg).unwrap_or_else(|_| {
+            let b = view_name.as_bytes();
+            let mut out = Vec::with_capacity(2 + b.len());
+            out.push(0x0a);
+            out.push(b.len() as u8);
+            out.extend_from_slice(b);
+            out
+        });
+        let mut grpc_sess = SessionState::new(888_001);
+        grpc_sess.user_id = Some(user_id);
+        grpc_sess.character_id = Some(char_id);
+        ctx.quasar_gateway.publish_event(
+            &grpc_sess,
+            EvePublicEvent {
+                payload: Some(GoogleAny {
+                    type_url:
+                        "type.googleapis.com/eve_public.app.eveonline.generic_ui.view.Activated"
+                            .into(),
+                    value,
+                }),
+                ..Default::default()
+            },
+            ctx.now_unix(),
+        );
+    }
+
+    let ctx = crate::seasons_and_campaigns::fast_real_sde_ctx();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+
+    let struct_pos = DVec3::new(250_000.0, 0.0, 0.0);
+    let mut ship_id = 0_i64;
+    let mut user_id = 0_u64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&DEMO_PILOT).expect("demo pilot");
+        let corp_id = ch.corporation_id;
+        user_id = ch.user_id;
+        ship_id = ch.active_ship_id;
+        ch.solar_system_id = PERIMETER_SYS;
+        ch.station_id = None;
+        ch.structure_id = Some(struct_id);
+        if let Some(item) = snap.items.get_mut(&ship_id) {
+            item.location_id = struct_id;
+            item.flag = eve_db::InventoryFlag::Hangar;
+        }
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832,
+                solar_system_id: PERIMETER_SYS,
+                owner_corp_id: corp_id,
+                name: "Perimeter Astrahus GH1477".into(),
+                position: struct_pos.to_array(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: false,
+                fuel_blocks: 500,
+                shield_hp: 2_500_000.0,
+                armor_hp: 2_500_000.0,
+                hull_hp: 2_500_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(PERIMETER_SYS);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: nearby_ball_id,
+            type_id: 1230,
+            position: struct_pos + DVec3::new(3_500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 120.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let mut h = common::new_wire_harness(&ctx, 147_700);
+    h.call_ok(
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &kw,
+    )
+    .await;
+    h.call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(DEMO_PILOT)], &kw)
+        .await;
+
+    // Step 2: View Outside -> Undock
+    let form1 = h.call_exchange("beyonce", None, "GetFormations", &[], &kw).await;
+    assert_eq!(extract_set_states(&form1).len(), 1);
+    assert_eq!(extract_set_states(&form1)[0].0, Some(struct_id));
+
+    ctx.advance_secs(12);
+    let undock1 = h.call_exchange("ship", None, "Undock", &[], &kw).await;
+    assert!(undock1.result.is_ok());
+    let u1_states = extract_set_states(&undock1);
+    assert_eq!(u1_states.len(), 1);
+    assert_eq!(u1_states[0].0, Some(ship_id));
+
+    // Step 3: Redock via stationSvc.Dock -> View Outside persists -> binds beyonce.
+    ctx.advance_secs(12);
+    let dock_out = h
+        .call_exchange("stationSvc", None, "Dock", &[PyRep::Integer(struct_id)], &kw)
+        .await;
+    assert!(dock_out.result.is_ok(), "stationSvc.Dock failed: {:?}", dock_out.result);
+
+    let form2 = h.call_exchange("beyonce", None, "GetFormations", &[], &kw).await;
+    assert_eq!(extract_set_states(&form2).len(), 1);
+    assert_eq!(extract_set_states(&form2)[0].0, Some(struct_id));
+    let bind2 = h
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(PERIMETER_SYS)), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert!(bind2.result.is_ok());
+    assert!(extract_set_states(&bind2).is_empty());
+
+    // Step 4: open_plex_store -> exitButton to hangar WITHOUT OID-.
+    publish_quasar_view(&ctx, user_id, DEMO_PILOT, "virtual_goods_store");
+    h.call_ok("storeManager", None, "get_categories", &[], &kw).await;
+    h.call_ok("storeManager", None, "get_offers", &[], &kw).await;
+    publish_quasar_view(&ctx, user_id, DEMO_PILOT, "hangar");
+
+    // Step 5: ship.Undock must defer SetState until post-OnAddBallpark GetFormations / MachoBindObject.
+    ctx.advance_secs(12);
+    let undock2 = h.call_exchange("ship", None, "Undock", &[], &kw).await;
+    assert!(undock2.result.is_ok());
+    assert!(undock2.violations.is_empty(), "violations: {:?}", undock2.violations);
+    assert!(
+        extract_set_states(&undock2).is_empty(),
+        "ship.Undock after PLEX exit to hangar must NOT emit premature SetState"
+    );
+
+    let form3 = h.call_exchange("beyonce", None, "GetFormations", &[], &kw).await;
+    assert!(form3.result.is_ok());
+    let f3_states = extract_set_states(&form3);
+    assert_eq!(f3_states.len(), 1);
+    assert_eq!(f3_states[0].0, Some(ship_id));
+    assert!(f3_states[0].1.iter().any(|b| b.id == struct_id));
+    assert!(f3_states[0].1.iter().any(|b| b.id == nearby_ball_id));
+
+    let bind3 = h
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(PERIMETER_SYS)), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert!(bind3.result.is_ok());
+    assert!(extract_set_states(&bind3).is_empty());
+
+    // Verify legitimate View Outside -> PLEX Store -> exit back to Structure -> ship.Undock still works.
+    ctx.advance_secs(12);
+    h.call_ok("stationSvc", None, "Dock", &[PyRep::Integer(struct_id)], &kw)
+        .await;
+    let form4 = h.call_exchange("beyonce", None, "GetFormations", &[], &kw).await;
+    assert_eq!(extract_set_states(&form4).len(), 1);
+    assert_eq!(extract_set_states(&form4)[0].0, Some(struct_id));
+
+    publish_quasar_view(&ctx, user_id, DEMO_PILOT, "virtual_goods_store");
+    publish_quasar_view(&ctx, user_id, DEMO_PILOT, "structure");
+
+    ctx.advance_secs(12);
+    let undock3 = h.call_exchange("ship", None, "Undock", &[], &kw).await;
+    assert!(undock3.result.is_ok());
+    let u3_states = extract_set_states(&undock3);
+    assert_eq!(
+        u3_states.len(),
+        1,
+        "View Outside -> virtual_goods_store -> structure -> ship.Undock must deliver SetState directly"
+    );
+    assert_eq!(u3_states[0].0, Some(ship_id));
+    assert!(u3_states[0].1.iter().any(|b| b.id == nearby_ball_id));
+}

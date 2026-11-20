@@ -1759,8 +1759,6 @@ def _collect_diff_parity_rows(root, base, head="HEAD"):
                 a0 = int(m.group(1))
                 cnt = int(m.group(2)) if m.group(2) is not None else 1
                 touched_lines.setdefault(cur_f, set()).update(range(max(1, a0), max(1, a0) + max(1, cnt)))
-        elif cur_f and cur_f.endswith(".rs") and ln.startswith("+") and not ln.startswith("+++"):
-            rows |= _extract_tags(ln[1:])
 
     if head == "HEAD":
         _, untracked_out = sh(["git", "ls-files", "--others", "--exclude-standard", "--", "crates/"], root)
@@ -1775,7 +1773,8 @@ def _collect_diff_parity_rows(root, base, head="HEAD"):
             if not os.path.isfile(fp):
                 continue
             try:
-                lines = open(fp, encoding="utf-8", errors="replace").read().splitlines()
+                with open(fp, encoding="utf-8", errors="replace") as fh:
+                    lines = fh.read().splitlines()
             except OSError:
                 continue
         else:
