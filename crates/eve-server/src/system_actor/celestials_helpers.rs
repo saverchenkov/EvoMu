@@ -610,16 +610,23 @@ pub(crate) fn clear_landed_warp_tracking_from_events(
                 .remove(&ball_id)
                 .is_some();
         }
+        let mut removed_return = false;
         if let Some(ref return_warps) = warp_tracking.return_warps {
-            return_warps
+            removed_return = return_warps
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&ball_id);
         }
         if stopped_ids.contains(&ball_id)
             && (removed_active
-                || prev_prov
-                    == Some(crate::system_actor::types::WarpProvenance::PlayerOrFleetWarp))
+                || removed_return
+                || matches!(
+                    prev_prov,
+                    Some(
+                        crate::system_actor::types::WarpProvenance::PlayerOrFleetWarp
+                            | crate::system_actor::types::WarpProvenance::ReconnectReturnWarp
+                    )
+                ))
         {
             finished_player_or_fleet.push(ball_id);
         }
