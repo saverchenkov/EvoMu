@@ -1979,7 +1979,8 @@ fn create_war_ally_offer_and_accept_enforce_same_alliance_and_allow_reoffer_afte
         );
     });
 
-    // Member corp of an alliance at war cannot bypass CannotAllyOwnWar via CreateWarAllyOffer.
+    // Non-executor member corp of an alliance at war cannot bypass CannotAllyOwnWar via CreateWarAllyOffer
+    // and cannot submit surrender negotiations (only the war owner or alliance executor may).
     let snap_before_own_war = ctx.db.snapshot_tables();
     assert_eq!(
         handle_wars(
@@ -1999,12 +2000,31 @@ fn create_war_ally_offer_and_accept_enforce_same_alliance_and_allow_reoffer_afte
         .code,
         "CannotAllyOwnWar"
     );
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut sister_sess,
+            "warsInfoMgr",
+            "CreateSurrenderNegotiation",
+            &[
+                PyRep::Integer(war_alliance_vs_corp),
+                PyRep::Real(0.0),
+                PyRep::String("unauthorized surrender".into()),
+            ],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NotWarParticipant"
+    );
     assert_eq!(ctx.db.snapshot_tables(), snap_before_own_war);
 
-    // Member corp of an alliance at war IS recognized as a war party for CreateSurrenderNegotiation.
+    // Alliance executor_corp_id CAN submit a surrender offer on the alliance war, cannot self-accept/decline,
+    // non-executor sister corp cannot accept/decline, and opposing defender CAN decline.
     let surr = handle_wars(
         &ctx,
-        &mut sister_sess,
+        &mut agg_sess,
         "warsInfoMgr",
         "CreateSurrenderNegotiation",
         &[
@@ -2017,6 +2037,49 @@ fn create_war_ally_offer_and_accept_enforce_same_alliance_and_allow_reoffer_afte
     .unwrap()
     .unwrap();
     assert_eq!(dict_str(&surr, "status"), Some("Offered"));
+    let surr_id = dict_i64(&surr, "negotiationID").unwrap();
+    let expected_counterparty_err = "NotNegotiationCounterparty";
+    for method in ["AcceptSurrender", "DeclineSurrender"] {
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                &mut agg_sess,
+                "warsInfoMgr",
+                method,
+                &[PyRep::Integer(surr_id)],
+                None,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            expected_counterparty_err
+        );
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                &mut sister_sess,
+                "warsInfoMgr",
+                method,
+                &[PyRep::Integer(surr_id)],
+                None,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            expected_counterparty_err
+        );
+    }
+    let declined = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warsInfoMgr",
+        "DeclineSurrender",
+        &[PyRep::Integer(surr_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_str(&declined, "status"), Some("Declined"));
 
     // External ally joins, receives a finite expiry via GMExtendAllyContract, and cannot re-offer while unexpired.
     agg_sess.role = ROLE_GMH;
@@ -2291,4 +2354,292 @@ fn gm_activate_defender_without_ally_id_clears_expired_ally_expiries_and_preserv
         assert!(is_war_participant_corp(snap, war_id, ally_corp, now));
         assert!(is_war_participant_corp(snap, war_id, ally_corp_2, now));
     });
+}
+
+#[test]
+fn surrender_negotiation_rejects_non_executor_sister_corps_and_same_side_self_accept() {
+    use eve_db::{clock::VirtualServerClock, AllianceRecord, PersistedWarMeta};
+    use std::sync::Arc;
+
+    let (ctx, mut agg_sess, agg_corp, mut def_sess, def_corp, _ally_sess, _ally_corp, _hq_id) =
+        setup_wars_ctx();
+    let t0 = 1_700_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t0)));
+
+    let agg_alliance = 99_940_001_i64;
+    let def_alliance = 99_940_002_i64;
+    let agg_sister_corp = 98_940_011_i64;
+    let agg_sister_char = 90_940_011_i64;
+    let def_sister_corp = 98_940_022_i64;
+    let def_sister_char = 90_940_022_i64;
+    let war_corp_vs_corp = 700_940_001_i64;
+    let war_alliance_vs_alliance = 700_940_002_i64;
+
+    let mut agg_sister_sess = agg_sess.clone();
+    agg_sister_sess.character_id = Some(agg_sister_char);
+    agg_sister_sess.corporation_id = Some(agg_sister_corp);
+    agg_sister_sess.alliance_id = Some(agg_alliance);
+
+    let mut def_sister_sess = def_sess.clone();
+    def_sister_sess.character_id = Some(def_sister_char);
+    def_sister_sess.corporation_id = Some(def_sister_corp);
+    def_sister_sess.alliance_id = Some(def_alliance);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&agg_corp).unwrap().alliance_id = Some(agg_alliance);
+        snap.corporations.get_mut(&def_corp).unwrap().alliance_id = Some(def_alliance);
+        let base_ch = snap.characters[&agg_sess.character_id.unwrap()].clone();
+        for (cid, uid, corp_id, ally_id, ticker) in [
+            (agg_sister_char, 941, agg_sister_corp, agg_alliance, "ASIS"),
+            (def_sister_char, 942, def_sister_corp, def_alliance, "DSIS"),
+        ] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.user_id = uid;
+            ch.corporation_id = corp_id;
+            ch.alliance_id = Some(ally_id);
+            snap.characters.insert(cid, ch);
+
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = corp_id;
+            corp.name = format!("Sister {ticker}");
+            corp.ticker = ticker.into();
+            corp.ceo_id = cid;
+            corp.alliance_id = Some(ally_id);
+            corp.members = [cid].into_iter().collect();
+            corp.member_roles = [(cid, u64::MAX)].into_iter().collect();
+            corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+            snap.corporations.insert(corp_id, corp);
+        }
+
+        snap.alliances.insert(
+            agg_alliance,
+            AllianceRecord {
+                alliance_id: agg_alliance,
+                name: "Agg Alliance".into(),
+                short_name: "AGGA".into(),
+                executor_corp_id: agg_corp,
+                member_corp_ids: [agg_corp, agg_sister_corp].into_iter().collect(),
+            },
+        );
+        snap.alliances.insert(
+            def_alliance,
+            AllianceRecord {
+                alliance_id: def_alliance,
+                name: "Def Alliance".into(),
+                short_name: "DEFA".into(),
+                executor_corp_id: def_corp,
+                member_corp_ids: [def_corp, def_sister_corp].into_iter().collect(),
+            },
+        );
+
+        // 1. Corp-vs-corp war where defender belongs to def_alliance alongside def_sister_corp.
+        snap.wars.insert(
+            war_corp_vs_corp,
+            WarRecord {
+                war_id: war_corp_vs_corp,
+                aggressor_corp_id: agg_corp,
+                defender_corp_id: def_corp,
+                mutual: false,
+                started_unix: t0.saturating_sub(WAR_TIMER_SECS),
+                active: true,
+            },
+        );
+        snap.war_state.wars.insert(
+            war_corp_vs_corp,
+            PersistedWarMeta {
+                open_for_allies: true,
+                ..Default::default()
+            },
+        );
+
+        // 2. Alliance-vs-alliance war between agg_alliance (executor agg_corp) and def_alliance (executor def_corp).
+        snap.wars.insert(
+            war_alliance_vs_alliance,
+            WarRecord {
+                war_id: war_alliance_vs_alliance,
+                aggressor_corp_id: agg_alliance,
+                defender_corp_id: def_alliance,
+                mutual: true,
+                started_unix: t0.saturating_sub(WAR_TIMER_SECS),
+                active: true,
+            },
+        );
+        snap.war_state
+            .wars
+            .insert(war_alliance_vs_alliance, PersistedWarMeta::default());
+    });
+
+    // A. In corp-vs-corp war, defender's sister corp cannot ally its own war and cannot create surrender offers.
+    let snap_before_sister = ctx.db.snapshot_tables();
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut def_sister_sess,
+            "warsInfoMgr",
+            "CreateWarAllyOffer",
+            &[PyRep::Integer(war_corp_vs_corp), PyRep::Real(0.0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CannotAllyOwnWar"
+    );
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut def_sister_sess,
+            "warsInfoMgr",
+            "CreateSurrenderNegotiation",
+            &[PyRep::Integer(war_corp_vs_corp), PyRep::Real(0.0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NotWarParticipant"
+    );
+    assert_eq!(ctx.db.snapshot_tables(), snap_before_sister);
+
+    // Even if a same-side sister-corp surrender row were injected into state, neither defender nor aggressor may accept it.
+    let injected_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.war_state.next_negotiation_id += 1;
+        let id = snap.war_state.next_negotiation_id;
+        snap.war_state.negotiations.push(Negotiation {
+            id,
+            war_id: war_corp_vs_corp,
+            kind: NegKind::Surrender,
+            from_corp: def_sister_corp,
+            isk: IskCents::ZERO,
+            message: "same-side exploit".into(),
+            status: "Offered".into(),
+            effective_unix: None,
+        });
+        id
+    });
+    for sess in [&mut def_sess, &mut agg_sess] {
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                sess,
+                "warsInfoMgr",
+                "AcceptSurrender",
+                &[PyRep::Integer(injected_id)],
+                None,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "NotNegotiationCounterparty"
+        );
+    }
+
+    // B. In alliance-vs-alliance war, non-executor sister corps cannot submit surrender offers.
+    for sess in [&mut agg_sister_sess, &mut def_sister_sess] {
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                sess,
+                "warsInfoMgr",
+                "CreateSurrenderNegotiation",
+                &[PyRep::Integer(war_alliance_vs_alliance), PyRep::Real(0.0)],
+                None,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "NotWarParticipant"
+        );
+    }
+
+    // Aggressor alliance executor submits surrender offer; only opposing defender alliance executor may decline/accept.
+    let s1 = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warsInfoMgr",
+        "CreateSurrenderNegotiation",
+        &[
+            PyRep::Integer(war_alliance_vs_alliance),
+            PyRep::Real(1_000_000.0),
+            PyRep::String("truce?".into()),
+        ],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let s1_id = dict_i64(&s1, "negotiationID").unwrap();
+    for sess in [&mut agg_sess, &mut agg_sister_sess, &mut def_sister_sess] {
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                sess,
+                "warsInfoMgr",
+                "AcceptSurrender",
+                &[PyRep::Integer(s1_id)],
+                None,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "NotNegotiationCounterparty"
+        );
+    }
+    let decl_s1 = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warsInfoMgr",
+        "DeclineSurrender",
+        &[PyRep::Integer(s1_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_str(&decl_s1, "status"), Some("Declined"));
+
+    // Defender alliance executor submits surrender offer; opposing aggressor alliance executor accepts cleanly.
+    let s2 = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warsInfoMgr",
+        "CreateSurrenderNegotiation",
+        &[
+            PyRep::Integer(war_alliance_vs_alliance),
+            PyRep::Real(2_000_000.0),
+            PyRep::String("we surrender".into()),
+        ],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let s2_id = dict_i64(&s2, "negotiationID").unwrap();
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut def_sess,
+            "warsInfoMgr",
+            "AcceptSurrender",
+            &[PyRep::Integer(s2_id)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NotNegotiationCounterparty"
+    );
+    let acc_s2 = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warsInfoMgr",
+        "AcceptSurrender",
+        &[PyRep::Integer(s2_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_str(&acc_s2, "status"), Some("Accepted"));
+    assert_eq!(
+        dict_i64(&acc_s2, "timeFinished"),
+        Some((t0 + WAR_TIMER_SECS) as i64)
+    );
 }

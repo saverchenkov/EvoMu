@@ -577,7 +577,9 @@ fn legal_war_or_suspect_target_honors_ally_expiry_and_alliance_allies() {
 
     ctx.db.with_snapshot(|snap| {
         assert!(!is_legal_war_or_suspect_target(snap, att_id, corp_ally_char, eff - 1));
+        assert!(!is_legal_war_or_suspect_target(snap, corp_ally_char, att_id, eff - 1));
         assert!(!is_legal_war_or_suspect_target(snap, att_id, alliance_ally_char, eff - 1));
+        assert!(!is_legal_war_or_suspect_target(snap, alliance_ally_char, att_id, eff - 1));
 
         for ts in [eff, exp - 1] {
             assert!(is_legal_war_or_suspect_target(snap, att_id, corp_ally_char, ts));
