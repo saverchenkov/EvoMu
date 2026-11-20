@@ -387,3 +387,259 @@ fn virtual_clock_advance_millis_and_set_wall_now_for_tests() {
     assert_eq!(dyn_clock.now_unix_secs(), 1_800_000_123);
     assert_eq!(dyn_clock.now_subsec_nanos(), 456_000_000);
 }
+
+mod clock_domain_unit_tests {
+    use crate::clock::{FILETIME_TICKS_PER_MS, FILETIME_UNIX_EPOCH_DIFF_MS};
+    use crate::{
+        DestinyStamp, SimDilatedMs, SimFileTime, SolarSystemSimClock, WallFileTime, WallUnixMs,
+        WorldStateSnapshot,
+    };
+    use std::any::TypeId;
+
+    #[test]
+    fn clock_domain_types_conversions_and_checked_bounds() {
+        assert_ne!(TypeId::of::<WallUnixMs>(), TypeId::of::<SimDilatedMs>());
+        assert_ne!(TypeId::of::<WallFileTime>(), TypeId::of::<SimFileTime>());
+
+        let unix_ms = WallUnixMs::from_millis(1_760_000_000_123);
+        assert_eq!(unix_ms.as_millis(), 1_760_000_000_123);
+        assert_eq!(unix_ms.as_secs(), 1_760_000_000);
+        assert_eq!(
+            WallUnixMs::checked_from_secs(1_760_000_000),
+            Some(WallUnixMs::from_millis(1_760_000_000_000))
+        );
+        assert_eq!(WallUnixMs::checked_from_secs(u64::MAX), None);
+
+        let wall_ft = unix_ms
+            .to_wall_filetime()
+            .expect("unix timestamp converts to WallFileTime");
+        let expected_wall_ticks =
+            (1_760_000_000_123_i64 + FILETIME_UNIX_EPOCH_DIFF_MS) * FILETIME_TICKS_PER_MS;
+        assert_eq!(wall_ft, WallFileTime::from_ticks(expected_wall_ticks));
+        assert_eq!(wall_ft.to_wall_unix_ms(), Some(unix_ms));
+
+        let epoch_ft = WallUnixMs::from_millis(0)
+            .to_wall_filetime()
+            .expect("unix epoch converts to WallFileTime");
+        assert_eq!(epoch_ft.to_wall_unix_ms(), Some(WallUnixMs::from_millis(0)));
+        assert_eq!(
+            epoch_ft
+                .checked_sub_ticks(1)
+                .and_then(WallFileTime::to_wall_unix_ms),
+            None
+        );
+        assert_eq!(WallFileTime::from_ticks(i64::MIN).to_wall_unix_ms(), None);
+
+        assert_eq!(WallUnixMs::from_millis(u64::MAX).to_wall_filetime(), None);
+        assert_eq!(WallUnixMs::from_millis(u64::MAX).checked_add_ms(1), None);
+        assert_eq!(WallUnixMs::from_millis(10).checked_sub_ms(11), None);
+        assert_eq!(
+            WallUnixMs::from_millis(10).checked_elapsed_since(WallUnixMs::from_millis(11)),
+            None
+        );
+
+        let sim_ms = SimDilatedMs::from_millis(1_759_999_700_450);
+        let sim_ft = sim_ms
+            .to_sim_filetime()
+            .expect("sim ms converts to SimFileTime");
+        let expected_sim_ticks =
+            (1_759_999_700_450_i64 + FILETIME_UNIX_EPOCH_DIFF_MS) * FILETIME_TICKS_PER_MS;
+        assert_eq!(sim_ft, SimFileTime::from_ticks(expected_sim_ticks));
+        assert_eq!(sim_ft.to_sim_dilated_ms(), Some(sim_ms));
+        assert_eq!(sim_ms.subsec_ms(), 450);
+        assert_eq!(sim_ms.remaining_ms_in_tick(), 550);
+        assert_eq!(
+            sim_ms.checked_to_destiny_stamp(),
+            Some(DestinyStamp::from_ticks(1_759_999_700))
+        );
+        assert_eq!(SimDilatedMs::from_millis(u64::MAX).to_sim_filetime(), None);
+        assert_eq!(
+            SimDilatedMs::from_millis(u64::MAX).checked_to_destiny_stamp(),
+            None
+        );
+        assert_eq!(
+            SimDilatedMs::from_millis(u64::MAX).to_destiny_stamp_saturating(),
+            DestinyStamp::from_ticks(u32::MAX)
+        );
+        assert_eq!(SimFileTime::from_ticks(i64::MIN).to_sim_dilated_ms(), None);
+    }
+
+    #[test]
+    fn solar_system_sim_clock_nonzero_initial_offset_and_projection() {
+        let wall_0 = WallUnixMs::from_millis(1_760_000_000_000);
+        let clock = SolarSystemSimClock::new(wall_0, -300_000, DestinyStamp::from_ticks(10_000), 1.0)
+            .expect("valid initial offset builds clock");
+
+        assert_eq!(clock.last_wall_ms(), wall_0);
+        assert_eq!(
+            clock.sim_dilated_ms(),
+            SimDilatedMs::from_millis(1_759_999_700_000)
+        );
+        assert_eq!(clock.sim_minus_wall_offset_ms(), Some(-300_000));
+        assert_eq!(clock.tidi_factor(), 1.0);
+        assert_eq!(clock.destiny_stamp(), DestinyStamp::from_ticks(10_000));
+
+        let wall_ft = clock.last_wall_filetime().expect("wall filetime");
+        assert_ne!(clock.sim_filetime().as_ticks(), wall_ft.as_ticks());
+        assert_eq!(
+            wall_ft.as_ticks() - clock.sim_filetime().as_ticks(),
+            300_000 * FILETIME_TICKS_PER_MS
+        );
+
+        let wall_plus_5s = wall_0.checked_add_ms(5_000).expect("wall + 5s");
+        assert_eq!(
+            clock.project_wall_to_sim_dilated_ms(wall_plus_5s),
+            Some(SimDilatedMs::from_millis(1_759_999_705_000))
+        );
+        assert_eq!(
+            clock.project_wall_to_sim_filetime(wall_plus_5s),
+            SimDilatedMs::from_millis(1_759_999_705_000).to_sim_filetime()
+        );
+        assert_eq!(
+            clock.project_wall_to_sim_dilated_ms(WallUnixMs::from_millis(1_759_999_999_000)),
+            None
+        );
+
+        // Positive offset also supported without overflow.
+        let pos_clock =
+            SolarSystemSimClock::new(wall_0, 45_500, DestinyStamp::from_ticks(1), 1.0)
+                .expect("positive initial offset succeeds");
+        assert_eq!(pos_clock.sim_minus_wall_offset_ms(), Some(45_500));
+
+        // Checked validation failures return None without panicking.
+        assert_eq!(
+            SolarSystemSimClock::new(
+                WallUnixMs::from_millis(100),
+                -500,
+                DestinyStamp::from_ticks(1),
+                1.0
+            ),
+            None
+        );
+        assert_eq!(
+            SolarSystemSimClock::new(wall_0, 0, DestinyStamp::from_ticks(1), f64::NAN),
+            None
+        );
+        assert_eq!(SolarSystemSimClock::clamp_tidi_factor(0.01), Some(0.10));
+        assert_eq!(SolarSystemSimClock::clamp_tidi_factor(2.5), Some(1.0));
+        assert_eq!(SolarSystemSimClock::clamp_tidi_factor(f64::INFINITY), None);
+    }
+
+    #[test]
+    fn solar_system_sim_clock_tidi_step_transitions_monotonic_and_stamp_tracking() {
+        let wall_0 = WallUnixMs::from_millis(1_760_000_000_000);
+        let mut clock =
+            SolarSystemSimClock::new(wall_0, -120_000, DestinyStamp::from_ticks(500), 1.0)
+                .expect("clock initialized");
+        let ft_0 = clock.sim_filetime();
+
+        // Phase 1 (TiDi 1.0): advance 1,500 wall ms -> +1,500 sim ms (stamp 500 -> 501, rem 500 ms).
+        let wall_1 = wall_0.checked_add_ms(1_500).expect("wall_1");
+        let sim_1 = clock.advance_to_wall_ms(wall_1).expect("phase 1 advance");
+        let ft_1 = clock.sim_filetime();
+        assert_eq!(sim_1, SimDilatedMs::from_millis(1_759_999_881_500));
+        assert!(ft_1 > ft_0);
+        assert_eq!(clock.destiny_stamp(), DestinyStamp::from_ticks(501));
+        assert_eq!(clock.stamp_remainder_ms(), 500);
+        assert_eq!(clock.remaining_ms_in_tick(), 500);
+        assert_eq!(clock.sim_minus_wall_offset_ms(), Some(-120_000));
+
+        // Transition 1.0 -> 0.25 at wall_1: SimFileTime and stamp remain monotonic.
+        assert_eq!(clock.set_tidi_factor_at(wall_1, 0.25), Some(0.25));
+        assert_eq!(clock.sim_filetime(), ft_1);
+        assert_eq!(clock.destiny_stamp(), DestinyStamp::from_ticks(501));
+        assert_eq!(clock.wall_ms_needed_for_sim_ms(500), Some(2_000));
+
+        // Phase 2 (TiDi 0.25): advance 2,000 wall ms -> +500 sim ms -> reaches stamp 502 cleanly.
+        let wall_2 = wall_1.checked_add_ms(2_000).expect("wall_2");
+        let sim_2 = clock.advance_to_wall_ms(wall_2).expect("phase 2 advance");
+        let ft_2 = clock.sim_filetime();
+        assert_eq!(sim_2, SimDilatedMs::from_millis(1_759_999_882_000));
+        assert!(ft_2 >= ft_1);
+        assert_eq!(clock.destiny_stamp(), DestinyStamp::from_ticks(502));
+        assert_eq!(clock.stamp_remainder_ms(), 0);
+        assert_eq!(clock.remaining_ms_in_tick(), 1_000);
+        assert_eq!(clock.sim_minus_wall_offset_ms(), Some(-121_500));
+
+        // Transition 0.25 -> 0.8 after +1,200 wall ms (+300 sim ms under outgoing 0.25).
+        let wall_3 = wall_2.checked_add_ms(1_200).expect("wall_3");
+        assert_eq!(clock.set_tidi_factor_at(wall_3, 0.8), Some(0.8));
+        let ft_3 = clock.sim_filetime();
+        assert!(ft_3 >= ft_2);
+        assert_eq!(clock.destiny_stamp(), DestinyStamp::from_ticks(502));
+        assert_eq!(clock.stamp_remainder_ms(), 300);
+        assert_eq!(clock.remaining_ms_in_tick(), 700);
+
+        // Phase 3 (TiDi 0.8): advance 1,000 wall ms -> +800 sim ms (300 + 800 = 1100 -> stamp 503, rem 100).
+        let wall_4 = wall_3.checked_add_ms(1_000).expect("wall_4");
+        let sim_4 = clock.advance_to_wall_ms(wall_4).expect("phase 3 advance");
+        let ft_4 = clock.sim_filetime();
+        assert_eq!(sim_4, SimDilatedMs::from_millis(1_759_999_883_100));
+        assert!(ft_4 > ft_3);
+        assert_eq!(clock.destiny_stamp(), DestinyStamp::from_ticks(503));
+        assert_eq!(clock.stamp_remainder_ms(), 100);
+        assert_eq!(clock.remaining_ms_in_tick(), 900);
+
+        // Transition 0.8 -> 1.0 at wall_4, then +900 wall ms -> reaches stamp 504 with 0 remainder.
+        assert_eq!(clock.set_tidi_factor_at(wall_4, 1.0), Some(1.0));
+        let wall_5 = wall_4.checked_add_ms(900).expect("wall_5");
+        let sim_5 = clock.advance_to_wall_ms(wall_5).expect("phase 4 advance");
+        let ft_5 = clock.sim_filetime();
+        assert_eq!(sim_5, SimDilatedMs::from_millis(1_759_999_884_000));
+        assert!(ft_5 > ft_4);
+        assert_eq!(clock.destiny_stamp(), DestinyStamp::from_ticks(504));
+        assert_eq!(clock.stamp_remainder_ms(), 0);
+        assert_eq!(clock.remaining_ms_in_tick(), 1_000);
+
+        // Backward wall timestamp never moves SimFileTime or DestinyStamp backward.
+        let backward_wall = wall_0;
+        assert_eq!(clock.advance_to_wall_ms(backward_wall), Some(sim_5));
+        assert_eq!(clock.sim_filetime(), ft_5);
+        assert_eq!(clock.destiny_stamp(), DestinyStamp::from_ticks(504));
+
+        // Non-finite TiDi change and overflowing delta fail safely without mutating state.
+        assert_eq!(clock.set_tidi_factor(f64::NAN), None);
+        assert_eq!(clock.advance_wall_ms(u64::MAX), None);
+        assert_eq!(clock.sim_filetime(), ft_5);
+        assert_eq!(clock.tidi_factor(), 1.0);
+
+        // Fixed-point precision avoids IEEE-754 floor drift on 100ms * 0.29 = 29ms.
+        let mut drift_clock =
+            SolarSystemSimClock::new(wall_0, 0, DestinyStamp::from_ticks(1), 0.29)
+                .expect("0.29 TiDi clock");
+        let after_100ms = drift_clock
+            .advance_wall_ms(100)
+            .expect("100ms advance at 0.29 TiDi");
+        assert_eq!(
+            after_100ms,
+            SimDilatedMs::from_millis(wall_0.as_millis() + 29)
+        );
+    }
+
+    #[test]
+    fn snapshot_now_unix_secs_parses_virtual_clock_blob() {
+        let mut snap = WorldStateSnapshot::default();
+        assert_eq!(snap.checked_snapshot_now_unix_secs(), None);
+        assert_eq!(snap.snapshot_now_unix_secs(), 0);
+
+        snap.service_state_blobs
+            .insert("__server_now_unix".into(), "1760000123".into());
+        assert_eq!(snap.checked_snapshot_now_unix_secs(), Some(1_760_000_123));
+        assert_eq!(snap.snapshot_now_unix_secs(), 1_760_000_123);
+
+        snap.service_state_blobs
+            .insert("__server_now_unix".into(), " 2000.75 ".into());
+        assert_eq!(snap.checked_snapshot_now_unix_secs(), Some(2_000));
+        assert_eq!(snap.snapshot_now_unix_secs(), 2_000);
+
+        snap.service_state_blobs
+            .insert("__server_now_unix".into(), "-5".into());
+        assert_eq!(snap.checked_snapshot_now_unix_secs(), None);
+        assert_eq!(snap.snapshot_now_unix_secs(), 0);
+
+        snap.service_state_blobs
+            .insert("__server_now_unix".into(), "NaN".into());
+        assert_eq!(snap.checked_snapshot_now_unix_secs(), None);
+        assert_eq!(snap.snapshot_now_unix_secs(), 0);
+    }
+}

@@ -1037,10 +1037,7 @@ fn handle_session_dump(
 ) -> PyRep {
     let sid = session.session_id;
     let now_unix = ctx.now_unix();
-    let now_millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or_else(|_| now_unix.saturating_mul(1_000));
+    let now_millis = ctx.clock().now_unix_millis();
 
     let session_dict = PyRep::keyval([
         ("sessionID", PyRep::Integer(sid as i64)),
