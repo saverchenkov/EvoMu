@@ -1105,7 +1105,14 @@ fn discover_registered_rpcs(root: &Path) -> (BTreeSet<(String, String)>, BTreeSe
     (rpcs, bindable)
 }
 
-type AllowlistMap = BTreeMap<(String, String), HashMap<String, String>>;
+#[derive(Debug, Clone)]
+struct AllowRule {
+    caller_scoped_mutation: bool,
+}
+
+const CALLER_SCOPED_MUTATION_PREFIX: &str = "caller_scoped_mutation:";
+
+type AllowlistMap = BTreeMap<(String, String), HashMap<String, AllowRule>>;
 
 fn load_allowlist_and_verify_parity(
     root: &Path,
@@ -1141,7 +1148,23 @@ fn load_allowlist_and_verify_parity(
                 !reason.trim().is_empty() && !reason.contains('\n'),
                 "reason for '{full_key}.{sit}' must be a non-empty single line"
             );
-            per_sit.insert(sit.clone(), reason.to_string());
+            let caller_scoped_mutation = reason.starts_with(CALLER_SCOPED_MUTATION_PREFIX);
+            if caller_scoped_mutation {
+                assert!(
+                    sit == "b",
+                    "caller_scoped_mutation prefix is only allowed on Situation 'b' (found on '{full_key}.{sit}')"
+                );
+                assert!(
+                    !reason[CALLER_SCOPED_MUTATION_PREFIX.len()..].trim().is_empty(),
+                    "caller_scoped_mutation rationale for '{full_key}.{sit}' must not be empty"
+                );
+            }
+            per_sit.insert(
+                sit.clone(),
+                AllowRule {
+                    caller_scoped_mutation,
+                },
+            );
         }
         allow_keys.insert((svc.to_string(), meth.to_string()));
         allow_map.insert((svc.to_string(), meth.to_string()), per_sit);
@@ -1256,6 +1279,7 @@ struct MatrixFixture {
     _bug_dir: TempDirGuard,
     other_sys_id: SolarSystemId,
     other_station_id: i64,
+    non_hq_station_id: i64,
     other_gate_id: i64,
     jita_gate_id: i64,
     a_ship_id: i64,
@@ -1762,6 +1786,21 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
     let other_constellation = other_sys.constellation_id;
     let other_region = other_sys.region_id;
     let other_station_id = other_sys.stations[0].station_id;
+    // Non-Pochven station that is neither Corp E's HQ (`other_station_id`) nor `CHAR_E_ID`'s school station (`school_id = 11`).
+    let school_11_station_id = ctx.sde.schools.get(&11).map(|s| s.station_id);
+    let non_hq_station_id = if Some(NPC_STATION_ID) != school_11_station_id
+        && NPC_STATION_ID != other_station_id
+    {
+        NPC_STATION_ID
+    } else {
+        ctx.sde
+            .solar_systems
+            .values()
+            .filter(|s| s.region_id != 10_000_070)
+            .flat_map(|s| s.stations.iter().map(|st| st.station_id))
+            .find(|&sid| sid != other_station_id && Some(sid) != school_11_station_id)
+            .expect("non-HQ, non-school station present in SDE")
+    };
     let b_planet_id = jita_sys.planet_ids.first().copied().unwrap_or(40_009_001);
     let d_planet_id = jita_sys.planet_ids.get(1).copied().unwrap_or(b_planet_id);
     let e_planet_id = other_sys.planet_ids.first().copied().unwrap_or(40_009_002);
@@ -2876,6 +2915,7 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
         _bug_dir: bug_dir,
         other_sys_id,
         other_station_id,
+        non_hq_station_id,
         other_gate_id,
         jita_gate_id,
         a_ship_id,
@@ -3337,7 +3377,11 @@ fn build_call_args(
         "beyonce" => match meth {
             "CmdWarpToStuff" | "CmdWarpToStuffAutopilot" => vec![
                 PyRep::String("item".into()),
-                PyRep::Integer(own_station),
+                PyRep::Integer(match sit {
+                    // Situation E is in `other_sys_id`: pass cross-system Jita station (warping across systems is illegal).
+                    Situation::E => NPC_STATION_ID,
+                    _ => own_station,
+                }),
                 PyRep::Real(0.0),
             ],
             "CmdDock" | "CmdTurboDock" => vec![PyRep::Integer(own_station)],
@@ -3347,8 +3391,17 @@ fn build_call_args(
                     _ => fix.jita_gate_id,
                 })]
             }
-            "CmdOrbit" | "CmdFollowBall" | "CmdKeepAtRange" | "CmdAlignTo" | "CmdAttackTarget"
-            | "CmdMineRepeatedly" | "CmdAbandonLoot" => vec![
+            "CmdOrbit" | "CmdFollowBall" | "CmdAlignTo" => vec![
+                PyRep::Integer(match sit {
+                    Situation::B => fix.b_space_ship_id,
+                    // Situation E is in `other_sys_id`: pass cross-system Jita ship (align/follow/orbit across systems is illegal).
+                    Situation::E => fix.b_space_ship_id,
+                    Situation::F => fix.f_space_ship_id,
+                    _ => fix.jita_gate_id,
+                }),
+                PyRep::Real(1_000.0),
+            ],
+            "CmdKeepAtRange" | "CmdAttackTarget" | "CmdMineRepeatedly" | "CmdAbandonLoot" => vec![
                 PyRep::Integer(match sit {
                     Situation::B => fix.b_space_ship_id,
                     Situation::E => fix.e_space_ship_id,
@@ -3541,6 +3594,22 @@ fn build_call_args(
         "dungeonInstanceCacheMgr" if meth == "GetOreAnomaliesCountInRange" => {
             vec![PyRep::Integer(1)]
         }
+        "charMgr" if meth == "SetHomeStation" => vec![PyRep::Integer(match sit {
+            Situation::B => CHAR_B_ID,
+            Situation::C => CORP_A_ID,
+            // Situation E is undocked in `other_sys_id`: pass non-HQ, non-school station where pilot is not docked.
+            Situation::E => fix.non_hq_station_id,
+            Situation::F => fix.jita_gate_id,
+            _ => own_char,
+        })],
+        "home_station" if meth == "set_home_station" => vec![PyRep::Integer(match sit {
+            Situation::B => CHAR_B_ID,
+            Situation::C => CORP_A_ID,
+            // Situation E is undocked in `other_sys_id`: pass non-HQ, non-school station where pilot is not docked.
+            Situation::E => fix.non_hq_station_id,
+            Situation::F => fix.jita_gate_id,
+            _ => own_char,
+        })],
         "charUnboundMgr" => match meth {
             "SelectCharacterID" => vec![PyRep::Integer(match sit {
                 Situation::A | Situation::B | Situation::C => CHAR_B_ID,
@@ -3571,6 +3640,438 @@ fn build_call_args(
 // Single Authoritative Matrix & Regression Gate Test
 // ============================================================================
 
+/// Returns `true` if any persisted or runtime state owned by Target B (`CHAR_B_ID`,
+/// `USER_B_ID`, `CORP_B_ID`, `ALLIANCE_B_ID`, or B's seeded entities) — or global server
+/// config/clock — diverged from `base`.
+///
+/// Used for Situation `"b"` RPCs explicitly allowlisted with `"caller_scoped_mutation:"` so
+/// that mutations to the caller's own state (`CHAR_A_ID`) are permitted while Target B remains
+/// strictly invariant.
+fn target_b_state_mutated(
+    fix: &MatrixFixture,
+    base: &RuntimeBaseline,
+    cur_db: Option<&WorldTablesSnapshot>,
+    bound_dirty: bool,
+    space_dirty: bool,
+) -> bool {
+    // Global server config and virtual clock must never be mutated by a caller-scoped RPC.
+    if *fix
+        .ctx
+        .global_config_values
+        .read()
+        .expect("global_config_values")
+        != base.global_config_values
+        || fix.ctx.clock().now_unix_secs() != base.clock_unix
+    {
+        return true;
+    }
+
+    // Target B's warp/invuln runtime entries must remain invariant.
+    let b_ship_ids = [fix.b_ship_id, fix.b_space_ship_id];
+    {
+        let aw = fix.ctx.active_warps.lock().expect("active_warps");
+        if b_ship_ids
+            .iter()
+            .any(|id| aw.get(id) != base.active_warps.get(id))
+        {
+            return true;
+        }
+        let rw = fix.ctx.return_warps.lock().expect("return_warps");
+        if b_ship_ids
+            .iter()
+            .any(|id| rw.contains(id) != base.return_warps.contains(id))
+        {
+            return true;
+        }
+        let pw = fix
+            .ctx
+            .pending_warp_finished
+            .lock()
+            .expect("pending_warp_finished");
+        if b_ship_ids
+            .iter()
+            .any(|id| pw.contains(id) != base.pending_warp_finished.contains(id))
+        {
+            return true;
+        }
+        let inv = fix
+            .ctx
+            .location_change_invuln
+            .lock()
+            .expect("location_change_invuln");
+        if [CHAR_B_ID, fix.b_ship_id, fix.b_space_ship_id]
+            .iter()
+            .any(|id| inv.get(id) != base.location_change_invuln.get(id))
+        {
+            return true;
+        }
+    }
+
+    // Target B's bound object entries must remain invariant (no removal, overwrite, or new B binding).
+    if bound_dirty {
+        let cur_bounds = fix.ctx.bound_objects.read().expect("bound_objects");
+        for (&id, b_entry) in &base.bound_keys {
+            if b_entry.1 == USER_B_ID || b_entry.2 == CHAR_B_ID {
+                let unchanged = cur_bounds.get(&id).is_some_and(|e| {
+                    b_entry.0 == e.session_id
+                        && b_entry.1 == e.user_id
+                        && b_entry.2 == e.character_id
+                        && b_entry.3 == e.service
+                        && b_entry.4 == e.object_id
+                });
+                if !unchanged {
+                    return true;
+                }
+            }
+        }
+        for (&id, e) in cur_bounds.iter() {
+            if (e.user_id == USER_B_ID || e.character_id == CHAR_B_ID)
+                && !base.bound_keys.contains_key(&id)
+            {
+                return true;
+            }
+        }
+    }
+
+    // Target B's in-space entities (ship, Upwell structure, POS tower) must remain invariant.
+    if space_dirty {
+        let b_balls = [fix.b_space_ship_id, CORP_B_STRUCTURE_ID, fix.b_pos_id];
+        for bp_base in &base.ballparks {
+            let sys = fix.ctx.systems.get_or_spawn(bp_base.sys_id);
+            let bp = sys.ballpark.read().expect("ballpark");
+            for &bid in &b_balls {
+                if bp.balls.get(&bid) != bp_base.balls.get(&bid) {
+                    return true;
+                }
+                let base_cs = bp_base.combat_states.get(&bid).map(combat_sig);
+                let cur_cs = bp.combat_states.get(&bid).map(combat_sig);
+                if base_cs != cur_cs {
+                    return true;
+                }
+            }
+        }
+    }
+
+    let Some(cur_tables) = cur_db else {
+        return false;
+    };
+    let b = &base.db.snapshot;
+    let c = &cur_tables.snapshot;
+
+    // 1. Direct Character B / Account B / Corp B / Alliance B keyed tables.
+    if b.accounts.get("neg_b") != c.accounts.get("neg_b")
+        || b.account_plex_vault.get(&USER_B_ID) != c.account_plex_vault.get(&USER_B_ID)
+        || b.characters.get(&CHAR_B_ID) != c.characters.get(&CHAR_B_ID)
+        || b.skills.get(&CHAR_B_ID) != c.skills.get(&CHAR_B_ID)
+        || b.skill_queues.get(&CHAR_B_ID) != c.skill_queues.get(&CHAR_B_ID)
+        || b.paused_skill_queues.contains(&CHAR_B_ID) != c.paused_skill_queues.contains(&CHAR_B_ID)
+        || b.skill_history.get(&CHAR_B_ID) != c.skill_history.get(&CHAR_B_ID)
+        || b.jump_clones.get(&CHAR_B_ID) != c.jump_clones.get(&CHAR_B_ID)
+        || b.active_implants.get(&CHAR_B_ID) != c.active_implants.get(&CHAR_B_ID)
+        || b.npe_progress.get(&CHAR_B_ID) != c.npe_progress.get(&CHAR_B_ID)
+        || b.standing_transactions.get(&CHAR_B_ID) != c.standing_transactions.get(&CHAR_B_ID)
+        || b.char_contacts.get(&CHAR_B_ID) != c.char_contacts.get(&CHAR_B_ID)
+        || b.char_contact_labels.get(&CHAR_B_ID) != c.char_contact_labels.get(&CHAR_B_ID)
+        || b.char_contact_notifications.get(&CHAR_B_ID)
+            != c.char_contact_notifications.get(&CHAR_B_ID)
+        || b.character_cspa_charges.get(&CHAR_B_ID) != c.character_cspa_charges.get(&CHAR_B_ID)
+        || b.char_wallet_transactions.get(&CHAR_B_ID)
+            != c.char_wallet_transactions.get(&CHAR_B_ID)
+        || b.char_medals.get(&CHAR_B_ID) != c.char_medals.get(&CHAR_B_ID)
+        || b.char_scoped_roles.get(&CHAR_B_ID) != c.char_scoped_roles.get(&CHAR_B_ID)
+        || b.character_doll_info.get(&CHAR_B_ID) != c.character_doll_info.get(&CHAR_B_ID)
+        || b.character_login_stats.get(&CHAR_B_ID) != c.character_login_stats.get(&CHAR_B_ID)
+        || b.char_lp_logs.as_cow_map().get(&CHAR_B_ID)
+            != c.char_lp_logs.as_cow_map().get(&CHAR_B_ID)
+        || b.licensed_skins.get(&CHAR_B_ID) != c.licensed_skins.get(&CHAR_B_ID)
+        || b.crimewatch_states.get(&CHAR_B_ID) != c.crimewatch_states.get(&CHAR_B_ID)
+        || b.mail_labels.get(&CHAR_B_ID) != c.mail_labels.get(&CHAR_B_ID)
+        || b.employment_history.get(&CHAR_B_ID) != c.employment_history.get(&CHAR_B_ID)
+        || b.fw_character_stats.get(&CHAR_B_ID) != c.fw_character_stats.get(&CHAR_B_ID)
+        || b.last_mission_decline_times.get(&CHAR_B_ID)
+            != c.last_mission_decline_times.get(&CHAR_B_ID)
+        || b.character_last_jump_unix.get(&CHAR_B_ID) != c.character_last_jump_unix.get(&CHAR_B_ID)
+        || b.corporations.get(&CORP_B_ID) != c.corporations.get(&CORP_B_ID)
+        || b.corp_governance.get(&CORP_B_ID) != c.corp_governance.get(&CORP_B_ID)
+        || b.corp_hangar_divisions.get(&CORP_B_ID) != c.corp_hangar_divisions.get(&CORP_B_ID)
+        || b.corp_contacts.get(&CORP_B_ID) != c.corp_contacts.get(&CORP_B_ID)
+        || b.corp_contact_labels.get(&CORP_B_ID) != c.corp_contact_labels.get(&CORP_B_ID)
+        || b.corp_medals.get(&CORP_B_ID) != c.corp_medals.get(&CORP_B_ID)
+        || b.corp_issued_medals.get(&CORP_B_ID) != c.corp_issued_medals.get(&CORP_B_ID)
+        || b.corp_member_limits.get(&CORP_B_ID) != c.corp_member_limits.get(&CORP_B_ID)
+        || b.corp_titles.get(&CORP_B_ID) != c.corp_titles.get(&CORP_B_ID)
+        || b.corp_role_history.get(&CORP_B_ID) != c.corp_role_history.get(&CORP_B_ID)
+        || b.corp_shareholders.get(&CORP_B_ID) != c.corp_shareholders.get(&CORP_B_ID)
+        || b.corp_alliance_history.get(&CORP_B_ID) != c.corp_alliance_history.get(&CORP_B_ID)
+        || b.corp_customs_offices.get(&CORP_B_ID) != c.corp_customs_offices.get(&CORP_B_ID)
+        || b.structure_vulnerability_windows.get(&CORP_B_STRUCTURE_ID)
+            != c.structure_vulnerability_windows.get(&CORP_B_STRUCTURE_ID)
+        || b.structure_esi_timer_meta.get(&CORP_B_STRUCTURE_ID)
+            != c.structure_esi_timer_meta.get(&CORP_B_STRUCTURE_ID)
+        || b.structure_docking_acl_denied.get(&CORP_B_STRUCTURE_ID)
+            != c.structure_docking_acl_denied.get(&CORP_B_STRUCTURE_ID)
+        || b.starbase_settings.get(&fix.b_pos_id) != c.starbase_settings.get(&fix.b_pos_id)
+        || b.alliances.get(&ALLIANCE_B_ID) != c.alliances.get(&ALLIANCE_B_ID)
+        || b.alliance_contacts.get(&ALLIANCE_B_ID) != c.alliance_contacts.get(&ALLIANCE_B_ID)
+        || b.alliance_contact_labels.get(&ALLIANCE_B_ID)
+            != c.alliance_contact_labels.get(&ALLIANCE_B_ID)
+        || b.alliance_lifecycle_meta.get(&ALLIANCE_B_ID)
+            != c.alliance_lifecycle_meta.get(&ALLIANCE_B_ID)
+        || b.fleets.get(&fix.b_fleet_id) != c.fleets.get(&fix.b_fleet_id)
+        || b.wars.get(&fix.b_war_id) != c.wars.get(&fix.b_war_id)
+        || b.war_lifecycle_meta.get(&fix.b_war_id) != c.war_lifecycle_meta.get(&fix.b_war_id)
+        || b.killmails.get(&fix.b_killmail_id) != c.killmails.get(&fix.b_killmail_id)
+        || b.killmail_details.get(&fix.b_killmail_id) != c.killmail_details.get(&fix.b_killmail_id)
+    {
+        return true;
+    }
+
+    // 2. Target B items, ships, containers, hangars, modules, and structures.
+    let b_item_locs = [
+        fix.b_ship_id,
+        fix.b_space_ship_id,
+        fix.b_cont_id,
+        CORP_B_OFFICE_ID,
+        CORP_B_STRUCTURE_ID,
+    ];
+    let b_item_ids = [
+        fix.b_ship_id,
+        fix.b_space_ship_id,
+        fix.b_cont_id,
+        fix.b_item_id,
+        fix.b_blueprint_id,
+        fix.b_pos_id,
+        CORP_B_OFFICE_ID,
+        CORP_B_OFFICE_ITEM_ID,
+        CORP_B_STRUCTURE_ID,
+    ];
+    let is_b_item = |id: i64, it: &InventoryItemRecord| {
+        it.owner_id == CHAR_B_ID
+            || it.owner_id == CORP_B_ID
+            || b_item_locs.contains(&it.location_id)
+            || b_item_ids.contains(&id)
+    };
+    let b_items_before: BTreeMap<i64, &InventoryItemRecord> = b
+        .items
+        .iter()
+        .filter(|(&id, it)| is_b_item(id, it))
+        .map(|(&id, it)| (id, it))
+        .collect();
+    let b_items_after: BTreeMap<i64, &InventoryItemRecord> = c
+        .items
+        .iter()
+        .filter(|(&id, it)| is_b_item(id, it))
+        .map(|(&id, it)| (id, it))
+        .collect();
+    if b_items_before != b_items_after {
+        return true;
+    }
+    for &iid in &b_item_ids {
+        if b.item_custom_names.get(&iid) != c.item_custom_names.get(&iid)
+            || b.item_positions.get(&iid) != c.item_positions.get(&iid)
+            || b.applied_ship_skins.get(&iid) != c.applied_ship_skins.get(&iid)
+            || b.module_online_states.get(&iid) != c.module_online_states.get(&iid)
+            || b.module_active_states.contains(&iid) != c.module_active_states.contains(&iid)
+            || b.module_active_charges.get(&iid) != c.module_active_charges.get(&iid)
+            || b.ship_fit_inputs.get(&iid) != c.ship_fit_inputs.get(&iid)
+            || b.weapon_banks.get(&iid) != c.weapon_banks.get(&iid)
+        {
+            return true;
+        }
+    }
+    let b_structs_before: BTreeMap<i64, &UpwellStructureRecord> = b
+        .structures
+        .iter()
+        .filter(|(&id, st)| id == CORP_B_STRUCTURE_ID || st.owner_corp_id == CORP_B_ID)
+        .map(|(&id, st)| (id, st))
+        .collect();
+    let b_structs_after: BTreeMap<i64, &UpwellStructureRecord> = c
+        .structures
+        .iter()
+        .filter(|(&id, st)| id == CORP_B_STRUCTURE_ID || st.owner_corp_id == CORP_B_ID)
+        .map(|(&id, st)| (id, st))
+        .collect();
+    if b_structs_before != b_structs_after {
+        return true;
+    }
+
+    // 3. Target B secondary records (fittings, orders, contracts, jobs, bookmarks, notes, mails, journal, PI, votes, KV).
+    fn filtered_entries_changed<'a, K, V, I1, I2, P>(iter_b: I1, iter_c: I2, mut pred: P) -> bool
+    where
+        K: Ord + 'a,
+        V: PartialEq + 'a,
+        I1: IntoIterator<Item = (&'a K, &'a V)>,
+        I2: IntoIterator<Item = (&'a K, &'a V)>,
+        P: FnMut(&K, &V) -> bool,
+    {
+        let before: BTreeMap<&'a K, &'a V> = iter_b
+            .into_iter()
+            .filter(|&(k, v)| pred(k, v))
+            .collect();
+        let after: BTreeMap<&'a K, &'a V> = iter_c
+            .into_iter()
+            .filter(|&(k, v)| pred(k, v))
+            .collect();
+        before != after
+    }
+
+    let b_entity_ids = [
+        CHAR_B_ID,
+        USER_B_ID as i64,
+        CORP_B_ID,
+        ALLIANCE_B_ID,
+        fix.b_ship_id,
+        fix.b_space_ship_id,
+        fix.b_cont_id,
+        fix.b_item_id,
+        fix.b_blueprint_id,
+        fix.b_pos_id,
+        fix.b_fleet_id,
+        fix.b_war_id,
+        fix.b_planet_id,
+        CORP_B_OFFICE_ID,
+        CORP_B_OFFICE_ITEM_ID,
+        CORP_B_STRUCTURE_ID,
+    ];
+    if filtered_entries_changed(b.saved_fittings.iter(), c.saved_fittings.iter(), |&id, f| {
+        id == fix.b_fitting_id || f.owner_id == CHAR_B_ID || f.owner_id == CORP_B_ID
+    }) || filtered_entries_changed(b.market_orders.iter(), c.market_orders.iter(), |&id, o| {
+        id == fix.b_order_id || o.owner_id == CHAR_B_ID || o.owner_id == CORP_B_ID
+    }) || filtered_entries_changed(b.contracts.iter(), c.contracts.iter(), |&id, ct| {
+        id == fix.b_contract_id
+            || ct.issuer_id == CHAR_B_ID
+            || ct.issuer_corp_id == CORP_B_ID
+            || ct.assignee_id == CHAR_B_ID
+            || ct.assignee_id == CORP_B_ID
+    }) || filtered_entries_changed(b.industry_jobs.iter(), c.industry_jobs.iter(), |&id, j| {
+        id == fix.b_job_id
+            || j.installer_id == CHAR_B_ID
+            || j.facility_id == CORP_B_STRUCTURE_ID
+    }) || filtered_entries_changed(b.bookmarks.iter(), c.bookmarks.iter(), |&id, bm| {
+        id == fix.b_bookmark_id || bm.owner_id == CHAR_B_ID || bm.owner_id == CORP_B_ID
+    }) || filtered_entries_changed(
+        b.bookmark_folders.iter(),
+        c.bookmark_folders.iter(),
+        |_, f| f.owner_id == CHAR_B_ID || f.owner_id == CORP_B_ID,
+    ) || filtered_entries_changed(b.owner_notes.iter(), c.owner_notes.iter(), |_, n| {
+        n.character_id == CHAR_B_ID
+    }) || filtered_entries_changed(b.char_notes.iter(), c.char_notes.iter(), |k, _| {
+        k.0 == CHAR_B_ID
+    }) || filtered_entries_changed(
+        b.mail_assigned_labels.iter(),
+        c.mail_assigned_labels.iter(),
+        |k, _| k.0 == CHAR_B_ID,
+    ) || filtered_entries_changed(
+        b.planetary_colonies.iter(),
+        c.planetary_colonies.iter(),
+        |k, _| k.0 == CHAR_B_ID,
+    ) || filtered_entries_changed(
+        b.planetary_colony_layouts.iter(),
+        c.planetary_colony_layouts.iter(),
+        |k, _| k.0 == CHAR_B_ID,
+    ) || filtered_entries_changed(b.corp_projects.iter(), c.corp_projects.iter(), |&id, p| {
+        id == fix.b_corp_project_id || p.corporation_id == CORP_B_ID
+    }) || filtered_entries_changed(b.corp_vote_cases.iter(), c.corp_vote_cases.iter(), |_, v| {
+        v.corporation_id == CORP_B_ID
+    }) || filtered_entries_changed(
+        b.corp_vote_ballots.iter(),
+        c.corp_vote_ballots.iter(),
+        |k, _| k.1 == CHAR_B_ID,
+    ) || filtered_entries_changed(
+        b.insurance_contracts.iter(),
+        c.insurance_contracts.iter(),
+        |_, ins| ins.owner_id == CHAR_B_ID || ins.owner_id == CORP_B_ID,
+    ) || filtered_entries_changed(
+        b.corp_wallet_journals.iter(),
+        c.corp_wallet_journals.iter(),
+        |k, _| k.0 == CORP_B_ID,
+    ) || filtered_entries_changed(
+        b.corp_wallet_transactions.iter(),
+        c.corp_wallet_transactions.iter(),
+        |k, _| k.0 == CORP_B_ID,
+    ) || filtered_entries_changed(
+        b.corp_lp_balances.iter(),
+        c.corp_lp_balances.iter(),
+        |k, _| k.0 == CORP_B_ID,
+    ) || filtered_entries_changed(
+        b.corp_role_assignments.iter(),
+        c.corp_role_assignments.iter(),
+        |k, _| k.0 == CORP_B_ID || k.1 == CHAR_B_ID,
+    ) || filtered_entries_changed(
+        b.corp_member_titles.iter(),
+        c.corp_member_titles.iter(),
+        |k, _| k.0 == CORP_B_ID || k.1 == CHAR_B_ID,
+    ) || filtered_entries_changed(b.entity_kv.iter(), c.entity_kv.iter(), |k, _| {
+        b_entity_ids.contains(&k.entity_id)
+    }) {
+        return true;
+    }
+
+    // Mail / wallet journal / mail state sets for Target B.
+    let b_mail_before = b.mails.iter().find(|m| m.message_id == fix.b_mail_id);
+    let b_mail_after = c.mails.iter().find(|m| m.message_id == fix.b_mail_id);
+    if b_mail_before != b_mail_after {
+        return true;
+    }
+    let b_read_before: BTreeSet<(i64, i64)> = b
+        .read_mails
+        .iter()
+        .copied()
+        .filter(|(cid, _)| *cid == CHAR_B_ID)
+        .collect();
+    let b_read_after: BTreeSet<(i64, i64)> = c
+        .read_mails
+        .iter()
+        .copied()
+        .filter(|(cid, _)| *cid == CHAR_B_ID)
+        .collect();
+    let b_del_before: BTreeSet<(i64, i64)> = b
+        .deleted_mails
+        .iter()
+        .copied()
+        .filter(|(cid, _)| *cid == CHAR_B_ID)
+        .collect();
+    let b_del_after: BTreeSet<(i64, i64)> = c
+        .deleted_mails
+        .iter()
+        .copied()
+        .filter(|(cid, _)| *cid == CHAR_B_ID)
+        .collect();
+    let b_trash_before: BTreeSet<(i64, i64)> = b
+        .trashed_mails
+        .iter()
+        .copied()
+        .filter(|(cid, _)| *cid == CHAR_B_ID)
+        .collect();
+    let b_trash_after: BTreeSet<(i64, i64)> = c
+        .trashed_mails
+        .iter()
+        .copied()
+        .filter(|(cid, _)| *cid == CHAR_B_ID)
+        .collect();
+    if b_read_before != b_read_after
+        || b_del_before != b_del_after
+        || b_trash_before != b_trash_after
+    {
+        return true;
+    }
+    let b_journal_before: Vec<_> = b
+        .wallet_journal
+        .iter()
+        .filter(|e| e.character_id == CHAR_B_ID || e.character_id == CORP_B_ID)
+        .collect();
+    let b_journal_after: Vec<_> = c
+        .wallet_journal
+        .iter()
+        .filter(|e| e.character_id == CHAR_B_ID || e.character_id == CORP_B_ID)
+        .collect();
+    if b_journal_before != b_journal_after {
+        return true;
+    }
+
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn evaluate_negative_call(
     fix: &MatrixFixture,
@@ -3582,9 +4083,13 @@ async fn evaluate_negative_call(
     meth: &str,
     args: &[PyRep],
     kw: &HashMap<String, PyRep>,
-    is_allowlisted: bool,
+    allow_rule: Option<&AllowRule>,
     observed: &mut BTreeSet<MatrixViolation>,
 ) {
+    let is_allowlisted = allow_rule.is_some();
+    let allow_caller_scoped_mutation =
+        sit == Situation::B && allow_rule.is_some_and(|r| r.caller_scoped_mutation);
+
     let epoch_before = fix.ctx.db.state_epoch();
     let commits_before = fix.ctx.db.tx_commit_count();
     let mut call_sess = fix.sess_by_sit[sit as usize].clone();
@@ -3596,11 +4101,14 @@ async fn evaluate_negative_call(
 
     let db_counter_bumped = fix.ctx.db.state_epoch() != epoch_before
         || fix.ctx.db.tx_commit_count() != commits_before;
-    let db_dirty = if db_counter_bumped {
-        fix.ctx.db.snapshot_tables().snapshot != runtime_baseline.db.snapshot
+    let cur_db = if db_counter_bumped {
+        Some(fix.ctx.db.snapshot_tables())
     } else {
-        false
+        None
     };
+    let db_dirty = cur_db
+        .as_ref()
+        .is_some_and(|tables| tables.snapshot != runtime_baseline.db.snapshot);
     let (runtime_dirty, bound_dirty, space_dirty) =
         check_runtime_changed(fix, runtime_baseline);
     let world_mutated = db_dirty || runtime_dirty;
@@ -3613,7 +4121,29 @@ async fn evaluate_negative_call(
             kind: "unexpected_allow".to_string(),
         });
     }
-    if world_mutated && (!is_allowlisted || matches!(sit, Situation::A | Situation::B)) {
+    let mutation_violation = if !world_mutated {
+        false
+    } else if !is_allowlisted || sit == Situation::A {
+        true
+    } else if sit == Situation::B {
+        if allow_caller_scoped_mutation && out.result.is_ok() {
+            // Caller-scoped mutations allowlisted in Situation B may mutate caller (CHAR_A_ID)
+            // state, but must still preserve strict target (CHAR_B_ID / CORP_B_ID) invariance.
+            target_b_state_mutated(
+                fix,
+                runtime_baseline,
+                cur_db.as_ref(),
+                bound_dirty,
+                space_dirty,
+            )
+        } else {
+            // Read-only Situation B allowlist entries and rejected calls require full invariance.
+            true
+        }
+    } else {
+        false
+    };
+    if mutation_violation {
         observed.insert(MatrixViolation {
             situation: sit_label.to_string(),
             service: svc.to_string(),
@@ -3707,9 +4237,9 @@ async fn run_situation_worker(
     let mut observed = BTreeSet::new();
 
     for (svc, meth) in discovered.iter() {
-        let is_allowlisted = allowlist
+        let allow_rule = allowlist
             .get(&(svc.clone(), meth.clone()))
-            .is_some_and(|m| m.contains_key(sit_code));
+            .and_then(|m| m.get(sit_code));
         let (bound_id, args) = build_call_args(&fix, sit, svc, meth);
         evaluate_negative_call(
             &fix,
@@ -3721,7 +4251,7 @@ async fn run_situation_worker(
             meth,
             &args,
             &kw,
-            is_allowlisted,
+            allow_rule,
             &mut observed,
         )
         .await;
@@ -3742,7 +4272,7 @@ async fn run_situation_worker(
                         meth,
                         &args,
                         &kw,
-                        false,
+                        None,
                         &mut observed,
                     )
                     .await;
