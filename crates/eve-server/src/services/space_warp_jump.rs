@@ -1007,6 +1007,61 @@ async fn handle_cmd_warp_to_stuff(
     }
 }
 
+fn verify_stargate_character_db_state(
+    ch: Option<&eve_db::CharacterRecord>,
+    char_id: i64,
+    entry_db_state: Option<(Option<i64>, Option<i64>, u32)>,
+) -> Result<(), BridgeRpcError> {
+    let ch = ch.ok_or_else(|| BridgeRpcError {
+        code: "CharacterNotFound".into(),
+        message: format!("Character {char_id} not found"),
+        client_error: None,
+    })?;
+    let entry_db_undocked =
+        entry_db_state.is_some_and(|(st, sr, _)| st.is_none() && sr.is_none());
+    let entry_db_sys = entry_db_state.map(|(_, _, sys)| sys).unwrap_or(0);
+    if entry_db_undocked {
+        let err_msg = if ch.station_id.is_some() || ch.structure_id.is_some() {
+            Some(format!(
+                "Character {char_id} is docked and cannot transition in space"
+            ))
+        } else if ch.solar_system_id != entry_db_sys {
+            Some(format!(
+                "Character {char_id} moved to solar system {} concurrently",
+                ch.solar_system_id
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = err_msg {
+            return Err(BridgeRpcError {
+                code: "SystemTransitionFailed".into(),
+                message,
+                client_error: None,
+            });
+        }
+    } else if entry_db_state
+        .is_some_and(|e| (ch.station_id, ch.structure_id, ch.solar_system_id) != e)
+    {
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: format!("Character {char_id} transitioned concurrently"),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
+fn check_stargate_entry_db_state(
+    ctx: &ServerContext,
+    char_id: i64,
+    entry_db_state: Option<(Option<i64>, Option<i64>, u32)>,
+) -> Result<(), BridgeRpcError> {
+    ctx.db.with_snapshot(|snap| {
+        verify_stargate_character_db_state(snap.characters.get(&char_id), char_id, entry_db_state)
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn commit_stargate_db_transition(
     ctx: &ServerContext,
@@ -1019,7 +1074,6 @@ fn commit_stargate_db_transition(
 ) -> Result<eve_db::CharacterRecord, BridgeRpcError> {
     let entry_db_undocked =
         entry_db_state.is_some_and(|(st, sr, _)| st.is_none() && sr.is_none());
-    let entry_db_sys = entry_db_state.map(|(_, _, sys)| sys).unwrap_or(0);
     ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(uid) = session.user_id {
             if ctx.db.kicked_reason(uid).is_some() {
@@ -1045,38 +1099,12 @@ fn commit_stargate_db_transition(
             ));
         }
 
+        verify_stargate_character_db_state(snap.characters.get(&char_id), char_id, entry_db_state)?;
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
             client_error: None,
         })?;
-        if entry_db_undocked {
-            let err_msg = if ch.station_id.is_some() || ch.structure_id.is_some() {
-                Some(format!(
-                    "Character {char_id} is docked and cannot transition in space"
-                ))
-            } else if ch.solar_system_id != entry_db_sys {
-                Some(format!(
-                    "Character {char_id} moved to solar system {} concurrently",
-                    ch.solar_system_id
-                ))
-            } else {
-                None
-            };
-            if let Some(message) = err_msg {
-                return Err(BridgeRpcError {
-                    code: "SystemTransitionFailed".into(),
-                    message,
-                    client_error: None,
-                });
-            }
-        } else if entry_db_state.is_some_and(|e| (ch.station_id, ch.structure_id, ch.solar_system_id) != e) {
-            return Err(BridgeRpcError {
-                code: "SystemTransitionFailed".into(),
-                message: format!("Character {char_id} transitioned concurrently"),
-                client_error: None,
-            });
-        }
         let (const_id, reg_id) = ctx
             .sde
             .solar_systems
@@ -1309,6 +1337,7 @@ async fn handle_cmd_stargate_jump(
     let now_ms = ctx.now_machonet_wallclock_ms();
 
     let _ = old_handle.settle_stargate_activation_states(now_ms);
+    let mut needs_lazy_wake = false;
     if let Some(st) = old_handle.stargate_activation_state(gate_id) {
         if st.activation_state != eve_destiny::STARGATE_ACTIVATION_STATE_OPEN {
             // Under `lazy_stargate_activation = true`, gates pointing to not-yet-loaded
@@ -1316,7 +1345,8 @@ async fn handle_cmd_stargate_jump(
             // (`#1080`). A pilot already within jump range (`<= 2,500 m`, e.g. after login or
             // server restart) sends `CmdStargateJump` directly without a preceding
             // `CmdWarpToStuff`/`CmdFollowBall`, so lazily load the unloaded destination and
-            // open the gate here after all pre-jump validation/range/lock guards pass (`#1413`).
+            // open the gate here after all pre-jump validation/range/lock/DB/toll guards pass
+            // (`#1413`, `#1429`).
             // Explicitly closed gates (`lazy_stargate_activation == false`, or destination
             // already loaded while `CLOSED`) and mid-transition `ACTIVATING` gates still reject
             // with `GateClosed`.
@@ -1325,25 +1355,47 @@ async fn handle_cmd_stargate_jump(
                     && ctx.systems.lazy_stargate_activation()
                     && !ctx.systems.is_system_loaded(dest_sys_id);
             if is_lazy_unloaded_gate {
-                check_jump_session_lease(ctx, session, char_id, entry_had_online_lease)?;
-                if ctx
-                    .systems
-                    .ensure_stargate_destination_loaded_for_intent(old_sys, gate_id, now_ms)
-                    .is_some()
-                    && ctx.systems.is_system_loaded(dest_sys_id)
-                {
-                    let _ = old_handle.set_stargate_activation_state(
-                        gate_id,
-                        eve_destiny::STARGATE_ACTIVATION_STATE_OPEN,
-                        0,
-                        0,
-                    );
-                } else {
-                    return Err(BridgeRpcError::gate_closed(gate_id));
-                }
+                needs_lazy_wake = true;
             } else {
                 return Err(BridgeRpcError::gate_closed(gate_id));
             }
+        }
+    }
+
+    // Verify session lease, DB entry state, and read-only Zarzakh entry toll BEFORE lazily
+    // waking an unloaded destination system or opening its source stargate (`#1429`).
+    // Actual ISK debit stays after `take_ball` + post-`take_ball` session-lease verification
+    // so ISK is never debited on a failed or displaced jump.
+    check_jump_session_lease(ctx, session, char_id, entry_had_online_lease)?;
+    check_stargate_entry_db_state(ctx, char_id, entry_db_state)?;
+    if dest_sys_id == SOLAR_SYSTEM_ZARZAKH {
+        crate::services::space_navigation_advanced::prevalidate_zarzakh_gate_toll(
+            ctx,
+            char_id,
+            ship_id,
+            gate_id,
+            jump.destination_stargate_id,
+            &current_ball,
+            args,
+            kwargs,
+        )?;
+    }
+
+    if needs_lazy_wake {
+        if ctx
+            .systems
+            .ensure_stargate_destination_loaded_for_intent(old_sys, gate_id, now_ms)
+            .is_some()
+            && ctx.systems.is_system_loaded(dest_sys_id)
+        {
+            let _ = old_handle.set_stargate_activation_state(
+                gate_id,
+                eve_destiny::STARGATE_ACTIVATION_STATE_OPEN,
+                0,
+                0,
+            );
+        } else {
+            return Err(BridgeRpcError::gate_closed(gate_id));
         }
     }
 

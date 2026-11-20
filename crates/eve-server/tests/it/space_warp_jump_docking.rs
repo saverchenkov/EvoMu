@@ -5116,3 +5116,255 @@ async fn jump_clock_continuity_across_tidi() {
     assert_eq!(rebase_tuple.0, wall_before_in + 60_000_000);
     assert_eq!(rebase_tuple.1, wall_before_in + 120_000_000);
 }
+
+#[tokio::test]
+async fn zarzakh_toll_rejections_never_load_lazy_zarzakh_gh_1429() {
+    // parity: feat:navigation.stargate-jump, feat:navigation.zarzakh-gate-toll
+    const ZARZAKH_SYS: u32 = 30_100_000;
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ctx.systems.set_lazy_stargate_activation(true);
+
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| {
+            j.to_solar_system_id == ZARZAKH_SYS
+                && j.from_solar_system_id != ZARZAKH_SYS
+                && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+        })
+        .min_by_key(|j| j.stargate_id)
+        .cloned()
+        .expect("SDE must contain a stargate leading into Zarzakh (30_100_000)");
+    let gate_radius = stargate_radius(&ctx, &gate);
+
+    let char_id = 91_429_001_i64;
+    let ship_id = 101_429_001_i64;
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587, // Rifter (<= 1.5M kg -> 10,000 ISK floor)
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 800.0, 0.0, 0.0),
+    )
+    .await;
+    let underfunded = eve_db::IskCents::from_isk(5_000);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.war_faction_id = None;
+        ch.balance = underfunded;
+    });
+    let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+    let src_h = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("source system loaded");
+    let v24_args = [
+        PyRep::Integer(gate.stargate_id),
+        PyRep::Integer(gate.destination_stargate_id),
+        PyRep::Integer(ship_id),
+    ];
+    let empty_kw = HashMap::new();
+    let epoch_0 = ctx.db.state_epoch();
+    let journal_len_0 = ctx.db.with_snapshot(|s| s.wallet_journal.len());
+
+    let assert_zarzakh_untouched = |expected_bal: eve_db::IskCents, expected_epoch: u64, sess: &SessionState| {
+        assert!(
+            !ctx.systems.is_system_loaded(ZARZAKH_SYS),
+            "rejected Zarzakh jump must NOT load Zarzakh (30_100_000)"
+        );
+        assert_eq!(
+            src_h
+                .stargate_activation_state(gate.stargate_id)
+                .map(|s| s.activation_state),
+            Some(eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED),
+            "rejected Zarzakh jump must leave entry stargate CLOSED"
+        );
+        assert_eq!(
+            ctx.db.state_epoch(),
+            expected_epoch,
+            "rejected Zarzakh jump must NOT mutate EveDb / state_epoch"
+        );
+        ctx.db.with_snapshot(|s| {
+            assert_eq!(s.characters[&char_id].balance, expected_bal);
+            assert_eq!(s.characters[&char_id].solar_system_id, gate.from_solar_system_id);
+            assert_eq!(s.wallet_journal.len(), journal_len_0);
+        });
+        assert_eq!(sess.solar_system_id, Some(gate.from_solar_system_id));
+    };
+
+    assert_zarzakh_untouched(underfunded, epoch_0, &sess);
+
+    // 1. Unconfirmed V24 3-arg jump -> AskConfirmZarzakhGateToll; Zarzakh stays unloaded, gate CLOSED, DB untouched.
+    let err_prompt = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &v24_args,
+            &empty_kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_prompt.code, "AskConfirmZarzakhGateToll");
+    assert!(err_prompt.message.contains("10000 ISK"));
+    assert_zarzakh_untouched(underfunded, epoch_0, &sess);
+
+    // 2. Declined toll (`confirmToll: false`) -> ZarzakhGateTollDeclined; Zarzakh stays unloaded, gate CLOSED, DB untouched.
+    let mut decline_kw = HashMap::new();
+    decline_kw.insert("confirmToll".to_string(), PyRep::Bool(false));
+    let err_declined = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &v24_args,
+            &decline_kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_declined.code, "ZarzakhGateTollDeclined");
+    assert_zarzakh_untouched(underfunded, epoch_0, &sess);
+
+    // 3. Underfunded 2-step V24 jump: quote -> confirm -> InsufficientFundsForZarzakhGateToll;
+    //    Zarzakh stays unloaded, gate stays CLOSED, DB/ISK untouched.
+    let err_requote = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &v24_args,
+            &empty_kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_requote.code, "AskConfirmZarzakhGateToll");
+    assert_zarzakh_untouched(underfunded, epoch_0, &sess);
+
+    let err_broke = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &v24_args,
+            &empty_kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_broke.code, "InsufficientFundsForZarzakhGateToll");
+    assert_zarzakh_untouched(underfunded, epoch_0, &sess);
+
+    // 4. Underfunded explicit `confirmToll: true` -> InsufficientFundsForZarzakhGateToll;
+    //    Zarzakh stays unloaded, gate stays CLOSED, DB/ISK untouched.
+    let mut confirm_kw = HashMap::new();
+    confirm_kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+    let err_broke_explicit = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &v24_args,
+            &confirm_kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_broke_explicit.code, "InsufficientFundsForZarzakhGateToll");
+    assert_zarzakh_untouched(underfunded, epoch_0, &sess);
+
+    // 5. Fund wallet and complete the 2-step V24 jump: Step 1 quotes without waking Zarzakh,
+    //    Step 2 lazily wakes Zarzakh, opens the source stargate, debits 10,000 ISK, and moves the ship.
+    let funded = eve_db::IskCents::from_isk(100_000);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().balance = funded;
+    });
+    let epoch_funded = ctx.db.state_epoch();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let err_step1 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &v24_args,
+            &empty_kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_step1.code, "AskConfirmZarzakhGateToll");
+    assert_zarzakh_untouched(funded, epoch_funded, &sess);
+
+    let res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &v24_args,
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("funded confirmed direct CmdStargateJump into Zarzakh must succeed (#1429)");
+    let PyRep::KeyVal(kv) = res else {
+        panic!("expected KeyVal from CmdStargateJump, got {res:?}");
+    };
+    assert_eq!(
+        kv.get("solarSystemID").and_then(|v| v.as_i64()),
+        Some(ZARZAKH_SYS as i64)
+    );
+    assert_eq!(sess.solar_system_id, Some(ZARZAKH_SYS));
+    assert!(
+        ctx.systems.is_system_loaded(ZARZAKH_SYS),
+        "Zarzakh (30_100_000) must be loaded after funded confirmed jump"
+    );
+    assert_eq!(
+        src_h
+            .stargate_activation_state(gate.stargate_id)
+            .map(|s| s.activation_state),
+        Some(eve_destiny::STARGATE_ACTIVATION_STATE_OPEN),
+        "source stargate must be OPEN after funded confirmed jump"
+    );
+    let dest_h = ctx
+        .systems
+        .get_handle(ZARZAKH_SYS)
+        .expect("Zarzakh system handle loaded");
+    assert!(
+        dest_h
+            .get_ball_snapshot(ship_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "ship must be materialized in Zarzakh"
+    );
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(
+            s.characters[&char_id].balance,
+            eve_db::IskCents::from_isk(90_000)
+        );
+        assert_eq!(s.characters[&char_id].solar_system_id, ZARZAKH_SYS);
+        assert!(s.wallet_journal.iter().any(|j| {
+            j.character_id == char_id
+                && j.entry_type == "zarzakh_gate_toll"
+                && j.amount == eve_db::IskCents::from_isk(10_000)
+        }));
+    });
+    let notes = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notes.iter().any(|n| n.event == "OnAccountChange"),
+        "confirmed Zarzakh jump debit must emit OnAccountChange"
+    );
+}

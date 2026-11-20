@@ -391,17 +391,7 @@ pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64,
     }
 }
 
-/// Validates and debits any Zarzakh gate toll, returning the debited ISK cents (`None` for pirate free pass).
-pub fn process_zarzakh_gate_toll_with_amount(
-    ctx: &ServerContext,
-    char_id: i64,
-    ship_id: i64,
-    from_gate_id: i64,
-    to_gate_id: i64,
-    current_ball: &eve_destiny::Ball,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Result<Option<eve_db::IskCents>, BridgeRpcError> {
+fn is_zarzakh_toll_exempt_pirate(ctx: &ServerContext, char_id: i64) -> bool {
     let char_war_faction = ctx.db.with_snapshot(|s| {
         let ch = s.characters.get(&char_id);
         s.fw_runtime
@@ -418,28 +408,23 @@ pub fn process_zarzakh_gate_toll_with_amount(
                 })
             })
     });
-    let is_pirate = matches!(char_war_faction, Some(500_010 | 500_011));
-    if is_pirate {
-        crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
-            st.zarzakh_toll_quotes.remove(&char_id);
-        });
-        return Ok(None);
-    }
+    matches!(char_war_faction, Some(500_010 | 500_011))
+}
 
-    let declined = kwargs.get("confirmToll") == Some(&PyRep::Bool(false))
+fn zarzakh_gate_toll_declined(args: &[PyRep], kwargs: &HashMap<String, PyRep>) -> bool {
+    kwargs.get("confirmToll") == Some(&PyRep::Bool(false))
         || kwargs.get("confirm_toll") == Some(&PyRep::Bool(false))
         || kwargs.get("declineToll") == Some(&PyRep::Bool(true))
         || kwargs.get("decline_toll") == Some(&PyRep::Bool(true))
         || args.get(1) == Some(&PyRep::Bool(false))
-        || args.get(3) == Some(&PyRep::Bool(false));
-    if declined {
-        crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
-            st.zarzakh_toll_quotes.remove(&char_id);
-        });
-        crate::services::cluster_macho_misc_services::persist_misc_state(ctx);
-        return Err(BridgeRpcError::user_error("ZarzakhGateTollDeclined"));
-    }
+        || args.get(3) == Some(&PyRep::Bool(false))
+}
 
+fn compute_zarzakh_gate_toll(
+    ctx: &ServerContext,
+    ship_id: i64,
+    current_ball: &eve_destiny::Ball,
+) -> (f64, i64, eve_db::IskCents) {
     // DERIVED: Zarzakh stargate transit toll scales with effective ship jump mass (`auditor_rows.json:6954-6960`, `Zarzakh.md:30-31`):
     // small hulls (<= 1,500,000 kg: capsules, shuttles, corvettes, frigates) pay the 10,000 ISK floor, scaling linearly up to
     // the 100,000,000 ISK cap at 150,000,000 kg (Orca `type_id 28606`, the heaviest Zarzakh-eligible SDE hull).
@@ -458,16 +443,148 @@ pub fn process_zarzakh_gate_toll_with_amount(
             .round() as i64
     };
     let toll_cents = eve_db::IskCents::from_isk(toll);
+    (mass, toll, toll_cents)
+}
 
-    let now = ctx.now_unix();
+fn zarzakh_gate_toll_explicit_confirm(args: &[PyRep], kwargs: &HashMap<String, PyRep>) -> bool {
     let is_three_arg_v24_call = args.len() >= 3 && args.get(1).and_then(|v| v.as_i64()).is_some();
-    let explicit_confirm = kwargs.get("confirmToll") == Some(&PyRep::Bool(true))
+    kwargs.get("confirmToll") == Some(&PyRep::Bool(true))
         || kwargs.get("confirm_toll") == Some(&PyRep::Bool(true))
         || args.get(1) == Some(&PyRep::Bool(true))
         || args.get(3) == Some(&PyRep::Bool(true))
         || (!is_three_arg_v24_call
             && kwargs.get("requireConfirm") != Some(&PyRep::Bool(true))
-            && kwargs.get("promptToll") != Some(&PyRep::Bool(true)));
+            && kwargs.get("promptToll") != Some(&PyRep::Bool(true)))
+}
+
+fn ask_confirm_zarzakh_gate_toll_error(ship_id: i64, toll: i64, mass: f64) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "AskConfirmZarzakhGateToll".into(),
+        message: format!(
+            "Confirm Zarzakh stargate transit toll of {toll} ISK for ship {ship_id} (effective mass {mass:.0} kg)"
+        ),
+        client_error: None,
+    }
+}
+
+/// Read-only pre-validation of Zarzakh entry gate toll before lazy stargate activation or ship
+/// ball removal (`#1429`).
+///
+/// Mirrors [`process_zarzakh_gate_toll_with_amount`]'s exact pirate exemption, decline check
+/// (`ZarzakhGateTollDeclined`), V24 3-arg quote/confirmation challenge (`AskConfirmZarzakhGateToll`),
+/// and wallet balance sufficiency check (`InsufficientFundsForZarzakhGateToll`) **without** debiting
+/// ISK or mutating `EveDb` / `state_epoch`.
+///
+/// On decline, quote prompt, or insufficient funds, updates only the in-memory `zarzakh_toll_quotes`
+/// map (without calling `persist_misc_state`) so two-step V24 confirmation flows remain intact; on
+/// success, keeps any matching pending quote in place for the post-`take_ball` debit call
+/// (`process_zarzakh_gate_toll_with_amount`) to consume.
+#[allow(clippy::too_many_arguments)]
+pub fn prevalidate_zarzakh_gate_toll(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    from_gate_id: i64,
+    to_gate_id: i64,
+    current_ball: &eve_destiny::Ball,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<Option<eve_db::IskCents>, BridgeRpcError> {
+    if is_zarzakh_toll_exempt_pirate(ctx, char_id) {
+        return Ok(None);
+    }
+
+    if zarzakh_gate_toll_declined(args, kwargs) {
+        crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
+            st.zarzakh_toll_quotes.remove(&char_id);
+        });
+        return Err(BridgeRpcError::user_error("ZarzakhGateTollDeclined"));
+    }
+
+    let (mass, toll, toll_cents) = compute_zarzakh_gate_toll(ctx, ship_id, current_ball);
+    let now = ctx.now_unix();
+    let explicit_confirm = zarzakh_gate_toll_explicit_confirm(args, kwargs);
+
+    let confirmed_quote = crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
+        if let Some(q) = st.zarzakh_toll_quotes.get(&char_id) {
+            if q.from_gate_id == from_gate_id && q.ship_id == ship_id && now <= q.expires_unix {
+                return Some(q.quoted_toll_cents);
+            }
+        }
+        if explicit_confirm {
+            return Some(toll_cents);
+        }
+        st.zarzakh_toll_quotes.insert(
+            char_id,
+            crate::services::cluster_macho_misc_services::PendingZarzakhTollQuote {
+                from_gate_id,
+                to_gate_id,
+                ship_id,
+                quoted_toll_cents: toll_cents,
+                expires_unix: now + 60,
+            },
+        );
+        None
+    });
+
+    let Some(effective_toll_cents) = confirmed_quote else {
+        return Err(ask_confirm_zarzakh_gate_toll_error(ship_id, toll, mass));
+    };
+
+    let balance_check = ctx.db.with_snapshot(|s| {
+        let c = s
+            .characters
+            .get(&char_id)
+            .ok_or_else(|| BridgeRpcError::user_error("CharacterNotFound"))?;
+        if c.balance < effective_toll_cents
+            || c.balance.checked_sub(effective_toll_cents).is_none()
+        {
+            return Err(BridgeRpcError::user_error(
+                "InsufficientFundsForZarzakhGateToll",
+            ));
+        }
+        Ok(())
+    });
+    if let Err(err) = balance_check {
+        crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
+            st.zarzakh_toll_quotes.remove(&char_id);
+        });
+        return Err(err);
+    }
+
+    Ok((effective_toll_cents.0 > 0).then_some(effective_toll_cents))
+}
+
+/// Validates and debits any Zarzakh gate toll, returning the debited ISK cents (`None` for pirate free pass).
+#[allow(clippy::too_many_arguments)]
+pub fn process_zarzakh_gate_toll_with_amount(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    from_gate_id: i64,
+    to_gate_id: i64,
+    current_ball: &eve_destiny::Ball,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<Option<eve_db::IskCents>, BridgeRpcError> {
+    if is_zarzakh_toll_exempt_pirate(ctx, char_id) {
+        crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
+            st.zarzakh_toll_quotes.remove(&char_id);
+        });
+        return Ok(None);
+    }
+
+    if zarzakh_gate_toll_declined(args, kwargs) {
+        crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
+            st.zarzakh_toll_quotes.remove(&char_id);
+        });
+        crate::services::cluster_macho_misc_services::persist_misc_state(ctx);
+        return Err(BridgeRpcError::user_error("ZarzakhGateTollDeclined"));
+    }
+
+    let (mass, toll, toll_cents) = compute_zarzakh_gate_toll(ctx, ship_id, current_ball);
+    let now = ctx.now_unix();
+    let explicit_confirm = zarzakh_gate_toll_explicit_confirm(args, kwargs);
 
     let confirmed_quote = crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
         if let Some(q) = st.zarzakh_toll_quotes.get(&char_id).cloned() {
@@ -495,13 +612,7 @@ pub fn process_zarzakh_gate_toll_with_amount(
     crate::services::cluster_macho_misc_services::persist_misc_state(ctx);
 
     let Some(effective_toll_cents) = confirmed_quote else {
-        return Err(BridgeRpcError {
-            code: "AskConfirmZarzakhGateToll".into(),
-            message: format!(
-                "Confirm Zarzakh stargate transit toll of {toll} ISK for ship {ship_id} (effective mass {mass:.0} kg)"
-            ),
-            client_error: None,
-        });
+        return Err(ask_confirm_zarzakh_gate_toll_error(ship_id, toll, mass));
     };
 
     let bal_after = ctx.db.try_with_mut_snapshot(|s| {
