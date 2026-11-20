@@ -1324,14 +1324,37 @@ pub(crate) fn is_valid_standing_owner_id(
 
 /// Applies a primary faction standing percentage change (`fac_pct`, positive for gain or
 /// negative for loss) and, when `apply_derived` is true, propagates derived faction standings
-/// per EVE Wiki (`NPC_standings.md`):
+/// per EVE Wiki (`NPC_standings.md` lines 137-156; `Getting_positive_Triglavian_and_EDENCOM_standings.md`
+/// lines 22-24, 48-50):
 /// - `Inter-Faction Standing Modifier = Secondary's view of Primary * (Primary Size / Secondary Size)`
 /// - `Derived Standing % = Gain % * (Inter-Faction Standing Modifier / 10.0)`
 /// - Gains and enemy losses are capped at Secondary's standing view of Primary (`rel`).
 /// - When `fac_pct < 0.0` (faction standing loss), friends (`rel > 0.0`) receive negative derived
-///   standings while enemies (`rel < 0.0`) do not receive positive derived standings.
+///   standings while enemies (`rel < 0.0`) do not receive positive derived standings — except the
+///   bipolar Triglavian (`500_026`) / EDENCOM (`500_027`) pair where standing loss on one side
+///   grants equal positive derived standing with the opposing side.
 pub fn apply_faction_standing_with_derived(
     ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    primary_faction_id: i64,
+    fac_pct: f64,
+    apply_derived: bool,
+    changes: &mut Vec<(i64, f64, f64)>,
+) {
+    apply_faction_standing_with_derived_sde(
+        &ctx.sde,
+        snap,
+        char_id,
+        primary_faction_id,
+        fac_pct,
+        apply_derived,
+        changes,
+    );
+}
+
+fn apply_faction_standing_with_derived_sde(
+    sde: &eve_sde::SdeRegistry,
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
     primary_faction_id: i64,
@@ -1359,7 +1382,10 @@ pub fn apply_faction_standing_with_derived(
     if !apply_derived {
         return;
     }
-    let primary_size = ctx.sde.factions.get(&(primary_faction_id as u32)).map_or(5.0, |f| f.size_factor);
+    let primary_size = sde
+        .factions
+        .get(&(primary_faction_id as u32))
+        .map_or(5.0, |f| f.size_factor);
     if primary_size <= 0.0 {
         return;
     }
@@ -1367,7 +1393,10 @@ pub fn apply_faction_standing_with_derived(
         if target_f != primary_faction_id || rel == 0.0 {
             continue;
         }
-        let secondary_size = ctx.sde.factions.get(&(secondary_f as u32)).map_or(5.0, |f| f.size_factor);
+        let secondary_size = sde
+            .factions
+            .get(&(secondary_f as u32))
+            .map_or(5.0, |f| f.size_factor);
         if secondary_size <= 0.0 {
             continue;
         }
@@ -1376,7 +1405,11 @@ pub fn apply_faction_standing_with_derived(
         let cur_other = ch.standings.get(&secondary_f).copied().unwrap_or(0.0);
         let new_other = if fac_pct > 0.0 {
             if rel > 0.0 {
-                if cur_other >= rel { cur_other } else { apply_standing_increase(cur_other, derived_pct).min(rel) }
+                if cur_other >= rel {
+                    cur_other
+                } else {
+                    apply_standing_increase(cur_other, derived_pct).min(rel)
+                }
             } else if cur_other <= rel {
                 cur_other
             } else {
@@ -1384,6 +1417,12 @@ pub fn apply_faction_standing_with_derived(
             }
         } else if rel > 0.0 {
             apply_standing_decrease(cur_other, derived_pct.abs())
+        } else if matches!(primary_faction_id, 500_026 | 500_027)
+            && matches!(secondary_f, 500_026 | 500_027)
+        {
+            // Per EVE Wiki (Getting_positive_Triglavian_and_EDENCOM_standings.md:22-24, 48-50):
+            // destroying EDENCOM or Triglavian ships causes equal opposing derived gain.
+            apply_standing_increase(cur_other, derived_pct.abs())
         } else {
             cur_other
         };
@@ -1393,6 +1432,622 @@ pub fn apply_faction_standing_with_derived(
             changes.push((secondary_f, new_other, d_other));
         }
     }
+}
+
+/// Duration of one NPC-kill standing tick in seconds (`600 s` = 10 minutes), tracked per
+/// `(character_id, faction_id, solar_system_id)`.
+///
+/// Source: EVE University Wiki `NPC_standings.md` ("Standing ticks", lines 180-183):
+/// "The standing tick is 10 minutes long and is tracked on per system basis."
+pub const NPC_KILL_STANDING_TICK_SECS: u64 = 600;
+
+/// SDE dogma attribute ID for `entityFactionLoss` (`sde_dogma_attributes.attribute_id = 562`).
+///
+/// Source: EVE Online SDE (`sde_dogma_attributes` / `sde_types.attributes_json`). Values are
+/// expressed on EVE's `[0.0, 10.0]` standing scale at `0.0` standing, so converting to the
+/// percentage parameter of `apply_standing_decrease` is `fac_pct = -(entity_faction_loss * 10.0)`
+/// (`S_new = S_old + (-10 - S_old) * (entity_faction_loss / 10.0)`). Cross-checked against
+/// EVE University Wiki `Getting_positive_Triglavian_and_EDENCOM_standings.md` lines 42-44
+/// (`Hypnosian Watcher` SDE `0.09276` -> wiki `0.093`; `Hypnosian Upholder` `0.10832` -> `0.108`;
+/// `Phase-II Legionary` `0.03` -> `0.03`).
+pub const ATTR_ENTITY_FACTION_LOSS: u16 = 562;
+
+/// SDE dogma attribute ID for `factionID` (`sde_dogma_attributes.attribute_id = 1341`).
+const ATTR_ENTITY_FACTION_ID: u16 = 1341;
+
+// DERIVED: Fallback `entityFactionLoss` values (on EVE's `[0.0, 10.0]` standing scale at 0.0,
+// i.e. `-0.1%`, `-0.05%`, `-0.02%`) used ONLY when a qualifying faction NPC ship/structure type
+// omits dogma attribute `562` (`entityFactionLoss`) in the SDE or a minimal test seed (for
+// example `Sentry Gun` group `99` or older `Faction Drone` entries where `562` is `NULL`).
+// Magnitudes match the SDE median of `entityFactionLoss` across battleship/structure (`0.01`),
+// cruiser/hauler (`0.005`), and frigate/destroyer (`0.002`) entity classes. Whenever attribute
+// `562` IS present with `<= 0.0` (e.g. FW complex guards, Abyssal, Homefront, Spawn Containers),
+// this fallback is NEVER used and zero standing loss is applied.
+const DERIVED_FALLBACK_LOSS_LARGE: f64 = 0.01;
+const DERIVED_FALLBACK_LOSS_MEDIUM: f64 = 0.005;
+const DERIVED_FALLBACK_LOSS_SMALL: f64 = 0.002;
+
+fn npc_kill_standing_tick_note_id(char_id: i64) -> i64 {
+    -(5_400_000_000_000_i64.saturating_add(char_id.abs()))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum NpcKillStandingTickRecord {
+    HighestLoss(i64, u32, u64, f64),
+    LegacyFirstKill(i64, u32, u64),
+}
+
+fn load_npc_kill_standing_ticks(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> Vec<(i64, u32, u64, f64)> {
+    let Some(note) = snap.owner_notes.get(&npc_kill_standing_tick_note_id(char_id)) else {
+        return Vec::new();
+    };
+    let Ok(records) = serde_json::from_str::<Vec<NpcKillStandingTickRecord>>(&note.note) else {
+        return Vec::new();
+    };
+    records
+        .into_iter()
+        .map(|rec| match rec {
+            NpcKillStandingTickRecord::HighestLoss(fid, sid, tick_start, max_loss) => {
+                (fid, sid, tick_start, max_loss)
+            }
+            NpcKillStandingTickRecord::LegacyFirstKill(fid, sid, tick_start) => {
+                (fid, sid, tick_start, 100.0)
+            }
+        })
+        .collect()
+}
+
+fn save_npc_kill_standing_ticks(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    ticks: &[(i64, u32, u64, f64)],
+    now_unix: u64,
+) {
+    let nid = npc_kill_standing_tick_note_id(char_id);
+    if let Ok(note) = serde_json::to_string(ticks) {
+        snap.owner_notes.insert(
+            nid,
+            eve_db::OwnerNoteRecord {
+                note_id: nid,
+                character_id: -5,
+                item_id: char_id,
+                label: format!("npc_kill_standing_ticks:{char_id}"),
+                note,
+                timestamp_unix: now_unix,
+            },
+        );
+    }
+}
+
+/// Returns true iff `faction_id` is a standing-bearing EVE NPC faction from `sde_factions`
+/// (`500_001..=500_020`, `500_024..=500_029`, excluding `500_021` "Unknown").
+pub fn is_standing_bearing_faction(faction_id: i64) -> bool {
+    matches!(faction_id, 500_001..=500_020 | 500_024..=500_029)
+}
+
+/// Returns true iff `group_id` is a non-standing NPC entity group excluded BEFORE evaluating
+/// dogma attribute `562` (`entityFactionLoss`):
+/// - Faction Warfare complex ("plex") guards and FW Infrastructure Hubs (`925`,
+///   `Faction_warfare_standings.md` lines 33 & 40, wikitext lines 50-55, 90 & 118: killing complex
+///   NPCs causes no faction standing loss; note `1174` is `Asteroid Rogue Drone Officer` and is
+///   deliberately not excluded).
+/// - Abyssal (`1982`, `1997`), Homefront Operations (`4569..=4577`, `4737`, `4771`),
+///   AIR/Unidentified (`4105`, `4128`, `4130`, `5119`), and Deadspace/Wormhole Sleepers
+///   (`959..=961`, `982..=987`, `1307`, `1529` — note SDE groups `983`, `985`, `987` carry
+///   residual positive `attr 562` despite WH Sleepers not lowering faction standings).
+/// - Non-combat containers/beacons (`306` Spawn Container, `496` Overseer's Belongings,
+///   `715` Destructible Agents In Space, `922` Capture Point, `952` Mission Container,
+///   `1207` Scatter Container).
+fn is_excluded_non_standing_npc_group(group_id: u32) -> bool {
+    matches!(
+        group_id,
+        306
+            | 496
+            | 715
+            | 922
+            | 925
+            | 952
+            | 959..=961
+            | 982..=987
+            | 1166..=1169
+            | 1175..=1186
+            | 1207
+            | 1307
+            | 1529
+            | 1982
+            | 1997
+            | 4105
+            | 4128
+            | 4130
+            | 4431..=4434
+            | 4569..=4577
+            | 4737
+            | 4771
+            | 5063..=5066
+            | 5119
+            | 5151
+            | 5186..=5193
+            | 5265..=5268
+    )
+}
+
+fn is_sleeper_npc_entity(sde_type: &eve_sde::InvType, group_name: &str) -> bool {
+    matches!(
+        sde_type.group_id,
+        959..=961 | 982..=987 | 1307 | 1529 | 4036
+    ) || group_name.contains("Sleeper")
+        || sde_type.name.contains("Sleeper")
+        || sde_type.name.contains("Sleepless")
+        || sde_type.name.contains("Awakened")
+        || sde_type.name.contains("Emergent")
+        || sde_type.name.contains("Hypnosian")
+}
+
+/// Resolves the standing-bearing NPC faction ID for a destroyed NPC entity type from SDE metadata
+/// (`sde_types.faction_id`, dogma attribute `1341` `factionID`, group/type/wreck names), falling
+/// back to runtime `explicit_faction_id`, `owner_id_opt` (faction or NPC corp), and `race_id`.
+pub fn resolve_npc_faction_id_for_standing(
+    sde: &eve_sde::SdeRegistry,
+    npc_type_id: u32,
+    explicit_faction_id: Option<u32>,
+    owner_id_opt: Option<i64>,
+) -> Option<i64> {
+    let sde_type = sde.types.get(&npc_type_id);
+    if let Some(fid) = sde_type
+        .and_then(|t| t.faction_id)
+        .map(i64::from)
+        .filter(|&f| is_standing_bearing_faction(f))
+    {
+        return Some(fid);
+    }
+    if let Some(fid) = sde_type
+        .and_then(|t| t.default_attributes.get(&ATTR_ENTITY_FACTION_ID).copied())
+        .map(|v| v.round() as i64)
+        .filter(|&f| is_standing_bearing_faction(f))
+    {
+        return Some(fid);
+    }
+
+    let group_name = sde_type
+        .and_then(|t| sde.groups.get(&t.group_id))
+        .map(|g| g.name.as_str())
+        .unwrap_or("");
+    let type_name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
+    let wreck_name = sde
+        .resolve_wreck_type_id(npc_type_id, None)
+        .and_then(|wid| sde.types.get(&wid))
+        .map(|w| w.name.as_str())
+        .unwrap_or("");
+
+    // DERIVED: Fallback keyword mapping from SDE entity group/type/wreck names to standing-bearing
+    // `sde_factions` IDs for legacy EVE NPC types whose `sde_types.faction_id` column is `NULL`
+    // (e.g. `Mission Caldari State Battleship` / `Caldari Navy Raven` 12391, `Pithi Invader` 16997,
+    // `Minmatar Sentry Gun` 3743). Specific sub-factions and pirate factions precede empire names.
+    const KEYWORD_TABLE: &[(&[&str], i64)] = &[
+        (&["Guristas", "Pithi", "Pithum", "Pith"], 500_010),
+        (&["Angel", "Gist", "Domination"], 500_011),
+        (&["Blood", "Corpus", "Corpior", "Corpatis"], 500_012),
+        (&["Sansha", "Centii", "Centum", "Centus"], 500_019),
+        (&["Serpentis", "Coreli", "Corelum", "Corelior", "Corelatis"], 500_020),
+        (&["Mordu"], 500_018),
+        (&["Ammatar"], 500_007),
+        (&["Khanid"], 500_008),
+        (&["Syndicate"], 500_009),
+        (&["Thukker"], 500_015),
+        (&["Sisters of EVE", "Sanctuary"], 500_016),
+        (&["Society of Conscious Thought", "SoCT"], 500_017),
+        (&["EverMore"], 500_013),
+        (&["ORE ", "Outer Ring Excavations"], 500_014),
+        (&["CONCORD", "DED ", "AEGIS", "SCC "], 500_006),
+        (&["Jove", "Jovian"], 500_005),
+        (&["Drifter", "Tyrannos", "Hypnosian"], 500_024),
+        (&["Rogue Drone", "Alvi", "Alvus", "Overmind"], 500_025),
+        (
+            &[
+                "Triglavian",
+                "Damavik",
+                "Vedmak",
+                "Drekavac",
+                "Leshak",
+                "Raznaborg",
+                "Zorya",
+                "Hospodar",
+                "Liminal",
+                "Zirnitra",
+            ],
+            500_026,
+        ),
+        (&["EDENCOM"], 500_027),
+        (&["Deathless"], 500_029),
+        (&["Caldari", "State Navy", "State Protectorate", "State Hauler"], 500_001),
+        (&["Minmatar", "Republic Fleet", "Republic Hauler", "Tribal Liberation"], 500_002),
+        (&["Amarr", "Imperial Navy", "Imperial Hauler", "24th Imperial"], 500_003),
+        (&["Gallente", "Federation Navy", "Federal Navy", "Federation Hauler", "Federal Defence"], 500_004),
+    ];
+    for text in [group_name, type_name, wreck_name] {
+        if text.is_empty() {
+            continue;
+        }
+        for &(tokens, fid) in KEYWORD_TABLE {
+            if tokens.iter().any(|tok| text.contains(tok)) {
+                return Some(fid);
+            }
+        }
+    }
+
+    if let Some(fid) = explicit_faction_id
+        .map(i64::from)
+        .filter(|&f| is_standing_bearing_faction(f))
+    {
+        return Some(fid);
+    }
+    if let Some(owner_id) = owner_id_opt {
+        if is_standing_bearing_faction(owner_id) {
+            return Some(owner_id);
+        }
+        if let Some(fid) = sde
+            .npc_corporations
+            .get(&owner_id)
+            .and_then(|c| c.faction_id)
+            .map(i64::from)
+            .filter(|&f| is_standing_bearing_faction(f))
+        {
+            return Some(fid);
+        }
+    }
+    sde_type
+        .and_then(|t| t.race_id)
+        .and_then(|rid| match rid {
+            1 => Some(500_001),
+            2 => Some(500_002),
+            4 => Some(500_003),
+            8 => Some(500_004),
+            _ => None,
+        })
+}
+
+/// Determines whether destroying `npc_type_id` in `solar_system_id` incurs a faction standing
+/// loss tick, returning `Some((faction_id, fac_pct_negative))` for
+/// [`apply_faction_standing_with_derived`] or `None` if the NPC does not count.
+///
+/// Rules and sources:
+/// - **Counting vs. non-counting NPCs**:
+///   - EVE Wiki `NPC_standings.md` (lines 126, 132, 173-174): destroying ships/structures
+///     belonging to an empire, pirate, or other standing-bearing faction (including Drifters and
+///     Rogue Drones) lowers faction standing; "not all ships count for this."
+///   - EVE Wiki `Faction_warfare_standings.md` (lines 33-36, wikitext lines 50-67, 116-118):
+///     killing FW complex ("plex") NPCs causes NO faction standing loss; killing faction mission
+///     NPCs causes faction standing loss + derived changes when the NPC carries a standing loss.
+///   - EVE Wiki `Getting_positive_Triglavian_and_EDENCOM_standings.md` (line 27): Abyssal
+///     Deadspace (`32_000_000..=32_999_999`) and Wormhole-space (`31_000_000..=31_999_999`) Sleeper
+///     kills do not modify faction standings.
+///   - Unknown type IDs missing from `sde.types` and non-NPC categories (`category_id != 11`, e.g.
+///     player ships, drones, deployables, Upwell structures) never count.
+///   - [`is_excluded_non_standing_npc_group`] and the WH-space Sleeper guard are evaluated
+///     BEFORE checking dogma attribute `562` (`entityFactionLoss`).
+/// - **Tick size**:
+///   - Primary source: EVE Online SDE dogma attribute `562` (`entityFactionLoss`) on `sde_types`.
+///     - If present and `<= 0.0`, returns `None` (no loss).
+///     - If present and `> 0.0`, converts to `fac_pct = -(loss * 10.0)` clamped to
+///       `[-100.0, -1e-6]`.
+///   - Fallback (`// DERIVED:`): when attribute `562` is absent on a qualifying `category_id == 11`
+///     faction NPC ship or structure, uses class fallback `0.01` (battleship/capital/officer/sentry/
+///     structure), `0.005` (cruiser/BC/hauler), or `0.002` (frigate/destroyer/other).
+pub fn resolve_npc_kill_standing_loss_spec(
+    sde: &eve_sde::SdeRegistry,
+    npc_type_id: u32,
+    explicit_faction_id: Option<u32>,
+    owner_id_opt: Option<i64>,
+    solar_system_id: u32,
+) -> Option<(i64, f64)> {
+    // Abyssal Deadspace pockets do not modify faction standings.
+    if (32_000_000..=32_999_999).contains(&solar_system_id) {
+        return None;
+    }
+    let sde_type = sde.types.get(&npc_type_id)?;
+    if sde_type.category_id != 11 {
+        return None;
+    }
+    if is_excluded_non_standing_npc_group(sde_type.group_id) {
+        return None;
+    }
+    let group_name = sde
+        .groups
+        .get(&sde_type.group_id)
+        .map(|g| g.name.as_str())
+        .unwrap_or("");
+    if (31_000_000..=31_999_999).contains(&solar_system_id)
+        && is_sleeper_npc_entity(sde_type, group_name)
+    {
+        return None;
+    }
+
+    let faction_id =
+        resolve_npc_faction_id_for_standing(sde, npc_type_id, explicit_faction_id, owner_id_opt)?;
+
+    let entity_faction_loss = match sde_type
+        .default_attributes
+        .get(&ATTR_ENTITY_FACTION_LOSS)
+        .copied()
+    {
+        Some(loss) => {
+            if !loss.is_finite() || loss <= 0.0 {
+                return None;
+            }
+            loss
+        }
+        None => {
+            let type_name = sde_type.name.as_str();
+            if matches!(
+                sde_type.group_id,
+                99 | 319 | 383 | 494 | 495 | 552 | 556 | 560 | 565 | 570 | 674 | 680 | 706 | 924
+            ) || group_name.contains("Battleship")
+                || group_name.contains("Capital")
+                || group_name.contains("Dreadnought")
+                || group_name.contains("Officer")
+                || group_name.contains("Structure")
+                || group_name.contains("Sentry")
+                || type_name.contains("Sentry")
+                || type_name.contains("Tower")
+            {
+                DERIVED_FALLBACK_LOSS_LARGE
+            } else if group_name.contains("Cruiser")
+                || group_name.contains("Battlecruiser")
+                || group_name.contains("BattleCruiser")
+                || group_name.contains("Hauler")
+                || group_name.contains("Transport")
+                || group_name.contains("Convoy")
+                || group_name.contains("Commander")
+            {
+                DERIVED_FALLBACK_LOSS_MEDIUM
+            } else {
+                DERIVED_FALLBACK_LOSS_SMALL
+            }
+        }
+    };
+
+    let fac_pct = -(entity_faction_loss * 10.0).clamp(1e-6, 100.0);
+    Some((faction_id, fac_pct))
+}
+
+fn resolve_player_killer_char_id_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    killer_id: i64,
+) -> Option<i64> {
+    if killer_id <= 0 {
+        return None;
+    }
+    if snap.characters.contains_key(&killer_id) {
+        return Some(killer_id);
+    }
+    if let Some(owner_id) = snap
+        .get_any_item(killer_id)
+        .map(|it| it.owner_id)
+        .filter(|oid| snap.characters.contains_key(oid))
+    {
+        return Some(owner_id);
+    }
+    snap.characters
+        .values()
+        .find(|c| c.active_ship_id == killer_id)
+        .map(|ch| ch.character_id)
+}
+
+/// Resolves runtime fighter squadron or active drone ball/item ownership to the owning player
+/// character ID without holding `WorldRepository` locks (`RANK_LEAF` lock safety).
+pub(crate) fn resolve_runtime_killer_char_id(ctx: &ServerContext, killer_id: i64) -> i64 {
+    if killer_id <= 0 {
+        return 0;
+    }
+    if let Some(cid) = ctx
+        .active_fighters
+        .read()
+        .ok()
+        .and_then(|af| {
+            af.get(&killer_id)
+                .or_else(|| af.values().find(|f| f.ball_id == killer_id || f.item_id == killer_id))
+                .map(|f| f.owner_char_id)
+        })
+        .filter(|&cid| cid > 0)
+    {
+        return cid;
+    }
+    if let Some(cid) = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space
+            .get(&killer_id)
+            .or_else(|| {
+                rt.active_drones_in_space
+                    .values()
+                    .find(|d| d.ball_id == killer_id || d.drone_item_id == killer_id)
+            })
+            .map(|d| d.owner_char_id)
+    })
+    .filter(|&cid| cid > 0)
+    {
+        return cid;
+    }
+    killer_id
+}
+
+fn apply_npc_kill_faction_standing_loss_in_snap_impl(
+    sde: &eve_sde::SdeRegistry,
+    snap: &mut eve_db::WorldStateSnapshot,
+    solar_system_id: u32,
+    killer_id: i64,
+    npc_type_id: u32,
+    explicit_faction_id: Option<u32>,
+    owner_id_opt: Option<i64>,
+    now_unix: u64,
+    apply_fn: impl FnOnce(
+        &mut eve_db::WorldStateSnapshot,
+        i64,
+        i64,
+        f64,
+        &mut Vec<(i64, f64, f64)>,
+    ),
+) -> (i64, Vec<(i64, f64, f64)>) {
+    let Some(char_id) = resolve_player_killer_char_id_in_snap(snap, killer_id) else {
+        return (0, Vec::new());
+    };
+    let Some((faction_id, fac_pct)) = resolve_npc_kill_standing_loss_spec(
+        sde,
+        npc_type_id,
+        explicit_faction_id,
+        owner_id_opt,
+        solar_system_id,
+    ) else {
+        return (char_id, Vec::new());
+    };
+
+    let new_loss = fac_pct.abs().clamp(0.0, 100.0);
+    let mut ticks = load_npc_kill_standing_ticks(snap, char_id);
+    // Prune expired 10-minute standing ticks before evaluating the active window.
+    ticks.retain(|&(_, _, tick_start, _)| {
+        now_unix < tick_start.saturating_add(NPC_KILL_STANDING_TICK_SECS)
+    });
+
+    // Highest-loss-wins within each active 600s `(character, faction, solar_system)` window
+    // (`Getting_positive_Triglavian_and_EDENCOM_standings.md:40-44`, matching `combat/crimewatch.rs`):
+    // keeping `tick_start_unix` fixed, a lower/equal loss is ignored and a higher loss applies the
+    // incremental percentage `(p_new - p_prev) / (1 - p_prev)` so frigate-then-battleship yields the
+    // exact same standing as killing the battleship directly via `apply_standing_decrease`.
+    let (effective_fac_pct, tick_start_unix) = if let Some(existing) = ticks
+        .iter()
+        .copied()
+        .find(|&(fid, sid, _, _)| fid == faction_id && sid == solar_system_id)
+    {
+        if new_loss <= existing.3 + 1e-12 {
+            return (char_id, Vec::new());
+        }
+        let p_prev = (existing.3 / 100.0).clamp(0.0, 1.0 - 1e-12);
+        let p_new = (new_loss / 100.0).clamp(0.0, 1.0);
+        let p_inc = ((p_new - p_prev) / (1.0 - p_prev)).clamp(0.0, 1.0);
+        let eff_pct = -(p_inc * 100.0);
+        if eff_pct.abs() <= 1e-9 {
+            return (char_id, Vec::new());
+        }
+        (eff_pct, existing.2)
+    } else {
+        (fac_pct, now_unix)
+    };
+
+    ticks.retain(|&(fid, sid, _, _)| !(fid == faction_id && sid == solar_system_id));
+    ticks.push((faction_id, solar_system_id, tick_start_unix, new_loss));
+    save_npc_kill_standing_ticks(snap, char_id, &ticks, now_unix);
+
+    let mut changes: Vec<(i64, f64, f64)> = Vec::new();
+    apply_fn(snap, char_id, faction_id, effective_fac_pct, &mut changes);
+
+    for &(from_id, _new_val, delta) in &changes {
+        if delta.abs() > 1e-9 {
+            snap.next_entity_id += 1;
+            let ev_id = snap.next_entity_id;
+            snap.standing_transactions
+                .entry(char_id)
+                .or_default()
+                .push(StandingTransactionRecord {
+                    event_id: ev_id,
+                    from_id,
+                    to_id: char_id,
+                    modification: delta,
+                    event_type_id: if delta >= 0.0 { 85 } else { 83 },
+                });
+        }
+    }
+
+    (char_id, changes)
+}
+
+/// Applies NPC-kill faction standing loss (plus derived faction changes and 10-minute per-system
+/// tick deduplication) directly inside an existing `WorldStateSnapshot` when only `SdeRegistry`
+/// is available (e.g. non-`ServerContext` unit paths). Callers with a [`ServerContext`] should
+/// prefer [`apply_npc_kill_faction_standing_loss`] so client notifications are emitted.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_npc_kill_faction_standing_loss_in_snap_sde(
+    sde: &eve_sde::SdeRegistry,
+    snap: &mut eve_db::WorldStateSnapshot,
+    solar_system_id: u32,
+    killer_id: i64,
+    npc_type_id: u32,
+    explicit_faction_id: Option<u32>,
+    owner_id_opt: Option<i64>,
+    now_unix: u64,
+) -> (i64, Vec<(i64, f64, f64)>) {
+    apply_npc_kill_faction_standing_loss_in_snap_impl(
+        sde,
+        snap,
+        solar_system_id,
+        killer_id,
+        npc_type_id,
+        explicit_faction_id,
+        owner_id_opt,
+        now_unix,
+        |snap, char_id, faction_id, fac_pct, changes| {
+            apply_faction_standing_with_derived_sde(
+                sde,
+                snap,
+                char_id,
+                faction_id,
+                fac_pct,
+                true,
+                changes,
+            );
+        },
+    )
+}
+
+/// Applies NPC-kill faction standing loss, derived faction standing changes via
+/// [`apply_faction_standing_with_derived`], standing transaction history, 10-minute highest-loss-wins
+/// `(character_id, faction_id, solar_system_id)` tick deduplication, and client notifications
+/// (`OnStandingSet` + `OnStandingsModified`) via [`notify_standing_changes`].
+///
+/// Returns the applied `(faction_id, new_standing, delta)` tuples (empty when the NPC does not
+/// count, the killer does not resolve to a player character, or the 10-minute per-system tick already
+/// recorded an equal or larger loss).
+pub fn apply_npc_kill_faction_standing_loss(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    killer_id: i64,
+    npc_type_id: u32,
+    explicit_faction_id: Option<u32>,
+    owner_id_opt: Option<i64>,
+    now_unix: u64,
+) -> Vec<(i64, f64, f64)> {
+    if killer_id <= 0 {
+        return Vec::new();
+    }
+    let effective_killer_id = resolve_runtime_killer_char_id(ctx, killer_id);
+    let (char_id, changes) = ctx.db.with_mut_snapshot(|snap| {
+        apply_npc_kill_faction_standing_loss_in_snap_impl(
+            &ctx.sde,
+            snap,
+            solar_system_id,
+            effective_killer_id,
+            npc_type_id,
+            explicit_faction_id,
+            owner_id_opt,
+            now_unix,
+            |snap, char_id, faction_id, fac_pct, changes| {
+                apply_faction_standing_with_derived(
+                    ctx,
+                    snap,
+                    char_id,
+                    faction_id,
+                    fac_pct,
+                    true,
+                    changes,
+                );
+            },
+        )
+    });
+    if char_id > 0 && !changes.is_empty() {
+        notify_standing_changes(ctx, char_id, &changes);
+    }
+    changes
 }
 
 pub fn apply_mission_completion_standings(

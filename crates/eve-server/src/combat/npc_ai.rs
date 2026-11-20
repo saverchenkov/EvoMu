@@ -1527,6 +1527,15 @@ fn finalize_destroyed_npc_side_effects(
             npc_ball_id,
             Some(killer_char_id),
         );
+        crate::services::agents_missions::agents_standings_arcs::apply_npc_kill_faction_standing_loss(
+            ctx,
+            sys_id,
+            killer_char_id,
+            entity.type_id,
+            (entity.faction_id > 0).then_some(entity.faction_id),
+            None,
+            now_unix,
+        );
         crate::quasar_gateway::isolate_side_effect("combat.npc_ai.npc_destroyed_progression", || {
             ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
                 killer_char_id as u32,
