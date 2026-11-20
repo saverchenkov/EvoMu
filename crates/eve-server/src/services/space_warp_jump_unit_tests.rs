@@ -4204,6 +4204,11 @@ async fn cmd_stargate_jump_zarzakh_toll_and_db_prevalidation_guards_gh_1429() {
     .unwrap()
     .unwrap_err();
     assert_eq!(err.code, "ZarzakhGateTollDeclined");
+    assert_eq!(
+        err.client_error.as_deref(),
+        Some(&eve_proto::ClientError::CustomInfo(err.message.clone()))
+    );
+    assert_ne!(err.message, err.code);
     assert_untouched(underfunded, epoch_0, &sess);
 
     // 2. Unconfirmed V24 3-arg jump -> AskConfirmZarzakhGateToll; Zarzakh stays unloaded, gate stays CLOSED, DB untouched.
@@ -4221,6 +4226,10 @@ async fn cmd_stargate_jump_zarzakh_toll_and_db_prevalidation_guards_gh_1429() {
     .unwrap_err();
     assert_eq!(err.code, "AskConfirmZarzakhGateToll");
     assert!(err.message.contains("10000 ISK"));
+    assert_eq!(
+        err.client_error.as_deref(),
+        Some(&eve_proto::ClientError::CustomInfo(err.message.clone()))
+    );
     assert_untouched(underfunded, epoch_0, &sess);
 
     // 3. Confirmed via stored quote but underfunded (5,000 < 10,000 ISK) -> InsufficientFundsForZarzakhGateToll;
@@ -4238,6 +4247,12 @@ async fn cmd_stargate_jump_zarzakh_toll_and_db_prevalidation_guards_gh_1429() {
     .unwrap()
     .unwrap_err();
     assert_eq!(err.code, "InsufficientFundsForZarzakhGateToll");
+    assert_eq!(
+        err.client_error.as_deref(),
+        Some(&eve_proto::ClientError::user(
+            eve_proto::UserErrorKey::NotEnoughMoney
+        ))
+    );
     assert_untouched(underfunded, epoch_0, &sess);
 
     // 4. Explicitly confirmed (`confirmToll: true`) but underfunded -> InsufficientFundsForZarzakhGateToll;
@@ -4257,6 +4272,12 @@ async fn cmd_stargate_jump_zarzakh_toll_and_db_prevalidation_guards_gh_1429() {
     .unwrap()
     .unwrap_err();
     assert_eq!(err.code, "InsufficientFundsForZarzakhGateToll");
+    assert_eq!(
+        err.client_error.as_deref(),
+        Some(&eve_proto::ClientError::user(
+            eve_proto::UserErrorKey::NotEnoughMoney
+        ))
+    );
     assert_untouched(underfunded, epoch_0, &sess);
 
     // 5. Missing DB character (`check_stargate_entry_db_state` -> CharacterNotFound) rejects BEFORE lazy wake.
@@ -4352,6 +4373,10 @@ async fn cmd_stargate_jump_zarzakh_toll_and_db_prevalidation_guards_gh_1429() {
     .unwrap()
     .unwrap_err();
     assert_eq!(err.code, "AskConfirmZarzakhGateToll");
+    assert_eq!(
+        err.client_error.as_deref(),
+        Some(&eve_proto::ClientError::CustomInfo(err.message.clone()))
+    );
     assert_untouched(funded, epoch_funded, &sess);
 
     // Step 2 of 2-step V24 jump: consumes quote, lazily wakes Zarzakh, opens gate, debits 10,000 ISK.
@@ -4393,5 +4418,205 @@ async fn cmd_stargate_jump_zarzakh_toll_and_db_prevalidation_guards_gh_1429() {
                 && j.entry_type == "zarzakh_gate_toll"
                 && j.amount == eve_db::IskCents::from_isk(10_000)
         }));
+    });
+}
+
+#[test]
+fn zarzakh_toll_prevalidate_and_process_emit_typed_client_errors_gh_1442() {
+    use crate::services::space_navigation_advanced::{
+        prevalidate_zarzakh_gate_toll, process_zarzakh_gate_toll_with_amount,
+    };
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let missing_char_id = 99_442_999_i64;
+    let ship_id = 895_442_001_i64;
+    let from_gate_id = 50_442_001_i64;
+    let to_gate_id = 50_442_002_i64;
+    let underfunded = eve_db::IskCents::from_isk(5_000);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.war_faction_id = None;
+        ch.balance = underfunded;
+        snap.characters.remove(&missing_char_id);
+    });
+    let journal_len_0 = ctx.db.with_snapshot(|s| s.wallet_journal.len());
+
+    let ball = Ball {
+        id: ship_id,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.0,
+        mass: 1_100_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let v24_args = [
+        PyRep::Integer(from_gate_id),
+        PyRep::Integer(to_gate_id),
+        PyRep::Integer(ship_id),
+    ];
+    let empty_kw = HashMap::new();
+    let mut decline_kw = HashMap::new();
+    decline_kw.insert("confirmToll".to_string(), PyRep::Bool(false));
+    let mut confirm_kw = HashMap::new();
+    confirm_kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+
+    let assert_typed_custom_info = |err: &eve_proto::BridgeRpcError, expected_code: &str| {
+        assert_eq!(err.code, expected_code);
+        assert_ne!(
+            err.message, err.code,
+            "{expected_code} must carry a descriptive message rather than echoing raw code"
+        );
+        assert!(
+            err.client_error.is_some(),
+            "{expected_code} must populate typed client_error"
+        );
+        let expected_ce = eve_proto::ClientError::CustomInfo(err.message.clone());
+        assert_eq!(err.client_error.as_deref(), Some(&expected_ce));
+        assert_eq!(err.to_client_error("beyonce", "CmdStargateJump"), expected_ce);
+    };
+    let assert_typed_not_enough_money = |err: &eve_proto::BridgeRpcError| {
+        assert_eq!(err.code, "InsufficientFundsForZarzakhGateToll");
+        assert!(err.message.contains("10000.00 ISK"));
+        assert!(
+            err.client_error.is_some(),
+            "InsufficientFundsForZarzakhGateToll must populate typed client_error"
+        );
+        let expected_ce = eve_proto::ClientError::user(eve_proto::UserErrorKey::NotEnoughMoney);
+        assert_eq!(err.client_error.as_deref(), Some(&expected_ce));
+        assert_eq!(err.to_client_error("beyonce", "CmdStargateJump"), expected_ce);
+    };
+
+    // --- 1. prevalidate_zarzakh_gate_toll ---
+    let err = prevalidate_zarzakh_gate_toll(
+        &ctx,
+        char_id,
+        ship_id,
+        from_gate_id,
+        to_gate_id,
+        &ball,
+        &v24_args,
+        &decline_kw,
+    )
+    .unwrap_err();
+    assert_typed_custom_info(&err, "ZarzakhGateTollDeclined");
+
+    let err = prevalidate_zarzakh_gate_toll(
+        &ctx,
+        char_id,
+        ship_id,
+        from_gate_id,
+        to_gate_id,
+        &ball,
+        &v24_args,
+        &empty_kw,
+    )
+    .unwrap_err();
+    assert_typed_custom_info(&err, "AskConfirmZarzakhGateToll");
+    assert!(err.message.contains("10000 ISK"));
+
+    let err = prevalidate_zarzakh_gate_toll(
+        &ctx,
+        char_id,
+        ship_id,
+        from_gate_id,
+        to_gate_id,
+        &ball,
+        &v24_args,
+        &empty_kw,
+    )
+    .unwrap_err();
+    assert_typed_not_enough_money(&err);
+
+    let err = prevalidate_zarzakh_gate_toll(
+        &ctx,
+        missing_char_id,
+        ship_id,
+        from_gate_id,
+        to_gate_id,
+        &ball,
+        &v24_args,
+        &confirm_kw,
+    )
+    .unwrap_err();
+    assert_typed_custom_info(&err, "CharacterNotFound");
+    assert!(err.message.contains(&missing_char_id.to_string()));
+
+    // --- 2. process_zarzakh_gate_toll_with_amount ---
+    let err = process_zarzakh_gate_toll_with_amount(
+        &ctx,
+        char_id,
+        ship_id,
+        from_gate_id,
+        to_gate_id,
+        &ball,
+        &v24_args,
+        &decline_kw,
+    )
+    .unwrap_err();
+    assert_typed_custom_info(&err, "ZarzakhGateTollDeclined");
+
+    let err = process_zarzakh_gate_toll_with_amount(
+        &ctx,
+        char_id,
+        ship_id,
+        from_gate_id,
+        to_gate_id,
+        &ball,
+        &v24_args,
+        &empty_kw,
+    )
+    .unwrap_err();
+    assert_typed_custom_info(&err, "AskConfirmZarzakhGateToll");
+    assert!(err.message.contains("10000 ISK"));
+
+    let err = process_zarzakh_gate_toll_with_amount(
+        &ctx,
+        char_id,
+        ship_id,
+        from_gate_id,
+        to_gate_id,
+        &ball,
+        &v24_args,
+        &empty_kw,
+    )
+    .unwrap_err();
+    assert_typed_not_enough_money(&err);
+
+    let err = process_zarzakh_gate_toll_with_amount(
+        &ctx,
+        char_id,
+        ship_id,
+        from_gate_id,
+        to_gate_id,
+        &ball,
+        &v24_args,
+        &confirm_kw,
+    )
+    .unwrap_err();
+    assert_typed_not_enough_money(&err);
+
+    let err = process_zarzakh_gate_toll_with_amount(
+        &ctx,
+        missing_char_id,
+        ship_id,
+        from_gate_id,
+        to_gate_id,
+        &ball,
+        &v24_args,
+        &confirm_kw,
+    )
+    .unwrap_err();
+    assert_typed_custom_info(&err, "CharacterNotFound");
+    assert!(err.message.contains(&missing_char_id.to_string()));
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.characters[&char_id].balance, underfunded);
+        assert_eq!(s.wallet_journal.len(), journal_len_0);
     });
 }
