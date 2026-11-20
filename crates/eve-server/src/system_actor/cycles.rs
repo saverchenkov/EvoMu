@@ -2237,15 +2237,16 @@ pub(crate) fn remove_non_warp_ship_module_cycles(
 
 /// Removes all active module cycles owned by or targeting `ship_id`.
 ///
-/// When `preserve_own_db_active_states` is `true` (used by DB-preserving stargate jumps),
-/// DB `module_active_states`/`module_active_charges`/`transient_item_attributes` cleanup and
+/// When `preserve_own_db_active_states` is `true` (used by DB-preserving stargate `TakeBall` and
+/// tokenized `RemoveBallIfToken` post-spawn stargate rollbacks), DB
+/// `module_active_states`/`module_active_charges`/`transient_item_attributes` cleanup and
 /// `module_deactivation_hook` emission are suppressed **only** for cycles owned by `ship_id`
-/// (`removed.ship_id == ship_id`) so DB rollback can still restore them cleanly. Any other
-/// ship's cycle targeting `ship_id` (`removed.ship_id != ship_id`) and any secondary cycle
+/// (`removed.ship_id == ship_id`) so DB rollback can restore or keep them intact cleanly. Any
+/// other ship's cycle targeting `ship_id` (`removed.ship_id != ship_id`) and any secondary cycle
 /// aborted by `reconcile_tackle_and_bubbles` still run full DB cleanup and
 /// `module_deactivation_hook` so attackers/fleetmates clear DB active state, receive
 /// deactivation notifications, and flush `projected_ewar` / `remote_assistance` before
-/// destination `build_ship_combat_state` runs (`#1237`).
+/// destination `build_ship_combat_state` runs or during rollback (`#1237`, `#1467`).
 fn is_db_write_reentrant(db_opt: &Option<Arc<eve_db::WorldRepository>>) -> bool {
     db_opt
         .as_ref()
