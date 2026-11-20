@@ -31,7 +31,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 # GitHub enforces a hard 65,536-character maximum on issue and comment bodies.
 MAX_GITHUB_BODY_CHARS = 62_000
@@ -143,6 +143,108 @@ def _fnv1a_i64(signature: str) -> int:
 
 def _get_bundle_trace(bundle: Dict[str, Any]) -> str:
     return str(bundle.get("trace") or bundle.get("traceback") or "")
+
+
+_BENIGN_CLIENT_TRACEBACK_RULES: Tuple[Tuple[str, str, str], ...] = (
+    ("marketbase", "_OnResize", "'NoneType' object has no attribute 'max'"),
+    ("minimap", "_ResizeSlider", "'MapSlider' object has no attribute 'minimumWidth'"),
+)
+
+_SERVER_FAULT_MARKERS = (
+    "InternalError",
+    "DatabasePersistenceError",
+    "ServerException",
+    "GenericInternalServerError",
+)
+
+_LOCATION_FUNC_RE = re.compile(r"^([^\s:]+):\d+\s+in\s+([^\s]+)$")
+
+
+def _strip_trace_locals_and_end(trace: str) -> str:
+    """Returns the trace text before any `Thread Locals:` or `EXCEPTION END` section."""
+    kept: List[str] = []
+    for line in trace.replace("\r\n", "\n").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("Thread Locals:", "EXCEPTION END")):
+            break
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _split_trace_sections(trace: str) -> Tuple[List[str], List[str]]:
+    raw = trace.replace("\r\n", "\n").strip()
+    if not raw:
+        return [], []
+    parts = _CALLSTACK_SPLIT_RE.split(raw, maxsplit=1)
+    primary_lines = [line.strip() for line in parts[0].splitlines() if line.strip()]
+    callstack_lines = (
+        [line.strip() for line in parts[1].splitlines() if line.strip()] if len(parts) > 1 else []
+    )
+    return primary_lines, callstack_lines
+
+
+def _extract_trace_location(trace: str) -> Optional[str]:
+    primary_lines, callstack_lines = _split_trace_sections(trace)
+    if not primary_lines and not callstack_lines:
+        return None
+    parsed_loc = _extract_location_from_lines(primary_lines)
+    if parsed_loc is None and callstack_lines:
+        parsed_loc = _extract_location_from_lines(callstack_lines)
+    return parsed_loc
+
+
+def is_benign_client_traceback(trace: str, stack_key: str = "", headline: str = "") -> bool:
+    """Returns True when `(trace, stack_key, headline)` matches a known benign CCP V24 client UI race."""
+    combined = "\n".join(part for part in (headline, stack_key, trace) if part)
+    if not combined.strip():
+        return False
+    if any(marker in combined for marker in _SERVER_FAULT_MARKERS):
+        return False
+
+    filtered_trace = _strip_trace_locals_and_end(trace)
+    if not filtered_trace.strip():
+        return False
+
+    exc_class, msg, location = parse_traceback_summary(filtered_trace, stack_key)
+    trace_loc = _extract_trace_location(filtered_trace)
+    if trace_loc is not None:
+        loc_match = _LOCATION_FUNC_RE.match(trace_loc.strip())
+    else:
+        loc_match = (
+            _LOCATION_FUNC_RE.match(location.strip())
+            if location.strip() not in ("", "unknown")
+            else None
+        )
+        if loc_match is None and stack_key.strip():
+            sk_lines = [line.strip() for line in stack_key.splitlines() if line.strip()]
+            sk_loc = _extract_location_from_lines(sk_lines) or ""
+            loc_match = _LOCATION_FUNC_RE.match(sk_loc.strip())
+    if loc_match is None:
+        return False
+
+    file_stem = _strip_py_extension(loc_match.group(1))
+    func_name = loc_match.group(2)
+    exc_text = f"{exc_class}: {msg}" if msg else exc_class
+    for expected_stem, expected_func, error_substr in _BENIGN_CLIENT_TRACEBACK_RULES:
+        if file_stem != expected_stem.lower() or func_name != expected_func:
+            continue
+        if exc_class == "AttributeError":
+            if error_substr in exc_text:
+                return True
+        elif exc_class in ("UnknownException", "LogException", "LogTraceback"):
+            attr_err = f"AttributeError: {error_substr}"
+            if attr_err in exc_text or attr_err in headline:
+                return True
+    return False
+
+
+def is_benign_client_traceback_bundle(bundle: Dict[str, Any]) -> bool:
+    """Returns True when a queued incident bundle represents only a known benign client UI layout race."""
+    trace = _get_bundle_trace(bundle)
+    stack_key = str(bundle.get("stack_key") or "")
+    manual = bundle.get("manual_report") if is_manual_report(bundle) else None
+    headline = str(manual.get("title") or "") if isinstance(manual, dict) and trace.strip() else ""
+    return is_benign_client_traceback(trace, stack_key=stack_key, headline=headline)
 
 
 def _extract_balanced_tuple_repr(text: str) -> str:
@@ -354,16 +456,10 @@ def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
     playtester log capture (`logmodule.LogException` / `log.LogTraceback`), or EVE
     `alert.SendClientStackTraceAlert` formatted exception block.
     """
-    raw = trace.replace("\r\n", "\n").strip()
-    if not raw:
-        return "UnknownException", "No traceback provided", stack_key or "unknown"
-
-    parts = _CALLSTACK_SPLIT_RE.split(raw, maxsplit=1)
-    primary_lines = [line.strip() for line in parts[0].splitlines() if line.strip()]
-    callstack_lines = (
-        [line.strip() for line in parts[1].splitlines() if line.strip()] if len(parts) > 1 else []
-    )
+    primary_lines, callstack_lines = _split_trace_sections(trace)
     all_lines = primary_lines or callstack_lines
+    if not all_lines:
+        return "UnknownException", "No traceback provided", stack_key or "unknown"
 
     exc_class, msg = _extract_exception_from_lines(primary_lines)
     if not exc_class and callstack_lines:
@@ -863,7 +959,8 @@ def _render_markdown_issue(
             + trace[-9_500:]
         )
     stack_key = bundle.get("stack_key", "")
-    stack_hash = bundle.get("stack_hash", 0)
+    stack_hash = _effective_bundle_hash(bundle)
+    legacy_hashes = _legacy_client_stack_hashes(bundle, effective_hash=stack_hash)
     unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
     timestamp = bundle.get("timestamp", datetime.now(timezone.utc).isoformat())
     session = bundle.get("session", {})
@@ -903,8 +1000,14 @@ def _render_markdown_issue(
     build_info = _extract_build_info(bundle)
     env_fault = classify_environment_fault(bundle)
 
+    sig_line = f"**Signature Hash:** `0x{unsigned_hash:016x}` (or `{stack_hash}`)"
+    if legacy_hashes:
+        raw_unsigned = legacy_hashes[0] & 0xFFFFFFFFFFFFFFFF
+        sig_line += f" | **Client Stack Hash:** `0x{raw_unsigned:016x}`"
+    sig_line += f" | **Occurrences Captured:** `{occurrences}`"
+
     body_lines = [
-        f"**Signature Hash:** `0x{unsigned_hash:016x}` (or `{stack_hash}`) | **Occurrences Captured:** `{occurrences}`",
+        sig_line,
         f"**Reported At:** `{timestamp}` | **Stack Key:** `{stack_key}`",
     ]
     telemetry_parts = [
@@ -1222,8 +1325,13 @@ def ensure_github_labels(repo: str, labels: List[str], ensured_cache: Set[str]) 
         ensured_cache.add(label)
 
 
-def find_existing_issue(repo: str, stack_hash: int, dry_run: bool = False) -> Optional[Tuple[int, str]]:
-    """Queries GitHub CLI to check if an issue for this stack_hash already exists."""
+def find_existing_issue(
+    repo: str,
+    stack_hash: int,
+    dry_run: bool = False,
+    alias_hashes: Optional[Sequence[int]] = None,
+) -> Optional[Tuple[int, str]]:
+    """Queries GitHub CLI to check if an issue for this stack_hash or legacy client hash already exists."""
     if dry_run or not check_gh_installed():
         return None
 
@@ -1232,6 +1340,13 @@ def find_existing_issue(repo: str, stack_hash: int, dry_run: bool = False) -> Op
         f'"**Signature Hash:** `0x{unsigned_hash:016x}`" in:body',
         f'"(or `{stack_hash}`)" in:body',
     ]
+    seen_hashes: Set[int] = {stack_hash}
+    for alias in alias_hashes or ():
+        if alias in seen_hashes:
+            continue
+        seen_hashes.add(alias)
+        alias_unsigned = alias & 0xFFFFFFFFFFFFFFFF
+        search_terms.append(f'"**Signature Hash:** `0x{alias_unsigned:016x}`" in:body')
     for term in search_terms:
         cmd = [
             "gh", "issue", "list",
@@ -1259,25 +1374,41 @@ def _effective_bundle_hash(bundle: Dict[str, Any]) -> int:
     env_fault = classify_environment_fault(bundle)
     if env_fault is not None:
         _, fingerprint, _ = env_fault
-        h = _fnv1a_i64(fingerprint)
-        bundle["stack_hash"] = h
-        return h
+        return _fnv1a_i64(fingerprint)
 
     if _is_client_python_exception_bundle(bundle):
         exc_class, msg, location = parse_traceback_summary(trace, stack_key)
         if exc_class != "UnknownException":
             norm_msg = _normalize_exception_message(msg)
-            h = _fnv1a_i64(f"client-python-exc:{exc_class}:{location}:{norm_msg}")
-            bundle["stack_hash"] = h
-            return h
+            return _fnv1a_i64(f"client-python-exc:{exc_class}:{location}:{norm_msg}")
 
     if stack_hash == -1040548311 or "MollycoddledUthread" in stack_key:
         exc_class, msg, location = parse_traceback_summary(trace, stack_key)
         base_hash = -1040548311 if "MollycoddledUthread" in stack_key else stack_hash
-        h = _fnv1a_i64(f"{base_hash}:{location}:{exc_class}:{msg}")
-        bundle["stack_hash"] = h
-        return h
+        return _fnv1a_i64(f"{base_hash}:{location}:{exc_class}:{msg}")
     return stack_hash
+
+
+def _legacy_client_stack_hashes(
+    bundle: Dict[str, Any],
+    effective_hash: Optional[int] = None,
+) -> List[int]:
+    """Returns distinct non-generic raw client stack hashes for dedup against legacy issues."""
+    if classify_environment_fault(bundle) is not None:
+        return []
+    stack_key = str(bundle.get("stack_key", ""))
+    if "MollycoddledUthread" in stack_key:
+        return []
+    try:
+        raw_hash = int(bundle.get("stack_hash", 0))
+    except (TypeError, ValueError):
+        return []
+    if raw_hash in (0, -1040548311):
+        return []
+    eff = effective_hash if effective_hash is not None else _effective_bundle_hash(bundle)
+    if raw_hash == eff:
+        return []
+    return [raw_hash]
 
 
 def _post_issue_comment(
@@ -1323,21 +1454,50 @@ def _post_issue_comment(
         return False
 
 
+def _merge_unique_hashes(*hash_groups: Optional[Sequence[int]], exclude: Optional[int] = None) -> List[int]:
+    merged: List[int] = []
+    seen: Set[int] = set()
+    if exclude is not None:
+        seen.add(exclude)
+    for group in hash_groups:
+        if not group:
+            continue
+        for val in group:
+            if val not in seen:
+                seen.add(val)
+                merged.append(val)
+    return merged
+
+
 def create_or_update_issue(
     repo: str,
     bundle: Dict[str, Any],
     occurrences: int = 1,
     ensured_labels: Optional[Set[str]] = None,
     dry_run: bool = False,
+    alias_hashes: Optional[Sequence[int]] = None,
 ) -> Optional[int]:
     """Creates a new issue or comments on an existing one (reopening if closed)."""
+    if is_benign_client_traceback_bundle(bundle):
+        print("[info] Suppressing known benign client UI traceback; skipping GitHub sync.")
+        return None
     if ensured_labels is None:
         ensured_labels = set()
     stack_hash = _effective_bundle_hash(bundle)
+    resolved_aliases = _merge_unique_hashes(
+        _legacy_client_stack_hashes(bundle, effective_hash=stack_hash),
+        alias_hashes,
+        exclude=stack_hash,
+    )
     unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
     title, labels = build_issue_title_and_labels(bundle)
 
-    existing = find_existing_issue(repo, stack_hash, dry_run=dry_run)
+    existing = find_existing_issue(
+        repo,
+        stack_hash,
+        dry_run=dry_run,
+        alias_hashes=resolved_aliases,
+    )
 
     if existing:
         existing_number, existing_state = existing
@@ -1472,10 +1632,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"[*] Discovered {len(json_files)} queued incident report(s) in '{args.queue_dir}'.")
 
     groups: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
+    suppressed_benign: List[Tuple[str, Dict[str, Any]]] = []
     for filepath in json_files:
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 bundle = json.load(f)
+            if is_benign_client_traceback_bundle(bundle):
+                suppressed_benign.append((filepath, bundle))
+                continue
             h = _effective_bundle_hash(bundle)
             groups.setdefault(h, []).append((filepath, bundle))
         except Exception as e:
@@ -1484,14 +1648,49 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.dry_run and not args.delete:
         os.makedirs(args.uploaded_dir, exist_ok=True)
 
+    def _dispose_processed_bundle(path: str, file_bundle: Dict[str, Any]) -> None:
+        if args.dry_run:
+            return
+        if args.delete:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        else:
+            dest = os.path.join(args.uploaded_dir, os.path.basename(path))
+            try:
+                shutil.move(path, dest)
+            except OSError as e:
+                print(f"[warn] Could not archive '{path}' to '{dest}': {e}", file=sys.stderr)
+        archive_or_delete_attachments(
+            args.queue_dir,
+            args.uploaded_dir,
+            file_bundle,
+            delete=args.delete,
+        )
+
     ensured_labels: Set[str] = set()
     success_count = 0
+    for path, benign_bundle in suppressed_benign:
+        print(f"[info] Suppressing known benign client UI traceback '{os.path.basename(path)}'.")
+        _dispose_processed_bundle(path, benign_bundle)
+        success_count += 1
+
     for stack_hash, files in groups.items():
         total_occurrences = len(files)
         unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
         (_, primary_bundle), extra_files = _select_primary_and_extras(files)
         env_fault = classify_environment_fault(primary_bundle)
-        print(f"[*] Processing error group 0x{unsigned_hash:016x} ({total_occurrences} occurrence(s))...")
+        group_aliases = _merge_unique_hashes(
+            *(_legacy_client_stack_hashes(b, effective_hash=stack_hash) for _, b in files),
+            exclude=stack_hash,
+        )
+        alias_suffix = (
+            " [client hash: " + ", ".join(f"0x{(a & 0xFFFFFFFFFFFFFFFF):016x}" for a in group_aliases) + "]"
+            if group_aliases
+            else ""
+        )
+        print(f"[*] Processing error group 0x{unsigned_hash:016x} ({total_occurrences} occurrence(s)){alias_suffix}...")
 
         issue_id = create_or_update_issue(
             args.repo,
@@ -1499,6 +1698,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             total_occurrences,
             ensured_labels=ensured_labels,
             dry_run=args.dry_run,
+            alias_hashes=group_aliases,
         )
         if issue_id:
             for occ_idx, (_, extra_bundle) in enumerate(extra_files, start=2):
@@ -1515,25 +1715,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if issue_id or args.dry_run:
             success_count += len(files)
             for path, file_bundle in files:
-                if args.dry_run:
-                    continue
-                if args.delete:
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-                else:
-                    dest = os.path.join(args.uploaded_dir, os.path.basename(path))
-                    try:
-                        shutil.move(path, dest)
-                    except OSError as e:
-                        print(f"[warn] Could not archive '{path}' to '{dest}': {e}", file=sys.stderr)
-                archive_or_delete_attachments(
-                    args.queue_dir,
-                    args.uploaded_dir,
-                    file_bundle,
-                    delete=args.delete,
-                )
+                _dispose_processed_bundle(path, file_bundle)
 
     print(f"[✓] Processed {success_count}/{len(json_files)} incident file(s).")
     return 0
