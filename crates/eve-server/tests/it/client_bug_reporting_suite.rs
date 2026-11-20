@@ -795,10 +795,10 @@ async fn test_alert_send_client_stack_trace_alert_suppresses_benign_and_preserve
     session.character_id = Some(90_000_001);
     session.solar_system_id = Some(30_000_144);
 
-    let benign_market_stack_key = " \nCaught at:\n/Users/buildagentA/eve/packages/carbonui/uilib.py(708) Update\n \nThrown at:\n/Users/buildagentA/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n";
-    let benign_market_trace = "EXCEPTION #7 logged at 11/20/2026 05:46:24 : Info: AttributeError: 'NoneType' object has no attribute 'max'\n\nFormatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n\nThrown at:\n /Users/buildagentA/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\nEXCEPTION END";
-    let benign_minimap_trace = "Traceback (most recent call last):\n  File \"/Users/buildagentA/eve/packages/carbonui/graphs/minimap.py\", line 111, in _ResizeSlider\nAttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n";
-    let genuine_trace = "EXCEPTION #8 logged at 11/20/2026 05:47:00 : unhandled exception\n\nFormatted exception info:\nKeyError: 'price'\n\nThrown at:\n/Users/buildagentA/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\nEXCEPTION END";
+    let benign_market_stack_key = " \nCaught at:\n/opt/ccp/eve/packages/carbonui/uilib.py(708) Update\n \nThrown at:\n/opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n";
+    let benign_market_trace = "EXCEPTION #7 logged at 11/20/2026 05:46:24 : Info: AttributeError: 'NoneType' object has no attribute 'max'\n\nFormatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n\nThrown at:\n /opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\nEXCEPTION END";
+    let benign_minimap_trace = "Traceback (most recent call last):\n  File \"/opt/ccp/eve/packages/carbonui/graphs/minimap.py\", line 111, in _ResizeSlider\nAttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n";
+    let genuine_trace = "EXCEPTION #8 logged at 11/20/2026 05:47:00 : unhandled exception\n\nFormatted exception info:\nKeyError: 'price'\n\nThrown at:\n/opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\nEXCEPTION END";
 
     assert!(is_benign_client_traceback(
         benign_market_stack_key,
@@ -875,8 +875,8 @@ fn test_sync_bugs_cli_dry_run_suppresses_benign_ui_bundles() {
         "timestamp": "2026-11-20T05:46:24Z",
         "timestamp_millis": 1795153584984u64,
         "stack_hash": 1448116342i64,
-        "stack_key": " \nThrown at:\n/Users/buildagentA/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n",
-        "trace": "EXCEPTION #7 logged at 11/20/2026 05:46:24 : Info: AttributeError: 'NoneType' object has no attribute 'max'\n\nFormatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n\nThrown at:\n /Users/buildagentA/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\nEXCEPTION END\n",
+        "stack_key": " \nThrown at:\n/opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n",
+        "trace": "EXCEPTION #7 logged at 11/20/2026 05:46:24 : Info: AttributeError: 'NoneType' object has no attribute 'max'\n\nFormatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n\nThrown at:\n /opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\nEXCEPTION END\n",
         "report_source": "exception",
         "session": { "character_id": 90000001, "solar_system_name": "Jita" },
         "flight_recorder": [{ "service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100 }],

@@ -160,6 +160,39 @@ _SERVER_FAULT_MARKERS = (
 _LOCATION_FUNC_RE = re.compile(r"^([^\s:]+):\d+\s+in\s+([^\s]+)$")
 
 
+def _strip_trace_locals_and_end(trace: str) -> str:
+    """Returns the trace text before any `Thread Locals:` or `EXCEPTION END` section."""
+    kept: List[str] = []
+    for line in trace.replace("\r\n", "\n").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("Thread Locals:", "EXCEPTION END")):
+            break
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _split_trace_sections(trace: str) -> Tuple[List[str], List[str]]:
+    raw = trace.replace("\r\n", "\n").strip()
+    if not raw:
+        return [], []
+    parts = _CALLSTACK_SPLIT_RE.split(raw, maxsplit=1)
+    primary_lines = [line.strip() for line in parts[0].splitlines() if line.strip()]
+    callstack_lines = (
+        [line.strip() for line in parts[1].splitlines() if line.strip()] if len(parts) > 1 else []
+    )
+    return primary_lines, callstack_lines
+
+
+def _extract_trace_location(trace: str) -> Optional[str]:
+    primary_lines, callstack_lines = _split_trace_sections(trace)
+    if not primary_lines and not callstack_lines:
+        return None
+    parsed_loc = _extract_location_from_lines(primary_lines)
+    if parsed_loc is None and callstack_lines:
+        parsed_loc = _extract_location_from_lines(callstack_lines)
+    return parsed_loc
+
+
 def is_benign_client_traceback(trace: str, stack_key: str = "", headline: str = "") -> bool:
     """Returns True when `(trace, stack_key, headline)` matches a known benign CCP V24 client UI race."""
     combined = "\n".join(part for part in (headline, stack_key, trace) if part)
@@ -168,28 +201,41 @@ def is_benign_client_traceback(trace: str, stack_key: str = "", headline: str = 
     if any(marker in combined for marker in _SERVER_FAULT_MARKERS):
         return False
 
-    exc_class, msg, location = parse_traceback_summary(trace, stack_key)
-    loc_match = _LOCATION_FUNC_RE.match(location.strip())
-    if loc_match is None and stack_key.strip():
-        sk_lines = [line.strip() for line in stack_key.splitlines() if line.strip()]
-        sk_loc = _extract_location_from_lines(sk_lines) or ""
-        loc_match = _LOCATION_FUNC_RE.match(sk_loc.strip())
+    filtered_trace = _strip_trace_locals_and_end(trace)
+    if not filtered_trace.strip():
+        return False
+
+    exc_class, msg, location = parse_traceback_summary(filtered_trace, stack_key)
+    trace_loc = _extract_trace_location(filtered_trace)
+    if trace_loc is not None:
+        loc_match = _LOCATION_FUNC_RE.match(trace_loc.strip())
+    else:
+        loc_match = (
+            _LOCATION_FUNC_RE.match(location.strip())
+            if location.strip() not in ("", "unknown")
+            else None
+        )
+        if loc_match is None and stack_key.strip():
+            sk_lines = [line.strip() for line in stack_key.splitlines() if line.strip()]
+            sk_loc = _extract_location_from_lines(sk_lines) or ""
+            loc_match = _LOCATION_FUNC_RE.match(sk_loc.strip())
     if loc_match is None:
         return False
 
     file_stem = _strip_py_extension(loc_match.group(1))
     func_name = loc_match.group(2)
     exc_text = f"{exc_class}: {msg}" if msg else exc_class
-    return any(
-        file_stem == expected_stem.lower()
-        and func_name == expected_func
-        and (
-            exc_class in ("AttributeError", error_substr)
-            or f"AttributeError: {error_substr}" in headline
-        )
-        and (error_substr in exc_text or error_substr in combined)
-        for expected_stem, expected_func, error_substr in _BENIGN_CLIENT_TRACEBACK_RULES
-    )
+    for expected_stem, expected_func, error_substr in _BENIGN_CLIENT_TRACEBACK_RULES:
+        if file_stem != expected_stem.lower() or func_name != expected_func:
+            continue
+        if exc_class == "AttributeError":
+            if error_substr in exc_text:
+                return True
+        elif exc_class in ("UnknownException", "LogException", "LogTraceback"):
+            attr_err = f"AttributeError: {error_substr}"
+            if attr_err in exc_text or attr_err in headline:
+                return True
+    return False
 
 
 def is_benign_client_traceback_bundle(bundle: Dict[str, Any]) -> bool:
@@ -410,16 +456,10 @@ def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
     playtester log capture (`logmodule.LogException` / `log.LogTraceback`), or EVE
     `alert.SendClientStackTraceAlert` formatted exception block.
     """
-    raw = trace.replace("\r\n", "\n").strip()
-    if not raw:
-        return "UnknownException", "No traceback provided", stack_key or "unknown"
-
-    parts = _CALLSTACK_SPLIT_RE.split(raw, maxsplit=1)
-    primary_lines = [line.strip() for line in parts[0].splitlines() if line.strip()]
-    callstack_lines = (
-        [line.strip() for line in parts[1].splitlines() if line.strip()] if len(parts) > 1 else []
-    )
+    primary_lines, callstack_lines = _split_trace_sections(trace)
     all_lines = primary_lines or callstack_lines
+    if not all_lines:
+        return "UnknownException", "No traceback provided", stack_key or "unknown"
 
     exc_class, msg = _extract_exception_from_lines(primary_lines)
     if not exc_class and callstack_lines:

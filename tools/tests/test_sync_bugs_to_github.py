@@ -1040,16 +1040,16 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
             stack_hash=1448116342,
             stack_key=(
                 " \nCaught at:\n"
-                "/Users/buildagentA/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/packages/carbonui/uilib.py(708) Update\n"
+                "/opt/ccp/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/packages/carbonui/uilib.py(708) Update\n"
                 " \nThrown at:\n"
-                "/Users/buildagentA/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n"
+                "/opt/ccp/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n"
             ),
             trace=(
                 "EXCEPTION #7 logged at 11/20/2026 05:46:24 : Info: AttributeError: 'NoneType' object has no attribute 'max' \n\n"
                 "Formatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n\n"
                 "Thrown at:\n"
-                " /Users/buildagentA/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/packages/carbonui/primitives/base.py(2097) UpdateAlignment\n"
-                " /Users/buildagentA/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n"
+                " /opt/ccp/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/packages/carbonui/primitives/base.py(2097) UpdateAlignment\n"
+                " /opt/ccp/buildAgentFull/work/d50fcc72fcb6ee81/eve/release/V24.02/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n"
                 "        absHeight = 555\n"
                 "Thread Locals:  session was <Session>\n"
                 "Stackhash: 1448116342\n"
@@ -1063,11 +1063,11 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
             "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n"
             "log.LogException args=() kwargs={}\n"
             "Traceback (most recent call last):\n"
-            '  File "/Users/buildagentA/eve/packages/carbonui/graphs/minimap.py", line 100, in UpdateAlignment\n'
-            '  File "/Users/buildagentA/eve/packages/carbonui/graphs/minimap.py", line 111, in _ResizeSlider\n'
+            '  File "/opt/ccp/eve/packages/carbonui/graphs/minimap.py", line 100, in UpdateAlignment\n'
+            '  File "/opt/ccp/eve/packages/carbonui/graphs/minimap.py", line 111, in _ResizeSlider\n'
             "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n\n"
             "CALLSTACK:\n"
-            '  File "/Users/buildagentA/eve/packages/carbonui/uilib.py", line 708, in Update\n'
+            '  File "/opt/ccp/eve/packages/carbonui/uilib.py", line 708, in Update\n'
         )
         minimap_manual_bundle = {
             "report_source": "f12_manual",
@@ -1085,10 +1085,18 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
         self.assertTrue(sync_mod.is_benign_client_traceback_bundle(minimap_manual_bundle))
         self.assertTrue(
             sync_mod.is_benign_client_traceback(
-                "<pre>/app/client/packages/carbonui/graphs/minimap.pyj(111) _ResizeSlider\n"
+                "<pre>/app/client/packages/carbonui/graphs/minimap.pyj(111) _ResizeSlider</pre>\n"
                 "Formatted exception info: AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n"
                 "EXCEPTION END\n",
                 "",
+            )
+        )
+        # LogException (non-concrete exception class) may fall back to headline when location matches.
+        self.assertTrue(
+            sync_mod.is_benign_client_traceback(
+                "logmodule.LogException args=()\nNoneType: None\nCALLSTACK:\n  File \"marketbase.py\", line 3718, in _OnResize\n",
+                "",
+                headline="[Bug Report] AttributeError: 'NoneType' object has no attribute 'max'",
             )
         )
 
@@ -1145,9 +1153,102 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
                 },
                 "session": {"character_id": 90000001},
             },
+            # Downstream `<lambda>` frame under `marketbase._OnResize` must not be suppressed.
+            _make_crash_bundle(
+                stack_hash=107,
+                trace=(
+                    "Traceback (most recent call last):\n"
+                    '  File "marketbase.py", line 3718, in _OnResize\n'
+                    '  File "marketbase.py", line 3724, in <lambda>\n'
+                    "AttributeError: 'NoneType' object has no attribute 'max'\n"
+                ),
+                flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+            ),
+            # Real non-matching leaf frame failing `_LOCATION_FUNC_RE` must not fall back to `stack_key`.
+            _make_crash_bundle(
+                stack_hash=108,
+                stack_key="/opt/ccp/eve/marketbase.py(3718) _OnResize",
+                trace=(
+                    "Traceback (most recent call last):\n"
+                    '  File "/opt/ccp/eve/marketbase.py", line 3718, in _OnResize\n'
+                    '  File "/opt/ccp/eve/my window.py", line 88, in OnOpen\n'
+                    "AttributeError: 'NoneType' object has no attribute 'max'\n"
+                ),
+                flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+            ),
+            _make_crash_bundle(
+                stack_hash=109,
+                stack_key="/opt/ccp/eve/marketbase.py(3718) _OnResize",
+                trace=(
+                    "Thrown at:\n"
+                    "<pre>/opt/ccp/eve/other.py(42)</pre>\n"
+                    "Formatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n"
+                    "EXCEPTION END\n"
+                ),
+                flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+            ),
+            # Different AttributeError with benign substring in `Thread Locals:` / `stack_key` / post-`EXCEPTION END`.
+            _make_crash_bundle(
+                stack_hash=110,
+                stack_key="AttributeError: 'NoneType' object has no attribute 'max'",
+                trace=(
+                    "Formatted exception info: AttributeError: 'NoneType' object has no attribute 'buyOrders'\n"
+                    "Thrown at:\n"
+                    " /opt/ccp/eve/marketbase.py(3718) _OnResize\n"
+                    "Thread Locals: prev = \"'NoneType' object has no attribute 'max'\"\n"
+                    "EXCEPTION END\n"
+                    "AttributeError: 'NoneType' object has no attribute 'max'\n"
+                ),
+                flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+            ),
+            # Concrete non-AttributeError must not be overridden by headline fallback or locals.
+            {
+                "report_source": "f12_manual",
+                "stack_hash": 111,
+                "stack_key": "marketbase.py(3718) _OnResize",
+                "trace": (
+                    "Formatted exception info: KeyError: 'price'\n"
+                    "Thrown at:\n"
+                    " /opt/ccp/eve/marketbase.py(3718) _OnResize\n"
+                    "Thread Locals: err = \"AttributeError: 'NoneType' object has no attribute 'max'\"\n"
+                    "EXCEPTION END\n"
+                ),
+                "manual_report": {
+                    "report_key": "playtester_step57955_1111222233334444",
+                    "category_id": "UI",
+                    "title": "[Bug Report] AttributeError: 'NoneType' object has no attribute 'max'",
+                },
+                "session": {"character_id": 90000001},
+            },
+            # Prose path inside exception message must not be misparsed as frame.
+            _make_crash_bundle(
+                stack_hash=112,
+                trace=(
+                    "Traceback (most recent call last):\n"
+                    '  File "other.py", line 10, in Foo\n'
+                    "RuntimeError: failed in /app/marketbase.py(3718) _OnResize\n"
+                ),
+                flight_recorder=[{"service": "marketProxy", "method": "GetOrders", "status": "OK", "duration_micros": 100}],
+            ),
         ]
         for idx, neg in enumerate(negative_cases):
             self.assertFalse(sync_mod.is_benign_client_traceback_bundle(neg), f"negative case {idx} suppressed")
+
+        # Direct `headline` fallback must not suppress a concrete KeyError or a different AttributeError.
+        self.assertFalse(
+            sync_mod.is_benign_client_traceback(
+                'Traceback (most recent call last):\n  File "marketbase.py", line 3718, in _OnResize\nKeyError: "price"\n',
+                "",
+                headline="AttributeError: 'NoneType' object has no attribute 'max'",
+            )
+        )
+        self.assertFalse(
+            sync_mod.is_benign_client_traceback(
+                'Traceback (most recent call last):\n  File "marketbase.py", line 3718, in _OnResize\nAttributeError: \'NoneType\' object has no attribute \'buyOrders\'\n',
+                "'NoneType' object has no attribute 'max'",
+                headline="AttributeError: 'NoneType' object has no attribute 'max'",
+            )
+        )
 
         # Direct create_or_update_issue suppresses benign bundle with zero gh calls.
         fake_gh = FakeGitHubCLI()
@@ -1192,7 +1293,7 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
             "EXCEPTION #7 logged at 11/20/2026 05:46:24 : Info: AttributeError: 'NoneType' object has no attribute 'max' \n\n"
             "Formatted exception info: AttributeError: 'NoneType' object has no attribute 'max'\n\n"
             "Thrown at:\n"
-            " /Users/buildagentA/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n"
+            " /opt/ccp/eve/eve/client/script/ui/shared/market/marketbase.py(3718) _OnResize\n"
             "EXCEPTION END\n"
         )
         market_1314_bundle = _make_crash_bundle(
