@@ -1175,6 +1175,248 @@ async fn epic_arc_messages_return_never_cached_result_over_machonet_26000() {
     assert_eq!(inner.as_ref(), &raw);
 }
 
+#[test]
+fn npc_kill_faction_standing_loss_tick_dedup_derived_and_notifications() {
+    // parity: feat:standings.standing-loss, feat:standings.npc-kill-standing-loss, plan:PVE-3
+    let mut ctx = make_test_context();
+    let char_id = 90_000_001_i64;
+    let now_base = ctx.now_unix();
+    ctx.db
+        .acquire_online_lock(1, 511, Some(char_id), true, now_base)
+        .unwrap();
+
+    // Seed SDE entity groups & types matching live EVE Online SDE dogma attribute 562 (`entityFactionLoss`).
+    let mut sde = (*ctx.sde).clone();
+    for (gid, gname) in [
+        (99, "Sentry Gun"),
+        (306, "Spawn Container"),
+        (615, "Deadspace Guristas Frigate"),
+        (674, "Mission Caldari State Battleship"),
+        (925, "FW Infrastructure Hub"),
+        (1167, "FW Caldari State Frigate"),
+        (1174, "Asteroid Rogue Drone Officer"),
+        (1310, "Drifter Battleship"),
+        (4028, "Triglavian Entities"),
+    ] {
+        sde.groups.insert(
+            gid,
+            eve_sde::GroupInfo {
+                group_id: gid,
+                category_id: 11,
+                name: gname.into(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: true,
+            },
+        );
+    }
+    let template_type = sde
+        .types
+        .values()
+        .next()
+        .cloned()
+        .expect("canonical seed must contain at least one InvType");
+    let make_npc_type = |type_id: u32,
+                         group_id: u32,
+                         category_id: u32,
+                         name: &str,
+                         faction_id: Option<u32>,
+                         loss_562: Option<f64>| {
+        let mut attrs = HashMap::new();
+        if let Some(v) = loss_562 {
+            attrs.insert(ATTR_ENTITY_FACTION_LOSS, v);
+        }
+        let mut t = template_type.clone();
+        t.type_id = type_id;
+        t.group_id = group_id;
+        t.category_id = category_id;
+        t.name = name.into();
+        t.faction_id = faction_id;
+        t.race_id = None;
+        t.default_attributes = attrs;
+        t.published = true;
+        t
+    };
+    sde.types.insert(
+        12_391,
+        make_npc_type(12_391, 674, 11, "Caldari Navy Raven", None, Some(0.03)),
+    );
+    sde.types.insert(
+        29_610,
+        make_npc_type(29_610, 1167, 11, "State Protectorate Frigate", Some(500_001), Some(0.0)),
+    );
+    sde.types.insert(
+        3_743,
+        make_npc_type(3_743, 99, 11, "Minmatar Sentry Gun", None, None),
+    );
+    sde.types.insert(
+        16_997,
+        make_npc_type(16_997, 615, 11, "Pithi Invader", None, Some(0.00175)),
+    );
+    sde.types.insert(
+        52_320,
+        make_npc_type(52_320, 4028, 11, "Zorya's Leshak", Some(500_026), Some(0.30)),
+    );
+    sde.types.insert(
+        34_495,
+        make_npc_type(34_495, 1310, 11, "Drifter Battleship", Some(500_024), Some(0.002535)),
+    );
+    sde.types.insert(
+        17_000,
+        make_npc_type(17_000, 306, 11, "Caldari Spawn Container", Some(500_001), None),
+    );
+    sde.types.insert(
+        29_302,
+        make_npc_type(29_302, 925, 11, "Caldari Infrastructure Hub", None, None),
+    );
+    sde.types.insert(
+        32_959,
+        make_npc_type(32_959, 1174, 11, "Unit D-34343", None, None),
+    );
+    sde.types.insert(
+        587,
+        make_npc_type(587, 25, 6, "Rifter", None, None),
+    );
+    ctx.sde = Arc::new(sde);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+        snap.standing_transactions.remove(&char_id);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let mut notify_rx = ctx.notify_tx.subscribe();
+
+    // 1. Destroying one Caldari Navy Raven (12391, entityFactionLoss=0.03 -> -0.3% = -0.03 at 0.0)
+    //    lowers Caldari State (500_001) and allies (Amarr 500_003, Mordu's 500_018), while enemies
+    //    (Gallente 500_004, Minmatar 500_002) remain unchanged per NPC_standings.md:154.
+    let changes1 = apply_npc_kill_faction_standing_loss(
+        &ctx,
+        30_000_142,
+        char_id,
+        12_391,
+        None,
+        None,
+        now_base,
+    );
+    assert!(!changes1.is_empty());
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!((st[&500_001] - (-0.03)).abs() < 1e-9, "Caldari State standing: {}", st[&500_001]);
+        assert!((st[&500_003] - (-0.015)).abs() < 1e-9, "Ally Amarr derived loss: {}", st[&500_003]);
+        assert!(st[&500_018] < 0.0, "Ally Mordu's Legion must lose standing");
+        assert_eq!(st.get(&500_004).copied().unwrap_or(0.0), 0.0, "Enemy Gallente must not gain");
+        assert_eq!(st.get(&500_002).copied().unwrap_or(0.0), 0.0, "Enemy Minmatar must not gain");
+        let txs = &snap.standing_transactions[&char_id];
+        assert!(txs.iter().any(|t| t.from_id == 500_001 && t.modification < 0.0 && t.event_type_id == 83));
+        assert!(txs.iter().any(|t| t.from_id == 500_003 && t.modification < 0.0 && t.event_type_id == 83));
+    });
+
+    // Verify client notifications arrive on both the live broadcast stream (`notify_tx`) and pending queue.
+    let mut bcast_events = Vec::new();
+    while let Ok((cid, notif)) = notify_rx.try_recv() {
+        if cid == char_id {
+            bcast_events.push(notif.event);
+        }
+    }
+    assert!(bcast_events.contains(&"OnStandingSet".to_string()), "bcast missing OnStandingSet: {bcast_events:?}");
+    assert!(bcast_events.contains(&"OnStandingsModified".to_string()), "bcast missing OnStandingsModified: {bcast_events:?}");
+    let queued = ctx.drain_notifications_for_char(char_id);
+    assert!(queued.iter().any(|n| n.event == "OnStandingSet"));
+    assert!(queued.iter().any(|n| n.event == "OnStandingsModified"));
+
+    // 2. Two more kills in the SAME solar system within 10 minutes (< 600s) change nothing and emit nothing.
+    let c2 = apply_npc_kill_faction_standing_loss(&ctx, 30_000_142, char_id, 12_391, None, None, now_base + 120);
+    let c3 = apply_npc_kill_faction_standing_loss(&ctx, 30_000_142, char_id, 12_391, None, None, now_base + 599);
+    assert!(c2.is_empty() && c3.is_empty());
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    assert!(notify_rx.try_recv().is_err());
+    let after_three_same_sys = ctx.db.with_snapshot(|s| s.characters[&char_id].standings[&500_001]);
+    assert!((after_three_same_sys - (-0.03)).abs() < 1e-9);
+
+    // 3. Kill at exactly +600s in the SAME system triggers the next 10-minute tick.
+    let c4 = apply_npc_kill_faction_standing_loss(&ctx, 30_000_142, char_id, 12_391, None, None, now_base + 600);
+    assert!(!c4.is_empty());
+    let _ = ctx.drain_notifications_for_char(char_id);
+    while notify_rx.try_recv().is_ok() {}
+
+    // 4. Three kills in THREE DIFFERENT systems inside 10 minutes apply THREE times.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+    });
+    let t_multi = now_base + 2_000;
+    for (idx, sys_id) in [30_000_142_u32, 30_000_144, 30_000_145].into_iter().enumerate() {
+        let chg = apply_npc_kill_faction_standing_loss(
+            &ctx,
+            sys_id,
+            char_id,
+            12_391,
+            None,
+            None,
+            t_multi + (idx as u64) * 30,
+        );
+        assert!(!chg.is_empty(), "kill in distinct system {sys_id} must apply");
+    }
+    let expected_three = -10.0 * (1.0 - (1.0 - 0.003_f64).powi(3));
+    let actual_three = ctx.db.with_snapshot(|s| s.characters[&char_id].standings[&500_001]);
+    assert!(
+        (actual_three - expected_three).abs() < 1e-9,
+        "3 systems inside 10m must apply 3x: got {actual_three}, expected {expected_three}"
+    );
+    let multi_notes = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(multi_notes.iter().filter(|n| n.event == "OnStandingSet").count(), 3);
+    assert_eq!(multi_notes.iter().filter(|n| n.event == "OnStandingsModified").count(), 3);
+
+    // 5. Non-counting entities: FW complex guard (attr 562 == 0.0), FW Infrastructure Hub (group 925),
+    //    Abyssal system, Spawn Container, player ship (category 6), and non-character NPC killer ID
+    //    must all be no-ops; Asteroid Rogue Drone Officer (group 1174) MUST NOT be excluded by 1166..=1186.
+    assert!(apply_npc_kill_faction_standing_loss(&ctx, 30_000_146, char_id, 29_610, Some(500_001), None, t_multi).is_empty());
+    assert!(apply_npc_kill_faction_standing_loss(&ctx, 30_000_146, char_id, 29_302, Some(500_001), None, t_multi).is_empty());
+    assert!(apply_npc_kill_faction_standing_loss(&ctx, 32_000_001, char_id, 12_391, Some(500_001), None, t_multi).is_empty());
+    assert!(apply_npc_kill_faction_standing_loss(&ctx, 30_000_146, char_id, 17_000, Some(500_001), None, t_multi).is_empty());
+    assert!(apply_npc_kill_faction_standing_loss(&ctx, 30_000_146, char_id, 587, Some(500_001), None, t_multi).is_empty());
+    assert!(apply_npc_kill_faction_standing_loss(&ctx, 30_000_146, 555_555_555, 12_391, Some(500_001), None, t_multi).is_empty());
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    let drone_officer_chg = apply_npc_kill_faction_standing_loss(&ctx, 30_000_146, char_id, 32_959, None, None, t_multi);
+    assert_eq!(drone_officer_chg.len(), 1);
+    assert_eq!(drone_officer_chg[0].0, 500_025);
+    assert!(drone_officer_chg[0].2 < 0.0, "group 1174 Rogue Drone Officer must lower 500_025 standing");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 6. Sentry gun without attr 562 (Minmatar Sentry Gun 3743 -> DERIVED fallback 0.01) lowers
+    //    Minmatar (500_002) and friends (Gallente 500_004, Thukker 500_015), not enemy Amarr (500_003).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+    });
+    let sentry_chg = apply_npc_kill_faction_standing_loss(&ctx, 30_000_147, char_id, 3_743, None, None, t_multi);
+    assert!(!sentry_chg.is_empty());
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!((st[&500_002] - (-0.01)).abs() < 1e-9);
+        assert!(st[&500_004] < 0.0, "Minmatar friend Gallente must lose standing");
+        assert!(st[&500_015] < 0.0, "Minmatar friend Thukker must lose standing");
+        assert_eq!(st.get(&500_003).copied().unwrap_or(0.0), 0.0, "Minmatar enemy Amarr must not gain");
+    });
+
+    // 7. Triglavian (500_026) kill lowers Triglavian and raises opposing EDENCOM (500_027) equally;
+    //    Drifter (500_024) kill lowers Drifter standing; Pirate (Guristas 500_010) lowers Guristas + Blood Raiders.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+    });
+    assert!(!apply_npc_kill_faction_standing_loss(&ctx, 30_000_148, char_id, 52_320, None, None, t_multi).is_empty());
+    assert!(!apply_npc_kill_faction_standing_loss(&ctx, 30_000_148, char_id, 34_495, None, None, t_multi).is_empty());
+    assert!(!apply_npc_kill_faction_standing_loss(&ctx, 30_000_148, char_id, 16_997, None, None, t_multi).is_empty());
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!((st[&500_026] - (-0.30)).abs() < 1e-9);
+        assert!((st[&500_027] - 0.30).abs() < 1e-9, "Bipolar EDENCOM gain on Triglavian kill");
+        assert!((st[&500_024] - (-0.002535)).abs() < 1e-9, "Drifter standing loss");
+        assert!((st[&500_010] - (-0.00175)).abs() < 1e-9, "Guristas standing loss");
+        assert!(st[&500_012] < 0.0, "Guristas ally Blood Raiders derived loss");
+    });
+}
+
 #[cfg(test)]
 #[path = "agents_standings_arcs_extra_unit_tests.rs"]
 mod agents_standings_arcs_extra_unit_tests;

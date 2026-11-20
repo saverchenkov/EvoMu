@@ -722,3 +722,515 @@ async fn finalize_cycle_destroyed_npcs_spawns_owner_slim_meta_and_allows_green_s
         Some(&eve_proto::PyRep::Bool(false))
     );
 }
+
+#[tokio::test]
+async fn npc_destruction_paths_apply_faction_standing_loss_ticks_and_emit_client_socket_notifications() {
+    // parity: feat:standings.standing-loss, feat:standings.npc-kill-standing-loss, plan:PVE-3
+    let (mut ctx, _session, char_id, _ship_id, sys_a) = make_fighter_ctx_and_session();
+    let sys_b: u32 = 30_000_144;
+    let sys_c: u32 = 30_000_145;
+    let now = ctx.now_unix();
+    ctx.db
+        .acquire_online_lock(1, 701, Some(char_id), true, now)
+        .unwrap();
+
+    // Ensure Caldari Navy Raven (12391), Minmatar Sentry Gun (3743), and Pithi Invader (16997)
+    // exist in SDE with authentic attribute 562 (`entityFactionLoss`) values.
+    let mut sde = (*ctx.sde).clone();
+    sde.groups.entry(674).or_insert(eve_sde::GroupInfo {
+        group_id: 674,
+        category_id: 11,
+        name: "Mission Caldari State Battleship".into(),
+        anchorable: false,
+        anchored: false,
+        fittable_non_singleton: false,
+        use_base_price: false,
+        published: true,
+    });
+    sde.groups.entry(99).or_insert(eve_sde::GroupInfo {
+        group_id: 99,
+        category_id: 11,
+        name: "Sentry Gun".into(),
+        anchorable: false,
+        anchored: false,
+        fittable_non_singleton: false,
+        use_base_price: false,
+        published: true,
+    });
+    sde.groups.entry(615).or_insert(eve_sde::GroupInfo {
+        group_id: 615,
+        category_id: 11,
+        name: "Deadspace Guristas Frigate".into(),
+        anchorable: false,
+        anchored: false,
+        fittable_non_singleton: false,
+        use_base_price: false,
+        published: true,
+    });
+    let mut navy_bs = make_fighter_type(12_391, 674, 11, 10_000.0, vec![(562, 0.03)]);
+    navy_bs.name = "Caldari Navy Raven".into();
+    sde.types.insert(12_391, navy_bs);
+    let mut sentry = make_fighter_type(3_743, 99, 11, 5_000.0, vec![]);
+    sentry.name = "Minmatar Sentry Gun".into();
+    sde.types.insert(3_743, sentry);
+    let mut pithi = make_fighter_type(16_997, 615, 11, 2_000.0, vec![(481, 50_000.0), (562, 0.00175)]);
+    pithi.name = "Pithi Invader".into();
+    sde.types.insert(16_997, pithi);
+    ctx.sde = Arc::new(sde);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.standings.clear();
+        ch.security_status = 0.0;
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let mut notify_rx = ctx.notify_tx.subscribe();
+
+    // Path 1: `NpcSpawnManager::handle_npc_destroyed` (combat/npc_ai.rs)
+    // 3 Caldari Navy kills in ONE system inside 10 minutes -> standings change ONCE, 1 client notification pair.
+    let mut mgr = crate::combat::npc_ai::NpcSpawnManager::new();
+    for (idx, bid) in [970_001_i64, 970_002, 970_003].into_iter().enumerate() {
+        mgr.entities.insert(
+            bid,
+            crate::combat::npc_ai::NpcCombatEntity {
+                ball_id: bid,
+                type_id: 12_391,
+                faction_id: 500_001,
+                state: crate::combat::npc_ai::NpcAiState::Idle,
+                spawn_group_id: 1,
+                spawn_pos: DVec3::ZERO,
+                target_id: None,
+                bounty_isk: 0.0,
+                optimal_range: 10_000.0,
+                orbit_range: 5_000.0,
+                base_dps: 50.0,
+                damage_vector: eve_destiny::DamageVector::default(),
+                last_attack_tick: 0,
+                has_shield_rep: false,
+                has_armor_rep: false,
+            },
+        );
+        mgr.handle_npc_destroyed(&ctx, sys_a, bid, char_id, now + (idx as u64) * 60)
+            .expect("handle_npc_destroyed navy npc");
+    }
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!((st[&500_001] - (-0.03)).abs() < 1e-9, "3 kills in 1 system inside 10m count once");
+        assert!((st[&500_003] - (-0.015)).abs() < 1e-9, "Caldari ally Amarr drops once");
+        assert_eq!(st.get(&500_004).copied().unwrap_or(0.0), 0.0, "Caldari enemy Gallente unchanged");
+    });
+    let mut rx_set = 0usize;
+    let mut rx_mod = 0usize;
+    while let Ok((cid, notif)) = notify_rx.try_recv() {
+        if cid == char_id {
+            if notif.event == "OnStandingSet" {
+                rx_set += 1;
+            } else if notif.event == "OnStandingsModified" {
+                rx_mod += 1;
+            }
+        }
+    }
+    assert_eq!((rx_set, rx_mod), (1, 1), "live socket broadcast must carry exactly 1 OnStandingSet + 1 OnStandingsModified");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Same 3 kills across 3 systems inside 10 minutes -> standings change 3 times!
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+    });
+    let t_3sys = now + 1_200;
+    for (idx, (sid, bid)) in [(sys_a, 970_011_i64), (sys_b, 970_012), (sys_c, 970_013)]
+        .into_iter()
+        .enumerate()
+    {
+        mgr.entities.insert(
+            bid,
+            crate::combat::npc_ai::NpcCombatEntity {
+                ball_id: bid,
+                type_id: 12_391,
+                faction_id: 500_001,
+                state: crate::combat::npc_ai::NpcAiState::Idle,
+                spawn_group_id: 2,
+                spawn_pos: DVec3::ZERO,
+                target_id: None,
+                bounty_isk: 0.0,
+                optimal_range: 10_000.0,
+                orbit_range: 5_000.0,
+                base_dps: 50.0,
+                damage_vector: eve_destiny::DamageVector::default(),
+                last_attack_tick: 0,
+                has_shield_rep: false,
+                has_armor_rep: false,
+            },
+        );
+        mgr.handle_npc_destroyed(&ctx, sid, bid, char_id, t_3sys + (idx as u64) * 30)
+            .expect("handle_npc_destroyed across 3 systems");
+    }
+    let expected_3x = -10.0 * (1.0 - (1.0 - 0.003_f64).powi(3));
+    let actual_3x = ctx.db.with_snapshot(|s| s.characters[&char_id].standings[&500_001]);
+    assert!((actual_3x - expected_3x).abs() < 1e-9, "3 systems inside 10m must apply 3x");
+    let mut rx3_set = 0usize;
+    let mut rx3_mod = 0usize;
+    while let Ok((cid, notif)) = notify_rx.try_recv() {
+        if cid == char_id {
+            if notif.event == "OnStandingSet" {
+                rx3_set += 1;
+            } else if notif.event == "OnStandingsModified" {
+                rx3_mod += 1;
+            }
+        }
+    }
+    assert_eq!((rx3_set, rx3_mod), (3, 3), "3 system ticks must push 3 standing notification pairs to socket");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Path 2: `handle_npc_destroyed_in_space_with_ctx` (combat_npc_encounters.rs) on a pirate rat
+    // preserves security status gain + bounty tick AND applies Guristas standing loss + notifications,
+    // while subsequent `populate_npc_wreck_on_turret_kill` in the same 10-minute window deduplicates.
+    ctx.advance_secs(2_000);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.standings.clear();
+        ch.security_status = 0.0;
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+            970_101,
+            16_997,
+            sys_a,
+            "Pirate",
+        );
+        ent.faction_id = 500_010;
+        ent.bounty_isk = 50_000.0;
+        rt.npc_entities.insert(970_101, ent);
+    });
+    handle_npc_destroyed_in_space_with_ctx(&ctx, sys_a, 970_101, Some(char_id)).await;
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert!(ch.security_status > 0.0, "pirate kill sec status gain must remain intact");
+        assert!((ch.standings[&500_010] - (-0.00175)).abs() < 1e-9, "Guristas standing loss applied");
+        assert!(ch.standings[&500_012] < 0.0, "Guristas ally Blood Raiders derived loss");
+    });
+    let notes_in_space = ctx.drain_notifications_for_char(char_id);
+    assert!(notes_in_space.iter().any(|n| n.event == "OnStandingSet"));
+    assert!(notes_in_space.iter().any(|n| n.event == "OnStandingsModified"));
+    while notify_rx.try_recv().is_ok() {}
+
+    // Subsequent turret wreck finalization for the same kill in the same 10-minute window must not double-apply.
+    let mut dropped = Vec::new();
+    let _ = populate_npc_wreck_on_turret_kill(&ctx, sys_a, 970_101, 16_997, DVec3::ZERO, 0, char_id, &mut dropped).await;
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    let guristas_after = ctx.db.with_snapshot(|s| s.characters[&char_id].standings[&500_010]);
+    assert!((guristas_after - (-0.00175)).abs() < 1e-9);
+
+    // Path 3: `death_pipeline::on_ball_destroyed_sync` on BOTH an ExtendedNpcEntity (step 2)
+    // and an NPC Sentry Gun structure stored in `snap.items` (step 5).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+        snap.items.insert(
+            970_202,
+            make_fighter_item(970_202, 3_743, 500_002, sys_b as i64, InventoryFlag::None, 1),
+        );
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+            970_201,
+            12_391,
+            sys_b,
+            "Navy",
+        );
+        ent.faction_id = 500_001;
+        rt.npc_entities.insert(970_201, ent);
+    });
+    let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(&ctx, sys_b, 970_201, Some(char_id), DVec3::ZERO)
+        .expect("on_ball_destroyed_sync ext npc");
+    let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(&ctx, sys_b, 970_202, Some(char_id), DVec3::ZERO)
+        .expect("on_ball_destroyed_sync npc sentry structure");
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!((st[&500_001] - (-0.03)).abs() < 1e-9, "death_pipeline ext navy NPC loss");
+        assert!((st[&500_002] - (-0.01)).abs() < 1e-9, "death_pipeline sentry structure loss");
+    });
+    let dp_notes = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(dp_notes.iter().filter(|n| n.event == "OnStandingSet").count(), 2);
+    assert_eq!(dp_notes.iter().filter(|n| n.event == "OnStandingsModified").count(), 2);
+    while notify_rx.try_recv().is_ok() {}
+
+    // Path 4: Live `npc_death_hook` (router/context.rs) -> `handle_npc_destroyed_in_space_with_ctx`
+    // emits live `OnStandingSet` + `OnStandingsModified` on `notify_tx` without waiting for wreck sweep.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+            970_301,
+            12_391,
+            sys_c,
+            "Navy",
+        );
+        ent.faction_id = 500_001;
+        rt.npc_entities.insert(970_301, ent);
+    });
+    ctx.systems
+        .invoke_npc_death_hook(sys_c, 970_301, Some(char_id))
+        .await;
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!((st[&500_001] - (-0.03)).abs() < 1e-9, "live npc_death_hook must lower Caldari standing");
+        assert!((st[&500_003] - (-0.015)).abs() < 1e-9, "live npc_death_hook must lower ally Amarr");
+    });
+    let mut hook_events = Vec::new();
+    while let Ok((cid, notif)) = notify_rx.try_recv() {
+        if cid == char_id {
+            hook_events.push(notif.event);
+        }
+    }
+    assert!(hook_events.contains(&"OnStandingSet".to_string()));
+    assert!(hook_events.contains(&"OnStandingsModified".to_string()));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Path 5: Direct turret/entropic `handle_ship_or_npc_destruction` on a `category_id == 11` NPC
+    // structure stored in `snap.items` (where `is_non_ship_structure_or_deployable == true`).
+    let sentry_ball_id = 970_302_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            sentry_ball_id,
+            make_fighter_item(sentry_ball_id, 3_743, 500_002, sys_c as i64, InventoryFlag::None, 1),
+        );
+    });
+    let sentry_ball = eve_destiny::Ball {
+        id: sentry_ball_id,
+        type_id: 3_743,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 100_000.0,
+        radius: 100.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    let sys_c_handle = ctx.systems.get_or_spawn(sys_c);
+    let _ = crate::services::combat_crimewatch::combat_weapons_spool::handle_ship_or_npc_destruction(
+        &ctx,
+        &sys_c_handle,
+        char_id,
+        _ship_id,
+        587,
+        2905,
+        sentry_ball_id,
+        &sentry_ball,
+        None,
+        sys_c,
+        1_000.0,
+        ctx.now_unix(),
+    )
+    .await;
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!((st[&500_002] - (-0.01)).abs() < 1e-9, "handle_ship_or_npc_destruction NPC structure loss");
+    });
+    let spool_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(spool_notes.iter().any(|n| n.event == "OnStandingSet"));
+    assert!(spool_notes.iter().any(|n| n.event == "OnStandingsModified"));
+
+    // Path 6: End-to-end TCP client socket delivery over `macho_listener::handle_macho_client`.
+    // Verifies framed `OnStandingSet` + `OnStandingsModified` MachoNet packets arrive on the live
+    // TCP socket when an NPC is destroyed in space.
+    use crate::macho_listener::{handle_macho_client, read_framed_pyrep, write_framed_pyrep};
+    use eve_machonet::{
+        placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeAck, CryptoHandshakeResult,
+        CryptoRequestPacket, CryptoServerHandshake, MachoAddress, MachoPacket, MachoPacketType,
+        VersionExchange, MACHO_PROXY_NODE_ID,
+    };
+
+    drop(notify_rx);
+    let ctx = Arc::new(ctx);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test macho tcp listener");
+    let addr = listener.local_addr().unwrap();
+    let srv_ctx = Arc::clone(&ctx);
+    let accept_task = tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _ = handle_macho_client(stream, srv_ctx).await;
+        }
+    });
+
+    let mut sock = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect to macho tcp listener");
+    let _hello = read_framed_pyrep(&mut sock).await.unwrap().unwrap();
+    write_framed_pyrep(&mut sock, &VersionExchange::default().to_pyrep())
+        .await
+        .unwrap();
+    write_framed_pyrep(&mut sock, &CryptoRequestPacket::placebo().to_pyrep())
+        .await
+        .unwrap();
+    let cc_rep = read_framed_pyrep(&mut sock).await.unwrap().unwrap();
+    assert_eq!(cc_rep.as_str(), Some("OK CC"));
+    let mut live_upd = CryptoChallengePacket::new_password_login("demo", "demo-secret");
+    live_upd.user_password = None;
+    write_framed_pyrep(&mut sock, &live_upd.to_pyrep())
+        .await
+        .unwrap();
+    let _ = read_framed_pyrep(&mut sock).await.unwrap().unwrap();
+    write_framed_pyrep(
+        &mut sock,
+        &CryptoChallengePacket::new_password_login("demo", "demo-secret").to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let srv_hs = CryptoServerHandshake::from_pyrep(&read_framed_pyrep(&mut sock).await.unwrap().unwrap())
+        .expect("CryptoServerHandshake");
+    write_framed_pyrep(
+        &mut sock,
+        &(CryptoHandshakeResult {
+            challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+            func_output: Vec::new(),
+            func_result: eve_proto::PyRep::Integer(0),
+        })
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let ack = CryptoHandshakeAck::from_pyrep(&read_framed_pyrep(&mut sock).await.unwrap().unwrap())
+        .expect("CryptoHandshakeAck");
+    let init_pkt =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut sock).await.unwrap().unwrap()).unwrap();
+    let MachoAddress::Client { client_id, .. } = init_pkt.destination else {
+        panic!("expected Client destination");
+    };
+    let _sess_chg =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut sock).await.unwrap().unwrap()).unwrap();
+
+    let sel_call = MachoPacket {
+        packet_type: MachoPacketType::CallReq,
+        source: MachoAddress::Client {
+            client_id,
+            call_id: 1,
+            service: None,
+        },
+        destination: MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: Some("charUnboundMgr".to_string()),
+            call_id: 0,
+        },
+        user_id: Some(ack.user_id),
+        payload: eve_proto::PyRep::Tuple(vec![eve_proto::PyRep::Tuple(vec![
+            eve_proto::PyRep::Integer(0),
+            eve_proto::PyRep::SubStream(Box::new(eve_proto::PyRep::Tuple(vec![
+                eve_proto::PyRep::ascii_bytes("SelectCharacterID"),
+                eve_proto::PyRep::Tuple(vec![eve_proto::PyRep::Integer(char_id)]),
+                eve_proto::PyRep::Dict(Vec::new()),
+            ]))),
+        ])]),
+        named_payload: std::collections::HashMap::new(),
+    };
+    write_framed_pyrep(&mut sock, &sel_call.to_pyrep())
+        .await
+        .unwrap();
+    loop {
+        let pkt = MachoPacket::from_pyrep(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                read_framed_pyrep(&mut sock),
+            )
+            .await
+            .expect("SelectCharacterID timeout")
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        if pkt.packet_type == MachoPacketType::CallRsp {
+            break;
+        }
+    }
+
+    // Clear stale queued notifications and standings, then destroy a Caldari Navy Raven in sys_d.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let sys_d: u32 = 30_000_149;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+            970_401,
+            12_391,
+            sys_d,
+            "Navy",
+        );
+        ent.faction_id = 500_001;
+        rt.npc_entities.insert(970_401, ent);
+    });
+    ctx.systems
+        .invoke_npc_death_hook(sys_d, 970_401, Some(char_id))
+        .await;
+
+    let extract_broadcast_args = |pkt: &MachoPacket| -> Option<(String, Vec<eve_proto::PyRep>)> {
+        if pkt.packet_type != MachoPacketType::Notification {
+            return None;
+        }
+        let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination else {
+            return None;
+        };
+        let eve_proto::PyRep::Tuple(outer) = &pkt.payload else {
+            return None;
+        };
+        let eve_proto::PyRep::Tuple(inner) = outer.first()? else {
+            return None;
+        };
+        let eve_proto::PyRep::SubStream(sub) = inner.get(1)? else {
+            return None;
+        };
+        let eve_proto::PyRep::Tuple(sub_t) = sub.as_ref() else {
+            return None;
+        };
+        let eve_proto::PyRep::Tuple(body_t) = sub_t.get(1)? else {
+            return None;
+        };
+        let eve_proto::PyRep::Tuple(args) = body_t.get(1)? else {
+            return None;
+        };
+        Some((broadcast_id.clone(), args.clone()))
+    };
+
+    let mut saw_wire_set = false;
+    let mut saw_wire_mod = false;
+    let wire_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !(saw_wire_set && saw_wire_mod) {
+        let rem = wire_deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(rem, read_framed_pyrep(&mut sock))
+            .await
+            .expect("timed out waiting for standing notification on TCP client socket")
+            .unwrap()
+            .expect("client socket closed prematurely");
+        let pkt = MachoPacket::from_pyrep(&rep).unwrap();
+        if let Some((ev, args)) = extract_broadcast_args(&pkt) {
+            if ev == "OnStandingSet" {
+                assert_eq!(args.first().and_then(|v| v.as_i64()), Some(500_001));
+                assert_eq!(args.get(1).and_then(|v| v.as_i64()), Some(char_id));
+                let st_val = args.get(2).and_then(|v| v.as_f64()).unwrap();
+                assert!((st_val - (-0.03)).abs() < 1e-9);
+                saw_wire_set = true;
+            } else if ev == "OnStandingsModified" {
+                let eve_proto::PyRep::List(mods) = args.first().expect("OnStandingsModified[0]") else {
+                    panic!("expected List payload in OnStandingsModified");
+                };
+                assert!(mods.iter().any(|entry| {
+                    matches!(entry, eve_proto::PyRep::Tuple(t)
+                        if t.first().and_then(|v| v.as_i64()) == Some(500_001)
+                            && t.get(1).and_then(|v| v.as_i64()) == Some(char_id)
+                            && t.get(2).and_then(|v| v.as_f64()).is_some_and(|d| (d - (-0.03)).abs() < 1e-9))
+                }));
+                assert!(mods.iter().any(|entry| {
+                    matches!(entry, eve_proto::PyRep::Tuple(t)
+                        if t.first().and_then(|v| v.as_i64()) == Some(500_003)
+                            && t.get(2).and_then(|v| v.as_f64()).is_some_and(|d| d < 0.0))
+                }));
+                saw_wire_mod = true;
+            }
+        }
+    }
+    assert!(saw_wire_set && saw_wire_mod);
+    drop(sock);
+    accept_task.abort();
+}
