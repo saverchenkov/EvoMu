@@ -923,7 +923,7 @@ impl ServerContext {
                     npc_id,
                 )
                 .await;
-                crate::services::combat_npc_encounters::handle_npc_destroyed_in_space(sys, db, sde, &*ctx.combat_ephemeral, sys_id, npc_id, killer_opt).await;
+                crate::services::combat_npc_encounters::handle_npc_destroyed_in_space_with_ctx(&ctx, sys_id, npc_id, killer_opt).await;
                 crate::services::fw_gameplay::on_fw_complex_guard_destroyed(sys, db, sys_id, npc_id).await;
                 if let Some(kid) = killer_opt {
                     let now_s = db.clock().now_unix_secs();

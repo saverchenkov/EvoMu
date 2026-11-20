@@ -29,6 +29,28 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     kv_get(rep, key)
 }
 
+async fn scan_signature_to_resolved(
+    ctx: &eve_server::router::ServerContext,
+    sess: &mut eve_machonet::SessionState,
+    sig_id: &str,
+    pos: [f64; 3],
+) {
+    let rows = crate::common::probe_scan(
+        ctx,
+        sess,
+        glam::DVec3::from_array(pos),
+        0.25 * 149_597_870_700.0,
+    )
+    .await;
+    assert!(
+        rows.iter().any(|r| {
+            dict_get(r, "signatureID").and_then(|v| v.as_str()) == Some(sig_id)
+                && dict_get(r, "resolved") == Some(&PyRep::Bool(true))
+        }),
+        "probe_scan must resolve {sig_id} to 100%: {rows:?}"
+    );
+}
+
 // parity: rpc:seasonManager.get_max_active_challenges
 // parity: rpc:seasonManager.reload_fsd_data
 // parity: rpc:seasonManager.fill_up_and_return_challenges_for_character
@@ -200,7 +222,7 @@ async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
     fly_stargates_to(&ctx, &mut sess, LOWSEC_NOURVUKAIKEN_SYS).await;
     ensure_system_pve_sites_seeded(&ctx, LOWSEC_NOURVUKAIKEN_SYS).await;
 
-    let (data_site_id, data_can_id, ghost_site_id, ghost_can_id, anomaly_id) =
+    let (data_site_id, data_pos, data_can_id, ghost_site_id, ghost_pos, ghost_can_id, anomaly_id) =
         with_pve_exploration_reg(&ctx, |reg| {
             let sites = &reg.sites_by_system[&LOWSEC_NOURVUKAIKEN_SYS];
             let ds = sites
@@ -210,14 +232,23 @@ async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
             let gs = sites
                 .iter()
                 .find(|s| s.site_category == "Ghost" && !s.hackable_can_ids.is_empty())
-                .map(|s| (s.site_id.clone(), s.hackable_can_ids[0]));
+                .map(|s| (s.site_id.clone(), s.position, s.hackable_can_ids[0]));
             let anom = sites
                 .iter()
                 .find(|s| (s.site_category == "CombatAnomaly" || s.site_category == "CombatSignature") && !s.active_npc_ball_ids.is_empty())
                 .expect("seeded combat anomaly");
-            (ds.site_id.clone(), ds.hackable_can_ids[0], gs.as_ref().map(|g| g.0.clone()), gs.map(|g| g.1), anom.site_id.clone())
+            (
+                ds.site_id.clone(),
+                ds.position,
+                ds.hackable_can_ids[0],
+                gs.as_ref().map(|g| g.0.clone()),
+                gs.as_ref().map(|g| g.1),
+                gs.map(|g| g.2),
+                anom.site_id.clone(),
+            )
         });
 
+    scan_signature_to_resolved(&ctx, &mut sess, &data_site_id, data_pos).await;
     move_ship_to_ball(&ctx, &mut sess, LOWSEC_NOURVUKAIKEN_SYS, ship_id, "dungeon", PyRep::String(data_site_id)).await;
     move_ship_to_ball(&ctx, &mut sess, LOWSEC_NOURVUKAIKEN_SYS, ship_id, "item", PyRep::Integer(data_can_id)).await;
 
@@ -259,7 +290,8 @@ async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
     assert_eq!(fc2, 2, "2nd fail records failure_counts=2");
     assert!(hacked2, "2nd fail detonates container");
 
-    if let (Some(gsid), Some(gcid)) = (ghost_site_id, ghost_can_id) {
+    if let (Some(gsid), Some(gpos), Some(gcid)) = (ghost_site_id, ghost_pos, ghost_can_id) {
+        scan_signature_to_resolved(&ctx, &mut sess, &gsid, gpos).await;
         move_ship_to_ball(&ctx, &mut sess, LOWSEC_NOURVUKAIKEN_SYS, ship_id, "dungeon", PyRep::String(gsid)).await;
         move_ship_to_ball(&ctx, &mut sess, LOWSEC_NOURVUKAIKEN_SYS, ship_id, "item", PyRep::Integer(gcid)).await;
         let _ = rpc_res(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(gcid)]).await;

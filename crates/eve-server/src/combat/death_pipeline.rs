@@ -1845,22 +1845,33 @@ pub fn on_ball_destroyed_sync(
         rt.npc_entities.contains_key(&ball_id)
     }) {
         crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            let removed = rt.npc_entities.remove(&ball_id).is_some();
-            if removed {
+            let removed = rt.npc_entities.remove(&ball_id);
+            if removed.is_some() {
                 rt.record_destroyed_item_id(ball_id);
             }
             removed
         })
     } else {
-        false
+        None
     };
-    if removed_ext_npc {
+    if let Some(ext_npc) = removed_ext_npc {
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.remove(&ball_id);
             snap.item_positions.remove(&ball_id);
             snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
         });
         sys_handle.try_remove_ball(ball_id);
+        if let Some(killer_id) = killer_id_opt {
+            crate::services::agents_missions::agents_standings_arcs::apply_npc_kill_faction_standing_loss(
+                ctx,
+                sys_id,
+                killer_id,
+                ext_npc.type_id,
+                (ext_npc.faction_id > 0).then_some(ext_npc.faction_id),
+                None,
+                ctx.now_unix(),
+            );
+        }
         return Ok(None);
     }
 
@@ -1953,8 +1964,36 @@ pub fn on_ball_destroyed_sync(
         return Ok(None);
     }
 
-    // 5. Non-ship space object (fighter, wreck, jetcan, deployable, POCO)
+    // 5. Non-ship space object (fighter, wreck, jetcan, deployable, POCO, or NPC structure)
+    let destroyed_npc_item_meta: Option<(u32, i64)> = if killer_id_opt.is_some() {
+        ctx.db.with_snapshot(|snap| {
+            snap.items.get(&ball_id).and_then(|it| {
+                (it.location_id == i64::from(sys_id)
+                    && ctx
+                        .sde
+                        .types
+                        .get(&it.type_id)
+                        .is_some_and(|t| t.category_id == 11))
+                .then_some((it.type_id, it.owner_id))
+            })
+        })
+    } else {
+        None
+    };
     cleanup_destroyed_non_ship_ball_sync(ctx, sys_id, ball_id);
+    if let (Some(killer_id), Some((npc_type_id, npc_owner_id))) =
+        (killer_id_opt, destroyed_npc_item_meta)
+    {
+        crate::services::agents_missions::agents_standings_arcs::apply_npc_kill_faction_standing_loss(
+            ctx,
+            sys_id,
+            killer_id,
+            npc_type_id,
+            None,
+            Some(npc_owner_id),
+            ctx.now_unix(),
+        );
+    }
     Ok(None)
 }
 
