@@ -4356,7 +4356,24 @@ _CORE_HUD_PRESERVE_TOKENS = (
     "activeitem",
     "stationservice",
 )
-_CHAT_WINDOW_TOKENS = ("chatchannel", "xmppchat", "lscchannel", "channelwindow")
+_CHAT_WINDOW_TOKENS = (
+    "chatwindowstack",
+    "chatchannel",
+    "xmppchat",
+    "lscchannel",
+    "channelwindow",
+)
+
+
+def _is_explicit_chrome_target(target_norm):
+    """Return True only when a normalized action target explicitly names preserved HUD/chat chrome."""
+    return bool(
+        target_norm
+        and any(
+            tok == target_norm or (len(target_norm) >= 5 and tok in target_norm)
+            for tok in (_CORE_HUD_PRESERVE_TOKENS + _CHAT_WINDOW_TOKENS)
+        )
+    )
 
 
 def _is_preserved_chrome_window(w, keep_chat=True):
@@ -4808,7 +4825,7 @@ def _click_top_tabs_in_window(target="", max_tabs=6, require_match=False):
     reg = getattr(uicore, "registry", None) if uicore is not None else None
     wins = list(reg.GetWindows() or []) if (reg is not None and hasattr(reg, "GetWindows")) else []
     t_norm = _normalize_window_tok(target)
-    is_explicit_chrome = bool(t_norm and any(tok == t_norm or (len(t_norm) >= 5 and tok in t_norm) for tok in (_CORE_HUD_PRESERVE_TOKENS + _CHAT_WINDOW_TOKENS)))
+    is_explicit_chrome = _is_explicit_chrome_target(t_norm)
     chosen = None
     surface_type = "window"
     chosen_id = ""
@@ -4967,7 +4984,7 @@ def _open_client_window(sm, target, require_open=False):
         if sec_id and (sec_cont is None or _is_visible(sec_cont) or sec_id == "notifications"):
             return True
         if reg is not None and hasattr(reg, "GetWindows"):
-            is_explicit_chrome = bool(t and any(tok == t or (len(t) >= 5 and tok in t) for tok in (_CORE_HUD_PRESERVE_TOKENS + _CHAT_WINDOW_TOKENS)))
+            is_explicit_chrome = _is_explicit_chrome_target(t)
             try:
                 for rw in list(reg.GetWindows() or []):
                     if rw is None or getattr(rw, "destroyed", False) or not _is_visible(rw):
@@ -5975,7 +5992,7 @@ def _execute_action(sm, action):
                                 wins.append(ch)
                 t_low = target.lower() if target else ""
                 t_norm = _normalize_window_tok(target)
-                is_explicit_chrome = bool(t_norm and any(tok == t_norm or (len(t_norm) >= 5 and tok in t_norm) for tok in (_CORE_HUD_PRESERVE_TOKENS + _CHAT_WINDOW_TOKENS)))
+                is_explicit_chrome = _is_explicit_chrome_target(t_norm)
                 has_visible_modal = any(
                     not getattr(w, "destroyed", False)
                     and _is_visible(w)

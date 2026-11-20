@@ -144,13 +144,14 @@ class TestHookStateDiffAndWindowCleanup(unittest.TestCase):
         w_modal = FakeWindow("msgbox", "MessageBox", "MessageBox", is_modal=True)
         w_lobby = FakeWindow("lobbyWnd", "lobbyWnd", "LobbyWnd")
         w_chat = FakeWindow("chatchannel_local", "chatchannel_local", "XmppChatWindow")
+        w_chat_stack = FakeWindow("ChatWindowStack", "ChatWindowStack", "ChatWindowStack")
         w_paint = FakeWindow("PaintTool", "PaintTool", "PaintToolWnd")
         w_agency = FakeWindow("AgencyWndNew", "AgencyWndNew", "AgencyWndNew")
         w_stack = FakeStackedWindow("InventorySpace", "InventorySpace", "InventoryPrimary")
 
         class FakeReg:
             def GetWindows(self):
-                return [w_modal, w_lobby, w_chat, w_paint, w_agency, w_stack]
+                return [w_modal, w_lobby, w_chat, w_chat_stack, w_paint, w_agency, w_stack]
 
         fake_uicore = types.SimpleNamespace(registry=FakeReg(), layer=None)
         fake_sm = mock.MagicMock()
@@ -168,6 +169,7 @@ class TestHookStateDiffAndWindowCleanup(unittest.TestCase):
         self.assertFalse(w_modal.closed)
         self.assertFalse(w_lobby.closed)
         self.assertFalse(w_chat.closed)
+        self.assertFalse(w_chat_stack.closed)
 
 
 class TestHookPressKeyCommandFallback(unittest.TestCase):
@@ -3880,6 +3882,82 @@ class TestScenarioHookExtensions(unittest.TestCase):
             fake_uicore.cmd = types.SimpleNamespace()
             res_nes_pri = hook._open_client_window(fake_sm, "nes", require_open=True)
             self.assertFalse(res_nes_pri.get("ok"), res_nes_pri)
+
+    def test_close_corporation_and_open_do_not_match_or_close_chat_window_stack(self):
+        hook = _load_hook_with_py2_stubs()
+        closed_wins = []
+
+        def _make_win(wid, name=None, caption=None):
+            w = types.SimpleNamespace(
+                windowID=wid,
+                name=name or wid,
+                caption=caption or wid,
+                destroyed=False,
+                display=True,
+                children=[],
+            )
+
+            def _close_win(win=w, win_id=wid):
+                win.destroyed = True
+                closed_wins.append(win_id)
+
+            w.CloseByUser = _close_win
+            w.Close = _close_win
+            return w
+
+        chat_stack = _make_win("ChatWindowStack", "ChatWindowStack", "Corp")
+        chat_corp = _make_win("chatchannel_corp", "chatchannel_corp", "Corp")
+        windows = [chat_stack, chat_corp]
+
+        fake_reg = types.SimpleNamespace(
+            GetWindows=lambda: list(windows),
+            GetModalWindow=lambda: None,
+            modals=[],
+        )
+        fake_uicore = types.SimpleNamespace(
+            cmd=types.SimpleNamespace(),
+            registry=fake_reg,
+            layer=types.SimpleNamespace(modal=None, abovemain=None, main=None),
+            desktop=types.SimpleNamespace(width=1280, height=800),
+        )
+        fake_viewstate = types.SimpleNamespace(
+            secondaryInfo=None,
+            activeView=None,
+            GetCurrentViewInfo=lambda: types.SimpleNamespace(name="hangar"),
+        )
+        fake_sm = types.SimpleNamespace(services={"viewState": fake_viewstate}, GetService=lambda n: {"viewState": fake_viewstate}.get(n))
+        sess = types.SimpleNamespace(
+            userid=1, charid=90000001, stationid=60003760, structureid=None,
+            shipid=100000001, solarsystemid=None, solarsystemid2=30000142, mutating=0, changing=None,
+        )
+
+        with mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_is_visible", side_effect=lambda obj: bool(getattr(obj, "display", True) and not getattr(obj, "destroyed", False))), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"session": {"charid": 90000001}, "open_windows": []}), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            res_open_corp = hook._open_client_window(fake_sm, "corporation", require_open=True)
+            self.assertFalse(res_open_corp.get("ok"), res_open_corp)
+
+            corp_win = _make_win("corporation", "corporation", "Corporation")
+            windows.append(corp_win)
+            res_close_corp = hook._execute_action(fake_sm, {"type": "close_window", "target": "corporation", "wait_ms": 0})
+            self.assertTrue(res_close_corp.get("action_ok"), res_close_corp)
+            self.assertEqual(closed_wins, ["corporation"])
+            self.assertTrue(corp_win.destroyed)
+            self.assertFalse(chat_stack.destroyed)
+            self.assertFalse(chat_corp.destroyed)
+
+            closed_wins[:] = []
+            res_close_stack = hook._execute_action(fake_sm, {"type": "close_window", "target": "ChatWindowStack", "wait_ms": 0})
+            self.assertTrue(res_close_stack.get("action_ok"), res_close_stack)
+            self.assertEqual(closed_wins, ["ChatWindowStack"])
+            self.assertTrue(chat_stack.destroyed)
 
 
 class TestComboDropdownAndFormWndLayout(unittest.TestCase):
