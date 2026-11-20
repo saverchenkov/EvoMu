@@ -2640,6 +2640,84 @@ class TestSpeedupOptimizations(unittest.TestCase):
             self.assertTrue(oracle._is_unhandled_tasklet_traceback("Unhandled exception in ModuleButton.OnStateChange", doomsday_unexpected_tb))
             self.assertFalse(oracle.is_ignorable_client_traceback("Unhandled exception in ModuleButton.OnStateChange", doomsday_unexpected_tb))
 
+    def test_evemisc_raise_drone_limit_user_error_is_benign_while_unexpected_errors_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            qdir.mkdir()
+            mem = playtester.PlaytesterMemory(root, git_head="7692e11ae")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+
+            drone_cap_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x95da80dd8, abps=1001, ctxt='<NO CONTEXT>^<function raise_ ff248588>'>\",) kwargs={}\n"
+                "Traceback (most recent call last):\n"
+                '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+                '  File "eve/client/script/util/eveMisc.py", line 105, in raise_\n'
+                "UserError: User error, msg=NoDroneManagementAbilitiesLeft, dict=None\n"
+            )
+            self.assertFalse(
+                oracle._is_unhandled_tasklet_traceback(
+                    "UserError: User error, msg=NoDroneManagementAbilitiesLeft, dict=None",
+                    drone_cap_tb,
+                )
+            )
+            self.assertTrue(
+                oracle.is_ignorable_client_traceback(
+                    "UserError: User error, msg=NoDroneManagementAbilitiesLeft, dict=None",
+                    drone_cap_tb,
+                    "Context menu closes and Hobgoblin I drones are launched into space.",
+                )
+            )
+
+            bay_space_tb = drone_cap_tb.replace(
+                "NoDroneManagementAbilitiesLeft", "NotEnoughDroneBaySpace"
+            )
+            self.assertFalse(
+                oracle._is_unhandled_tasklet_traceback(
+                    "UserError: User error, msg=NotEnoughDroneBaySpace, dict=None",
+                    bay_space_tb,
+                )
+            )
+            self.assertTrue(
+                oracle.is_ignorable_client_traceback(
+                    "UserError: User error, msg=NotEnoughDroneBaySpace, dict=None",
+                    bay_space_tb,
+                )
+            )
+
+            unexpected_user_error_tb = drone_cap_tb.replace(
+                "NoDroneManagementAbilitiesLeft", "ItemNotFound"
+            )
+            self.assertTrue(
+                oracle._is_unhandled_tasklet_traceback(
+                    "UserError: User error, msg=ItemNotFound, dict=None",
+                    unexpected_user_error_tb,
+                )
+            )
+            self.assertFalse(
+                oracle.is_ignorable_client_traceback(
+                    "UserError: User error, msg=ItemNotFound, dict=None",
+                    unexpected_user_error_tb,
+                )
+            )
+
+            other_site_tb = drone_cap_tb.replace(
+                'File "eve/client/script/util/eveMisc.py", line 105, in raise_',
+                'File "eve/client/script/parklife/droneMgr.py", line 210, in OnCrash',
+            ).replace("function raise_", "function OnCrash")
+            self.assertTrue(
+                oracle._is_unhandled_tasklet_traceback(
+                    "UserError: User error, msg=NoDroneManagementAbilitiesLeft, dict=None",
+                    other_site_tb,
+                )
+            )
+            self.assertFalse(
+                oracle.is_ignorable_client_traceback(
+                    "UserError: User error, msg=NoDroneManagementAbilitiesLeft, dict=None",
+                    other_site_tb,
+                )
+            )
+
     def test_parse_tb_blocks_splits_action_tasklet_and_schedule_startup_headers(self):
         raw_tb = (
             "[evomu_site] logmodule.LogException args=(\"first\",)\n"

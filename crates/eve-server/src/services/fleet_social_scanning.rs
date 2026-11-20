@@ -60,11 +60,22 @@ fn require_undocked_scanning_system(
 ) -> Result<(i64, u32), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(scan_rpc_err(docked_code, docked_msg));
+        return Err(BridgeRpcError::with_client_error(
+            docked_code,
+            docked_msg,
+            eve_proto::ClientError::CustomInfo(docked_msg.into()),
+        ));
     }
     let sys_id = match session.solar_system_id {
         Some(s) if s > 0 => s,
-        _ => return Err(scan_rpc_err("NoSolarSystem", "Session has no active solar system")),
+        _ => {
+            let msg = "Session has no active solar system";
+            return Err(BridgeRpcError::with_client_error(
+                "NoSolarSystem",
+                msg,
+                eve_proto::ClientError::CustomInfo(msg.into()),
+            ));
+        }
     };
     Ok((char_id, sys_id))
 }
@@ -76,9 +87,125 @@ fn require_undocked_scanning_ship(
 ) -> Result<(i64, u32), BridgeRpcError> {
     let (char_id, sys_id) = require_undocked_scanning_system(session, docked_code, docked_msg)?;
     if session.ship_id.is_none() {
-        return Err(scan_rpc_err("NoActiveShip", "Session has no active ship"));
+        let msg = "Session has no active ship";
+        return Err(BridgeRpcError::with_client_error(
+            "NoActiveShip",
+            msg,
+            eve_proto::ClientError::CustomInfo(msg.into()),
+        ));
     }
     Ok((char_id, sys_id))
+}
+
+fn exact_int_arg(rep: &PyRep) -> Option<i64> {
+    match rep {
+        PyRep::Integer(v) => Some(*v),
+        _ => None,
+    }
+}
+
+fn exact_float_arg(rep: &PyRep) -> Option<f64> {
+    match rep {
+        PyRep::Real(v) => Some(*v),
+        PyRep::Integer(v) => Some(*v as f64),
+        _ => None,
+    }
+}
+
+fn parse_optional_scan_sys_arg(
+    ctx: &ServerContext,
+    session: &SessionState,
+    caller_sys: u32,
+    args: &[PyRep],
+    action: &str,
+) -> Result<u32, BridgeRpcError> {
+    if args.len() > 1 {
+        return Err(scan_rpc_err(
+            "InvalidArguments",
+            format!("{action} accepts at most 1 argument"),
+        ));
+    }
+    let Some(arg) = args.first().filter(|a| !matches!(a, PyRep::None)) else {
+        if caller_sys == 0 {
+            return Err(scan_rpc_err(
+                "NoSolarSystem",
+                "Session has no active solar system",
+            ));
+        }
+        return Ok(caller_sys);
+    };
+    let Some(raw_sys) = exact_int_arg(arg) else {
+        return Err(scan_rpc_err(
+            "InvalidSolarSystem",
+            format!("Invalid solar system argument for {action}"),
+        ));
+    };
+    let Ok(req_sys) = u32::try_from(raw_sys) else {
+        return Err(scan_rpc_err(
+            "InvalidSolarSystem",
+            format!("Invalid solar system {raw_sys} for {action}"),
+        ));
+    };
+    if req_sys == 0 {
+        return Err(scan_rpc_err(
+            "InvalidSolarSystem",
+            format!("Invalid solar system 0 for {action}"),
+        ));
+    }
+    if req_sys != caller_sys {
+        if !session.has_gm_role() {
+            return Err(scan_rpc_err(
+                "AccessDenied",
+                format!("Cannot {action} for remote solar system {req_sys}"),
+            ));
+        }
+        if !ctx.sde.solar_systems.is_empty() && !ctx.sde.solar_systems.contains_key(&req_sys) {
+            return Err(scan_rpc_err(
+                "InvalidSolarSystem",
+                format!("Unknown solar system {req_sys} for {action}"),
+            ));
+        }
+    }
+    Ok(req_sys)
+}
+
+fn validate_coords_triple(rep: &PyRep) -> Option<[f64; 3]> {
+    let (PyRep::List(c) | PyRep::Tuple(c)) = rep else {
+        return None;
+    };
+    if c.len() < 3 {
+        return None;
+    }
+    let x = exact_float_arg(&c[0])?;
+    let y = exact_float_arg(&c[1])?;
+    let z = exact_float_arg(&c[2])?;
+    (x.is_finite() && y.is_finite() && z.is_finite()).then_some([x, y, z])
+}
+
+fn validate_scan_probe_entry(rep: &PyRep) -> Option<[f64; 3]> {
+    if let Some(coords) = validate_coords_triple(rep) {
+        return Some(coords);
+    }
+    if !matches!(rep, PyRep::Dict(_) | PyRep::KeyVal(_)) {
+        return None;
+    }
+    let find_key = |key: &str| -> Option<&PyRep> {
+        match rep {
+            PyRep::KeyVal(kv) => kv.iter().find(|(k, _)| *k == key).map(|(_, v)| v),
+            PyRep::Dict(kv) => kv
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(key))
+                .map(|(_, v)| v),
+            _ => None,
+        }
+    };
+    if let Some(pos) = find_key("pos").or_else(|| find_key("destination")) {
+        return validate_coords_triple(pos);
+    }
+    let x = find_key("x").and_then(exact_float_arg).filter(|v| v.is_finite())?;
+    let y = find_key("y").and_then(exact_float_arg).filter(|v| v.is_finite())?;
+    let z = find_key("z").and_then(exact_float_arg).filter(|v| v.is_finite())?;
+    Some([x, y, z])
 }
 
 pub(super) async fn handle_scanning_and_wormholes(
@@ -98,19 +225,50 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = match session.solar_system_id {
-                Some(s) if s > 0 => s,
-                _ => return Some(Err(BridgeRpcError::user_error("NoSolarSystem"))),
+            let caller_sys = session.solar_system_id.unwrap_or(0);
+            if caller_sys == 0 {
+                return Some(Err(BridgeRpcError::user_error("NoSolarSystem")));
+            }
+            let sys_id = match parse_optional_scan_sys_arg(
+                ctx,
+                session,
+                caller_sys,
+                args,
+                "register signal tracker",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
             let now_unix = ctx.now_unix();
-            if !crate::services::pve_exploration::read_pve_exploration_reg(ctx, |reg| {
-                reg.seeded_systems.get(&sys_id).copied().unwrap_or(false)
-            }) {
-                crate::services::pve_exploration::ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            }
-            let sigs = match read_system_signatures_ready(ctx, sys_id, now_unix) {
-                Some((ready_sigs, anom_ids)) if !anom_ids.is_empty() => ready_sigs,
-                _ => ensure_system_signatures(ctx, sys_id).await,
+            let is_docked = session.station_id.is_some() || session.structure_id.is_some();
+            let sigs = if is_docked {
+                ctx.db.with_snapshot(|snap| {
+                    snap.cosmic_signatures
+                        .get(&sys_id)
+                        .map(|list| {
+                            list.iter()
+                                .filter(|s| {
+                                    !s.collapsed
+                                        && (s.lifetime_seconds == 0
+                                            || now_unix
+                                                < s.created_unix.saturating_add(s.lifetime_seconds))
+                                })
+                                .cloned()
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+            } else {
+                if !crate::services::pve_exploration::read_pve_exploration_reg(ctx, |reg| {
+                    reg.seeded_systems.get(&sys_id).copied().unwrap_or(false)
+                }) {
+                    crate::services::pve_exploration::ensure_system_pve_sites_seeded(ctx, sys_id)
+                        .await;
+                }
+                match read_system_signatures_ready(ctx, sys_id, now_unix) {
+                    Some((ready_sigs, anom_ids)) if !anom_ids.is_empty() => ready_sigs,
+                    _ => ensure_system_signatures(ctx, sys_id).await,
+                }
             };
             let (anom_count, anom_rows, struct_rows, sig_count) = ctx.db.with_snapshot(|snap| {
                 let anom_ids: std::collections::HashSet<&str> = snap
@@ -165,7 +323,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                     .count();
                 (ac, a_rows, st_rows, sc)
             });
-            if method == "SignalTrackerRegister" {
+            if !is_docked && method == "SignalTrackerRegister" {
                 register_signal_tracker_subscriber(ctx, sys_id, char_id);
                 crate::services::notify_emitters_tournaments_anomalies::emit_signal_tracker_full_state_for_system(
                     ctx, char_id, sys_id, &sigs,
@@ -174,7 +332,7 @@ pub(super) async fn handle_scanning_and_wormholes(
             Some(Ok(PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(sys_id as i64)),
                 ("service", PyRep::String("scanMgr".into())),
-                ("registered", PyRep::Bool(true)),
+                ("registered", PyRep::Bool(!is_docked)),
                 ("signatureCount", PyRep::Integer(sig_count as i64)),
                 ("anomalyCount", PyRep::Integer(anom_count as i64)),
                 ("structureCount", PyRep::Integer(struct_rows.len() as i64)),
@@ -213,17 +371,51 @@ pub(super) async fn handle_scanning_and_wormholes(
 
         ("scanMgr", "GetSignatures") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let sys_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .map(|v| v as u32)
-                .or(session.solar_system_id)
+            let caller_sys = session
+                .solar_system_id
                 .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
                 .unwrap_or(0);
+            let sys_id = match parse_optional_scan_sys_arg(
+                ctx,
+                session,
+                caller_sys,
+                args,
+                "query signatures",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let now_unix = ctx.now_unix();
+            let is_docked = session.station_id.is_some() || session.structure_id.is_some();
             let (signatures, anom_ids_owned) =
                 if let Some((ready_sigs, ready_anoms)) = read_system_signatures_ready(ctx, sys_id, now_unix) {
                     (ready_sigs, ready_anoms)
+                } else if is_docked {
+                    ctx.db.with_snapshot(|snap| {
+                        let anom_ids: Vec<String> = snap
+                            .cosmic_anomalies
+                            .get(&sys_id)
+                            .map(|l| l.iter().map(|a| a.anomaly_id.clone()).collect())
+                            .unwrap_or_default();
+                        let sigs = snap
+                            .cosmic_signatures
+                            .get(&sys_id)
+                            .map(|l| {
+                                l.iter()
+                                    .filter(|sig| {
+                                        !sig.collapsed
+                                            && (sig.lifetime_seconds == 0
+                                                || now_unix
+                                                    < sig
+                                                        .created_unix
+                                                        .saturating_add(sig.lifetime_seconds))
+                                    })
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (sigs, anom_ids)
+                    })
                 } else {
                     let _ = ensure_system_signatures(ctx, sys_id).await;
                     let any_expired = ctx.db.with_snapshot(|snap| {
@@ -324,36 +516,118 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let now_unix = ctx.now_unix();
-            if read_system_signatures_ready(ctx, sys_id, now_unix).is_none() {
-                let _ = ensure_system_signatures(ctx, sys_id).await;
+            if args.len() > 3 {
+                let msg = "RequestScans accepts at most 3 arguments";
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "InvalidArguments",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
+                )));
             }
             let (probe_positions_rep, scan_radius_meters, base_probe_strength) =
-                if let Some(PyRep::Real(r)) = args.first() {
-                    let s = args.get(1).and_then(|a| a.as_f64()).unwrap_or(40.0);
+                if matches!(args.first(), Some(PyRep::Real(_))) {
+                    let Some(r) = exact_float_arg(&args[0]).filter(|v| v.is_finite() && *v > 0.0) else {
+                        let msg = "Invalid scan radius argument";
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidProbeCoordinates",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
+                        )));
+                    };
+                    let s = match args.get(1) {
+                        None | Some(PyRep::None) => 40.0,
+                        Some(a) => match exact_float_arg(a).filter(|v| v.is_finite() && *v > 0.0) {
+                            Some(v) => v,
+                            None => {
+                                let msg = "Invalid probe sensor strength argument";
+                                return Some(Err(BridgeRpcError::with_client_error(
+                                    "InvalidProbeCoordinates",
+                                    msg,
+                                    eve_proto::ClientError::CustomInfo(msg.into()),
+                                )));
+                            }
+                        },
+                    };
+                    if let Some(pos_rep) = args.get(2).filter(|a| !matches!(a, PyRep::None)) {
+                        if !matches!(pos_rep, PyRep::List(_) | PyRep::Tuple(_)) {
+                            let msg = "Probe coordinates must be a list or tuple";
+                            return Some(Err(BridgeRpcError::with_client_error(
+                                "InvalidProbeCoordinates",
+                                msg,
+                                eve_proto::ClientError::CustomInfo(msg.into()),
+                            )));
+                        }
+                    }
                     (args.get(2), r.max(0.25 * AU_IN_METERS), s)
                 } else {
-                    let r = args
-                        .get(1)
-                        .and_then(|a| a.as_f64())
-                        .unwrap_or(4.0 * AU_IN_METERS)
-                        .max(0.25 * AU_IN_METERS);
-                    let s = args.get(2).and_then(|a| a.as_f64()).unwrap_or(40.0);
+                    if let Some(first) = args.first().filter(|a| !matches!(a, PyRep::None)) {
+                        if !matches!(first, PyRep::List(_) | PyRep::Tuple(_)) {
+                            let msg = "Invalid scan request target argument";
+                            return Some(Err(BridgeRpcError::with_client_error(
+                                "InvalidProbeCoordinates",
+                                msg,
+                                eve_proto::ClientError::CustomInfo(msg.into()),
+                            )));
+                        }
+                    }
+                    let r = match args.get(1) {
+                        None | Some(PyRep::None) => 4.0 * AU_IN_METERS,
+                        Some(a) => match exact_float_arg(a).filter(|v| v.is_finite() && *v > 0.0) {
+                            Some(v) => v,
+                            None => {
+                                let msg = "Invalid scan radius argument";
+                                return Some(Err(BridgeRpcError::with_client_error(
+                                    "InvalidProbeCoordinates",
+                                    msg,
+                                    eve_proto::ClientError::CustomInfo(msg.into()),
+                                )));
+                            }
+                        },
+                    }
+                    .max(0.25 * AU_IN_METERS);
+                    let s = match args.get(2) {
+                        None | Some(PyRep::None) => 40.0,
+                        Some(a) => match exact_float_arg(a).filter(|v| v.is_finite() && *v > 0.0) {
+                            Some(v) => v,
+                            None => {
+                                let msg = "Invalid probe sensor strength argument";
+                                return Some(Err(BridgeRpcError::with_client_error(
+                                    "InvalidProbeCoordinates",
+                                    msg,
+                                    eve_proto::ClientError::CustomInfo(msg.into()),
+                                )));
+                            }
+                        },
+                    };
                     (args.first(), r, s)
                 };
 
             let mut probes = Vec::new();
-            if let Some(PyRep::List(list)) = probe_positions_rep {
+            if let Some(rep) = probe_positions_rep.filter(|a| !matches!(a, PyRep::None)) {
+                let (PyRep::List(list) | PyRep::Tuple(list)) = rep else {
+                    let msg = "Probe coordinates must be a list or tuple";
+                    return Some(Err(BridgeRpcError::with_client_error(
+                        "InvalidProbeCoordinates",
+                        msg,
+                        eve_proto::ClientError::CustomInfo(msg.into()),
+                    )));
+                };
                 for item in list {
-                    if let PyRep::List(coords) | PyRep::Tuple(coords) = item {
-                        if coords.len() >= 3 {
-                            let x = coords[0].as_f64().unwrap_or(0.0);
-                            let y = coords[1].as_f64().unwrap_or(0.0);
-                            let z = coords[2].as_f64().unwrap_or(0.0);
-                            probes.push(DVec3::new(x, y, z));
-                        }
-                    }
+                    let Some(coords) = validate_scan_probe_entry(item) else {
+                        let msg = "Probe coordinate entry must contain 3 finite numbers";
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidProbeCoordinates",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
+                        )));
+                    };
+                    probes.push(DVec3::new(coords[0], coords[1], coords[2]));
                 }
+            }
+
+            let now_unix = ctx.now_unix();
+            if read_system_signatures_ready(ctx, sys_id, now_unix).is_none() {
+                let _ = ensure_system_signatures(ctx, sys_id).await;
             }
             if probes.is_empty() {
                 if let Some(launched) = ctx.social_extras.lock().unwrap().active_probes.get(&char_id) {
@@ -399,14 +673,6 @@ pub(super) async fn handle_scanning_and_wormholes(
             let radius_au = scan_radius_meters / AU_IN_METERS;
             let now_ft = ctx.now_blueos_filetime_ticks();
             let probe_ids_rep: Vec<PyRep> = (0..probes.len()).map(|i| PyRep::Integer(900_000 + i as i64)).collect();
-            ctx.emit_typed(
-                NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnSystemScanStarted {
-                    start_time: now_ft,
-                    duration_ms: scan_time_ms,
-                    probes: PyRep::List(probe_ids_rep),
-                },
-            );
 
             let updated_results = ctx.db.try_with_mut_snapshot(|snap| {
                 let anom_ids_owned: Vec<String> = snap
@@ -472,6 +738,14 @@ pub(super) async fn handle_scanning_and_wormholes(
 
             match updated_results {
                 Ok(results) => {
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnSystemScanStarted {
+                            start_time: now_ft,
+                            duration_ms: scan_time_ms,
+                            probes: PyRep::List(probe_ids_rep),
+                        },
+                    );
                     crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
                         let now = crate::services::pve_exploration::now_sec(reg);
                         if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
@@ -542,22 +816,86 @@ pub(super) async fn handle_scanning_and_wormholes(
                 return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotDscanInThisSystem)));
             }
             if session.ship_id.is_none() {
-                return Some(Err(scan_rpc_err(
+                let msg = "Directional scanner requires an active ship";
+                return Some(Err(BridgeRpcError::with_client_error(
                     "NoActiveShip",
-                    "Directional scanner requires an active ship",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             }
-            let scan_angle = args
-                .first()
-                .and_then(|a| a.as_f64())
-                .unwrap_or(360.0)
-                .clamp(5.0, 360.0);
+            if args.len() > 5 {
+                let msg = "Directional scan accepts at most 5 arguments";
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "InvalidArgs",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
+                )));
+            }
+            let scan_angle = match args.first() {
+                None | Some(PyRep::None) => 360.0,
+                Some(a) => match exact_float_arg(a)
+                    .filter(|v| v.is_finite() && *v >= 0.0 && *v <= 360.0)
+                {
+                    Some(v) => v.clamp(5.0, 360.0),
+                    None => {
+                        let msg = "Invalid directional scan angle";
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidArgs",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
+                        )));
+                    }
+                },
+            };
             let max_scan_range = 14.3 * AU_IN_METERS;
-            let scan_range = args
-                .get(1)
-                .and_then(|a| a.as_f64())
-                .unwrap_or(max_scan_range)
-                .clamp(0.0, max_scan_range);
+            let scan_range = match args.get(1) {
+                None | Some(PyRep::None) => max_scan_range,
+                Some(a) => match exact_float_arg(a).filter(|v| v.is_finite() && *v >= 0.0) {
+                    Some(v) => v.clamp(0.0, max_scan_range),
+                    None => {
+                        let msg = "Invalid directional scan range";
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidArgs",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
+                        )));
+                    }
+                },
+            };
+            match &args.get(2..) {
+                Some([]) | None => {}
+                Some([dir_rep]) => {
+                    if !matches!(dir_rep, PyRep::None) && validate_coords_triple(dir_rep).is_none() {
+                        let msg = "Invalid directional scan vector";
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidArgs",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
+                        )));
+                    }
+                }
+                Some([dx, dy, dz]) => {
+                    if [dx, dy, dz]
+                        .into_iter()
+                        .any(|r| exact_float_arg(r).is_none_or(|v| !v.is_finite()))
+                    {
+                        let msg = "Invalid directional scan vector components";
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidArgs",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
+                        )));
+                    }
+                }
+                Some(_) => {
+                    let msg = "Invalid directional scan arguments";
+                    return Some(Err(BridgeRpcError::with_client_error(
+                        "InvalidArgs",
+                        msg,
+                        eve_proto::ClientError::CustomInfo(msg.into()),
+                    )));
+                }
+            }
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let caller_ship = session.ship_id;
@@ -644,6 +982,14 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if args.len() > 4 {
+                let msg = "LaunchProbes accepts at most 4 arguments";
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "InvalidArguments",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
+                )));
+            }
             let max_probes = ctx.db.with_snapshot(|snap| {
                 snap.skills
                     .get(&char_id)
@@ -651,7 +997,21 @@ pub(super) async fn handle_scanning_and_wormholes(
                     .map(|s| (4 + s.level as i64).min(8))
                     .unwrap_or(8)
             });
-            let requested = args.first().and_then(|a| a.as_i64()).unwrap_or(max_probes);
+            let requested = match args.first() {
+                None | Some(PyRep::None) => max_probes,
+                Some(PyRep::String(s)) if !s.trim().is_empty() => max_probes,
+                Some(a) => match exact_int_arg(a).filter(|&v| v > 0) {
+                    Some(v) => v,
+                    None => {
+                        let msg = "Invalid probe count requested";
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidArguments",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
+                        )));
+                    }
+                },
+            };
             if requested > max_probes {
                 return Some(Err(BridgeRpcError {
                     code: "MaxProbesExceeded".into(),
@@ -660,24 +1020,38 @@ pub(super) async fn handle_scanning_and_wormholes(
                 }));
             }
             let probe_count = requested.clamp(1, max_probes);
-            let formation_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let formation_id = match args.get(1) {
+                None | Some(PyRep::None) => 0,
+                Some(a) => match exact_int_arg(a) {
+                    Some(v) => v,
+                    None => {
+                        let msg = "Invalid probe formation ID";
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidArguments",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
+                        )));
+                    }
+                },
+            };
             let (formation_name, scan_radius_m, spread_factor) = match formation_id {
                 1 => ("Spread", 4.0 * AU_IN_METERS, 0.85),
                 2 => ("Custom", 1.0 * AU_IN_METERS, 0.50),
                 _ => ("Pinpoint", 0.5 * AU_IN_METERS, 0.40),
             };
-            let center = if let Some(PyRep::List(c) | PyRep::Tuple(c)) = args.get(2) {
-                if c.len() >= 3 {
-                    [
-                        c[0].as_f64().unwrap_or(0.0),
-                        c[1].as_f64().unwrap_or(0.0),
-                        c[2].as_f64().unwrap_or(0.0),
-                    ]
-                } else {
-                    [0.0, 0.0, 0.0]
-                }
-            } else {
-                [0.0, 0.0, 0.0]
+            let center = match args.get(2) {
+                None | Some(PyRep::None) => [0.0, 0.0, 0.0],
+                Some(rep) => match validate_coords_triple(rep) {
+                    Some(c) => c,
+                    None => {
+                        let msg = "Invalid LaunchProbes center coordinates";
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidProbeCoordinates",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
+                        )));
+                    }
+                },
             };
             let now_unix = ctx.now_unix();
             let d = scan_radius_m * spread_factor;
@@ -692,17 +1066,25 @@ pub(super) async fn handle_scanning_and_wormholes(
                 [d * 0.5, d * 0.5, d * 0.5],
             ];
             let mut custom_offsets: Vec<[f64; 3]> = Vec::new();
-            if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.get(3) {
+            if let Some(offsets_rep) = args.get(3).filter(|a| !matches!(a, PyRep::None)) {
+                let (PyRep::List(list) | PyRep::Tuple(list)) = offsets_rep else {
+                    let msg = "Invalid LaunchProbes custom offsets";
+                    return Some(Err(BridgeRpcError::with_client_error(
+                        "InvalidProbeCoordinates",
+                        msg,
+                        eve_proto::ClientError::CustomInfo(msg.into()),
+                    )));
+                };
                 for item in list {
-                    if let PyRep::List(c) | PyRep::Tuple(c) = item {
-                        if c.len() >= 3 {
-                            custom_offsets.push([
-                                c[0].as_f64().unwrap_or(0.0),
-                                c[1].as_f64().unwrap_or(0.0),
-                                c[2].as_f64().unwrap_or(0.0),
-                            ]);
-                        }
-                    }
+                    let Some(coords) = validate_coords_triple(item) else {
+                        let msg = "Invalid LaunchProbes custom offset coordinates";
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidProbeCoordinates",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
+                        )));
+                    };
+                    custom_offsets.push(coords);
                 }
             }
             let mut pos_reps = Vec::new();
@@ -778,15 +1160,28 @@ pub(super) async fn handle_scanning_and_wormholes(
         // =====================================================================
         ("wormholeMgr", "GetWormholePolarization") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if args.len() != 1 {
+                let msg = "GetWormholePolarization requires exactly 1 wormhole target argument";
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "WormholeNotFound",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
+                )));
+            }
             let sys_id = session
                 .solar_system_id
                 .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
                 .unwrap_or(0);
             let now_unix = ctx.now_unix();
-            let arg_str_opt = args.first().and_then(|a| a.as_str());
-            let arg_int_opt = args.first().and_then(|a| a.as_i64());
+            let arg_str_opt = args
+                .first()
+                .and_then(|a| a.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let arg_int_opt = args.first().and_then(exact_int_arg);
 
-            // Match either a signature ID string (`WST-101` or `K162-WST-101`) or a wormhole ball ID (`>= 40_000_000`).
+            // Match either a signature ID string (`WST-101` or `K162-WST-101`) or a wormhole ball ID (`>= 40_000_000`),
+            // or a valid solar system ID (`30_000_000..=39_999_999` in SDE).
             // Pure snapshot lookup: reading polarization must never seed or mutate DB state.
             if arg_str_opt.is_some() || arg_int_opt.is_some_and(|id| id >= 40_000_000) {
                 let wh_match = ctx.db.with_snapshot(|snap| {
@@ -835,11 +1230,12 @@ pub(super) async fn handle_scanning_and_wormholes(
                     None
                 });
                 let Some((wh, entrance_wh_id, _exit_wh_id)) = wh_match else {
-                    return Some(Err(BridgeRpcError {
-                        code: "WormholeNotFound".into(),
-                        message: format!("Wormhole not found in system {sys_id}"),
-                        client_error: None,
-                    }));
+                    let msg = format!("Wormhole not found in system {sys_id}");
+                    return Some(Err(BridgeRpcError::with_client_error(
+                        "WormholeNotFound",
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
+                    )));
                 };
                 let dest_sys = wh.destination_system_id.unwrap_or(31_000_005) as i64;
                 let pol_key = arg_int_opt.unwrap_or(entrance_wh_id);
@@ -861,7 +1257,20 @@ pub(super) async fn handle_scanning_and_wormholes(
                 return Some(Ok(PyRep::None));
             }
 
-            let target_sys = arg_int_opt.unwrap_or(31_000_005);
+            let Some(target_sys) = arg_int_opt.filter(|&id| {
+                u32::try_from(id).ok().is_some_and(|sys| {
+                    (30_000_000..=39_999_999).contains(&sys)
+                        && (ctx.sde.solar_systems.is_empty()
+                            || ctx.sde.solar_systems.contains_key(&sys))
+                })
+            }) else {
+                let msg = "Unknown or invalid wormhole target";
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "WormholeNotFound",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
+                )));
+            };
             let exp_unix = ctx.db.with_snapshot(|snap| {
                 snap.wh_polarizations
                     .get(&(char_id, target_sys))
@@ -910,7 +1319,36 @@ pub(super) async fn handle_scanning_and_wormholes(
             if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "activate acceleration gate") {
                 return Some(Err(e));
             }
-            let gate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if args.is_empty() || args.len() > 2 {
+                let msg = "ActivateAccelerationGate requires gate ID and optional dungeon ID";
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "InvalidArguments",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
+                )));
+            }
+            let Some(gate_id) = exact_int_arg(&args[0]).filter(|&id| id > 0) else {
+                let msg = "Invalid acceleration gate ID";
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "InvalidGateID",
+                    msg,
+                    eve_proto::ClientError::CustomInfo(msg.into()),
+                )));
+            };
+            let override_dungeon_id = match args.get(1) {
+                None | Some(PyRep::None) => None,
+                Some(a) => match exact_int_arg(a).and_then(|v| u32::try_from(v).ok()) {
+                    Some(v) if v > 0 => Some(v),
+                    _ => {
+                        let msg = "Invalid dungeon override argument";
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidArguments",
+                            msg,
+                            eve_proto::ClientError::CustomInfo(msg.into()),
+                        )));
+                    }
+                },
+            };
             if ctx.db.with_snapshot(|snap| snap.fw_runtime.fw_complexes.contains_key(&gate_id)) {
                 return Some(
                     crate::services::fw_gameplay::activate_fw_complex_gate_in_space(
@@ -982,7 +1420,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                 }
             }
 
-            let gate_check = ctx.db.try_with_mut_snapshot(|snap| {
+            let gate_preview = ctx.db.with_snapshot(|snap| -> Result<(Option<u32>, Option<u32>, bool, Option<i64>), BridgeRpcError> {
                 let (dungeon_id_opt, req_key_opt, consume_key) = snap
                     .items
                     .get(&gate_id)
@@ -994,11 +1432,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                     })
                     .unwrap_or((None, None, false));
 
-                let effective_dungeon_id = dungeon_id_opt.or_else(|| {
-                    args.get(1)
-                        .and_then(|a| a.as_i64())
-                        .and_then(|v| u32::try_from(v).ok())
-                });
+                let effective_dungeon_id = dungeon_id_opt.or(override_dungeon_id);
 
                 if let Some(did) = effective_dungeon_id {
                     if let Some(dungeon) = ctx.sde.dungeons.get(&did) {
@@ -1037,7 +1471,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                     }
                 }
 
-                let mut key_consumed = false;
+                let mut consume_item_id = None;
                 if let Some(req_key_type_id) = req_key_opt.filter(|&k| k > 0) {
                     let key_item_id = snap
                         .items
@@ -1061,22 +1495,22 @@ pub(super) async fn handle_scanning_and_wormholes(
                     };
 
                     if consume_key {
-                        if let Some(item) = snap.items.get_mut(&kid) {
-                            item.quantity -= 1;
-                            if item.quantity <= 0 {
-                                snap.items.remove(&kid);
-                            }
-                            key_consumed = true;
-                        }
+                        consume_item_id = Some(kid);
                     }
                 }
-                Ok((effective_dungeon_id, req_key_opt, key_consumed))
+                Ok((effective_dungeon_id, req_key_opt, consume_item_id.is_some(), consume_item_id))
             });
 
-            let (dungeon_id_used, key_type_used, key_consumed) = match gate_check {
+            let (dungeon_id_used, key_type_used, key_consumed, consume_item_id) = match gate_preview {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+
+            if let Some(kid) = consume_item_id {
+                if let Err(e) = consume_gate_key_in_cargo(ctx, ship_id, kid, key_type_used) {
+                    return Some(Err(e));
+                }
+            }
 
             if !validated_gate.is_covert_cloaked {
                 let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
@@ -1193,6 +1627,39 @@ pub(crate) fn signal_tracker_subscribers_in_snap(
     subs.sort_unstable();
     subs.dedup();
     subs
+}
+
+pub(crate) fn consume_gate_key_in_cargo(
+    ctx: &ServerContext,
+    ship_id: i64,
+    kid: i64,
+    key_type_used: Option<u32>,
+) -> Result<(), BridgeRpcError> {
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let missing_key_err = || {
+            let msg = "Gate key item is no longer present in cargo";
+            BridgeRpcError::with_client_error(
+                "MissingGateKey",
+                msg,
+                eve_proto::ClientError::CustomInfo(msg.into()),
+            )
+        };
+        let Some(item) = snap.items.get_mut(&kid) else {
+            return Err(missing_key_err());
+        };
+        if item.location_id != ship_id
+            || item.flag != eve_db::InventoryFlag::Cargo
+            || key_type_used != Some(item.type_id)
+            || item.quantity < 1
+        {
+            return Err(missing_key_err());
+        }
+        item.quantity -= 1;
+        if item.quantity <= 0 {
+            snap.items.remove(&kid);
+        }
+        Ok(())
+    })
 }
 
 fn random_sphere_offset(dev_radius: f64, sig_id: &str) -> glam::DVec3 {

@@ -1128,6 +1128,486 @@ async fn drifter_hive_in_system_signature_query_is_read_pure_and_pochven_boss_ki
     assert!(read_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&pochven_sys][1].completed));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn triglavian_site_concurrent_completion_pays_exactly_once() {
+    let sde = shared_sde();
+    let pochven_sys = sde
+        .solar_systems
+        .values()
+        .filter(|s| s.region_id == 10_000_070)
+        .min_by_key(|s| s.solar_system_id)
+        .map(|s| s.solar_system_id)
+        .expect("canonical SDE contains Pochven solar system");
+    let (ctx, mut sess1, char1, ship1) = make_ctx_and_pilot(pochven_sys, true);
+    let char2: i64 = 90_010_002;
+    let ship2: i64 = 1_010_000_002;
+    let ship_tid = find_ship_type_id(&sde);
+    ctx.db.provision_gm_account("spec_site_pilot_2", "pw", char2, "SpecSitePilot2");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char2) {
+            ch.solar_system_id = pochven_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship2;
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
+        snap.items.insert(
+            ship2,
+            InventoryItemRecord {
+                item_id: ship2,
+                type_id: ship_tid,
+                owner_id: char2,
+                location_id: pochven_sys as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(ship1, [10_500.0, 0.0, 0.0]);
+        snap.item_positions.insert(ship2, [10_500.0, 0.0, 0.0]);
+    });
+    let uid2 = ctx.db.with_snapshot(|s| s.characters[&char2].user_id);
+    ctx.db
+        .acquire_online_lock(uid2, 102, Some(char2), false, ctx.now_unix())
+        .expect("register online session for pilot 2");
+    let mut sess2 = SessionState::new(102);
+    sess2.user_id = Some(uid2);
+    sess2.character_id = Some(char2);
+    sess2.solar_system_id = Some(pochven_sys);
+    sess2.ship_id = Some(ship2);
+
+    // Seed and spawn Pochven Triglavian sites undocked in-system.
+    let _ = handle_pve_special_sites(
+        &ctx,
+        &mut sess1,
+        "dungeonInstanceCacheMgr",
+        "GetTriglavianSiteInstances",
+        &[PyRep::Integer(i64::from(pochven_sys))],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("seed Pochven sites");
+
+    let site0 = read_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&pochven_sys][0].clone());
+    let sys_handle = ctx.systems.get_or_spawn(pochven_sys);
+    for (sid, bid) in [(ship1, ship1), (ship2, ship2)] {
+        let _ = sid;
+        sys_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: bid,
+                type_id: ship_tid,
+                position: glam::DVec3::new(10_500.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await
+            .expect("spawn pilot ball");
+    }
+
+    assert!(
+        sys_handle.get_ball_snapshot(site0.boss_npc_ball_id).await.unwrap().is_some(),
+        "site0 boss NPC must be spawned before clearing"
+    );
+    sys_handle.remove_ball(site0.boss_npc_ball_id).await.expect("clear boss");
+    for &ebid in &site0.escort_ball_ids {
+        sys_handle.remove_ball(ebid).await.expect("clear escort");
+    }
+
+    // Two concurrent completions across two pilots must execute atomically and pay strictly once.
+    let (res1, res2) = tokio::join!(
+        complete_special_dungeon_instance(&ctx, &mut sess1, site0.instance_id, 1),
+        complete_special_dungeon_instance(&ctx, &mut sess2, site0.instance_id, 1),
+    );
+    let (winner_cid, loser_cid, winner_rep, loser_err) = match (res1, res2) {
+        (Ok(ok), Err(err)) => (char1, char2, ok, err),
+        (Err(err), Ok(ok)) => (char2, char1, ok, err),
+        (Ok(a), Ok(b)) => panic!("Both concurrent callers paid out! res1={a:?} res2={b:?}"),
+        (Err(a), Err(b)) => panic!("Neither caller completed site: err1={a:?} err2={b:?}"),
+    };
+    assert_eq!(loser_err.code, "SiteAlreadyCompleted");
+    assert_eq!(winner_rep.dict_get("completed"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        winner_rep.dict_get("baseIsk").and_then(|v| v.as_i64()),
+        Some(site0.base_isk)
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.pve_special_sites.triglavian_sites[&pochven_sys][0].completed);
+        let win_ch = &snap.characters[&winner_cid];
+        let lose_ch = &snap.characters[&loser_cid];
+        assert_eq!(
+            win_ch.balance,
+            IskCents::from_isk(1_000_000 + site0.base_isk),
+            "winner must receive exact single base_isk payout"
+        );
+        assert_eq!(
+            lose_ch.balance,
+            IskCents::from_isk(1_000_000),
+            "loser must receive zero ISK"
+        );
+        assert!((win_ch.standings.get(&500_026).copied().unwrap_or(0.0)).abs() > 0.0);
+        assert_eq!(lose_ch.standings.get(&500_026).copied().unwrap_or(0.0), 0.0);
+        assert_eq!(lose_ch.standings.get(&500_027).copied().unwrap_or(0.0), 0.0);
+
+        let qty_for = |cid: i64, tid: u32| -> i32 {
+            snap.items
+                .values()
+                .filter(|it| it.owner_id == cid && it.type_id == tid)
+                .map(|it| it.quantity)
+                .sum()
+        };
+        assert_eq!(qty_for(winner_cid, 48_121), site0.survey_db_drop as i32);
+        assert_eq!(qty_for(winner_cid, 30_747), 2);
+        assert_eq!(qty_for(loser_cid, 48_121), 0);
+        assert_eq!(qty_for(loser_cid, 30_747), 0);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn triglavian_site_cannot_complete_unspawned_or_remotely_queried_without_killing_npcs() {
+    let sde = shared_sde();
+    let jita_sys: SolarSystemId = 30_000_142;
+    let pochven_sys = sde
+        .solar_systems
+        .values()
+        .filter(|s| s.region_id == 10_000_070)
+        .min_by_key(|s| s.solar_system_id)
+        .map(|s| s.solar_system_id)
+        .expect("canonical SDE contains Pochven solar system");
+    let (ctx, mut session, char_id, ship_id) = make_ctx_and_pilot(jita_sys, true);
+    let kw = HashMap::new();
+
+    // 1. Remote query from Jita returns site metadata read-only without seeding DB or spawning balls.
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+    let remote_rep = handle_pve_special_sites(
+        &ctx,
+        &mut session,
+        "dungeonInstanceCacheMgr",
+        "GetTriglavianSiteInstances",
+        &[PyRep::Integer(i64::from(pochven_sys))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("remote Pochven read succeeds");
+    let PyRep::Dict(ref outer) = remote_rep else {
+        panic!("expected dict, got {remote_rep:?}");
+    };
+    let (_, PyRep::List(ref site_list)) = outer[0] else {
+        panic!("expected site list");
+    };
+    let remote_inst_id = site_list[0]
+        .dict_get("instanceID")
+        .and_then(|v| v.as_i64())
+        .expect("remote query returns instanceID");
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(read_pve_special_reg(&ctx, |reg| !reg.triglavian_sites.contains_key(&pochven_sys)));
+    assert!(ctx.systems.get_handle(pochven_sys).is_none());
+
+    // Remote completion attempt fails.
+    let remote_complete = complete_special_dungeon_instance(&ctx, &mut session, remote_inst_id, 1)
+        .await
+        .expect_err("remote completion must fail");
+    assert_eq!(remote_complete.code, "DungeonNotFound");
+
+    // 2. Arriving in Pochven on-grid without killing NPCs fails (spawns NPCs -> WaveNpcsRemaining).
+    let ship_tid = find_ship_type_id(&sde);
+    session.solar_system_id = Some(pochven_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = pochven_sys;
+        }
+        snap.item_positions.insert(ship_id, [10_500.0, 0.0, 0.0]);
+    });
+    let sys_handle = ctx.systems.get_or_spawn(pochven_sys);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: ship_tid,
+            position: glam::DVec3::new(10_500.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn pilot ship");
+
+    let live_err = complete_special_dungeon_instance(&ctx, &mut session, remote_inst_id, 1)
+        .await
+        .expect_err("site with live NPCs must reject completion");
+    assert_eq!(live_err.code, "WaveNpcsRemaining");
+
+    // 3. Unspawned zero-ball sites cannot complete from ballpark absence alone.
+    let zero_ball_inst = 720_991;
+    with_pve_special_reg(&ctx, |reg| {
+        reg.triglavian_sites
+            .entry(pochven_sys)
+            .or_default()
+            .push(TriglavianSiteRecord {
+                instance_id: zero_ball_inst,
+                dungeon_id: 900_991,
+                dungeon_name: "Zero-Ball Exploit Site".to_string(),
+                solar_system_id: pochven_sys,
+                faction_owner_id: 500_026,
+                base_isk: 30_000_000,
+                survey_db_drop: 150,
+                completed: false,
+                boss_npc_ball_id: 0,
+                boss_type_id: 0,
+                escort_ball_ids: Vec::new(),
+                escort_type_ids: Vec::new(),
+                beacon_ball_id: 0,
+            });
+    });
+
+    let zero_err = complete_special_dungeon_instance(&ctx, &mut session, zero_ball_inst, 1)
+        .await
+        .expect_err("zero-ball site must not complete");
+    assert_eq!(zero_err.code, "SiteNotSpawned");
+
+    // 4. Real transient spawn failure rolls back `Spawning` via RAII Drop, rejects completion
+    //    without payout, and recovers cleanly on subsequent retry.
+    let pochven_sys_2 = sde
+        .solar_systems
+        .values()
+        .filter(|s| s.region_id == 10_000_070 && s.solar_system_id != pochven_sys)
+        .min_by_key(|s| s.solar_system_id)
+        .map(|s| s.solar_system_id)
+        .expect("canonical SDE contains second Pochven solar system");
+    let sys2_handle = ctx.systems.get_or_spawn(pochven_sys_2);
+    session.solar_system_id = Some(pochven_sys_2);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = pochven_sys_2;
+        }
+        snap.item_positions.insert(ship_id, [10_500.0, 0.0, 0.0]);
+    });
+    sys2_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: ship_tid,
+            position: glam::DVec3::new(10_500.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn pilot ship in sys2");
+
+    // Persist sys2 Triglavian sites directly into the registry (simulating an unspawned
+    // persisted site before `spawn_special_site_balls` runs) and inject a transient actor panic on
+    // command 2 (`spawn_ball_with_combat` of boss NPC after `get_ball_snapshot`).
+    let sys2_sites = build_default_triglavian_sites_for_system(
+        &ctx,
+        pochven_sys_2,
+        &edencom_minor_victory_systems(),
+        &triglavian_minor_victory_systems(),
+    );
+    assert!(!sys2_sites.is_empty());
+    let sys2_inst = sys2_sites[0].instance_id;
+    let sys2_boss = sys2_sites[0].boss_npc_ball_id;
+    let sys2_escorts = sys2_sites[0].escort_ball_ids.clone();
+    with_pve_special_reg(&ctx, |reg| {
+        reg.triglavian_sites.insert(pochven_sys_2, sys2_sites);
+    });
+
+    sys2_handle
+        .panic_on_command_countdown_for_test
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    let transient_err = complete_special_dungeon_instance(&ctx, &mut session, sys2_inst, 1)
+        .await
+        .expect_err("transient spawn failure must reject completion");
+    assert_eq!(transient_err.code, "BallparkSpawnFailed");
+    assert!(
+        !ctx.systems.is_special_site_ball_spawned(pochven_sys_2, sys2_boss),
+        "failed spawn must roll back Spawning guard"
+    );
+    assert!(
+        sys2_handle.get_ball_snapshot(sys2_boss).await.unwrap().is_none(),
+        "failed spawn must leave boss absent from ballpark"
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.balance, IskCents::from_isk(1_000_000));
+        assert_eq!(ch.standings.get(&500_026).copied().unwrap_or(0.0), 0.0);
+        assert_eq!(ch.standings.get(&500_027).copied().unwrap_or(0.0), 0.0);
+    });
+
+    // Retrying once actor recovers spawns the NPCs cleanly (never stuck as SiteNotSpawned) and
+    // rejects completion because live NPCs are now in space.
+    let retry_live = complete_special_dungeon_instance(&ctx, &mut session, sys2_inst, 1)
+        .await
+        .expect_err("recovered retry must spawn NPCs and reject while NPCs remain alive");
+    assert_eq!(retry_live.code, "WaveNpcsRemaining");
+    assert!(ctx.systems.is_special_site_ball_spawned(pochven_sys_2, sys2_boss));
+    assert!(sys2_handle.get_ball_snapshot(sys2_boss).await.unwrap().is_some());
+
+    // After killing/clearing all spawned NPCs on retry, completion succeeds once.
+    sys2_handle.remove_ball(sys2_boss).await.expect("clear recovered boss");
+    for &ebid in &sys2_escorts {
+        sys2_handle.remove_ball(ebid).await.expect("clear recovered escort");
+    }
+    let ok = complete_special_dungeon_instance(&ctx, &mut session, sys2_inst, 1)
+        .await
+        .expect("completion succeeds after clearing recovered NPCs");
+    assert_eq!(ok.dict_get("completed"), Some(&PyRep::Bool(true)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn triglavian_cold_system_concurrent_spawn_synchronizes_via_notify() {
+    let sde = shared_sde();
+    let mv_sys = edencom_minor_victory_systems()[0];
+    let (ctx, sess1, _char1, ship1) = make_ctx_and_pilot(mv_sys, true);
+    ensure_special_sites_initialized(&ctx);
+
+    let site0 = read_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&mv_sys][0].clone());
+    let ship_tid = find_ship_type_id(&sde);
+    let char2: i64 = 90_010_003;
+    let ship2: i64 = 1_010_000_003;
+    ctx.db.provision_gm_account("spec_notify_2", "pw", char2, "SpecNotify2");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char2) {
+            ch.solar_system_id = mv_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship2;
+        }
+        snap.items.insert(
+            ship2,
+            InventoryItemRecord {
+                item_id: ship2,
+                type_id: ship_tid,
+                owner_id: char2,
+                location_id: mv_sys as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(ship1, [10_500.0, 0.0, 0.0]);
+        snap.item_positions.insert(ship2, [10_500.0, 0.0, 0.0]);
+    });
+    let uid2 = ctx.db.with_snapshot(|s| s.characters[&char2].user_id);
+    ctx.db
+        .acquire_online_lock(uid2, 103, Some(char2), false, ctx.now_unix())
+        .expect("register online session");
+    let mut sess2 = SessionState::new(103);
+    sess2.user_id = Some(uid2);
+    sess2.character_id = Some(char2);
+    sess2.solar_system_id = Some(mv_sys);
+    sess2.ship_id = Some(ship2);
+
+    let sys_handle = ctx.systems.get_or_spawn(mv_sys);
+    for bid in [ship1, ship2] {
+        sys_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: bid,
+                type_id: ship_tid,
+                position: glam::DVec3::new(10_500.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await
+            .expect("spawn pilot ship");
+    }
+
+    // 1. Hold active `Spawning` guard on boss NPC to simulate an in-flight cold-system spawner,
+    //    and launch concurrent `GetTriglavianSiteInstances` and `complete_special_dungeon_instance`.
+    let hold_guard = ctx
+        .systems
+        .begin_special_site_ball_spawn(mv_sys, site0.boss_npc_ball_id)
+        .await
+        .expect("acquire initial Spawning guard");
+
+    let ctx_get = ctx.clone();
+    let mut sess_get = sess1.clone();
+    let get_task = tokio::spawn(async move {
+        handle_pve_special_sites(
+            &ctx_get,
+            &mut sess_get,
+            "dungeonInstanceCacheMgr",
+            "GetTriglavianSiteInstances",
+            &[PyRep::Integer(i64::from(mv_sys))],
+            &HashMap::new(),
+        )
+        .await
+    });
+
+    let ctx_comp = ctx.clone();
+    let comp_inst = site0.instance_id;
+    let comp_task = tokio::spawn(async move {
+        complete_special_dungeon_instance(&ctx_comp, &mut sess2, comp_inst, 1).await
+    });
+
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        !get_task.is_finished(),
+        "concurrent GetTriglavianSiteInstances must wait on Notify rather than returning before boss spawns"
+    );
+    assert!(
+        !comp_task.is_finished(),
+        "concurrent completion must wait on Notify rather than skipping ahead to SiteNotSpawned"
+    );
+
+    // Finish spawning boss NPC and confirm the guard -> both waiters unblock cleanly.
+    let boss_tid = if site0.boss_type_id != 0 { site0.boss_type_id } else { 48_122 };
+    let cs = build_special_site_npc_combat_state(&ctx.sde, boss_tid);
+    sys_handle
+        .spawn_ball_with_combat(
+            make_site_npc_ball(site0.boss_npc_ball_id, boss_tid, glam::DVec3::new(10_000.0, 0.0, 0.0)),
+            cs,
+        )
+        .await
+        .expect("spawn held boss NPC");
+    hold_guard.confirm();
+
+    let get_res = tokio::time::timeout(std::time::Duration::from_secs(3), get_task)
+        .await
+        .expect("GetTriglavianSiteInstances wakes after confirm()")
+        .expect("get task join ok")
+        .expect("rpc handled")
+        .expect("GetTriglavianSiteInstances succeeds");
+    assert!(matches!(get_res, PyRep::Dict(ref d) if !d.is_empty()));
+
+    let comp_err = tokio::time::timeout(std::time::Duration::from_secs(3), comp_task)
+        .await
+        .expect("complete_special_dungeon_instance wakes after confirm()")
+        .expect("complete task join ok")
+        .expect_err("must reject while spawned NPCs remain alive");
+    assert_eq!(
+        comp_err.code, "WaveNpcsRemaining",
+        "Notify-synchronized completion must observe WaveNpcsRemaining, never SiteNotSpawned"
+    );
+    let _ = sess1.character_id;
+}
+
 #[cfg(test)]
 #[path = "pve_special_sites_extra_unit_tests.rs"]
 mod pve_special_sites_extra_unit_tests;

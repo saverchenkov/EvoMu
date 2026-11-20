@@ -1273,3 +1273,338 @@ async fn scan_mgr_get_signatures_expired_wormhole_runs_lifecycle_cleanup_in_seed
     assert_eq!(ctx.db.state_epoch(), e_post);
     assert_eq!(ctx.db.tx_commit_count(), c_post);
 }
+
+#[tokio::test]
+async fn scan_and_wormhole_prechecks_and_docked_read_purity() {
+    use eve_destiny::{Ball, MovementMode};
+    use glam::DVec3;
+
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let char_id = 100_000_777_i64;
+    let ship_id = 500_000_777_i64;
+    let sys_id = 30_000_142_u32;
+    let kw = HashMap::new();
+
+    let mut docked = make_session(char_id, sys_id);
+    docked.station_id = Some(60_003_760);
+    docked.ship_id = Some(ship_id);
+
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    // 1. Docked SignalTrackerRegister & GetSignatures are strictly read-pure on unseeded systems.
+    let reg_docked = handle_scanning_and_wormholes(&ctx, &mut docked, "scanMgr", "SignalTrackerRegister", &[], &kw)
+        .await
+        .unwrap()
+        .expect("docked SignalTrackerRegister");
+    assert_eq!(reg_docked.dict_get("registered"), Some(&PyRep::Bool(false)));
+    assert!(
+        handle_scanning_and_wormholes(&ctx, &mut docked, "scanMgr", "GetSignatures", &[], &kw)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(signal_tracker_subscribers_in_snap(snap, sys_id).is_empty());
+    });
+    assert!(
+        !ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnSignalTrackerFullState"),
+        "docked SignalTrackerRegister must not register or emit full state"
+    );
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 2. Foreign / invalid / remote args fail on SignalTrackerRegister & GetSignatures with 0 DB writes.
+    let mut undocked = make_session(char_id, sys_id);
+    undocked.ship_id = Some(ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    for meth in ["SignalTrackerRegister", "GetSignatures"] {
+        for bad_args in [
+            vec![PyRep::Integer(2_199_002)],
+            vec![PyRep::Integer(98_099_001)],
+            vec![PyRep::Integer(60_003_761)],
+            vec![PyRep::Integer(50_001_248)],
+            vec![PyRep::Bool(true)],
+            vec![PyRep::Integer(sys_id as i64), PyRep::Integer(1)],
+        ] {
+            let err = handle_scanning_and_wormholes(&ctx, &mut undocked, "scanMgr", meth, &bad_args, &kw)
+                .await
+                .unwrap()
+                .expect_err("invalid scanMgr sys arg must fail");
+            assert!(!err.code.is_empty());
+        }
+    }
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 3. Invalid RequestScans args reject before DB seeding or emitting OnSystemScanStarted.
+    for bad_req in [
+        vec![PyRep::Integer(60_003_761)],
+        vec![PyRep::Bool(true)],
+        vec![PyRep::List(vec![PyRep::List(vec![PyRep::Real(f64::NAN), PyRep::Real(0.0), PyRep::Real(0.0)])])],
+        vec![PyRep::Real(-1.0), PyRep::Real(40.0), PyRep::List(vec![])],
+        vec![PyRep::List(vec![]), PyRep::Real(AU_IN_METERS), PyRep::Real(40.0), PyRep::Integer(9)],
+    ] {
+        let err = handle_scanning_and_wormholes(&ctx, &mut undocked, "scanMgr", "RequestScans", &bad_req, &kw)
+            .await
+            .unwrap()
+            .expect_err("invalid RequestScans must fail");
+        assert!(!err.code.is_empty());
+    }
+    assert!(!ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .any(|n| n.event == "OnSystemScanStarted"));
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 4. ConeScan / DirectionalScan reject foreign IDs, out-of-range angles, negative ranges, and bad vectors.
+    let invalid_args_code = "InvalidArgs";
+    for meth in ["ConeScan", "DirectionalScan"] {
+        for bad_dscan in [
+            vec![PyRep::Integer(2_199_002)],
+            vec![PyRep::Integer(98_099_001)],
+            vec![PyRep::Integer(60_003_761)],
+            vec![PyRep::Real(-1.0)],
+            vec![PyRep::Real(361.0)],
+            vec![PyRep::Real(30.0), PyRep::Real(-1.0)],
+            vec![PyRep::Bool(true)],
+            vec![PyRep::Real(30.0), PyRep::Real(1000.0), PyRep::Tuple(vec![PyRep::String("bad".into()), PyRep::Real(0.0), PyRep::Real(0.0)])],
+            vec![PyRep::Real(30.0), PyRep::Real(1000.0), PyRep::Real(1.0), PyRep::Real(0.0)],
+        ] {
+            let err = handle_scanning_and_wormholes(&ctx, &mut undocked, "scanMgr", meth, &bad_dscan, &kw)
+                .await
+                .unwrap()
+                .expect_err("invalid directional scan args must fail");
+            assert_eq!(err.code, invalid_args_code);
+        }
+    }
+    assert!(!ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .any(|n| n.event == "OnDirectionalScanComplete"));
+
+    // 5. LaunchProbes validates args before overwriting existing active_probes or emitting notifications.
+    let valid_launch = handle_scanning_and_wormholes(&ctx, &mut undocked, "scanMgr", "LaunchProbes", &[PyRep::Integer(2)], &kw)
+        .await
+        .unwrap()
+        .expect("LaunchProbes 2");
+    assert_eq!(valid_launch.dict_get("probeCount"), Some(&PyRep::Integer(2)));
+    let _ = ctx.drain_notifications_for_char(char_id);
+    for bad_launch in [
+        vec![PyRep::Integer(0)],
+        vec![PyRep::Integer(-1)],
+        vec![PyRep::Bool(true)],
+        vec![PyRep::Integer(2), PyRep::Bool(true)],
+        vec![PyRep::Integer(2), PyRep::Integer(0), PyRep::Tuple(vec![PyRep::Real(f64::NAN), PyRep::Real(0.0), PyRep::Real(0.0)])],
+    ] {
+        let err = handle_scanning_and_wormholes(&ctx, &mut undocked, "scanMgr", "LaunchProbes", &bad_launch, &kw)
+            .await
+            .unwrap()
+            .expect_err("invalid LaunchProbes must fail");
+        assert!(!err.code.is_empty());
+    }
+    assert_eq!(
+        ctx.social_extras.lock().unwrap().active_probes.get(&char_id).map(|v| v.len()),
+        Some(2),
+        "failed LaunchProbes must not clear or mutate existing probes"
+    );
+    assert!(!ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .any(|n| n.event == "OnNewProbe"));
+
+    // 6. GetWormholePolarization rejects char/corp/station/gate IDs and empty/bool/extra args cleanly.
+    for bad_wh in [
+        vec![],
+        vec![PyRep::Bool(true)],
+        vec![PyRep::String(String::new())],
+        vec![PyRep::Integer(2_199_002)],
+        vec![PyRep::Integer(2_199_004)],
+        vec![PyRep::Integer(98_099_001)],
+        vec![PyRep::Integer(60_003_761)],
+        vec![PyRep::Integer(50_001_248)],
+        vec![PyRep::Integer(31_000_005), PyRep::Integer(1)],
+    ] {
+        let err = handle_scanning_and_wormholes(&ctx, &mut undocked, "wormholeMgr", "GetWormholePolarization", &bad_wh, &kw)
+            .await
+            .unwrap()
+            .expect_err("invalid GetWormholePolarization target must reject");
+        assert_eq!(err.code, "WormholeNotFound");
+    }
+    assert_eq!(
+        handle_scanning_and_wormholes(
+            &ctx,
+            &mut undocked,
+            "wormholeMgr",
+            "GetWormholePolarization",
+            &[PyRep::Integer(31_000_005)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("valid system polarization lookup"),
+        PyRep::None
+    );
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 7. ActivateAccelerationGate rejects invalid gate args and stays DB-read-pure when gate has no consumable key.
+    for bad_gate in [
+        vec![],
+        vec![PyRep::Integer(0)],
+        vec![PyRep::Bool(true)],
+        vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(3)],
+    ] {
+        let err = handle_scanning_and_wormholes(&ctx, &mut undocked, "keeper", "ActivateAccelerationGate", &bad_gate, &kw)
+            .await
+            .unwrap()
+            .expect_err("invalid ActivateAccelerationGate args must fail");
+        assert!(!err.code.is_empty());
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let gate_id = 700_000_777_i64;
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: gate_id,
+            type_id: 17_831,
+            position: DVec3::new(100.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e8,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let e_gate = ctx.db.state_epoch();
+    let c_gate = ctx.db.tx_commit_count();
+    let ok_gate = handle_scanning_and_wormholes(
+        &ctx,
+        &mut undocked,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(gate_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("keyless acceleration gate succeeds");
+    assert_eq!(ok_gate.dict_get("keyConsumed"), Some(&PyRep::Bool(false)));
+    assert_eq!(ctx.db.state_epoch(), e_gate, "keyless gate activation must not write DB");
+    assert_eq!(ctx.db.tx_commit_count(), c_gate, "keyless gate activation must not commit DB tx");
+}
+
+#[test]
+fn consume_gate_key_in_cargo_enforces_ownership_flag_type_and_presence_atomically() {
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let char_id = 100_000_001;
+    let ship_id = 500_000_001;
+    let other_ship_id = 500_000_002;
+    let key_type_id = 20_765_u32;
+    let missing_kid = 9_900_001_i64;
+    let moved_kid = 9_900_002_i64;
+    let wrong_flag_kid = 9_900_003_i64;
+    let wrong_type_kid = 9_900_004_i64;
+    let zero_qty_kid = 9_900_005_i64;
+    let valid_kid = 9_900_006_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            moved_kid,
+            InventoryItemRecord {
+                item_id: moved_kid,
+                type_id: key_type_id,
+                owner_id: char_id,
+                location_id: other_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            wrong_flag_kid,
+            InventoryItemRecord {
+                item_id: wrong_flag_kid,
+                type_id: key_type_id,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::DroneBay,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            wrong_type_kid,
+            InventoryItemRecord {
+                item_id: wrong_type_kid,
+                type_id: key_type_id + 1,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            zero_qty_kid,
+            InventoryItemRecord {
+                item_id: zero_qty_kid,
+                type_id: key_type_id,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 0,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            valid_kid,
+            InventoryItemRecord {
+                item_id: valid_kid,
+                type_id: key_type_id,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 2,
+                ..Default::default()
+            },
+        );
+    });
+
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+    for bad_kid in [missing_kid, moved_kid, wrong_flag_kid, wrong_type_kid, zero_qty_kid] {
+        let err = consume_gate_key_in_cargo(&ctx, ship_id, bad_kid, Some(key_type_id))
+            .expect_err("TOCTOU-invalid gate key must fail with MissingGateKey");
+        assert_eq!(err.code, "MissingGateKey");
+    }
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    consume_gate_key_in_cargo(&ctx, ship_id, valid_kid, Some(key_type_id))
+        .expect("first valid cargo key consumption succeeds");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&valid_kid).map(|i| i.quantity)), Some(1));
+    consume_gate_key_in_cargo(&ctx, ship_id, valid_kid, Some(key_type_id))
+        .expect("second valid cargo key consumption removes exhausted stack");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.contains_key(&valid_kid)), false);
+}

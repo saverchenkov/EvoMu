@@ -1649,6 +1649,236 @@ fn place_buy_order_immediate_non_buy_stuff_enforces_visibility_skill() {
     );
 }
 
+#[test]
+fn rejected_place_buy_order_does_not_sweep_expired_orders() {
+    use crate::services::market_contracts::PLEX_TYPE_ID;
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+    };
+    use crate::services::structure_profile_services::SETTING_MARKET_TAX;
+    use eve_db::CorporationRecord;
+
+    let ctx = test_ctx();
+    let caller_id = 90_000_001_i64;
+    let other_id = 90_000_002_i64;
+    let now = ctx.now_unix();
+    let kw = HashMap::new();
+    let caller_corp_id = 98_940_001_i64;
+    let struct_owner_corp = 98_940_002_i64;
+    let offline_fort_id = 10_000_940_001_i64;
+    let acl_denied_fort_id = 10_000_940_002_i64;
+    let expired_oid = 9_720_001_i64;
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.retain(|_, o| o.is_npc);
+        s.corporations.insert(
+            caller_corp_id,
+            CorporationRecord::new(caller_corp_id, "CallerCorp", "CLRC", other_id),
+        );
+        s.corporations.insert(
+            struct_owner_corp,
+            CorporationRecord::new(struct_owner_corp, "StructOwnerCorp", "SOCP", other_id),
+        );
+        if let Some(ch) = s.characters.get_mut(&caller_id) {
+            ch.corporation_id = caller_corp_id;
+        }
+        s.corp_role_assignments.remove(&(caller_corp_id, caller_id));
+        s.market_orders.insert(
+            expired_oid,
+            MarketOrderRecord {
+                order_id: expired_oid,
+                owner_id: other_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: true,
+                price: IskCents::from_isk(10),
+                vol_entered: 5,
+                vol_remaining: 5,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(50),
+            },
+        );
+        save_market_order_meta(
+            s,
+            expired_oid,
+            MarketOrderMeta {
+                range: -1,
+                duration: 1,
+                issue_unix: now.saturating_sub(2 * 86_400),
+                order_state: None,
+                account_key: None,
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+        for (sid, online) in [(offline_fort_id, false), (acl_denied_fort_id, true)] {
+            s.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35_833,
+                    owner_corp_id: struct_owner_corp,
+                    solar_system_id: 30_000_142,
+                    name: format!("BuyTest-{sid}"),
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: if online { 500 } else { 0 },
+                    ..Default::default()
+                },
+            );
+            s.items.insert(
+                sid + 1,
+                InventoryItemRecord {
+                    item_id: sid + 1,
+                    type_id: 35_892,
+                    owner_id: struct_owner_corp,
+                    location_id: sid,
+                    flag: InventoryFlag::from_u16(164),
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            s.module_online_states.insert(sid + 1, online);
+        }
+        let mut ext = load_ext_state(s);
+        ext.owner_groups.insert(
+            9401,
+            AccessGroupRecord {
+                group_id: 9401,
+                creator_id: other_id,
+                owner_corp_id: struct_owner_corp,
+                name: "AllowedOnlyOther".into(),
+                description: String::new(),
+                members: HashMap::from([(other_id, 0)]),
+            },
+        );
+        let mut prof = StructureAccessProfile {
+            profile_id: 9401,
+            corp_only: false,
+            ..Default::default()
+        };
+        prof.service_acl_rules.insert(SETTING_MARKET_TAX, vec![(9401, 100)]);
+        ext.access_profiles.insert(acl_denied_fort_id, prof);
+        save_ext_state(s, &ext);
+    });
+
+    let _ = ctx.drain_notifications_for_char(other_id);
+    let eid_before = ctx.db.with_snapshot(|s| s.next_entity_id);
+    let mut sess = jita_session(caller_id, caller_corp_id);
+
+    // 1. Missing corporate Trader role rejects before sweep
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "marketProxy",
+            "PlaceBuyOrder",
+            &[
+                PyRep::Integer(JITA_STATION_ID),
+                PyRep::Integer(34),
+                PyRep::Real(10.0),
+                PyRep::Integer(5),
+                PyRep::Integer(-1),
+                PyRep::Integer(1),
+                PyRep::Integer(90),
+                PyRep::Bool(true),
+            ],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleRequired"
+    );
+
+    // 2. Bogus stationID with PLEX bypass rejects as InvalidMarketStation before sweep
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "marketProxy",
+            "PlaceBuyOrder",
+            &[
+                PyRep::Integer(69_999_999),
+                PyRep::Integer(PLEX_TYPE_ID as i64),
+                PyRep::Real(5_000_000.0),
+                PyRep::Integer(1),
+                PyRep::Integer(-1),
+                PyRep::Integer(1),
+                PyRep::Integer(90),
+                PyRep::Bool(false),
+            ],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidMarketStation"
+    );
+
+    // 3. Offline Upwell structure rejects as MarketHubOffline before sweep
+    sess.station_id = Some(offline_fort_id);
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "marketProxy",
+            "PlaceBuyOrder",
+            &[
+                PyRep::Integer(offline_fort_id),
+                PyRep::Integer(34),
+                PyRep::Real(10.0),
+                PyRep::Integer(5),
+                PyRep::Integer(-1),
+                PyRep::Integer(1),
+                PyRep::Integer(90),
+                PyRep::Bool(false),
+            ],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "MarketHubOffline"
+    );
+
+    // 4. ACL-denied Upwell structure rejects as StructureServiceAccessDenied before sweep
+    sess.station_id = Some(acl_denied_fort_id);
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "marketProxy",
+            "PlaceBuyOrder",
+            &[
+                PyRep::Integer(acl_denied_fort_id),
+                PyRep::Integer(34),
+                PyRep::Real(10.0),
+                PyRep::Integer(5),
+                PyRep::Integer(-1),
+                PyRep::Integer(1),
+                PyRep::Integer(90),
+                PyRep::Bool(false),
+            ],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "StructureServiceAccessDenied"
+    );
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.market_orders[&expired_oid].vol_remaining, 5);
+        assert_eq!(s.next_entity_id, eid_before);
+    });
+    assert!(ctx.drain_notifications_for_char(other_id).is_empty());
+}
+
 #[cfg(test)]
 #[path = "market_trading_extra_unit_tests.rs"]
 mod market_trading_extra_unit_tests;
