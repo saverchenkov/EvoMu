@@ -1457,6 +1457,249 @@ fn upwell_clone_bay_setting_23_disablement_and_flat_scalar_fee_clone_jump() {
     assert!(!ctx.drain_notifications_for_char(owner_cid).iter().any(|n| n.event == "OnAccountChange"));
 }
 
+#[tokio::test]
+async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
+    let mut ctx = test_ctx();
+    let titan_tid = 99_912;
+    let vat_mod_tid = 99_913;
+    let ozone_tid = 16_273;
+    clone_type_with(&mut ctx.sde, 11_567, titan_tid, 30, 6, &[]);
+    clone_type_with(
+        &mut ctx.sde,
+        24_576,
+        vat_mod_tid,
+        815,
+        7,
+        &[(73, 300_000.0), (713, f64::from(ozone_tid)), (714, 250.0)],
+    );
+    clone_type_with(&mut ctx.sde, 34, ozone_tid, 423, 4, &[]);
+
+    let sys_id = 30_000_142;
+    let (host_uid, host_cid, corp_id, titan_id, vat_id) = ctx.db.with_mut_snapshot(|snap| {
+        let c1 = snap.characters.values_mut().next().expect("host char");
+        c1.solar_system_id = sys_id;
+        c1.station_id = None;
+        c1.structure_id = None;
+        let host_cid = c1.character_id;
+        let host_uid = c1.user_id;
+        let corp = c1.corporation_id;
+
+        let titan = put_item(snap, titan_tid, host_cid, i64::from(sys_id), InventoryFlag::None, 1, true);
+        let vat = put_item(snap, vat_mod_tid, host_cid, titan, InventoryFlag::HiSlot0, 1, true);
+        snap.module_online_states.insert(vat, true);
+        if let Some(h) = snap.characters.get_mut(&host_cid) {
+            h.active_ship_id = titan;
+        }
+        (host_uid, host_cid, corp, titan, vat)
+    });
+    ctx.invalidate_ship_fitting(titan_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(host_uid, 999_403, Some(host_cid), true, ctx.now_unix());
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h
+        .spawn_ball_with_meta(
+            Ball {
+                id: titan_id,
+                type_id: titan_tid,
+                position: DVec3::new(50_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 75.0,
+                inertia: 40.0,
+                mass: 2_400_000_000.0,
+                radius: 6_500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 0,
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                ..Default::default()
+            },
+            SlimItemMeta {
+                owner_id: host_cid,
+                char_id: Some(host_cid),
+                corp_id,
+                group_id: 30,
+                category_id: 6,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    // Non-gate active cloak still rejects direct activate_clone_vat_bay with ShipCloaked.
+    let active_err = activate_clone_vat_bay(&ctx, &sys_h, host_cid, titan_id, vat_id)
+        .await
+        .expect_err("active non-gate cloak must reject Clone Vat Bay");
+    assert_eq!(active_err.code, "ShipCloaked");
+
+    // Gate cloak bypasses active-cloak rejection; failing on missing fuel preserves gate cloak, undock invuln, and location_change_invuln.
+    sys_h
+        .set_combat_state(
+            titan_id,
+            CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 30,
+                undock_invulnerable_remaining_ticks: 15,
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, host_cid, ctx.now_unix() + 60);
+    let _ = ctx.drain_notifications_for_char(host_cid);
+
+    let direct_gate_err = activate_clone_vat_bay(&ctx, &sys_h, host_cid, titan_id, vat_id)
+        .await
+        .expect_err("gate-cloaked Clone Vat Bay without fuel must pass cloak check and fail on fuel");
+    assert_eq!(direct_gate_err.code, "NotEnoughFuel");
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+
+    let mut host_sess = make_session(host_uid, host_cid, corp_id, sys_id, None, None, Some(titan_id));
+    let kw = std::collections::HashMap::new();
+    let wrapped_fuel_err = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut host_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(vat_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("handle_module_cycles Clone Vat Bay failure must propagate NotEnoughFuel");
+    assert_eq!(wrapped_fuel_err.code, "NotEnoughFuel");
+    let cs_after_err = sys_h.get_combat_state(titan_id).await.unwrap().unwrap();
+    assert!(cs_after_err.is_cloaked);
+    assert_eq!(cs_after_err.gate_cloak_remaining_ticks, 30);
+    assert_eq!(cs_after_err.undock_invulnerable_remaining_ticks, 15);
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    let err_notifs = ctx.drain_notifications_for_char(host_cid);
+    assert!(!err_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+
+    // Provide fuel: gate-cloaked handle_module_cycles activates Clone Vat Bay and breaks gate cloak, undock invuln, and location_change_invuln with single OnInvulnCancelled.
+    ctx.db.with_mut_snapshot(|snap| {
+        put_item(
+            snap,
+            ozone_tid,
+            host_cid,
+            titan_id,
+            InventoryFlag::SpecializedFuelBay,
+            300,
+            false,
+        );
+    });
+    let ok = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut host_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(vat_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("gate-cloaked Clone Vat Bay with fuel must succeed via handle_module_cycles");
+    let PyRep::KeyVal(kv) = ok else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(kv.get("cloneVatBayActive").and_then(PyRep::as_bool), Some(true));
+    assert_eq!(kv.get("fuelConsumed").and_then(PyRep::as_i64), Some(250));
+    let cs_after_ok = sys_h.get_combat_state(titan_id).await.unwrap().unwrap();
+    assert!(!cs_after_ok.is_cloaked);
+    assert_eq!(cs_after_ok.gate_cloak_remaining_ticks, 0);
+    assert_eq!(cs_after_ok.undock_invulnerable_remaining_ticks, 0);
+    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    let ok_notifs = ctx.drain_notifications_for_char(host_cid);
+    assert!(ok_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+    assert_eq!(ok_notifs.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+
+    // Non-gate undock invuln + location_change_invuln: fuel failure preserves both; commit clears both and emits single OnInvulnCancelled (no OnJumpCloakCancelled).
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_clone_vat_bay_state(snap);
+        st.active_by_ship.remove(&titan_id);
+        save_clone_vat_bay_state(snap, &st);
+        snap.module_active_states.remove(&vat_id);
+        snap.items.retain(|_, i| !(i.location_id == titan_id && i.type_id == ozone_tid));
+    });
+    let _ = sys_h.remove_module_cycle(titan_id, vat_id).await;
+    sys_h
+        .set_combat_state(
+            titan_id,
+            CombatState {
+                is_cloaked: false,
+                gate_cloak_remaining_ticks: 0,
+                undock_invulnerable_remaining_ticks: 15,
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, host_cid, ctx.now_unix() + 60);
+    let _ = ctx.drain_notifications_for_char(host_cid);
+
+    let nongate_err = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut host_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(vat_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("non-gate undock-invuln Clone Vat Bay without fuel must reject");
+    assert_eq!(nongate_err.code, "NotEnoughFuel");
+    let cs_nongate_err = sys_h.get_combat_state(titan_id).await.unwrap().unwrap();
+    assert_eq!(cs_nongate_err.undock_invulnerable_remaining_ticks, 15);
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    assert!(!ctx.drain_notifications_for_char(host_cid).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        put_item(
+            snap,
+            ozone_tid,
+            host_cid,
+            titan_id,
+            InventoryFlag::SpecializedFuelBay,
+            300,
+            false,
+        );
+    });
+    let nongate_ok = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut host_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(vat_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("non-gate undock-invuln Clone Vat Bay with fuel must succeed");
+    let PyRep::KeyVal(nongate_kv) = nongate_ok else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(nongate_kv.get("cloneVatBayActive").and_then(PyRep::as_bool), Some(true));
+    let cs_nongate_ok = sys_h.get_combat_state(titan_id).await.unwrap().unwrap();
+    assert_eq!(cs_nongate_ok.undock_invulnerable_remaining_ticks, 0);
+    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    let nongate_notifs = ctx.drain_notifications_for_char(host_cid);
+    assert!(!nongate_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+    assert_eq!(nongate_notifs.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+}
+
 #[cfg(test)]
 #[path = "character_clone_jump_rules_extra_unit_tests.rs"]
 mod character_clone_jump_rules_extra_unit_tests;

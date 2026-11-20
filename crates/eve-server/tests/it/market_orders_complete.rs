@@ -417,7 +417,10 @@ async fn test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations() 
     let struct_id = 1_030_000_777_001_i64;
     let hub_item_id = 1_030_000_777_002_i64;
     let corp_id = ctx.db.with_mut_snapshot(|snap| {
-        let cid = snap.characters[&90_000_001].corporation_id;
+        let cid = 98_000_778_i64;
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = cid;
+        }
         snap.corporations.insert(
             cid,
             { let mut __corp = CorporationRecord::default();
@@ -425,6 +428,8 @@ async fn test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations() 
                 __corp.name = "Citadel Market Corp".into();
                 __corp.ticker = "CMKT".into();
                 __corp.ceo_id = 90_000_001;
+                __corp.members.insert(90_000_001);
+                __corp.member_roles.insert(90_000_001, u64::MAX);
                 __corp.set_division_balance(1, IskCents(0));
                 __corp },
         );
@@ -470,6 +475,7 @@ async fn test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations() 
         }
         cid
     });
+    s1.corporation_id = Some(corp_id);
     s1.station_id = None;
     s1.structure_id = Some(struct_id);
 

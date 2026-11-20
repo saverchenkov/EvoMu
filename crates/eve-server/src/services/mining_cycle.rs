@@ -257,7 +257,13 @@ async fn check_requirements(ctx: &ServerContext, cycle: &ActiveMiningCycle) -> R
     if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
         return Err(err(MiningStopReason::Warping, "Cannot mine while warping".into()));
     }
-    if sys.get_combat_state(cycle.ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+    if crate::services::inventory_fitting::fitting_module_cycles::is_ship_actively_cloaked(
+        ctx,
+        &sys,
+        cycle.ship_id,
+    )
+    .await
+    {
         return Err(err(MiningStopReason::Cloaked, "Cannot mine while cloaked".into()));
     }
     let fit = ctx.get_or_rebuild_ship_fitting(cycle.char_id, cycle.ship_id)?;

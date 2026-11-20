@@ -134,13 +134,19 @@ async fn test_e1_broker_fee_and_sales_tax_skill_discounts() {
 
     // Structure broker rate (1.0% owner + 0.5% SCC surcharge = 1.5%)
     let struct_id = 1_040_000_111_001_i64;
+    let struct_corp_id = 98_000_111_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        let cid = snap.characters[&90_000_001].corporation_id;
+        let cid = struct_corp_id;
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = cid;
+        }
         snap.corporations.insert(cid, { let mut __corp = CorporationRecord::default();
             __corp.corporation_id = cid;
             __corp.name = "Mkt".into();
             __corp.ticker = "MKT".into();
             __corp.ceo_id = 90_000_001;
+            __corp.members.insert(90_000_001);
+            __corp.member_roles.insert(90_000_001, u64::MAX);
             __corp });
         snap.structures.insert(struct_id, eve_db::UpwellStructureRecord {
             structure_id: struct_id, type_id: 35833, owner_corp_id: cid, solar_system_id: 30_000_142,
@@ -150,6 +156,7 @@ async fn test_e1_broker_fee_and_sales_tax_skill_discounts() {
         snap.items.insert(struct_id + 1, InventoryItemRecord { item_id: struct_id + 1, type_id: 35892, owner_id: cid, location_id: struct_id, flag: InventoryFlag::ServiceSlot0, quantity: 1, singleton: true, version: 1, dynamic_attributes: HashMap::from([(2, 1.0)]), ..Default::default() });
         snap.module_online_states.insert(struct_id + 1, true);
     });
+    s1.corporation_id = Some(struct_corp_id);
     rpc(&ctx, &mut s1, "facilityManager", "SetFacilityTaxes", &[PyRep::Integer(struct_id), PyRep::keyval([("market", PyRep::Real(0.01))])]).await.unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {

@@ -805,6 +805,14 @@ async fn newbie_ship_clears_stale_future_cooldown_timestamp() {
 
     let claim_key = -8_800_000_i64 - char_id;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            3327,
+            eve_db::TrainedSkillRecord {
+                type_id: 3327,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
         snap.item_custom_names
             .insert(claim_key, (fixed_now + 86_400).to_string());
     });

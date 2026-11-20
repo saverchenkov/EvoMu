@@ -441,8 +441,7 @@ pub fn check_crimewatch_action_restriction(
     let is_capsule = ctx
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id == 670).unwrap_or(false));
-    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-    let st = cw.get_or_create(char_id);
+    let st = ctx.crimewatch.state_of(char_id).unwrap_or_default();
     let has_pending_concord = st.pending_concord_arrival.is_some();
     let has_weapon_timer = st.is_weapon_timer_active(now_unix);
     let has_pvp_timer = st.is_pvp_active(now_unix);
