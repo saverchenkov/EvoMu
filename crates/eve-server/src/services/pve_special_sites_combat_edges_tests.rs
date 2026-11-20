@@ -627,7 +627,15 @@ async fn seasonal_site_npc_destroyed_and_ensure_seasonal_sites_edges() {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
 
     seed_char(&ctx, killer, "Seasonal Pilot", sys_id);
+    let now_ft = ctx.now_blueos_filetime_ticks();
     ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns.season_configuration = Some(SeasonConfig {
+            season_id: 77,
+            season_name: "Crimson Harvest".into(),
+            start_time_ft: now_ft - 1_000_000_000,
+            end_time_ft: now_ft + 1_000_000_000,
+            ..SeasonConfig::default()
+        });
         snap.cosmic_anomalies
             .entry(sys_id)
             .or_default()
@@ -635,8 +643,24 @@ async fn seasonal_site_npc_destroyed_and_ensure_seasonal_sites_edges() {
                 anomaly_id: "dng-900001-501".into(),
                 solar_system_id: sys_id,
                 name: "Crimson Gauntlet".into(),
-                anomaly_type: "Combat".into(),
+                anomaly_type: "SeasonalEventSite".into(),
                 position: [100.0, 200.0, 300.0],
+                signal_strength: 1.0,
+                ore_types: vec![],
+                remaining_volume: 0.0,
+                created_unix: 1_775_900_000,
+                lifetime_seconds: 86_400,
+                cleared: false,
+            });
+        snap.cosmic_anomalies
+            .entry(sys_id)
+            .or_default()
+            .push(CosmicAnomalyRecord {
+                anomaly_id: "dng-900002-502".into(),
+                solar_system_id: sys_id,
+                name: "Expired Site".into(),
+                anomaly_type: "SeasonalEventSite".into(),
+                position: [0.0, 0.0, 0.0],
                 signal_strength: 1.0,
                 ore_types: vec![],
                 remaining_volume: 0.0,
@@ -648,16 +672,16 @@ async fn seasonal_site_npc_destroyed_and_ensure_seasonal_sites_edges() {
             .entry(sys_id)
             .or_default()
             .push(CosmicAnomalyRecord {
-                anomaly_id: "dng-900002-502".into(),
+                anomaly_id: "dng-900003-503".into(),
                 solar_system_id: sys_id,
-                name: "Expired Site".into(),
-                anomaly_type: "Combat".into(),
-                position: [0.0, 0.0, 0.0],
+                name: "No Killer Site".into(),
+                anomaly_type: "SeasonalEventSite".into(),
+                position: [400.0, 500.0, 600.0],
                 signal_strength: 1.0,
                 ore_types: vec![],
                 remaining_volume: 0.0,
-                created_unix: 10,
-                lifetime_seconds: 3600,
+                created_unix: 1_775_900_000,
+                lifetime_seconds: 86_400,
                 cleared: false,
             });
     });
@@ -668,7 +692,6 @@ async fn seasonal_site_npc_destroyed_and_ensure_seasonal_sites_edges() {
             .await;
     }
 
-    let now_ft = ctx.now_blueos_filetime_ticks();
     with_pve_special_reg(&ctx, |reg| {
         reg.seasonal_event_sites.insert(
             sys_id,

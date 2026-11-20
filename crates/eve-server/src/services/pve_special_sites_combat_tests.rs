@@ -974,14 +974,20 @@ async fn seasonal_completion_atomic_rollback_and_no_double_pay_and_sde_fallback(
         .is_empty()
     );
 
-    // Trigger final kill with nonexistent character ID -> atomic transaction rolls back ALL writes.
+    // Trigger genuine mid-transaction failure (wallet IskCents::checked_add overflow AFTER
+    // site.completed / cooldown / details / exploration / anomaly writes) -> atomic rollback.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot) {
+            ch.balance = IskCents(i64::MAX - 10);
+        }
+    });
     let bad_kill = on_special_site_npc_destroyed_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
         sys_id,
         site.escort_ball_ids[1],
-        Some(999_999_999),
+        Some(pilot),
     )
     .await;
     assert!(bad_kill.is_empty());
@@ -1020,14 +1026,20 @@ async fn seasonal_completion_atomic_rollback_and_no_double_pay_and_sde_fallback(
     });
     assert!(exp_still_open, "exploration site must stay uncleared after rollback");
 
-    // Valid final kill commits atomically, then replay cannot double-pay.
+    // Restore normal wallet, then complete via active ship ball ID (ship -> char resolution P2 #1);
+    // replay cannot double-pay.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot) {
+            ch.balance = IskCents(0);
+        }
+    });
     let ok_kill = on_special_site_npc_destroyed_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
         sys_id,
         site.escort_ball_ids[1],
-        Some(pilot),
+        Some(ship_id),
     )
     .await;
     assert_eq!(ok_kill.len(), 1);
@@ -1045,10 +1057,61 @@ async fn seasonal_completion_atomic_rollback_and_no_double_pay_and_sde_fallback(
         assert_eq!(
             snap.characters[&pilot].balance.0,
             site.reward_isk * 100,
-            "wallet must receive exactly one completion payout"
+            "wallet must receive exactly one completion payout via ship-ID killer resolution"
         );
         let st = crate::services::season_manager::load_season_state(snap, pilot);
         assert_eq!(st.season_points, site.reward_points);
+    });
+
+    // Non-character / absent killer ID on final kill still completes site, arms cooldown, and
+    // cleans exploration/anomaly/relay without wedging or rolling back (P2 #1).
+    let sys_nonchar: SolarSystemId = 30_000_144;
+    let nonchar_sites = ensure_seasonal_event_sites_for_system(&ctx, sys_nonchar).await;
+    assert_eq!(nonchar_sites.len(), 1);
+    let ncs = &nonchar_sites[0];
+    let ncs_details = get_seasonal_site_details(&ctx, ncs.instance_id).expect("ncs details");
+    let _ = on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_nonchar,
+        ncs.boss_npc_ball_id,
+        Some(999_999_999),
+    )
+    .await;
+    let _ = on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_nonchar,
+        ncs.escort_ball_ids[0],
+        Some(999_999_999),
+    )
+    .await;
+    let nonchar_final = on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_nonchar,
+        ncs.escort_ball_ids[1],
+        Some(999_999_999),
+    )
+    .await;
+    assert!(nonchar_final.is_empty());
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.pve_special_sites.seasonal_event_sites[&sys_nonchar]
+                .iter()
+                .any(|s| s.instance_id == ncs.instance_id && s.completed),
+            "non-character killer must still complete seasonal site cleanly"
+        );
+        assert!(
+            load_seasonal_cooldown_store(snap)
+                .until_by_system
+                .contains_key(&sys_nonchar),
+            "cooldown must still be armed after non-character killer completion"
+        );
+        assert!(!snap.transient_items.contains_key(&ncs_details.relay_ball_id));
     });
 }
 
@@ -1651,7 +1714,7 @@ async fn seasonal_relay_hack_idempotent_expiry_and_overflow_container_consistenc
     let expected_pos = DVec3::from_array(details.site_position) + DVec3::new(500.0, 0.0, 0.0);
     let mut kill_ids = vec![site.boss_npc_ball_id];
     kill_ids.extend_from_slice(&site.escort_ball_ids);
-    for npc_bid in kill_ids {
+    for &npc_bid in &kill_ids {
         let (_, dead, _) = sys_handle
             .apply_damage_with_attacker(
                 npc_bid,
@@ -1663,7 +1726,15 @@ async fn seasonal_relay_hack_idempotent_expiry_and_overflow_container_consistenc
             .expect("npc ball exists");
         assert!(dead);
     }
-    let (cont_id, cont_type, cont_pos, has_meta) = ctx.db.with_snapshot(|snap| {
+    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        for &npc_bid in &kill_ids {
+            assert!(
+                rt.is_recently_destroyed_item_id(npc_bid),
+                "destroyed seasonal NPC {npc_bid} must be recorded in #1032 recently_destroyed_item_ids"
+            );
+        }
+    });
+    let (cont_id, cont_type, cont_flag, cont_pos, has_meta) = ctx.db.with_snapshot(|snap| {
         let (&cid, item) = snap
             .items
             .iter()
@@ -1671,9 +1742,10 @@ async fn seasonal_relay_hack_idempotent_expiry_and_overflow_container_consistenc
             .expect("seasonal overflow cargo container must be persisted with resolved type_id");
         let pos = snap.item_positions.get(&cid).copied();
         let meta = snap.sp6_lifecycle.space_object_meta.contains_key(&cid);
-        (cid, item.type_id, pos, meta)
+        (cid, item.type_id, item.flag, pos, meta)
     });
     assert_eq!(cont_type, expected_cont_type);
+    assert_eq!(cont_flag, InventoryFlag::None, "overflow container DB flag must be InventoryFlag::None");
     assert_eq!(cont_pos, Some([expected_pos.x, expected_pos.y, expected_pos.z]));
     assert!(has_meta, "overflow container must record sp6_lifecycle space_object_meta");
     let (_, cont_ball) = sys_handle
@@ -1683,6 +1755,40 @@ async fn seasonal_relay_hack_idempotent_expiry_and_overflow_container_consistenc
         .expect("overflow container ball spawned in Ballpark");
     assert_eq!(cont_ball.type_id, expected_cont_type);
     assert_eq!(cont_ball.position, expected_pos);
+    assert_eq!(cont_ball.max_velocity, 0.0, "overflow container must be stationary (max_velocity == 0)");
+    assert_eq!(cont_ball.speed_fraction, 0.0, "overflow container must have zero speed_fraction");
+    assert!(
+        sys_handle.get_combat_state(cont_id).await.unwrap().is_some(),
+        "overflow container must have Ballpark CombatState"
+    );
+    let cont_slim = sys_handle
+        .get_ball_slim_item(cont_id)
+        .await
+        .unwrap()
+        .expect("overflow container slim item");
+    assert_eq!(
+        cont_slim.dict_get("ownerID"),
+        Some(&eve_proto::PyRep::Integer(pilot)),
+        "overflow container SlimItemMeta must use pilot as ownerID"
+    );
+    let obs_id = 1_060_899_i64;
+    let _ = sys_handle
+        .spawn_ball(make_site_npc_ball(obs_id, 587, expected_pos + DVec3::new(10.0, 0.0, 0.0)))
+        .await;
+    let (_, set_state_rep, _) = sys_handle.get_set_state(obs_id).await.expect("get_set_state");
+    let Some(eve_proto::PyRep::Bytes(state_bytes)) = set_state_rep.dict_get("state") else {
+        panic!("SetState missing bytes state");
+    };
+    let (_, _, decoded_balls) = eve_destiny::wire::decode_add_balls(state_bytes).expect("decode SetState balls");
+    let wire_cont = decoded_balls
+        .iter()
+        .find(|b| b.id == cont_id)
+        .expect("overflow container present in SetState wire buffer");
+    assert_eq!(
+        wire_cont.flags & eve_destiny::wire::BALL_FLAG_IS_FREE,
+        0,
+        "overflow container must omit BALL_FLAG_IS_FREE"
+    );
 
     // 3. Expired (>24h) or out-of-window seasonal site rejects `on_seasonal_relay_hacked` (`R1482-R2-P1-4`).
     let other_sys: SolarSystemId = 30_000_144;
@@ -1698,4 +1804,241 @@ async fn seasonal_relay_hack_idempotent_expiry_and_overflow_container_consistenc
             .relay_hacked,
         "expired >24h seasonal site must reject on_seasonal_relay_hacked"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seasonal_expired_and_out_of_window_npc_kills_prune_without_rewards_or_cooldown() {
+    let sde = shared_sde();
+    let sys_1: SolarSystemId = 30_000_142;
+    let sys_2: SolarSystemId = 30_000_144;
+    let pilot: i64 = 90_060_821;
+    let ship_id: i64 = 1_060_821;
+    let base_unix = 1_776_100_000_u64;
+    let ctx = setup_seasonal_test_ctx(
+        Arc::clone(&sde),
+        base_unix,
+        1,
+        "Crimson Harvest",
+        7,
+        pilot,
+        ship_id,
+        sys_1,
+    );
+
+    // Part A: >24h anomaly expiration inside multi-day active season.
+    let sites_1 = ensure_seasonal_event_sites_for_system(&ctx, sys_1).await;
+    assert_eq!(sites_1.len(), 1);
+    let site_1 = sites_1[0].clone();
+    let details_1 = get_seasonal_site_details(&ctx, site_1.instance_id).expect("details_1");
+    let h1 = ctx.systems.get_or_spawn(sys_1);
+
+    // Seed second system while still inside season window too.
+    let sites_2 = ensure_seasonal_event_sites_for_system(&ctx, sys_2).await;
+    assert_eq!(sites_2.len(), 1);
+    let site_2 = sites_2[0].clone();
+    let details_2 = get_seasonal_site_details(&ctx, site_2.instance_id).expect("details_2");
+    let h2 = ctx.systems.get_or_spawn(sys_2);
+
+    // Advance +90,000s (>86,400s anomaly lifetime, still inside 7-day season).
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix + 90_000)));
+    let exp_ch = on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_1,
+        site_1.boss_npc_ball_id,
+        Some(pilot),
+    )
+    .await;
+    assert!(exp_ch.is_empty(), "expired seasonal site kill must pay zero rewards");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&pilot].balance.0, 0);
+        let st = crate::services::season_manager::load_season_state(snap, pilot);
+        assert_eq!(st.season_points, 0);
+        assert!(
+            snap.pve_special_sites
+                .seasonal_event_sites
+                .get(&sys_1)
+                .is_none_or(Vec::is_empty),
+            "expired seasonal site must be pruned on kill"
+        );
+        assert!(!load_seasonal_site_details_map(snap).contains_key(&site_1.instance_id));
+        assert!(
+            !load_seasonal_cooldown_store(snap)
+                .until_by_system
+                .contains_key(&sys_1),
+            "expired seasonal cleanup must NOT arm respawn cooldown"
+        );
+        let anom_key = format!("dng-{}-{}", site_1.dungeon_id, site_1.instance_id);
+        assert!(
+            !snap
+                .cosmic_anomalies
+                .get(&sys_1)
+                .is_some_and(|l| l.iter().any(|a| a.anomaly_id == anom_key))
+        );
+        assert!(!snap.transient_items.contains_key(&details_1.relay_ball_id));
+    });
+    assert!(h1.get_ball_snapshot(site_1.boss_npc_ball_id).await.unwrap().is_none());
+    assert!(h1.get_ball_snapshot(site_1.escort_ball_ids[0]).await.unwrap().is_none());
+    assert!(h1.get_ball_snapshot(details_1.relay_ball_id).await.unwrap().is_none());
+    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        assert!(rt.bounty_credited_balls.contains(&site_1.boss_npc_ball_id));
+        assert!(rt.is_recently_destroyed_item_id(site_1.boss_npc_ball_id));
+        assert!(!rt.npc_entities.contains_key(&site_1.escort_ball_ids[0]));
+    });
+    let exp_pruned = crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+        !reg.sites_by_system
+            .get(&sys_1)
+            .is_some_and(|l| l.iter().any(|s| s.site_id == details_1.exploration_site_id))
+    });
+    assert!(exp_pruned);
+
+    // Since cooldown was NOT armed, ensure_seasonal_event_sites_for_system spawns fresh replacement.
+    let respawned = ensure_seasonal_event_sites_for_system(&ctx, sys_1).await;
+    assert_eq!(respawned.len(), 1);
+    assert_ne!(respawned[0].instance_id, site_1.instance_id);
+
+    // Part B: Past season end window via live apply_damage_with_attacker death hook.
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix + 8 * 86_400)));
+    let (_, dead, _) = h2
+        .apply_damage_with_attacker(
+            site_2.boss_npc_ball_id,
+            eve_destiny::DamageVector::new(1_000_000.0, 1_000_000.0, 1_000_000.0, 1_000_000.0),
+            Some(pilot),
+        )
+        .await
+        .expect("damage npc")
+        .expect("npc ball exists");
+    assert!(dead);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&pilot].balance.0, 0);
+        assert!(
+            !load_seasonal_cooldown_store(snap)
+                .until_by_system
+                .contains_key(&sys_2),
+            "out-of-season cleanup must NOT arm respawn cooldown"
+        );
+        assert!(!snap.transient_items.contains_key(&details_2.relay_ball_id));
+    });
+    assert!(h2.get_ball_snapshot(details_2.relay_ball_id).await.unwrap().is_none());
+    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        assert!(rt.is_recently_destroyed_item_id(site_2.boss_npc_ball_id));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seasonal_concurrent_ensure_and_npc_destruction_never_resurrects_or_duplicates() {
+    let sde = shared_sde();
+    let sys_1: SolarSystemId = 30_000_142;
+    let sys_2: SolarSystemId = 30_000_144;
+    let pilot: i64 = 90_060_831;
+    let ship_id: i64 = 1_060_831;
+    let ctx = Arc::new(setup_seasonal_test_ctx(
+        Arc::clone(&sde),
+        1_776_200_000,
+        1,
+        "Crimson Harvest",
+        7,
+        pilot,
+        ship_id,
+        sys_1,
+    ));
+
+    // 1. Concurrent creation callers serialize cleanly without duplicate sites or overwrites.
+    let c1 = Arc::clone(&ctx);
+    let c2 = Arc::clone(&ctx);
+    let (a1_res, a2_res) = tokio::join!(
+        tokio::spawn(async move { ensure_seasonal_event_sites_for_system(&c1, sys_1).await }),
+        tokio::spawn(async move { ensure_seasonal_event_sites_for_system(&c2, sys_1).await }),
+    );
+    let a1 = a1_res.expect("task a1");
+    let a2 = a2_res.expect("task a2");
+    assert_eq!(a1.len(), 1);
+    assert_eq!(a2.len(), 1);
+    assert_eq!(a1[0].instance_id, a2[0].instance_id);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.pve_special_sites.seasonal_event_sites[&sys_1].len(), 1);
+    });
+
+    // 2. Concurrent recovery re-materialization vs NPC destruction & completion never resurrects.
+    let s2 = ensure_seasonal_event_sites_for_system(&ctx, sys_2).await;
+    assert_eq!(s2.len(), 1);
+    let site = s2[0].clone();
+    let details = get_seasonal_site_details(&ctx, site.instance_id).expect("details");
+    let h2 = ctx.systems.get_or_spawn(sys_2);
+
+    // Simulate missing relay, missing escort ball, & missing AI before racing recovery against live kills.
+    h2.try_remove_ball(details.relay_ball_id);
+    h2.try_remove_ball(site.escort_ball_ids[0]);
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.npc_entities.remove(&site.boss_npc_ball_id);
+        for &ebid in &site.escort_ball_ids {
+            rt.npc_entities.remove(&ebid);
+        }
+    });
+
+    let ctx_a = Arc::clone(&ctx);
+    let ctx_b = Arc::clone(&ctx);
+    let boss_id = site.boss_npc_ball_id;
+    let esc_0 = site.escort_ball_ids[0];
+    let esc_1 = site.escort_ball_ids[1];
+    let (race_res, kill_res) = tokio::join!(
+        tokio::spawn(async move {
+            let r1 = ensure_seasonal_event_sites_for_system(&ctx_a, sys_2).await;
+            tokio::task::yield_now().await;
+            let r2 = ensure_seasonal_event_sites_for_system(&ctx_a, sys_2).await;
+            (r1, r2)
+        }),
+        tokio::spawn(async move {
+            let mut sum = 0usize;
+            for &bid in &[esc_0, boss_id, esc_1] {
+                tokio::task::yield_now().await;
+                sum += on_special_site_npc_destroyed_core(
+                    &ctx_b.systems,
+                    &ctx_b.db,
+                    &ctx_b.sde,
+                    sys_2,
+                    bid,
+                    Some(pilot),
+                )
+                .await
+                .len();
+                h2.try_remove_ball(bid);
+            }
+            sum
+        })
+    );
+    let rem_after_race = race_res.expect("race task");
+    let payouts = kill_res.expect("kill task");
+    assert!(
+        rem_after_race.0.len() <= 1 && rem_after_race.1.len() <= 1,
+        "racing ensure must never create more than one site"
+    );
+    assert_eq!(payouts, 1, "site completion must pay out exactly once");
+
+    let final_sites = ensure_seasonal_event_sites_for_system(&ctx, sys_2).await;
+    assert!(final_sites.is_empty());
+    let h2_check = ctx.systems.get_or_spawn(sys_2);
+    for &bid in &[boss_id, esc_0, esc_1, details.relay_ball_id] {
+        assert!(
+            h2_check.get_ball_snapshot(bid).await.unwrap().is_none(),
+            "ball {bid} must never resurrect after completion during concurrent ensure"
+        );
+    }
+    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        for &bid in &[boss_id, esc_0, esc_1] {
+            assert!(
+                !rt.npc_entities.contains_key(&bid),
+                "defeated seasonal NPC {bid} must never resurrect into rt.npc_entities"
+            );
+        }
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&pilot].balance.0, site.reward_isk * 100);
+        assert!(
+            load_seasonal_cooldown_store(snap)
+                .until_by_system
+                .contains_key(&sys_2)
+        );
+    });
 }
