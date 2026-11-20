@@ -244,80 +244,211 @@ def env_audit(root):
     return "\n\n".join(lines) or "(no wrappers found)"
 
 
-def _count_active_cargo_processes():
-    """Return the count of live host `cargo` processes (`pgrep -x cargo`), or 0 if unavailable."""
+def _inspect_cargo_pid_meta(pids):
+    """Best-effort inspection of `cargo` PIDs to exclude exempt Playtester / hourly CI builds and
+    child `cargo` processes already accounted for by a held review flock slot.
+    Returns `{pid: {"ppid": int|None, "exempt": bool}}`."""
+    if not pids:
+        return {}
+    meta = {pid: {"ppid": None, "exempt": False} for pid in pids}
+    pid_arg = ",".join(str(p) for p in sorted(pids))
+    try:
+        ps_proc = subprocess.run(
+            ["ps", "-ww", "-o", "pid=,ppid=,args=", "-p", pid_arg],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if ps_proc.returncode == 0 and ps_proc.stdout.strip():
+            for ln in ps_proc.stdout.splitlines():
+                parts = ln.strip().split(None, 2)
+                if len(parts) < 2:
+                    continue
+                try:
+                    pid = int(parts[0])
+                    ppid = int(parts[1])
+                except ValueError:
+                    continue
+                if pid not in meta:
+                    continue
+                args = parts[2] if len(parts) >= 3 else ""
+                meta[pid]["ppid"] = ppid
+                if "EvoMu-playtester" in args or "hourly_test_suite" in args:
+                    meta[pid]["exempt"] = True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        lsof_proc = subprocess.run(
+            ["lsof", "-a", "-d", "cwd", "-Fn", "-p", pid_arg],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if lsof_proc.returncode == 0 and lsof_proc.stdout.strip():
+            cur_pid = None
+            for ln in lsof_proc.stdout.splitlines():
+                if ln.startswith("p"):
+                    try:
+                        cur_pid = int(ln[1:])
+                    except ValueError:
+                        cur_pid = None
+                elif ln.startswith("n") and cur_pid in meta:
+                    cwd_s = ln[1:]
+                    if "EvoMu-playtester" in cwd_s or "hourly_test_suite" in cwd_s:
+                        meta[cur_pid]["exempt"] = True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return meta
+
+
+def _count_active_cargo_processes(exclude_parent_pids=None):
+    """Return the count of live non-exempt host `cargo` processes (`pgrep -x cargo`), excluding
+    exempt Playtester / hourly-CI builds and children of `exclude_parent_pids` (which already hold
+    a review flock slot).
+
+    Returns `0` when `pgrep` cleanly reports no matching processes (`returncode == 1`), or `None`
+    when `pgrep` itself fails/errors (never silently fails open to `0`, TT-22)."""
     try:
         proc = subprocess.run(["pgrep", "-x", "cargo"], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode == 1:
         return 0
     if proc.returncode != 0:
+        return None
+    pids = []
+    for ln in proc.stdout.splitlines():
+        s = ln.strip()
+        if s.isdigit():
+            pids.append(int(s))
+    if not pids:
         return 0
-    return sum(1 for ln in proc.stdout.splitlines() if ln.strip())
+    excl = set(exclude_parent_pids or ())
+    meta = _inspect_cargo_pid_meta(pids)
+    count = 0
+    for pid in pids:
+        info = meta.get(pid) or {}
+        if info.get("exempt"):
+            continue
+        if excl and info.get("ppid") in excl:
+            continue
+        count += 1
+    return count
 
 
 def _acquire_cargo_test_slot(root):
-    """Acquire one of EVOMU_MAX_CARGO_TEST_SLOTS (default 4) kernel flock slots AND verify total live
-    host `cargo` processes (`pgrep -x cargo`) stay below `max_slots` across reviews + coder subagents."""
+    """Acquire one of EVOMU_MAX_CARGO_TEST_SLOTS (default 4) kernel flock slots using a coordinator
+    mutex so concurrent reviews never TOCTOU-overshoot `max_slots` (TT-22), while also accounting
+    for external non-playtester coder `cargo` processes without double-counting held review slots."""
     try:
         import fcntl
     except ImportError:
         return None
     max_slots = max(1, int(os.environ.get("EVOMU_MAX_CARGO_TEST_SLOTS", "4")))
     mdir = rl.main_state_dir(root)
+    coord_path = os.path.join(mdir, "cargo_test_slot_coord.lock")
     waited_slot = False
     waited_cargo = False
+    warned_pgrep = False
     while True:
-        active = _count_active_cargo_processes()
-        if active >= max_slots:
-            if not waited_cargo:
-                print(
-                    "[review] waiting for active host cargo processes to drop below %d (currently %d)..."
-                    % (max_slots, active),
-                    flush=True,
-                )
-                waited_cargo = True
-            time.sleep(5.0)
-            continue
-        recheck_exceeded = False
-        for slot in range(max_slots):
-            lpath = os.path.join(mdir, "cargo_test_slot_%d.lock" % slot)
-            fh = open(lpath, "a+", encoding="utf-8")
-            try:
-                os.set_inheritable(fh.fileno(), False)
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except (BlockingIOError, OSError):
-                fh.close()
-                continue
-            active_now = _count_active_cargo_processes()
-            if active_now >= max_slots:
+        coord_fh = open(coord_path, "a+", encoding="utf-8")
+        try:
+            os.set_inheritable(coord_fh.fileno(), False)
+            fcntl.flock(coord_fh.fileno(), fcntl.LOCK_EX)
+            held_slots = 0
+            held_pids = set()
+            free_slot = None
+            for slot in range(max_slots):
+                lpath = os.path.join(mdir, "cargo_test_slot_%d.lock" % slot)
+                fh = open(lpath, "a+", encoding="utf-8")
                 try:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    os.set_inheritable(fh.fileno(), False)
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (BlockingIOError, OSError):
+                    held_slots += 1
+                    try:
+                        fh.seek(0)
+                        rec = json.loads(fh.read().strip() or "{}")
+                        if isinstance(rec.get("pid"), int):
+                            held_pids.add(rec["pid"])
+                    except Exception:  # noqa: BLE001
+                        pass
+                    fh.close()
+                    continue
+                if free_slot is None:
+                    free_slot = (slot, fh)
+                else:
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                    fh.close()
+
+            if free_slot is None:
+                pass
+            else:
+                slot_idx, slot_fh = free_slot
+                ext_cargo = _count_active_cargo_processes(exclude_parent_pids=held_pids)
+                if ext_cargo is None:
+                    if not warned_pgrep:
+                        print(
+                            "[review] WARNING: pgrep unavailable for global cargo check; "
+                            "enforcing strict %d-slot kernel flock cap." % max_slots,
+                            flush=True,
+                        )
+                        warned_pgrep = True
+                    total_in_flight = held_slots
+                else:
+                    total_in_flight = held_slots + ext_cargo
+
+                if total_in_flight < max_slots:
+                    slot_fh.seek(0)
+                    slot_fh.truncate()
+                    slot_fh.write(json.dumps({
+                        "pid": os.getpid(),
+                        "root": root,
+                        "slot": slot_idx,
+                        "ts": time.time(),
+                    }) + "\n")
+                    slot_fh.flush()
+                    print(
+                        "[review] acquired cargo test slot %d/%d (held_slots=%d, external_cargo=%s, cap=%d)"
+                        % (slot_idx + 1, max_slots, held_slots, ext_cargo, max_slots),
+                        flush=True,
+                    )
+                    return slot_fh
+
+                try:
+                    fcntl.flock(slot_fh.fileno(), fcntl.LOCK_UN)
                 except OSError:
                     pass
-                fh.close()
+                slot_fh.close()
                 if not waited_cargo:
                     print(
-                        "[review] waiting for active host cargo processes to drop below %d (currently %d)..."
-                        % (max_slots, active_now),
+                        "[review] waiting for active cargo slots to drop below %d "
+                        "(held_slots=%d, external_cargo=%s)..." % (max_slots, held_slots, ext_cargo),
                         flush=True,
                     )
                     waited_cargo = True
-                recheck_exceeded = True
-                break
-            fh.seek(0)
-            fh.truncate()
-            fh.write(json.dumps({"pid": os.getpid(), "root": root, "slot": slot, "ts": time.time()}) + "\n")
-            fh.flush()
-            print("[review] acquired cargo test slot %d/%d (host cargo: %d/%d)" % (slot + 1, max_slots, active_now, max_slots), flush=True)
-            return fh
-        if recheck_exceeded:
+                need_cargo_wait = True
+            need_cargo_wait = free_slot is not None
+        finally:
+            try:
+                fcntl.flock(coord_fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            coord_fh.close()
+
+        if need_cargo_wait:
             time.sleep(5.0)
-            continue
-        if not waited_slot:
-            print("[review] waiting for a free cargo test slot (max %d concurrent workspace test runs)..." % max_slots,
-                  flush=True)
-            waited_slot = True
-        time.sleep(2.0)
+        else:
+            if not waited_slot:
+                print(
+                    "[review] waiting for a free cargo test slot (max %d concurrent test runs)..." % max_slots,
+                    flush=True,
+                )
+                waited_slot = True
+            time.sleep(2.0)
 
 
 def _release_cargo_test_slot(fh):
@@ -340,6 +471,61 @@ SENTINEL_IT_FILTERS = (
     "client_harness",
 )
 SENTINEL_LIB_FILTER = "macho_listener"
+
+# Always-on surgical historical canaries (user decision 2026-11-20, mined from 49 historical P0 CI breaks):
+# 12 single tests folded into the already-running `eve-server --test it` and `eve-server --lib` binaries
+# (zero extra binary links or SDE loads; excludes slow/flaky tests).
+SENTINEL_IT_CANARY_TESTS = (
+    "features_structure_modules_rpcs::test_b22_overheat_rack_heat_and_damage_propagation",
+    "features_daily_challenges::ess_grid_warp_and_module_restrictions::test_b36_ess_grid_warp_and_module_restrictions",
+    "notify_services_and_events::criminal_timer_and_fw_capture_notices::parity_notify_capture_batch::test_parity_notify_criminal_timer_and_fw_capture_changed",
+    "notify_services_and_events::dungeon_escalation_and_fw_bunker_notices::parity_notify_batch2::test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update",
+    "economy_industry_pi_extended::pi_poco_gantry_deploy_reinforce::test_wallet_evermarks_and_item_trader",
+    "corporation_membership_and_titles::get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_util_rows",
+    "world_space_exploration::world_features_ext_b::test_corp_member_audit_reinforce_default_and_fleet_handover_formations",
+    "combat_npc_crimewatch::test_c3_wrecks_loot_50pct_ownership_killmails_esi_hash_pod_corpse_and_self_destruct",
+    "modules_grappler_hull_energizer_and_spool::test_modules_grappler_ehe_mutadaptive_repairer_and_entropic_disintegrator",
+)
+SENTINEL_LIB_CANARY_TESTS = (
+    "router::dispatch::dispatch_unit_tests::dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered",
+    "router::tests::journeys_and_catalog::test_all_18_e2e_journeys_and_catalog_coverage",
+    "router::notify_registry_tests::raw_notify_ratchet_holds_and_migrated_files_stay_clean",
+)
+
+# Path-triggered surgical rules T1..T6 (user decision 2026-11-20)
+T1_CLIENT_CONTRACT_TEST = (
+    "client_contract::tests::user_error_key_catalogue_matches_v24_dialogs_static_and_ratchet_holds"
+)
+T2_DESTINY_IT_TESTS = (
+    "space::test_p7_destiny_binary_stream_undock_movement_and_stargate_jump",
+    "pve_escalations_expeditions_arena_live::test_live_proving_grounds_validation_queue_and_sphere_hazard",
+)
+T3_CORP_IT_TESTS = (
+    "corp_fleet_social_edge_coverage::corp_medals_bulletins_votes_offices_and_hangars_errors",
+)
+T3_CORP_LIB_TESTS = (
+    "router::dispatch::wal_poison_tests::test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_without_poisoning_next_rpc",
+)
+T4_COMBAT_MODULE_IT_TESTS = (
+    "features_homefront_operations::homefront_operations_it::test_homefront_operations_live_rpc_mining_salvage_and_nonhub_seeding",
+    "combat_weapons_wrecks::test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradation",
+    "features_freight_and_courier::test_corruption_all_stages_1_to_5_and_drop_removal",
+    "features_paragon_missions::test_operations_tutorial_tasks_categories_progress_and_rewards",
+)
+T4_COMBAT_MODULE_LIB_TESTS = (
+    "services::pve_ess_reserve_banks::pve_ess_reserve_banks_tests::wave4_ess_boundary_thresholds_tax_exempt_and_autopayout_edges",
+    "services::tactical_modules::superweapon_ops::tactical_modules_superweapon_ops_edges_tests::f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_on_commit",
+)
+T5_STRUCTURE_IT_TESTS = (
+    "structures_lifecycle_complete::test_damage_cap_and_repair_timer_with_pause_threshold",
+    "structures_lifecycle_complete::test_reinforcement_cycle_per_size_and_security_band",
+)
+T6_PROTO_LIB_TEST = "pb::pb_unit_tests::raw_encode_field_ratchet_enforced_on_eve_server_src"
+
+PATH_TRIGGERED_IT_CANARIES = (
+    T2_DESTINY_IT_TESTS + T3_CORP_IT_TESTS + T4_COMBAT_MODULE_IT_TESTS + T5_STRUCTURE_IT_TESTS
+)
+
 MAX_AFFECTED_IT_FILTERS = 12
 MAX_AFFECTED_LIB_FILTERS = 6
 REV_DEP_CACHE_FILENAME = "reverse_dep_index_v2.json"
@@ -623,6 +809,17 @@ def _enclosing_fns_at_ref(root, ref, rel_path, line_nums):
     return out
 
 
+def _is_test_only_rs_path(rel):
+    rel_u = rel.replace("\\", "/")
+    fname = rel_u.rsplit("/", 1)[-1]
+    return (
+        "/tests/" in rel_u
+        or rel_u.startswith("tests/")
+        or fname == "tests.rs"
+        or fname.endswith(("_unit_tests.rs", "_tests.rs", "_test.rs"))
+    )
+
+
 def _is_central_router_auth_file(rel):
     """Return True for central production router/auth files whose blast radius covers
     bound-object auth, bridge dispatch, Quasar gateway pre-auth, and property routing (#1393)."""
@@ -631,23 +828,92 @@ def _is_central_router_auth_file(rel):
     if len(parts) != 5 or parts[:4] != ["crates", "eve-server", "src", "router"]:
         return False
     fname = parts[4]
-    if not fname.endswith(".rs"):
-        return False
-    if fname == "tests.rs" or fname.endswith(("_unit_tests.rs", "_tests.rs", "_test.rs")):
+    if not fname.endswith(".rs") or _is_test_only_rs_path(rel_u):
         return False
     if fname in ("dispatch.rs", "context.rs", "mod.rs"):
         return True
     return fname == "binding.rs" or fname.startswith("binding_")
 
 
+def _matches_t2_destiny_space_file(rel):
+    rel_u = rel.replace("\\", "/")
+    if rel_u.startswith("crates/eve-destiny/"):
+        return True
+    if not rel_u.startswith("crates/eve-server/src/") or _is_test_only_rs_path(rel_u):
+        return False
+    fname = rel_u.rsplit("/", 1)[-1]
+    if "/system_actor/" in rel_u or fname.startswith("system_actor"):
+        return True
+    return fname in ("space_warp_jump.rs", "nav_warp_interdiction.rs", "space_destiny.rs")
+
+
+def _matches_t3_corp_auth_file(rel):
+    rel_u = rel.replace("\\", "/")
+    if _is_test_only_rs_path(rel_u):
+        return False
+    if rel_u == "crates/eve-db/src/characters.rs":
+        return True
+    fname = rel_u.rsplit("/", 1)[-1]
+    if fname == "snapshot_ext.rs":
+        return True
+    if "corp_roles" in rel_u or "corp_governance" in rel_u:
+        return True
+    return fname.startswith(("corp_registry", "social_corp"))
+
+
+def _matches_t4_combat_module_file(rel):
+    rel_u = rel.replace("\\", "/")
+    if rel_u == "crates/eve-proto/src/marshal.rs":
+        return True
+    if not rel_u.startswith("crates/eve-server/src/") or _is_test_only_rs_path(rel_u):
+        return False
+    fname = rel_u.rsplit("/", 1)[-1]
+    if "/tactical_modules/" in rel_u:
+        return True
+    return fname.startswith((
+        "fitting_module_cycles",
+        "combat_weapons",
+        "tactical_modules",
+        "pve_ess",
+        "pve_homefront",
+    ))
+
+
+def _matches_t5_structure_pos_file(rel):
+    rel_u = rel.replace("\\", "/")
+    if not rel_u.startswith("crates/eve-server/src/") or _is_test_only_rs_path(rel_u):
+        return False
+    fname = rel_u.rsplit("/", 1)[-1]
+    return (
+        fname.startswith(("structure_", "structures_", "upwell", "pos_", "starbase"))
+        or fname == "pos.rs"
+        or "_upwell" in fname
+        or "_pos." in fname
+        or "_pos_" in fname
+        or "starbase" in fname
+    )
+
+
+def _matches_t6_proto_quasar_file(rel):
+    rel_u = rel.replace("\\", "/")
+    if rel_u.startswith("crates/eve-proto/") or rel_u.startswith("crates/eve-quasar/"):
+        return True
+    if not rel_u.startswith("crates/") or _is_test_only_rs_path(rel_u):
+        return False
+    fname = rel_u.rsplit("/", 1)[-1]
+    return "/quasar_" in rel_u or fname.startswith("quasar_")
+
+
 def derive_affected_test_commands(root, base, cargo, head="HEAD"):
-    """Derive targeted `cargo test -j 4` commands covering:
-    1. Always-on fast wire/bootstrap sentinel (`rpc_client_contracts`, `login_space_bootstrap_sequence`,
-       `client_harness`, and `--lib macho_listener`) whenever any `.rs`/`.json`/`.txt` under `crates/` changes.
-    2. Reverse-import / RPC-service / `On*`-notification / symbol affected `tests/it/*.rs` (bounded to
-       <= 12 integration test filters + sentinel set) and `--lib` modules (including `crates/eve-quasar/`).
-    3. Fast router/auth blast-radius tests (`router::binding`, `main_unit_tests`, `quasar_gateway`, and
-       `property_coverage_suite` dispatch/quasar routing) whenever central production `router/` files change."""
+    """Derive targeted `cargo test -j 4` (and Python `unittest`) commands covering:
+    1. Always-on wire/bootstrap sentinels (`rpc_client_contracts`, `login_space_bootstrap_sequence`,
+       `client_harness`, `--lib macho_listener`) plus 12 always-on surgical historical canaries
+       (`SENTINEL_IT_CANARY_TESTS`, `SENTINEL_LIB_CANARY_TESTS`) whenever Rust crate files change.
+    2. Reverse-import / RPC-service (including core services with `df > 45`, TT-03) / `On*`-notification
+       / symbol affected `tests/it/*.rs` (never truncating directly modified `tests/it/*.rs` or `--lib`
+       modules) and crate `--lib` modules (including `crates/eve-quasar/`).
+    3. Fast blast-radius & path-triggered surgical rules: central `router/` auth (`#1393`) plus `T1..T6`.
+    4. Python `unittest` discovery suites for `tools/client-harness/`, `tools/sde-import/`, and `tools/`."""
     diff_base = base
     if head == "HEAD":
         for trunk_ref in ("main", "origin/main"):
@@ -661,24 +927,39 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
                         diff_base = mb_sha
                     break
 
-    _, diff_files_out = sh(["git", "diff", "--name-only", diff_base, head, "--", "crates/", "client-bridge/", "tools/client-harness/"], root)
+    _, diff_files_out = sh(["git", "diff", "--name-only", diff_base, head, "--", "crates/", "client-bridge/", "tools/"], root)
     changed_all = [l.strip() for l in diff_files_out.splitlines() if l.strip()]
     changed_crates = [f for f in changed_all if f.startswith("crates/") and f.endswith((".rs", ".json", ".txt", ".toml", ".proto"))]
     harness_or_journeys_touched = any(
         f.startswith(("client-bridge/", "tools/client-harness/", "crates/eve-server/src/bin/"))
         for f in changed_all
     )
+    client_harness_touched = any(f.startswith("tools/client-harness/") for f in changed_all)
+    sde_import_touched = any(f.startswith("tools/sde-import/") for f in changed_all)
+    tools_py_touched = any(
+        f.startswith("tools/tests/")
+        or (f.startswith("tools/") and "/" not in f[len("tools/"):] and f.endswith(".py"))
+        for f in changed_all
+    )
     router_auth_touched = any(_is_central_router_auth_file(f) for f in changed_crates)
+    t1_client_err_touched = any(
+        f.startswith("crates/eve-testkit/") or f.rsplit("/", 1)[-1] == "client_error.rs"
+        for f in changed_crates
+    )
+    t2_destiny_touched = any(_matches_t2_destiny_space_file(f) for f in changed_crates)
+    t3_corp_touched = any(_matches_t3_corp_auth_file(f) for f in changed_crates)
+    t4_combat_touched = any(_matches_t4_combat_module_file(f) for f in changed_crates)
+    t5_struct_touched = any(_matches_t5_structure_pos_file(f) for f in changed_crates)
+    t6_proto_touched = any(_matches_t6_proto_quasar_file(f) for f in changed_crates)
     include_sentinel = any(f.endswith((".rs", ".json", ".txt")) for f in changed_crates) or harness_or_journeys_touched
 
-    lib_filters_by_crate = {}
+    direct_lib_filters_by_crate = {}
+    extra_lib_filters_by_crate = {}
     whole_lib_crates = set()
     non_server_integ = []
     direct_server_it = []
     if harness_or_journeys_touched:
         direct_server_it.append("rpc_dispatch_and_client_harness_e2e")
-    if router_auth_touched and "quasar_gateway" not in direct_server_it:
-        direct_server_it.append("quasar_gateway")
     changed_server_stems = set()
     quasar_crate_touched = False
 
@@ -697,10 +978,10 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
                     if st in ("lib", "main"):
                         whole_lib_crates.add("eve-quasar")
                     else:
-                        lib_filters_by_crate.setdefault("eve-quasar", set()).add(st)
+                        direct_lib_filters_by_crate.setdefault("eve-quasar", set()).add(st)
                 else:
                     whole_lib_crates.add("eve-quasar")
-            lib_filters_by_crate.setdefault("eve-server", set()).update(("quasar_gateway", "quasar_grpc"))
+            direct_lib_filters_by_crate.setdefault("eve-server", set()).update(("quasar_gateway", "quasar_grpc"))
             changed_server_stems.update(("quasar_gateway", "quasar_grpc"))
             continue
 
@@ -711,11 +992,11 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
             elif crate == "eve-testkit":
                 whole_lib_crates.add("eve-testkit")
                 if "notify" in fname:
-                    lib_filters_by_crate.setdefault("eve-server", set()).add("notify_registry")
+                    direct_lib_filters_by_crate.setdefault("eve-server", set()).add("notify_registry")
                 if "quasar_tap" in fname and "quasar_tap" not in direct_server_it:
                     direct_server_it.append("quasar_tap")
             elif crate == "eve-db":
-                lib_filters_by_crate.setdefault("eve-db", set()).add("lock_rank")
+                direct_lib_filters_by_crate.setdefault("eve-db", set()).add("lock_rank")
             elif crate != "eve-server":
                 whole_lib_crates.add(crate)
             continue
@@ -743,11 +1024,11 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
                 if crate != "eve-server":
                     whole_lib_crates.add(crate)
                 else:
-                    lib_filters_by_crate.setdefault(crate, set()).add("config::tests")
+                    direct_lib_filters_by_crate.setdefault(crate, set()).add("config::tests")
                 continue
             base_stem = _norm_src_stem("/".join(parts[3:]))
-            if not ( crate == "eve-server" and base_stem == SENTINEL_LIB_FILTER ):
-                lib_filters_by_crate.setdefault(crate, set()).add(base_stem)
+            if not (crate == "eve-server" and base_stem == SENTINEL_LIB_FILTER):
+                direct_lib_filters_by_crate.setdefault(crate, set()).add(base_stem)
             if crate == "eve-server":
                 rel_in_src = "/".join(parts[3:])
                 fname = parts[-1]
@@ -760,20 +1041,29 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
 
     # Reverse-import / RPC-service / On*-notification / symbol test selection for `eve-server`
     selected_server_it = []
-    if changed_server_stems or direct_server_it or quasar_crate_touched or "eve-server" in lib_filters_by_crate:
+    direct_present_count = 0
+    diff_src = ""
+    if changed_server_stems or direct_server_it or quasar_crate_touched or "eve-server" in direct_lib_filters_by_crate:
         _, diff_src = sh(["git", "diff", "-U0", diff_base, head, "--", "crates/eve-server/src/"], root)
         all_added_src = "\n".join(
             ln[1:] for ln in diff_src.splitlines() if ln.startswith("+") and not ln.startswith("+++")
         )
+        all_changed_src = "\n".join(
+            ln[1:]
+            for ln in diff_src.splitlines()
+            if (ln.startswith("+") or ln.startswith("-")) and not ln.startswith(("+++", "---"))
+        )
         if re.search(r"\bencode_(?:varint|bytes|string|fixed32|fixed64)_field\s*\(", all_added_src):
-            lib_filters_by_crate.setdefault("eve-proto", set()).add("pb")
+            direct_lib_filters_by_crate.setdefault("eve-proto", set()).add("pb")
         if re.search(r"\buser_error\s*\(", all_added_src):
-            lib_filters_by_crate.setdefault("eve-testkit", set()).add("client_contract")
+            direct_lib_filters_by_crate.setdefault("eve-testkit", set()).add("client_contract")
+        if re.search(r"\b(?:BridgeRpcError|ClientError)\b|\buser_error\s*\(", all_changed_src):
+            t1_client_err_touched = True
         if re.search(
             r"\.(?:notify|push_notification|notify_remote_message)\s*\(|\b(?:build_macho_notification_packet|notify_char)\s*\(",
             all_added_src,
         ):
-            lib_filters_by_crate.setdefault("eve-server", set()).add("notify_registry")
+            direct_lib_filters_by_crate.setdefault("eve-server", set()).add("notify_registry")
 
     if changed_server_stems or direct_server_it or quasar_crate_touched:
         idx = _load_or_build_reverse_dep_index(root)
@@ -806,13 +1096,14 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
                         hop1_stems.update(idx["src_parent"].get(r, ()))
             hop1_stems -= changed_server_stems
 
-            # Propagate up to 2 downstream `--lib` test modules for changed `src` modules / notifications
-            ev_lib_set = lib_filters_by_crate.setdefault("eve-server", set())
+            # Propagate downstream `--lib` test modules into `extra_lib_filters_by_crate` (never displacing direct edits)
+            ev_direct_lib = direct_lib_filters_by_crate.get("eve-server", set())
+            ev_extra_lib = extra_lib_filters_by_crate.setdefault("eve-server", set())
             for h_st in sorted(hop1_stems):
-                if len(ev_lib_set) >= MAX_AFFECTED_LIB_FILTERS:
+                if len(ev_direct_lib) + len(ev_extra_lib) >= MAX_AFFECTED_LIB_FILTERS:
                     break
-                if h_st not in ("tests", SENTINEL_LIB_FILTER):
-                    ev_lib_set.add(h_st)
+                if h_st not in ("tests", SENTINEL_LIB_FILTER) and h_st not in ev_direct_lib:
+                    ev_extra_lib.add(h_st)
 
             file_lines = {}
             cur_f = None
@@ -856,8 +1147,8 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
                 ev = m1 or m2
                 qw["on:" + ev] = max(qw.get("on:" + ev, 0.0), 14.0)
                 for lmod in sorted(idx["lib_notif_mods"].get(ev, ())):
-                    if len(ev_lib_set) < MAX_AFFECTED_LIB_FILTERS:
-                        ev_lib_set.add(lmod)
+                    if len(ev_direct_lib) + len(ev_extra_lib) < MAX_AFFECTED_LIB_FILTERS and lmod not in ev_direct_lib:
+                        ev_extra_lib.add(lmod)
             for fx in _FX_RE.findall(changed_blob):
                 qw["fx:" + fx] = max(qw.get("fx:" + fx, 0.0), 18.0)
             for q in _QUOTED_IDENT_RE.findall(changed_blob):
@@ -870,19 +1161,38 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
             avg_len = idx["avg_len"]
             token_df = idx["token_df"]
             rem_weights = {}
+            high_df_weights = {}
             for tok, w in qw.items():
                 df = token_df.get(tok, 0)
                 if 1 <= df <= 45:
                     rem_weights[tok] = w * math.log((n_it + 1.0) / (df + 0.5))
+                elif df > 45 and tok.startswith(("svc:", "rpc:", "mod:", "sym:", "on:", "fx:")):
+                    # TT-03: retain damped IDF signal for high-df core EVE services (charUnboundMgr,
+                    # dogmaIM, beyonce, invbroker, stationSvc, corpRegistry, publicGatewaySvc, marketProxy,
+                    # agentMgr) instead of dropping them to 0.0 at df > 45.
+                    idf = max(0.20, math.log((n_it + 1.0) / (df + 0.5)))
+                    high_df_weights[tok] = w * idf * 0.25
+            if not rem_weights and high_df_weights:
+                rem_weights.update(high_df_weights)
+            elif high_df_weights:
+                # Keep core-service `svc:` tokens as low-weight tie-breakers (never drowning specific df<=45 tokens)
+                for tok, hw in high_df_weights.items():
+                    if tok.startswith("svc:"):
+                        rem_weights[tok] = hw * 0.08
 
-            selected_server_it = [s for s in direct_server_it if s in head_it][:4]
+            # TT-03: Never truncate directly modified `tests/it/*.rs` files at [:4]; keep all of them,
+            # and always preserve at least `MAX_AFFECTED_IT_FILTERS - 4` (= 8) reverse-dep slots so
+            # editing >4 IT files never starves reverse-dependency discovery.
+            selected_server_it = [s for s in direct_server_it if s in head_it]
+            direct_present_count = len(selected_server_it)
+            rev_dep_target = max(MAX_AFFECTED_IT_FILTERS, direct_present_count + max(0, MAX_AFFECTED_IT_FILTERS - 4))
             for m in selected_server_it:
                 for tok in it_tokens.get(m, ()):
                     if tok in rem_weights:
                         rem_weights[tok] *= 0.25
 
             candidates = [m for m in sorted(it_tokens) if m in head_it and m not in selected_server_it]
-            while len(selected_server_it) < MAX_AFFECTED_IT_FILTERS and candidates:
+            while len(selected_server_it) < rev_dep_target and candidates:
                 best_m, best_sc = None, 0.0
                 for m in candidates:
                     toks = it_tokens[m]
@@ -899,11 +1209,13 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
                     if tok in rem_weights:
                         rem_weights[tok] *= 0.2
         else:
-            selected_server_it = list(direct_server_it[:MAX_AFFECTED_IT_FILTERS])
+            selected_server_it = list(direct_server_it)
+            direct_present_count = len(selected_server_it)
 
-    if router_auth_touched and "eve-server" in lib_filters_by_crate:
+    if router_auth_touched:
         # Avoid running `router::binding` twice when `router/binding.rs` also triggers the blast-radius rule below.
-        lib_filters_by_crate["eve-server"].discard("binding")
+        direct_lib_filters_by_crate.get("eve-server", set()).discard("binding")
+        extra_lib_filters_by_crate.get("eve-server", set()).discard("binding")
 
     cmds = []
     seen_cmds = set()
@@ -918,21 +1230,36 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
     if include_sentinel:
         for sflt in SENTINEL_IT_FILTERS:
             _add_cmd([cargo, "test", "-p", "eve-server", "--test", "it", sflt])
+        for cflt in SENTINEL_IT_CANARY_TESTS:
+            _add_cmd([cargo, "test", "-p", "eve-server", "--test", "it", cflt])
         _add_cmd([cargo, "test", "-p", "eve-server", "--lib", SENTINEL_LIB_FILTER])
+        for cflt in SENTINEL_LIB_CANARY_TESTS:
+            _add_cmd([cargo, "test", "-p", "eve-server", "--lib", cflt])
 
     for crate in sorted(whole_lib_crates):
         _add_cmd([cargo, "test", "-p", crate, "--lib"])
-    for crate, filters in sorted(lib_filters_by_crate.items()):
-        if crate in whole_lib_crates or not filters:
+
+    all_lib_crates = sorted(set(direct_lib_filters_by_crate) | set(extra_lib_filters_by_crate))
+    for crate in all_lib_crates:
+        if crate in whole_lib_crates:
             continue
-        cleaned = [f for f in sorted(filters) if f != "tests"] or sorted(filters)
-        if "notify_registry" in cleaned:
-            cleaned = ["notify_registry"] + [f for f in cleaned if f != "notify_registry"]
+        direct_f = [f for f in sorted(direct_lib_filters_by_crate.get(crate, set())) if f != "tests"] or sorted(
+            direct_lib_filters_by_crate.get(crate, set())
+        )
+        if "notify_registry" in direct_f:
+            direct_f = ["notify_registry"] + [f for f in direct_f if f != "notify_registry"]
+        extra_f = [
+            f for f in sorted(extra_lib_filters_by_crate.get(crate, set()))
+            if f != "tests" and f not in direct_f
+        ]
+        # TT-03: Always include every directly modified module; only cap propagated extra modules.
         cap = MAX_AFFECTED_LIB_FILTERS if crate == "eve-server" else 4
-        for flt in cleaned[:cap]:
+        remaining_extra = max(0, cap - len(direct_f))
+        for flt in direct_f + extra_f[:remaining_extra]:
             _add_cmd([cargo, "test", "-p", crate, "--lib", flt])
 
-    for submod in selected_server_it[:MAX_AFFECTED_IT_FILTERS]:
+    it_limit = max(MAX_AFFECTED_IT_FILTERS, direct_present_count + max(0, MAX_AFFECTED_IT_FILTERS - 4))
+    for submod in selected_server_it[:it_limit]:
         _add_cmd([cargo, "test", "-p", "eve-server", "--test", "it", submod])
 
     non_root_integ = {(c, b) for c, b, s in non_server_integ if s and s not in ("main", "mod")}
@@ -953,7 +1280,8 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
         if submod and submod not in ("main", "mod"):
             _add_cmd([cargo, "test", "-p", crate, "--test", bin_name, submod])
         else:
-            _add_cmd([cargo, "test", "-p", crate, "--test", bin_name, "smoke"])
+            # TT-03: Run root non-server integration binary unfiltered instead of hardcoded `"smoke"`.
+            _add_cmd([cargo, "test", "-p", crate, "--test", bin_name])
 
     if router_auth_touched:
         _add_cmd([cargo, "test", "-p", "eve-server", "--lib", "router::binding"])
@@ -963,6 +1291,38 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
             cargo, "test", "-p", "eve-testkit", "--test", "property_coverage_suite",
             "test_t5_server_dispatch_and_quasar_gateway_routing",
         ])
+
+    # Path-triggered surgical rules T1..T6 (user decision 2026-11-20)
+    if t1_client_err_touched:
+        _add_cmd([cargo, "test", "-p", "eve-testkit", "--lib", T1_CLIENT_CONTRACT_TEST])
+    if t2_destiny_touched:
+        _add_cmd([cargo, "test", "-p", "eve-destiny", "--lib"])
+        _add_cmd([cargo, "test", "-p", "eve-destiny", "--test", "t11_destiny_differential"])
+        for tflt in T2_DESTINY_IT_TESTS:
+            _add_cmd([cargo, "test", "-p", "eve-server", "--test", "it", tflt])
+    if t3_corp_touched:
+        for tflt in T3_CORP_IT_TESTS:
+            _add_cmd([cargo, "test", "-p", "eve-server", "--test", "it", tflt])
+        for tflt in T3_CORP_LIB_TESTS:
+            _add_cmd([cargo, "test", "-p", "eve-server", "--lib", tflt])
+    if t4_combat_touched:
+        for tflt in T4_COMBAT_MODULE_IT_TESTS:
+            _add_cmd([cargo, "test", "-p", "eve-server", "--test", "it", tflt])
+        for tflt in T4_COMBAT_MODULE_LIB_TESTS:
+            _add_cmd([cargo, "test", "-p", "eve-server", "--lib", tflt])
+    if t5_struct_touched:
+        for tflt in T5_STRUCTURE_IT_TESTS:
+            _add_cmd([cargo, "test", "-p", "eve-server", "--test", "it", tflt])
+    if t6_proto_touched:
+        _add_cmd([cargo, "test", "-p", "eve-proto", "--lib", T6_PROTO_LIB_TEST])
+
+    # TT-06 / TT-29: Python unittest discovery suites when `tools/` changes
+    if client_harness_touched and os.path.isdir(os.path.join(root, "tools", "client-harness")):
+        _add_cmd([sys.executable, "-m", "unittest", "discover", "-s", "tools/client-harness", "-p", "test_*.py", "-v"])
+    if sde_import_touched and os.path.isdir(os.path.join(root, "tools", "sde-import")):
+        _add_cmd([sys.executable, "-m", "unittest", "discover", "-s", "tools/sde-import", "-p", "test_*.py", "-v"])
+    if tools_py_touched and os.path.isdir(os.path.join(root, "tools", "tests")):
+        _add_cmd([sys.executable, "-m", "unittest", "discover", "-s", "tools/tests", "-p", "test_*.py", "-v"])
 
     if not cmds:
         _add_cmd([cargo, "test", "-p", "eve-server", "--lib", "config::tests"])
@@ -1051,13 +1411,46 @@ def _coalesce_cargo_test_commands(cmds):
     return out
 
 
+_RUST_SUMMARY_RE = re.compile(r"^test result: (?:ok|FAILED)\.\s+(\d+) passed;\s+(\d+) failed;", re.M)
+_PY_UNITTEST_RAN_RE = re.compile(r"^Ran (\d+) tests? in [0-9.]+s\s*$", re.M)
+_PY_UNITTEST_STATUS_RE = re.compile(r"^(OK|FAILED)(?:\s*\(([^)]*)\))?\s*$", re.M)
+
+
+def _parse_test_counts(out):
+    """Parse anchored Rust `libtest` and Python `unittest` summaries without matching arbitrary log text (TT-23)."""
+    rust_matches = _RUST_SUMMARY_RE.findall(out)
+    passed = sum(int(p) for p, _ in rust_matches)
+    failed = sum(int(f) for _, f in rust_matches)
+
+    for m_ran in _PY_UNITTEST_RAN_RE.finditer(out):
+        ran = int(m_ran.group(1))
+        tail = out[m_ran.end():m_ran.end() + 240]
+        m_st = _PY_UNITTEST_STATUS_RE.search(tail)
+        py_fail = 0
+        py_skip = 0
+        if m_st:
+            details = m_st.group(2) or ""
+            for k in ("failures", "errors"):
+                km = re.search(r"\b%s=(\d+)" % k, details)
+                if km:
+                    py_fail += int(km.group(1))
+            sm = re.search(r"\bskipped=(\d+)", details)
+            if sm:
+                py_skip = int(sm.group(1))
+            if m_st.group(1) == "FAILED" and py_fail == 0:
+                py_fail = 1
+        passed += max(0, ran - py_fail - py_skip)
+        failed += py_fail
+    return passed, failed
+
+
 def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=False):
     env = {k: v for k, v in os.environ.items() if k not in WRAPPER_ENV}
-    # Isolated from agent artifacts. Disable incremental cache (~7.5 GiB/slot) so 5 concurrent review slots stay lean.
+    # Isolated from agent artifacts. Disable incremental cache (~7.5 GiB/slot) so concurrent review slots stay lean.
     env["CARGO_TARGET_DIR"] = os.environ.get("EVOMU_REVIEW_TARGET_DIR") or os.path.join(sdir, "target")
     env["CARGO_INCREMENTAL"] = "0"
     # Strictly enforce Workspace Rule 3 (`-j 4`, `RUST_TEST_THREADS=4`) on every child `cargo test`
-    # so 5 concurrent review slots never spawn 64..80 WorldState/EveDb threads and exhaust swap.
+    # so concurrent review slots never exhaust macOS memory/swap.
     env["CARGO_BUILD_JOBS"] = "4"
     env["RUST_TEST_THREADS"] = "4"
     # Reuse sccache for fast compilation when available.
@@ -1071,10 +1464,11 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
     use_full = full_workspace or os.environ.get("EVOMU_FULL_WORKSPACE_TESTS") == "1"
     raw_cmds = [[cargo, "test", "-j", "4", "--workspace", "--no-fail-fast"]] if use_full else derive_affected_test_commands(root, base, cargo)
     cmds = [_ensure_cargo_j4(c) for c in raw_cmds]
-    if not use_full and any(c and c[-1] in SENTINEL_IT_FILTERS for c in cmds):
+    if not use_full and any(c and os.path.basename(c[0]) == "cargo" and c[-1] in SENTINEL_IT_FILTERS for c in cmds):
         cmds.insert(0, [cargo, "check", "-j", "4", "--workspace", "--bins"])
     cmds = _coalesce_cargo_test_commands(cmds)
-    slot_fh = _acquire_cargo_test_slot(root)
+    has_cargo = any(c and os.path.basename(c[0]) == "cargo" for c in cmds)
+    slot_fh = _acquire_cargo_test_slot(root) if has_cargo else None
     outs = []
     rc = 0
     try:
@@ -1086,8 +1480,10 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
                 rc = c_rc
         out = "\n\n".join(outs)
         if not use_full and rc == 0:
-            passed_so_far = sum(int(m) for m in re.findall(r"test result: \w+\. (\d+) passed", out))
+            passed_so_far, _ = _parse_test_counts(out)
             if passed_so_far == 0:
+                if slot_fh is None:
+                    slot_fh = _acquire_cargo_test_slot(root)
                 fallback_cmd = _ensure_cargo_j4([cargo, "test", "-j", "4", "-p", "eve-server", "--lib", "config::tests"])
                 c_rc, c_out = sh(fallback_cmd, root, env=env, timeout=timeout)
                 outs.append("$ %s\n%s" % (" ".join(fallback_cmd), c_out))
@@ -1098,17 +1494,27 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
         _release_cargo_test_slot(slot_fh)
     santa = max(out.count("This application has been blocked from executing"),
                 len(re.findall(r"signal: 9, SIGKILL", out)))  # Santa banner goes to the TTY
-    passed = sum(int(m) for m in re.findall(r"test result: \w+\. (\d+) passed", out))
-    failed = sum(int(m) for m in re.findall(r"(\d+) failed", out))
+    passed, failed = _parse_test_counts(out)
     killed = rc < 0
+    scoped = not use_full
     cmd_desc = " ; ".join(" ".join(c) for c in cmds)
-    header = ("ORCHESTRATOR SUMMARY: exit=%d santa_blocks=%d passed=%d failed=%d executed=%s\n"
+    exec_label = (
+        "INCOMPLETE (test runner killed by signal %d; tests and parity are partial)" % -rc
+        if killed
+        else (("yes (scoped)" if scoped else "yes (full_workspace)") if (passed + failed) > 0 else "NO")
+    )
+    header = ("ORCHESTRATOR SUMMARY: exit=%d santa_blocks=%d passed=%d failed=%d scoped=%s executed=%s\n"
               "command: CARGO_TARGET_DIR=%s %s\n\n"
-              % (rc, santa, passed, failed,
-                 "INCOMPLETE (cargo killed by signal %d; tests and parity are partial)" % -rc if killed
-                 else ("yes" if (passed + failed) > 0 else "NO"),
+              % (rc, santa, passed, failed, "true" if scoped else "false", exec_label,
                  env["CARGO_TARGET_DIR"], cmd_desc))
-    return header + out, {"exit": rc, "santa_blocks": santa, "passed": passed, "failed": failed, "killed": killed, "scoped": not use_full}
+    return header + out, {
+        "exit": rc,
+        "santa_blocks": santa,
+        "passed": passed,
+        "failed": failed,
+        "killed": killed,
+        "scoped": scoped,
+    }
 
 
 class TestRun(object):
@@ -1160,10 +1566,247 @@ def code_patch_id(root, commit):
     return out.split()[0] if out.split() else ""
 
 
+_TEST_REGRESSION_RE = re.compile(
+    r"\b(?:flaky|flake|flakiness|now\s+fails?|breaks?\s+existing\s+test|"
+    r"existing\s+tests?\b[^.\n]{0,60}\b(?:fail|fails|failing|flaky|broke|broken)|"
+    r"tests?\s+(?:is|are)\s+(?:now\s+)?(?:flaky|failing))\b",
+    re.I,
+)
+_EVIDENCE_PATH_RE = re.compile(r"([A-Za-z0-9_./\-]+\.(?:rs|py|md|toml|json|sql|sh|proto|txt))\b")
+
+
+def _is_test_regression_finding(finding):
+    blob = " ".join(str(finding.get(k, "") or "") for k in ("title", "evidence", "fix"))
+    return bool(_TEST_REGRESSION_RE.search(blob))
+
+
+def _finding_touches_changed_files(finding, changed_files):
+    if not changed_files:
+        return False
+    norm_changed = {f.replace("\\", "/") for f in changed_files}
+    basenames = {f.rsplit("/", 1)[-1] for f in norm_changed}
+    blob = "%s %s" % (finding.get("evidence", ""), finding.get("title", ""))
+    cited = [m.replace("\\", "/") for m in _EVIDENCE_PATH_RE.findall(blob)]
+    if not cited:
+        return True  # No file cited -> cannot prove finding is strictly pre-existing outside the diff
+    for path in cited:
+        if path in norm_changed:
+            return True
+        if any(cf.endswith("/" + path) or cf == path for cf in norm_changed):
+            return True
+        if "/" not in path and path in basenames:
+            return True
+    return False
+
+
+def _enforce_verdict_rubric(verdict, so, changed_files=()):
+    """Mechanically enforce PROC-01 verdict rules:
+    - Any P0 finding -> FAIL
+    - Any FALSE claim -> FAIL
+    - Any P1 finding in the branch's own diff (`scope == "own_diff"`, or unspecified scope citing changed
+      files / no file) -> FAIL
+    - Any finding reporting a flaky/failing existing test (`scope == "existing_test_regression"` or
+      test-regression text) -> FAIL
+    - PASS_WITH_ISSUES is permitted ONLY for strictly pre-existing P1s outside the branch's own changes."""
+    if verdict not in ("PASS", "PASS_WITH_ISSUES"):
+        return verdict, []
+    reasons = []
+    for c in so.get("claims_assessment", []) or []:
+        if str(c.get("status", "")).upper() == "FALSE":
+            reasons.append("FALSE claim: %s" % str(c.get("claim", ""))[:80])
+    for f in so.get("blocking_findings", []) or []:
+        sev = str(f.get("severity", "")).upper()
+        fid = str(f.get("id", "finding"))
+        scope = str(f.get("scope", "") or "").strip().lower()
+        if sev == "P0":
+            reasons.append("P0 finding %s" % fid)
+        elif sev == "P1":
+            if scope == "existing_test_regression" or _is_test_regression_finding(f):
+                reasons.append("flaky/failing existing-test finding %s" % fid)
+            elif scope == "own_diff":
+                reasons.append("own-diff P1 %s" % fid)
+            elif scope == "pre_existing":
+                continue
+            elif _finding_touches_changed_files(f, changed_files):
+                reasons.append("own-diff P1 %s (unscoped)" % fid)
+    if reasons:
+        so["summary"] = (
+            "[RUBRIC ENFORCEMENT (PROC-01): %s -> verdict promoted from %s to FAIL] "
+            % ("; ".join(reasons[:5]), verdict)
+        ) + so.get("summary", "")
+        return "FAIL", reasons
+    return verdict, []
+
+
+def _newest_trunk_ref(root):
+    """Return the newest available trunk ref among `origin/main` and `main`, or None."""
+    has_om = subprocess.run(["git", "rev-parse", "--verify", "-q", "origin/main"], cwd=root, capture_output=True).returncode == 0
+    has_m = subprocess.run(["git", "rev-parse", "--verify", "-q", "main"], cwd=root, capture_output=True).returncode == 0
+    if has_om and has_m:
+        if subprocess.run(["git", "merge-base", "--is-ancestor", "origin/main", "main"], cwd=root, capture_output=True).returncode == 0:
+            return "main"
+        return "origin/main"
+    if has_om:
+        return "origin/main"
+    if has_m:
+        return "main"
+    return None
+
+
+def check_base_freshness(root, head="HEAD"):
+    """Cheap (<50ms) base-freshness & in-memory 3-way trial-merge check against trunk (`origin/main`/`main`, TT-04).
+    Never mutates the working tree or index."""
+    trunk = _newest_trunk_ref(root)
+    info = {
+        "trunk_ref": trunk,
+        "commits_behind": 0,
+        "commits_ahead": 0,
+        "merge_base": "",
+        "merge_conflict": False,
+        "conflict_files": [],
+        "overlapping_files": [],
+    }
+    if not trunk:
+        return info
+    mb = subprocess.run(["git", "merge-base", trunk, head], cwd=root, capture_output=True, text=True).stdout.strip()
+    info["merge_base"] = mb
+    behind_p = subprocess.run(["git", "rev-list", "--count", "%s..%s" % (head, trunk)], cwd=root, capture_output=True, text=True)
+    ahead_p = subprocess.run(["git", "rev-list", "--count", "%s..%s" % (trunk, head)], cwd=root, capture_output=True, text=True)
+    if behind_p.returncode == 0 and behind_p.stdout.strip().isdigit():
+        info["commits_behind"] = int(behind_p.stdout.strip())
+    if ahead_p.returncode == 0 and ahead_p.stdout.strip().isdigit():
+        info["commits_ahead"] = int(ahead_p.stdout.strip())
+    if info["commits_behind"] > 0 and mb:
+        t_files = set(
+            subprocess.run(["git", "diff", "--name-only", mb, trunk, "--", ".", ":(exclude).agents"],
+                           cwd=root, capture_output=True, text=True).stdout.splitlines()
+        )
+        h_files = set(
+            subprocess.run(["git", "diff", "--name-only", mb, head, "--", ".", ":(exclude).agents"],
+                           cwd=root, capture_output=True, text=True).stdout.splitlines()
+        )
+        info["overlapping_files"] = sorted(f for f in (t_files & h_files) if f.strip())
+        mt = subprocess.run(
+            ["git", "merge-tree", "--write-tree", "--name-only", trunk, head],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        if mt.returncode == 1:
+            info["merge_conflict"] = True
+            lines = [ln.strip() for ln in mt.stdout.splitlines() if ln.strip()]
+            # First line is the conflict tree SHA; remaining non-CONFLICT lines list conflicted paths.
+            cfiles = []
+            for ln in lines[1:]:
+                if ln.startswith("CONFLICT"):
+                    continue
+                if not re.fullmatch(r"[0-9a-f]{40}", ln):
+                    cfiles.append(ln)
+            info["conflict_files"] = sorted(set(cfiles))
+    return info
+
+
+def _collect_diff_parity_rows(root, base, head="HEAD"):
+    """Collect ledger row IDs referenced by `// parity:` tags on any test function added/modified
+    in `base..head` (plus untracked `.rs` files when `head == 'HEAD'`). Used to enforce real
+    `assume_tests_pass=False` parity closure on scoped test runs (TT-01)."""
+    parity_tag_re = re.compile(r"//+!?\s*parity:\s*(.+)$")
+    test_attr_re = re.compile(r"#\[(?:tokio::)?test\b|#\[rstest\b|#\[test_case\b|#\[proptest\b|#\[test\(")
+    fn_re = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<(]")
+
+    def _extract_tags(line):
+        m = parity_tag_re.search(line)
+        if not m:
+            return set()
+        return {t.strip() for t in m.group(1).split(",") if t.strip() and "*" not in t}
+
+    diff_cmd = ["git", "diff", "-U0", base]
+    if head != "HEAD":
+        diff_cmd.append(head)
+    diff_cmd += ["--", "crates/"]
+    _, diff_out = sh(diff_cmd, root)
+
+    touched_lines = {}
+    rows = set()
+    cur_f = None
+    for ln in diff_out.splitlines():
+        if ln.startswith("+++ b/"):
+            cur_f = ln[6:]
+        elif ln.startswith("@@") and cur_f and cur_f.endswith(".rs"):
+            m = re.search(r"\+(\d+)(?:,(\d+))?", ln)
+            if m:
+                a0 = int(m.group(1))
+                cnt = int(m.group(2)) if m.group(2) is not None else 1
+                touched_lines.setdefault(cur_f, set()).update(range(max(1, a0), max(1, a0) + max(1, cnt)))
+        elif cur_f and cur_f.endswith(".rs") and ln.startswith("+") and not ln.startswith("+++"):
+            rows |= _extract_tags(ln[1:])
+
+    if head == "HEAD":
+        _, untracked_out = sh(["git", "ls-files", "--others", "--exclude-standard", "--", "crates/"], root)
+        for uf in untracked_out.splitlines():
+            uf = uf.strip()
+            if uf.endswith(".rs"):
+                touched_lines[uf] = None
+
+    for rel_f, lset in touched_lines.items():
+        if head == "HEAD":
+            fp = os.path.join(root, rel_f)
+            if not os.path.isfile(fp):
+                continue
+            try:
+                lines = open(fp, encoding="utf-8", errors="replace").read().splitlines()
+            except OSError:
+                continue
+        else:
+            p = subprocess.run(["git", "show", "%s:%s" % (head, rel_f)], cwd=root, capture_output=True, text=True)
+            if p.returncode != 0:
+                continue
+            lines = p.stdout.splitlines()
+
+        test_starts = [i for i, l in enumerate(lines) if test_attr_re.search(l)]
+        blocks = []
+        for k, attr_idx in enumerate(test_starts):
+            next_attr = test_starts[k + 1] if k + 1 < len(test_starts) else len(lines)
+            start_idx = attr_idx
+            while start_idx > 0 and lines[start_idx - 1].lstrip().startswith(("//", "#[")):
+                start_idx -= 1
+            fn_idx = None
+            for j in range(attr_idx, min(attr_idx + 8, next_attr)):
+                if fn_re.search(lines[j]):
+                    fn_idx = j
+                    break
+            if fn_idx is not None:
+                blocks.append((start_idx, attr_idx, fn_idx))
+        for k, (start_idx, _attr_idx, fn_idx) in enumerate(blocks):
+            end_idx = blocks[k + 1][0] if k + 1 < len(blocks) else len(lines)
+            while end_idx > fn_idx + 1 and not lines[end_idx - 1].strip():
+                end_idx -= 1
+            if lset is not None and not any((ln_i + 1) in lset for ln_i in range(start_idx, end_idx)):
+                continue
+            for j in range(start_idx, min(fn_idx + 13, end_idx)):
+                rows |= _extract_tags(lines[j])
+    return rows
+
+
+def _compute_unclosed_rows(pre_test_done_rows, real_rows, diff_parity_rows, scoped):
+    """Return sorted ledger rows expected to be closed that failed to close in `real_rows`
+    (`assume_tests_pass=False`). Full-workspace runs verify all `pre_test_done_rows`;
+    scoped runs verify every ledger row tagged/touched by the branch diff (TT-01)."""
+    acceptable = ("DONE", "NA", "FLAGGED_FAKE", "BLOCKED_BY_FEATURES", "PARKED", "SUPERVISOR_OWNED")
+    if not scoped:
+        target_rows = pre_test_done_rows
+    else:
+        target_rows = {rid for rid in diff_parity_rows if rid in real_rows}
+    return sorted(
+        rid for rid in target_rows
+        if (real_rows.get(rid) or {}).get("status") not in acceptable
+    )
+
+
 def code_review_verdict(r):
     """The code reviewer's own verdict for a claims review record. A review the code reviewer passed but the test
-    gate downgraded is recorded as FAIL; its code verdict is still PASS/PASS_WITH_ISSUES when the test gate failed
-    and the reviewer raised no P0 of its own (result.json keeps the reviewer's structured verdict). None when unknown."""
+    gate downgraded is recorded as FAIL; its code verdict is still PASS/PASS_WITH_ISSUES only when the test gate
+    failed alone and the reviewer raised no P0, own-diff P1, or test-regression finding (PROC-01). None when unknown."""
     if r.get("verdict") in CARRY_VERDICTS:
         return r["verdict"]
     if r.get("verdict") != "FAIL" or not r.get("report"):
@@ -1172,12 +1815,17 @@ def code_review_verdict(r):
         so = json.load(open(os.path.join(os.path.dirname(r["report"]), "result.json"))).get("structured", {})
     except Exception:  # noqa: BLE001
         return None
-    # PASS_WITH_ISSUES reviews list their P1 findings as blocking too; only a P0 of the reviewer's own disqualifies.
-    own_p0 = [f for f in so.get("blocking_findings", []) or []
-              if f.get("id") != "ORCHESTRATOR-POST-REVIEW-TEST-FAIL" and f.get("severity") == "P0"]
-    if own_p0 or so.get("verdict") not in CARRY_VERDICTS:
+    if so.get("verdict") not in CARRY_VERDICTS:
         return None
-    return so["verdict"]
+    non_orch = [
+        f for f in (so.get("blocking_findings", []) or [])
+        if not str(f.get("id", "")).startswith("ORCHESTRATOR-")
+    ]
+    check_so = dict(so, blocking_findings=non_orch)
+    enforced, _ = _enforce_verdict_rubric(so["verdict"], check_so, changed_files=())
+    if enforced not in CARRY_VERDICTS:
+        return None
+    return enforced
 
 
 def find_carry_review(root, head, head_pid=None):
@@ -1252,7 +1900,7 @@ def py2_check(root):
 def build_prompt(ctx_dir, has_claims, mode="claims"):
     brief = open(GAP_BRIEF if mode == "gap-audit" else BRIEF).read()
     lines = [brief, "\n\n---\n## This run\n",
-             "- Context directory (read these first): `%s`\n" % ctx_dir,
+             "- Context directory (read these first): `%s` (includes `base_freshness.txt`, `increment_size.txt`, `tests.txt`, `diff.patch`)\n" % ctx_dir,
              "- Parity status (mechanical, authoritative for completeness): `%s/parity.md` and `parity.json`\n"
              % ctx_dir,
              "- Pinned ledger and auditor rows: `%s/`\n" % PARITY_DIR]
@@ -1266,6 +1914,11 @@ def build_prompt(ctx_dir, has_claims, mode="claims"):
     lines += [
         "- Do NOT modify any file. Produce your final answer strictly as the JSON object required "
         "by the schema; put the full human-readable report in `report_markdown`.\n",
+        "- PROC-01 VERDICT RUBRIC: Return `FAIL` for any P0, any FALSE claim, ANY P1 in this branch's own new/changed "
+        "code (`scope: \"own_diff\"`), or ANY finding that an existing test is now flaky/failing "
+        "(`scope: \"existing_test_regression\"`). Return `PASS_WITH_ISSUES` ONLY for strictly pre-existing P1 issues "
+        "outside this branch's own changes (`scope: \"pre_existing\"`). The orchestrator mechanically promotes "
+        "own-diff P1s and existing-test regressions to `FAIL`.\n",
         "- IMPORTANT (headless mode): any message that contains text without a tool call ends your session. "
         "Work silently: call tools back-to-back with no narration, and emit text only once, as the final JSON.\n",
         "- IMPORTANT: shell/terminal commands are auto-denied in this headless session, and a denied command "
@@ -1279,10 +1932,10 @@ def build_prompt(ctx_dir, has_claims, mode="claims"):
 
 def render_report(meta, so, parity_md=""):
     out = ["# EvoMu independent %s: %s" % ("gap audit" if meta.get("mode") == "gap-audit" else "review",
-                                          so.get("verdict", meta["verdict"])), "",
+                                          meta["verdict"]), "",
            "| Field | Value |", "|---|---|"]
     for k in ["verdict", "mode", "timestamp", "model", "effort", "head", "base", "tree", "tests_executed",
-              "test_summary", "parity_percent", "conversation_id"]:
+              "test_summary", "commits_behind_trunk", "merge_conflict", "parity_percent", "conversation_id"]:
         out.append("| %s | `%s` |" % (k, meta.get(k)))
     out += ["", "## Summary", so.get("summary", "")]
     if meta.get("mode") == "gap-audit":
@@ -1297,11 +1950,11 @@ def render_report(meta, so, parity_md=""):
             out.append("- `%s`: %s" % (r.get("id"), r.get("evidence")))
         out += ["", "Cleared fake flags: %s" % ", ".join(so.get("cleared_fake", []) or ["none"])]
     else:
-        out += ["", "## Blocking findings", "| ID | Sev | Title | Evidence | Fix |", "|---|---|---|---|---|"]
+        out += ["", "## Blocking findings", "| ID | Sev | Scope | Title | Evidence | Fix |", "|---|---|---|---|---|---|"]
         for f in so.get("blocking_findings", []):
-            out.append("| %s | %s | %s | %s | %s |" % tuple(
+            out.append("| %s | %s | %s | %s | %s | %s |" % tuple(
                 str(f.get(k, "")).replace("|", "\\|").replace("\n", " ")
-                for k in ["id", "severity", "title", "evidence", "fix"]))
+                for k in ["id", "severity", "scope", "title", "evidence", "fix"]))
         out += ["", "## Claims assessment", "| Claim | Status | Evidence |", "|---|---|---|"]
         for c in so.get("claims_assessment", []):
             out.append("| %s | %s | %s |" % tuple(
@@ -1481,19 +2134,20 @@ def apply_gap_audit(so, ts):
     return added
 
 
-def run_parity(root, sdir, ctx, assume_tests_pass=False):
+def run_parity(root, sdir, ctx, assume_tests_pass=False, out_name="parity.json", md_name="parity.md"):
     tests = os.path.join(ctx, "tests.txt")
+    out_path = os.path.join(ctx, out_name)
+    md_path = os.path.join(ctx, md_name)
     cmd = [sys.executable, PARITY_STATUS, "--tests", tests, "--attest-dir", os.path.join(ctx, "attest"),
-           "--out", os.path.join(ctx, "parity.json"), "--md", os.path.join(ctx, "parity.md"),
-           "--state-dir", sdir]
+           "--out", out_path, "--md", md_path, "--state-dir", sdir]
     if assume_tests_pass:
         cmd.append("--assume-tests-pass")
     rc, out = sh(cmd, root, timeout=900)
     try:
-        summ = json.load(open(os.path.join(ctx, "parity.json")))["summary"]
+        summ = json.load(open(out_path))["summary"]
     except Exception:  # noqa: BLE001
         summ = {"percent_closed": None, "complete": False, "error": out[-2000:]}
-    md = open(os.path.join(ctx, "parity.md")).read() if os.path.exists(os.path.join(ctx, "parity.md")) else out
+    md = open(md_path).read() if os.path.exists(md_path) else out
     return summ, md
 
 
@@ -1526,6 +2180,9 @@ def background_gap_audit(a, root, sdir):
     run_dir = os.path.abspath(a.reuse_context)
     ctx = os.path.join(run_dir, "context")
     meta0 = json.load(open(os.path.join(ctx, "run_meta.json")))
+    if (meta0.get("test_meta") or {}).get("pending"):
+        print("[review] refusing to run background gap-audit on provisional/pending tests.txt (TT-23)")
+        return 3
     ts, tree_before = meta0["ts"], meta0["tree"]
     parity = meta0.get("parity") or {}
     parity_md = open(os.path.join(ctx, "parity.md")).read() if os.path.exists(os.path.join(ctx, "parity.md")) else ""
@@ -1547,9 +2204,14 @@ def background_gap_audit(a, root, sdir):
     write(rpath, report)
     write(os.path.join(sdir, "latest_gap_audit.md"), report)
     write(os.path.join(run_dir, "gap_result.json"), json.dumps({"meta": meta, "structured": so}, indent=2))
+    rec = dict(meta, report=rpath)
     st = rl.load_state(root)
-    st.setdefault("reviews", []).append(dict(meta, report=rpath))
+    st.setdefault("reviews", []).append(rec)
     rl.save_state(root, st)
+    try:
+        rl.archive_review(root, rec, run_dir)
+    except Exception as e:  # noqa: BLE001
+        print("[review] WARNING: could not archive background gap-audit %s: %s" % (ts, e))
     print("[review] background gap-audit VERDICT: %s (%s)" % (verdict, rpath))
     return UNAVAILABLE_EXIT if verdict == "UNAVAILABLE" else GAP_EXIT.get(verdict, 3)
 
@@ -1623,7 +2285,7 @@ def snapshot_review(a, root):
             argv.append(x)
         if a.claims_file:
             argv += ["--claims-file", os.path.abspath(a.claims_file)]
-        argv += ["--in-place"]
+        argv += ["--in-place", "--from-snapshot"]
         if not a.no_auto_audit and not a.foreground_audit:
             argv += ["--foreground-audit"]  # the snapshot is deleted afterwards, so no detached audits from it
         env = dict(os.environ, EVOMU_REVIEW_TARGET_DIR=os.path.join(sdir, "target"))
@@ -1697,6 +2359,7 @@ def main():
                          "can keep editing and committing in this worktree while the review runs.")
     ap.add_argument("--in-place", action="store_true",
                     help="Review this worktree's working tree directly (legacy; the tree must stay untouched)")
+    ap.add_argument("--from-snapshot", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--final", action="store_true",
                     help="Final-acceptance claims review: reviewer chain %s (first with quota wins). Only a PASS "
                          "from a --final review satisfies final_gate.py. Use once per milestone tree, not for "
@@ -1733,6 +2396,50 @@ def main():
     write(os.path.join(ctx, "git_status.txt"), sh(["git", "status", "--short"], root)[1])
     write(os.path.join(ctx, "diffstat.txt"), sh(["git", "diff", "--stat", base, "--", ".", ":(exclude).agents"], root)[1])
     write(os.path.join(ctx, "diff.patch"), sh(["git", "diff", base, "--", ".", ":(exclude).agents", ":(exclude)docs/index/*.json"], root)[1])
+    _, changed_files_out = sh(["git", "diff", "--name-only", base, "--", ".", ":(exclude).agents"], root)
+    changed_files = sorted({ln.strip() for ln in changed_files_out.splitlines() if ln.strip()})
+
+    # TT-04: Cheap (<50ms) base-freshness & in-memory trial-merge check against trunk (`origin/main`/`main`).
+    freshness = check_base_freshness(root, head)
+    fresh_lines = [
+        "trunk_ref: %s" % (freshness["trunk_ref"] or "(none)"),
+        "commits_behind: %d" % freshness["commits_behind"],
+        "commits_ahead: %d" % freshness["commits_ahead"],
+        "merge_base: %s" % (freshness["merge_base"][:12] if freshness["merge_base"] else "(none)"),
+        "merge_conflict: %s" % ("YES" if freshness["merge_conflict"] else "no"),
+    ]
+    if freshness["conflict_files"]:
+        fresh_lines.append("conflict_files: %s" % ", ".join(freshness["conflict_files"]))
+    if freshness["overlapping_files"]:
+        fresh_lines.append("overlapping_files_modified_on_trunk: %s" % ", ".join(freshness["overlapping_files"][:30]))
+    write(os.path.join(ctx, "base_freshness.txt"), "\n".join(fresh_lines) + "\n")
+    if freshness["commits_behind"] > 0:
+        print(
+            "[review] base freshness: %d commit(s) behind %s (merge_conflict=%s, overlapping_files=%d)"
+            % (
+                freshness["commits_behind"],
+                freshness["trunk_ref"],
+                freshness["merge_conflict"],
+                len(freshness["overlapping_files"]),
+            ),
+            flush=True,
+        )
+
+    # PROC-12: Enforce 60-file / 8,000-line increment-size cap directly inside run_review.py.
+    inc_size = None
+    inc_viols = []
+    try:
+        import preflight as pf_mod  # noqa: E402
+        inc_size = pf_mod.increment_size(root)
+        inc_viols = pf_mod.lint_increment_size(root, a.claims_file)
+    except Exception:  # noqa: BLE001
+        inc_size, inc_viols = None, []
+    if inc_size is not None:
+        write(
+            os.path.join(ctx, "increment_size.txt"),
+            "files=%d lines=%d cap_files=60 cap_lines=8000 violations=%d\n" % (inc_size[0], inc_size[1], len(inc_viols)),
+        )
+
     agents_ref = base
     for cand_ref in ("origin/main", "main"):
         if subprocess.run(["git", "rev-parse", "--verify", "-q", cand_ref], cwd=root, capture_output=True).returncode == 0:
@@ -1748,48 +2455,70 @@ def main():
 
     test_meta = {"executed": False, "note": "skipped by --skip-tests"}
     pre_test_done_rows = set()
+    diff_parity_rows = set()
     if a.skip_tests:
         write(os.path.join(ctx, "tests.txt"), "ORCHESTRATOR SUMMARY: tests skipped by --skip-tests (NOT executed)\n")
         parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=False)
     elif a.mode == "claims":
-        # The LLM code review and `cargo test --workspace` run at the same time (user decision 2026-11-11; before
-        # that, tests ran only after a passing code review). The reviewer sees this provisional tests.txt; the real
-        # results replace it when both finish, and a failing test run downgrades a passing verdict to FAIL.
-        sys.path.insert(0, os.path.join(HERE, "parity"))
-        import parity_status as ps_mod  # noqa: E402
-        fn_names, total_tests, total_ignored = ps_mod.discover_test_fns(ps_mod.rust_files(root))
+        # TT-02 / PROC-03: NEVER fabricate synthetic `test <fn> ... ok` lines or fake workspace pass counts.
+        # Tests run concurrently alongside the LLM code review; write an honest PENDING notice into `tests.txt`,
+        # which is overwritten with the real scoped (or `--final` full-workspace) test output once tests finish.
+        scope_label = "CONCURRENT_WORKSPACE_TEST_GATE" if a.final else "CONCURRENT_SCOPED_TEST_GATE"
         provisional_header = (
-            "ORCHESTRATOR SUMMARY: exit=0 santa_blocks=0 passed=%d failed=0 executed=CONCURRENT_TEST_GATE "
-            "(cargo test --workspace is running while you review; any compile/test failure or unclosed row "
-            "automatically downgrades the verdict to FAIL)\n\n" % total_tests
+            "ORCHESTRATOR SUMMARY: status=PENDING exit=0 santa_blocks=0 passed=0 failed=0 scoped=%s executed=%s\n"
+            "(%s are running concurrently while you review; no test pass count exists yet. "
+            "Real test output replaces this file before the verdict is recorded, and any compile/test failure "
+            "or unclosed parity row automatically downgrades the verdict to FAIL. "
+            "Do NOT cite a workspace-wide pass count from this placeholder.)\n"
+            % (
+                "false" if a.final else "true",
+                scope_label,
+                "Full workspace tests (`cargo test --workspace --no-fail-fast`)" if a.final
+                else "Targeted affected tests (sentinels + surgical canaries + path/reverse-dep/Python suites)",
+            )
         )
-        synth_body = "\n".join(
-            ["test %s ... ok" % fn for fn in sorted(fn_names)] +
-            ["test result: ok. %d passed; 0 failed; %d ignored; 0 measured; 0 filtered out" % (total_tests, total_ignored)]
+        write(os.path.join(ctx, "tests.txt"), provisional_header)
+        test_meta = {
+            "exit": None,
+            "santa_blocks": 0,
+            "passed": 0,
+            "failed": 0,
+            "killed": False,
+            "scoped": not a.final,
+            "pending": True,
+            "executed": False,
+        }
+        # Pre-test static parity view (saved separately as parity_static.json for preflight baseline diffing)
+        parity, parity_md = run_parity(
+            root, sdir, ctx, assume_tests_pass=True, out_name="parity_static.json", md_name="parity_static.md"
         )
-        write(os.path.join(ctx, "tests.txt"), provisional_header + synth_body + "\n")
-        test_meta = {"exit": 0, "santa_blocks": 0, "passed": total_tests, "failed": 0, "killed": False,
-                     "executed": "CONCURRENT_TEST_GATE"}
-        parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=True)
+        shutil.copy(os.path.join(ctx, "parity_static.json"), os.path.join(ctx, "parity.json"))
+        write(
+            os.path.join(ctx, "parity.md"),
+            "> Provisional pre-test static parity (`--assume-tests-pass`); overwritten with real executed parity "
+            "(`assume_tests_pass=False`) after tests complete.\n\n" + parity_md,
+        )
         try:
             pre_test_done_rows = {
-                rid for rid, rinfo in json.load(open(os.path.join(ctx, "parity.json")))["rows"].items()
+                rid for rid, rinfo in json.load(open(os.path.join(ctx, "parity_static.json")))["rows"].items()
                 if rinfo.get("status") == "DONE"
             }
         except Exception:  # noqa: BLE001
             pre_test_done_rows = set()
-        print("[review] pre-test static parity: %s%% closed (%s/%s rows); cargo test runs alongside the code review"
-              % (parity.get("percent_closed"), parity.get("closed_rows"), parity.get("total_rows")))
+        diff_parity_rows = _collect_diff_parity_rows(root, base)
+        print("[review] pre-test static parity: %s%% closed (%s/%s rows); %d diff-tagged row(s); tests run alongside code review"
+              % (parity.get("percent_closed"), parity.get("closed_rows"), parity.get("total_rows"), len(diff_parity_rows)))
     else:
-        print("[review] running affected cargo tests (isolated target dir)...")
+        print("[review] running affected tests (isolated target dir)...")
         text, tm = run_tests(root, sdir, a.test_timeout, attest_dir=os.path.join(ctx, "attest"), base=base,
                              full_workspace=a.final)
         write(os.path.join(ctx, "tests.txt"), text)
         test_meta = dict(tm, executed=(tm["passed"] + tm["failed"]) > 0 and not tm.get("killed"))
         print("[review] tests: %s" % test_meta)
-        parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=not a.final)
-        print("[review] parity: %s%% closed (%s/%s rows)" % (parity.get("percent_closed"), parity.get("closed_rows"),
-                                                            parity.get("total_rows")))
+        # TT-01: Always compute real post-test parity (`assume_tests_pass=False`).
+        parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=False)
+        print("[review] parity (executed): %s%% closed (%s/%s rows)" % (parity.get("percent_closed"), parity.get("closed_rows"),
+                                                                        parity.get("total_rows")))
 
     # Test-loop timing recorded by preflight (claims_template's "Test loop" line) so the reviewer can verify it.
     try:
@@ -1812,7 +2541,7 @@ def main():
 
     write(os.path.join(ctx, "run_meta.json"), json.dumps({
         "ts": ts, "head": head, "base": base, "tree": tree_before, "test_meta": test_meta,
-        "parity": parity, "model": a.model, "effort": a.effort}))
+        "parity": parity, "base_freshness": freshness, "model": a.model, "effort": a.effort}))
     has_claims = bool(a.claims_file and os.path.exists(a.claims_file))
     if has_claims:
         shutil.copy(a.claims_file, os.path.join(ctx, "claims.md"))
@@ -1840,7 +2569,8 @@ def main():
         meta = {"verdict": verdict, "mode": mode, "timestamp": ts, "model": model_used or a.model, "effort": a.effort,
                 "head": head, "base": base, "tree": tree_before, "tests_executed": test_meta.get("executed"),
                 "test_summary": json.dumps(test_meta), "parity_percent": parity.get("percent_closed"),
-                "parity_complete": parity.get("complete"), "conversation_id": conv}
+                "parity_complete": parity.get("complete"), "commits_behind_trunk": freshness.get("commits_behind", 0),
+                "merge_conflict": bool(freshness.get("merge_conflict")), "conversation_id": conv}
         if mode == "claims":
             meta.update(extra_meta)  # patch_id always; carried_from / carried_from_head on a carried-over review
         if a.final and mode == "claims":
@@ -1850,12 +2580,54 @@ def main():
         write(rpath, report)
         write(os.path.join(sdir, "latest_gap_audit.md" if mode == "gap-audit" else "latest.md"), report)
         write(os.path.join(run_dir, "%sresult.json" % prefix), json.dumps({"meta": meta, "structured": so}, indent=2))
+        rec = dict(meta, report=rpath)
         st = rl.load_state(root)
-        st.setdefault("reviews", []).append(dict(meta, report=rpath))
+        st.setdefault("reviews", []).append(rec)
         rl.save_state(root, st)
+        if not a.from_snapshot:
+            # TT-06: Always archive direct `--in-place` reviews to `.evomu-reviews/review_archive/`
+            # (snapshot_review archives once on the parent checkout with snapshot_commit).
+            try:
+                rl.archive_review(root, rec, run_dir)
+            except Exception as e:  # noqa: BLE001
+                print("[review] WARNING: could not archive --in-place review %s: %s" % (ts, e))
         print("[review] %s VERDICT: %s" % (mode, verdict))
         print("[review] report: %s" % rpath)
         return rpath
+
+    # Mechanical pre-reviewer hard gates for claims mode (TT-04 merge conflict, PROC-12 increment cap)
+    if a.mode == "claims" and not a.dry_run:
+        pre_blockers = []
+        if freshness.get("merge_conflict"):
+            pre_blockers.append({
+                "id": "ORCHESTRATOR-MERGE-CONFLICT",
+                "severity": "P0",
+                "scope": "own_diff",
+                "title": "Branch has merge conflict against %s" % (freshness.get("trunk_ref") or "origin/main"),
+                "evidence": "%s/base_freshness.txt (conflicts: %s)" % (ctx, ", ".join(freshness.get("conflict_files") or ["(see git merge-tree)"])),
+                "fix": "Rebase onto latest %s, resolve conflicts, re-run preflight and targeted tests, then re-run run_review.py." % (freshness.get("trunk_ref") or "origin/main"),
+            })
+        if inc_viols:
+            pre_blockers.append({
+                "id": "ORCHESTRATOR-INCREMENT-TOO-LARGE",
+                "severity": "P0",
+                "scope": "own_diff",
+                "title": "Unmerged diff exceeds 60-file / 8,000-line increment cap (PROC-12)",
+                "evidence": "%s/increment_size.txt (%s)" % (ctx, inc_viols[0][1]),
+                "fix": "Split the branch into smaller increments (<= 60 files and <= 8,000 changed lines) and land separately.",
+            })
+        if pre_blockers:
+            so_block = {
+                "verdict": "FAIL",
+                "summary": "Orchestrator pre-review gate FAIL: %s" % "; ".join(b["title"] for b in pre_blockers),
+                "blocking_findings": pre_blockers,
+                "claims_assessment": [],
+                "open_findings_status": [],
+                "report_markdown": "## Orchestrator Pre-Review Gate Failure\n\n"
+                + "\n".join("- **%s**: %s (`%s`)" % (b["id"], b["title"], b["evidence"]) for b in pre_blockers) + "\n",
+            }
+            record("claims", "FAIL", so_block, "", "", model_used="orchestrator-pregate")
+            return EXIT["FAIL"]
 
     rc = 0
     modes = [a.mode]
@@ -1867,6 +2639,9 @@ def main():
     for mode in modes:
         prefix = "" if mode == a.mode else "gap_"
         if mode == "gap-audit" and mode != a.mode and not a.foreground_audit and not a.dry_run:
+            if test_meta.get("pending"):
+                print("[review] skipping detached gap-audit because test run did not finalize (TT-23)")
+                continue
             log = open(os.path.join(run_dir, "gap_background.log"), "w")
             subprocess.Popen([sys.executable, os.path.abspath(__file__), "--mode", "gap-audit",
                               "--reuse-context", run_dir, "--model", a.model, "--effort", a.effort,
@@ -1893,7 +2668,9 @@ def main():
             if os.environ.get("EVOMU_REVIEW_NO_CARRY") == "1":
                 carry = None
             if not a.skip_tests:
-                print("[review] starting affected cargo tests now, alongside the code review...", flush=True)
+                print("[review] starting %s tests now, alongside the code review..." % (
+                    "full workspace" if final_run else "affected"
+                ), flush=True)
                 test_run = TestRun(root, sdir, a.test_timeout, os.path.join(ctx, "attest"), base=base,
                                    full_workspace=final_run)
         if carry:
@@ -1915,6 +2692,8 @@ def main():
             verdict, so, conv, model_used = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, valid, prefix,
                                                             check_tree=None if test_run is not None else True,
                                                             chain=FINAL_CHAIN if final_run else None)
+            if mode == "claims" and verdict in ("PASS", "PASS_WITH_ISSUES"):
+                verdict, _rubric_reasons = _enforce_verdict_rubric(verdict, so, changed_files=changed_files)
         if test_run is not None:
             if verdict not in ("PASS", "PASS_WITH_ISSUES"):
                 print("[review] code review returned %s; waiting for the test run so this report covers both..."
@@ -1940,43 +2719,46 @@ def main():
                 pf_mod.record_timing(root, wall_test, text)
             except Exception:  # noqa: BLE001
                 pass
-            parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=not final_run)
-            print("[review] post-review parity: %s%% closed (%s/%s rows)"
+            # TT-01: ALWAYS evaluate post-test parity with `assume_tests_pass=False` against real `tests.txt`.
+            parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=False)
+            print("[review] post-review parity (executed): %s%% closed (%s/%s rows)"
                   % (parity.get("percent_closed"), parity.get("closed_rows"), parity.get("total_rows")), flush=True)
             write(os.path.join(ctx, "run_meta.json"), json.dumps({
                 "ts": ts, "head": head, "base": base, "tree": tree_before, "test_meta": test_meta,
-                "parity": parity, "model": a.model, "effort": a.effort}))
+                "parity": parity, "base_freshness": freshness, "model": a.model, "effort": a.effort}))
             real_rows = {}
             try:
                 real_rows = json.load(open(os.path.join(ctx, "parity.json"))).get("rows", {})
             except Exception:  # noqa: BLE001
                 pass
-            unclosed_rows = sorted(
-                rid for rid in pre_test_done_rows
-                if (real_rows.get(rid) or {}).get("status") not in ("DONE", "NA", "FLAGGED_FAKE", "BLOCKED_BY_FEATURES")
+            unclosed_rows = _compute_unclosed_rows(
+                pre_test_done_rows, real_rows, diff_parity_rows, scoped=bool(tm.get("scoped"))
             )
             tests_ok = (tm["exit"] == 0 and tm["failed"] == 0 and tm["passed"] > 0
                         and not tm.get("killed") and tm.get("santa_blocks", 0) == 0)
             if not tests_ok or unclosed_rows:
                 failing_names = re.findall(r"^test (\S+) \.\.\. FAILED", text, re.M)
+                failing_names += re.findall(r"^(?:FAIL|ERROR): (\S+)", text, re.M)
                 err_tail = "\n".join(text.splitlines()[-40:])
-                reason = ("exit=%d, passed=%d, failed=%d, killed=%s, santa=%d, failing=%s, unclosed_rows=%s"
-                          % (tm["exit"], tm["passed"], tm["failed"], tm.get("killed"), tm.get("santa_blocks", 0),
-                             failing_names[:10], unclosed_rows[:10]))
+                reason = ("exit=%d, passed=%d, failed=%d, scoped=%s, killed=%s, santa=%d, failing=%s, unclosed_rows=%s"
+                          % (tm["exit"], tm["passed"], tm["failed"], bool(tm.get("scoped")), tm.get("killed"),
+                             tm.get("santa_blocks", 0), failing_names[:10], unclosed_rows[:10]))
                 downgraded = verdict in ("PASS", "PASS_WITH_ISSUES")
                 if downgraded:
                     verdict = "FAIL"
+                gate_label = "cargo test --workspace gate" if final_run else "affected test gate"
                 so.setdefault("blocking_findings", []).insert(0, {
                     "id": "ORCHESTRATOR-POST-REVIEW-TEST-FAIL",
                     "severity": "P0",
-                    "title": "cargo test --workspace gate failed",
+                    "scope": "own_diff",
+                    "title": "%s failed" % gate_label,
                     "evidence": "%s/tests.txt (%s)" % (ctx, reason),
-                    "fix": "Fix the compilation error or failing test(s) in %s/tests.txt and re-run run_review.py." % ctx,
+                    "fix": "Fix the compilation error, failing test(s), or unclosed parity row(s) in %s/tests.txt and re-run run_review.py." % ctx,
                 })
                 so["summary"] = ("[TEST GATE FAILED (%s)%s] " % (reason, " -> verdict downgraded to FAIL" if downgraded else "")) + so.get("summary", "")
                 so["report_markdown"] = (
-                    "## Orchestrator Test Gate Failure\n\n`cargo test --workspace --no-fail-fast` failed "
-                    "(%s).\n\n```\n%s\n```\n\n" % (reason, err_tail)
+                    "## Orchestrator Test Gate Failure\n\n`%s` failed (%s).\n\n```\n%s\n```\n\n"
+                    % ("cargo test --workspace --no-fail-fast" if final_run else "affected test suite", reason, err_tail)
                 ) + so.get("report_markdown", "")
         if mode == "gap-audit" and verdict in GAP_EXIT:
             added = apply_gap_audit(so, ts)
