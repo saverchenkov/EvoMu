@@ -207,6 +207,78 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
+#[derive(Clone, Copy)]
+enum SpecialSiteRpcErrorCode {
+    NotInSiteSystem,
+    SiteAlreadyCompleted,
+    WaveNpcsRemaining,
+    SiteNotSpawned,
+    BallparkSpawnFailed,
+    DungeonNotFound,
+}
+
+impl SpecialSiteRpcErrorCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotInSiteSystem => "NotInSiteSystem",
+            Self::SiteAlreadyCompleted => "SiteAlreadyCompleted",
+            Self::WaveNpcsRemaining => "WaveNpcsRemaining",
+            Self::SiteNotSpawned => "SiteNotSpawned",
+            Self::BallparkSpawnFailed => "BallparkSpawnFailed",
+            Self::DungeonNotFound => "DungeonNotFound",
+        }
+    }
+
+    fn build(self, message: impl Into<String>) -> BridgeRpcError {
+        let msg = message.into();
+        BridgeRpcError::with_client_error(
+            self.as_str(),
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        )
+    }
+}
+
+type ConfirmedSpecialSiteBallMap = std::collections::HashMap<
+    u64,
+    (
+        std::sync::Weak<crate::system_actor::SystemRegistry>,
+        std::collections::HashSet<(SolarSystemId, i64)>,
+    ),
+>;
+
+static CONFIRMED_SPECIAL_SITE_BALLS: std::sync::OnceLock<
+    std::sync::Mutex<ConfirmedSpecialSiteBallMap>,
+> = std::sync::OnceLock::new();
+
+fn confirmed_special_site_balls() -> &'static std::sync::Mutex<ConfirmedSpecialSiteBallMap> {
+    CONFIRMED_SPECIAL_SITE_BALLS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn mark_special_site_ball_spawned(ctx: &ServerContext, sys_id: SolarSystemId, ball_id: i64) {
+    let mut map = confirmed_special_site_balls()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, (weak, _)| weak.strong_count() > 0);
+    let (_, set) = map
+        .entry(ctx.instance_id)
+        .or_insert_with(|| (Arc::downgrade(&ctx.systems), std::collections::HashSet::new()));
+    set.insert((sys_id, ball_id));
+}
+
+fn is_special_site_ball_confirmed_spawned(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    ball_id: i64,
+) -> bool {
+    confirmed_special_site_balls()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&ctx.instance_id)
+        .is_some_and(|(_, set)| set.contains(&(sys_id, ball_id)))
+}
+
 pub(crate) fn next_spec_seq(reg: &mut PveSpecialSitesRegistry) -> i64 {
     reg.next_seq += 1;
     reg.next_seq
@@ -614,7 +686,9 @@ pub(crate) fn deposit_loot_into_ship_or_container_in_snapshot(
 }
 
 pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
-    ensure_special_sites_spawned_for_systems(ctx, None).await;
+    if let Err(err) = ensure_special_sites_spawned_for_systems(ctx, None).await {
+        tracing::warn!(error = %err.message, code = %err.code, "Failed spawning special sites");
+    }
 }
 
 /// Lazily initializes and spawns special-site NPCs/beacons ONLY for `sys_id` so querying one
@@ -623,7 +697,9 @@ pub async fn ensure_special_sites_spawned_for_system(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
 ) {
-    ensure_special_sites_spawned_for_systems(ctx, Some(sys_id)).await;
+    if let Err(err) = ensure_special_sites_spawned_for_systems(ctx, Some(sys_id)).await {
+        tracing::warn!(system_id = sys_id, error = %err.message, code = %err.code, "Failed spawning special sites for system");
+    }
 }
 
 fn collect_triglavian_site_balls(sites: &[TriglavianSiteRecord]) -> Vec<(SolarSystemId, i64, u32, DVec3)> {
@@ -632,14 +708,18 @@ fn collect_triglavian_site_balls(sites: &[TriglavianSiteRecord]) -> Vec<(SolarSy
         if !s.completed {
             let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_122 };
             let base_x = 10_000.0 + (s_idx as f64) * 20_000.0;
-            t_list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, DVec3::new(base_x, 0.0, 0.0)));
-            if s.beacon_ball_id != 0 {
+            if s.boss_npc_ball_id > 0 {
+                t_list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, DVec3::new(base_x, 0.0, 0.0)));
+            }
+            if s.beacon_ball_id > 0 {
                 t_list.push((s.solar_system_id, s.beacon_ball_id, 42_538, DVec3::new(base_x - 500.0, 0.0, 0.0)));
             }
             for (e_idx, (&esc_bid, &esc_tid)) in s.escort_ball_ids.iter().zip(&s.escort_type_ids).enumerate() {
-                let offset_x = base_x + 5_000.0 + (e_idx as f64) * 1_000.0;
-                let offset_y = 2_000.0 + (e_idx as f64) * 1_500.0;
-                t_list.push((s.solar_system_id, esc_bid, esc_tid, DVec3::new(offset_x, offset_y, 0.0)));
+                if esc_bid > 0 {
+                    let offset_x = base_x + 5_000.0 + (e_idx as f64) * 1_000.0;
+                    let offset_y = 2_000.0 + (e_idx as f64) * 1_500.0;
+                    t_list.push((s.solar_system_id, esc_bid, esc_tid, DVec3::new(offset_x, offset_y, 0.0)));
+                }
             }
         }
     }
@@ -649,27 +729,44 @@ fn collect_triglavian_site_balls(sites: &[TriglavianSiteRecord]) -> Vec<(SolarSy
 async fn spawn_special_site_balls(
     ctx: &ServerContext,
     balls: Vec<(SolarSystemId, i64, u32, DVec3)>,
-) {
+) -> Result<(), BridgeRpcError> {
     for (sys_id, bid, tid, pos) in balls {
+        if bid <= 0 {
+            continue;
+        }
         if !ctx.systems.claim_special_site_ball(sys_id, bid) {
             continue;
         }
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
-            if tid == 42_538 {
-                let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
+        let snapshot = sys_handle.get_ball_snapshot(bid).await.map_err(|err| {
+            SpecialSiteRpcErrorCode::BallparkSpawnFailed.build(format!(
+                "Failed querying ballpark for special site ball {bid} in system {sys_id}: {err}"
+            ))
+        })?;
+        if snapshot.is_none() {
+            let spawn_res = if tid == 42_538 {
+                sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await
             } else {
                 let cs = build_special_site_npc_combat_state(&ctx.sde, tid);
-                let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
-            }
+                sys_handle
+                    .spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs)
+                    .await
+            };
+            spawn_res.map_err(|err| {
+                SpecialSiteRpcErrorCode::BallparkSpawnFailed.build(format!(
+                    "Failed spawning special site ball {bid} in system {sys_id}: {err}"
+                ))
+            })?;
         }
+        mark_special_site_ball_spawned(ctx, sys_id, bid);
     }
+    Ok(())
 }
 
 async fn ensure_special_sites_spawned_for_systems(
     ctx: &ServerContext,
     filter_sys: Option<SolarSystemId>,
-) {
+) -> Result<(), BridgeRpcError> {
     ensure_special_sites_initialized(ctx);
     if let Some(sys_id) = filter_sys {
         with_pve_special_reg(ctx, |reg| {
@@ -754,8 +851,9 @@ async fn ensure_special_sites_spawned_for_systems(
             Some(inst_id),
         );
     }
-    spawn_special_site_balls(ctx, general_to_spawn).await;
-    spawn_special_site_balls(ctx, trig_to_spawn).await;
+    spawn_special_site_balls(ctx, general_to_spawn).await?;
+    spawn_special_site_balls(ctx, trig_to_spawn).await?;
+    Ok(())
 }
 
 pub async fn on_warp_to_homefront_site(
@@ -772,6 +870,57 @@ pub async fn on_warp_to_homefront_site(
 }
 
 
+async fn verify_triglavian_npc_ball_cleared(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    sys_id: SolarSystemId,
+    npc_ball_id: i64,
+    role: &str,
+) -> Result<(), BridgeRpcError> {
+    if npc_ball_id <= 0 || !is_special_site_ball_confirmed_spawned(ctx, sys_id, npc_ball_id) {
+        return Err(SpecialSiteRpcErrorCode::SiteNotSpawned.build(format!(
+            "Triglavian site {role} NPC {npc_ball_id} has not been spawned in system {sys_id}"
+        )));
+    }
+    let snap_opt = sys_handle.get_ball_snapshot(npc_ball_id).await.map_err(|err| {
+        SpecialSiteRpcErrorCode::BallparkSpawnFailed.build(format!(
+            "Failed querying ballpark for Triglavian site {role} NPC {npc_ball_id}: {err}"
+        ))
+    })?;
+    if snap_opt.is_some() {
+        return Err(SpecialSiteRpcErrorCode::WaveNpcsRemaining.build(format!(
+            "Triglavian site {role} NPC {npc_ball_id} is still alive"
+        )));
+    }
+    Ok(())
+}
+
+async fn verify_triglavian_npcs_cleared(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    trig: &TriglavianSiteRecord,
+) -> Result<(), BridgeRpcError> {
+    verify_triglavian_npc_ball_cleared(
+        ctx,
+        sys_handle,
+        trig.solar_system_id,
+        trig.boss_npc_ball_id,
+        "wave",
+    )
+    .await?;
+    for &ebid in &trig.escort_ball_ids {
+        verify_triglavian_npc_ball_cleared(
+            ctx,
+            sys_handle,
+            trig.solar_system_id,
+            ebid,
+            "escort",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 pub async fn complete_special_dungeon_instance(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -786,7 +935,7 @@ pub async fn complete_special_dungeon_instance(
         ));
     }
     let caller_sys = session.solar_system_id.ok_or_else(|| rpc_err("NotInSpace", "Caller must be in space"))?;
-    ensure_special_sites_spawned_for_system(ctx, caller_sys).await;
+    ensure_special_sites_spawned_for_systems(ctx, Some(caller_sys)).await?;
     let sys_handle = ctx.systems.get_or_spawn(caller_sys);
 
     // 1. Check Drifter Hives (by solarSystemID 31000001..31000005 or dungeonID 5642..5651)
@@ -837,11 +986,44 @@ pub async fn complete_special_dungeon_instance(
                 for (&bid, &tid) in next_room.npc_ball_ids.iter().zip(&next_room.npc_type_ids) {
                     ctx.systems.claim_special_site_ball(caller_sys, bid);
                     let cs = build_special_site_npc_combat_state(&ctx.sde, tid);
-                    let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, DVec3::new(10_000.0, 0.0, 0.0)), cs).await;
+                    match sys_handle
+                        .spawn_ball_with_combat(
+                            make_site_npc_ball(bid, tid, DVec3::new(10_000.0, 0.0, 0.0)),
+                            cs,
+                        )
+                        .await
+                    {
+                        Ok(_) => mark_special_site_ball_spawned(ctx, caller_sys, bid),
+                        Err(err) => tracing::warn!(
+                            system_id = caller_sys,
+                            ball_id = bid,
+                            error = %err,
+                            "Failed spawning Drifter Hive room NPC ball"
+                        ),
+                    }
                 }
                 if next_room.beacon_ball_id != 0 {
                     ctx.systems.claim_special_site_ball(caller_sys, next_room.beacon_ball_id);
-                    let _ = sys_handle.spawn_ball(make_site_npc_ball(next_room.beacon_ball_id, 42_538, DVec3::new(12_000.0, 0.0, 0.0))).await;
+                    match sys_handle
+                        .spawn_ball(make_site_npc_ball(
+                            next_room.beacon_ball_id,
+                            42_538,
+                            DVec3::new(12_000.0, 0.0, 0.0),
+                        ))
+                        .await
+                    {
+                        Ok(_) => mark_special_site_ball_spawned(
+                            ctx,
+                            caller_sys,
+                            next_room.beacon_ball_id,
+                        ),
+                        Err(err) => tracing::warn!(
+                            system_id = caller_sys,
+                            ball_id = next_room.beacon_ball_id,
+                            error = %err,
+                            "Failed spawning Drifter Hive room beacon ball"
+                        ),
+                    }
                 }
             }
             return Ok(kv);
@@ -887,7 +1069,17 @@ pub async fn complete_special_dungeon_instance(
             )
         });
         if let Some(cid) = spawned_cid {
-            let _ = sys_handle.spawn_ball(make_site_npc_ball(cid, 23, DVec3::new(10_500.0, 0.0, 0.0))).await;
+            if let Err(err) = sys_handle
+                .spawn_ball(make_site_npc_ball(cid, 23, DVec3::new(10_500.0, 0.0, 0.0)))
+                .await
+            {
+                tracing::warn!(
+                    system_id = caller_sys,
+                    container_id = cid,
+                    error = %err,
+                    "Failed spawning Drifter Hive loot container ball"
+                );
+            }
         }
         return Ok(kv);
     }
@@ -915,74 +1107,142 @@ pub async fn complete_special_dungeon_instance(
 
     // 3. Check Triglavian Sites (720_001..720_002)
     let trig_lookup = read_pve_special_reg(ctx, |reg| {
-        reg.triglavian_sites.get(&caller_sys)
-            .and_then(|list| list.iter().enumerate().find(|(_, s)| s.instance_id == instance_id).map(|(idx, s)| (idx, s.clone())))
-            .or_else(|| reg.triglavian_sites.values().flatten().find(|s| s.instance_id == instance_id).map(|s| (0, s.clone())))
+        reg.triglavian_sites
+            .get(&caller_sys)
+            .and_then(|list| {
+                list.iter()
+                    .enumerate()
+                    .find(|(_, s)| s.instance_id == instance_id)
+                    .map(|(idx, s)| (idx, s.clone()))
+            })
+            .or_else(|| {
+                reg.triglavian_sites
+                    .values()
+                    .flatten()
+                    .find(|s| s.instance_id == instance_id)
+                    .map(|s| (0, s.clone()))
+            })
     });
     if let Some((trig_idx, trig)) = trig_lookup {
         if caller_sys != trig.solar_system_id {
-            return Err(rpc_err("NotInSiteSystem", format!("Must be in system {} to complete {}", trig.solar_system_id, trig.dungeon_name)));
+            return Err(SpecialSiteRpcErrorCode::NotInSiteSystem.build(format!(
+                "Must be in system {} to complete {}",
+                trig.solar_system_id, trig.dungeon_name
+            )));
         }
         if trig.completed {
-            return Err(rpc_err("SiteAlreadyCompleted", format!("Triglavian site {} is already completed", trig.instance_id)));
+            return Err(SpecialSiteRpcErrorCode::SiteAlreadyCompleted.build(format!(
+                "Triglavian site {} is already completed",
+                trig.instance_id
+            )));
         }
-        if sys_handle.get_ball_snapshot(trig.boss_npc_ball_id).await.ok().flatten().is_some() {
-            return Err(rpc_err("WaveNpcsRemaining", format!("Triglavian site wave NPC {} is still alive", trig.boss_npc_ball_id)));
-        }
-        for &ebid in &trig.escort_ball_ids {
-            if sys_handle.get_ball_snapshot(ebid).await.ok().flatten().is_some() {
-                return Err(rpc_err("WaveNpcsRemaining", format!("Triglavian site escort NPC {ebid} is still alive")));
-            }
-        }
+        verify_triglavian_npcs_cleared(ctx, &sys_handle, &trig).await?;
         let trig_pos = DVec3::new(10_000.0 + (trig_idx as f64) * 20_000.0, 0.0, 0.0);
         crate::services::r6_t1_p0_helpers::verify_special_site_caller_on_grid(
-            ctx, session, &sys_handle, char_id, trig_pos, &trig.dungeon_name,
-        ).await?;
-        let (loot_iid, nexus_iid) = with_pve_special_reg(ctx, |reg| {
-            let seq_id = 1_899_500_000 + next_spec_seq(reg);
-            let nex_id = 1_899_600_000 + next_spec_seq(reg);
-            if let Some(list) = reg.triglavian_sites.get_mut(&trig.solar_system_id) {
-                if let Some(s) = list.iter_mut().find(|s| s.instance_id == instance_id) {
-                    s.completed = true;
-                }
-            }
-            (seq_id, nex_id)
-        });
-        let (gain_faction, lose_faction) = if trig.faction_owner_id == 500_027 { (500_026_i64, 500_027_i64) } else { (500_027_i64, 500_026_i64) };
+            ctx,
+            session,
+            &sys_handle,
+            char_id,
+            trig_pos,
+            &trig.dungeon_name,
+        )
+        .await?;
+
         let ship_id = session.ship_id.unwrap_or(0);
-        let ((new_bal_isk, _standing_pair), spawned_cid) = ctx.db.with_mut_snapshot(|snap| {
-            let res_pair = crate::services::pve_special_sites_ops::apply_triglavian_standings_and_isk(
-                snap,
-                char_id,
-                gain_faction,
-                lose_faction,
-                trig.base_isk,
-                &trig.dungeon_name,
-            );
-            let cid = deposit_loot_into_ship_or_container_in_snapshot(
-                snap,
-                &ctx.sde,
-                char_id,
-                caller_sys,
-                ship_id,
-                &[(loot_iid, 48_121, trig.survey_db_drop as i32), (nexus_iid, 30_747, 2)],
-            );
-            (res_pair, cid)
-        });
+        let now_sec = ctx.now_unix();
+        let (inst_id, base_isk, new_bal_isk, spawned_cid) =
+            ctx.db.try_with_mut_snapshot(|snap| -> Result<_, BridgeRpcError> {
+                if snap.pve_special_sites.sim_clock_sec < now_sec {
+                    snap.pve_special_sites.sim_clock_sec = now_sec;
+                }
+                let (inst_id, dungeon_name, faction_owner_id, base_isk, survey_db_drop) = {
+                    let site = snap
+                        .pve_special_sites
+                        .triglavian_sites
+                        .get_mut(&caller_sys)
+                        .and_then(|list| list.iter_mut().find(|s| s.instance_id == instance_id))
+                        .ok_or_else(|| {
+                            SpecialSiteRpcErrorCode::DungeonNotFound.build(format!(
+                                "Dungeon instance {instance_id} not found"
+                            ))
+                        })?;
+                    if site.solar_system_id != caller_sys {
+                        return Err(SpecialSiteRpcErrorCode::NotInSiteSystem.build(format!(
+                            "Must be in system {} to complete {}",
+                            site.solar_system_id, site.dungeon_name
+                        )));
+                    }
+                    if site.completed {
+                        return Err(SpecialSiteRpcErrorCode::SiteAlreadyCompleted.build(format!(
+                            "Triglavian site {} is already completed",
+                            site.instance_id
+                        )));
+                    }
+                    site.completed = true;
+                    (
+                        site.instance_id,
+                        site.dungeon_name.clone(),
+                        site.faction_owner_id,
+                        site.base_isk,
+                        site.survey_db_drop,
+                    )
+                };
+                let loot_iid = 1_899_500_000 + next_spec_seq(&mut snap.pve_special_sites);
+                let nexus_iid = 1_899_600_000 + next_spec_seq(&mut snap.pve_special_sites);
+                let (gain_faction, lose_faction) = if faction_owner_id == 500_027 {
+                    (500_026_i64, 500_027_i64)
+                } else {
+                    (500_027_i64, 500_026_i64)
+                };
+                let (new_bal_opt, _standing_pair) =
+                    crate::services::pve_special_sites_ops::apply_triglavian_standings_and_isk(
+                        snap,
+                        char_id,
+                        gain_faction,
+                        lose_faction,
+                        base_isk,
+                        &dungeon_name,
+                    );
+                let cid = deposit_loot_into_ship_or_container_in_snapshot(
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    caller_sys,
+                    ship_id,
+                    &[
+                        (loot_iid, 48_121, survey_db_drop as i32),
+                        (nexus_iid, 30_747, 2),
+                    ],
+                );
+                Ok((inst_id, base_isk, new_bal_opt, cid))
+            })?;
+
         if let Some(cid) = spawned_cid {
-            let _ = sys_handle.spawn_ball(make_site_npc_ball(cid, 23, DVec3::new(10_500.0, 0.0, 0.0))).await;
+            if let Err(err) = sys_handle
+                .spawn_ball(make_site_npc_ball(cid, 23, DVec3::new(10_500.0, 0.0, 0.0)))
+                .await
+            {
+                tracing::warn!(
+                    system_id = caller_sys,
+                    container_id = cid,
+                    error = %err,
+                    "Failed spawning Triglavian site loot container ball"
+                );
+            }
         }
         if let Some(bal) = new_bal_isk {
-            let _ = ctx.notify_account_change(char_id, "cash", char_id, bal);
+            drop(ctx.notify_account_change(char_id, "cash", char_id, bal));
         }
         return Ok(PyRep::keyval([
-            ("instanceID", PyRep::Integer(trig.instance_id)),
+            ("instanceID", PyRep::Integer(inst_id)),
             ("completed", PyRep::Bool(true)),
-            ("baseIsk", PyRep::Integer(trig.base_isk)),
+            ("baseIsk", PyRep::Integer(base_isk)),
         ]));
     }
 
-    Err(rpc_err("DungeonNotFound", format!("Dungeon instance {instance_id} not found")))
+    Err(SpecialSiteRpcErrorCode::DungeonNotFound.build(format!(
+        "Dungeon instance {instance_id} not found"
+    )))
 }
 
 fn resolve_session_system_id(
@@ -1102,7 +1362,11 @@ pub async fn handle_pve_special_sites(
 
             let sites: Vec<TriglavianSiteRecord> = if let Some(list) = existing_opt {
                 if in_system_undocked {
-                    spawn_special_site_balls(ctx, collect_triglavian_site_balls(&list)).await;
+                    if let Err(err) =
+                        spawn_special_site_balls(ctx, collect_triglavian_site_balls(&list)).await
+                    {
+                        return Some(Err(err));
+                    }
                 }
                 list
             } else if is_pochven || !reg_initialized {
@@ -1116,7 +1380,12 @@ pub async fn handle_pve_special_sites(
                     let persisted = with_pve_special_reg(ctx, |reg| {
                         persist_triglavian_sites_for_system_locked(ctx, reg, sys_id)
                     });
-                    spawn_special_site_balls(ctx, collect_triglavian_site_balls(&persisted)).await;
+                    if let Err(err) =
+                        spawn_special_site_balls(ctx, collect_triglavian_site_balls(&persisted))
+                            .await
+                    {
+                        return Some(Err(err));
+                    }
                     persisted
                 } else {
                     computed
