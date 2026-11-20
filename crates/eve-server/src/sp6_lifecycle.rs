@@ -1981,7 +1981,7 @@ pub fn reconnect_character_in_space_sync(
     cluster_tick::on_advance_secs(ctx, now_unix, 0);
     cluster_tick::collapse_stranded_abyssal_if_needed_sync(ctx, char_id, now_unix);
 
-    let (sys_id, ship_id, ship_type_id, pos_arr, vel_arr, had_live_disc, pre_warp_pos_opt, corp_id, alliance_id, sec_status) =
+    let (sys_id, ship_id, ship_type_id, pos_arr, vel_arr, had_live_disc, pre_warp_pos_opt, disc_warp_dest_opt, corp_id, alliance_id, sec_status) =
         ctx.db.with_mut_snapshot(|snap| {
             let ch = snap.characters.get(&char_id)?;
             if ch.station_id.is_some() || ch.structure_id.is_some() {
@@ -2002,6 +2002,7 @@ pub fn reconnect_character_in_space_sync(
                 .remove(&char_id)
                 .filter(|d| d.ship_id == ship_id && snap.items.contains_key(&d.ship_id));
             let pre_warp_pos_opt = disc_entry.as_ref().and_then(|d| d.pre_warp_position);
+            let disc_warp_dest_opt = disc_entry.as_ref().and_then(|d| d.emergency_warp_dest);
             let disc_vel = disc_entry.as_ref().map(|d| d.last_velocity);
             let disc_pos = disc_entry.map(|d| d.last_position);
             snap.sp6_lifecycle.safe_logoffs.remove(&char_id);
@@ -2092,6 +2093,7 @@ pub fn reconnect_character_in_space_sync(
                 vel_arr,
                 disc_pos.is_some(),
                 pre_warp_pos_opt,
+                disc_warp_dest_opt,
                 corp_id,
                 alliance_id,
                 sec_status,
@@ -2122,8 +2124,6 @@ pub fn reconnect_character_in_space_sync(
             if let Some(live_pos) = bp.balls.get(&ship_id).map(|b| b.position) {
                 existing_pos = live_pos;
             }
-            bp.observer_events.remove(&ship_id);
-            bp.queue_set_state(ship_id);
             if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
                 cs.is_emergency_warping = false;
             }
@@ -2133,8 +2133,22 @@ pub fn reconnect_character_in_space_sync(
                 if let Some(orig_arr) = pre_warp_pos_opt {
                     let orig_pos = DVec3::from_array(orig_arr);
                     if existing_pos.distance(orig_pos) > 10_000.0 {
-                        let _ = bp.set_mode(ship_id, MovementMode::new_warp(existing_pos, orig_pos, warp_speed));
-                        started_return_warp = true;
+                        if matches!(
+                            bp.balls.get(&ship_id).map(|b| &b.mode),
+                            Some(MovementMode::Warp { phase, .. })
+                                if *phase != eve_destiny::WarpPhase::Aligning
+                        ) {
+                            let _ = bp.force_stop_warp(ship_id);
+                        }
+                        if bp
+                            .set_mode(
+                                ship_id,
+                                MovementMode::new_warp(existing_pos, orig_pos, warp_speed),
+                            )
+                            .is_ok()
+                        {
+                            started_return_warp = true;
+                        }
                     }
                 }
             }
@@ -2149,8 +2163,9 @@ pub fn reconnect_character_in_space_sync(
                 // cannot start a return warp (<= 10 km from orig_pos, or tackled/ineligible):
                 // stop the outbound warp immediately so reconnect never flings the ship off-grid (#843).
                 let _ = bp.force_stop_warp(ship_id);
-                bp.queue_set_state(ship_id);
             }
+            bp.observer_events.remove(&ship_id);
+            bp.queue_set_state(ship_id);
         }
         if started_return_warp {
             sys_handle.set_warp_provenance(
@@ -2204,17 +2219,59 @@ pub fn reconnect_character_in_space_sync(
     sys_handle.try_remove_ball(ship_id);
 
     let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
+    let effective_max_vel = cs.base_max_velocity.unwrap_or(max_vel);
+    let effective_inertia = cs.base_inertia.unwrap_or(inertia);
+    let effective_mass = cs.base_mass.unwrap_or(mass);
+    let effective_warp_speed = if ctx.sde.types.contains_key(&ship_type_id) {
+        crate::services::space_destiny::compute_pilot_warp_speed_au_s(
+            ctx,
+            char_id,
+            sys_id,
+            ship_type_id,
+        )
+        .clamp(1.5, 12.0)
+    } else {
+        warp_speed
+    };
 
     let raw_vel = DVec3::from_array(vel_arr);
-    let spawn_vel = if raw_vel.is_finite() {
+    let fallback_vel = if raw_vel.is_finite() {
         raw_vel
     } else {
         DVec3::ZERO
     };
+    let mut resume_client_warp = false;
+    let (spawn_mode, spawn_vel, spawn_speed_fraction) =
+        if pre_warp_pos_opt.is_none() {
+            if let Some(dest_arr) = disc_warp_dest_opt {
+                let (mode, vel, sf) = cluster_tick::reconstruct_persisted_warp_kinematics(
+                    final_pos,
+                    DVec3::from_array(dest_arr),
+                    effective_warp_speed,
+                    effective_max_vel,
+                    vel_arr,
+                );
+                if matches!(
+                    mode,
+                    MovementMode::Warp { phase, .. }
+                        if phase != eve_destiny::WarpPhase::Aligning
+                ) {
+                    resume_client_warp = true;
+                    (mode, vel, sf)
+                } else {
+                    (MovementMode::Stop, fallback_vel, 0.0)
+                }
+            } else {
+                (MovementMode::Stop, fallback_vel, 0.0)
+            }
+        } else {
+            (MovementMode::Stop, fallback_vel, 0.0)
+        };
     sys_handle.try_spawn_ball_with_meta(
         Ball {
             id: ship_id, type_id: ship_type_id, position: final_pos, velocity: spawn_vel,
-            max_velocity: max_vel, inertia, mass, radius, speed_fraction: 0.0, mode: MovementMode::Stop,
+            max_velocity: effective_max_vel, inertia: effective_inertia, mass: effective_mass, radius,
+            speed_fraction: spawn_speed_fraction, mode: spawn_mode,
         },
         cs,
         SlimItemMeta {
@@ -2224,19 +2281,25 @@ pub fn reconnect_character_in_space_sync(
     );
     let mut started_return_warp = false;
     if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.observer_events.remove(&ship_id);
-        bp.queue_set_state(ship_id);
         if pre_warp_eligible
             && crate::services::space_nav_movement_guard::can_warp_in_ballpark(&bp, ship_id)
         {
             if let Some(orig_arr) = pre_warp_pos_opt {
                 let orig_pos = DVec3::from_array(orig_arr);
-                if final_pos.distance(orig_pos) > 10_000.0 {
-                    let _ = bp.set_mode(ship_id, MovementMode::new_warp(final_pos, orig_pos, warp_speed));
+                if final_pos.distance(orig_pos) > 10_000.0
+                    && bp
+                        .set_mode(
+                            ship_id,
+                            MovementMode::new_warp(final_pos, orig_pos, effective_warp_speed),
+                        )
+                        .is_ok()
+                {
                     started_return_warp = true;
                 }
             }
         }
+        bp.observer_events.remove(&ship_id);
+        bp.queue_set_state(ship_id);
     }
     if started_return_warp {
         sys_handle.set_warp_provenance(
@@ -2247,6 +2310,13 @@ pub fn reconnect_character_in_space_sync(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(ship_id);
+    } else if resume_client_warp {
+        crate::services::space_destiny::track_player_or_fleet_warp(
+            ctx,
+            Some(&sys_handle),
+            ship_id,
+            char_id,
+        );
     } else {
         sys_handle.clear_warp_provenance(ship_id);
         ctx.return_warps
