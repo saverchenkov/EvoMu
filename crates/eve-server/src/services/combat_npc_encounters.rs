@@ -1102,15 +1102,26 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
             .map(|(&k, _)| k)
             .or(npc.target_id)
             .and_then(|killer_id| {
+                let effective_killer_id =
+                    crate::services::agents_missions::agents_standings_arcs::resolve_runtime_killer_char_id(
+                        ctx,
+                        killer_id,
+                    );
                 ctx.db.with_snapshot(|s| {
-                    if s.characters.contains_key(&killer_id) {
-                        Some(killer_id)
-                    } else if let Some(ship) = s.items.get(&killer_id) {
+                    if s.characters.contains_key(&effective_killer_id) {
+                        Some(effective_killer_id)
+                    } else if let Some(ship) = s.get_any_item(effective_killer_id) {
                         if s.characters.contains_key(&ship.owner_id) {
                             Some(ship.owner_id)
                         } else {
                             None
                         }
+                    } else if let Some((&char_id, _)) = s
+                        .characters
+                        .iter()
+                        .find(|(_, c)| c.active_ship_id == effective_killer_id)
+                    {
+                        Some(char_id)
                     } else {
                         None
                     }

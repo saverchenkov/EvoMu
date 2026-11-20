@@ -1032,6 +1032,491 @@ async fn npc_destruction_paths_apply_faction_standing_loss_ticks_and_emit_client
     assert!(spool_notes.iter().any(|n| n.event == "OnStandingSet"));
     assert!(spool_notes.iter().any(|n| n.event == "OnStandingsModified"));
 
+    // Path 5b (F-1): Missile launcher kill via `activate_missile_or_breacher_launcher` ->
+    // `step_missiles_and_breachers` -> `handle_destroyed_ball_from_missile_or_aoe` ->
+    // `destroy_specialized_npc_with_hint`, plus non-double-apply check.
+    {
+        let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+        let seed_ship = sde.types.get(&587).expect("seed Rifter").clone();
+        sde.groups.insert(
+            674,
+            eve_sde::GroupInfo {
+                group_id: 674,
+                category_id: 11,
+                name: "Mission Caldari State Battleship".to_string(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: true,
+            },
+        );
+        let mut bs_type = seed_ship.clone();
+        bs_type.type_id = 12_391;
+        bs_type.group_id = 674;
+        bs_type.category_id = 11;
+        bs_type.name = "Caldari Navy Raven".to_string();
+        bs_type.faction_id = Some(500_001);
+        bs_type.default_attributes.insert(562, 0.03);
+        bs_type.default_attributes.insert(263, 1.0);
+        bs_type.default_attributes.insert(265, 1.0);
+        bs_type.default_attributes.insert(9, 1.0);
+        sde.types.insert(12_391, bs_type);
+
+        let mut launcher_type = seed_ship.clone();
+        launcher_type.type_id = 2_410;
+        launcher_type.group_id = 509;
+        launcher_type.category_id = 7;
+        launcher_type.name = "Light Missile Launcher I".to_string();
+        launcher_type.default_attributes.insert(51, 2_000.0);
+        launcher_type.default_attributes.insert(6, 1.0);
+        sde.types.insert(2_410, launcher_type);
+
+        let mut missile_type = seed_ship.clone();
+        missile_type.type_id = 209;
+        missile_type.group_id = 384;
+        missile_type.category_id = 8;
+        missile_type.name = "Scourge Light Missile".to_string();
+        missile_type.volume = 0.015;
+        missile_type.default_attributes.insert(37, 3_750.0);
+        missile_type.default_attributes.insert(281, 6_000.0);
+        missile_type.default_attributes.insert(9, 75.0);
+        missile_type.default_attributes.insert(653, 170.0);
+        missile_type.default_attributes.insert(654, 40.0);
+        missile_type.default_attributes.insert(1353, 0.604);
+        sde.types.insert(209, missile_type.clone());
+
+        let mut wreck_type = seed_ship;
+        wreck_type.type_id = 26_473;
+        wreck_type.group_id = 186;
+        wreck_type.category_id = 2;
+        wreck_type.name = "Caldari Battleship Wreck".to_string();
+        sde.types.insert(26_473, wreck_type);
+
+        let m_ctx = ServerContext::with_sde_and_repository(
+            Arc::new(sde),
+            Arc::new(eve_db::WorldRepository::with_demo_seed()),
+        );
+        let m_sys = 30_000_142_u32;
+        let m_char = 98_200_001_i64;
+        let m_ship = 98_200_101_i64;
+        let m_launcher = 98_200_201_i64;
+        let m_charge = 98_200_301_i64;
+        let m_npc_ball = 98_200_401_i64;
+
+        m_ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.insert(
+                m_char,
+                eve_db::CharacterRecord {
+                    character_id: m_char,
+                    user_id: 1,
+                    name: "Missile Pilot".to_string(),
+                    corporation_id: 1_000_044,
+                    solar_system_id: m_sys,
+                    active_ship_id: m_ship,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                m_ship,
+                eve_db::InventoryItemRecord {
+                    item_id: m_ship,
+                    type_id: 587,
+                    owner_id: m_char,
+                    location_id: m_sys as i64,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                m_launcher,
+                eve_db::InventoryItemRecord {
+                    item_id: m_launcher,
+                    type_id: 2_410,
+                    owner_id: m_char,
+                    location_id: m_ship,
+                    flag: eve_db::InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                m_charge,
+                eve_db::InventoryItemRecord {
+                    item_id: m_charge,
+                    type_id: 209,
+                    owner_id: m_char,
+                    location_id: m_ship,
+                    flag: eve_db::InventoryFlag::HiSlot0,
+                    quantity: 20,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        });
+        m_ctx
+            .db
+            .acquire_online_lock(1, 98_201, Some(m_char), true, m_ctx.now_unix())
+            .expect("missile pilot online lock");
+
+        let m_sys_handle = m_ctx.systems.get_or_spawn(m_sys);
+        let attacker_ball = eve_destiny::Ball {
+            id: m_ship,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 400.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        };
+        let _ = m_sys_handle.try_spawn_ball_with_combat(
+            attacker_ball.clone(),
+            eve_destiny::CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                capacitor: 500.0,
+                max_capacitor: 500.0,
+                ..Default::default()
+            },
+        );
+        let npc_ball = eve_destiny::Ball {
+            id: m_npc_ball,
+            type_id: 12_391,
+            position: glam::DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 2.0,
+            mass: 50_000_000.0,
+            radius: 400.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        };
+        let _ = m_sys_handle.try_spawn_ball_with_combat(
+            npc_ball,
+            eve_destiny::CombatState {
+                shield_hp: 0.0,
+                max_shield_hp: 10.0,
+                armor_hp: 0.0,
+                max_armor_hp: 10.0,
+                structure_hp: 1.0,
+                max_structure_hp: 10.0,
+                signature_radius: 400.0,
+                ..Default::default()
+            },
+        );
+        let _ = m_sys_handle
+            .add_target_lock(
+                m_ship,
+                eve_destiny::TargetLock {
+                    target_id: m_npc_ball,
+                    lock_time_ms: 100.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(100_000.0),
+                },
+            )
+            .await;
+
+        let fitted_launcher = eve_dogma::FittedModule {
+            item_id: m_launcher,
+            type_id: 2_410,
+            flag_id: 27,
+            state: eve_dogma::ModuleState::Online,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: Some(209),
+            charge_quantity: 20,
+            dynamic_attribute_overrides: std::collections::HashMap::new(),
+        };
+        let mut fit = eve_dogma::ShipFittingEngine::from_sde(m_ship, 587, &m_ctx.sde);
+        fit.modules.insert(m_launcher, fitted_launcher.clone());
+
+        // Notice `m_npc_ball` is intentionally NOT inserted into `rt.npc_entities` so `npc_death_hook`
+        // is a no-op and `handle_destroyed_ball_from_missile_or_aoe -> destroy_specialized_npc_with_hint`
+        // performs the standing loss directly.
+        crate::services::combat_crimewatch::activate_missile_or_breacher_launcher(
+            &m_ctx,
+            m_char,
+            m_ship,
+            m_sys,
+            m_ctx.now_unix(),
+            m_launcher,
+            &fitted_launcher,
+            &fit,
+            209,
+            &missile_type,
+            &attacker_ball,
+            m_npc_ball,
+            eve_destiny::DamageVector::new(0.0, 0.0, 180.0, 0.0),
+            false,
+            false,
+            true,
+        )
+        .await
+        .expect("missile launcher activation succeeds");
+        let _ = crate::services::combat_crimewatch::step_missiles_and_breachers(&m_ctx, m_sys, 2.0).await;
+
+        m_ctx.db.with_snapshot(|snap| {
+            let st = snap.characters[&m_char].standings.get(&500_001).copied().unwrap_or(0.0);
+            assert!(
+                (st - (-0.03)).abs() < 1e-9,
+                "missile kill via destroy_specialized_npc_with_hint must apply -0.03 standing loss, got {st}"
+            );
+        });
+        let m_notes = m_ctx.drain_notifications_for_char(m_char);
+        assert!(m_notes.iter().any(|n| n.event == "OnStandingSet"));
+        assert!(m_notes.iter().any(|n| n.event == "OnStandingsModified"));
+
+        // Re-invoking `destroy_specialized_npc_with_hint` for the same tick/NPC (simulating when `npc_death_hook`
+        // fired just before `handle_destroyed_ball_from_missile_or_aoe`) must not double-apply standing loss.
+        crate::services::combat_crimewatch::destroy_specialized_npc_with_hint(
+            &m_ctx,
+            m_sys,
+            m_npc_ball,
+            m_char,
+            Some((12_391, glam::DVec3::new(1_000.0, 0.0, 0.0))),
+        )
+        .await;
+        m_ctx.db.with_snapshot(|snap| {
+            let st = snap.characters[&m_char].standings.get(&500_001).copied().unwrap_or(0.0);
+            assert!((st - (-0.03)).abs() < 1e-9, "same-tick re-entry must not double-apply, got {st}");
+        });
+        assert!(
+            m_ctx.drain_notifications_for_char(m_char).is_empty(),
+            "same-tick re-entry must emit zero duplicate standing notifications"
+        );
+    }
+
+    // Path 5c (F-1): Combat drone `CmdEngage` -> `destroy_specialized_npc_with_hint` + drone ball_id killer resolution.
+    {
+        let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+        let seed_ship = sde.types.get(&587).expect("seed Rifter").clone();
+        sde.groups.insert(
+            674,
+            eve_sde::GroupInfo {
+                group_id: 674,
+                category_id: 11,
+                name: "Mission Caldari State Battleship".to_string(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: true,
+            },
+        );
+        let mut bs_type = seed_ship.clone();
+        bs_type.type_id = 12_391;
+        bs_type.group_id = 674;
+        bs_type.category_id = 11;
+        bs_type.name = "Caldari Navy Raven".to_string();
+        bs_type.faction_id = Some(500_001);
+        bs_type.default_attributes.insert(562, 0.03);
+        sde.types.insert(12_391, bs_type);
+
+        let mut drone_type = seed_ship;
+        drone_type.type_id = 2_454;
+        drone_type.group_id = 100;
+        drone_type.category_id = 18;
+        drone_type.name = "Hobgoblin I".to_string();
+        drone_type.volume = 5.0;
+        sde.types.insert(2_454, drone_type);
+
+        let d_ctx = ServerContext::with_sde_and_repository(
+            Arc::new(sde),
+            Arc::new(eve_db::WorldRepository::with_demo_seed()),
+        );
+        let d_sys = 30_000_142_u32;
+        let d_char = 98_300_001_i64;
+        let d_ship = 98_300_101_i64;
+        let d_drone = 98_300_201_i64;
+        let d_npc = 98_300_301_i64;
+        let d_char2 = 98_300_002_i64;
+        let d_ship2 = 98_300_102_i64;
+        let d_drone2 = 98_300_202_i64;
+        let d_npc2 = 98_300_302_i64;
+
+        d_ctx.db.with_mut_snapshot(|snap| {
+            for (cid, uid, sid, name) in [
+                (d_char, 1_u64, d_ship, "Drone Pilot"),
+                (d_char2, 98_302_u64, d_ship2, "Drone Hint Pilot"),
+            ] {
+                snap.characters.insert(
+                    cid,
+                    eve_db::CharacterRecord {
+                        character_id: cid,
+                        user_id: uid,
+                        name: name.to_string(),
+                        corporation_id: 1_000_044,
+                        solar_system_id: d_sys,
+                        active_ship_id: sid,
+                        ..Default::default()
+                    },
+                );
+                snap.items.insert(
+                    sid,
+                    eve_db::InventoryItemRecord {
+                        item_id: sid,
+                        type_id: 587,
+                        owner_id: cid,
+                        location_id: d_sys as i64,
+                        flag: eve_db::InventoryFlag::None,
+                        quantity: 1,
+                        singleton: true,
+                        ..Default::default()
+                    },
+                );
+            }
+        });
+        d_ctx
+            .db
+            .acquire_online_lock(1, 98_301, Some(d_char), true, d_ctx.now_unix())
+            .expect("drone pilot online lock");
+
+        let d_sys_handle = d_ctx.systems.get_or_spawn(d_sys);
+        let mk_ball = |id, type_id, x| eve_destiny::Ball {
+            id,
+            type_id,
+            position: glam::DVec3::new(x, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.0,
+            mass: 50_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        };
+        let _ = d_sys_handle.spawn_ball(mk_ball(d_ship, 587, 0.0)).await;
+        let _ = d_sys_handle.spawn_ball(mk_ball(d_drone, 2_454, 500.0)).await;
+        let _ = d_sys_handle.try_spawn_ball_with_combat(
+            mk_ball(d_npc, 12_391, 1_000.0),
+            eve_destiny::CombatState {
+                shield_hp: 0.0,
+                max_shield_hp: 10.0,
+                armor_hp: 0.0,
+                max_armor_hp: 10.0,
+                structure_hp: 1.0,
+                max_structure_hp: 10.0,
+                signature_radius: 400.0,
+                ..Default::default()
+            },
+        );
+        let _ = d_sys_handle
+            .add_target_lock(
+                d_ship,
+                eve_destiny::TargetLock {
+                    target_id: d_npc,
+                    lock_time_ms: 100.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(50_000.0),
+                },
+            )
+            .await;
+
+        crate::services::combat_crimewatch::with_mut_combat_runtime(&d_ctx, |rt| {
+            for (did, owner, pship) in [(d_drone, d_char, d_ship), (d_drone2, d_char2, d_ship2)] {
+                rt.active_drones_in_space.insert(
+                    did,
+                    crate::services::combat_crimewatch::DroneSpaceState {
+                        ball_id: did,
+                        drone_item_id: did,
+                        type_id: 2_454,
+                        group_id: 100,
+                        owner_char_id: owner,
+                        original_owner_char_id: owner,
+                        parent_ship_id: pship,
+                        solar_system_id: d_sys,
+                        target_id: None,
+                        activity_state: 0,
+                        assist_char_id: None,
+                        guard_char_id: None,
+                        is_abandoned: false,
+                        is_sentry: false,
+                        bandwidth_used: 5.0,
+                        max_velocity: 1_000.0,
+                        optimal_range: 20_000.0,
+                        damage_vector: eve_destiny::DamageVector {
+                            em: 0.0,
+                            thermal: 200.0,
+                            kinetic: 0.0,
+                            explosive: 0.0,
+                        },
+                        shield_repair_amount: 0.0,
+                        armor_repair_amount: 0.0,
+                        hull_repair_amount: 0.0,
+                        web_speed_factor: 0.0,
+                        neut_amount: 0.0,
+                        ecm_strength: 0.0,
+                        tp_sig_bonus_pct: 0.0,
+                    },
+                );
+            }
+        });
+
+        let mut d_session = eve_machonet::SessionState::new(98_300);
+        d_session.user_id = Some(1);
+        d_session.character_id = Some(d_char);
+        d_session.solar_system_id = Some(d_sys);
+        d_session.ship_id = Some(d_ship);
+
+        let engage_res = crate::services::combat_crimewatch::handle_npcs_drones(
+            &d_ctx,
+            &mut d_session,
+            "entity",
+            "CmdEngage",
+            &[
+                eve_proto::PyRep::Integer(d_npc),
+                eve_proto::PyRep::List(vec![eve_proto::PyRep::Integer(d_drone)]),
+            ],
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .expect("CmdEngage dispatch");
+        assert!(engage_res.is_ok(), "CmdEngage must succeed: {engage_res:?}");
+
+        if d_sys_handle.get_combat_state(d_npc).await.ok().flatten().is_some() {
+            crate::services::combat_crimewatch::step_engaged_drones(&d_ctx, d_ctx.now_unix() + 10).await;
+        }
+
+        d_ctx.db.with_snapshot(|snap| {
+            let st = snap.characters[&d_char].standings.get(&500_001).copied().unwrap_or(0.0);
+            assert!(
+                (st - (-0.03)).abs() < 1e-9,
+                "combat drone CmdEngage kill must award -0.03 standing loss, got {st}"
+            );
+        });
+        let d_notes = d_ctx.drain_notifications_for_char(d_char);
+        assert!(d_notes.iter().any(|n| n.event == "OnStandingSet"));
+        assert!(d_notes.iter().any(|n| n.event == "OnStandingsModified"));
+
+        // Also test passing drone `ball_id` directly as `killer_char_id` to `destroy_specialized_npc_with_hint`.
+        crate::services::combat_crimewatch::destroy_specialized_npc_with_hint(
+            &d_ctx,
+            d_sys,
+            d_npc2,
+            d_drone2,
+            Some((12_391, glam::DVec3::ZERO)),
+        )
+        .await;
+        d_ctx.db.with_snapshot(|snap| {
+            let st2 = snap.characters[&d_char2].standings.get(&500_001).copied().unwrap_or(0.0);
+            assert!(
+                (st2 - (-0.03)).abs() < 1e-9,
+                "destroy_specialized_npc_with_hint must resolve drone ball_id killer to owner char, got {st2}"
+            );
+        });
+    }
+
     // Path 6: End-to-end TCP client socket delivery over `macho_listener::handle_macho_client`.
     // Verifies framed `OnStandingSet` + `OnStandingsModified` MachoNet packets arrive on the live
     // TCP socket when an NPC is destroyed in space.

@@ -1417,6 +1417,409 @@ fn npc_kill_faction_standing_loss_tick_dedup_derived_and_notifications() {
     });
 }
 
+fn mk_standing_test_group(group_id: u32, category_id: u32, name: &str) -> eve_sde::GroupInfo {
+    eve_sde::GroupInfo {
+        group_id,
+        category_id,
+        name: name.to_string(),
+        anchorable: false,
+        anchored: false,
+        fittable_non_singleton: false,
+        use_base_price: false,
+        published: true,
+    }
+}
+
+fn mk_standing_test_type(
+    type_id: u32,
+    group_id: u32,
+    category_id: u32,
+    name: &str,
+    faction_id: Option<u32>,
+    entity_faction_loss: Option<f64>,
+) -> eve_sde::InvType {
+    let mut default_attributes = HashMap::new();
+    if let Some(loss) = entity_faction_loss {
+        default_attributes.insert(562_u16, loss);
+    }
+    eve_sde::InvType {
+        type_id,
+        group_id,
+        category_id,
+        name: name.to_string(),
+        mass: 1_000.0,
+        volume: 1_000.0,
+        capacity: 0.0,
+        radius: 50.0,
+        base_price: 0.0,
+        published: true,
+        portion_size: 1,
+        market_group_id: None,
+        race_id: None,
+        faction_id,
+        variation_parent_type_id: None,
+        description_id: None,
+        icon_id: None,
+        graphic_id: None,
+        sound_id: None,
+        meta_group_id: None,
+        meta_level: None,
+        tech_level: None,
+        default_effect_id: None,
+        description: String::new(),
+        effect_ids: Vec::new(),
+        default_attributes,
+    }
+}
+
+fn spawn_standing_test_char(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: u32,
+    initial_caldari_standing: Option<f64>,
+) {
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = eve_db::CharacterRecord {
+            character_id: char_id,
+            name: format!("Standings Tester {char_id}"),
+            corporation_id: 1_000_044,
+            solar_system_id,
+            ..Default::default()
+        };
+        if let Some(val) = initial_caldari_standing {
+            ch.standings.insert(500_001, val);
+        }
+        snap.characters.insert(char_id, ch);
+    });
+}
+
+fn open_real_sde_for_npc_standings_test() -> Option<Arc<eve_sde::SdeRegistry>> {
+    if let Some(env_path) = std::env::var_os("EVOMU_SDE_PATH").filter(|v| !v.is_empty()) {
+        let p = std::path::PathBuf::from(env_path);
+        if p.exists() {
+            return Some(Arc::new(
+                eve_sde::SdeRegistry::open(&p).expect("open EVOMU_SDE_PATH sqlite"),
+            ));
+        }
+    }
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for _ in 0..5 {
+        let candidate = dir.join("data/evomu_sde.sqlite");
+        if candidate.exists() {
+            return Some(Arc::new(
+                eve_sde::SdeRegistry::open(&candidate).expect("open evomu_sde.sqlite"),
+            ));
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+// parity: feat:standings.standing-loss, feat:standings.npc-kill-standing-loss, plan:PVE-3
+#[test]
+fn npc_kill_faction_standings_highest_loss_wins_tick_and_legacy_note_compat() {
+    let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+    sde.groups
+        .insert(671, mk_standing_test_group(671, 11, "Mission Caldari State Frigate"));
+    sde.groups
+        .insert(674, mk_standing_test_group(674, 11, "Mission Caldari State Battleship"));
+    sde.types.insert(
+        24_997,
+        mk_standing_test_type(24_997, 671, 11, "State Bo-Hi", Some(500_001), Some(0.001)),
+    );
+    sde.types.insert(
+        12_391,
+        mk_standing_test_type(12_391, 674, 11, "Caldari Navy Raven", Some(500_001), Some(0.03)),
+    );
+
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    );
+    let sys_id = 30_000_142_u32;
+    let t0 = 1_700_000_000_u64;
+
+    // 1. Starting at 0.0: frigate (-0.001) then battleship (-0.03) upgrades cleanly to -0.03,
+    //    then another frigate inside the same 600s tick adds zero extra loss.
+    let char_zero = 98_100_001_i64;
+    spawn_standing_test_char(&ctx, char_zero, sys_id, None);
+    let chg_frig =
+        apply_npc_kill_faction_standing_loss(&ctx, sys_id, char_zero, 24_997, None, None, t0);
+    assert!(!chg_frig.is_empty());
+    ctx.db.with_snapshot(|snap| {
+        let st = snap.characters[&char_zero].standings[&500_001];
+        assert!((st - (-0.001)).abs() < 1e-12, "frigate initial standing loss got {st}");
+    });
+
+    let chg_bs =
+        apply_npc_kill_faction_standing_loss(&ctx, sys_id, char_zero, 12_391, None, None, t0 + 120);
+    assert!(!chg_bs.is_empty());
+    ctx.db.with_snapshot(|snap| {
+        let st = snap.characters[&char_zero].standings[&500_001];
+        assert!(
+            (st - (-0.03)).abs() < 1e-12,
+            "highest-loss-wins upgrade must equal direct -0.03, got {st}"
+        );
+    });
+
+    let chg_lower =
+        apply_npc_kill_faction_standing_loss(&ctx, sys_id, char_zero, 24_997, None, None, t0 + 240);
+    assert!(
+        chg_lower.is_empty(),
+        "lower frigate loss after battleship in same 600s tick must apply zero extra loss"
+    );
+
+    // 2. Starting at +5.0: frigate then battleship must match direct battleship under apply_standing_decrease,
+    //    and tick_start_unix remains anchored at t0 (resets at t0 + 600, not t0 + 120 + 600).
+    let char_upgraded = 98_100_002_i64;
+    let char_direct = 98_100_003_i64;
+    spawn_standing_test_char(&ctx, char_upgraded, sys_id, Some(5.0));
+    spawn_standing_test_char(&ctx, char_direct, sys_id, Some(5.0));
+
+    assert!(!apply_npc_kill_faction_standing_loss(
+        &ctx,
+        sys_id,
+        char_upgraded,
+        24_997,
+        None,
+        None,
+        t0,
+    )
+    .is_empty());
+    assert!(!apply_npc_kill_faction_standing_loss(
+        &ctx,
+        sys_id,
+        char_upgraded,
+        12_391,
+        None,
+        None,
+        t0 + 60,
+    )
+    .is_empty());
+    assert!(!apply_npc_kill_faction_standing_loss(
+        &ctx,
+        sys_id,
+        char_direct,
+        12_391,
+        None,
+        None,
+        t0,
+    )
+    .is_empty());
+
+    ctx.db.with_snapshot(|snap| {
+        let upgraded = snap.characters[&char_upgraded].standings[&500_001];
+        let direct = snap.characters[&char_direct].standings[&500_001];
+        assert!(upgraded < 5.0);
+        assert!(
+            (upgraded - direct).abs() < 1e-12,
+            "non-zero base incremental upgrade ({upgraded}) must equal direct battleship ({direct})"
+        );
+    });
+
+    assert!(
+        apply_npc_kill_faction_standing_loss(&ctx, sys_id, char_upgraded, 24_997, None, None, t0 + 599)
+            .is_empty(),
+        "tick window must remain anchored at t0"
+    );
+    assert!(
+        !apply_npc_kill_faction_standing_loss(&ctx, sys_id, char_upgraded, 24_997, None, None, t0 + 600)
+            .is_empty(),
+        "kill at t0 + 600 must start a new tick window"
+    );
+
+    // 3. Legacy 3-tuple OwnerNoteRecord format `(faction_id, solar_system_id, tick_start)` stays backward-compatible.
+    let char_legacy = 98_100_004_i64;
+    spawn_standing_test_char(&ctx, char_legacy, sys_id, None);
+    ctx.db.with_mut_snapshot(|snap| {
+        let nid = -(5_400_000_000_000_i64.saturating_add(char_legacy.abs()));
+        snap.owner_notes.insert(
+            nid,
+            eve_db::OwnerNoteRecord {
+                note_id: nid,
+                character_id: char_legacy,
+                item_id: char_legacy,
+                label: "npc_kill_standing_tick".to_string(),
+                note: serde_json::to_string(&vec![(500_001_i64, sys_id, t0)]).unwrap(),
+                timestamp_unix: t0,
+            },
+        );
+    });
+    assert!(
+        apply_npc_kill_faction_standing_loss(&ctx, sys_id, char_legacy, 12_391, None, None, t0 + 100)
+            .is_empty(),
+        "legacy 3-tuple record inside active 600s window must prevent extra standing loss"
+    );
+    assert!(
+        !apply_npc_kill_faction_standing_loss(&ctx, sys_id, char_legacy, 24_997, None, None, t0 + 600)
+            .is_empty(),
+        "legacy 3-tuple record expires cleanly after 600s"
+    );
+}
+
+// parity: feat:standings.standing-loss, feat:standings.npc-kill-standing-loss, plan:PVE-3
+#[test]
+fn npc_kill_faction_standings_group_exclusion_before_attr562_and_wh_sleepers() {
+    let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+    sde.groups
+        .insert(925, mk_standing_test_group(925, 22, "Infrastructure Hub"));
+    sde.groups.insert(
+        983,
+        mk_standing_test_group(983, 11, "Deadspace Sleeper Sleepless Patroller"),
+    );
+    sde.groups
+        .insert(4_036, mk_standing_test_group(4_036, 11, "Sleeper Entities"));
+    // Deliberately assign positive attr 562 to excluded groups to prove group exclusion runs BEFORE attr 562.
+    sde.types.insert(
+        29_302,
+        mk_standing_test_type(
+            29_302,
+            925,
+            22,
+            "Caldari Infrastructure Hub",
+            Some(500_001),
+            Some(0.05),
+        ),
+    );
+    sde.types.insert(
+        30_188,
+        mk_standing_test_type(
+            30_188,
+            983,
+            11,
+            "Sleepless Patroller",
+            Some(500_024),
+            Some(0.0017761),
+        ),
+    );
+    sde.types.insert(
+        56_328,
+        mk_standing_test_type(
+            56_328,
+            4_036,
+            11,
+            "Hypnosian Sentinel",
+            Some(500_024),
+            Some(0.142162994),
+        ),
+    );
+
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    );
+    let char_id = 98_100_010_i64;
+    let k_sys = 30_000_142_u32;
+    let wh_sys = 31_000_001_u32;
+    let t0 = 1_700_001_000_u64;
+    spawn_standing_test_char(&ctx, char_id, k_sys, None);
+
+    assert!(
+        apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 29_302, Some(500_001), None, t0)
+            .is_empty(),
+        "excluded FW i-Hub group 925 with positive attr 562 must yield zero standing loss"
+    );
+    assert!(
+        apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 30_188, Some(500_024), None, t0)
+            .is_empty(),
+        "excluded Sleeper group 983 with positive attr 562 must yield zero standing loss in k-space"
+    );
+    assert!(
+        apply_npc_kill_faction_standing_loss(&ctx, wh_sys, char_id, 30_188, Some(500_024), None, t0)
+            .is_empty(),
+        "excluded Sleeper group 983 must yield zero standing loss in w-space"
+    );
+    assert!(
+        apply_npc_kill_faction_standing_loss(&ctx, wh_sys, char_id, 56_328, Some(500_024), None, t0)
+            .is_empty(),
+        "Sleeper Entities group 4036 in w-space (31_000_000..=31_999_999) must yield zero standing loss"
+    );
+    // F-4: unknown npc_type_id not present in SDE must return empty even when explicit_faction_id is passed.
+    assert!(
+        apply_npc_kill_faction_standing_loss(
+            &ctx,
+            k_sys,
+            char_id,
+            999_999_777,
+            Some(500_001),
+            None,
+            t0
+        )
+        .is_empty(),
+        "unknown NPC type ID absent from SdeRegistry must yield zero standing loss"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.characters[&char_id].standings.is_empty());
+    });
+}
+
+// parity: feat:standings.standing-loss, feat:standings.npc-kill-standing-loss, plan:PVE-3
+#[test]
+fn npc_kill_faction_standings_verified_against_real_sqlite_sde() {
+    let sde = open_real_sde_for_npc_standings_test()
+        .expect("data/evomu_sde.sqlite must be available for real-SDE verification");
+
+    let frigate = sde.types.get(&24_997).expect("real SDE type 24997 State Bo-Hi");
+    assert_eq!(frigate.group_id, 671);
+    assert!((frigate.default_attributes.get(&562).copied().unwrap_or(0.0) - 0.001).abs() < 1e-9);
+
+    let bs = sde.types.get(&12_391).expect("real SDE type 12391 Caldari Navy Raven");
+    assert_eq!(bs.group_id, 674);
+    assert!((bs.default_attributes.get(&562).copied().unwrap_or(0.0) - 0.03).abs() < 1e-9);
+
+    let sleeper = sde.types.get(&30_188).expect("real SDE type 30188 Sleepless Patroller");
+    assert_eq!(sleeper.group_id, 983);
+    assert!(sleeper.default_attributes.get(&562).copied().unwrap_or(0.0) > 0.0);
+
+    let trig = sde.types.get(&52_320).expect("real SDE type 52320 Zorya's Leshak");
+    assert_eq!(trig.faction_id, Some(500_026));
+    let expected_trig_loss = trig.default_attributes.get(&562).copied().unwrap_or(0.0);
+    assert!(expected_trig_loss > 0.30);
+
+    let ctx = ServerContext::with_sde_and_repository(
+        sde,
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    );
+    let char_id = 98_100_020_i64;
+    let k_sys = 30_000_142_u32;
+    let wh_sys = 31_000_001_u32;
+    let t0 = 1_700_002_000_u64;
+    spawn_standing_test_char(&ctx, char_id, k_sys, None);
+
+    // Excluded real SDE types produce zero loss even with real SDE attr 562 / FW metadata.
+    assert!(apply_npc_kill_faction_standing_loss(&ctx, wh_sys, char_id, 30_188, None, None, t0).is_empty());
+    assert!(apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 30_188, None, None, t0).is_empty());
+    assert!(apply_npc_kill_faction_standing_loss(&ctx, wh_sys, char_id, 56_328, None, None, t0).is_empty());
+    assert!(apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 29_302, None, None, t0).is_empty());
+    assert!(apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 32_914, None, None, t0).is_empty());
+
+    // Real SDE highest-loss-wins tick upgrade: State Bo-Hi (24997) -> Caldari Navy Raven (12391).
+    assert!(!apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 24_997, None, None, t0).is_empty());
+    assert!(!apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 12_391, None, None, t0 + 30).is_empty());
+    assert!(!apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 52_320, None, None, t0 + 40).is_empty());
+
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.characters[&char_id].standings;
+        assert!(
+            (st[&500_001] - (-0.03)).abs() < 1e-9,
+            "real SDE Caldari upgrade must settle at -0.03, got {}",
+            st[&500_001]
+        );
+        assert!(
+            (st[&500_026] - (-expected_trig_loss)).abs() < 1e-9,
+            "real SDE Triglavian standing loss must match attr 562 ({expected_trig_loss}), got {}",
+            st[&500_026]
+        );
+        assert!(
+            (st[&500_027] - expected_trig_loss).abs() < 1e-9,
+            "real SDE bipolar EDENCOM gain must match attr 562 ({expected_trig_loss}), got {}",
+            st[&500_027]
+        );
+    });
+}
+
 #[cfg(test)]
 #[path = "agents_standings_arcs_extra_unit_tests.rs"]
 mod agents_standings_arcs_extra_unit_tests;
