@@ -477,8 +477,35 @@ def _live_session_attr(attr, default=None):
     return default if val is None else val
 
 
-def _wait_session_attr(attr, expected, timeout_sec=5.0):
+_FITTED_MODULE_FLAGS = set(list(range(11, 35)) + list(range(92, 100)) + list(range(125, 133)))
+
+
+def _snapshot_ship_fitted_item_ids(sm, ship_id):
+    """Return the set of itemIDs currently fitted in module/rig/subsystem slots on ship_id."""
+    if not ship_id:
+        return set()
+    _, rows = sm.RemoteSvc("invbroker").MachoBindObject(int(ship_id), ("List", (), {}))
+    rows = rows or []
+    fitted_ids = set()
+    for row in rows:
+        flag = _get_field(row, "flagID", None)
+        if flag is None:
+            flag = _get_field(row, "flag", None)
+        if flag is None or int(flag) not in _FITTED_MODULE_FLAGS:
+            continue
+        loc = _get_field(row, "locationID", None)
+        if loc is not None and int(loc) != int(ship_id):
+            continue
+        iid = _extract_id(row, ("itemID", "itemId"))
+        if iid:
+            fitted_ids.add(int(iid))
+    return fitted_ids
+
+
+def _wait_session_attr(attr, expected, timeout_sec=5.0, raise_on_timeout=False):
     deadline = time.time() + float(timeout_sec)
+    cur = None
+    busy = False
     while time.time() < deadline:
         sess = getattr(__builtin__, "session", None)
         cur = getattr(sess, attr, None) if sess is not None else None
@@ -490,7 +517,19 @@ def _wait_session_attr(attr, expected, timeout_sec=5.0):
             _sleep_ms(200)
             return cur
         _sleep_ms(50)
-    return _live_session_attr(attr, expected)
+    sess = getattr(__builtin__, "session", None)
+    if sess is not None:
+        cur = getattr(sess, attr, None)
+        busy = bool(getattr(sess, "mutating", 0) or getattr(sess, "changing", None) is not None)
+        if cur == expected and not busy:
+            _sleep_ms(200)
+            return cur
+    if raise_on_timeout:
+        raise RuntimeError(
+            "Timed out waiting for session.%s == %r (got %r, busy=%r)"
+            % (attr, expected, cur, busy)
+        )
+    return cur
 
 
 def _try_slash(sm, cmd):
@@ -900,6 +939,7 @@ def _dock_station(sm, station_id=60003760, allow_time_control=True):
     else:
         _wait_session_timer_clear(max_wait_sec=12.0)
     sm.RemoteSvc("stationSvc").Dock(station_id)
+    docked_ok = False
     deadline = time.time() + (16.0 if not allow_time_control else 10.0)
     while time.time() < deadline:
         sess = getattr(__builtin__, "session", None)
@@ -908,8 +948,19 @@ def _dock_station(sm, station_id=60003760, allow_time_control=True):
             and not getattr(sess, "mutating", 0)
             and getattr(sess, "changing", None) is None
         ):
+            docked_ok = True
             break
         _sleep_ms(100)
+    if not docked_ok:
+        sess = getattr(__builtin__, "session", None)
+        raise RuntimeError(
+            "Timed out waiting for dock at %r (stationid=%r, structureid=%r)"
+            % (
+                station_id,
+                getattr(sess, "stationid", None) if sess is not None else None,
+                getattr(sess, "structureid", None) if sess is not None else None,
+            )
+        )
     if allow_time_control:
         try:
             sm.RemoteSvc("timeControl").ClearSessionTimer()
@@ -943,12 +994,9 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
     if cur_station is not None and cur_station != target_station:
         _undock_ship(sm)
     if getattr(sess, "structureid", None):
-        try:
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
-            sm.RemoteSvc("structureDocking").Undock(int(getattr(sess, "structureid")))
-            _wait_session_attr("structureid", None, timeout_sec=3.0)
-        except Exception:
-            pass
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        sm.RemoteSvc("structureDocking").Undock(int(getattr(sess, "structureid")))
+        _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
     if getattr(sess, "solarsystemid", None) and not getattr(sess, "stationid", None):
         _sleep_sim_ms(1200)
     _wait_warp_fx_settled(sm, timeout_sec=35.0)
@@ -965,51 +1013,49 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
         sm.RemoteSvc("stationSvc").Dock(target_station)
     except Exception:
         _try_slash(sm, "/tr %d" % target_station)
-        _wait_session_attr("solarsystemid2", target_system, timeout_sec=3.0)
+        _wait_session_attr("solarsystemid2", target_system, timeout_sec=3.0, raise_on_timeout=True)
         _wait_view_settled(sm)
         _advance_clock(sm, ipc, 12)
         sm.RemoteSvc("stationSvc").Dock(target_station)
+    docked_ok = False
     deadline = time.time() + 10.0
     while time.time() < deadline:
         sess = getattr(__builtin__, "session", None)
         if getattr(sess, "stationid", None) == target_station and getattr(sess, "changing", None) is None:
+            docked_ok = True
             break
         _sleep_ms(100)
-    try:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-    except Exception:
-        pass
+    if not docked_ok:
+        sess = getattr(__builtin__, "session", None)
+        raise RuntimeError(
+            "Timed out waiting to dock at baseline station %d (got stationid=%r)"
+            % (target_station, getattr(sess, "stationid", None) if sess is not None else None)
+        )
+    sm.RemoteSvc("timeControl").ClearSessionTimer()
     _ensure_view(sm, "hangar")
 
 
 def _leave_active_fleet(sm):
     fid = _live_session_attr("fleetid", None)
     if fid:
-        try:
-            sm.RemoteSvc("fleetMgr").LeaveFleet()
-            _wait_session_attr("fleetid", None, timeout_sec=3.0)
-        except Exception:
-            pass
-    try:
-        fleet_svc = sm.GetService("fleet") if hasattr(sm, "GetService") else None
-        if fleet_svc is not None and hasattr(fleet_svc, "fleet"):
-            fleet_svc.fleet = None
-    except Exception:
-        pass
+        sm.RemoteSvc("fleetMgr").LeaveFleet()
+        _wait_session_attr("fleetid", None, timeout_sec=3.0, raise_on_timeout=True)
+    fleet_svc = sm.GetService("fleet") if hasattr(sm, "GetService") else None
+    if fleet_svc is not None and hasattr(fleet_svc, "fleet"):
+        fleet_svc.fleet = None
 
 
 def _cleanup_corp_structures(sm, ipc=None, structure_ids=None):
-    """Best-effort unanchor + package of active structures owned by the current player corp."""
+    """Unanchor and clean up active structures owned by the current player corp."""
     cur_corp = int(_live_session_attr("corpid", 0) or 0)
     if cur_corp < 98000000:
         return
     ids = []
+    errors = []
     for sid in (structure_ids or ()):
-        try:
-            if sid and int(sid) not in ids:
-                ids.append(int(sid))
-        except Exception:
-            pass
+        sid_i = int(sid) if sid else 0
+        if sid_i and sid_i not in ids:
+            ids.append(sid_i)
     try:
         corp_structs = sm.RemoteSvc("structureDirectory").GetMyCorporationStructures()
         if isinstance(corp_structs, dict):
@@ -1021,58 +1067,52 @@ def _cleanup_corp_structures(sm, ipc=None, structure_ids=None):
                 sid = int(_get_field(row, "structureID", _get_field(row, "itemID", 0)) or 0)
                 if sid and sid not in ids:
                     ids.append(sid)
-    except Exception:
-        pass
+    except Exception as exc:
+        errors.append("GetMyCorporationStructures: %s" % exc)
     for sid in ids:
-        if _live_session_attr("structureid", None) == sid:
-            try:
+        try:
+            if _live_session_attr("structureid", None) == sid:
                 sm.RemoteSvc("timeControl").ClearSessionTimer()
                 sm.RemoteSvc("structureDocking").Undock(sid)
-                _wait_session_attr("structureid", None, timeout_sec=3.0)
-            except Exception:
-                pass
-        try:
-            sm.RemoteSvc("structureDeployment").Unanchor(sid)
-        except Exception:
-            _try_slash(sm, "/structure state %d 110" % sid)
+                _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
             try:
                 sm.RemoteSvc("structureDeployment").Unanchor(sid)
             except Exception:
-                pass
-        _try_slash(sm, "/upwelltimer %d" % sid)
-        try:
+                _try_slash(sm, "/structure state %d 110" % sid)
+                sm.RemoteSvc("structureDeployment").Unanchor(sid)
+            _try_slash(sm, "/upwelltimer %d" % sid)
             _advance_clock(sm, ipc, 5)
-        except Exception:
-            pass
+        except Exception as exc:
+            errors.append("structure %d cleanup: %s" % (sid, exc))
     if ids:
         try:
             sm.RemoteSvc("structureDirectory").GetMyCorporationStructures()
-        except Exception:
-            pass
+        except Exception as exc:
+            errors.append("GetMyCorporationStructures verify: %s" % exc)
+    if errors:
+        raise RuntimeError("Corp structure cleanup failed: %s" % "; ".join(errors))
 
 
 def _resign_player_corp(sm, baseline_corp_id=0, ipc=None, structure_ids=None):
     cur_corp = int(_live_session_attr("corpid", 0) or 0)
     if cur_corp >= 98000000 and (not baseline_corp_id or cur_corp != int(baseline_corp_id)):
         _cleanup_corp_structures(sm, ipc=ipc, structure_ids=structure_ids)
-        try:
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
-        except Exception:
-            pass
-        try:
-            _advance_clock(sm, ipc, 12)
-        except Exception:
-            pass
-        try:
-            sm.RemoteSvc("corpRegistry").ResignFromCorp()
-            deadline = time.time() + 3.0
-            while time.time() < deadline:
-                now_corp = int(_live_session_attr("corpid", 0) or 0)
-                if 0 < now_corp < 98000000:
-                    break
-                _sleep_ms(50)
-        except Exception:
-            pass
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        _advance_clock(sm, ipc, 12)
+        sm.RemoteSvc("corpRegistry").ResignFromCorp()
+        resigned = False
+        now_corp = cur_corp
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            now_corp = int(_live_session_attr("corpid", 0) or 0)
+            if 0 < now_corp < 98000000:
+                resigned = True
+                break
+            _sleep_ms(50)
+        if not resigned:
+            raise RuntimeError(
+                "Timed out waiting for corp resignation (corpid=%r)" % (now_corp,)
+            )
 
 
 def _ensure_home_ship(sm, target_ship_id, ipc=None):
@@ -1082,85 +1122,130 @@ def _ensure_home_ship(sm, target_ship_id, ipc=None):
     cur_sid = int(_live_session_attr("shipid", 0) or 0)
     if cur_sid == target_sid:
         return target_sid
-    try:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-    except Exception:
-        pass
+    sm.RemoteSvc("timeControl").ClearSessionTimer()
     try:
         sm.RemoteSvc("ship").Board(target_sid)
     except Exception:
-        try:
-            _advance_clock(sm, ipc, 12)
-        except Exception:
-            pass
+        _advance_clock(sm, ipc, 12)
         try:
             sm.RemoteSvc("ship").AssembleShip([target_sid])
         except Exception:
             pass
-        try:
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
-        except Exception:
-            pass
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
         sm.RemoteSvc("ship").Board(target_sid)
-    _wait_session_attr("shipid", target_sid, timeout_sec=3.0)
+    _wait_session_attr("shipid", target_sid, timeout_sec=3.0, raise_on_timeout=True)
     _sleep_ms(100)
     _wait_view_settled(sm)
-    try:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-    except Exception:
-        pass
+    sm.RemoteSvc("timeControl").ClearSessionTimer()
     return int(_live_session_attr("shipid", target_sid) or target_sid)
 
 
 def _reset_baseline_state(sm, ipc, baseline, char_id=None):
-    """Best-effort restore of baseline station, starting ship, NPC corp, and cleared fleet."""
+    """Restore baseline character, station, ship fit, NPC corp, FW enlistment, targets, and fleet."""
     target_char = int(char_id or baseline.get("char_id", 0) or 0)
     home_station = int(baseline.get("station_id", 60003760) or 60003760)
     home_system = int(baseline.get("system_id", 30000142) or 30000142)
     home_ship = int(baseline.get("ship_id", 0) or 0)
     home_corp = int(baseline.get("corp_id", 0) or 0)
+    baseline_wf = baseline.get("warfaction_id", None)
+    errors = []
+
+    def _run_step(label, fn):
+        try:
+            fn()
+        except Exception as exc:
+            errors.append("%s: %s" % (label, exc))
 
     if target_char and int(_live_session_attr("charid", 0) or 0) != target_char:
-        try:
+        def _switch_char():
             sm.GetService("sessionMgr").PerformSessionChange(
                 "charsel", sm.RemoteSvc("charUnboundMgr").SelectCharacterID, target_char
             )
+            _wait_session_attr("charid", target_char, timeout_sec=3.0, raise_on_timeout=True)
             _ensure_view(sm, "hangar")
-        except Exception:
-            pass
 
-    if _live_session_attr("fleetid", None):
-        _leave_active_fleet(sm)
-    else:
-        try:
+        _run_step("char_switch", _switch_char)
+
+    def _reset_fleet():
+        if _live_session_attr("fleetid", None):
+            _leave_active_fleet(sm)
+        else:
             fleet_svc = sm.GetService("fleet") if hasattr(sm, "GetService") else None
             if fleet_svc is not None and getattr(fleet_svc, "fleet", None) is not None:
                 fleet_svc.fleet = None
-        except Exception:
-            pass
+
+    _run_step("leave_fleet", _reset_fleet)
+
+    def _clear_targets():
+        in_space = bool(_live_session_attr("solarsystemid", None) and not _live_session_attr("stationid", None))
+        has_targets = False
+        target_svc = None
+        if hasattr(sm, "GetService"):
+            target_svc = sm.GetService("target")
+            if target_svc is not None and hasattr(target_svc, "GetTargets"):
+                raw_targets = target_svc.GetTargets()
+                if isinstance(raw_targets, (dict, list, tuple, set)) and raw_targets:
+                    has_targets = True
+        if in_space or has_targets:
+            sm.RemoteSvc("dogmaIM").ClearTargets()
+            if target_svc is not None and hasattr(target_svc, "ClearTargets"):
+                target_svc.ClearTargets()
+
+    _run_step("clear_targets", _clear_targets)
 
     cur_corp = int(_live_session_attr("corpid", 0) or 0)
     if cur_corp >= 98000000 and (not home_corp or cur_corp != home_corp):
-        _cleanup_corp_structures(sm, ipc=ipc)
+        _run_step("cleanup_corp_structures", lambda: _cleanup_corp_structures(sm, ipc=ipc))
 
     cur_station = _live_session_attr("stationid", None)
     cur_struct = _live_session_attr("structureid", None)
     cur_sys = int(_live_session_attr("solarsystemid2", home_system) or home_system)
     if cur_station != home_station or cur_struct is not None or cur_sys != home_system:
-        _ensure_docked_jita(sm, ipc, station_id=home_station, system_id=home_system)
+        _run_step(
+            "ensure_docked_jita",
+            lambda: _ensure_docked_jita(sm, ipc, station_id=home_station, system_id=home_system),
+        )
 
     if home_ship and int(_live_session_attr("shipid", 0) or 0) != home_ship:
-        try:
-            _ensure_home_ship(sm, home_ship, ipc=ipc)
-        except Exception:
-            pass
+        _run_step("ensure_home_ship", lambda: _ensure_home_ship(sm, home_ship, ipc=ipc))
+
+    if home_ship and baseline.get("fitted_item_ids") is not None:
+        def _strip_extra_fitted():
+            cur_ship_id = int(_live_session_attr("shipid", 0) or home_ship or 0)
+            if cur_ship_id != home_ship:
+                raise RuntimeError("Cannot strip modules: expected home_ship=%d, got %d" % (home_ship, cur_ship_id))
+            baseline_fitted = set(int(x) for x in (baseline.get("fitted_item_ids") or ()))
+            extra_fitted = sorted(_snapshot_ship_fitted_item_ids(sm, home_ship) - baseline_fitted)
+            if not extra_fitted:
+                return
+            inv_hangar, _ = sm.RemoteSvc("invbroker").MachoBindObject(home_station, None)
+            for iid in extra_fitted:
+                try:
+                    inv_hangar.Add(iid, home_ship, flag=4)
+                except Exception:
+                    dogma_ship, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(home_ship, None)
+                    dogma_ship.TakeModuleOffline(home_ship, iid)
+                    inv_hangar.Add(iid, home_ship, flag=4)
+
+        _run_step("strip_non_baseline_fitting", _strip_extra_fitted)
 
     cur_corp = int(_live_session_attr("corpid", 0) or 0)
     if cur_corp >= 98000000 and (not home_corp or cur_corp != home_corp):
-        _resign_player_corp(sm, home_corp, ipc=ipc)
+        _run_step("resign_player_corp", lambda: _resign_player_corp(sm, home_corp, ipc=ipc))
+
+    cur_wf = _live_session_attr("warfactionid", None)
+    if cur_wf and cur_wf != baseline_wf:
+        def _leave_fw():
+            sm.RemoteSvc("fwCharacterEnlistmentMgr").RemoveMyDirectEnlistment()
+            _wait_session_attr("warfactionid", baseline_wf, timeout_sec=3.0, raise_on_timeout=True)
+
+        _run_step("leave_faction_warfare", _leave_fw)
 
     if target_char:
-        _sync_quasar_gateway(sm, target_char)
+        _run_step("sync_quasar_gateway", lambda: _sync_quasar_gateway(sm, target_char))
+
+    if errors:
+        raise RuntimeError("Baseline state reset failed: %s" % "; ".join(errors))
 
 
 class _RecordedBoundProxy(object):

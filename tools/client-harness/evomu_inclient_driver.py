@@ -45,6 +45,7 @@ from evomu_inclient_helpers import (
     _resign_player_corp,
     _sleep_ms,
     _sleep_sim_ms,
+    _snapshot_ship_fitted_item_ids,
     _sync_quasar_gateway,
     _trace,
     _try_slash,
@@ -500,17 +501,15 @@ def _journey_mining_loop(ctx):
     ore_id = None
     reproc_quotes = None
     reproc_res = None
+    body_failed = False
     try:
         if venture_id:
             _board_station_ship(sm, venture_id, assemble=True)
             if miner_id:
-                try:
-                    inv_v, _ = sm.RemoteSvc("invbroker").MachoBindObject(venture_id, None)
-                    inv_v.Add(miner_id, 60003760, flag=27)
-                    dogma_v, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
-                    dogma_v.SetModuleOnline(venture_id, miner_id)
-                except Exception:
-                    pass
+                inv_v, _ = sm.RemoteSvc("invbroker").MachoBindObject(venture_id, None)
+                inv_v.Add(miner_id, 60003760, flag=27)
+                dogma_v, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
+                dogma_v.SetModuleOnline(venture_id, miner_id)
         _undock_ship(sm)
         active_mine_ship = venture_id or primary_ship_id
         bp_mine = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
@@ -521,69 +520,58 @@ def _journey_mining_loop(ctx):
                     rock_id = int(bid)
                     break
         if not rock_id:
-            try:
-                b_jita_mine = _get_beyonce(sm, 30000142)
-                _warp_full(sm, b_jita_mine, 50001249)
-                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                sm.RemoteSvc("beyonce").CmdStargateJump(50001249)
-                _wait_session_attr("solarsystemid2", 30000144, timeout_sec=3.0)
-                b_perim_mine = _get_beyonce(sm, 30000144)
-                _ensure_view(sm, "inflight")
-                _wait_view_settled(sm)
-                bp_perim = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
-                belt_id = 40009232
-                if bp_perim is not None:
-                    for bid in list(bp_perim.balls.keys()):
-                        slim_b = bp_perim.GetInvItem(bid)
-                        if slim_b is not None and int(getattr(slim_b, "groupID", 0) or 0) == 9:
-                            belt_id = int(bid)
-                            break
-                _warp_full(sm, b_perim_mine, belt_id)
-                _wait_view_settled(sm)
-                bp_mine = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
-                if bp_mine is not None:
-                    for bid in list(bp_mine.balls.keys()):
-                        slim_m = bp_mine.GetInvItem(bid)
-                        if int(bid) != active_mine_ship and slim_m is not None and int(getattr(slim_m, "categoryID", 0) or 0) == 25:
-                            rock_id = int(bid)
-                            break
-            except Exception:
-                pass
-        if rock_id:
-            try:
-                sm.RemoteSvc("dogmaIM").AddTarget(rock_id)
-                if venture_id and miner_id:
-                    dogma_mine, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
-                    mine_rep = dogma_mine.Activate(miner_id, "mining", rock_id)
-            except Exception:
-                pass
+            b_jita_mine = _get_beyonce(sm, 30000142)
+            _warp_full(sm, b_jita_mine, 50001249)
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            sm.RemoteSvc("beyonce").CmdStargateJump(50001249)
+            _wait_session_attr("solarsystemid2", 30000144, timeout_sec=3.0, raise_on_timeout=True)
+            b_perim_mine = _get_beyonce(sm, 30000144)
+            _ensure_view(sm, "inflight")
+            _wait_view_settled(sm)
+            bp_perim = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
+            belt_id = 40009232
+            if bp_perim is not None:
+                for bid in list(bp_perim.balls.keys()):
+                    slim_b = bp_perim.GetInvItem(bid)
+                    if slim_b is not None and int(getattr(slim_b, "groupID", 0) or 0) == 9:
+                        belt_id = int(bid)
+                        break
+            _warp_full(sm, b_perim_mine, belt_id)
+            _wait_view_settled(sm)
+            bp_mine = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
+            if bp_mine is not None:
+                for bid in list(bp_mine.balls.keys()):
+                    slim_m = bp_mine.GetInvItem(bid)
+                    if int(bid) != active_mine_ship and slim_m is not None and int(getattr(slim_m, "categoryID", 0) or 0) == 25:
+                        rock_id = int(bid)
+                        break
+        if not rock_id:
+            raise RuntimeError("No asteroid rock found in Jita or Perimeter belt")
+        sm.RemoteSvc("dogmaIM").AddTarget(rock_id)
+        if venture_id and miner_id:
+            dogma_mine, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
+            mine_rep = dogma_mine.Activate(miner_id, "mining", rock_id)
         _advance_clock(sm, ipc, 65)
         if venture_id and miner_id and mine_rep is not None:
-            try:
-                dogma_mine, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
-                dogma_mine.Deactivate(miner_id)
-            except Exception:
-                pass
+            dogma_mine, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
+            dogma_mine.Deactivate(miner_id)
         if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) == 30000144:
             b_perim_ret = _get_beyonce(sm, 30000144)
             _warp_full(sm, b_perim_ret, 50002185)
             sm.RemoteSvc("timeControl").ClearSessionTimer()
             sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
-            _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
+            _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0, raise_on_timeout=True)
             _ensure_view(sm, "inflight")
             _wait_view_settled(sm)
             b_jita_ret = _get_beyonce(sm, 30000142)
             _warp_full(sm, b_jita_ret, 60003760)
         _dock_station(sm, 60003760)
         if venture_id:
-            try:
-                inv_hangar, _ = sm.RemoteSvc("invbroker").MachoBindObject(60003760, None)
-                _, ship_ore_items = sm.RemoteSvc("invbroker").MachoBindObject(venture_id, ("List", (), {}))
-                for it in (ship_ore_items or []):
-                    if int(_get_field(it, "typeID", 0)) in (1228, 1230):
-                        inv_hangar.Add(int(_get_field(it, "itemID", 0)), venture_id)
-            except Exception:
-                pass
+            inv_hangar, _ = sm.RemoteSvc("invbroker").MachoBindObject(60003760, None)
+            _, ship_ore_items = sm.RemoteSvc("invbroker").MachoBindObject(venture_id, ("List", (), {}))
+            for it in (ship_ore_items or []):
+                if int(_get_field(it, "typeID", 0)) in (1228, 1230):
+                    inv_hangar.Add(int(_get_field(it, "itemID", 0)), venture_id)
         _, inv_ore = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
         for it in (inv_ore or []):
             if int(_get_field(it, "typeID", 0)) in (1228, 1230) and int(_get_field(it, "quantity", 0)) >= 100:
@@ -592,21 +580,23 @@ def _journey_mining_loop(ctx):
         if not ore_id:
             _try_slash(sm, "/createitem 1228 200")
             ore_id, _ = _find_hangar_item(sm, 60003760, 1228, min_qty=100, reverse=False)
-        if ore_id:
-            try:
-                reproc_svc, _ = sm.RemoteSvc("reprocessingSvc").MachoBindObject(60003760, None)
-                reproc_quotes = reproc_svc.GetQuotes([ore_id], 60003760)
-                reproc_res = reproc_svc.Reprocess([ore_id], 60003760)
-            except Exception:
-                pass
+        if not ore_id:
+            raise RuntimeError("No ore available for reprocessing")
+        reproc_svc, _ = sm.RemoteSvc("reprocessingSvc").MachoBindObject(60003760, None)
+        reproc_quotes = reproc_svc.GetQuotes([ore_id], 60003760)
+        reproc_res = reproc_svc.Reprocess([ore_id], 60003760)
+    except Exception:
+        body_failed = True
+        raise
     finally:
+        cleanup_errors = []
         try:
             if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) == 30000144:
                 b_perim_ret = _get_beyonce(sm, 30000144)
                 _warp_full(sm, b_perim_ret, 50002185)
                 sm.RemoteSvc("timeControl").ClearSessionTimer()
                 sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
-                _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
+                _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0, raise_on_timeout=True)
                 _ensure_view(sm, "inflight")
                 _wait_view_settled(sm)
             if int(_live_session_attr("stationid", 0) or 0) != 60003760:
@@ -614,13 +604,18 @@ def _journey_mining_loop(ctx):
                     b_jita_ret = _get_beyonce(sm, 30000142)
                     _warp_full(sm, b_jita_ret, 60003760)
                     _dock_station(sm, 60003760)
-        except Exception:
-            pass
-        _ensure_docked_jita(sm, ipc)
+        except Exception as exc:
+            cleanup_errors.append("return_to_jita: %s" % exc)
         try:
-            _ensure_home_ship(sm, primary_ship_id)
-        except Exception:
-            pass
+            _ensure_docked_jita(sm, ipc)
+        except Exception as exc:
+            cleanup_errors.append("ensure_docked_jita: %s" % exc)
+        try:
+            _ensure_home_ship(sm, primary_ship_id, ipc=ipc)
+        except Exception as exc:
+            cleanup_errors.append("ensure_home_ship: %s" % exc)
+        if not body_failed and cleanup_errors:
+            raise RuntimeError("mining_loop cleanup failed: %s" % "; ".join(cleanup_errors))
     passed = bool(
         venture_id
         and miner_id
@@ -644,16 +639,32 @@ def _journey_pve_combat(ctx):
     ipc = ctx["ipc"]
     ship_id = int(_live_session_attr("shipid", ctx["primary_ship_id"]) or ctx["primary_ship_id"])
     _undock_ship(sm)
-    rat_rep = _try_slash(sm, "/spawnnpc 10035")
-    rat_id = int(
-        _get_field(rat_rep, "npcID", _get_field(rat_rep, "ballID", _get_field(rat_rep, "itemID", 0))) or 0
-    )
-    if rat_id:
+    rat_id = 0
+    body_failed = False
+    try:
+        rat_rep = _try_slash(sm, "/spawnnpc 10035")
+        rat_id = int(
+            _get_field(rat_rep, "npcID", _get_field(rat_rep, "ballID", _get_field(rat_rep, "itemID", 0))) or 0
+        )
+        if rat_id <= 0:
+            raise RuntimeError("Failed to spawn PvE NPC rat (rep=%r)" % (rat_rep,))
         sm.RemoteSvc("dogmaIM").AddTarget(rat_id)
         _try_slash(sm, "/despawn %d" % rat_id)
-    _advance_clock(sm, ipc, 2)
-    _dock_station(sm, 60003760)
-    passed = rat_id != 0
+        _advance_clock(sm, ipc, 2)
+    except Exception:
+        body_failed = True
+        if rat_id > 0:
+            _try_slash(sm, "/despawn %d" % rat_id)
+        raise
+    finally:
+        cleanup_errors = []
+        try:
+            _dock_station(sm, 60003760)
+        except Exception as exc:
+            cleanup_errors.append("dock_station: %s" % exc)
+        if not body_failed and cleanup_errors:
+            raise RuntimeError("pve_combat cleanup failed: %s" % "; ".join(cleanup_errors))
+    passed = rat_id > 0
     return passed, {
         "ship_id": ship_id,
         "npc_id": rat_id,
@@ -680,6 +691,7 @@ def _journey_missions(ctx):
     ag_action = None
     lp_offers = None
     moved_ag_station = False
+    body_failed = False
     try:
         if sec_ag_station_id and sec_ag_station_id != 60003760 and sec_ag_sys_id == 30000142:
             _undock_ship(sm)
@@ -688,17 +700,15 @@ def _journey_missions(ctx):
             _warp_full(sm, b_ag, sec_ag_station_id)
             _dock_station(sm, sec_ag_station_id)
         if sec_ag_id:
-            try:
-                bound_ag, _ = sm.RemoteSvc("agentMgr").MachoBindObject(sec_ag_id, None)
-                ag_action = bound_ag.DoAction(2)
-            except Exception:
-                pass
-        try:
-            lp_offers = sm.RemoteSvc("LPStoreMgr").GetAvailableOffersFromCorp(1000035)
-        except Exception:
-            pass
+            bound_ag, _ = sm.RemoteSvc("agentMgr").MachoBindObject(sec_ag_id, None)
+            ag_action = bound_ag.DoAction(2)
+        lp_offers = sm.RemoteSvc("LPStoreMgr").GetAvailableOffersFromCorp(1000035)
+    except Exception:
+        body_failed = True
+        raise
     finally:
         if moved_ag_station:
+            cleanup_errors = []
             try:
                 if int(_live_session_attr("stationid", 0) or 0) != 60003760:
                     if int(_live_session_attr("stationid", 0) or 0):
@@ -706,9 +716,14 @@ def _journey_missions(ctx):
                     b_ag_ret = _get_beyonce(sm, 30000142)
                     _warp_full(sm, b_ag_ret, 60003760)
                     _dock_station(sm, 60003760)
-            except Exception:
-                pass
-            _ensure_docked_jita(sm, ipc)
+            except Exception as exc:
+                cleanup_errors.append("return_to_jita: %s" % exc)
+            try:
+                _ensure_docked_jita(sm, ipc)
+            except Exception as exc:
+                cleanup_errors.append("ensure_docked_jita: %s" % exc)
+            if not body_failed and cleanup_errors:
+                raise RuntimeError("missions cleanup failed: %s" % "; ".join(cleanup_errors))
     passed = bool(agents_rows and len(agents_rows) > 0 and sec_ag_id and ag_action is not None and lp_offers is not None)
     return passed, {
         "agents_count": len(agents_rows or []),
@@ -746,17 +761,10 @@ def _journey_exploration(ctx):
     if probe_id:
         inv_ship_exp.Add(probe_id, 60003760, flag=27)
     if launcher_id:
-        try:
-            dogma_dock_exp, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(ship_id, None)
-            dogma_dock_exp.SetModuleOnline(ship_id, launcher_id)
-        except Exception:
-            pass
+        dogma_dock_exp, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(ship_id, None)
+        dogma_dock_exp.SetModuleOnline(ship_id, launcher_id)
     _undock_ship(sm)
     dscan_res = sm.RemoteSvc("scanSvc").ConeScan(360.0, 21474836475000.0, [1.0, 0.0, 0.0])
-    try:
-        sm.RemoteSvc("hackingMgr").StartNewGameInstance(1870014200)
-    except Exception:
-        pass
     dogma_exp, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(ship_id, None)
     launch_rep = dogma_exp.Activate(launcher_id, "default")
     probe_pids = list(_get_field(launch_rep, "probeIDs", []) or [])
@@ -1019,6 +1027,7 @@ def _journey_planetary(ctx):
     hauler_id, _ = _find_hangar_item(sm, 60003760, 20185, reverse=False)
     cc_id, _ = _find_hangar_item(sm, 60003760, 2524, reverse=False)
     pinfo = None
+    body_failed = False
     try:
         active_pi_ship = primary_ship_id
         if hauler_id:
@@ -1035,12 +1044,21 @@ def _journey_planetary(ctx):
         _advance_clock(sm, ipc, 1800)
         pinfo = sm.RemoteSvc("planetMgr").GetPlanetResourceInfo(40009077)
         _dock_station(sm, 60003760)
+    except Exception:
+        body_failed = True
+        raise
     finally:
-        _ensure_docked_jita(sm, ipc)
+        cleanup_errors = []
         try:
-            _ensure_home_ship(sm, primary_ship_id)
-        except Exception:
-            pass
+            _ensure_docked_jita(sm, ipc)
+        except Exception as exc:
+            cleanup_errors.append("ensure_docked_jita: %s" % exc)
+        try:
+            _ensure_home_ship(sm, primary_ship_id, ipc=ipc)
+        except Exception as exc:
+            cleanup_errors.append("ensure_home_ship: %s" % exc)
+        if not body_failed and cleanup_errors:
+            raise RuntimeError("planetary cleanup failed: %s" % "; ".join(cleanup_errors))
     passed = pinfo is not None
     return passed, {
         "planet_id": 40009077,
@@ -1144,6 +1162,7 @@ def _journey_structures(ctx):
     baseline_corp_id = ctx["baseline_corp_id"]
     struct_id = None
     c_id = int(_live_session_attr("corpid", 0) or 0)
+    body_failed = False
     try:
         if c_id < 98000000:
             _try_slash(sm, "/giveskill 3363 2")
@@ -1210,12 +1229,12 @@ def _journey_structures(ctx):
             struct_id = int(_extract_id(anc_res) or cit_id)
             core_rep = _try_slash(sm, "/load me 56201 1")
             core_id = int(_get_field(core_rep, "itemID", 0) or 0)
-            if core_id > 0:
-                try:
-                    inv_st, _ = sm.RemoteSvc("invbroker").MachoBindObject(struct_id, None)
-                    inv_st.Add(core_id, active_st_ship, flag=180)
-                except Exception:
-                    pass
+            if core_id <= 0:
+                raise RuntimeError(
+                    "Failed to spawn Quantum Core for structure %d (rep=%r)" % (struct_id, core_rep)
+                )
+            inv_st, _ = sm.RemoteSvc("invbroker").MachoBindObject(struct_id, None)
+            inv_st.Add(core_id, active_st_ship, flag=180)
             for _ in range(4):
                 _try_slash(sm, "/upwelltimer %d" % struct_id)
             sm.RemoteSvc("timeControl").AdvanceClock(900)
@@ -1225,42 +1244,58 @@ def _journey_structures(ctx):
             try:
                 sm.RemoteSvc("timeControl").ClearSessionTimer()
                 sm.RemoteSvc("structureDocking").Dock(struct_id)
-                _wait_session_attr("structureid", struct_id, timeout_sec=3.0)
+                _wait_session_attr("structureid", struct_id, timeout_sec=3.0, raise_on_timeout=True)
                 sm.RemoteSvc("structureControl").TakeControl(struct_id)
                 sm.RemoteSvc("structureControl").GetStructurePilot(struct_id)
                 sm.RemoteSvc("structureControl").ReleaseControl(struct_id)
                 sm.RemoteSvc("timeControl").ClearSessionTimer()
                 sm.RemoteSvc("structureDocking").Undock(struct_id)
-                _wait_session_attr("structureid", None, timeout_sec=3.0)
+                _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
             except Exception:
                 if _live_session_attr("structureid", None) is not None:
-                    try:
-                        sm.RemoteSvc("timeControl").ClearSessionTimer()
-                        sm.RemoteSvc("structureDocking").Undock(struct_id)
-                        _wait_session_attr("structureid", None, timeout_sec=3.0)
-                    except Exception:
-                        pass
+                    sm.RemoteSvc("timeControl").ClearSessionTimer()
+                    sm.RemoteSvc("structureDocking").Undock(struct_id)
+                    _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
+                raise
             _cleanup_corp_structures(sm, ipc=ipc, structure_ids=(struct_id,))
             _warp_full(sm, b_perim, 50002185)
             sm.RemoteSvc("timeControl").ClearSessionTimer()
             sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
-            _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
+            _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0, raise_on_timeout=True)
             b_jita_back = _get_beyonce(sm, 30000142)
             _ensure_view(sm, "inflight")
             _wait_view_settled(sm)
             _warp_full(sm, b_jita_back, 60003760)
+    except Exception:
+        body_failed = True
+        raise
     finally:
-        if struct_id or int(_live_session_attr("corpid", 0) or 0) >= 98000000:
-            _cleanup_corp_structures(sm, ipc=ipc, structure_ids=(struct_id,) if struct_id else None)
-        if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) != 30000142:
-            _try_slash(sm, "/tr 60003760")
-            _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
-        _ensure_docked_jita(sm, ipc)
+        cleanup_errors = []
+        try:
+            if struct_id or int(_live_session_attr("corpid", 0) or 0) >= 98000000:
+                _cleanup_corp_structures(sm, ipc=ipc, structure_ids=(struct_id,) if struct_id else None)
+        except Exception as exc:
+            cleanup_errors.append("cleanup_corp_structures: %s" % exc)
+        try:
+            if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) != 30000142:
+                _try_slash(sm, "/tr 60003760")
+                _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0, raise_on_timeout=True)
+        except Exception as exc:
+            cleanup_errors.append("return_to_jita: %s" % exc)
+        try:
+            _ensure_docked_jita(sm, ipc)
+        except Exception as exc:
+            cleanup_errors.append("ensure_docked_jita: %s" % exc)
         try:
             _ensure_home_ship(sm, primary_ship_id, ipc=ipc)
-        except Exception:
-            pass
-        _resign_player_corp(sm, baseline_corp_id, ipc=ipc, structure_ids=(struct_id,) if struct_id else None)
+        except Exception as exc:
+            cleanup_errors.append("ensure_home_ship: %s" % exc)
+        try:
+            _resign_player_corp(sm, baseline_corp_id, ipc=ipc, structure_ids=(struct_id,) if struct_id else None)
+        except Exception as exc:
+            cleanup_errors.append("resign_player_corp: %s" % exc)
+        if not body_failed and cleanup_errors:
+            raise RuntimeError("structures cleanup failed: %s" % "; ".join(cleanup_errors))
     passed = struct_id is not None
     return passed, {
         "structure_id": struct_id,
@@ -1293,17 +1328,10 @@ def _journey_daily_goals_events(ctx):
         if gw_obj is not None and hasattr(gw_obj, "get_request_broker_details")
         else {}
     )
-    goals_cur = None
-    goal_prog = None
-    try:
-        from dailygoals.client.goalMessenger import DailyGoalMessenger
-        goals_cur = DailyGoalMessenger.get_instance(pgw).get_current_goals()
-    except Exception:
-        pass
-    try:
-        goal_prog = sm.RemoteSvc("seasonManager").get_character_progress_by_character_id(2)
-    except Exception:
-        pass
+    from dailygoals.client.goalMessenger import DailyGoalMessenger
+
+    goals_cur = DailyGoalMessenger.get_instance(pgw).get_current_goals()
+    goal_prog = sm.RemoteSvc("seasonManager").get_character_progress_by_character_id(2)
     ops_cat = sm.RemoteSvc("operationsManager").can_character_play_the_tutorial()
     pgw_avail = bool(pgw.is_available()) if pgw is not None and hasattr(pgw, "is_available") else False
     passed = bool(pgw_avail and ops_cat is not None and goals_cur and goal_prog is not None)
@@ -1317,6 +1345,7 @@ def _journey_daily_goals_events(ctx):
 
 def _journey_cosmetics_store(ctx):
     sm = ctx["sm"]
+    ipc = ctx.get("ipc")
     primary_ship_id = ctx["primary_ship_id"]
     fc_res = sm.RemoteSvc("FastCheckoutService").GetOffersForUser()
     fc_packs = fc_res.get("offers", []) if isinstance(fc_res, dict) else getattr(fc_res, "offers", [])
@@ -1340,6 +1369,7 @@ def _journey_cosmetics_store(ctx):
 
     cos_ship_id = primary_ship_id
     skins = []
+    body_failed = False
     try:
         _, inv_cos = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
         ship_type_id = 0
@@ -1365,12 +1395,16 @@ def _journey_cosmetics_store(ctx):
         sm.RemoteSvc("shipCosmeticsMgr").GiveSkin(170)
         sm.RemoteSvc("shipCosmeticsMgr").ApplySkinToShip(cos_ship_id, 170)
         skins = sm.RemoteSvc("shipCosmeticsMgr").GetLicencedSkins()
+    except Exception:
+        body_failed = True
+        raise
     finally:
         if cos_ship_id != primary_ship_id:
             try:
-                _ensure_home_ship(sm, primary_ship_id)
+                _ensure_home_ship(sm, primary_ship_id, ipc=ipc)
             except Exception:
-                pass
+                if not body_failed:
+                    raise
     passed = (
         fc_free_ok
         and fc_status == "COMPLETED"
@@ -1470,10 +1504,11 @@ def _journey_titans(ctx):
         _try_slash(sm, "/giveskill %d 5" % sk_id)
     titan_id = 0
     dd_ok = False
+    body_failed = False
     try:
         sm.RemoteSvc("timeControl").ClearSessionTimer()
         _try_slash(sm, "/tr 30004759")
-        _wait_session_attr("solarsystemid2", 30004759, timeout_sec=5.0)
+        _wait_session_attr("solarsystemid2", 30004759, timeout_sec=5.0, raise_on_timeout=True)
         _ensure_view(sm, "inflight")
         _wait_view_settled(sm)
         sp_tit = _try_slash(sm, "/spawn 11567")
@@ -1481,7 +1516,7 @@ def _journey_titans(ctx):
         if titan_id > 0:
             sm.RemoteSvc("timeControl").ClearSessionTimer()
             sm.RemoteSvc("ship").Board(titan_id)
-            _wait_session_attr("shipid", titan_id, timeout_sec=3.0)
+            _wait_session_attr("shipid", titan_id, timeout_sec=3.0, raise_on_timeout=True)
             dd_fit = _try_slash(sm, "/fit me 24550")
             dd_mod_id = int(_get_field(dd_fit, "itemID", 0) or 0)
             _try_slash(sm, "/fit me 43658")
@@ -1492,27 +1527,36 @@ def _journey_titans(ctx):
             sp_cap = _try_slash(sm, "/spawn 19720")
             cap_tgt_id = int(_get_field(sp_cap, "spawnedID", _get_field(sp_cap, "itemID", 0)) or 0)
             if cap_tgt_id > 0 and dd_mod_id > 0:
-                try:
-                    sm.RemoteSvc("dogmaIM").AddTarget(cap_tgt_id)
-                except Exception:
-                    pass
+                sm.RemoteSvc("dogmaIM").AddTarget(cap_tgt_id)
                 dogma_tit, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(titan_id, None)
                 dd_res = dogma_tit.Activate(dd_mod_id, "superWeapon", cap_tgt_id, 0)
                 dd_ok = dd_res is not None
                 sm.RemoteSvc("timeControl").AdvanceClock(310)
                 _try_slash(sm, "/despawn %d" % cap_tgt_id)
+    except Exception:
+        body_failed = True
+        raise
     finally:
+        cleanup_errors = []
         try:
             sm.RemoteSvc("timeControl").ClearSessionTimer()
-        except Exception:
-            pass
-        _try_slash(sm, "/tr 60003760")
-        _wait_session_attr("solarsystemid2", 30000142, timeout_sec=5.0)
-        _ensure_docked_jita(sm, ipc)
+        except Exception as exc:
+            cleanup_errors.append("ClearSessionTimer: %s" % exc)
+        try:
+            _try_slash(sm, "/tr 60003760")
+            _wait_session_attr("solarsystemid2", 30000142, timeout_sec=5.0, raise_on_timeout=True)
+        except Exception as exc:
+            cleanup_errors.append("return_to_jita: %s" % exc)
+        try:
+            _ensure_docked_jita(sm, ipc)
+        except Exception as exc:
+            cleanup_errors.append("ensure_docked_jita: %s" % exc)
         try:
             _ensure_home_ship(sm, primary_ship_id, ipc=ipc)
-        except Exception:
-            pass
+        except Exception as exc:
+            cleanup_errors.append("ensure_home_ship: %s" % exc)
+        if not body_failed and cleanup_errors:
+            raise RuntimeError("titans cleanup failed: %s" % "; ".join(cleanup_errors))
     passed = titan_id > 0 and dd_ok
     return passed, {
         "titan_id": titan_id,
@@ -1595,6 +1639,12 @@ def _execute_all_journeys(cfg, ipc):
     home_system_id = int(getattr(sess, "solarsystemid2", None) or 30000142)
     cur_corp_id = int(getattr(sess, "corpid", 0) or 0)
     baseline_corp_id = cur_corp_id if 0 < cur_corp_id < 98000000 else 0
+    baseline_wf = getattr(sess, "warfactionid", None)
+    baseline_fitted_ids = (
+        sorted(_snapshot_ship_fitted_item_ids(sm, primary_ship_id))
+        if primary_ship_id
+        else []
+    )
 
     outcomes = {}
     pgw = _sync_quasar_gateway(sm, char_id) or sm.GetService("publicGatewaySvc")
@@ -1618,6 +1668,8 @@ def _execute_all_journeys(cfg, ipc):
             "station_id": home_station_id,
             "system_id": home_system_id,
             "corp_id": baseline_corp_id,
+            "warfaction_id": baseline_wf,
+            "fitted_item_ids": baseline_fitted_ids,
         },
         "esi_port": esi_port,
         "pgw": pgw,
@@ -1641,19 +1693,43 @@ def _execute_all_journeys(cfg, ipc):
         if only_set is not None and jid not in only_set:
             continue
 
+        pre_reset_tb = None
         try:
             _reset_baseline_state(sm, ipc, ctx["baseline"], char_id=ctx["char_id"])
         except Exception:
-            pass
-
-        if jid in _C2_JOURNEYS:
-            try:
-                ensure_c2_ready()
-            except Exception:
-                ctx["char2_id"] = ctx["char2_id"] or 90000002
+            pre_reset_tb = traceback.format_exc()
 
         ipc.notify({"cmd": "journey_start", "id": jid})
         _emit_client_marker(cfg, "EVOMU_JOURNEY_START", jid)
+
+        if pre_reset_tb is not None:
+            _trace(cfg, "PRE-RESET EXCEPTION before %s:\n%s" % (jid, pre_reset_tb))
+            try:
+                sys.stdout.write("[client-1] journey=%s pre-reset exception:\n%s\n" % (jid, pre_reset_tb))
+                sys.stdout.flush()
+            except Exception:
+                pass
+            shot_path = None
+            if not cfg.get("silent", False):
+                shot_path = _capture_inclient_screenshot(out_dir, jid, ipc=ipc)
+            metrics = {"pre_reset_failed": True}
+            entry = {
+                "passed": False,
+                "bridge_verified": False,
+                "real_client_verified": False,
+                "rpcs_sent": [],
+                "metrics": metrics,
+                "screenshot": shot_path,
+                "traceback": pre_reset_tb,
+                "evidence": _format_evidence(False, [], metrics, shot_path, pre_reset_tb),
+            }
+            outcomes[jid] = entry
+            if outcomes_path:
+                _atomic_write_json(outcomes_path, outcomes)
+            ipc.notify({"cmd": "journey_progress", "id": jid, "entry": entry})
+            _emit_client_marker(cfg, "EVOMU_JOURNEY_END", jid, "passed=False rpcs=0 pre_reset_failed=True")
+            ipc.notify({"cmd": "journey_end", "id": jid, "passed": False})
+            continue
 
         j_rpcs = []
         rpc_sink[0] = j_rpcs
@@ -1662,6 +1738,8 @@ def _execute_all_journeys(cfg, ipc):
         tb_str = None
         shot_path = None
         try:
+            if jid in _C2_JOURNEYS:
+                ensure_c2_ready()
             _sync_quasar_gateway(sm, char_id)
             res = handler(ctx)
             if isinstance(res, tuple):
@@ -1683,9 +1761,23 @@ def _execute_all_journeys(cfg, ipc):
         if not cfg.get("silent", False):
             shot_path = _capture_inclient_screenshot(out_dir, jid, ipc=ipc)
 
+        try:
+            _reset_baseline_state(sm, ipc, ctx["baseline"], char_id=ctx["char_id"])
+        except Exception:
+            post_tb = traceback.format_exc()
+            _trace(cfg, "POST-RESET EXCEPTION after %s:\n%s" % (jid, post_tb))
+            try:
+                sys.stdout.write("[client-1] journey=%s post-reset exception:\n%s\n" % (jid, post_tb))
+                sys.stdout.flush()
+            except Exception:
+                pass
+            passed = False
+            metrics["post_reset_failed"] = True
+            tb_str = ("%s\n%s" % (tb_str, post_tb)) if tb_str else post_tb
+
         entry = {
             "passed": bool(passed),
-            "bridge_verified": True,
+            "bridge_verified": bool(passed),
             "real_client_verified": bool(passed),
             "rpcs_sent": list(j_rpcs),
             "metrics": metrics,
@@ -1701,11 +1793,6 @@ def _execute_all_journeys(cfg, ipc):
         try:
             sys.stdout.write("[client-1] done %s: passed=%r\n" % (jid, bool(passed)))
             sys.stdout.flush()
-        except Exception:
-            pass
-
-        try:
-            _reset_baseline_state(sm, ipc, ctx["baseline"], char_id=ctx["char_id"])
         except Exception:
             pass
 

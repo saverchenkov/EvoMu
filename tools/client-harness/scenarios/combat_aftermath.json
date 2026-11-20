@@ -41,7 +41,14 @@
     {
       "id": "board_merlin",
       "action": {"type": "click_widget", "target": "context_menu_Board Ship", "wait_ms": 1200},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "rpc_sent": ["ship.Board"],
+        "expect_session_field": "shipid!=None",
+        "state_checks": [{"field": "session.shipid", "changed": true}],
+        "ui_delta_without_relog": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {
       "id": "close_shiphangar_merlin",
@@ -62,7 +69,14 @@
     {
       "id": "undock_for_combat",
       "action": {"type": "undock", "wait_ms": 3500},
-      "checks": {"expect_session_field": "stationid==None", "no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "rpc_sent": ["ship.Undock"],
+        "expect_session_field": "stationid==None",
+        "ship_shown": true,
+        "ui_delta_without_relog": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {
       "id": "stop_after_undock",
@@ -85,23 +99,24 @@
     {
       "id": "lock_npc",
       "action": {"type": "lock_target", "target": "Pithi Invader", "wait_ms": 4000},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"rpc_sent": ["dogmaIM.AddTarget"], "no_client_exception": true, "no_error_reply": true}
     },
     {"id": "tc_npc_lock", "time_control": true, "action": {"type": "advance_server_time", "seconds": 2}},
     {
       "id": "wait_npc_locked",
       "action": {"type": "wait", "wait_ms": 2000},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "wait_until": {"timeout_ms": 10000, "poll_interval_ms": 500, "checks": {"state_checks": [{"field": "locked_targets", "non_empty": true}]}},
+      "checks": {"state_checks": [{"field": "locked_targets", "non_empty": true}], "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "fire_gun_1",
       "action": {"type": "activate_module", "target": "inFlightHighSlot1", "wait_ms": 800},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"rpc_sent": ["dogmaIM.Activate"], "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "fire_gun_2",
       "action": {"type": "activate_module", "target": "inFlightHighSlot2", "wait_ms": 800},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"rpc_sent": ["dogmaIM.Activate"], "no_client_exception": true, "no_error_reply": true}
     },
     {"id": "tc_combat_1", "time_control": true, "action": {"type": "advance_server_time", "seconds": 6}},
     {"id": "wait_combat_1", "action": {"type": "wait", "wait_ms": 2000}, "checks": {"no_client_exception": true, "no_error_reply": true}},
@@ -114,7 +129,12 @@
       "id": "wait_wreck_spawn",
       "action": {"type": "wait", "wait_ms": 2500},
       "wait_until": {"timeout_ms": 30000, "poll_interval_ms": 800, "checks": {"expect_ball_present": "Guristas Small Wreck"}},
-      "checks": {"expect_ball_present": "Guristas Small Wreck", "no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "expect_ball_present": "Guristas Small Wreck",
+        "state_checks": [{"field": "space.nearby_balls", "non_empty": true}],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {
       "id": "approach_wreck",
@@ -137,7 +157,12 @@
     {
       "id": "open_wreck_cargo",
       "action": {"type": "click_widget", "target": "main/l_main/selecteditemview/content/main/bottomCont/buttonCont/selectedItemOpenCargo", "wait_ms": 1800},
-      "checks": {"expect_window_open": "InventorySpace", "no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "expect_window_open": "InventorySpace",
+        "window_populated": {"window": "InventorySpace", "min_populated": 1, "require_rpc_or_data": false},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {
       "id": "select_wreck_inv_tree",
@@ -147,34 +172,78 @@
     {
       "id": "click_loot_all",
       "action": {"type": "click_widget", "target": "main/l_main/InventorySpace/content/main/rightCont/bottomRightcont/specialActionsCont/invLootAllBtn", "wait_ms": 1500},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "rpc_sent": [{"name": "invbroker.MultiAdd", "min_count": 1, "require_ok": true}],
+        "notification_received": ["OnItemChange"],
+        "state_checks": [
+          {"field": "cargo_item_count", "increased": true},
+          {"field": "inventory_state.cargo_total_quantity", "increased": true}
+        ],
+        "ui_delta_without_relog": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {
       "id": "lock_wreck",
       "action": {"type": "lock_target", "target": "Guristas Small Wreck", "wait_ms": 4000},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"rpc_sent": ["dogmaIM.AddTarget"], "no_client_exception": true, "no_error_reply": true}
     },
     {"id": "tc_wreck_lock", "time_control": true, "action": {"type": "advance_server_time", "seconds": 2}},
-    {"id": "wait_wreck_locked", "action": {"type": "wait", "wait_ms": 2000}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {
+      "id": "wait_wreck_locked",
+      "action": {"type": "wait", "wait_ms": 2000},
+      "wait_until": {"timeout_ms": 10000, "poll_interval_ms": 500, "checks": {"state_checks": [{"field": "locked_targets", "non_empty": true}]}},
+      "checks": {"state_checks": [{"field": "locked_targets", "non_empty": true}], "no_client_exception": true, "no_error_reply": true}
+    },
     {
       "id": "activate_salvager",
       "action": {"type": "activate_module", "target": "ModuleButton_25861", "wait_ms": 800},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"rpc_sent": ["dogmaIM.Activate"], "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "wait_salvage_cycle",
       "action": {"type": "wait", "wait_ms": 12000, "strict_wait": true},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "wait_until": {
+        "timeout_ms": 35000,
+        "poll_interval_ms": 1000,
+        "checks": {
+          "state_checks": [
+            {"field": "locked_targets", "equals": []},
+            {"field": "inventory_state.cargo_total_quantity", "increased": true}
+          ]
+        }
+      },
+      "checks": {
+        "state_checks": [
+          {"field": "locked_targets", "equals": []},
+          {"field": "inventory_state.cargo_total_quantity", "increased": true}
+        ],
+        "ui_delta_without_relog": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {
       "id": "dock_for_insurance",
       "action": {"type": "dock", "target": "60003760", "wait_ms": 2500},
-      "checks": {"expect_session_field": "stationid==60003760", "no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "rpc_sent": ["stationSvc.Dock"],
+        "expect_session_field": "stationid==60003760",
+        "ui_delta_without_relog": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {
       "id": "open_insurance",
       "action": {"type": "open_window", "target": "insurance", "wait_ms": 1200},
-      "checks": {"expect_window_open": "insurance", "no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "expect_window_open": "insurance",
+        "window_populated": {"window": "insurance", "min_populated": 1, "require_rpc_or_data": false},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {
       "id": "select_merlin_insurance",
@@ -199,12 +268,25 @@
     {
       "id": "confirm_platinum_insurance",
       "action": {"type": "click_widget", "target": "main/l_main/InsuranceTermsWindow/content/main/mainCont/ButtonGroup/btns/ButtonWrapper/Insure_Btn", "wait_ms": 1200},
-      "checks": {"expect_window_closed": "InsuranceTermsWindow", "no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "expect_window_closed": "InsuranceTermsWindow",
+        "rpc_sent": [{"name": "insuranceSvc.InsureShip", "min_count": 1, "require_ok": true}],
+        "state_checks": [{"field": "wallet_isk", "decreased": true}],
+        "ui_delta_without_relog": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {
       "id": "undock_for_self_destruct",
       "action": {"type": "undock", "wait_ms": 3500},
-      "checks": {"expect_session_field": "stationid==None", "no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "rpc_sent": ["ship.Undock"],
+        "expect_session_field": "stationid==None",
+        "ship_shown": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {"id": "stop_before_sd", "action": {"type": "stop", "wait_ms": 500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
     {"id": "wait_session_change_sd", "action": {"type": "wait", "wait_ms": 16000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}},
@@ -221,18 +303,48 @@
     {
       "id": "confirm_self_destruct",
       "action": {"type": "click_widget", "target": "modal/l_modal/l_modal_modal/modal/content/main/bottom/ButtonGroup/btns/ButtonWrapper/yes_dialog_button", "wait_ms": 1500},
-      "checks": {"expect_modal_absent": true, "no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "rpc_sent": ["ship.SelfDestruct"],
+        "expect_modal_absent": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
-    {"id": "tc_self_destruct_detonate", "time_control": true, "action": {"type": "advance_server_time", "seconds": 125}},
+    {
+      "id": "tc_self_destruct_detonate",
+      "time_control": true,
+      "action": {"type": "advance_server_time", "seconds": 125},
+      "checks": {
+        "state_checks": [
+          {"field": "session.shipid", "changed": true},
+          {"field": "wallet_isk", "delta": 0.0, "tolerance": 0.01}
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
     {
       "id": "wait_after_detonate",
       "action": {"type": "wait", "wait_ms": 3500, "strict_wait": true},
-      "checks": {"expect_ball_present": "Caldari Frigate Wreck", "no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "expect_ball_present": "Caldari Frigate Wreck",
+        "expect_session_field": "shipid!=None",
+        "state_checks": [{"field": "wallet_isk", "delta": 0.0, "tolerance": 0.01}],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {
       "id": "dock_in_capsule",
       "action": {"type": "dock", "target": "60003760", "wait_ms": 3500},
-      "checks": {"expect_session_field": "stationid==60003760", "no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "rpc_sent": ["stationSvc.Dock"],
+        "expect_session_field": "stationid==60003760",
+        "state_checks": [{"field": "wallet_isk", "delta": 0.0, "tolerance": 0.01}],
+        "ui_delta_without_relog": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {
       "id": "open_charactersheet",
@@ -240,7 +352,15 @@
       "checks": {"expect_window_open": "charactersheet", "no_client_exception": true, "no_error_reply": true}
     },
     {"id": "open_cs_interactions", "action": {"type": "click_widget", "target": "interactions", "wait_ms": 1000}, "checks": {"no_client_exception": true, "no_error_reply": true}},
-    {"id": "open_cs_combat_log", "action": {"type": "click_widget", "target": "mykills", "wait_ms": 1500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {
+      "id": "open_cs_combat_log",
+      "action": {"type": "click_widget", "target": "mykills", "wait_ms": 1500},
+      "checks": {
+        "rpc_sent": ["charMgr.GetRecentShipKillsAndLosses"],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
     {
       "id": "open_combat_log_combo",
       "action": {"type": "click_widget", "target": "main/l_main/charactersheet/content/main/mainCont/panelCont/InteractionsPanel/panelCont/KillsPanel/combatlogpanel/combo", "wait_ms": 800},
@@ -254,19 +374,61 @@
     {
       "id": "open_kill_report",
       "action": {"type": "click_widget", "target": "/content/main/mainCont/panelCont/InteractionsPanel/panelCont/KillsPanel/scroll/maincontainer/__clipper/__content/entry_0", "double_click": true, "wait_ms": 1500},
-      "checks": {"expect_window_open": "KillReportWnd", "no_client_exception": true, "no_error_reply": true}
+      "checks": {
+        "expect_window_open": "KillReportWnd",
+        "window_populated": {"window": "KillReportWnd", "min_populated": 1, "contains_text": "Merlin", "require_rpc_or_data": false},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
     },
     {"id": "open_wallet", "action": {"type": "open_window", "target": "wallet", "wait_ms": 1000}, "checks": {"expect_window_open": "walletWindow", "no_client_exception": true, "no_error_reply": true}},
     {"id": "open_wallet_personal", "action": {"type": "click_widget", "target": "personal", "wait_ms": 1000}, "checks": {"no_client_exception": true, "no_error_reply": true}},
-    {"id": "open_wallet_transactions", "action": {"type": "click_widget", "target": "IskPanelTab_transactions", "wait_ms": 1500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {
+      "id": "open_wallet_transactions",
+      "action": {"type": "click_widget", "target": "IskPanelTab_transactions", "wait_ms": 1500},
+      "checks": {
+        "window_populated": {"window": "walletWindow", "min_populated": 1, "require_rpc_or_data": false},
+        "ui_delta_without_relog": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
     {"id": "open_mail", "action": {"type": "open_window", "target": "mail", "wait_ms": 1000}, "checks": {"expect_window_open": "mail", "no_client_exception": true, "no_error_reply": true}},
-    {"id": "open_mail_inbox", "action": {"type": "click_widget", "target": "entry_2", "wait_ms": 1500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {
+      "id": "open_mail_inbox",
+      "action": {"type": "click_widget", "target": "entry_2", "wait_ms": 1500},
+      "checks": {
+        "window_populated": {"window": "mail", "min_populated": 1, "require_rpc_or_data": false},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
     {"id": "wait_session_timer_shuttle", "action": {"type": "wait", "wait_ms": 11000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}},
     {"id": "open_shiphangar_shuttle", "action": {"type": "open_window", "target": "shiphangar", "wait_ms": 1000}, "checks": {"expect_window_open": "StationShips", "no_client_exception": true, "no_error_reply": true}},
     {"id": "rclick_shuttle", "action": {"type": "click_widget", "target": "ItemEntry_672", "right_click": true, "wait_ms": 800}, "checks": {"expect_context_menu_item": "Board Ship", "no_client_exception": true, "no_error_reply": true}},
-    {"id": "board_shuttle", "action": {"type": "click_widget", "target": "context_menu_Board Ship", "wait_ms": 1500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {
+      "id": "board_shuttle",
+      "action": {"type": "click_widget", "target": "context_menu_Board Ship", "wait_ms": 1500},
+      "checks": {
+        "rpc_sent": ["ship.Board"],
+        "state_checks": [{"field": "session.shipid", "changed": true}],
+        "ui_delta_without_relog": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
     {"id": "wait_session_timer_undock_shuttle", "action": {"type": "wait", "wait_ms": 11000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}},
-    {"id": "undock_shuttle", "action": {"type": "undock", "wait_ms": 3500}, "checks": {"expect_session_field": "stationid==None", "no_client_exception": true, "no_error_reply": true}},
+    {
+      "id": "undock_shuttle",
+      "action": {"type": "undock", "wait_ms": 3500},
+      "checks": {
+        "rpc_sent": ["ship.Undock"],
+        "expect_session_field": "stationid==None",
+        "ship_shown": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
     {"id": "stop_shuttle", "action": {"type": "stop", "wait_ms": 500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
     {"id": "wait_session_timer_safelogoff", "action": {"type": "wait", "wait_ms": 16000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}},
     {"id": "tc_clear_npc_timer_safelogoff", "time_control": true, "action": {"type": "advance_server_time", "seconds": 305}},

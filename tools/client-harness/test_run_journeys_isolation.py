@@ -61,12 +61,13 @@ class _FakeSession:
 
 
 class _FakeItem:
-    def __init__(self, item_id, type_id, quantity=1, flag_id=4, singleton=1):
+    def __init__(self, item_id, type_id, quantity=1, flag_id=4, singleton=1, location_id=60003760):
         self.itemID = item_id
         self.typeID = type_id
         self.quantity = quantity
         self.flagID = flag_id
         self.singleton = singleton
+        self.locationID = location_id
 
 
 class _FakeCharRow:
@@ -128,6 +129,11 @@ class _FakeWorldState:
         self.unassembled_ships = set()
         self.space_ships = set()
         self.slash_cmds = []
+        self.fitted_items = []
+        self.unfitted_items = []
+        self.locked_targets = set()
+        self.cleared_targets = []
+        self.fw_resignations = []
 
     def _alloc(self):
         self.next_id += 1
@@ -135,11 +141,27 @@ class _FakeWorldState:
 
     def handle_bound(self, svc_name, obj_id, method_name, *args, **kwargs):
         self.calls.append((svc_name + ".bound", method_name, obj_id))
+        full = "%s.%s" % (svc_name, method_name)
+        if full in self.fail_methods:
+            raise self.fail_methods[full]
         if svc_name == "dogmaIM" and method_name == "Activate":
             return {"probeIDs": [70001, 70002]}
         if svc_name == "dogmaIM" and method_name == "GetShipAttributes":
             return {"maxVelocity": 350.0}
         if svc_name == "invbroker" and method_name == "Add":
+            item_id = int(args[0]) if args else 0
+            flag = kwargs.get("flag")
+            if int(obj_id) in (60003760, 60015169) and flag == 4 and item_id:
+                kept = []
+                for it in self.fitted_items:
+                    if int(getattr(it, "itemID", 0)) == item_id:
+                        it.flagID = 4
+                        it.locationID = int(obj_id)
+                        self.hangar.append(it)
+                        self.unfitted_items.append(item_id)
+                    else:
+                        kept.append(it)
+                self.fitted_items = kept
             return True
         if svc_name == "beyonce" and method_name in ("CmdWarpToStuff",):
             return True
@@ -168,7 +190,12 @@ class _FakeWorldState:
             obj_id = args[0]
             call = args[1] if len(args) > 1 else None
             if svc_name == "invbroker" and isinstance(call, tuple) and call[0] == "List":
-                return (None, list(self.hangar))
+                if int(obj_id) in (60003760, 60015169):
+                    return (None, list(self.hangar))
+                return (
+                    None,
+                    [it for it in self.fitted_items if int(getattr(it, "locationID", obj_id)) == int(obj_id)],
+                )
             if svc_name == "dogmaIM" and isinstance(call, tuple) and call[0] == "GetShipAttributes":
                 return (None, {"maxVelocity": 350.0})
             return (_FakeBoundObject(svc_name, obj_id, self), [])
@@ -406,6 +433,23 @@ class _FakeWorldState:
             self.sess.warfactionid = int(args[0])
             return True
 
+        if svc_name == "fwCharacterEnlistmentMgr" and method_name == "RemoveMyDirectEnlistment":
+            if not self.sess.stationid:
+                raise RuntimeError("Direct FW resignation requires being docked")
+            self.fw_resignations.append(self.sess.warfactionid)
+            self.sess.warfactionid = None
+            return True
+
+        if svc_name == "dogmaIM":
+            if method_name == "AddTarget":
+                if args:
+                    self.locked_targets.add(int(args[0]))
+                return True
+            if method_name == "ClearTargets":
+                self.cleared_targets.append(sorted(self.locked_targets))
+                self.locked_targets.clear()
+                return True
+
         if svc_name == "randomJumpMgr" and method_name == "ActivateRandomJumpFilament":
             self.sess.solarsystemid = 30002000
             self.sess.solarsystemid2 = 30002000
@@ -535,6 +579,10 @@ class _FakeSM:
             ),
             "sessionMgr": types.SimpleNamespace(
                 PerformSessionChange=lambda _reason, fn, *args: fn(*args)
+            ),
+            "target": types.SimpleNamespace(
+                GetTargets=lambda: list(state.locked_targets),
+                ClearTargets=lambda: state.locked_targets.clear(),
             ),
         }
 
@@ -1167,6 +1215,252 @@ class RunJourneysIsolationTests(unittest.TestCase):
         self.assertEqual(sink[0]["service"], "beyonce.bound")
         self.assertEqual(sink[0]["method"], "CmdWarpToStuff")
         self.assertEqual(sink[0]["status"], "ok")
+
+    def _run_driver_subset(self, only_journeys, fail_methods=None, ipc_override=None):
+        import evomu_inclient_driver as drv
+        import evomu_inclient_helpers as hlp
+
+        sess = _FakeSession()
+        state = _FakeWorldState(sess, fail_methods=fail_methods)
+        sm = _FakeSM(state)
+        ipc = ipc_override if ipc_override is not None else _FakeIPC(state)
+        mock_http_resp = mock.MagicMock()
+        mock_http_resp.getcode.return_value = 200
+        mock_http_resp.read.return_value = b'{"players": 1}'
+        with (
+            mock.patch.object(drv.__builtin__, "sm", sm, create=True),
+            mock.patch.object(drv.__builtin__, "session", sess, create=True),
+            mock.patch.object(hlp.__builtin__, "sm", sm, create=True),
+            mock.patch.object(hlp.__builtin__, "session", sess, create=True),
+            mock.patch.object(hlp, "_sleep_ms", return_value=None),
+            mock.patch.object(hlp, "_sleep_sim_ms", return_value=None),
+            mock.patch.object(hlp, "_wait_warp_fx_settled", return_value=None),
+            mock.patch.object(drv, "_warp_full", return_value={"warp": True}),
+            mock.patch.object(drv, "_warp_animated", return_value={"warp": True}),
+            mock.patch.object(drv._urllib, "urlopen", return_value=mock_http_resp),
+        ):
+            outcomes = drv._execute_all_journeys(
+                {
+                    "out_dir": os.path.join(self.tmp, "subset_" + "_".join(only_journeys)),
+                    "user": "demo",
+                    "password": "demo-secret",
+                    "char_id": 90000001,
+                    "esi_port": 26004,
+                    "only_journeys": only_journeys,
+                    "silent": True,
+                },
+                ipc,
+            )
+        return outcomes, state, sess
+
+    def test_driver_fail_closed_bridge_verified_and_no_swallowed_errors(self):
+        # Failed journey never gets hardcoded bridge_verified=True
+        outcomes, _, _ = self._run_driver_subset(
+            ["create_character"],
+            fail_methods={"charUnboundMgr.CreateCharacterWithDoll": RuntimeError("char boom")},
+        )
+        self.assertFalse(outcomes["create_character"]["passed"])
+        self.assertFalse(outcomes["create_character"]["bridge_verified"])
+        self.assertFalse(outcomes["create_character"]["real_client_verified"])
+        self.assertIn("char boom", outcomes["create_character"]["traceback"])
+
+        # _journey_structures propagates TakeControl failure and still emergency-undocks
+        outcomes_st, _, sess_st = self._run_driver_subset(
+            ["structures"],
+            fail_methods={"structureControl.TakeControl": RuntimeError("control denied")},
+        )
+        self.assertFalse(outcomes_st["structures"]["passed"])
+        self.assertFalse(outcomes_st["structures"]["bridge_verified"])
+        self.assertIsNone(sess_st.structureid)
+        self.assertIn("control denied", outcomes_st["structures"]["traceback"])
+
+        # _journey_structures propagates Undock failure
+        outcomes_su, _, _ = self._run_driver_subset(
+            ["structures"],
+            fail_methods={"structureDocking.Undock": RuntimeError("undock jammed")},
+        )
+        self.assertFalse(outcomes_su["structures"]["passed"])
+        self.assertFalse(outcomes_su["structures"]["bridge_verified"])
+        self.assertIn("undock jammed", outcomes_su["structures"]["traceback"])
+
+        # _journey_mining_loop propagates Reprocess failure
+        outcomes_m, _, _ = self._run_driver_subset(
+            ["mining_loop"],
+            fail_methods={"reprocessingSvc.Reprocess": RuntimeError("reprocess failed")},
+        )
+        self.assertFalse(outcomes_m["mining_loop"]["passed"])
+        self.assertFalse(outcomes_m["mining_loop"]["bridge_verified"])
+        self.assertIn("reprocess failed", outcomes_m["mining_loop"]["traceback"])
+
+        # _journey_pve_combat propagates AddTarget failure
+        outcomes_p, _, _ = self._run_driver_subset(
+            ["pve_combat"],
+            fail_methods={"dogmaIM.AddTarget": RuntimeError("targeting offline")},
+        )
+        self.assertFalse(outcomes_p["pve_combat"]["passed"])
+        self.assertFalse(outcomes_p["pve_combat"]["bridge_verified"])
+        self.assertIn("targeting offline", outcomes_p["pve_combat"]["traceback"])
+
+        # C2 failure inside _execute_all_journeys fails closed without synthesizing char2_id=90000002
+        class _FailC2IPC(_FakeIPC):
+            def request(self, payload):
+                if payload.get("cmd") == "ensure_client2_ready":
+                    raise RuntimeError("client2 unavailable")
+                return super(_FailC2IPC, self).request(payload)
+
+        outcomes_c2, _, _ = self._run_driver_subset(["fleet"], ipc_override=_FailC2IPC())
+        self.assertFalse(outcomes_c2["fleet"]["passed"])
+        self.assertFalse(outcomes_c2["fleet"]["bridge_verified"])
+        self.assertIn("client2 unavailable", outcomes_c2["fleet"]["traceback"])
+
+    def test_reset_baseline_state_resets_fw_targets_fittings_and_propagates_errors(self):
+        import evomu_inclient_helpers as hlp
+
+        sess = _FakeSession()
+        state = _FakeWorldState(sess)
+        sm = _FakeSM(state)
+        ipc = _FakeIPC(state)
+        base_item = _FakeItem(888000, 3413, 1, flag_id=19, singleton=1, location_id=100001)
+        extra_item = _FakeItem(888001, 2889, 1, flag_id=27, singleton=1, location_id=100001)
+        state.fitted_items = [base_item, extra_item]
+
+        # Dirty state spanning FW, locked targets, non-baseline modules, fleet, space, ship, player corp
+        sess.warfactionid = 500001
+        state.locked_targets = {777001, 777002}
+        sess.fleetid = 555
+        sess.stationid = None
+        sess.solarsystemid = 30000142
+        sess.shipid = 999999
+        sess.corpid = 98000010
+        baseline = {
+            "char_id": 90000001,
+            "station_id": 60003760,
+            "system_id": 30000142,
+            "ship_id": 100001,
+            "corp_id": 1000167,
+            "warfaction_id": None,
+            "fitted_item_ids": [888000],
+        }
+
+        with (
+            mock.patch.object(hlp.__builtin__, "sm", sm, create=True),
+            mock.patch.object(hlp.__builtin__, "session", sess, create=True),
+            mock.patch.object(hlp, "_sleep_ms", return_value=None),
+            mock.patch.object(hlp, "_sleep_sim_ms", return_value=None),
+            mock.patch.object(hlp, "_wait_warp_fx_settled", return_value=None),
+        ):
+            hlp._reset_baseline_state(sm, ipc, baseline)
+
+            self.assertIsNone(sess.warfactionid)
+            self.assertEqual(state.fw_resignations, [500001])
+            self.assertEqual(state.locked_targets, set())
+            self.assertEqual(state.cleared_targets, [[777001, 777002]])
+            self.assertEqual(state.unfitted_items, [888001])
+            self.assertEqual([it.itemID for it in state.fitted_items], [888000])
+            self.assertIsNone(sess.fleetid)
+            self.assertEqual(sess.stationid, 60003760)
+            self.assertEqual(sess.shipid, 100001)
+            self.assertEqual(sess.corpid, 1000167)
+
+            # Teardown failures must raise instead of swallowing errors
+            sess.warfactionid = 500001
+            state.fail_methods["fwCharacterEnlistmentMgr.RemoveMyDirectEnlistment"] = RuntimeError("fw locked")
+            with self.assertRaises(RuntimeError) as ctx_fw:
+                hlp._reset_baseline_state(sm, ipc, baseline)
+            self.assertIn("leave_faction_warfare", str(ctx_fw.exception))
+            state.fail_methods.pop("fwCharacterEnlistmentMgr.RemoveMyDirectEnlistment")
+            sess.warfactionid = None
+
+            sess.fleetid = 556
+            state.fail_methods["fleetMgr.LeaveFleet"] = RuntimeError("fleet stuck")
+            with self.assertRaises(RuntimeError) as ctx_fl:
+                hlp._reset_baseline_state(sm, ipc, baseline)
+            self.assertIn("fleet stuck", str(ctx_fl.exception))
+            state.fail_methods.pop("fleetMgr.LeaveFleet")
+            sess.fleetid = None
+
+        # Post-reset failure inside _execute_all_journeys fails the journey rather than swallowing
+        outcomes_fw, _, _ = self._run_driver_subset(
+            ["sovereignty_fw"],
+            fail_methods={"fwCharacterEnlistmentMgr.RemoveMyDirectEnlistment": RuntimeError("post fw fail")},
+        )
+        self.assertFalse(outcomes_fw["sovereignty_fw"]["passed"])
+        self.assertFalse(outcomes_fw["sovereignty_fw"]["bridge_verified"])
+        self.assertFalse(outcomes_fw["sovereignty_fw"]["real_client_verified"])
+        self.assertTrue(outcomes_fw["sovereignty_fw"]["metrics"].get("post_reset_failed"))
+
+    def test_finalize_journey_run_fails_closed_on_unattributed_stale_and_driver_errors(self):
+        rj = _load_run_journeys()
+        srv_log = os.path.join(self.tmp, "server.log")
+        cli_log = os.path.join(self.tmp, "client_1.log")
+        with open(srv_log, "w", encoding="utf-8") as sf:
+            sf.write("EXCEPTION unattributed server crash before journey marker\n")
+        with open(cli_log, "w", encoding="utf-8") as cf:
+            cf.write("[EVOMU_JOURNEY_START] id=launch_login\n[EVOMU_JOURNEY_END] id=launch_login\n")
+        clean_outcomes = {
+            "launch_login": {"passed": True, "bridge_verified": True, "real_client_verified": True, "rpcs_sent": []},
+            "station_ui": {"passed": True, "bridge_verified": True, "real_client_verified": True, "rpcs_sent": []},
+        }
+        res_unattr, rc_unattr = rj.finalize_journey_run(
+            out_dir=self.tmp,
+            journey_list=[{"id": "launch_login"}, {"id": "station_ui"}],
+            server_log_path=srv_log,
+            client_logs=[cli_log],
+            client_app_path="/nonexistent/EVE.app",
+            build_info={"build": "9999999"},
+            concurrent_clients_tested=1,
+            should_launch_real_client=True,
+            real_outcomes=clean_outcomes,
+            bridge_outcomes={},
+        )
+        self.assertEqual(rc_unattr, 2)
+        self.assertEqual(len(res_unattr["unattributed_log_errors"]), 1)
+        for jid in ("launch_login", "station_ui"):
+            self.assertFalse(res_unattr["journeys"][jid]["passed"])
+            self.assertFalse(res_unattr["journeys"][jid]["real_client_verified"])
+            self.assertFalse(res_unattr["journeys"][jid]["bridge_verified"])
+            self.assertIn("EXCEPTION unattributed server crash before journey marker", res_unattr["journeys"][jid]["log_errors"])
+
+        # Stale Destiny action errors fail all journeys even with clean logs
+        with open(srv_log, "w", encoding="utf-8") as sf:
+            sf.write("INFO all clean\n")
+        res_stale, rc_stale = rj.finalize_journey_run(
+            out_dir=self.tmp,
+            journey_list=[{"id": "launch_login"}],
+            server_log_path=srv_log,
+            client_logs=[cli_log],
+            client_app_path="/nonexistent/EVE.app",
+            build_info={"build": "9999999"},
+            concurrent_clients_tested=1,
+            should_launch_real_client=True,
+            real_outcomes=clean_outcomes,
+            bridge_outcomes={},
+            stale_errors=["[classify_client_log] FAIL: stale-at-action=2 (stale-at-history=0)"],
+        )
+        self.assertEqual(rc_stale, 2)
+        self.assertFalse(res_stale["journeys"]["launch_login"]["passed"])
+        self.assertFalse(res_stale["journeys"]["launch_login"]["real_client_verified"])
+        self.assertFalse(res_stale["journeys"]["launch_login"]["bridge_verified"])
+
+        # Driver timeout / crash fails all journeys even with zero log errors (exit code 1)
+        res_drv, rc_drv = rj.finalize_journey_run(
+            out_dir=self.tmp,
+            journey_list=[{"id": "launch_login"}],
+            server_log_path=srv_log,
+            client_logs=[cli_log],
+            client_app_path="/nonexistent/EVE.app",
+            build_info={"build": "9999999"},
+            concurrent_clients_tested=1,
+            should_launch_real_client=True,
+            real_outcomes=clean_outcomes,
+            bridge_outcomes={},
+            driver_errors=["Real client timed out after 60.0s before driver completion"],
+        )
+        self.assertEqual(rc_drv, 1)
+        self.assertEqual(res_drv["driver_errors"], ["Real client timed out after 60.0s before driver completion"])
+        self.assertFalse(res_drv["journeys"]["launch_login"]["passed"])
+        self.assertFalse(res_drv["journeys"]["launch_login"]["real_client_verified"])
+        self.assertFalse(res_drv["journeys"]["launch_login"]["bridge_verified"])
 
 
 if __name__ == "__main__":
