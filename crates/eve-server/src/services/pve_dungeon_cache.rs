@@ -162,6 +162,14 @@ pub fn seed_system_ice_belt_from_sde(ctx: &ServerContext, sys_id: SolarSystemId)
     ice_types.dedup();
     let position = derive_system_site_position_from_sde(ctx, sys_id, 3, 5.0);
     let now = ctx.now_unix();
+    let already_seeded = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&sys_id)
+            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == ICE_BELT_ANOMALY_TYPE))
+    });
+    if already_seeded {
+        return;
+    }
     ctx.db.with_mut_snapshot(|snap| {
         let list = snap.cosmic_anomalies.entry(sys_id).or_default();
         if list.iter().any(|a| a.anomaly_type == ICE_BELT_ANOMALY_TYPE) {
@@ -455,6 +463,158 @@ fn unseeded_agency_anomaly_instances(
             .push(registry_instance_id(&spec.site_id));
     }
     out
+}
+
+/// Reads combat anomaly instances for `sys_id` read-only, falling back to deterministic
+/// SDE-derived combat anomalies when the system has not yet been materialized in DB.
+fn combat_anomaly_instances_readonly(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    include_seasonal: bool,
+) -> BTreeMap<u32, Vec<i64>> {
+    let pve_seeded = read_pve_exploration_reg(ctx, |reg| {
+        reg.seeded_systems.get(&sys_id).copied().unwrap_or(false)
+    });
+    let mut by_dungeon = registry_instances(ctx, sys_id, false);
+    if !pve_seeded && by_dungeon.is_empty() {
+        by_dungeon = unseeded_agency_anomaly_instances(ctx, sys_id);
+    }
+    if include_seasonal {
+        for (did, iids) in anomaly_instances(ctx, sys_id, "SeasonalEventSite") {
+            by_dungeon.entry(did).or_default().extend(iids);
+        }
+    }
+    by_dungeon
+}
+
+/// Reads SDE ore anomaly instances for `sys_id` strictly read-only without mutating DB state.
+fn ore_anomaly_instances_readonly(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+) -> BTreeMap<u32, Vec<i64>> {
+    let already_seeded = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&sys_id)
+            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "OreAnomaly"))
+            || snap.cosmic_signatures.get(&sys_id).is_some_and(|list| {
+                list.iter()
+                    .any(|s| matches!(s.sig_group.as_str(), "OreAnomaly" | "Ore" | "Gas"))
+            })
+    });
+    if already_seeded {
+        return anomaly_instances(ctx, sys_id, "OreAnomaly");
+    }
+    let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
+        return BTreeMap::new();
+    };
+    let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+    for def in COSMIC_ORE_SITES
+        .iter()
+        .filter(|d| d.kind == crate::services::mining_sites::SiteKind::Anomaly && d.band.matches_system(sys))
+    {
+        if let Ok(site) = resolve_ore_site(&ctx.sde, def) {
+            if site.asteroids.iter().all(|a| ctx.sde.types.contains_key(&a.type_id)) {
+                out.entry(site.dungeon_id)
+                    .or_default()
+                    .push(registry_instance_id(&format!("DNG-{}-{sys_id}", site.dungeon_id)));
+            }
+        }
+    }
+    out
+}
+
+/// Reads ice-belt instances for `sys_id` strictly read-only without mutating DB state.
+fn ice_belt_instances_readonly(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+) -> BTreeMap<u32, Vec<i64>> {
+    let has_any_ice_row = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&sys_id)
+            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == ICE_BELT_ANOMALY_TYPE))
+    });
+    if has_any_ice_row {
+        return anomaly_instances(ctx, sys_id, ICE_BELT_ANOMALY_TYPE);
+    }
+    let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+    let regional_did = if crate::services::mining_sites::is_designated_ice_system(sys_id) {
+        crate::services::mining_sites::resolve_regional_ice_belt(&ctx.sde, sys_id)
+            .and_then(|res| res.ok())
+            .filter(|site| site.asteroids.iter().all(|a| ctx.sde.types.contains_key(&a.type_id)))
+            .map(|site| site.dungeon_id)
+    } else {
+        None
+    };
+    if let Some(did) = regional_did.or_else(|| ice_belt_dungeon_for_system(ctx, sys_id)) {
+        out.entry(did)
+            .or_default()
+            .push(registry_instance_id(&format!("DNG-{did}-{sys_id}")));
+    }
+    out
+}
+
+/// Validates ship-level warpability constraints (pre-warp checks, active warp, movement/tackle/cloak
+/// locks, and minimum 150 km warp capacitor) before lazy site seeding can mutate the database.
+async fn validate_pre_agency_warp(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: SolarSystemId,
+    pre_ball: &eve_destiny::Ball,
+) -> Result<(), BridgeRpcError> {
+    crate::services::nav_warp_interdiction::validate_pre_warp_common(
+        ctx, char_id, ship_id, sys_id, sys_handle,
+    )
+    .await?;
+    crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&pre_ball.mode)?;
+    ctx.validate_ship_movement(
+        char_id,
+        ship_id,
+        crate::services::space_nav_movement_guard::MovementIntent::AgencyWarp { sys_id },
+    )
+    .await?;
+
+    let (base_warp_cap_need, sde_max_cap) = ctx
+        .sde
+        .types
+        .get(&pre_ball.type_id)
+        .map(|t| {
+            let wcn = t.default_attributes.get(&153).copied().unwrap_or(1.24e-6);
+            let cap = t.default_attributes.get(&482).copied().unwrap_or(250.0);
+            (wcn, cap)
+        })
+        .unwrap_or((1.24e-6, 250.0));
+    let wdo_lvl = ctx.db.with_snapshot(|snap| {
+        snap.skills
+            .get(&char_id)
+            .and_then(|m| m.get(&3455))
+            .map(|s| s.level.min(5))
+            .unwrap_or(0)
+    });
+    let eff_warp_cap_need = base_warp_cap_need * (1.0 - 0.10 * (wdo_lvl as f64));
+    let cap_per_m = (eff_warp_cap_need * pre_ball.mass) / 149_597_870_700.0;
+    if cap_per_m > 0.0 {
+        if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+            if (cs.max_capacitor - 250.0).abs() < 1e-6
+                && (cs.capacitor - 250.0).abs() < 1e-6
+                && sde_max_cap > 250.0
+            {
+                cs.capacitor = sde_max_cap;
+            }
+            if (cs.capacitor / cap_per_m) < 150_000.0 {
+                return Err(BridgeRpcError {
+                    code: "NotEnoughCapacitor".into(),
+                    message: format!(
+                        "Insufficient capacitor ({:.3} GJ) to initiate minimum 150 km warp",
+                        cs.capacitor
+                    ),
+                    client_error: None,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Resolves an already-populated content warp target read-only.
@@ -1512,9 +1672,14 @@ pub async fn handle(
                     format!("Target content site ({target_iid:?}, {target_did:?}) not found in system {sys_id}"),
                 )));
             }
-            let pre_handle = ctx.systems.get_or_spawn(sys_id);
-            match pre_handle.get_ball_snapshot(ship_id).await {
-                Ok(Some(_)) => {}
+            let Some(pre_handle) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(rpc_msg_err(
+                    "ShipNotInSpace",
+                    "Active ship is not spawned in Ballpark",
+                )));
+            };
+            let pre_ball = match pre_handle.get_ball_snapshot(ship_id).await {
+                Ok(Some((_, ball))) => ball,
                 Ok(None) => {
                     return Some(Err(rpc_msg_err(
                         "ShipNotInSpace",
@@ -1524,6 +1689,18 @@ pub async fn handle(
                 Err(e) => {
                     return Some(Err(rpc_msg_err("DestinyCommandFailed", e)));
                 }
+            };
+            if let Err(e) = validate_pre_agency_warp(
+                ctx,
+                &pre_handle,
+                char_id,
+                ship_id,
+                sys_id,
+                &pre_ball,
+            )
+            .await
+            {
+                return Some(Err(e));
             }
             if need_pve {
                 Box::pin(ensure_system_pve_sites_seeded(ctx, sys_id)).await;
@@ -1561,7 +1738,13 @@ pub async fn handle(
             }
         };
 
-        let handle = ctx.systems.get_or_spawn(sys_id);
+        let Some(handle) = ctx.systems.get_handle(sys_id) else {
+            return Some(Err(BridgeRpcError {
+                code: "ShipNotInSpace".into(),
+                message: "Active ship is not spawned in Ballpark".into(),
+                client_error: None,
+            }));
+        };
         let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
             Ok(v) => v,
             Err(e) => return Some(Err(BridgeRpcError { code: "DestinyCommandFailed".into(), message: e, client_error: None })),
@@ -1603,13 +1786,21 @@ pub async fn handle(
     }
 
     if method == "GetFactionWarfareBattlefieldInstances" {
+        if let Err(e) = ServerContext::require_character(session) {
+            return Some(Err(e));
+        }
         if let Some(sys_id) = args
             .first()
             .and_then(|a| a.as_i64())
             .and_then(|v| u32::try_from(v).ok())
             .or(session.solar_system_id)
         {
-            crate::services::fw_gameplay::ensure_warzone_sites_spawned(ctx, sys_id).await;
+            if session.solar_system_id == Some(sys_id)
+                && session.station_id.is_none()
+                && session.structure_id.is_none()
+            {
+                crate::services::fw_gameplay::ensure_warzone_sites_spawned(ctx, sys_id).await;
+            }
         }
         return None;
     }
@@ -1639,21 +1830,37 @@ pub async fn handle(
             client_error: None,
         }));
     };
+    let in_system_undocked = session.station_id.is_none() && session.structure_id.is_none();
 
     match method {
         "GetCombatAnomalyInstances" => {
-            ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(ctx, sys_id).await;
-            let _ = crate::services::pve_special_sites::ensure_seasonal_event_sites_for_system(ctx, sys_id).await;
-            let mut by_dungeon = registry_instances(ctx, sys_id, false);
-            for (did, iids) in anomaly_instances(ctx, sys_id, "SeasonalEventSite") {
-                by_dungeon.entry(did).or_default().extend(iids);
-            }
+            let by_dungeon = if in_system_undocked {
+                ensure_system_pve_sites_seeded(ctx, sys_id).await;
+                crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
+                    ctx, sys_id,
+                )
+                .await;
+                let _ = crate::services::pve_special_sites::ensure_seasonal_event_sites_for_system(
+                    ctx, sys_id,
+                )
+                .await;
+                let mut out = registry_instances(ctx, sys_id, false);
+                for (did, iids) in anomaly_instances(ctx, sys_id, "SeasonalEventSite") {
+                    out.entry(did).or_default().extend(iids);
+                }
+                out
+            } else {
+                combat_anomaly_instances_readonly(ctx, sys_id, true)
+            };
             Some(Ok(instances_reply(sys_id, by_dungeon)))
         }
         "GetCombatAnomaliesCount" => {
-            ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            let instances = registry_instances(ctx, sys_id, false);
+            let instances = if in_system_undocked {
+                ensure_system_pve_sites_seeded(ctx, sys_id).await;
+                registry_instances(ctx, sys_id, false)
+            } else {
+                combat_anomaly_instances_readonly(ctx, sys_id, false)
+            };
             let count: usize = instances.values().map(|v| v.len()).sum();
             Some(Ok(PyRep::Dict(vec![(
                 PyRep::Integer(sys_id as i64),
@@ -1661,13 +1868,21 @@ pub async fn handle(
             )])))
         }
         "GetOreAnomalyInstances" => {
-            seed_system_mining_sites_from_sde(ctx, sys_id).await;
-            let by_dungeon = anomaly_instances(ctx, sys_id, "OreAnomaly");
+            let by_dungeon = if in_system_undocked {
+                seed_system_mining_sites_from_sde(ctx, sys_id).await;
+                anomaly_instances(ctx, sys_id, "OreAnomaly")
+            } else {
+                ore_anomaly_instances_readonly(ctx, sys_id)
+            };
             Some(Ok(instances_reply(sys_id, by_dungeon)))
         }
         "GetOreAnomaliesCount" => {
-            seed_system_mining_sites_from_sde(ctx, sys_id).await;
-            let instances = anomaly_instances(ctx, sys_id, "OreAnomaly");
+            let instances = if in_system_undocked {
+                seed_system_mining_sites_from_sde(ctx, sys_id).await;
+                anomaly_instances(ctx, sys_id, "OreAnomaly")
+            } else {
+                ore_anomaly_instances_readonly(ctx, sys_id)
+            };
             let count: usize = instances.values().map(|v| v.len()).sum();
             Some(Ok(PyRep::Dict(vec![(
                 PyRep::Integer(sys_id as i64),
@@ -1689,21 +1904,28 @@ pub async fn handle(
             let systems = reachable_solar_systems_within_jumps(&ctx.sde, sys_id, max_jumps);
             let mut entries = Vec::with_capacity(systems.len());
             for s in systems {
-                seed_system_mining_sites_from_sde(ctx, s).await;
-                let instances = anomaly_instances(ctx, s, "OreAnomaly");
+                let instances = ore_anomaly_instances_readonly(ctx, s);
                 let count: usize = instances.values().map(|v| v.len()).sum();
                 entries.push((PyRep::Integer(s as i64), PyRep::Integer(count as i64)));
             }
             Some(Ok(PyRep::Dict(entries)))
         }
         "GetIceBeltInstances" => {
-            seed_system_ice_belt_from_sde(ctx, sys_id);
-            let by_dungeon = anomaly_instances(ctx, sys_id, ICE_BELT_ANOMALY_TYPE);
+            let by_dungeon = if in_system_undocked {
+                seed_system_ice_belt_from_sde(ctx, sys_id);
+                anomaly_instances(ctx, sys_id, ICE_BELT_ANOMALY_TYPE)
+            } else {
+                ice_belt_instances_readonly(ctx, sys_id)
+            };
             Some(Ok(instances_reply(sys_id, by_dungeon)))
         }
         "GetIceBeltsCount" => {
-            seed_system_ice_belt_from_sde(ctx, sys_id);
-            let instances = anomaly_instances(ctx, sys_id, ICE_BELT_ANOMALY_TYPE);
+            let instances = if in_system_undocked {
+                seed_system_ice_belt_from_sde(ctx, sys_id);
+                anomaly_instances(ctx, sys_id, ICE_BELT_ANOMALY_TYPE)
+            } else {
+                ice_belt_instances_readonly(ctx, sys_id)
+            };
             let count: usize = instances.values().map(|v| v.len()).sum();
             Some(Ok(PyRep::Dict(vec![(
                 PyRep::Integer(sys_id as i64),
@@ -1741,7 +1963,9 @@ pub async fn handle(
             Some(Ok(PyRep::Dict(entries)))
         }
         "GetFactionWarfareInstances" => {
-            crate::services::fw_gameplay::ensure_warzone_sites_spawned(ctx, sys_id).await;
+            if in_system_undocked {
+                crate::services::fw_gameplay::ensure_warzone_sites_spawned(ctx, sys_id).await;
+            }
             let by_dng: BTreeMap<u32, Vec<i64>> = ctx.db.with_snapshot(|snap| {
                 let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
                 for (&cid, (csys, tier, fac, _, completed)) in &snap.fw_runtime.fw_complexes {
@@ -1818,15 +2042,17 @@ pub async fn handle(
                 .and_then(|a| a.as_i64())
                 .and_then(|raw| u32::try_from(raw).ok())
                 .unwrap_or(sys_id);
-            if session.solar_system_id == Some(target_sys) {
+            if in_system_undocked && session.solar_system_id == Some(target_sys) {
                 crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(ctx, target_sys).await;
             }
             Some(res)
         }
         _ => {
             // GetSignatureInstances: probe-only exploration sites plus SDE-seeded ore/gas signatures.
-            ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            seed_system_mining_sites_from_sde(ctx, sys_id).await;
+            if in_system_undocked {
+                ensure_system_pve_sites_seeded(ctx, sys_id).await;
+                seed_system_mining_sites_from_sde(ctx, sys_id).await;
+            }
             let mut out = registry_instances(ctx, sys_id, true);
             let now = ctx.now_unix();
             ctx.db.with_snapshot(|snap| {
