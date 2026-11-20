@@ -396,7 +396,10 @@ async fn test_market_broker_fee_and_sales_tax() {
     // 3. Player Upwell structure broker fee rate & 50% SCC / 50% owner split (`feat:market.upwell-orders`)
     let struct_id = 1_000_000_777_001_i64;
     let struct_corp_id = ctx.db.with_mut_snapshot(|snap| {
-        let corp_id = snap.characters[&90_000_001].corporation_id;
+        let corp_id = 98_000_777_i64;
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = corp_id;
+        }
         snap.corporations.insert(
             corp_id,
             { let mut __corp = CorporationRecord::default();
@@ -404,6 +407,8 @@ async fn test_market_broker_fee_and_sales_tax() {
                 __corp.name = "Market Hub Corp".into();
                 __corp.ticker = "MHUB".into();
                 __corp.ceo_id = 90_000_001;
+                __corp.members.insert(90_000_001);
+                __corp.member_roles.insert(90_000_001, u64::MAX);
                 __corp.set_division_balance(1, IskCents(0));
                 __corp },
         );
@@ -445,6 +450,7 @@ async fn test_market_broker_fee_and_sales_tax() {
         snap.module_online_states.insert(struct_id + 1, true);
         corp_id
     });
+    s1.corporation_id = Some(struct_corp_id);
     ctx.dispatch_rpc(
         &mut s1,
         "facilityManager",
