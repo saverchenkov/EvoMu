@@ -61,13 +61,15 @@ class _FakeSession:
 
 
 class _FakeItem:
-    def __init__(self, item_id, type_id, quantity=1, flag_id=4, singleton=1, location_id=60003760):
+    def __init__(self, item_id, type_id, quantity=1, flag_id=4, singleton=1, location_id=60003760, category_id=None):
         self.itemID = item_id
         self.typeID = type_id
         self.quantity = quantity
         self.flagID = flag_id
         self.singleton = singleton
         self.locationID = location_id
+        if category_id is not None:
+            self.categoryID = category_id
 
 
 class _FakeCharRow:
@@ -131,9 +133,20 @@ class _FakeWorldState:
         self.slash_cmds = []
         self.fitted_items = []
         self.unfitted_items = []
+        self.destroyed_fittings = []
+        self.charge_item_ids = set()
+        self.fail_on_subsystem_with_modules = False
+        self.sticky_fitted_items = set()
+        self.omit_list_category_id = False
         self.locked_targets = set()
         self.cleared_targets = []
         self.fw_resignations = []
+
+    def _is_charge(self, it):
+        return (
+            int(getattr(it, "categoryID", 0) or 0) == 8
+            or int(getattr(it, "itemID", 0)) in self.charge_item_ids
+        )
 
     def _alloc(self):
         self.next_id += 1
@@ -146,22 +159,77 @@ class _FakeWorldState:
             raise self.fail_methods[full]
         if svc_name == "dogmaIM" and method_name == "Activate":
             return {"probeIDs": [70001, 70002]}
+        if svc_name == "dogmaIM" and method_name == "DestroyFitting":
+            item_id = int(args[0]) if args else 0
+            self.fitted_items = [
+                it for it in self.fitted_items if int(getattr(it, "itemID", 0)) != item_id
+            ]
+            self.destroyed_fittings.append(item_id)
+            return True
         if svc_name == "dogmaIM" and method_name == "GetShipAttributes":
             return {"maxVelocity": 350.0}
         if svc_name == "invbroker" and method_name == "Add":
             item_id = int(args[0]) if args else 0
+            target_loc_arg = int(args[1]) if len(args) > 1 and args[1] is not None else None
             flag = kwargs.get("flag")
             if int(obj_id) in (60003760, 60015169) and flag == 4 and item_id:
-                kept = []
-                for it in self.fitted_items:
-                    if int(getattr(it, "itemID", 0)) == item_id:
-                        it.flagID = 4
-                        it.locationID = int(obj_id)
-                        self.hangar.append(it)
-                        self.unfitted_items.append(item_id)
-                    else:
-                        kept.append(it)
-                self.fitted_items = kept
+                if item_id in self.sticky_fitted_items:
+                    return True
+                found_idx = next(
+                    (idx for idx, it in enumerate(self.fitted_items) if int(getattr(it, "itemID", 0)) == item_id),
+                    None,
+                )
+                if found_idx is not None:
+                    src = self.fitted_items[found_idx]
+                    old_loc = int(getattr(src, "locationID", obj_id))
+                    old_flag = int(getattr(src, "flagID", 4))
+                    if self.fail_on_subsystem_with_modules and 125 <= old_flag <= 132:
+                        has_mod = any(
+                            11 <= int(getattr(o, "flagID", 0)) <= 34
+                            and not self._is_charge(o)
+                            and int(getattr(o, "locationID", 0)) == old_loc
+                            for o in self.fitted_items
+                        )
+                        if has_mod:
+                            raise RuntimeError("SubsystemHasFittedModules")
+                    self.fitted_items.pop(found_idx)
+                    src.flagID = 4
+                    src.locationID = int(obj_id)
+                    self.hangar.append(src)
+                    self.unfitted_items.append(item_id)
+                    if 11 <= old_flag <= 34 and not self._is_charge(src):
+                        kept = []
+                        for other in self.fitted_items:
+                            if (
+                                int(getattr(other, "locationID", 0)) == old_loc
+                                and int(getattr(other, "flagID", 0)) == old_flag
+                                and self._is_charge(other)
+                            ):
+                                other.flagID = 4
+                                other.locationID = int(obj_id)
+                                self.hangar.append(other)
+                                self.unfitted_items.append(int(other.itemID))
+                            else:
+                                kept.append(other)
+                        self.fitted_items = kept
+                    return True
+                # Model resolve_inv_target_location fallback (inventory_bound.rs:2205-2211)
+                # when item is already at bound station obj_id and args[1] != obj_id.
+                if target_loc_arg is not None and target_loc_arg != int(obj_id):
+                    hangar_idx = next(
+                        (
+                            idx
+                            for idx, it in enumerate(self.hangar)
+                            if int(getattr(it, "itemID", 0)) == item_id
+                            and int(getattr(it, "locationID", 0)) == int(obj_id)
+                        ),
+                        None,
+                    )
+                    if hangar_idx is not None:
+                        moved = self.hangar.pop(hangar_idx)
+                        moved.locationID = target_loc_arg
+                        moved.flagID = int(flag)
+                        self.fitted_items.append(moved)
             return True
         if svc_name == "beyonce" and method_name in ("CmdWarpToStuff",):
             return True
@@ -192,10 +260,20 @@ class _FakeWorldState:
             if svc_name == "invbroker" and isinstance(call, tuple) and call[0] == "List":
                 if int(obj_id) in (60003760, 60015169):
                     return (None, list(self.hangar))
-                return (
-                    None,
-                    [it for it in self.fitted_items if int(getattr(it, "locationID", obj_id)) == int(obj_id)],
-                )
+                rows = [it for it in self.fitted_items if int(getattr(it, "locationID", obj_id)) == int(obj_id)]
+                if self.omit_list_category_id:
+                    rows = [
+                        _FakeItem(
+                            it.itemID,
+                            it.typeID,
+                            it.quantity,
+                            it.flagID,
+                            it.singleton,
+                            it.locationID,
+                        )
+                        for it in rows
+                    ]
+                return (None, rows)
             if svc_name == "dogmaIM" and isinstance(call, tuple) and call[0] == "GetShipAttributes":
                 return (None, {"maxVelocity": 350.0})
             return (_FakeBoundObject(svc_name, obj_id, self), [])
@@ -1540,6 +1618,102 @@ class RunJourneysIsolationTests(unittest.TestCase):
         self.assertFalse(res_drv["journeys"]["launch_login"]["passed"])
         self.assertFalse(res_drv["journeys"]["launch_login"]["real_client_verified"])
         self.assertFalse(res_drv["journeys"]["launch_login"]["bridge_verified"])
+
+    def test_strip_extra_fittings_handles_auto_unfitted_charges_rigs_and_subsystems(self):
+        import evomu_inclient_helpers as hlp
+
+        # Case 1 (HF-1483-01): module_id < charge_id WITH List() omitting categoryID.
+        # Unfitting the module auto-unfits the charge to station hangar; re-snapshotting
+        # must skip the already-unfitted charge so inv_hangar.Add never re-injects it
+        # back onto home_ship with flag=4.
+        sess = _FakeSession()
+        state = _FakeWorldState(sess)
+        state.omit_list_category_id = True
+        sm = _FakeSM(state)
+        ipc = _FakeIPC(state)
+        base_mod = _FakeItem(888000, 3413, 1, flag_id=19, singleton=1, location_id=100001)
+        extra_mod = _FakeItem(888001, 17938, 1, flag_id=27, singleton=1, location_id=100001)
+        extra_charge = _FakeItem(888002, 30013, 8, flag_id=27, singleton=0, location_id=100001, category_id=8)
+        state.charge_item_ids.add(888002)
+        state.fitted_items = [base_mod, extra_mod, extra_charge]
+        baseline = {
+            "char_id": 90000001,
+            "station_id": 60003760,
+            "system_id": 30000142,
+            "ship_id": 100001,
+            "corp_id": 1000167,
+            "warfaction_id": None,
+            "fitted_item_ids": [888000],
+        }
+        with (
+            mock.patch.object(hlp.__builtin__, "sm", sm, create=True),
+            mock.patch.object(hlp.__builtin__, "session", sess, create=True),
+            mock.patch.object(hlp, "_sleep_ms", return_value=None),
+        ):
+            hlp._reset_baseline_state(sm, ipc, baseline)
+        self.assertEqual([it.itemID for it in state.fitted_items], [888000])
+        self.assertIn(888001, state.unfitted_items)
+        self.assertIn(888002, state.unfitted_items)
+        hangar_charge = next(it for it in state.hangar if it.itemID == 888002)
+        self.assertEqual(hangar_charge.locationID, 60003760)
+        self.assertEqual(hangar_charge.flagID, 4)
+
+        # Verify the test double itself reproduces resolve_inv_target_location re-injection
+        # if a stale inv_hangar.Add(charge_id, home_ship, flag=4) call IS made.
+        inv_hangar, _ = sm.RemoteSvc("invbroker").MachoBindObject(60003760, None)
+        inv_hangar.Add(888002, 100001, flag=4)
+        self.assertTrue(
+            any(it.itemID == 888002 and it.locationID == 100001 and it.flagID == 4 for it in state.fitted_items)
+        )
+
+        # Case 2: Rigs (92..99) use dogmaIM.DestroyFitting, modules (11..34) strip before
+        # T3 subsystems (125..132), and explicit categoryID=8 charges strip cleanly.
+        sess2 = _FakeSession()
+        state2 = _FakeWorldState(sess2)
+        state2.fail_on_subsystem_with_modules = True
+        sm2 = _FakeSM(state2)
+        ipc2 = _FakeIPC(state2)
+        sub_mod = _FakeItem(888010, 29968, 1, flag_id=125, singleton=1, location_id=100001)
+        high_mod = _FakeItem(888020, 17938, 1, flag_id=27, singleton=1, location_id=100001)
+        probe_chg = _FakeItem(888030, 30013, 8, flag_id=27, singleton=0, location_id=100001, category_id=8)
+        rig_mod = _FakeItem(888025, 31089, 1, flag_id=92, singleton=1, location_id=100001)
+        base2 = _FakeItem(888000, 29968, 1, flag_id=126, singleton=1, location_id=100001)
+        state2.charge_item_ids.add(888030)
+        state2.fitted_items = [base2, sub_mod, high_mod, probe_chg, rig_mod]
+        with (
+            mock.patch.object(hlp.__builtin__, "sm", sm2, create=True),
+            mock.patch.object(hlp.__builtin__, "session", sess2, create=True),
+            mock.patch.object(hlp, "_sleep_ms", return_value=None),
+        ):
+            hlp._reset_baseline_state(sm2, ipc2, baseline)
+        self.assertEqual([it.itemID for it in state2.fitted_items], [888000])
+        self.assertEqual(state2.destroyed_fittings, [888025])
+        self.assertEqual(state2.unfitted_items, [888030, 888020, 888010])
+
+        # Case 3: Stuck fitted item triggers fail-closed post-strip verification error.
+        state2.sticky_fitted_items.add(888099)
+        state2.fitted_items.append(_FakeItem(888099, 2889, 1, flag_id=27, singleton=1, location_id=100001))
+        with (
+            mock.patch.object(hlp.__builtin__, "sm", sm2, create=True),
+            mock.patch.object(hlp.__builtin__, "session", sess2, create=True),
+            mock.patch.object(hlp, "_sleep_ms", return_value=None),
+        ):
+            with self.assertRaises(RuntimeError) as ctx_sticky:
+                hlp._reset_baseline_state(sm2, ipc2, baseline)
+        self.assertIn("Extra fitted items remain", str(ctx_sticky.exception))
+        self.assertIn("888099", str(ctx_sticky.exception))
+
+    def test_journey_structures_preserves_primary_error_when_cleanup_undock_fails(self):
+        outcomes_both, _, _ = self._run_driver_subset(
+            ["structures"],
+            fail_methods={
+                "structureControl.TakeControl": RuntimeError("control denied"),
+                "structureDocking.Undock": RuntimeError("undock jammed"),
+            },
+        )
+        self.assertFalse(outcomes_both["structures"]["passed"])
+        self.assertFalse(outcomes_both["structures"]["bridge_verified"])
+        self.assertIn("control denied", outcomes_both["structures"]["traceback"])
 
 
 if __name__ == "__main__":

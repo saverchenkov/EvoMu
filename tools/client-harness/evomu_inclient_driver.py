@@ -1271,9 +1271,16 @@ def _journey_structures(ctx):
                 _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
             except Exception:
                 if _live_session_attr("structureid", None) is not None:
-                    sm.RemoteSvc("timeControl").ClearSessionTimer()
-                    sm.RemoteSvc("structureDocking").Undock(struct_id)
-                    _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
+                    try:
+                        sm.RemoteSvc("timeControl").ClearSessionTimer()
+                        sm.RemoteSvc("structureDocking").Undock(struct_id)
+                        _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
+                    except Exception as undock_exc:
+                        sys.stdout.write(
+                            "[client-1] WARN _journey_structures cleanup undock failed: %s\n"
+                            % undock_exc
+                        )
+                        sys.stdout.flush()
                 raise
             _cleanup_corp_structures(sm, ipc=ipc, structure_ids=(struct_id,))
             _warp_full(sm, b_perim, 50002185)

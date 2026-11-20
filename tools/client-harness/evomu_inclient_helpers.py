@@ -481,16 +481,19 @@ def _live_session_attr(attr, default=None):
     return default if val is None else val
 
 
-_FITTED_MODULE_FLAGS = set(list(range(11, 35)) + list(range(92, 100)) + list(range(125, 133)))
+_MODULE_SLOT_FLAGS = set(range(11, 35))
+_RIG_SLOT_FLAGS = set(range(92, 100))
+_SUBSYSTEM_SLOT_FLAGS = set(range(125, 133))
+_FITTED_MODULE_FLAGS = _MODULE_SLOT_FLAGS | _RIG_SLOT_FLAGS | _SUBSYSTEM_SLOT_FLAGS
 
 
-def _snapshot_ship_fitted_item_ids(sm, ship_id):
-    """Return the set of itemIDs currently fitted in module/rig/subsystem slots on ship_id."""
+def _snapshot_ship_fitted_items(sm, ship_id):
+    """Return dict {itemID: {'flag_id': int, 'category_id': int|None}} fitted on ship_id."""
     if not ship_id:
-        return set()
+        return {}
     _, rows = sm.RemoteSvc("invbroker").MachoBindObject(int(ship_id), ("List", (), {}))
     rows = rows or []
-    fitted_ids = set()
+    fitted = {}
     for row in rows:
         flag = _get_field(row, "flagID", None)
         if flag is None:
@@ -502,8 +505,78 @@ def _snapshot_ship_fitted_item_ids(sm, ship_id):
             continue
         iid = _extract_id(row, ("itemID", "itemId"))
         if iid:
-            fitted_ids.add(int(iid))
-    return fitted_ids
+            cat_id = _get_field(row, "categoryID", None)
+            fitted[int(iid)] = {
+                "flag_id": int(flag),
+                "category_id": int(cat_id) if cat_id is not None else None,
+            }
+    return fitted
+
+
+def _snapshot_ship_fitted_item_ids(sm, ship_id):
+    """Return the set of itemIDs currently fitted in module/rig/subsystem slots on ship_id."""
+    return set(_snapshot_ship_fitted_items(sm, ship_id).keys())
+
+
+def _fitted_strip_sort_key(entry):
+    iid, meta = entry
+    cat_id = meta.get("category_id")
+    flag_id = meta.get("flag_id", 0)
+    if cat_id == 8:
+        tier = 0
+    elif flag_id in _MODULE_SLOT_FLAGS:
+        tier = 1
+    elif flag_id in _RIG_SLOT_FLAGS:
+        tier = 2
+    else:
+        tier = 3
+    return (tier, int(iid))
+
+
+def _strip_extra_ship_fittings(sm, home_station, home_ship, baseline_fitted):
+    """Strip non-baseline fitted charges, modules, rigs, and subsystems from home_ship."""
+    cur_ship_id = int(_live_session_attr("shipid", 0) or home_ship or 0)
+    if cur_ship_id != home_ship:
+        raise RuntimeError(
+            "Cannot strip modules: expected home_ship=%d, got %d" % (home_ship, cur_ship_id)
+        )
+    baseline_set = set(int(x) for x in (baseline_fitted or ()))
+    extra_items = dict(
+        (iid, meta)
+        for iid, meta in _snapshot_ship_fitted_items(sm, home_ship).items()
+        if iid not in baseline_set
+    )
+    if not extra_items:
+        return
+    inv_hangar, _ = sm.RemoteSvc("invbroker").MachoBindObject(home_station, None)
+    dogma_ship = None
+    ordered_items = sorted(extra_items.items(), key=_fitted_strip_sort_key)
+    for iid, _ in ordered_items:
+        # Re-snapshot before each unfit: moving a module auto-unfits loaded charges
+        # to home_station, so a stale inv_hangar.Add(charge, home_ship, flag=4) would
+        # re-inject the charge onto home_ship with flag=4 via resolve_inv_target_location.
+        current_fitted = _snapshot_ship_fitted_items(sm, home_ship)
+        if iid not in current_fitted:
+            continue
+        flag_id = current_fitted[iid]["flag_id"]
+        if flag_id in _RIG_SLOT_FLAGS:
+            if dogma_ship is None:
+                dogma_ship, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(home_ship, None)
+            dogma_ship.DestroyFitting(iid)
+            continue
+        try:
+            inv_hangar.Add(iid, home_ship, flag=4)
+        except Exception:
+            if dogma_ship is None:
+                dogma_ship, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(home_ship, None)
+            dogma_ship.TakeModuleOffline(home_ship, iid)
+            inv_hangar.Add(iid, home_ship, flag=4)
+    remaining_extra = sorted(_snapshot_ship_fitted_item_ids(sm, home_ship) - baseline_set)
+    if remaining_extra:
+        raise RuntimeError(
+            "Extra fitted items remain on home_ship %d after strip: %s"
+            % (home_ship, remaining_extra)
+        )
 
 
 def _wait_session_attr(attr, expected, timeout_sec=5.0, raise_on_timeout=True):
@@ -1223,24 +1296,12 @@ def _reset_baseline_state(sm, ipc, baseline, char_id=None):
         _run_step("ensure_home_ship", lambda: _ensure_home_ship(sm, home_ship, ipc=ipc))
 
     if home_ship and baseline.get("fitted_item_ids") is not None:
-        def _strip_extra_fitted():
-            cur_ship_id = int(_live_session_attr("shipid", 0) or home_ship or 0)
-            if cur_ship_id != home_ship:
-                raise RuntimeError("Cannot strip modules: expected home_ship=%d, got %d" % (home_ship, cur_ship_id))
-            baseline_fitted = set(int(x) for x in (baseline.get("fitted_item_ids") or ()))
-            extra_fitted = sorted(_snapshot_ship_fitted_item_ids(sm, home_ship) - baseline_fitted)
-            if not extra_fitted:
-                return
-            inv_hangar, _ = sm.RemoteSvc("invbroker").MachoBindObject(home_station, None)
-            for iid in extra_fitted:
-                try:
-                    inv_hangar.Add(iid, home_ship, flag=4)
-                except Exception:
-                    dogma_ship, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(home_ship, None)
-                    dogma_ship.TakeModuleOffline(home_ship, iid)
-                    inv_hangar.Add(iid, home_ship, flag=4)
-
-        _run_step("strip_non_baseline_fitting", _strip_extra_fitted)
+        _run_step(
+            "strip_non_baseline_fitting",
+            lambda: _strip_extra_ship_fittings(
+                sm, home_station, home_ship, baseline.get("fitted_item_ids")
+            ),
+        )
 
     cur_corp = int(_live_session_attr("corpid", 0) or 0)
     if cur_corp >= 98000000 and (not home_corp or cur_corp != home_corp):
