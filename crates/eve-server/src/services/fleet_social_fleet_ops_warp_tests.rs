@@ -1232,3 +1232,390 @@ async fn fleet_warp_enforces_capacitor_short_warp_clamp_and_pilot_warp_speed() {
     assert!(cs4_after.capacitor.abs() < 1e-9);
 }
 
+#[tokio::test]
+async fn fleet_warp_skips_active_warp_preserves_cloak_invuln_and_deduplicates_invuln_cancel() {
+    let ctx = test_ctx_with_clock(1_800_001_200);
+    let (_fleet_id, mut fc_sess) = seed_multi_member_fleet(&ctx).await;
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let now = ctx.now_unix();
+    mark_online(&ctx, 90_000_001, fc_sess.session_id, now);
+    mark_online(&ctx, 90_000_002, 81_002, now);
+    mark_online(&ctx, 90_000_003, 81_003, now);
+
+    // 1. Put 90_000_002 (100_000_002) already into active warp (Cruising), with gate cloak,
+    //    undock invulnerability, and location_change_invuln; verify skip preserves ALL of them.
+    let mut active_mode = MovementMode::new_warp(DVec3::ZERO, DVec3::new(10_000_000_000.0, 0.0, 0.0), 3.0);
+    if let MovementMode::Warp { ref mut phase, .. } = active_mode {
+        *phase = eve_destiny::WarpPhase::Cruising;
+    }
+    sys.set_warp_movement_mode(
+        100_000_002,
+        active_mode.clone(),
+        crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+    )
+    .await
+    .unwrap();
+    sys.modify_combat_state(100_000_002, |cs| {
+        cs.gate_cloak_remaining_ticks = 25;
+        cs.is_cloaked = true;
+        cs.undock_invulnerable_remaining_ticks = 25;
+    })
+    .await
+    .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, 90_000_002, now + 60);
+
+    // 2. Give 90_000_003 (100_000_003) BOTH gate cloak, undock invulnerability, AND location_change_invuln.
+    sys.modify_combat_state(100_000_003, |cs| {
+        cs.gate_cloak_remaining_ticks = 20;
+        cs.is_cloaked = true;
+        cs.undock_invulnerable_remaining_ticks = 20;
+    })
+    .await
+    .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, 90_000_003, now + 60);
+
+    // Give FC location_change_invuln to verify beyonce.CmdWarpToStuff(..., fleet=True) deduplication too.
+    sys.modify_combat_state(100_000_001, |cs| {
+        cs.undock_invulnerable_remaining_ticks = 15;
+    })
+    .await
+    .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, 90_000_001, now + 60);
+    let _ = ctx.drain_notifications_for_char(90_000_001);
+    let _ = ctx.drain_notifications_for_char(90_000_002);
+    let _ = ctx.drain_notifications_for_char(90_000_003);
+
+    let dest = DVec3::new(5_000_000_000.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmarks.insert(
+            991_101,
+            BookmarkRecord {
+                bookmark_id: 991_101,
+                owner_id: 90_000_001,
+                label: "FleetParitySpot".into(),
+                solar_system_id: sys_id,
+                x: dest.x,
+                y: dest.y,
+                z: dest.z,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+    let mut kw_fleet = HashMap::new();
+    kw_fleet.insert("fleet".to_string(), PyRep::Bool(true));
+    let res = crate::services::space_destiny::handle(
+        &ctx,
+        &mut fc_sess,
+        None,
+        "beyonce",
+        "CmdWarpToStuff",
+        &[PyRep::String("bookmark".into()), PyRep::Integer(991_101)],
+        &kw_fleet,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(kv) = res else { panic!("expected KeyVal") };
+    if let Some(PyRep::List(ids)) = kv.get("warpedMemberIDs") {
+        assert!(!ids.contains(&PyRep::Integer(90_000_002)), "active warp member must be skipped");
+        assert!(ids.contains(&PyRep::Integer(90_000_001)));
+        assert!(ids.contains(&PyRep::Integer(90_000_003)));
+    } else {
+        panic!("expected warpedMemberIDs");
+    }
+
+    // Active-warp 90_000_002 kept its original Cruising trajectory, cloak, undock invuln, and location invuln.
+    let (_, b2) = sys.get_ball_snapshot(100_000_002).await.unwrap().unwrap();
+    match b2.mode {
+        MovementMode::Warp { destination, phase, .. } => {
+            assert_eq!(phase, eve_destiny::WarpPhase::Cruising);
+            assert!((destination.x - 10_000_000_000.0).abs() < 1.0);
+        }
+        other => panic!("expected untouched Cruising warp, got {other:?}"),
+    }
+    let cs2 = sys.get_combat_state(100_000_002).await.unwrap().unwrap();
+    assert_eq!(cs2.gate_cloak_remaining_ticks, 25);
+    assert_eq!(cs2.undock_invulnerable_remaining_ticks, 25);
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, 90_000_002, now));
+    assert!(ctx.drain_notifications_for_char(90_000_002).is_empty());
+
+    // Warped 90_000_003 & FC 90_000_001 each received OnInvulnCancelled strictly ONCE (and 90_000_003 once for OnJumpCloakCancelled).
+    let n1 = ctx.drain_notifications_for_char(90_000_001);
+    assert_eq!(n1.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    let n3 = ctx.drain_notifications_for_char(90_000_003);
+    assert_eq!(n3.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), 1);
+    assert_eq!(n3.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    let cs3 = sys.get_combat_state(100_000_003).await.unwrap().unwrap();
+    assert_eq!(cs3.gate_cloak_remaining_ticks, 0);
+    assert_eq!(cs3.undock_invulnerable_remaining_ticks, 0);
+    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, 90_000_003, now));
+    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, 90_000_001, now));
+}
+
+#[tokio::test]
+async fn fleet_warp_enforces_post_range_and_formation_minimum_distance() {
+    let ctx = test_ctx_with_clock(1_800_001_300);
+    let (_fleet_id, mut fc_sess) = seed_multi_member_fleet(&ctx).await;
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let kw = HashMap::new();
+
+    // Place FC at 0 and wingmate 90_000_002 at (-10_000, 0, 0). Target at (160_000, 0, 0) with
+    // min_range = 100_000 -> requested_dist_m <= 70_000 < 150_000 -> all near members must be skipped.
+    sys.set_ball_position(100_000_001, DVec3::ZERO).await;
+    sys.set_ball_position(100_000_002, DVec3::new(-10_000.0, 0.0, 0.0)).await;
+    sys.set_ball_position(100_000_003, DVec3::new(0.0, 0.0, 0.0)).await;
+    sys.set_ball_position(100_000_004, DVec3::new(0.0, 0.0, 0.0)).await;
+
+    let res_short = handle_fleet_ops(
+        &ctx,
+        &mut fc_sess,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(160_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::Real(100_000.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(kv_short) = res_short else { panic!("expected KeyVal") };
+    assert_eq!(kv_short.get("warpCount").and_then(|v| v.as_i64()), Some(0));
+    for sid in [100_000_001, 100_000_002, 100_000_003, 100_000_004] {
+        let (_, b) = sys.get_ball_snapshot(sid).await.unwrap().unwrap();
+        assert!(matches!(b.mode, MovementMode::Stop), "ship {sid} must stay stopped under min_range short warp");
+    }
+
+    // With min_range = 0.0 and Arrow formation (id=3, spacing=20_000): FC (slot 0) warps 160 km,
+    // while slot 1 is shifted -20 km behind anchor (< 150 km) and must stay stopped.
+    sys.set_ball_position(100_000_002, DVec3::ZERO).await;
+    let res_form = handle_fleet_ops(
+        &ctx,
+        &mut fc_sess,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(160_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::Integer(3),
+            PyRep::Real(20_000.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(kv_form) = res_form else { panic!("expected KeyVal") };
+    assert_eq!(kv_form.get("warpCount").and_then(|v| v.as_i64()), Some(1));
+    let (_, b1) = sys.get_ball_snapshot(100_000_001).await.unwrap().unwrap();
+    let (_, b2) = sys.get_ball_snapshot(100_000_002).await.unwrap().unwrap();
+    assert!(matches!(b1.mode, MovementMode::Warp { .. }));
+    assert!(matches!(b2.mode, MovementMode::Stop));
+}
+
+#[tokio::test]
+async fn fleet_warp_runs_hooks_dungeon_exit_and_warp_bubble_interdiction() {
+    let ctx = test_ctx_with_clock(1_800_001_400);
+    let (_fleet_id, mut fc_sess) = seed_multi_member_fleet(&ctx).await;
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let kw = HashMap::new();
+    let now = ctx.now_unix();
+    mark_online(&ctx, 90_000_001, fc_sess.session_id, now);
+    mark_online(&ctx, 90_000_002, 82_002, now);
+    mark_online(&ctx, 90_000_003, 82_003, now);
+    mark_online(&ctx, 90_000_004, 82_004, now);
+
+    // Seed active dungeon at origin so all warped members emit OnExitingDungeon on direct FleetWarp.
+    let origin_pos = [0.0, 0.0, 0.0];
+    crate::services::pve_dungeon_runtime::with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(
+            959_101,
+            eve_db::DungeonRuntimeInstance {
+                instance_id: 959_101,
+                dungeon_id: 9_901,
+                dungeon_name: "Direct Fleet Exit Pocket".into(),
+                category: "Deadspace".into(),
+                archetype: "Deadspace".into(),
+                solar_system_id: sys_id,
+                owner_char_id: 90_000_001,
+                base_position: origin_pos,
+                disallow_mwd: false,
+                entry_gate_ball_id: None,
+                entry_gate_pos: None,
+                entry_gate_locked: false,
+                current_room_index: 0,
+                rooms: vec![eve_db::DungeonRuntimeRoom {
+                    room_index: 0,
+                    room_id: 9_901_00,
+                    room_name: "Entry".into(),
+                    position: origin_pos,
+                    gate_destination_pos: origin_pos,
+                    gated: false,
+                    disallow_mwd: None,
+                    gate_ball_id: None,
+                    gate_locked: false,
+                    objects: Vec::new(),
+                    npc_groups: Vec::new(),
+                    triggers: Vec::new(),
+                    spawned: false,
+                    cleared: false,
+                }],
+                completed: false,
+                despawned: false,
+                active_objective_id: 0,
+                last_completed_task_id: None,
+                completed_task_ids: Vec::new(),
+                created_unix: now,
+            },
+        );
+    });
+
+    // Seed wingmate 90_000_002 with active non-warp module cycle, deployed drone, safe logoff,
+    // and make 90_000_003 interdiction-nullified, while placing 90_000_004 inside an origin bubble.
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id: 100_000_002,
+        module_id: 77_002,
+        module_type_id: 519,
+        owner_char_id: Some(90_000_002),
+        effect_name: "moduleBonusMicrowarpdrive".into(),
+        is_mwd_or_mjd: true,
+        repeat: 1,
+        duration_s: 10.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(
+            88_002,
+            crate::services::combat_crimewatch::DroneSpaceState {
+                ball_id: 88_002,
+                drone_item_id: 88_002,
+                type_id: 2454,
+                group_id: 100,
+                owner_char_id: 90_000_002,
+                original_owner_char_id: 90_000_002,
+                parent_ship_id: 100_000_002,
+                solar_system_id: sys_id,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 1000.0,
+                optimal_range: 5000.0,
+                damage_vector: eve_destiny::DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
+    });
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
+        st.safe_logoffs.insert(
+            90_000_002,
+            eve_db::SafeLogoffEntry {
+                char_id: 90_000_002,
+                ship_id: 100_000_002,
+                solar_system_id: sys_id,
+                started_unix: now,
+                complete_at_unix: now + 30,
+                completed: false,
+            },
+        );
+    });
+
+    // Place 90_000_004 far enough inside an origin bubble at (5_000_000, 0, 0), and put FC/WC/SC
+    // within 50 km of (0,0,0) inside the dungeon pocket.
+    sys.set_ball_position(100_000_003, DVec3::new(10_000.0, 0.0, 0.0)).await;
+    sys.set_ball_position(100_000_004, DVec3::new(5_000_000.0, 0.0, 0.0)).await;
+    sys.set_interdiction_nullified(100_000_003, true).await.unwrap();
+    sys.add_warp_bubble(771_001, DVec3::new(5_000_000.0, 0.0, 0.0), 20_000.0)
+        .await
+        .unwrap();
+
+    let dest = DVec3::new(100_000_000.0, 0.0, 0.0);
+    // Catch bubble 100 km in front of destination with 20 km radius -> intercepts non-nullified at x ~ 99_880_000.
+    sys.add_warp_bubble(771_002, DVec3::new(99_900_000.0, 0.0, 0.0), 20_000.0)
+        .await
+        .unwrap();
+
+    let _ = ctx.drain_notifications_for_char(90_000_001);
+    let _ = ctx.drain_notifications_for_char(90_000_002);
+    let _ = ctx.drain_notifications_for_char(90_000_003);
+
+    let res = handle_fleet_ops(
+        &ctx,
+        &mut fc_sess,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(dest.x),
+            PyRep::Real(dest.y),
+            PyRep::Real(dest.z),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(kv) = res else { panic!("expected KeyVal") };
+    assert_eq!(kv.get("warpCount").and_then(|v| v.as_i64()), Some(3));
+
+    // Origin bubble member 90_000_004 was skipped.
+    let (_, b4) = sys.get_ball_snapshot(100_000_004).await.unwrap().unwrap();
+    assert!(matches!(b4.mode, MovementMode::Stop));
+
+    // Non-nullified FC & WC were intercepted by destination catch bubble; nullified SC bypassed to dest.
+    let (_, b1) = sys.get_ball_snapshot(100_000_001).await.unwrap().unwrap();
+    let (_, b2) = sys.get_ball_snapshot(100_000_002).await.unwrap().unwrap();
+    let (_, b3) = sys.get_ball_snapshot(100_000_003).await.unwrap().unwrap();
+    match (b1.mode, b2.mode, b3.mode) {
+        (
+            MovementMode::Warp { destination: d1, .. },
+            MovementMode::Warp { destination: d2, .. },
+            MovementMode::Warp { destination: d3, .. },
+        ) => {
+            assert!(d1.x < 99_950_000.0, "FC must be intercepted by catch bubble, got {d1:?}");
+            assert!(d2.x < 99_950_000.0, "WC must be intercepted by catch bubble, got {d2:?}");
+            assert!((d3.x - dest.x).abs() < 1.0, "nullified SC must bypass catch bubble, got {d3:?}");
+        }
+        other => panic!("expected Warp modes for warped members, got {other:?}"),
+    }
+
+    // Per-member hooks ran for wingmate 90_000_002: module stopped, drone abandoned, safe logoff aborted, dungeon exited.
+    assert!(!sys.has_module_cycle(100_000_002, 77_002).await);
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        assert!(rt.active_drones_in_space[&88_002].is_abandoned);
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.sp6_lifecycle.safe_logoffs.contains_key(&90_000_002));
+    });
+    assert!(ctx
+        .drain_notifications_for_char(90_000_001)
+        .iter()
+        .any(|n| n.event == "OnExitingDungeon"));
+    assert!(ctx
+        .drain_notifications_for_char(90_000_002)
+        .iter()
+        .any(|n| n.event == "OnExitingDungeon"));
+}
+

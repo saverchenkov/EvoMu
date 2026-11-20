@@ -1470,3 +1470,183 @@ async fn update_state_request_fallback_respawn_requires_space_residency_and_syst
         "valid in-space character + ship must still support fallback ball respawn"
     );
 }
+
+#[tokio::test]
+async fn update_state_request_structure_view_outside_observes_structure_and_never_spawns_docked_ship() {
+    let ctx = test_ctx();
+    let sys_a = 30_000_142_u32;
+    let corp_id = 98_100_900_i64;
+    let struct_id = 1_040_001_448_001_i64;
+    let destroyed_struct_id = 1_040_001_448_002_i64;
+    let cid = 9_914_481_i64;
+    let docked_ship = 9_914_482_i64;
+    let invalid_cid = 9_914_483_i64;
+    let invalid_ship = 9_914_484_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832, // Astrahus
+                solar_system_id: sys_a,
+                owner_corp_id: corp_id,
+                name: "GH1448 View Outside Astrahus".into(),
+                position: [250_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 2_500_000.0,
+                armor_hp: 2_500_000.0,
+                hull_hp: 2_500_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            destroyed_struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: destroyed_struct_id,
+                type_id: 35832,
+                solar_system_id: sys_a,
+                owner_corp_id: corp_id,
+                name: "GH1448 Destroyed Astrahus".into(),
+                position: [350_000.0, 0.0, 0.0],
+                state: "Destroyed".into(),
+                quantum_core_installed: false,
+                fuel_blocks: 0,
+                shield_hp: 0.0,
+                armor_hp: 0.0,
+                hull_hp: 0.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+
+        let template = snap.characters.values().next().expect("demo char").clone();
+        let mut ch = template.clone();
+        ch.character_id = cid;
+        ch.user_id = cid as u64;
+        ch.corporation_id = corp_id;
+        ch.solar_system_id = sys_a;
+        ch.station_id = None;
+        ch.structure_id = Some(struct_id);
+        ch.active_ship_id = docked_ship;
+        snap.characters.insert(cid, ch);
+        put_item(
+            snap,
+            Some(docked_ship),
+            587,
+            cid,
+            struct_id,
+            InventoryFlag::Hangar,
+            1,
+            true,
+        );
+
+        let mut ch_inv = template;
+        ch_inv.character_id = invalid_cid;
+        ch_inv.user_id = invalid_cid as u64;
+        ch_inv.corporation_id = corp_id;
+        ch_inv.solar_system_id = sys_a;
+        ch_inv.station_id = None;
+        ch_inv.structure_id = Some(destroyed_struct_id);
+        ch_inv.active_ship_id = invalid_ship;
+        snap.characters.insert(invalid_cid, ch_inv);
+        put_item(
+            snap,
+            Some(invalid_ship),
+            587,
+            invalid_cid,
+            destroyed_struct_id,
+            InventoryFlag::Hangar,
+            1,
+            true,
+        );
+    });
+
+    let bound_a = bound_sys(sys_a);
+    let handle_a = ctx.systems.get_or_spawn(sys_a);
+
+    let mut sess = make_session(cid, corp_id, Some(sys_a), Some(docked_ship), 0);
+    sess.station_id = None;
+    sess.structure_id = Some(struct_id);
+    handle(&ctx, &mut sess, Some(&bound_a), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        handle_a.get_ball_snapshot(struct_id).await.unwrap().is_some(),
+        "View Outside UpdateStateRequest must ensure the structure ball exists in space"
+    );
+    assert!(
+        handle_a.get_ball_snapshot(docked_ship).await.unwrap().is_none(),
+        "View Outside must NEVER spawn the pilot's docked ship ball in space"
+    );
+    assert!(
+        ctx.is_space_ballpark_bootstrapped(sess.session_id, cid, sys_a),
+        "View Outside UpdateStateRequest must mark ballpark bootstrapped for deduplication"
+    );
+    let (_, evs, _) = handle_a.drain_observer_updates(struct_id).await.unwrap();
+    assert!(
+        evs.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })),
+        "View Outside must queue SetState observing structure_id={struct_id}, got {evs:?}"
+    );
+    assert!(
+        handle_a
+            .drain_observer_updates(docked_ship)
+            .await
+            .unwrap()
+            .1
+            .is_empty(),
+        "docked ship must have zero observer updates during View Outside"
+    );
+
+    // Rapid follow-up explicit UpdateStateRequest for same (sys_a, structure_id) hits cooldown.
+    handle(&ctx, &mut sess, Some(&bound_a), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, evs_dup, _) = handle_a.drain_observer_updates(struct_id).await.unwrap();
+    assert!(
+        !evs_dup
+            .iter()
+            .any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })),
+        "rapid repeat View Outside UpdateStateRequest must respect cooldown"
+    );
+
+    // Destroyed or non-resident structure must not spawn ball or push SetState.
+    let mut sess_destroyed = make_session(invalid_cid, corp_id, Some(sys_a), Some(invalid_ship), 0);
+    sess_destroyed.session_id = 711;
+    sess_destroyed.structure_id = Some(destroyed_struct_id);
+    handle(
+        &ctx,
+        &mut sess_destroyed,
+        Some(&bound_a),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        handle_a
+            .get_ball_snapshot(destroyed_struct_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "destroyed structure must not spawn exterior ball on View Outside"
+    );
+    assert!(
+        !ctx.is_space_ballpark_bootstrapped(sess_destroyed.session_id, invalid_cid, sys_a),
+        "destroyed structure View Outside must not mark ballpark bootstrapped"
+    );
+}

@@ -1050,34 +1050,6 @@ async fn handle_agent_warp_to_location(
                 }
             }
         }
-        let member_ship_ids: Vec<(i64, i64)> = if let Some(fid) = session.fleet_id {
-            ctx.db.with_snapshot(|snap| {
-                snap.fleets
-                    .get(&fid)
-                    .map(|f| {
-                        f.member_details
-                            .keys()
-                            .filter_map(|&cid| {
-                                let ch = snap.characters.get(&cid)?;
-                                (ch.solar_system_id == sys_id
-                                    && ch.station_id.is_none()
-                                    && ch.structure_id.is_none())
-                                .then_some((cid, ch.active_ship_id))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            })
-        } else {
-            Vec::new()
-        };
-        let mut pre_warp_by_char: HashMap<i64, (i64, [f64; 3])> =
-            HashMap::with_capacity(member_ship_ids.len());
-        for (m_cid, m_sid) in member_ship_ids {
-            if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(m_sid).await {
-                pre_warp_by_char.insert(m_cid, (m_sid, b.position.to_array()));
-            }
-        }
         let fleet_args = [
             PyRep::Real(landing_pos.x),
             PyRep::Real(landing_pos.y),
@@ -1095,69 +1067,16 @@ async fn handle_agent_warp_to_location(
             Some(res) => res?,
             None => return Ok(PyRep::Bool(false)),
         };
-        let mut warp_count = 0_i64;
-        let mut warped_ids: Vec<i64> = Vec::new();
-        let mut landing_map: HashMap<i64, [f64; 3]> = HashMap::new();
-        if let PyRep::KeyVal(kv) = fleet_reply {
-            warp_count = kv.get("warpCount").and_then(|v| v.as_i64()).unwrap_or(0);
-            if let Some(PyRep::List(ids)) = kv.get("warpedMemberIDs") {
-                for v in ids {
-                    if let Some(cid) = v.as_i64() {
-                        warped_ids.push(cid);
-                    }
-                }
-            }
-            if let Some(PyRep::List(entries)) = kv.get("landingPositions") {
-                for entry in entries {
-                    if let PyRep::Tuple(parts) = entry {
-                        if parts.len() >= 4 {
-                            if let (Some(cid), Some(lx), Some(ly), Some(lz)) = (
-                                parts[0].as_i64(),
-                                parts[1].as_f64(),
-                                parts[2].as_f64(),
-                                parts[3].as_f64(),
-                            ) {
-                                landing_map.insert(cid, [lx, ly, lz]);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if warp_count <= 0 || warped_ids.is_empty() {
+        let warp_count = match fleet_reply {
+            PyRep::KeyVal(kv) => kv.get("warpCount").and_then(|v| v.as_i64()).unwrap_or(0),
+            _ => 0,
+        };
+        if warp_count <= 0 {
             return Ok(PyRep::Bool(false));
         }
-        let mut fleet_leave_entries = Vec::with_capacity(warped_ids.len());
-        for m_cid in warped_ids {
-            let (m_sid, pre_pos) = pre_warp_by_char
-                .get(&m_cid)
-                .copied()
-                .unwrap_or((ship_id, current_ball.position.to_array()));
-            let land_pos = if let Some(lp) = landing_map.get(&m_cid).copied() {
-                lp
-            } else {
-                sys_handle
-                    .get_ball_snapshot(m_sid)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|(_, b)| match b.mode {
-                        MovementMode::Warp { destination, .. } => Some(destination.to_array()),
-                        _ => None,
-                    })
-                    .unwrap_or(landing_pos.to_array())
-            };
-            crate::services::nav_warp_interdiction::on_warp_initiated_hooks(
-                ctx,
-                &sys_handle,
-                m_cid,
-                m_sid,
-                sys_id,
-            )
-            .await;
-            fleet_leave_entries.push((m_cid, pre_pos, land_pos));
-        }
-        fleet_leave_entries
+        // `handle_fleet_warp` already ran `on_warp_initiated_hooks` and
+        // `on_warp_start_leave_dungeon_if_needed` for every warped fleet member.
+        Vec::new()
     } else {
         if warp_dist_m < MIN_AGENT_WARP_DISTANCE_M {
             return Err(BridgeRpcError::warp_distance_too_short(format!(
