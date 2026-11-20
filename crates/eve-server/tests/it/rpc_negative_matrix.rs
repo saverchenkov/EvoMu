@@ -3666,45 +3666,51 @@ fn target_b_state_mutated(
         return true;
     }
 
-    // Target B's warp/invuln runtime entries must remain invariant.
+    // Target B's warp/invuln runtime entries must remain invariant (acquire one lock at a time for lock-rank safety).
     let b_ship_ids = [fix.b_ship_id, fix.b_space_ship_id];
-    {
+    let aw_dirty = {
         let aw = fix.ctx.active_warps.lock().expect("active_warps");
-        if b_ship_ids
+        b_ship_ids
             .iter()
             .any(|id| aw.get(id) != base.active_warps.get(id))
-        {
-            return true;
-        }
+    };
+    if aw_dirty {
+        return true;
+    }
+    let rw_dirty = {
         let rw = fix.ctx.return_warps.lock().expect("return_warps");
-        if b_ship_ids
+        b_ship_ids
             .iter()
             .any(|id| rw.contains(id) != base.return_warps.contains(id))
-        {
-            return true;
-        }
+    };
+    if rw_dirty {
+        return true;
+    }
+    let pw_dirty = {
         let pw = fix
             .ctx
             .pending_warp_finished
             .lock()
             .expect("pending_warp_finished");
-        if b_ship_ids
+        b_ship_ids
             .iter()
             .any(|id| pw.contains(id) != base.pending_warp_finished.contains(id))
-        {
-            return true;
-        }
+    };
+    if pw_dirty {
+        return true;
+    }
+    let inv_dirty = {
         let inv = fix
             .ctx
             .location_change_invuln
             .lock()
             .expect("location_change_invuln");
-        if [CHAR_B_ID, fix.b_ship_id, fix.b_space_ship_id]
+        [CHAR_B_ID, fix.b_ship_id, fix.b_space_ship_id]
             .iter()
             .any(|id| inv.get(id) != base.location_change_invuln.get(id))
-        {
-            return true;
-        }
+    };
+    if inv_dirty {
+        return true;
     }
 
     // Target B's bound object entries must remain invariant (no removal, overwrite, or new B binding).
