@@ -617,6 +617,84 @@ pub fn sync_auto_delivered_asset_safety_wraps(ctx: &ServerContext) {
     });
 }
 
+/// Constructs a typed `StructureNotFound` error for missing or invalid Upwell structure IDs.
+pub(crate) fn structure_not_found_err(structure_id: i64) -> BridgeRpcError {
+    let msg = format!("Structure {structure_id} does not exist");
+    BridgeRpcError::with_client_error(
+        "StructureNotFound",
+        msg.clone(),
+        eve_proto::ClientError::CustomInfo(msg),
+    )
+}
+
+/// Constructs a typed `StructureDestroyed` error for destroyed Upwell structures.
+pub(crate) fn structure_destroyed_err(structure_id: i64) -> BridgeRpcError {
+    let msg = format!("Structure {structure_id} has been destroyed");
+    BridgeRpcError::with_client_error(
+        "StructureDestroyed",
+        msg.clone(),
+        eve_proto::ClientError::CustomInfo(msg),
+    )
+}
+
+/// Resolves `(is_ceo, effective_roles)` for `char_id` inside registered player corporation
+/// `corp_id` strictly from DB state (`0` session role fallback), returning `None` for invalid/NPC
+/// corporations or characters excluded from `corp.members`.
+fn db_corp_roles_for_member(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    corp_id: i64,
+    loc_id: Option<i64>,
+    now_unix: u64,
+) -> Option<(bool, u64)> {
+    if corp_id <= 0
+        || (1_000_000..2_000_000).contains(&corp_id)
+        || ctx.sde.npc_corporations.contains_key(&corp_id)
+    {
+        return None;
+    }
+    let corp = snap.corporations.get(&corp_id)?;
+    let excluded_member =
+        corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id);
+    if excluded_member {
+        return None;
+    }
+    let (is_ceo, eff_roles) =
+        snap.effective_corp_roles_at(corp_id, char_id, loc_id, 0, now_unix);
+    Some((corp.ceo_id == char_id || is_ceo, eff_roles))
+}
+
+/// Returns `true` when `char_id` belongs to `st.owner_corp_id` in DB (`character.corporation_id`
+/// matches, registered non-NPC corp, not excluded from `corp.members`) and holds CEO status or any
+/// role bit in `required_any_roles` via DB-authoritative role resolution.
+pub(crate) fn has_db_structure_corp_role(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    st: &UpwellStructureRecord,
+    required_any_roles: u64,
+    now_unix: u64,
+) -> bool {
+    let caller_corp = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .unwrap_or(0);
+    if caller_corp != st.owner_corp_id {
+        return false;
+    }
+    db_corp_roles_for_member(
+        ctx,
+        snap,
+        char_id,
+        st.owner_corp_id,
+        Some(st.structure_id),
+        now_unix,
+    )
+    .is_some_and(|(is_ceo, eff_roles)| is_ceo || (eff_roles & required_any_roles) != 0)
+}
+
 /// Returns `true` when `char_id` belongs to registered player corporation `corp_id` (not excluded
 /// from `corp.members`) and holds CEO status or `required_role` strictly from DB state (`0` session fallback).
 fn has_db_corp_asset_safety_role(
@@ -628,25 +706,9 @@ fn has_db_corp_asset_safety_role(
     required_role: u64,
     now_unix: u64,
 ) -> bool {
-    if corp_id <= 0
-        || (1_000_000..2_000_000).contains(&corp_id)
-        || ctx.sde.npc_corporations.contains_key(&corp_id)
-    {
-        return false;
-    }
-    let Some(corp) = snap.corporations.get(&corp_id) else {
-        return false;
-    };
-    let excluded_member =
-        corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id);
-    if excluded_member {
-        return false;
-    }
-    let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(corp_id, char_id, loc_id, 0, now_unix);
-    corp.ceo_id == char_id
-        || is_ceo
-        || eve_db::corp_roles::has_role(eff_roles, required_role)
+    db_corp_roles_for_member(ctx, snap, char_id, corp_id, loc_id, now_unix).is_some_and(
+        |(is_ceo, eff_roles)| is_ceo || eve_db::corp_roles::has_role(eff_roles, required_role),
+    )
 }
 
 fn handle_get_items_in_safety(ctx: &ServerContext, session: &mut SessionState, is_corp: bool) -> Result<PyRep, BridgeRpcError> {
@@ -1037,17 +1099,61 @@ fn handle_get_structure_description(ctx: &ServerContext, session: &mut SessionSt
     })
 }
 
-fn handle_structure_get_guests(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
-    let Some(structure_id) = arg_i64(args, 0).or(session.structure_id) else {
+fn handle_structure_get_guests(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let explicit_structure_id = crate::router::RpcArgs::positional(args).opt_i64(0, "")?;
+    let Some(structure_id) = explicit_structure_id.or(session.structure_id) else {
         return Ok(PyRep::Dict(Vec::new()));
     };
+    if structure_id <= 0 {
+        return Err(structure_not_found_err(structure_id));
+    }
+    let is_gm = session.has_gm_role();
+    let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
+        let Some(st) = snap.structures.get(&structure_id) else {
+            return Err(structure_not_found_err(structure_id));
+        };
+        let is_docked = snap
+            .characters
+            .get(&char_id)
+            .is_some_and(|c| c.structure_id == Some(structure_id));
+        let is_corp_manager = has_db_structure_corp_role(
+            ctx,
+            snap,
+            char_id,
+            st,
+            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
+            now_unix,
+        );
+        if !is_gm && !is_docked && !is_corp_manager {
+            return Err(BridgeRpcError::with_client_error(
+                "StructureOwnershipViolation",
+                format!(
+                    "Character {char_id} is not docked in or authorized to view guests of structure {structure_id}"
+                ),
+                eve_proto::ClientError::user(eve_proto::UserErrorKey::AccessDenied),
+            ));
+        }
+        if st.state == "Destroyed" {
+            return Err(structure_destroyed_err(structure_id));
+        }
         let mut guests: Vec<(i64, i64, Option<i64>, Option<i64>)> = snap
             .characters
             .values()
             .filter(|c| c.structure_id == Some(structure_id))
-            .map(|c| (c.character_id, c.corporation_id, c.alliance_id, c.war_faction_id))
+            .map(|c| {
+                (
+                    c.character_id,
+                    c.corporation_id,
+                    c.alliance_id,
+                    c.war_faction_id,
+                )
+            })
             .collect();
         guests.sort_by_key(|g| g.0);
         Ok(PyRep::Dict(

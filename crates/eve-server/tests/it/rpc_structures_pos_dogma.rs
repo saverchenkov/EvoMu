@@ -836,7 +836,14 @@ async fn test_structure_guests_hangar_view_and_directory_parity() {
         "ShieldVulnerable",
     );
 
-    let g_init = rpc(&ctx, &mut sess1, "structureGuests", "GetGuests", &[PyRep::Integer(structure_id)]).await.expect("structureGuests.GetGuests initially empty");
+    let undocked_denied = rpc(&ctx, &mut sess1, "structureGuests", "GetGuests", &[PyRep::Integer(structure_id)])
+        .await
+        .expect_err("undocked NPC-corp pilot cannot inspect structureGuests.GetGuests");
+    assert_eq!(undocked_denied.code, "StructureOwnershipViolation");
+
+    let mut gm_sess = sess1.clone();
+    gm_sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    let g_init = rpc(&ctx, &mut gm_sess, "structureGuests", "GetGuests", &[PyRep::Integer(structure_id)]).await.expect("GM inspects structureGuests.GetGuests initially empty");
     let PyRep::Dict(g_map0) = g_init else { panic!("expected Dict, got {g_init:?}"); };
     assert!(g_map0.is_empty(), "No guests should be docked yet");
 

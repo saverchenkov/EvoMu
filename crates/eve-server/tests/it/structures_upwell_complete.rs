@@ -268,7 +268,11 @@ async fn test_structure_description_deliveries_cargo_dropoff_guests_and_hangar_v
         .await
         .expect_err("drop-off is an in-space action");
     assert_eq!(docked_drop.code, "MustBeInSpace");
-    let guests = rpc(&ctx, &mut other, "structureGuests", "GetGuests", &[PyRep::Integer(struct_id)]).await.expect("GetGuests");
+    let denied_guests = rpc(&ctx, &mut other, "structureGuests", "GetGuests", &[PyRep::Integer(struct_id)])
+        .await
+        .expect_err("undocked cross-corp outsider cannot call GetGuests");
+    assert_eq!(denied_guests.code, "StructureOwnershipViolation");
+    let guests = rpc(&ctx, &mut sess, "structureGuests", "GetGuests", &[PyRep::Integer(struct_id)]).await.expect("GetGuests");
     let PyRep::Dict(guest_rows) = &guests else { panic!("dict expected, got {guests:?}") };
     let guest_ids: Vec<i64> = guest_rows.iter().filter_map(|(k, v)| {
         assert!(matches!(v, PyRep::Tuple(t) if t.len() == 3), "expected 3-tuple value, got {v:?}");
