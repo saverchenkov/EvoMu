@@ -792,6 +792,19 @@ pub(crate) async fn write_out_frames_for_call_req<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+/// Returns the destiny ballpark observer ball ID when `session` is either undocked in space
+/// (`ship_id`) or attached in Upwell "View Outside" (`structure_id`). Never observes a docked
+/// ship ball while `structure_id.is_some()`, and returns `None` while docked in an NPC station.
+fn ballpark_observer_id_for_session(session: &SessionState) -> Option<i64> {
+    if session.character_id.is_none()
+        || session.station_id.is_some()
+        || session.solar_system_id.is_none()
+    {
+        return None;
+    }
+    session.structure_id.or(session.ship_id).filter(|&id| id > 0)
+}
+
 fn is_bootstrap_rpc(service: &str, method: &str, was_live: bool, in_space: bool) -> bool {
     matches!(
         (service, method),
@@ -800,6 +813,7 @@ fn is_bootstrap_rpc(service: &str, method: &str, was_live: bool, in_space: bool)
             | ("character", "GetCharacterSelectionInfo")
             | ("stationSvc", "Undock")
             | ("structureDocking", "Undock")
+            | ("ship", "Undock")
             | ("beyonce", "MachoBindObject")
             | ("beyonce", "GetFormations")
             | ("beyonce", "UpdateStateRequest")
@@ -1492,10 +1506,7 @@ async fn execute_call_req_wire_inner(
         })
     });
     if service == "beyonce" && method == "UpdateStateRequest" {
-        let stream_live = matches!(
-            wire.wire_state.destiny,
-            DestinyStream::Live { set_state_stamp, .. } if set_state_stamp > 0
-        );
+        let stream_live = !wire.wire_state.needs_initial_set_state();
         if !stream_live {
             if let Some(cid) = session.character_id {
                 crate::services::space_destiny::reset_update_state_rate_limit(
@@ -1557,14 +1568,38 @@ async fn execute_call_req_wire_inner(
     }
 
     let owns_char_session = session_owns_char_notifications(ctx, session);
-    let was_in_space = prev_session.character_id.is_some()
+    let prev_stream_active = !matches!(wire.wire_state.destiny, DestinyStream::Detached)
+        || wire.subscribed_sys_id.is_some();
+    let prev_undocked_space = prev_session.character_id.is_some()
         && prev_session.station_id.is_none()
         && prev_session.structure_id.is_none()
         && prev_session.solar_system_id.is_some();
-    let is_in_space = session.character_id.is_some()
+    let prev_structure_view_outside = prev_session.character_id.is_some()
+        && prev_session.station_id.is_none()
+        && prev_session.structure_id.is_some()
+        && prev_session.solar_system_id.is_some()
+        && prev_stream_active;
+    let was_in_space = prev_undocked_space || prev_structure_view_outside;
+    let is_undocked_space = session.character_id.is_some()
         && session.station_id.is_none()
         && session.structure_id.is_none()
         && session.solar_system_id.is_some();
+    let is_structure_docked = session.character_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_some()
+        && session.solar_system_id.is_some();
+    let is_beyonce_ballpark_rpc = method == "UpdateStateRequest"
+        || (service == "beyonce" && (method == "MachoBindObject" || method == "GetFormations"));
+    let is_structure_view_outside = is_structure_docked
+        && ((prev_structure_view_outside
+            && prev_session.station_id.is_none()
+            && prev_session.structure_id == session.structure_id
+            && prev_session.solar_system_id == session.solar_system_id)
+            || (is_beyonce_ballpark_rpc && rpc_res.is_ok()));
+    let is_in_space = is_undocked_space || is_structure_view_outside;
+    let is_upwell_undock = rpc_res.is_ok()
+        && prev_session.structure_id.is_some()
+        && is_undocked_space;
     let target_sys_id = is_in_space.then_some(session.solar_system_id).flatten();
     let mut cross_sys_pre_ticks = Vec::new();
     let mut cross_sys_pre_destiny = None;
@@ -1584,13 +1619,14 @@ async fn execute_call_req_wire_inner(
             && session.solar_system_id != prev_session.solar_system_id
             && matches!(wire.wire_state.destiny, DestinyStream::Live { .. })
         {
-            if let (Some(old_sys_id), Some(old_ship_id)) = (
+            if let (Some(old_sys_id), Some(old_obs_id)) = (
                 prev_session.solar_system_id,
-                prev_session.ship_id.or(session.ship_id),
+                ballpark_observer_id_for_session(&prev_session)
+                    .or_else(|| ballpark_observer_id_for_session(session)),
             ) {
                 let old_handle = ctx.systems.get_or_spawn(old_sys_id);
                 if let Ok((tick, obs_evs, updates_pyrep, watermark_seq)) =
-                    old_handle.drain_observer_updates_with_seq(old_ship_id).await
+                    old_handle.drain_observer_updates_with_seq(old_obs_id).await
                 {
                     old_handle.record_warp_stops_from_events(&obs_evs);
                     let mut ignored_post = Vec::new();
@@ -1599,7 +1635,7 @@ async fn execute_call_req_wire_inner(
                             ctx,
                             sys_rx,
                             old_sys_id,
-                            &[old_ship_id],
+                            &[old_obs_id],
                             wire.wire_state,
                             Some(watermark_seq),
                             &mut cross_sys_pre_ticks,
@@ -1616,7 +1652,7 @@ async fn execute_call_req_wire_inner(
                             tick,
                             &obs_evs,
                             updates_pyrep,
-                            &[old_ship_id],
+                            &[old_obs_id],
                             SelfDestinyWireContext::NonDock,
                         );
                     } else {
@@ -1630,7 +1666,10 @@ async fn execute_call_req_wire_inner(
         if cross_sys_pre_ticks.is_empty() && cross_sys_pre_destiny.is_none() {
             wire.wire_state.leave_space();
         }
-        if !is_in_space || (was_in_space && session.solar_system_id != prev_session.solar_system_id) {
+        if !is_in_space
+            || (was_in_space && session.solar_system_id != prev_session.solar_system_id)
+            || is_upwell_undock
+        {
             ctx.systems
                 .clear_explicit_update_state_guards_for_session(session.session_id);
         }
@@ -1645,32 +1684,22 @@ async fn execute_call_req_wire_inner(
     let cross_sys_pre_detach =
         !cross_sys_pre_ticks.is_empty() || cross_sys_pre_destiny.is_some();
     let mut was_live = matches!(wire.wire_state.destiny, DestinyStream::Live { .. });
-    let is_ballpark_init_rpc = (method == "UpdateStateRequest"
-        || (service == "beyonce" && (method == "MachoBindObject" || method == "GetFormations")))
-        && is_in_space;
-    if is_ballpark_init_rpc
-        && (!was_live
-            || matches!(
-                wire.wire_state.destiny,
-                DestinyStream::Live {
-                    set_state_stamp: 0,
-                    ..
-                }
-            ))
-    {
-        // Drain any pre-bind 1Hz ticks buffered in `sys_rx` between `SelectCharacterID`
-        // and `beyonce.MachoBindObject` / `UpdateStateRequest` so stale ticks (e.g. tick N-1)
-        // are never flushed out-of-order after the synchronous post-bind `SetState` drain (tick N).
+    let is_ballpark_init_rpc = (is_beyonce_ballpark_rpc && is_in_space) || is_upwell_undock;
+    let structure_dock_transition =
+        is_structure_docked && prev_session.structure_id != session.structure_id;
+    let needs_initial = wire.wire_state.needs_initial_set_state();
+    if is_ballpark_init_rpc && (needs_initial || is_upwell_undock || structure_dock_transition) {
+        if is_upwell_undock {
+            ctx.systems
+                .clear_explicit_update_state_guards_for_session(session.session_id);
+        }
+        // Drain any pre-bind 1Hz ticks buffered in `sys_rx` between `SelectCharacterID` /
+        // `View Outside` and `beyonce.MachoBindObject` / `UpdateStateRequest` / Upwell `Undock`
+        // so stale ticks (e.g. tick N-1) are never flushed out-of-order after `SetState` (tick N).
         if let Some(sys_rx) = wire.sys_rx.as_mut() {
             let _ = drain_sys_rx_discarding_lag(sys_rx);
         }
-        if matches!(
-            wire.wire_state.destiny,
-            DestinyStream::Live {
-                set_state_stamp: 0,
-                ..
-            }
-        ) {
+        if was_live {
             wire.wire_state.enter_space(session.solar_system_id);
             was_live = false;
         } else {
@@ -1710,7 +1739,8 @@ async fn execute_call_req_wire_inner(
     }
 
     let docking_transition = was_in_space && !is_in_space;
-    let death_respawn_docking = docking_transition && session.ship_id != prev_session.ship_id;
+    let death_respawn_docking =
+        docking_transition && prev_undocked_space && session.ship_id != prev_session.ship_id;
 
     let mut pre_dock_destiny = None;
     let mut pre_dock_ticks = Vec::new();
@@ -1724,17 +1754,18 @@ async fn execute_call_req_wire_inner(
             }
             if let Some(old_sys_id) = prev_session.solar_system_id.or(session.solar_system_id) {
                 let sys_handle = ctx.systems.get_or_spawn(old_sys_id);
-                if let Some(old_ship_id) = prev_session.ship_id {
-                    let _ = sys_handle.drain_observer_updates(old_ship_id).await;
+                if let Some(old_obs_id) = ballpark_observer_id_for_session(&prev_session) {
+                    let _ = sys_handle.drain_observer_updates(old_obs_id).await;
                 }
             }
-        } else if let (Some(sys_id), Some(ship_id)) = (
+        } else if let (Some(sys_id), Some(obs_id)) = (
             session.solar_system_id.or(prev_session.solar_system_id),
-            session.ship_id.or(prev_session.ship_id),
+            ballpark_observer_id_for_session(&prev_session)
+                .or_else(|| ballpark_observer_id_for_session(session)),
         ) {
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             if let Ok((tick, obs_evs, updates_pyrep, watermark_seq)) =
-                sys_handle.drain_observer_updates_with_seq(ship_id).await
+                sys_handle.drain_observer_updates_with_seq(obs_id).await
             {
                 let mut ignored_post = Vec::new();
                 let (ep, live_ok) = if matches!(wire.wire_state.destiny, DestinyStream::Live { .. })
@@ -1744,7 +1775,7 @@ async fn execute_call_req_wire_inner(
                             ctx,
                             sys_rx,
                             sys_id,
-                            &[ship_id],
+                            &[obs_id],
                             wire.wire_state,
                             Some(watermark_seq),
                             &mut pre_dock_ticks,
@@ -1767,7 +1798,7 @@ async fn execute_call_req_wire_inner(
                         tick,
                         &obs_evs,
                         updates_pyrep,
-                        &[ship_id],
+                        &[obs_id],
                         SelfDestinyWireContext::DockSettle,
                     );
                 } else {
@@ -1786,7 +1817,10 @@ async fn execute_call_req_wire_inner(
             let _ = ctx
                 .systems
                 .get_or_spawn(sys_id)
-                .flush_peer_observer_updates(prev_session.ship_id.or(session.ship_id))
+                .flush_peer_observer_updates(
+                    ballpark_observer_id_for_session(&prev_session)
+                        .or_else(|| ballpark_observer_id_for_session(session)),
+                )
                 .await;
         }
     } else if owns_char_session
@@ -1797,7 +1831,7 @@ async fn execute_call_req_wire_inner(
             let _ = ctx
                 .systems
                 .get_or_spawn(old_sys_id)
-                .flush_peer_observer_updates(prev_session.ship_id)
+                .flush_peer_observer_updates(ballpark_observer_id_for_session(&prev_session))
                 .await;
         }
     }
@@ -1839,16 +1873,17 @@ async fn execute_call_req_wire_inner(
         && !cross_sys_pre_detach
         && (was_in_space || is_in_space)
     {
-        if let (Some(sys_id), Some(ship_id)) = (
+        if let (Some(sys_id), Some(observer_id)) = (
             session.solar_system_id.or(prev_session.solar_system_id),
-            session.ship_id.or(prev_session.ship_id),
+            ballpark_observer_id_for_session(session)
+                .or_else(|| ballpark_observer_id_for_session(&prev_session)),
         ) {
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             // Drain observer events atomically with the system's broadcast sequence watermark
             // FIRST, then drain `sys_rx` splitting `broadcast_seq <= watermark_seq` before the
             // direct drain and `broadcast_seq > watermark_seq` after it (`GH #1172`).
             if let Ok((mut tick, mut obs_evs, mut updates_pyrep, watermark_seq)) =
-                sys_handle.drain_observer_updates_with_seq(ship_id).await
+                sys_handle.drain_observer_updates_with_seq(observer_id).await
             {
                 sys_handle.record_warp_stops_from_events(&obs_evs);
                 let has_set_state = obs_evs
@@ -1861,15 +1896,17 @@ async fn execute_call_req_wire_inner(
                             | eve_destiny::DestinyEvent::RemoveBall { .. }
                     )
                 });
-                let ship_changed_in_space = is_in_space && session.ship_id != prev_session.ship_id;
+                let ship_changed_in_space = prev_undocked_space
+                    && is_undocked_space
+                    && session.ship_id != prev_session.ship_id;
                 let same_system_live_ship_swap = ship_changed_in_space
                     && effective_was_live
                     && prev_session.solar_system_id == session.solar_system_id;
-                let suppressed_ids = [ship_id, prev_session.ship_id.unwrap_or(ship_id)];
+                let suppressed_ids = [observer_id, prev_session.ship_id.unwrap_or(observer_id)];
                 let lookup_ids: &[i64] = if ship_changed_in_space {
                     &suppressed_ids
                 } else {
-                    std::slice::from_ref(&ship_id)
+                    std::slice::from_ref(&observer_id)
                 };
 
                 let mut ep = wire.wire_state.current_epoch();
@@ -1907,6 +1944,7 @@ async fn execute_call_req_wire_inner(
                     }
                 }
 
+                let mut blocked_invalid_structure_view = false;
                 if ((!effective_was_live
                     || (ship_changed_in_space
                         && !same_system_live_ship_swap
@@ -1919,14 +1957,25 @@ async fn execute_call_req_wire_inner(
                     // concurrent 1Hz tick drained `SetState` between `MachoBindObject` and
                     // this post-bind drain (`#845`): synthesize `SetState` so the stream
                     // transitions cleanly into `Live`.
+                    // Do not synthesize a View Outside SetState if `space_destiny` rejected the
+                    // structure (not bootstrapped in DB / missing or destroyed structure).
+                    let allow_structure_resync = !is_structure_docked
+                        || session.character_id.is_some_and(|cid| {
+                            ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
+                        });
                     post_drain_tick_batches.clear();
-                    if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                    if !allow_structure_resync {
+                        blocked_invalid_structure_view = true;
+                        obs_evs.clear();
+                        updates_pyrep = PyRep::None;
+                        effective_was_live = false;
+                    } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
                         if let Some(resynced) = resync_set_state_with_sys_rx(
                             ctx,
                             &sys_handle,
                             sys_rx,
                             sys_id,
-                            ship_id,
+                            observer_id,
                             lookup_ids,
                             wire.wire_state,
                         )
@@ -1947,14 +1996,18 @@ async fn execute_call_req_wire_inner(
                         effective_was_live = false;
                     }
                 }
-                if !obs_evs.is_empty() {
+                if blocked_invalid_structure_view {
+                    wire.wire_state.leave_space();
+                    wire.sys_rx.detach();
+                    *wire.subscribed_sys_id = None;
+                } else if !obs_evs.is_empty() {
                     post_rpc_direct_batch = build_destiny_batch(
                         ctx,
                         ep,
                         tick,
                         &obs_evs,
                         updates_pyrep,
-                        &suppressed_ids,
+                        lookup_ids,
                         SelfDestinyWireContext::NonDock,
                     );
                 }
@@ -1966,7 +2019,10 @@ async fn execute_call_req_wire_inner(
             let _ = ctx
                 .systems
                 .get_or_spawn(sys_id)
-                .flush_peer_observer_updates(session.ship_id.or(prev_session.ship_id))
+                .flush_peer_observer_updates(
+                    ballpark_observer_id_for_session(session)
+                        .or_else(|| ballpark_observer_id_for_session(&prev_session)),
+                )
                 .await;
         }
     }
@@ -2879,75 +2935,71 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         None => true,
                     }
                 });
+                let session_obs_id = ballpark_observer_id_for_session(&session);
+                let probe_obs_id = ballpark_observer_id_for_session(&db_probe);
                 let still_in_same_live_space = online_char_matches
-                    && db_probe.character_id.is_some()
-                    && db_probe.station_id.is_none()
-                    && db_probe.structure_id.is_none()
+                    && session_obs_id.is_some()
+                    && probe_obs_id == session_obs_id
                     && db_probe.solar_system_id == session.solar_system_id
                     && db_probe.solar_system_id == subscribed_sys_id
-                    && db_probe.ship_id == session.ship_id;
+                    && db_probe.structure_id == session.structure_id;
                 match tick_res {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                         warn!("machoNet session {session_id} sys_rx lagged by {skipped} ticks; resyncing SetState (ORD-5)");
                         if still_in_same_live_space && session_owns_char_notifications(&ctx, &session) {
                             wire_state.on_broadcast_lagged();
-                            if session.character_id.is_some()
-                                && session.station_id.is_none()
-                                && session.structure_id.is_none()
+                            if let (Some(sys_id), Some(observer_id), Some(ref mut rx)) =
+                                (session.solar_system_id, session_obs_id, sys_rx.as_mut())
                             {
-                                if let (Some(sys_id), Some(ship_id), Some(ref mut rx)) =
-                                    (session.solar_system_id, session.ship_id, sys_rx.as_mut())
+                                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                                if let Some(resynced) = resync_set_state_with_sys_rx(
+                                    &ctx,
+                                    &sys_handle,
+                                    rx,
+                                    sys_id,
+                                    observer_id,
+                                    &[observer_id],
+                                    &mut wire_state,
+                                )
+                                .await
                                 {
-                                    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                                    if let Some(resynced) = resync_set_state_with_sys_rx(
-                                        &ctx,
-                                        &sys_handle,
-                                        rx,
-                                        sys_id,
-                                        ship_id,
-                                        &[ship_id],
-                                        &mut wire_state,
-                                    )
-                                    .await
-                                    {
-                                        if session_owns_char_notifications(&ctx, &session) {
-                                            let ep = wire_state.current_epoch();
-                                            let write_failed = if let Some(batch) = build_destiny_batch(
-                                                &ctx,
-                                                ep,
-                                                resynced.tick,
-                                                &resynced.events,
-                                                resynced.updates_pyrep,
-                                                &[ship_id],
-                                                SelfDestinyWireContext::NonDock,
-                                            ) {
-                                                emit_tick_batch_with_observability(
-                                                    &ctx,
-                                                    &mut wire_state,
-                                                    &mut writer,
-                                                    client_id,
-                                                    &session,
-                                                    batch,
-                                                    "lagged_resync_tick",
-                                                )
-                                                .await
-                                                .is_err()
-                                            } else {
-                                                false
-                                            } || emit_tick_batches_with_observability(
+                                    if session_owns_char_notifications(&ctx, &session) {
+                                        let ep = wire_state.current_epoch();
+                                        let write_failed = if let Some(batch) = build_destiny_batch(
+                                            &ctx,
+                                            ep,
+                                            resynced.tick,
+                                            &resynced.events,
+                                            resynced.updates_pyrep,
+                                            &[observer_id],
+                                            SelfDestinyWireContext::NonDock,
+                                        ) {
+                                            emit_tick_batch_with_observability(
                                                 &ctx,
                                                 &mut wire_state,
                                                 &mut writer,
                                                 client_id,
                                                 &session,
-                                                resynced.post_batches,
-                                                "system_tick_broadcast",
+                                                batch,
+                                                "lagged_resync_tick",
                                             )
                                             .await
-                                            .is_err();
-                                            if write_failed {
-                                                break;
-                                            }
+                                            .is_err()
+                                        } else {
+                                            false
+                                        } || emit_tick_batches_with_observability(
+                                            &ctx,
+                                            &mut wire_state,
+                                            &mut writer,
+                                            client_id,
+                                            &session,
+                                            resynced.post_batches,
+                                            "system_tick_broadcast",
+                                        )
+                                        .await
+                                        .is_err();
+                                        if write_failed {
+                                            break;
                                         }
                                     }
                                 }
@@ -2961,20 +3013,17 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     Ok(tick_msg) => {
                         if still_in_same_live_space
                             && session_owns_char_notifications(&ctx, &session)
-                            && session.character_id.is_some()
-                            && session.station_id.is_none()
-                            && session.structure_id.is_none()
                             && session.solar_system_id == Some(tick_msg.solar_system_id)
                         {
-                            if let Some(ship_id) = session.ship_id {
-                                if let Some(updates_pyrep) = tick_msg.observer_updates_pyrep.get(&ship_id) {
+                            if let Some(observer_id) = session_obs_id {
+                                if let Some(updates_pyrep) = tick_msg.observer_updates_pyrep.get(&observer_id) {
                                     let evs = tick_msg
                                         .observer_events
-                                        .get(&ship_id)
+                                        .get(&observer_id)
                                         .map(Vec::as_slice)
                                         .unwrap_or(&tick_msg.events);
                                     let ep = wire_state.current_epoch();
-                                    if let Some(batch) = build_destiny_batch(&ctx, ep, tick_msg.tick, evs, updates_pyrep.clone(), &[ship_id], SelfDestinyWireContext::NonDock) {
+                                    if let Some(batch) = build_destiny_batch(&ctx, ep, tick_msg.tick, evs, updates_pyrep.clone(), &[observer_id], SelfDestinyWireContext::NonDock) {
                                         if emit_tick_batch_with_observability(
                                             &ctx,
                                             &mut wire_state,
@@ -3036,25 +3085,41 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             subscribed_sys_id = None;
                             continue;
                         }
+                        let prev_stream_active = !matches!(
+                            wire_state.destiny,
+                            crate::outbound_sequencer::DestinyStream::Detached
+                        ) || sys_rx.is_some()
+                            || subscribed_sys_id.is_some();
+                        let prev_obs_id = ballpark_observer_id_for_session(&prev_session);
                         let was_in_space = prev_session.character_id.is_some()
                             && prev_session.station_id.is_none()
-                            && prev_session.structure_id.is_none()
-                            && prev_session.solar_system_id.is_some();
+                            && prev_session.solar_system_id.is_some()
+                            && (prev_session.structure_id.is_none() || prev_stream_active);
                         let charsel_transition =
                             session_owns_charsel_transition(&ctx, &session);
+                        let same_structure_view_outside = prev_stream_active
+                            && session.character_id.is_some()
+                            && session.station_id.is_none()
+                            && session.structure_id.is_some()
+                            && prev_session.station_id.is_none()
+                            && prev_session.structure_id == session.structure_id
+                            && prev_session.solar_system_id == session.solar_system_id;
                         let is_in_space = !charsel_transition
                             && session.character_id.is_some()
                             && session.station_id.is_none()
-                            && session.structure_id.is_none()
-                            && session.solar_system_id.is_some();
+                            && session.solar_system_id.is_some()
+                            && (session.structure_id.is_none() || same_structure_view_outside);
                         let target_sys_id = is_in_space.then_some(session.solar_system_id).flatten();
                         let docking_transition = was_in_space && !is_in_space;
+                        let structure_mode_changed =
+                            was_in_space && prev_session.structure_id != session.structure_id;
                         let sys_changed = is_in_space
                             && (session.solar_system_id != prev_session.solar_system_id
                                 || target_sys_id != subscribed_sys_id
                                 || sys_rx.is_none());
 
                         if docking_transition
+                            || structure_mode_changed
                             || sys_changed
                             || (!is_in_space
                                 && (sys_rx.is_some()
@@ -3072,22 +3137,23 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     crate::outbound_sequencer::DestinyStream::Detached
                                 )
                                 && (docking_transition
+                                    || structure_mode_changed
                                     || (was_in_space
                                         && session.solar_system_id != prev_session.solar_system_id))
                             {
                                 if let Some(old_sys_id) = prev_session.solar_system_id {
                                     let old_sys = ctx.systems.get_or_spawn(old_sys_id);
                                     if session_owns_char_notifications(&ctx, &session) {
-                                        if let Some(old_ship_id) = prev_session.ship_id {
+                                        if let Some(old_obs_id) = prev_obs_id {
                                             // Discard stale old-system observer updates (e.g. pod
                                             // TerminalExplosion / RemoveBall / SetState) on async
                                             // DeathRespawn (#1010) before SessionChangeNotification
                                             // tears down the client ballpark via OnPrimaryViewChanged.
-                                            let _ = old_sys.drain_observer_updates(old_ship_id).await;
+                                            let _ = old_sys.drain_observer_updates(old_obs_id).await;
                                         }
                                         if session_owns_char_notifications(&ctx, &session) {
                                             let _ = old_sys
-                                                .flush_peer_observer_updates(prev_session.ship_id)
+                                                .flush_peer_observer_updates(prev_obs_id)
                                                 .await;
                                         }
                                     }
@@ -3132,6 +3198,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             if is_in_space
                                 && !docking_transition
                                 && !sys_changed
+                                && session.structure_id.is_none()
+                                && prev_session.structure_id.is_none()
                                 && session.ship_id != prev_session.ship_id
                             {
                                 if let (Some(new_ship_id), Some(sys_id), Some(ref mut rx)) =
@@ -4384,10 +4452,14 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
     session: &mut SessionState,
     wire: &mut CallReqWireRefs<'_>,
 ) -> (Vec<crate::outbound_sequencer::OutFrame>, Vec<PyRep>) {
+    let prev_stream_active = !matches!(
+        wire.wire_state.destiny,
+        crate::outbound_sequencer::DestinyStream::Detached
+    ) || wire.subscribed_sys_id.is_some();
     let was_in_space = session.character_id.is_some()
         && session.station_id.is_none()
-        && session.structure_id.is_none()
-        && session.solar_system_id.is_some();
+        && session.solar_system_id.is_some()
+        && (session.structure_id.is_none() || prev_stream_active);
     let prev_session = session.clone();
     if session.character_id.is_some() {
         ctx.sync_session(session);
@@ -4411,11 +4483,22 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
     {
         out_frames.push(flush_frame);
     }
+    let same_structure_view_outside = prev_stream_active
+        && session.character_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_some()
+        && prev_session.station_id.is_none()
+        && prev_session.structure_id == session.structure_id
+        && prev_session.solar_system_id == session.solar_system_id;
     let is_in_space = session.character_id.is_some()
         && session.station_id.is_none()
-        && session.structure_id.is_none()
-        && session.solar_system_id.is_some();
-    if was_in_space && (!is_in_space || prev_session.solar_system_id != session.solar_system_id) {
+        && session.solar_system_id.is_some()
+        && (session.structure_id.is_none() || same_structure_view_outside);
+    if was_in_space
+        && (!is_in_space
+            || prev_session.solar_system_id != session.solar_system_id
+            || prev_session.structure_id != session.structure_id)
+    {
         wire.wire_state.leave_space();
         ctx.systems
             .clear_explicit_update_state_guards_for_session(session.session_id);
@@ -4432,14 +4515,14 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
             *wire.sys_rx = ctx.systems.get_or_spawn(sys_id).subscribe();
             *wire.subscribed_sys_id = Some(sys_id);
         }
-        if let Some(ship_id) = session.ship_id {
+        if let Some(observer_id) = ballpark_observer_id_for_session(session) {
             let mut pending_batches = Vec::new();
             let mut ignored_post = Vec::new();
             let (_ep, effective_was_live) = drain_pending_tick_batches_for_sys_with_watermark(
                 ctx,
                 wire.sys_rx,
                 sys_id,
-                &[ship_id],
+                &[observer_id],
                 wire.wire_state,
                 None,
                 &mut pending_batches,
