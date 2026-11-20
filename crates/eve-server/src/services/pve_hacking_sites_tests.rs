@@ -954,4 +954,99 @@ async fn hacking_mgr_guards_reject_unauth_docked_invalid_target_and_no_game_with
     .unwrap()
     .expect("QuitHackingAttempt succeeds");
     assert_eq!(quit_rep, PyRep::Bool(true));
+
+    // 6. BF-1354B-06 / BF-1354B-01 regressions:
+    //    - 64-bit tile index truncation `(1i64 << 32) + idx` rejects with InvalidTileIndex
+    //    - Missing solar_system_id rejects ClickedOnTile with NoSolarSystem
+    //    - Cross-system QuitHackingAttempt & implicit 0-arg GetMyHackProgress reject with NotInSiteSystem
+    //      without destroying the active game in the original system.
+    let re_start = handle_pve_hacking(
+        &ctx,
+        &mut space,
+        "hackingMgr",
+        "StartNewGameInstance",
+        &[PyRep::Integer(can_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("restart fresh game succeeds");
+    assert_eq!(re_start.dict_get("status"), Some(&PyRep::String("InProgress".into())));
+    with_pve_exploration_reg(&ctx, |reg| {
+        if let Some(g) = reg.hacking_games.get_mut(&(char_id, can_id)) {
+            if !g.utilities.is_empty() {
+                g.utilities[0] = Some(HackingUtilityKind::KernelRot);
+            }
+        }
+    });
+
+    const INVALID_TILE_CODE: &str = "InvalidTileIndex";
+    const HACKING_SVC: &str = "hackingMgr";
+    let truncated_tile = PyRep::Integer((1i64 << 32) + 1);
+    for (meth, args) in [
+        ("ClickedOnTile", vec![PyRep::Integer(can_id), truncated_tile.clone()]),
+        ("UsedUtilityElement", vec![PyRep::Integer(can_id), PyRep::Integer(0), truncated_tile.clone()]),
+        ("UsedUtilityElementOnVirus", vec![PyRep::Integer(can_id), PyRep::Integer(0), truncated_tile]),
+    ] {
+        let err = handle_pve_hacking(&ctx, &mut space, HACKING_SVC, meth, &args, &kw)
+            .await
+            .unwrap()
+            .expect_err(&format!("overflow tile index in {meth} must reject"));
+        assert_eq!(err.code, INVALID_TILE_CODE);
+    }
+
+    let mut no_sys = space.clone();
+    no_sys.solar_system_id = None;
+    let no_sys_err = handle_pve_hacking(
+        &ctx,
+        &mut no_sys,
+        "hackingMgr",
+        "ClickedOnTile",
+        &[PyRep::Integer(can_id), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("missing solar_system_id in ClickedOnTile must reject");
+    assert_eq!(no_sys_err.code, "NoSolarSystem");
+    assert!(no_sys_err.client_error.is_some(), "new guard must emit typed ClientError");
+
+    let mut other_sys = space.clone();
+    other_sys.solar_system_id = Some(30_000_144);
+    let epoch_before_cross = ctx.db.state_epoch();
+    let commits_before_cross = ctx.db.tx_commit_count();
+    let cross_prog_err = handle_pve_hacking(
+        &ctx,
+        &mut other_sys,
+        "hackingMgr",
+        "GetMyHackProgress",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("implicit GetMyHackProgress across systems must reject");
+    assert_eq!(cross_prog_err.code, "NotInSiteSystem");
+    assert!(cross_prog_err.client_error.is_some());
+
+    let cross_quit_err = handle_pve_hacking(
+        &ctx,
+        &mut other_sys,
+        "hackingMgr",
+        "QuitHackingAttempt",
+        &[PyRep::Integer(can_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("cross-system QuitHackingAttempt must reject");
+    assert_eq!(cross_quit_err.code, "NotInSiteSystem");
+    assert!(cross_quit_err.client_error.is_some());
+    assert_eq!(ctx.db.state_epoch(), epoch_before_cross);
+    assert_eq!(ctx.db.tx_commit_count(), commits_before_cross);
+    assert!(read_pve_exploration_reg(&ctx, |reg| {
+        reg.hacking_games
+            .get(&(char_id, can_id))
+            .is_some_and(|g| g.status == "InProgress")
+    }));
 }

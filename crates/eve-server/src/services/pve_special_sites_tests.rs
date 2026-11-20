@@ -628,24 +628,90 @@ async fn rpc_dispatch_interference_storms_and_errors() {
             e.last_updated_sec = e.last_updated_sec.saturating_sub(25_000);
         }
     });
-    let st_decayed = handle_pve_special_sites(
-        &ctx, &mut session, "solarsystemInterferenceMgr", "GetSolarSystemInterferenceBand", &[], &HashMap::new(),
-    )
-    .await
-    .expect("handled")
-    .expect("decayed interference state");
-    assert!(format!("{st_decayed:?}").contains("interferenceLevel"));
-    assert!(session.notifications.iter().any(|n| n.0 == "OnSolarsystemInterferenceChanged"));
+    let expected_ts_ft = read_pve_special_reg(&ctx, |reg| {
+        (reg.interference_by_system[&poch_or_ls].last_updated_sec as i64 + 11_644_473_600)
+            * 10_000_000
+    });
+    session.notifications.clear();
+    let _ = ctx.drain_notifications_for_char(_char_id);
+    let epoch_before_reads = ctx.db.state_epoch();
+    let commits_before_reads = ctx.db.tx_commit_count();
 
+    // Repeated interference reads reflect decayed level & band read-only using entry.last_updated_sec,
+    // without mutating DB state or emitting OnSolarsystemInterferenceChanged.
+    for _ in 0..2 {
+        let st_decayed = handle_pve_special_sites(
+            &ctx, &mut session, "solarsystemInterferenceMgr", "GetSolarSystemInterferenceBand", &[], &HashMap::new(),
+        )
+        .await
+        .expect("handled")
+        .expect("decayed interference state");
+        assert!(format!("{st_decayed:?}").contains("interferenceLevel"));
+        assert_eq!(st_decayed.dict_get("interferenceBand").and_then(|v| v.as_i64()), Some(2));
+        assert_eq!(
+            st_decayed.dict_get("lastDecayTickTimestamp").and_then(|v| v.as_i64()),
+            Some(expected_ts_ft)
+        );
+    }
+    assert_eq!(ctx.db.state_epoch(), epoch_before_reads);
+    assert_eq!(ctx.db.tx_commit_count(), commits_before_reads);
+    assert!(
+        !session.notifications.iter().any(|n| n.0 == "OnSolarsystemInterferenceChanged"),
+        "read-only interference queries must not emit OnSolarsystemInterferenceChanged"
+    );
+    assert!(
+        ctx.drain_notifications_for_char(_char_id).is_empty(),
+        "read-only interference queries must not queue cluster notifications"
+    );
+
+    // Untracked session system must not be fabricated into GetAllInterferenceBands, and invalid explicit system rejects.
+    let mut jita_session = session.clone();
+    jita_session.solar_system_id = Some(30_000_142);
     let all_bands = handle_pve_special_sites(
-        &ctx, &mut session, "solarsystemInterferenceMgr", "GetAllInterferenceBands", &[], &HashMap::new(),
+        &ctx, &mut jita_session, "solarsystemInterferenceMgr", "GetAllInterferenceBands", &[], &HashMap::new(),
     )
     .await
     .expect("handled")
     .expect("all bands dict");
-    assert!(matches!(all_bands, PyRep::Dict(ref d) if !d.is_empty()));
+    let PyRep::Dict(ref band_items) = all_bands else { panic!("expected dict") };
+    assert!(band_items.iter().any(|(k, _)| k.as_i64() == Some(poch_or_ls as i64)));
+    assert!(
+        !band_items.iter().any(|(k, _)| k.as_i64() == Some(30_000_142)),
+        "GetAllInterferenceBands must not fabricate untracked session systems"
+    );
+    for bad_sys in [
+        PyRep::Integer(-1),
+        PyRep::Integer((1i64 << 32) + 30_000_142),
+        PyRep::Integer(99_999_999),
+        PyRep::String("bad".into()),
+    ] {
+        let err = handle_pve_special_sites(
+            &ctx, &mut session, "solarsystemInterferenceMgr", "GetLocalInterferenceState", &[bad_sys], &HashMap::new(),
+        )
+        .await
+        .expect("handled")
+        .expect_err("invalid solarSystemID must reject");
+        assert_eq!(err.code, "UnknownSolarSystem");
+    }
 
+    // Background clock tick persists decay and emits OnSolarsystemInterferenceChanged once on band crossing.
     advance_pve_special_clock(&ctx, 3_600);
+    let tick_notifs = ctx.drain_notifications_for_char(_char_id);
+    assert!(
+        tick_notifs.iter().any(|n| n.event == "OnSolarsystemInterferenceChanged"),
+        "advance_pve_special_clock must emit OnSolarsystemInterferenceChanged when band decays"
+    );
+    assert_eq!(
+        read_pve_special_reg(&ctx, |reg| reg.interference_by_system.get(&poch_or_ls).map(|e| e.band)),
+        Some(2)
+    );
+    advance_pve_special_clock(&ctx, 3_600);
+    assert!(
+        !ctx.drain_notifications_for_char(_char_id)
+            .iter()
+            .any(|n| n.event == "OnSolarsystemInterferenceChanged"),
+        "subsequent tick without band crossing must not re-emit OnSolarsystemInterferenceChanged"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -916,11 +982,150 @@ async fn special_sites_map_tales_and_interference_queries_are_read_pure_and_auth
         .dispatch_rpc(&mut session, "solarsystemInterferenceMgr", None, "GetAllInterferenceBands", &[], &kw, None)
         .await
         .expect("GetAllInterferenceBands");
-    assert!(matches!(all_bands, PyRep::Dict(ref d) if !d.is_empty()));
+    assert!(matches!(all_bands, PyRep::Dict(ref d) if d.is_empty()));
 
     assert_eq!(ctx.db.state_epoch(), epoch0, "authenticated read-only queries must not bump state_epoch");
     assert_eq!(ctx.db.tx_commit_count(), commits0, "authenticated read-only queries must not bump tx_commit_count");
     assert!(read_pve_special_reg(&ctx, |reg| !reg.initialized));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drifter_hive_in_system_signature_query_is_read_pure_and_pochven_boss_kill_persists() {
+    let drifter_sys: SolarSystemId = 31_000_001;
+    let (drifter_ctx, mut drifter_sess, _d_char, _d_ship) = make_ctx_and_pilot(drifter_sys, true);
+    let kw = HashMap::new();
+
+    let d_epoch0 = drifter_ctx.db.state_epoch();
+    let d_commits0 = drifter_ctx.db.tx_commit_count();
+    let in_sys_sig = drifter_ctx
+        .dispatch_rpc(
+            &mut drifter_sess,
+            "dungeonInstanceCacheMgr",
+            None,
+            "GetSignatureInstances",
+            &[PyRep::Integer(i64::from(drifter_sys))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("in-system GetSignatureInstances");
+    assert!(matches!(in_sys_sig, PyRep::Dict(ref d) if !d.is_empty()));
+    assert_eq!(drifter_ctx.db.state_epoch(), d_epoch0, "in-system Drifter Hive query must not bump state_epoch");
+    assert_eq!(drifter_ctx.db.tx_commit_count(), d_commits0, "in-system Drifter Hive query must not bump tx_commit_count");
+    assert!(drifter_ctx.systems.get_handle(drifter_sys).is_none(), "in-system GetSignatureInstances must not spawn system actor");
+
+    let pochven_sys = shared_sde()
+        .solar_systems
+        .values()
+        .filter(|s| s.region_id == 10_000_070)
+        .min_by_key(|s| s.solar_system_id)
+        .map(|s| s.solar_system_id)
+        .expect("canonical SDE contains Pochven solar system");
+    let (ctx, mut session, char_id, ship_id) = make_ctx_and_pilot(pochven_sys, true);
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+
+    // Remote / docked Pochven queries remain 100% read-pure with zero DB writes or ball spawns.
+    session.station_id = Some(60_003_760);
+    let remote_res = handle_pve_special_sites(
+        &ctx,
+        &mut session,
+        "dungeonInstanceCacheMgr",
+        "GetTriglavianSiteInstances",
+        &[PyRep::Integer(i64::from(pochven_sys))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked Pochven query succeeds");
+    assert!(matches!(remote_res, PyRep::Dict(ref d) if !d.is_empty()));
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(ctx.systems.get_handle(pochven_sys).is_none());
+
+    // Undocked in-system Pochven query persists reg.triglavian_sites FIRST before spawning NPC balls,
+    // so both boss-kill events and complete_special_dungeon_instance succeed on a cold DB.
+    session.station_id = None;
+    let in_sys_res = handle_pve_special_sites(
+        &ctx,
+        &mut session,
+        "dungeonInstanceCacheMgr",
+        "GetTriglavianSiteInstances",
+        &[PyRep::Integer(i64::from(pochven_sys))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("undocked Pochven query succeeds");
+    assert!(matches!(in_sys_res, PyRep::Dict(ref d) if !d.is_empty()));
+
+    let sites = read_pve_special_reg(&ctx, |reg| reg.triglavian_sites.get(&pochven_sys).cloned())
+        .expect("Pochven triglavian_sites must be persisted when spawning balls");
+    assert_eq!(sites.len(), 2);
+
+    // Repeated in-system read skips unnecessary DB write commits.
+    let commits_after_seed = ctx.db.tx_commit_count();
+    let _ = handle_pve_special_sites(
+        &ctx,
+        &mut session,
+        "dungeonInstanceCacheMgr",
+        "GetTriglavianSiteInstances",
+        &[PyRep::Integer(i64::from(pochven_sys))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("repeat Pochven query succeeds");
+    assert_eq!(ctx.db.tx_commit_count(), commits_after_seed);
+
+    let sys_handle = ctx.systems.get_handle(pochven_sys).expect("Pochven system actor spawned");
+    let site0 = &sites[0];
+    assert!(sys_handle.get_ball_snapshot(site0.boss_npc_ball_id).await.ok().flatten().is_some());
+
+    // Boss kill via on_special_site_npc_destroyed_core finds persisted site 0 and awards standings/ISK.
+    let kill_accts = crate::services::pve_special_sites_combat::on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        pochven_sys,
+        site0.boss_npc_ball_id,
+        Some(char_id),
+    )
+    .await;
+    assert!(
+        kill_accts.iter().any(|(cid, _)| *cid == char_id),
+        "Pochven boss kill must award killer character"
+    );
+    assert!(read_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&pochven_sys][0].completed));
+
+    // Manual completion via complete_special_dungeon_instance on site 1 succeeds as well.
+    let site1 = &sites[1];
+    let ship_tid = find_ship_type_id(&shared_sde());
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(ship_id, [30_500.0, 0.0, 0.0]);
+    });
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: ship_tid,
+            position: glam::DVec3::new(30_500.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let _ = sys_handle.remove_ball(site1.boss_npc_ball_id).await;
+    for &ebid in &site1.escort_ball_ids {
+        let _ = sys_handle.remove_ball(ebid).await;
+    }
+    let _ = complete_special_dungeon_instance(&ctx, &mut session, site1.instance_id, 1)
+        .await
+        .expect("Pochven site completion succeeds");
+    assert!(read_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&pochven_sys][1].completed));
 }
 
 #[cfg(test)]

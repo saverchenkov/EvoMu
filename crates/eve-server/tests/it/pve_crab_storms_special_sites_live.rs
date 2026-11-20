@@ -449,6 +449,7 @@ async fn test_crab_beacon_lifecycle_ceq_interference_and_cyno_jammer_live() {
 #[tokio::test]
 async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
     let ctx = paused_ctx();
+    eve_server::services::pve_special_sites::ensure_special_sites_initialized(&ctx);
     let (mut pilot, _) = gm_pilot_fitted_in_space(&ctx, 72_030, 92_100_030, 626 /* Vexor */, 30_000_208 /* Storm 1 Core */, &[], &[]).await;
 
     let PyRep::List(weather_rows) = ok(&ctx, &mut pilot.sess, "map", "GetAllRoamingWeatherSystems", &[]).await else { panic!("weather rows") };
