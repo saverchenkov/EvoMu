@@ -2061,7 +2061,7 @@ def _snapshot_fitting_ship_ids(controller=None):
 
 
 def _is_stale_ship_dogma_key_error(exc, controller=None, initial_ship_ids=None):
-    """Return True iff *exc* is a KeyError for an unloaded ship ID during a live ship swap (#1410)."""
+    """Return True iff *exc* is a KeyError for an unloaded ship ID during a live ship swap (#1410, #1443)."""
     if not isinstance(exc, KeyError) or not getattr(exc, "args", None):
         return False
     missing_key = _as_positive_ship_id(exc.args[0])
@@ -2145,7 +2145,7 @@ def _make_fitting_panel_stale_ship_guard(orig_fn, controller_attr="controller"):
 
 
 def _install_fitting_active_ship_guard():
-    """Guard fittingSvc/fittingWarnings/StatsPanel/DronePanel against dock & ship-swap races (#1254, #1410)."""
+    """Guard fittingSvc/fittingWarnings/StatsPanel/DronePanel against dock & ship-swap races (#1254, #1410, #1443)."""
     changed = False
     fsvc_mod = sys.modules.get("eve.client.script.environment.fittingSvc")
     fsvc_cls = None
