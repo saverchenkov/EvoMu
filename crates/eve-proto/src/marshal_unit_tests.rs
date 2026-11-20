@@ -878,3 +878,107 @@ fn decode_partial_call_header_recovers_source_from_corrupted_call_req_payload() 
     );
 }
 
+#[test]
+fn issue_1479_iterative_pyrep_ops_and_bounded_encode_survive_small_stack() {
+    // Run on a tiny 256 KiB stack where deep recursive traversal/encoding would overflow immediately.
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            const DEEP: usize = 20_000;
+            let mut deep_dict_chain =
+                PyRep::Dict(vec![(PyRep::String("needle".into()), PyRep::Integer(42))]);
+            for i in 0..DEEP {
+                deep_dict_chain = match i % 3 {
+                    0 => PyRep::Tuple(vec![deep_dict_chain]),
+                    1 => PyRep::Object {
+                        type_name: "Custom".into(),
+                        args: Box::new(deep_dict_chain),
+                    },
+                    _ => PyRep::ObjectEx {
+                        is_type_2: true,
+                        header: Box::new(deep_dict_chain),
+                        list: Vec::new(),
+                        dict: Vec::new(),
+                    },
+                };
+            }
+
+            assert_eq!(deep_dict_chain.node_count(), DEEP + 3);
+            assert_eq!(deep_dict_chain.dict_get("needle"), Some(&PyRep::Integer(42)));
+
+            let mut deep = PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(deep_dict_chain))));
+            deep = PyRep::ChecksumedStream {
+                checksum: 0x1234_5678,
+                body: Box::new(deep),
+            };
+
+            let cloned = deep.clone();
+            assert_eq!(deep, cloned);
+
+            let dbg = format!("{deep:?}");
+            assert!(dbg.contains("Integer(42)"));
+
+            assert_eq!(try_encode(&deep), Err(ProtoError::RecursionLimitExceeded));
+            assert_eq!(encode_zlib(&deep), Err(ProtoError::RecursionLimitExceeded));
+            // Infallible `encode` enforces `MAX_ENCODE_DEPTH` iteratively and returns empty rather
+            // than overflowing the stack or allocating an unbounded frame.
+            assert!(encode(&deep).is_empty());
+
+            deep.drop_iterative();
+            cloned.drop_iterative();
+
+            // Verify `encode` and `encode_zlib` frame-byte limits.
+            let over_wire_max = PyRep::Bytes(vec![0u8; MAX_FRAME_SIZE + 1]);
+            assert!(matches!(
+                encode_zlib(&over_wire_max),
+                Err(ProtoError::FrameTooLarge(_))
+            ));
+            let over_encode_max = PyRep::Bytes(vec![0u8; MAX_ENCODE_FRAME_BYTES + 1]);
+            assert!(encode(&over_encode_max).is_empty());
+
+            // Verify `decode_partial_call_header` rejects saved-element height amplification cleanly.
+            let mut partial_amp = vec![MARSHAL_HEADER_BYTE];
+            partial_amp.extend_from_slice(&1u32.to_le_bytes());
+            partial_amp.push(MarshalOpcode::PyTwoTuple as u8);
+            partial_amp.push((MarshalOpcode::PyOneTuple as u8) | SAVE_FLAG);
+            partial_amp.resize(partial_amp.len() + 62, MarshalOpcode::PyOneTuple as u8);
+            partial_amp.push(MarshalOpcode::PyNone as u8); // slot 1 height = 63
+            partial_amp.push(MarshalOpcode::PyOneTuple as u8); // depth 1
+            partial_amp.push(MarshalOpcode::PySavedStreamElement as u8); // depth 2 + 63 = 65 > 64
+            partial_amp.push(1);
+            partial_amp.extend_from_slice(&1u32.to_le_bytes());
+            assert_eq!(
+                decode_partial_call_header(&partial_amp, MAX_FRAME_SIZE, MAX_DECODED_NODES),
+                None
+            );
+
+            // Verify 64 nested `PySubStream` frames decode & drop cleanly on the 256 KiB stack,
+            // while 65 nested frames fail cleanly with `RecursionLimitExceeded`.
+            let wrap_substream = |inner: &[u8]| {
+                let mut out = vec![MARSHAL_HEADER_BYTE, 0, 0, 0, 0, MarshalOpcode::PySubStream as u8];
+                if inner.len() < 0xFF {
+                    out.push(inner.len() as u8);
+                } else {
+                    out.push(0xFF);
+                    out.extend_from_slice(&(inner.len() as u32).to_le_bytes());
+                }
+                out.extend_from_slice(inner);
+                out
+            };
+            let mut nested_sub = vec![MARSHAL_HEADER_BYTE, 0, 0, 0, 0, MarshalOpcode::PyOneInteger as u8];
+            for _ in 0..MAX_RECURSION_DEPTH {
+                nested_sub = wrap_substream(&nested_sub);
+            }
+            let decoded_sub = decode(&nested_sub).expect("64 nested substreams must decode");
+            drop(decoded_sub);
+            let over_nested_sub = wrap_substream(&nested_sub);
+            assert!(matches!(
+                decode(&over_nested_sub),
+                Err(ProtoError::RecursionLimitExceeded)
+            ));
+        })
+        .expect("spawn stack-bounded test thread");
+
+    handle.join().expect("deep iterative test thread panicked or overflowed");
+}
+
