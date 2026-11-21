@@ -212,7 +212,10 @@ async fn declare_war_validation_matrix_and_sync_wars_hq_defender_loss() {
     ctx.db.with_mut_snapshot(|s| {
         s.structures.get_mut(&agg_hq_id).unwrap().state = "Destroyed".into();
     });
-    let after_hq_loss = call_wars(&ctx, &mut def_sess, "warsInfoMgr", "GetPublicWarInfo", &[PyRep::Integer(war_id)], None).await.unwrap();
+    let PyRep::List(after_hq_list) = call_wars(&ctx, &mut def_sess, "warsInfoMgr", "GetPublicWarInfo", &[PyRep::Integer(war_id)], None).await.unwrap() else {
+        panic!("expected List from GetPublicWarInfo");
+    };
+    let after_hq_loss = &after_hq_list[0];
     assert_eq!(after_hq_loss.dict_get("active").and_then(|v| v.as_bool()), Some(false));
     assert!(after_hq_loss.dict_get("timeFinished").is_some_and(|v| !matches!(v, PyRep::None)));
     ctx.db.with_mut_snapshot(|s| {
@@ -373,8 +376,11 @@ async fn war_negotiations_decline_retract_mutual_invites_and_statistics_groups()
     });
     let _ = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "Bind", &[PyRep::Integer(war_id)], None).await.unwrap();
     let _ = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "SetSessionCheck", &[], Some(war_id)).await.unwrap();
-    let base_info = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "GetBaseInfo", &[PyRep::Integer(war_id)], Some(war_id)).await.unwrap();
-    assert_eq!(base_info.dict_get("killsForDefender").and_then(|v| v.as_i64()), Some(1));
+    let PyRep::Tuple(base_parts) = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "GetBaseInfo", &[PyRep::Integer(war_id)], Some(war_id)).await.unwrap() else {
+        panic!("expected 4-tuple from GetBaseInfo");
+    };
+    assert_eq!(base_parts.len(), 4);
+    assert_eq!(base_parts[0].dict_get("killsForDefender").and_then(|v| v.as_i64()), Some(1));
     let kills = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "GetKills", &[PyRep::Integer(war_id)], Some(war_id)).await.unwrap();
     assert!(matches!(kills, PyRep::Rowset { .. }));
     let by_grp = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "GetKillsByGroup", &[PyRep::Integer(war_id)], Some(war_id)).await.unwrap();
@@ -451,8 +457,10 @@ async fn war_registry_timers_surrender_ally_retract_mutual_and_error_guards() {
         PyRep::None
     );
     let _ = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "SetSessionCheck", &[PyRep::Bool(true)], Some(war_id)).await.unwrap();
-    let pub_info = call_wars(&ctx, &mut agg_sess, "warsInfoMgr", "GetPublicWarInfo", &[PyRep::Integer(war_id)], None).await.unwrap();
-    assert_eq!(pub_info.dict_get("warID"), Some(&PyRep::Integer(war_id)));
+    let PyRep::List(pub_items) = call_wars(&ctx, &mut agg_sess, "warsInfoMgr", "GetPublicWarInfo", &[PyRep::Integer(war_id)], None).await.unwrap() else {
+        panic!("expected List from GetPublicWarInfo");
+    };
+    assert_eq!(pub_items[0].dict_get("warID"), Some(&PyRep::Integer(war_id)));
     let _ = call_wars(&ctx, &mut agg_sess, "warRegistry", "UnBind", &[PyRep::Integer(war_id)], None).await;
     let _ = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "UnBind", &[PyRep::Integer(war_id)], None).await;
 

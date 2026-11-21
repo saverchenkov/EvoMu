@@ -710,7 +710,10 @@ pub async fn handle(
                     client_error: None,
                 }));
             };
-            Some(Ok(PyRep::Real(ratio)))
+            Some(Ok(PyRep::keyval([
+                ("capacity", PyRep::Real(1_000.0)),
+                ("used", PyRep::Real(ratio * 1_000.0)),
+            ])))
         }
         ("beyonce", "GetContainerExpiryDate") => {
             let (_, char_id) = match ServerContext::require_character(session) {

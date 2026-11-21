@@ -322,7 +322,7 @@ async fn beyonce_corp_asset_transfer_self_destruct_siphon_expiry_and_spawnpoint_
         call_ops(&ctx, &mut sess, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_id)])
             .await
             .unwrap(),
-        PyRep::Real(0.0)
+        PyRep::keyval([("capacity", PyRep::Real(1_000.0)), ("used", PyRep::Real(0.0))])
     );
     assert_eq!(
         call_ops(&ctx, &mut sess, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(999_777_666)])

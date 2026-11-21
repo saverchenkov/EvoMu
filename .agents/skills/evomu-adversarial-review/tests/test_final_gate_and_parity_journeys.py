@@ -512,6 +512,22 @@ class TestFinalGateAndParityJourneys(unittest.TestCase):
         self.assertIn("Foundation-First Wave", prio_lines)
         self.assertIn("Wave F1", prio_lines)
         self.assertIn("Wave F2", prio_lines)
+        for token in (
+            "#1538",
+            "#1539",
+            "#1540",
+            "#1541",
+            "#1542",
+            "#1543",
+            "#1544",
+            "drain-only",
+            "compiled RPC registry",
+            "#1195` Track 1",
+            "guards-off real-client run",
+            "#1454",
+            "find_site_index_by_id_or_dungeon",
+        ):
+            self.assertIn(token, prio_lines, "Active Execution Priority missing %r" % token)
         phases, _titles = status_table.plan_structure()
         pve_phase = [ids for name, ids in phases if name.startswith("Phase PVE:")]
         self.assertEqual(pve_phase, [["PVE-1", "PVE-2", "PVE-3", "PVE-4", "PVE-5", "PVE-6"]])

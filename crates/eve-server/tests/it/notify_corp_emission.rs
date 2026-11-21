@@ -317,6 +317,9 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
             .unwrap()
             .set_division_balance(1, eve_db::IskCents::from_isk(5_000_000));
     });
+    for c in [P1, P2] {
+        let _ = ctx.drain_notifications_for_char(c);
+    }
     let ad = ctx
         .dispatch_rpc(
             &mut s1,

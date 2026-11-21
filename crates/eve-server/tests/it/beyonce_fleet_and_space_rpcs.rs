@@ -523,7 +523,10 @@ async fn test_beyonce_structures_containers_and_siphons() {
         .dispatch_rpc(&mut sess, "beyonce", None, "GetCapacityOfSiphon", &[PyRep::Integer(siphon_id)], &HashMap::new(), None)
         .await
         .expect("GetCapacityOfSiphon");
-    let PyRep::Real(pct) = cap_usage else { panic!("expected Real from GetCapacityOfSiphon") };
+    let cap_val = cap_usage.dict_get("capacity").and_then(|v| v.as_f64()).expect("capacity");
+    let used_val = cap_usage.dict_get("used").and_then(|v| v.as_f64()).expect("used");
+    assert_eq!(cap_val, 1_000.0);
+    let pct = used_val / cap_val;
     assert!((0.0..=1.0).contains(&pct), "Capacity fraction should be in [0, 1]");
 }
 

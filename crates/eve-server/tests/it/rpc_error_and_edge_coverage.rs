@@ -303,7 +303,10 @@ async fn test_station_clones_certificates_and_skills_edge_paths() {
         rpc(&ctx, &mut s1, "stationSvc", "GetSolarSystem", &[PyRep::Integer(STATION_JITA)])
             .await
             .expect("GetSolarSystem(station)"),
-        PyRep::Integer(SYS_JITA)
+        PyRep::keyval([
+            ("solarSystemID", PyRep::Integer(SYS_JITA)),
+            ("factionID", PyRep::None),
+        ])
     );
     let sys_kv = rpc(&ctx, &mut s1, "stationSvc", "GetSolarSystem", &[])
         .await

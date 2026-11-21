@@ -454,7 +454,11 @@ fn sweep_expired_order_notifications_and_handle_edge_mutants() {
     assert_eq!(sweep_expired_orders_and_notify(&ctx, now), 0);
 
     let notifs = ctx.drain_notifications_for_char(char_id);
-    // Personal bid (cash) + Corp bid div 3 (cash3) only — NOT 3 accounts (zero-price skipped)
+    // Personal bid (cash) + Corp bid div 3 (cash3) + Personal PLEX sell return (plex, via
+    // PlexAccountChangeHook). V24.02 client OnAccountChange handlers safely ignore "plex"
+    // (walletSvc/lpStore/securityOffice filter to cash..cash7; accountSvc resets tx cache;
+    // industrySvc gets None from get_accounting_key_for_name and skips it) and read PLEX via
+    // Quasar BalanceChangedNotice (#931 follow-up). Exact len=3 ensures zero-price bid is silent.
     let acct_keys: Vec<(i64, String)> = notifs
         .iter()
         .filter(|n| n.event == "OnAccountChange")
@@ -462,7 +466,8 @@ fn sweep_expired_order_notifications_and_handle_edge_mutants() {
         .collect();
     assert!(acct_keys.contains(&(char_id, "cash".to_string())), "got {acct_keys:?}");
     assert!(acct_keys.contains(&(corp_id, "cash3".to_string())), "got {acct_keys:?}");
-    assert_eq!(acct_keys.len(), 2, "zero-price bid must not emit OnAccountChange: {acct_keys:?}");
+    assert!(acct_keys.contains(&(char_id, "plex".to_string())), "got {acct_keys:?}");
+    assert_eq!(acct_keys.len(), 3, "zero-price bid must not emit OnAccountChange: {acct_keys:?}");
 
     // OnMarketItemReceived emitted for all 5 sell orders (940_004..=940_008)
     let mkt_recv_oids: Vec<i64> = notifs

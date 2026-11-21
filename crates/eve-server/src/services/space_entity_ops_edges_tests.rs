@@ -970,7 +970,10 @@ async fn self_destruct_transfer_corp_asset_turbo_dock_unanchor_shipping_and_gett
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(siphon_full, PyRep::Real(1.0));
+    assert_eq!(
+        siphon_full,
+        PyRep::keyval([("capacity", PyRep::Real(1_000.0)), ("used", PyRep::Real(1_000.0))])
+    );
     let siphon_zero_cap = handle(
         &ctx,
         &mut gm_sess,
@@ -983,7 +986,10 @@ async fn self_destruct_transfer_corp_asset_turbo_dock_unanchor_shipping_and_gett
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(siphon_zero_cap, PyRep::Real(0.0));
+    assert_eq!(
+        siphon_zero_cap,
+        PyRep::keyval([("capacity", PyRep::Real(1_000.0)), ("used", PyRep::Real(0.0))])
+    );
 
     let exp = handle(
         &ctx,

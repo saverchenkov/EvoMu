@@ -567,9 +567,14 @@ async fn social_wars_negotiation_and_mutual_war_error_paths_plus_kill_filtering(
             },
         );
     });
-    let base_info = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "GetBaseInfo", &[PyRep::Integer(war_id)], None)
+    let PyRep::Tuple(base_parts) = call_wars(&ctx, &mut agg_sess, "warStatisticMgr", "GetBaseInfo", &[PyRep::Integer(war_id)], None)
         .await
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("expected 4-tuple from GetBaseInfo");
+    };
+    assert_eq!(base_parts.len(), 4);
+    let base_info = &base_parts[0];
     assert_eq!(base_info.dict_get("killsForDefender").and_then(|v| v.as_i64()), Some(1));
     assert_eq!(base_info.dict_get("killsForAggressor").and_then(|v| v.as_i64()), Some(0));
 
