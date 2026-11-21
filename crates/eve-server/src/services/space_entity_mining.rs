@@ -1697,11 +1697,7 @@ fn resolve_reprocess_output_dest(
     let office_id_opt = find_corp_office_at_station(snap, caller_corp, station_id);
     let is_own_corp_office = caller_corp > 0 && office_id_opt == Some(target_loc);
 
-    if snap
-        .items
-        .get(&target_loc)
-        .is_some_and(|item| item.type_id == 27 && !is_own_corp_office)
-    {
+    if snap.items.get(&target_loc).is_some_and(|i| i.type_id == 27 && !is_own_corp_office) {
         return Err(BridgeRpcError {
             code: "InvalidOutputLocation".into(),
             message: format!(
@@ -1711,17 +1707,19 @@ fn resolve_reprocess_output_dest(
         });
     }
 
+    // ReprocessingWnd keeps stale (prev_station_or_structure, Hangar) across undock/redock and sends owner=None (#1563).
+    let stale_hangar_redirect = target_loc != station_id
+        && !is_own_corp_office
+        && parsed.explicit_out_owner.is_none()
+        && parsed.explicit_out_flag == Some(InventoryFlag::Hangar)
+        && (sde.stations.contains_key(&target_loc) || snap.structures.contains_key(&target_loc))
+        && !snap.items.get(&target_loc).is_some_and(|i| i.location_id == station_id);
+    let target_loc = if stale_hangar_redirect { station_id } else { target_loc };
+
     if target_loc == station_id || is_own_corp_office {
         return resolve_station_or_office_dest(
-            snap,
-            parsed,
-            station_id,
-            target_loc,
-            is_own_corp_office,
-            char_id,
-            caller_corp,
-            default_station_flag,
-            now_unix,
+            snap, parsed, station_id, target_loc, is_own_corp_office,
+            char_id, caller_corp, default_station_flag, now_unix,
         );
     }
 
