@@ -1150,14 +1150,8 @@ async fn slash_tr_mid_warp_stops_warp_and_flushes_pre_set_state_tick_gh994() {
     assert!(jita_handle.spawn_ball_with_meta(ball, combat, slim).await.is_ok());
     // Consume initial spawn observer events so only post-warp-stop updates remain.
     let _ = jita_handle.drain_observer_updates(ship_id).await;
-    ctx.active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(ship_id, cid);
-    ctx.return_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(ship_id);
+    jita_handle.insert_active_warp_for_test(ship_id, cid);
+    jita_handle.insert_return_warp_for_test(ship_id);
     let mut jita_rx = jita_handle.subscribe();
 
     let same_res = handle(
@@ -1172,8 +1166,8 @@ async fn slash_tr_mid_warp_stops_warp_and_flushes_pre_set_state_tick_gh994() {
     .expect("handled")
     .expect("same-system /tr mid-warp succeeds");
     assert_eq!(keyval_i64(&same_res, "solarSystemID"), Some(i64::from(jita_sys)));
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
-    assert!(!ctx.return_warps.lock().unwrap().contains(&ship_id));
+    assert!(!jita_handle.is_active_warp(ship_id));
+    assert!(!jita_handle.is_return_warp(ship_id));
     assert!(
         jita_rx.try_recv().is_err(),
         "same-system /tr must not emit a premature TickBroadcast splitting Stop from SetBallPosition (#1005/#1006)"
@@ -1230,10 +1224,7 @@ async fn slash_tr_mid_warp_stops_warp_and_flushes_pre_set_state_tick_gh994() {
     let _ = jita_handle.take_ball(ship_id).await;
     assert!(jita_handle.spawn_ball_with_meta(warp_ball, combat2, slim2).await.is_ok());
     let _ = jita_handle.drain_observer_updates(ship_id).await;
-    ctx.active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(ship_id, cid);
+    jita_handle.insert_active_warp_for_test(ship_id, cid);
     while jita_rx.try_recv().is_ok() {}
 
     let cross_res = handle(
@@ -1248,8 +1239,8 @@ async fn slash_tr_mid_warp_stops_warp_and_flushes_pre_set_state_tick_gh994() {
     .expect("handled")
     .expect("cross-system /tr mid-warp succeeds");
     assert_eq!(keyval_i64(&cross_res, "solarSystemID"), Some(i64::from(perim_sys)));
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
-    assert!(!ctx.return_warps.lock().unwrap().contains(&ship_id));
+    assert!(!jita_handle.is_active_warp(ship_id));
+    assert!(!jita_handle.is_return_warp(ship_id));
 
     let old_bcast = jita_rx
         .try_recv()

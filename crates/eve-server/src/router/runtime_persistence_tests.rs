@@ -188,7 +188,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             },
         );
         record_session_change_timer(&ctx, cid, 1_700_000_000, sys_id, 10, "undock");
-        ctx.active_warps.lock().unwrap().insert(ship_id, 60_003_760);
         ctx.weapon_cycle_state
             .write()
             .unwrap()
@@ -372,7 +371,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
         // Crash-lost runtime kinds must remain cleared across restart (`#920`, `#875`).
         assert!(ctx2.mining_cycles.read().unwrap().is_empty());
         assert!(ctx2.session_change_timers.lock().unwrap().contains_key(&cid));
-        assert!(ctx2.active_warps.lock().unwrap().is_empty());
         assert!(ctx2.weapon_cycle_state.read().unwrap().is_empty());
         assert!(ctx2
             .map_landmarks
@@ -800,7 +798,6 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         ctx.mining_cycles.write().unwrap().clear();
         ctx.phased_asteroid_fields.write().unwrap().clear();
         ctx.session_change_timers.lock().unwrap().clear();
-        ctx.active_warps.lock().unwrap().clear();
         ctx.location_change_invuln.lock().unwrap().clear();
         ctx.weapon_cycle_state.write().unwrap().clear();
         ctx.projected_ewar.write().unwrap().clear();
@@ -1159,13 +1156,6 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                 );
             },
             &|c| c.session_change_timers.lock().unwrap().clear(),
-        );
-        check_crash_lost(
-            "active_warps",
-            &|c| {
-                c.active_warps.lock().unwrap().insert(1, 2);
-            },
-            &|c| c.active_warps.lock().unwrap().clear(),
         );
         check_one(
             "location_change_invuln",

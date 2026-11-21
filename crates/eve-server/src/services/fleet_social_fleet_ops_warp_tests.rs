@@ -709,7 +709,8 @@ async fn fleet_warp_tracks_members_in_active_warps_preserves_mid_tunnel_update_s
 
     let sys = ctx.systems.get_or_spawn(30_000_142);
     {
-        let warps = ctx.active_warps.lock().unwrap();
+        let view = sys.view();
+        let warps = &view.active_warps;
         assert_eq!(warps.get(&100_000_001), Some(&90_000_001));
         assert_eq!(warps.get(&100_000_002), Some(&90_000_002));
         assert_eq!(warps.get(&100_000_003), Some(&90_000_003));
@@ -797,13 +798,14 @@ async fn fleet_warp_tracks_members_in_active_warps_preserves_mid_tunnel_update_s
         b2_landed.position.distance(dest)
     );
     {
-        let warps = ctx.active_warps.lock().unwrap();
+        let view = sys.view();
+        let warps = &view.active_warps;
         assert!(!warps.contains_key(&100_000_001));
         assert!(!warps.contains_key(&100_000_002));
         assert!(!warps.contains_key(&100_000_003));
     }
     assert_eq!(sys.warp_provenance(100_000_002), None);
-    assert!(ctx.pending_warp_finished.lock().unwrap().contains(&100_000_002));
+    assert!(sys.is_pending_warp_finished(100_000_002));
 
     let _ = ctx.drain_notifications_for_char(90_000_002);
     crate::services::space_destiny::handle(
@@ -820,7 +822,7 @@ async fn fleet_warp_tracks_members_in_active_warps_preserves_mid_tunnel_update_s
     .unwrap();
     let notes = ctx.drain_notifications_for_char(90_000_002);
     assert!(notes.iter().any(|n| n.event == "OnWarpFinished"));
-    assert!(!ctx.pending_warp_finished.lock().unwrap().contains(&100_000_002));
+    assert!(!sys.is_pending_warp_finished(100_000_002));
 }
 
 #[tokio::test]

@@ -1533,7 +1533,9 @@ pub(super) async fn handle_scanning_and_wormholes(
                 .is_ok()
             {
                 crate::services::space_destiny::track_player_or_fleet_warp(
-                    ctx, None, ship_id, char_id,
+                    &sys_handle,
+                    ship_id,
+                    char_id,
                 );
             }
 

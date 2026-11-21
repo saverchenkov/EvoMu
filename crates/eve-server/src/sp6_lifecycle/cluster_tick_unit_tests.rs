@@ -2105,9 +2105,9 @@ async fn clean_shutdown_final_checkpoint_persists_ship_condition_and_clock_offse
             .await
             .expect("spawn_ball_with_combat");
 
-        // Advance clock directly (not yet persisted to world_meta) & populate CrashLost map.
+        // Advance clock directly (not yet persisted to world_meta) & populate CrashLost state.
         ctx.clock().advance_secs(42);
-        ctx.active_warps.lock().unwrap().insert(ship_id, 60_003_760);
+        handle.insert_active_warp_for_test(ship_id, 60_003_760);
 
         let flushed = crate::sp6_lifecycle::flush_all_systems_final_checkpoints(&ctx).await;
         assert_eq!(flushed, 1, "expected 1 active system flushed on shutdown");
@@ -2135,7 +2135,7 @@ async fn clean_shutdown_final_checkpoint_persists_ship_condition_and_clock_offse
 
     let ctx2 = ServerContext::with_sde_and_repository(sde, db2);
     ctx2.hydrate_server_runtime_from_db();
-    assert!(ctx2.active_warps.lock().unwrap().is_empty());
+    assert!(!ctx2.systems.get_or_spawn(sys_id).is_active_warp(ship_id));
 
     drop(ctx2);
     let _ = std::fs::remove_dir_all(&dir);

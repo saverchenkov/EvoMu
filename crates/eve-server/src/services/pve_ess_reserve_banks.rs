@@ -1041,7 +1041,7 @@ pub async fn try_activate_ess_acceleration_gate(
         .await
         .is_ok()
     {
-        crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);
+        crate::services::space_destiny::track_player_or_fleet_warp(&sys_handle, ship_id, char_id);
     }
     Some(Ok(PyRep::keyval([
         ("success", PyRep::Bool(true)),

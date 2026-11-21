@@ -1287,23 +1287,7 @@ async fn handle_update_state_request_inner(
     };
     let mut did_warp_finish = false;
     if matches!(ship_ball.mode, MovementMode::Stop) {
-        handle.clear_warp_provenance(ship_id);
-        ctx.return_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id);
-        let removed_active = ctx
-            .active_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id)
-            .is_some();
-        let removed_pending = ctx
-            .pending_warp_finished
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id);
-        if removed_active || removed_pending {
+        if handle.consume_warp_finished(ship_id) {
             did_warp_finish = true;
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
@@ -1332,11 +1316,7 @@ async fn handle_update_state_request_inner(
             .ok()
             .and_then(|bp| bp.combat_states.get(&ship_id).map(|cs| cs.is_emergency_warping))
             .unwrap_or(false);
-        let in_active_warps = ctx
-            .active_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&ship_id);
+        let in_active_warps = handle.is_active_warp(ship_id);
         let is_client_or_fleet_active_warp = in_active_warps
             || (!is_emergency_combat_state
                 && provenance == Some(crate::system_actor::WarpProvenance::PlayerOrFleetWarp));
@@ -1345,11 +1325,7 @@ async fn handle_update_state_request_inner(
         }
         let is_explicit_emergency = is_emergency_combat_state
             || provenance == Some(crate::system_actor::WarpProvenance::DisconnectedEmergencyWarp);
-        let in_return_warps = ctx
-            .return_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&ship_id);
+        let in_return_warps = handle.is_return_warp(ship_id);
         let is_reconnect_return_warp = !is_explicit_emergency
             && (in_return_warps
                 || provenance == Some(crate::system_actor::WarpProvenance::ReconnectReturnWarp));
@@ -1357,7 +1333,7 @@ async fn handle_update_state_request_inner(
             // Untracked/orphan warp or SP-6 outbound emergency warp has neither a valid client/fleet
             // warp nor an active SP-6 reconnect return-warp; stop at current coordinates before `SetState`.
             let _ = handle.force_stop_warp(ship_id);
-            clear_warp_tracking(ctx, Some(&handle), ship_id);
+            clear_warp_tracking(&handle, ship_id);
             forced_stop_warp = true;
         }
     }
@@ -1381,56 +1357,23 @@ async fn handle_update_state_request_inner(
     Ok(PyRep::None)
 }
 
-/// Records a player or fleet warp across `ctx.active_warps` and actor provenance while clearing
-/// any stale reconnect-return or deferred-landing markers (`#1175`).
+/// Records a player or fleet warp in the owning system actor while clearing any stale
+/// reconnect-return or deferred-landing markers (`#1175`, `#1541`).
 pub(crate) fn track_player_or_fleet_warp(
-    ctx: &ServerContext,
-    sys_handle: Option<&crate::system_actor::SystemHandle>,
+    sys_handle: &crate::system_actor::SystemHandle,
     ship_id: i64,
     char_id: i64,
 ) {
-    if let Some(handle) = sys_handle {
-        handle.set_warp_provenance(
-            ship_id,
-            crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
-        );
-    }
-    ctx.pending_warp_finished
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&ship_id);
-    ctx.return_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&ship_id);
-    ctx.active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(ship_id, char_id);
+    sys_handle.track_player_or_fleet_warp(ship_id, char_id);
 }
 
 /// Clears all active, reconnect-return, deferred-finish, and actor warp provenance tracking for
-/// `ship_id` (`#1175`).
+/// `ship_id` (`#1175`, `#1541`).
 pub(crate) fn clear_warp_tracking(
-    ctx: &ServerContext,
-    sys_handle: Option<&crate::system_actor::SystemHandle>,
+    sys_handle: &crate::system_actor::SystemHandle,
     ship_id: i64,
 ) {
-    if let Some(handle) = sys_handle {
-        handle.clear_warp_provenance(ship_id);
-    }
-    ctx.active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&ship_id);
-    ctx.return_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&ship_id);
-    ctx.pending_warp_finished
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&ship_id);
+    sys_handle.clear_warp_tracking(ship_id);
 }
 
 async fn handle_admin_get_bubble_id(
