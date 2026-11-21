@@ -190,12 +190,12 @@ struct PendingAoeActivation {
 enum WeaponDispatchOutcome {
     EarlyDone(Option<Result<PyRep, BridgeRpcError>>),
     Dispatched(Option<Result<PyRep, BridgeRpcError>>),
-    PendingAoe(PendingAoeActivation),
+    PendingAoe(Box<PendingAoeActivation>),
 }
 
 #[inline(never)]
 async fn execute_pending_aoe_activation(
-    ctx: &ServerContext, aoe: PendingAoeActivation, kwargs: &HashMap<String, PyRep>,
+    ctx: &ServerContext, aoe: Box<PendingAoeActivation>, kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let mod_type = ctx.sde.types.get(&aoe.mod_type_id)?;
     let aoe_res = activate_aoe_or_defender_module(
@@ -203,12 +203,19 @@ async fn execute_pending_aoe_activation(
         aoe.module_id, &aoe.eff_m, mod_type, &aoe.attacker_ball, aoe.target_id_opt, kwargs,
     ).await?;
     if aoe.is_overloaded && aoe_res.is_ok() {
-        if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(aoe.char_id, aoe.ship_id) {
-            if !fit.modules.contains_key(&aoe.module_id) {
-                fit.modules.insert(aoe.module_id, aoe.eff_m);
+        let PendingAoeActivation {
+            char_id,
+            ship_id,
+            module_id,
+            eff_m,
+            ..
+        } = *aoe;
+        if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+            if !fit.modules.contains_key(&module_id) {
+                fit.modules.insert(module_id, eff_m);
             }
             finalize_weapon_activation_overload_and_delay(
-                ctx, aoe.char_id, aoe.ship_id, aoe.module_id, &mut fit, true, false, None,
+                ctx, char_id, ship_id, module_id, &mut fit, true, false, None,
             );
         }
     }
@@ -314,6 +321,8 @@ async fn handle_weapons_inner(
         None => None,
     };
 
+    let attacker_ball = Box::new(attacker_ball);
+
     let (res, should_break_cloak) = match run_resolved_weapon_module(
         ctx, char_id, ship_id, sys_id, sys_handle, attacker_tick, attacker_ball,
         controlling_structure, method, module_id, target_id_opt, kwargs,
@@ -333,11 +342,16 @@ async fn handle_weapons_inner(
     res
 }
 
+struct ResolvedWeaponFit {
+    fit: eve_dogma::ShipFittingEngine,
+    m: eve_dogma::FittedModule,
+}
+
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 async fn run_resolved_weapon_module(
     ctx: &ServerContext, char_id: i64, ship_id: i64, sys_id: u32,
-    sys_handle: crate::system_actor::SystemHandle, attacker_tick: u64, attacker_ball: eve_destiny::Ball,
+    sys_handle: crate::system_actor::SystemHandle, attacker_tick: u64, attacker_ball: Box<eve_destiny::Ball>,
     controlling_structure: bool, method: &str, module_id: i64, target_id_opt: Option<i64>,
     kwargs: &HashMap<String, PyRep>,
 ) -> WeaponDispatchOutcome {
@@ -360,7 +374,7 @@ async fn run_resolved_weapon_module(
             fit = rebuilt;
         }
     }
-    let mut m = if let Some(found) = fit.modules.get(&module_id).cloned() {
+    let m = if let Some(found) = fit.modules.get(&module_id).cloned() {
         found
     } else if let Some(fm) = crate::services::inventory_fitting::fitting_module_cycles::fallback_fitted_weapon_module(ctx, ship_id, module_id) {
         fit.modules.insert(module_id, fm.clone());
@@ -372,6 +386,7 @@ async fn run_resolved_weapon_module(
             client_error: None,
         })));
     };
+    let mut resolved = Box::new(ResolvedWeaponFit { fit, m });
     if let Err(e) =
         crate::services::inventory_fitting::check_module_reloading(ctx, ship_id, module_id)
     {
@@ -387,11 +402,11 @@ async fn run_resolved_weapon_module(
         })));
     }
     if let Err(e) = crate::services::fitting_cycles_overheat::check_module_or_bank_not_burned_out(
-        ctx, ship_id, module_id, &m,
+        ctx, ship_id, module_id, &resolved.m,
     ) {
         return WeaponDispatchOutcome::EarlyDone(Some(Err(e)));
     }
-    if m.state == eve_dogma::ModuleState::Offline
+    if resolved.m.state == eve_dogma::ModuleState::Offline
         || !ctx.db.with_snapshot(|s| s.module_online_states.get(&module_id).copied().unwrap_or(true))
     {
         return WeaponDispatchOutcome::EarlyDone(Some(Err(BridgeRpcError {
@@ -400,10 +415,10 @@ async fn run_resolved_weapon_module(
             client_error: None,
         })));
     }
-    let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
+    let Some(mod_type) = ctx.sde.types.get(&resolved.m.type_id) else {
         return WeaponDispatchOutcome::EarlyDone(Some(Err(BridgeRpcError {
             code: "ModuleNotFound".into(),
-            message: format!("Module type {} not found in SDE", m.type_id),
+            message: format!("Module type {} not found in SDE", resolved.m.type_id),
             client_error: None,
         })));
     };
@@ -420,11 +435,12 @@ async fn run_resolved_weapon_module(
         return WeaponDispatchOutcome::EarlyDone(Some(res));
     }
     if let Err(e) = crate::services::fitting_cycles_overheat::check_nanite_repair_overheat_lockout(
-        &sys_handle, ship_id, module_id, method, m.state,
+        &sys_handle, ship_id, module_id, method, resolved.m.state,
     ) {
         return WeaponDispatchOutcome::EarlyDone(Some(Err(e)));
     }
     if method == "Overload" && target_id_opt.is_none() {
+        let ResolvedWeaponFit { fit, mut m } = *resolved;
         return WeaponDispatchOutcome::EarlyDone(Some(
             crate::services::fitting_cycles_overheat::handle_early_targetless_overload(
                 ctx,
@@ -449,7 +465,7 @@ async fn run_resolved_weapon_module(
     }
     handle_weapons_after_cloak_guard(
         ctx, char_id, ship_id, sys_id, &sys_handle, attacker_tick, &attacker_ball,
-        method, module_id, target_id_opt, &mut m, mod_type, &mut fit, kwargs,
+        method, module_id, target_id_opt, &mut resolved.m, mod_type, &mut resolved.fit, kwargs,
     ).await
 }
 
@@ -569,7 +585,7 @@ async fn handle_targeted_ewar_module(
     is_overloaded: bool, m: &mut eve_dogma::FittedModule, mod_type: &eve_sde::InvType,
     fit: &mut eve_dogma::ShipFittingEngine,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
+    let mod_state = Box::new(fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde));
         let Some(tid) = target_id_opt else {
             return Some(Err(BridgeRpcError {
                 code: "TargetRequired".into(),
@@ -606,6 +622,7 @@ async fn handle_targeted_ewar_module(
                 client_error: None,
             }));
         };
+        let target_ball = Box::new(target_ball);
         let victim_char_opt = ctx.db.with_snapshot(|snap| {
             if snap.characters.contains_key(&tid) {
                 Some(tid)
@@ -739,9 +756,10 @@ async fn handle_targeted_ewar_module(
                     charge_type_id: m.charge_type_id,
                     distance: ewar_dist,
                     overloaded: is_overloaded,
-                    effective_module: mod_state.clone(),
+                    effective_module: *mod_state,
                 },
             );
+            drop(target_ball);
             if let Some(vcid) = victim_char_opt {
                 let _ = evaluate_effective_signature_radius(ctx, vcid, tid, sys_id).await;
             } else {
@@ -868,7 +886,7 @@ async fn handle_aoe_or_defender_dispatch(
         if is_overloaded {
             eff_m.state = eve_dogma::ModuleState::Overloaded;
         }
-        WeaponDispatchOutcome::PendingAoe(PendingAoeActivation {
+        WeaponDispatchOutcome::PendingAoe(Box::new(PendingAoeActivation {
             attacker_ball: attacker_ball.clone(),
             char_id,
             ship_id,
@@ -880,7 +898,7 @@ async fn handle_aoe_or_defender_dispatch(
             now_unix,
             sys_sec,
             is_overloaded,
-        })
+        }))
 }
 
 fn weapon_charge_has_mod(
@@ -1022,7 +1040,7 @@ async fn prepare_direct_weapon_shot(
     m: &mut eve_dogma::FittedModule,
     mod_type: &eve_sde::InvType,
     fit: &mut eve_dogma::ShipFittingEngine,
-) -> std::ops::ControlFlow<Option<Result<PyRep, BridgeRpcError>>, PreparedDirectWeaponShot> {
+) -> std::ops::ControlFlow<Option<Result<PyRep, BridgeRpcError>>, Box<PreparedDirectWeaponShot>> {
     let loaded_charge_opt = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
@@ -1092,7 +1110,7 @@ async fn prepare_direct_weapon_shot(
         }
         pre_fit.recalculate_stats(&ctx.sde);
         let ms = pre_fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
-        (Some(pre_fit), ms)
+        (Some(Box::new(pre_fit)), Box::new(ms))
     } else {
         if let Some(charge_type_id) = charge_type_id_opt {
             if let Some(fm) = fit.modules.get_mut(&module_id) {
@@ -1103,7 +1121,7 @@ async fn prepare_direct_weapon_shot(
                 }
             }
         }
-        (None, fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde))
+        (None, Box::new(fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde)))
     };
     let charge_type_opt = charge_type_id_opt.and_then(|ctid| ctx.sde.types.get(&ctid));
     let is_fof_missile = charge_type_opt.is_some_and(|ct| matches!(ct.group_id, 394..=396));
@@ -1158,6 +1176,7 @@ async fn prepare_direct_weapon_shot(
             client_error: None,
         })));
     };
+    let target_ball = Box::new(target_ball);
 
     // Safety setting gate (`feat:crimewatch.safety-settings`)
     if let Some((victim_char_id, _)) = player_target_info {
@@ -1255,7 +1274,7 @@ async fn prepare_direct_weapon_shot(
         if target_id_opt.is_some() {
             let (_, _, max_flight_range) =
                 super::combat_missiles_aoe::compute_missile_flight_kinematics(
-                    autoload_fit_opt.as_ref().unwrap_or(fit),
+                    autoload_fit_opt.as_deref().unwrap_or(fit),
                     module_id,
                     charge_type_opt,
                     &ctx.sde,
@@ -1429,8 +1448,8 @@ async fn prepare_direct_weapon_shot(
     }
 
     drop(pending_weapon_autoload);
-    std::ops::ControlFlow::Continue(PreparedDirectWeaponShot {
-        mod_state,
+    std::ops::ControlFlow::Continue(Box::new(PreparedDirectWeaponShot {
+        mod_state: *mod_state,
         charge_item_id_opt,
         charge_type_id_opt,
         is_fof_missile,
@@ -1441,7 +1460,7 @@ async fn prepare_direct_weapon_shot(
         resolved_target_id,
         player_target_info,
         target_ball_id,
-        target_ball,
+        target_ball: *target_ball,
         is_upwell_target,
         optimal_range,
         falloff_range,
@@ -1449,7 +1468,7 @@ async fn prepare_direct_weapon_shot(
         base_cap_need,
         cap_before,
         cap_after,
-    })
+    }))
 }
 
 fn apply_weapon_charge_volatility_and_base_damage(
@@ -1758,6 +1777,12 @@ async fn apply_vorton_arc_secondary_hits(
                 continue;
             }
             if let Ok(Some((_, arc_ball))) = sys_handle.get_ball_snapshot(arc_id).await {
+                let (arc_type_id, arc_pos, arc_radius, arc_speed) = (
+                    arc_ball.type_id,
+                    arc_ball.position,
+                    arc_ball.radius,
+                    arc_ball.velocity.length(),
+                );
                 let arc_vic_opt = ctx.db.with_snapshot(|snap| {
                     if snap.characters.contains_key(&arc_id) {
                         Some(arc_id)
@@ -1789,7 +1814,7 @@ async fn apply_vorton_arc_secondary_hits(
                             rt.has_limited_engagement_with(vcid, char_id, now_unix)
                         });
                         if !is_legal {
-                            let is_pod = arc_ball.type_id == 670;
+                            let is_pod = arc_type_id == 670;
                             let concord_suppressed = !is_pod
                                 && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
                             let would_be_crim = (sys_sec >= 0.45 && !concord_suppressed) || (sys_sec > 0.0 && is_pod);
@@ -1803,8 +1828,8 @@ async fn apply_vorton_arc_secondary_hits(
                     }
                 }
                 let arc_factor = missile_damage_factor(
-                    arc_ball.radius.max(35.0),
-                    arc_ball.velocity.length(),
+                    arc_radius.max(35.0),
+                    arc_speed,
                     exp_rad,
                     exp_vel,
                     drf,
@@ -1834,8 +1859,8 @@ async fn apply_vorton_arc_secondary_hits(
                         } || with_combat_runtime(ctx, |rt| {
                             rt.has_limited_engagement_with(vcid, char_id, now_unix)
                         });
-                        let is_arc_pod = arc_ball.type_id == 670;
-                        let is_arc_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, arc_ball.type_id);
+                        let is_arc_pod = arc_type_id == 670;
+                        let is_arc_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, arc_type_id);
                         let is_new_agg = ctx.crimewatch.read().map(|cw| cw.get_aggression(char_id, vcid, now_unix).is_none()).unwrap_or(true);
                         {
                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
@@ -1859,7 +1884,7 @@ async fn apply_vorton_arc_secondary_hits(
                     }
                     if arc_destroyed {
                         super::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
-                            ctx, sys_id, char_id, arc_id, arc_ball.type_id, arc_ball.position, now_unix,
+                            ctx, sys_id, char_id, arc_id, arc_type_id, arc_pos, now_unix,
                         )
                         .await;
                     }
@@ -2203,7 +2228,7 @@ async fn execute_direct_turret_or_vorton_shot(
     sys_handle: &crate::system_actor::SystemHandle, attacker_tick: u64,
     attacker_ball: &eve_destiny::Ball, module_id: i64, now_unix: u64, sys_sec: f64,
     is_overloaded: bool, m: &eve_dogma::FittedModule, mod_type: &eve_sde::InvType,
-    fit: &mut eve_dogma::ShipFittingEngine, prep: PreparedDirectWeaponShot,
+    fit: &mut eve_dogma::ShipFittingEngine, prep: Box<PreparedDirectWeaponShot>,
     base_dmg: DamageVector, crystal_damage_after: f64, crystal_shattered: bool,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let charge_type_opt = prep.charge_type_id_opt.and_then(|ctid| ctx.sde.types.get(&ctid));
@@ -2301,7 +2326,7 @@ async fn handle_direct_weapon_activation(
     if prep.is_missile_launcher {
         let PreparedDirectWeaponShot {
             charge_item_id_opt, charge_type_id_opt, target_ball_id, is_fof_missile, is_breacher_pod, ..
-        } = prep;
+        } = *prep;
         return activate_and_finalize_missile_shot(
             ctx, char_id, ship_id, sys_id, now_unix, module_id, m, fit,
             charge_item_id_opt, charge_type_id_opt, charge_type_opt, attacker_ball,

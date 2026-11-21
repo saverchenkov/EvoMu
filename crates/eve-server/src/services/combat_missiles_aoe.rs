@@ -190,49 +190,61 @@ pub async fn step_missiles_and_breachers(
     let mut completed = Vec::new();
     for mid in missile_ids {
         let state_opt = with_combat_runtime(ctx, |rt| rt.in_flight_missiles.get(&mid).cloned());
-        let Some(mut mstate) = state_opt else {
+        let Some(mstate) = state_opt else {
             continue;
         };
+        let mut mstate = Box::new(mstate);
 
         // Check if missile ball was destroyed in Ballpark
-        let missile_ball_opt = sys_handle.get_ball_snapshot(mid).await.ok().flatten();
-        let missile_cs_opt = sys_handle.get_combat_state(mid).await.ok().flatten();
-        if missile_ball_opt.is_none() || missile_cs_opt.as_ref().is_some_and(|cs| cs.structure_hp <= 0.0) {
+        let missile_pos_opt = sys_handle
+            .get_ball_snapshot(mid)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| b.position);
+        let missile_destroyed_in_cs = sys_handle
+            .get_combat_state(mid)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|cs| cs.structure_hp <= 0.0);
+        if missile_pos_opt.is_none() || missile_destroyed_in_cs {
             mstate.destroyed = true;
             mstate.applied_damage = 0.0;
             let _ = sys_handle.remove_ball(mid).await;
             with_mut_combat_runtime(ctx, |rt| {
-                rt.in_flight_missiles.insert(mid, mstate.clone());
+                rt.in_flight_missiles.insert(mid, (*mstate).clone());
             });
-            completed.push(mstate);
+            completed.push(*mstate);
             continue;
         }
-        let (_, mut m_ball) = missile_ball_opt.unwrap();
-        let Some((_, t_ball)) = sys_handle
+        let mut m_pos = missile_pos_opt.unwrap();
+        let Some((t_pos, t_type_id, t_radius, t_vel, t_max_speed_fallback)) = sys_handle
             .get_ball_snapshot(mstate.target_ball_id)
             .await
             .ok()
             .flatten()
+            .map(|(_, b)| (b.position, b.type_id, b.radius, b.velocity, b.max_velocity * b.speed_fraction))
         else {
             mstate.expired = true;
             let _ = sys_handle.remove_ball(mid).await;
             with_mut_combat_runtime(ctx, |rt| {
-                rt.in_flight_missiles.insert(mid, mstate.clone());
+                rt.in_flight_missiles.insert(mid, (*mstate).clone());
             });
-            completed.push(mstate);
+            completed.push(*mstate);
             continue;
         };
 
-        let to_target = t_ball.position - m_ball.position;
+        let to_target = t_pos - m_pos;
         let raw_len = to_target.length();
         // Why: Measure remaining missile flight to target hull surface across all target ID ranges (#1247).
-        let dist = (raw_len - t_ball.radius.max(0.0)).max(0.0);
+        let dist = (raw_len - t_radius.max(0.0)).max(0.0);
         let dir = if raw_len > 1e-3 {
             to_target / raw_len
         } else {
             DVec3::X
         };
-        let target_radial_vel = t_ball.velocity.dot(dir).max(0.0);
+        let target_radial_vel = t_vel.dot(dir).max(0.0);
         let closing_speed = (mstate.max_velocity - target_radial_vel).max(0.0);
         let step_time = dt.min(mstate.remaining_flight_s);
         let dist_covered = closing_speed * step_time;
@@ -244,15 +256,15 @@ pub async fn step_missiles_and_breachers(
             let _ = sys_handle.remove_ball(mid).await;
 
             let raw_sig = if let Ok(Some(t_cs)) = sys_handle.get_combat_state(mstate.target_ball_id).await {
-                t_cs.base_signature_radius.unwrap_or(if t_cs.signature_radius > 0.0 { t_cs.signature_radius } else { t_ball.radius.max(35.0) })
+                t_cs.base_signature_radius.unwrap_or(if t_cs.signature_radius > 0.0 { t_cs.signature_radius } else { t_radius.max(35.0) })
             } else {
-                t_ball.radius.max(35.0)
+                t_radius.max(35.0)
             };
             let target_sig = ctx.effective_target_signature_radius(mstate.target_ball_id, raw_sig);
-            let target_speed = if t_ball.velocity.length() > 0.0 {
-                t_ball.velocity.length()
+            let target_speed = if t_vel.length() > 0.0 {
+                t_vel.length()
             } else {
-                t_ball.max_velocity * t_ball.speed_fraction
+                t_max_speed_fallback
             };
             let factor = missile_damage_factor(
                 target_sig,
@@ -306,8 +318,8 @@ pub async fn step_missiles_and_breachers(
                         mstate.solar_system_id,
                         mstate.attacker_char_id,
                         mstate.target_ball_id,
-                        t_ball.type_id,
-                        t_ball.position,
+                        t_type_id,
+                        t_pos,
                         now_unix,
                     )
                     .await;
@@ -343,12 +355,12 @@ pub async fn step_missiles_and_breachers(
                 }
             }
             with_mut_combat_runtime(ctx, |rt| {
-                rt.in_flight_missiles.insert(mid, mstate.clone());
+                rt.in_flight_missiles.insert(mid, (*mstate).clone());
             });
-            completed.push(mstate);
+            completed.push(*mstate);
         } else {
-            m_ball.position += dir * (mstate.max_velocity * step_time);
-            let _ = sys_handle.set_ball_position(mid, m_ball.position).await;
+            m_pos += dir * (mstate.max_velocity * step_time);
+            let _ = sys_handle.set_ball_position(mid, m_pos).await;
             mstate.remaining_flight_s -= step_time;
             if mstate.remaining_flight_s <= 1e-6 {
                 // Missile ran out of flight time before reaching target (outrun/out of range) -> 0 damage!
@@ -356,12 +368,12 @@ pub async fn step_missiles_and_breachers(
                 mstate.applied_damage = 0.0;
                 let _ = sys_handle.remove_ball(mid).await;
                 with_mut_combat_runtime(ctx, |rt| {
-                    rt.in_flight_missiles.insert(mid, mstate.clone());
+                    rt.in_flight_missiles.insert(mid, (*mstate).clone());
                 });
-                completed.push(mstate);
+                completed.push(*mstate);
             } else {
                 with_mut_combat_runtime(ctx, |rt| {
-                    rt.in_flight_missiles.insert(mid, mstate.clone());
+                    rt.in_flight_missiles.insert(mid, (*mstate).clone());
                 });
             }
         }
@@ -727,26 +739,40 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                 if sys_sec > 0.0 && safety != SafetyLevel::Red {
                     return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                 }
-                let is_overloaded = m.state == eve_dogma::ModuleState::Overloaded;
-                let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
-                let mod_state_opt = fit_opt.as_ref().map(|f| f.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde));
-                let emp_range = mod_state_opt.as_ref().map(|st| st.get_attribute(99, &ctx.sde)).filter(|&r| r > 0.0)
-                    .unwrap_or_else(|| mod_type.default_attributes.get(&99).copied().unwrap_or(3_000.0));
-                let sb_dmg = mod_state_opt.as_ref().map(|st| DamageVector {
-                    em: st.get_attribute(114, &ctx.sde), explosive: st.get_attribute(116, &ctx.sde),
-                    kinetic: st.get_attribute(117, &ctx.sde), thermal: st.get_attribute(118, &ctx.sde),
-                }).filter(|d| d.total() > 0.0).unwrap_or_else(|| DamageVector {
-                    em: mod_type.default_attributes.get(&114).copied().unwrap_or(0.0),
-                    explosive: mod_type.default_attributes.get(&116).copied().unwrap_or(0.0),
-                    kinetic: mod_type.default_attributes.get(&117).copied().unwrap_or(0.0),
-                    thermal: mod_type.default_attributes.get(&118).copied().unwrap_or(0.0),
-                });
-                if deduct_capacitor {
+                let (emp_range, sb_dmg, cap_need) = {
+                    let is_overloaded = m.state == eve_dogma::ModuleState::Overloaded;
+                    let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+                    let mod_state_opt = fit_opt.as_ref().map(|f| {
+                        f.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde)
+                    });
+                    let emp_range = mod_state_opt
+                        .as_ref()
+                        .map(|st| st.get_attribute(99, &ctx.sde))
+                        .filter(|&r| r > 0.0)
+                        .unwrap_or_else(|| mod_type.default_attributes.get(&99).copied().unwrap_or(3_000.0));
+                    let sb_dmg = mod_state_opt
+                        .as_ref()
+                        .map(|st| DamageVector {
+                            em: st.get_attribute(114, &ctx.sde),
+                            explosive: st.get_attribute(116, &ctx.sde),
+                            kinetic: st.get_attribute(117, &ctx.sde),
+                            thermal: st.get_attribute(118, &ctx.sde),
+                        })
+                        .filter(|d| d.total() > 0.0)
+                        .unwrap_or_else(|| DamageVector {
+                            em: mod_type.default_attributes.get(&114).copied().unwrap_or(0.0),
+                            explosive: mod_type.default_attributes.get(&116).copied().unwrap_or(0.0),
+                            kinetic: mod_type.default_attributes.get(&117).copied().unwrap_or(0.0),
+                            thermal: mod_type.default_attributes.get(&118).copied().unwrap_or(0.0),
+                        });
                     let cap_need = mod_state_opt
                         .as_ref()
                         .map(|st| st.get_attribute(6, &ctx.sde))
                         .filter(|&c| c > 0.0)
                         .unwrap_or_else(|| mod_type.default_attributes.get(&6).copied().unwrap_or(30.0));
+                    (emp_range, sb_dmg, cap_need)
+                };
+                if deduct_capacitor {
                     if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
                         if cs.capacitor < cap_need {
                             return Some(Err(BridgeRpcError {
@@ -1320,14 +1346,15 @@ pub async fn activate_missile_or_breacher_launcher(
                 let dot_flat = charge_type.default_attributes.get(&5736).copied().unwrap_or(200.0);
                 let dot_pct = charge_type.default_attributes.get(&5737).copied().unwrap_or(0.6) / 100.0;
 
-                let target_ball_opt = sys_handle
-                    .get_ball_snapshot(target_ball_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|(_, b)| b);
-                let spawn_pos =
-                    compute_missile_surface_spawn_pos(attacker_ball, target_ball_opt.as_ref());
+                let spawn_pos = {
+                    let target_ball_opt = sys_handle
+                        .get_ball_snapshot(target_ball_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|(_, b)| b);
+                    compute_missile_surface_spawn_pos(attacker_ball, target_ball_opt.as_ref())
+                };
 
                 let missile_ball_id = ctx.db.with_mut_snapshot(|snap| {
                     snap.next_entity_id += 1;
