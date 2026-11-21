@@ -1006,7 +1006,7 @@
       "files": {
         "combat/death_pipeline.rs": 4,
         "combat/drones_salvage_tractor.rs": 2,
-        "router/cache_notifications.rs": 17,
+        "router/cache_notifications.rs": 15,
         "router/context_charges.rs": 1,
         "services/agents_mission_rewards.rs": 2,
         "services/agents_missions.rs": 2,
@@ -1080,28 +1080,20 @@
       "path_exclude_substring": "router/delta_",
       "description": "Hand-written wallet/account-change emitters (3 helpers + direct OnAccountChange) outside router/delta_* (#931).",
       "files": {
-        "router/context.rs": 1,
         "services/agents_missions.rs": 1,
         "services/auth_cache.rs": 1,
         "services/character_clone_jump_rules.rs": 2,
         "services/character_clones_implants.rs": 2,
         "services/contracts_service.rs": 1,
         "services/contracts_service_ops.rs": 1,
-        "services/fleet_social.rs": 2,
         "services/fleet_social_corp_gov.rs": 2,
         "services/fleet_social_corp_tail.rs": 1,
         "services/industry_jobs.rs": 1,
         "services/lp_store.rs": 1,
         "services/market_contracts.rs": 3,
-        "services/market_orders_escrow.rs": 5,
-        "services/market_trading.rs": 4,
-        "services/pve_special_sites.rs": 1,
-        "services/pve_special_sites_combat.rs": 1,
-        "services/space_entity_mining.rs": 1,
+        "services/market_trading.rs": 2,
         "services/space_warp_jump.rs": 2,
-        "services/structure_upwell_ops.rs": 2,
-        "services/wallet_ledger.rs": 2,
-        "services/wallet_services_ext.rs": 2
+        "services/wallet_ledger.rs": 2
       }
     },
     "system_time_now_in_gameplay": {

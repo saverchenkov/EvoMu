@@ -546,7 +546,6 @@ pub fn handle(
             });
             match res {
                 Ok((rem_plex, item_id, delivered_items, tx_id, omega_notice)) => {
-                    let _ = ctx.notify_account_change(char_id, "plex", char_id, rem_plex as f64);
                     for rec in &delivered_items {
                         ctx.notify_item_mutation(char_id, None, Some(rec));
                     }
@@ -1144,7 +1143,6 @@ fn handle_trade_action(
     let mut added_item_ids: Vec<i64> = Vec::new();
     let mut item_diffs: Vec<(i64, Option<InventoryItemRecord>, Option<InventoryItemRecord>)> =
         Vec::new();
-    let mut bal_updates: Vec<(i64, IskCents)> = Vec::new();
     let mut custom_reply: Option<PyRep> = None;
     let mut manifest_error = false;
     enum TradeActionOutcome {
@@ -1372,7 +1370,6 @@ fn handle_trade_action(
                                     rpc_err("Overflow", "Wallet balance overflow during trade")
                                 })?);
                                 let ba = ca.balance;
-                                bal_updates.push((tr.char_a, ba));
                                 snap.append_journal(
                                     tr.char_a,
                                     "PlayerTrading",
@@ -1386,7 +1383,6 @@ fn handle_trade_action(
                                     rpc_err("Overflow", "Wallet balance overflow during trade")
                                 })?);
                                 let bb = cb.balance;
-                                bal_updates.push((tr.char_b, bb));
                                 snap.append_journal(
                                     tr.char_b,
                                     "PlayerTrading",
@@ -1439,9 +1435,6 @@ fn handle_trade_action(
                         }
                     }
                     ctx.notify_item_mutation(fallback_char, pre.as_ref(), post.as_ref());
-                }
-                for (party_id, bal) in bal_updates {
-                    ctx.notify_wallet_balance(false, party_id, 1, bal);
                 }
                 let mut traded_ids = Vec::new();
                 for &(iid, _) in tr.items_a.iter().chain(tr.items_b.iter()) {

@@ -1118,7 +1118,7 @@ pub async fn complete_special_dungeon_instance(
 
         let ship_id = session.ship_id.unwrap_or(0);
         let now_sec = ctx.now_unix();
-        let (inst_id, base_isk, new_bal_isk, spawned_cid) =
+        let (inst_id, base_isk, spawned_cid) =
             ctx.db.try_with_mut_snapshot(|snap| -> Result<_, BridgeRpcError> {
                 if snap.pve_special_sites.sim_clock_sec < now_sec {
                     snap.pve_special_sites.sim_clock_sec = now_sec;
@@ -1162,7 +1162,7 @@ pub async fn complete_special_dungeon_instance(
                 } else {
                     (500_027_i64, 500_026_i64)
                 };
-                let (new_bal_opt, _standing_pair) =
+                let (_, _standing_pair) =
                     crate::services::pve_special_sites_ops::apply_triglavian_standings_and_isk(
                         snap,
                         char_id,
@@ -1182,7 +1182,7 @@ pub async fn complete_special_dungeon_instance(
                         (nexus_iid, 30_747, 2),
                     ],
                 );
-                Ok((inst_id, base_isk, new_bal_opt, cid))
+                Ok((inst_id, base_isk, cid))
             })?;
 
         if let Some(cid) = spawned_cid {
@@ -1197,9 +1197,6 @@ pub async fn complete_special_dungeon_instance(
                     "Failed spawning Triglavian site loot container ball"
                 );
             }
-        }
-        if let Some(bal) = new_bal_isk {
-            drop(ctx.notify_account_change(char_id, "cash", char_id, bal));
         }
         return Ok(PyRep::keyval([
             ("instanceID", PyRep::Integer(inst_id)),

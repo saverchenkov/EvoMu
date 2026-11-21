@@ -1,9 +1,10 @@
-//! Commit-time wallet & PLEX Vault delta projection bridge (`#931` Track 1).
+//! Commit-time wallet/PLEX delivery & explicit in-transaction effect bridge (`#931` Tracks 1–2).
 //!
 //! Wires [`DeltaStateCache`] + [`DefaultDeltaProjection::wallets_only`] into
 //! `WorldRepository::register_post_commit_listener` so committed `ChangeSet` deltas on
 //! personal ISK (`"cash"`), corp divisions `1..=7` (`"cash"` / `"cash2".."cash7"`), and PLEX
-//! (`"plex"`) automatically materialize `OnAccountChange` notifications without hand-written emitters.
+//! (`"plex"`) materialize `OnAccountChange` notifications, while forwarding committed item
+//! changes to [`delta_item_compare::ItemCompareBridge`].
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +17,7 @@ use crate::router::cache_notifications::{
     MAX_PENDING_NOTIFICATIONS_PER_CHAR,
 };
 use crate::router::context::ServerContext;
+use crate::router::delta_item_compare::{ItemCompareBridge, TxItemEffectKeys};
 use crate::router::delta_projection::{
     materialize_pending_notifications, resolve_all_notifications, DefaultDeltaProjection,
     DeltaProjectionHook, DeltaSink, DeltaStateCache, OnlineCharacterLookup, PlexDelta,
@@ -113,6 +115,7 @@ impl EpochLedger {
 
 struct DeltaCommitBridgeState {
     recent_epoch: Mutex<EpochLedger>,
+    item_compare: Arc<ItemCompareBridge>,
 }
 
 static COMMIT_BRIDGES: OnceLock<Mutex<HashMap<BridgeKey, Weak<DeltaCommitBridgeState>>>> =
@@ -162,6 +165,12 @@ fn extract_account_change_fields(payload_args: &[PyRep]) -> Option<(String, i64,
         }
         _ => None,
     }
+}
+
+#[derive(Debug, Default)]
+struct EmittedEffectKeys {
+    account_keys: HashSet<(i64, Option<(String, i64)>)>,
+    item_effects: TxItemEffectKeys,
 }
 
 fn resolve_tx_effect_recipients(
@@ -220,8 +229,8 @@ fn dispatch_tx_effects(
     now_ft: i64,
     commit_epoch: u64,
     staging_scope_id: Option<u64>,
-) -> (HashSet<(i64, Option<(String, i64)>)>, Vec<ProjectedAccountRecord>) {
-    let mut emitted_account_effects = HashSet::new();
+) -> (EmittedEffectKeys, Vec<ProjectedAccountRecord>) {
+    let mut emitted_effects = EmittedEffectKeys::default();
     let mut records = Vec::new();
     let mut built = Vec::new();
 
@@ -249,7 +258,13 @@ fn dispatch_tx_effects(
                 now_ft,
             );
             if is_account_change {
-                emitted_account_effects.insert((cid, suppression_key.clone()));
+                emitted_effects
+                    .account_keys
+                    .insert((cid, suppression_key.clone()));
+            } else {
+                emitted_effects
+                    .item_effects
+                    .observe(cid, &effect.event, &effect.args);
             }
             if let Some((ref account_key, owner_id, balance)) = fields_opt {
                 records.push(ProjectedAccountRecord {
@@ -269,7 +284,7 @@ fn dispatch_tx_effects(
     if !built.is_empty() {
         enqueue_or_stage_pending_batch(pend, notify_tx, &built);
     }
-    (emitted_account_effects, records)
+    (emitted_effects, records)
 }
 
 fn dedup_resolved_account_changes(resolved: Vec<ResolvedNotification>) -> Vec<ResolvedNotification> {
@@ -303,8 +318,8 @@ fn project_wallet_notifs_for_commit(
 }
 
 /// Registers the authoritative DB post-commit listener on `ctx.db`, dispatching explicit
-/// `TxNotificationEffect`s and projecting committed wallet / corp-division / PLEX Vault deltas
-/// from each `ChangeSet` (`#931` Track 1).
+/// `TxNotificationEffect`s, projecting committed wallet / corp-division / PLEX Vault deltas
+/// (`OnAccountChange`), and wiring compare-only item/blueprint parity telemetry (`#931` Tracks 1–2).
 pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
     let pend_ptr = pending_notifications_ptr(&*ctx.pending_notifications);
     let bridge_key = (ctx.db.instance_id(), pend_ptr);
@@ -316,6 +331,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
         }
         let state = Arc::new(DeltaCommitBridgeState {
             recent_epoch: Mutex::new(EpochLedger::default()),
+            item_compare: Arc::new(ItemCompareBridge::new(ctx.db.instance_id())),
         });
         map.insert(bridge_key, Arc::downgrade(&state));
         state
@@ -352,9 +368,8 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
             let staging_scope_id =
                 current_dispatch_staging_scope_id(Some(&*pend), Some(&notify_tx));
 
-            let (emitted_account_effects, mut committed_records) = if effects.notifications.is_empty()
-            {
-                (HashSet::new(), Vec::new())
+            let (emitted_effects, mut committed_records) = if effects.notifications.is_empty() {
+                (EmittedEffectKeys::default(), Vec::new())
             } else {
                 dispatch_tx_effects(
                     &db,
@@ -381,11 +396,15 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 let filtered: Vec<ResolvedNotification> = resolved
                     .into_iter()
                     .filter(|r| {
-                        if emitted_account_effects.contains(&(r.recipient_char_id, None)) {
+                        if emitted_effects
+                            .account_keys
+                            .contains(&(r.recipient_char_id, None))
+                        {
                             return false;
                         }
                         if let Some((key, owner_id, _)) = extract_account_change_fields(&r.args) {
-                            if emitted_account_effects
+                            if emitted_effects
+                                .account_keys
                                 .contains(&(r.recipient_char_id, Some((key, owner_id))))
                             {
                                 return false;
@@ -414,6 +433,15 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                     }
                 }
             }
+
+            bridge.item_compare.on_commit(
+                snap,
+                changes,
+                &sde,
+                now_unix,
+                &*db,
+                &emitted_effects.item_effects,
+            );
 
             if !committed_records.is_empty() {
                 bridge
@@ -535,6 +563,22 @@ fn insert_before_pos_with_cap(
     queue.insert(pos, notif);
 }
 
+fn lookup_commit_bridge(ctx: &ServerContext) -> Option<Arc<DeltaCommitBridgeState>> {
+    let bridge_key = (
+        ctx.db.instance_id(),
+        pending_notifications_ptr(&*ctx.pending_notifications),
+    );
+    commit_bridges()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&bridge_key)
+        .and_then(Weak::upgrade)
+}
+
+pub(crate) fn item_compare_bridge(ctx: &ServerContext) -> Option<Arc<ItemCompareBridge>> {
+    lookup_commit_bridge(ctx).map(|b| Arc::clone(&b.item_compare))
+}
+
 /// Coordinates remaining unlocked manual `OnAccountChange` calls with same-epoch commit-projected
 /// `OnAccountChange` notifications: deduplicates identical committed balances and preserves
 /// pre-settlement intermediate balances ahead of the committed final balance.
@@ -549,15 +593,7 @@ pub(crate) fn try_handle_legacy_account_change_emit(
         return None;
     }
     let (account_key, owner_id, manual_bal) = extract_account_change_fields(payload_args)?;
-    let bridge_key = (
-        ctx.db.instance_id(),
-        pending_notifications_ptr(&*ctx.pending_notifications),
-    );
-    let bridge = commit_bridges()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&bridge_key)
-        .and_then(Weak::upgrade)?;
+    let bridge = lookup_commit_bridge(ctx)?;
     let staging_scope_id =
         current_dispatch_staging_scope_id(Some(&*ctx.pending_notifications), Some(&ctx.notify_tx));
     let matching: Vec<ProjectedAccountRecord> = {
