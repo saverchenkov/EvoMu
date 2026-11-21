@@ -1321,13 +1321,14 @@ async fn unified_break_protection_and_force_decloak_return_unique_events() {
     .unwrap();
 
     // Sync actor-side location_change_invuln and break simultaneously with undock + warp-exit + tether + gate cloak.
-    h.try_sync_location_change_invuln(char_id, LocationChangeInvulnSyncOp::Grant(5_000));
+    let tok_5k = LocationInvulnToken { seq: 1, until_unix: 5_000 };
+    h.try_sync_location_change_invuln(char_id, LocationChangeInvulnSyncOp::Grant(tok_5k));
     let ev = h
         .break_protection(
             ship_id,
             Some(char_id),
             ProtectionBreakReason::TargetLock,
-            Some(5_000),
+            Some(tok_5k),
             1_000,
         )
         .await
@@ -1621,7 +1622,7 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
             ship_nc,
             Some(char_nc),
             ProtectionBreakReason::ModuleActivation,
-            Some(2_000),
+            Some(LocationInvulnToken { seq: 2, until_unix: 2_000 }),
             1_000,
         )
         .await
@@ -1678,6 +1679,66 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
     assert!(dmg_res.1);
     assert!(h.get_protection_snapshot(ship_nc).await.unwrap().is_none());
     assert!(!h.has_active_non_gate_cloak_sync(ship_nc));
+}
+
+#[tokio::test]
+async fn r4_try_emit_destiny_remove_cycle_and_db_ball_eviction_preserve_sync_and_lock_ranks() {
+    let reg = SystemRegistry::new();
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let (sys_id, other_sys_id): (SolarSystemId, SolarSystemId) = (30_000_142, 30_000_144);
+    let (h, other_h) = (reg.get_or_spawn(sys_id), reg.get_or_spawn(other_sys_id));
+    celestials::register_db_system_ballpark(&db, sys_id, &h);
+    let (s_emit, s_cyc, s_db1, s_db2, s_db3) = (9801, 9802, 9803, 9804, 9805);
+    for (bid, gate) in [(s_emit, true), (s_cyc, false), (s_db1, true), (s_db2, true), (s_db3, true)] {
+        let mut cs = CombatState::default();
+        if gate { cs.apply_jump_cloak_and_invuln_timers(45); }
+        h.spawn_ball_with_meta(
+            make_actor_ball(bid, 587, DVec3::ZERO), cs,
+            SlimItemMeta { char_id: Some(90_000_100 + bid), is_cloaked: gate, ..Default::default() },
+        ).await.unwrap();
+    }
+    // 1. F1486-R4-01: same-thread `try_emit_destiny_event` with `actor_state`, `ballpark`, and `RANK_LEAF` locks held.
+    {
+        let _st = h.actor_state.write().unwrap();
+        assert!(h.try_emit_destiny_event(s_emit, DestinyEvent::SetSpeedFraction { ball_id: s_emit, fraction: 0.5 }));
+    }
+    let _ = h.query_current_tick().await.unwrap();
+    assert!((h.ballpark.read().unwrap().balls[&s_emit].speed_fraction - 0.5).abs() < 1e-6);
+    {
+        let _bp = h.ballpark.read().unwrap();
+        let leaf = eve_db::lock_rank::RankedMutex::<(), { eve_db::lock_rank::RANK_LEAF }>::new(());
+        let _leaf = leaf.lock().unwrap();
+        assert!(h.try_emit_destiny_event(s_emit, DestinyEvent::Stop { ball_id: s_emit }));
+    }
+    let _ = h.query_current_tick().await.unwrap();
+    assert!(matches!(h.ballpark.read().unwrap().balls[&s_emit].mode, MovementMode::Stop));
+
+    // 2. F1486-R4-02a: `try_remove_module_cycle` updates `protection_registry` + `has_active_non_gate_cloak_sync`.
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: s_cyc, module_id: 99_001, module_type_id: 11578, effect_name: "cloakingWarpSafe".into(),
+        owner_char_id: Some(90_009_802), duration_s: 5.0, elapsed_s: 0.0, repeat: 1, ..Default::default()
+    }).await.unwrap();
+    h.modify_combat_state(s_cyc, |c| { c.is_covert_cloak = true; c.cloak_velocity_multiplier = Some(0.25); }).await.unwrap();
+    assert!(h.has_active_non_gate_cloak_sync(s_cyc));
+    assert!(h.actor_state.read().unwrap().protection_registry[&s_cyc].has_active_cloak_cycle);
+    let _ = h.try_remove_module_cycle(s_cyc, 99_001);
+    let snap_cyc = h.actor_state.read().unwrap().protection_registry[&s_cyc];
+    assert!(!snap_cyc.has_active_cloak_cycle && !snap_cyc.snapshot.has_cloak_velocity_multiplier && !snap_cyc.snapshot.is_covert_cloak);
+    assert!(!h.has_active_non_gate_cloak_sync(s_cyc));
+
+    // 3. F1486-R4-02b: `try_remove_ball_for_db` evicts `protection_registry` outside and inside held locks.
+    for bid in [s_db1, s_db2, s_db3] { assert!(h.actor_state.read().unwrap().protection_registry.contains_key(&bid)); }
+    try_remove_ball_for_db(&db, sys_id, s_db1);
+    {
+        let _bp_other = other_h.ballpark.write().unwrap();
+        try_remove_ball_for_db(&db, sys_id, s_db2);
+        let _st_other = other_h.actor_state.write().unwrap();
+        try_remove_ball_for_db(&db, sys_id, s_db3);
+    }
+    let (bp_r, st_r) = (h.ballpark.read().unwrap(), h.actor_state.read().unwrap());
+    for bid in [s_db1, s_db2, s_db3] {
+        assert!(!bp_r.balls.contains_key(&bid) && !st_r.protection_registry.contains_key(&bid));
+    }
 }
 
 #[tokio::test]
@@ -1744,7 +1805,7 @@ async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_a
     let err = h.activate_module_cycle_atomic(AtomicActivateCycleRequest {
         char_id: 95_906, cycle: stale_cycle(995_001, 1, 0.0, 500.0),
         allow_while_warping: false, allow_while_cloaked: true, break_protection: true,
-        break_reason: ProtectionBreakReason::ModuleActivation, location_change_invuln_until_unix: None, real_now_unix: 1_700_000_000,
+        break_reason: ProtectionBreakReason::ModuleActivation, location_change_invuln: None, real_now_unix: 1_700_000_000,
     }).await.unwrap_err();
     assert!(err.contains("Insufficient capacitor"), "got unexpected err: {err}");
     assert!(!h.get_protection_snapshot(ship_f).await.unwrap().unwrap().has_active_cloak_cycle);

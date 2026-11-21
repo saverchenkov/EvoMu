@@ -1892,7 +1892,7 @@ async fn break_ship_protection_with_location_invuln_emits_single_invuln_cancelle
     grant_location_change_invulnerability(&ctx, char_id, t_race);
     let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
     let peeked = peek_active_location_change_invuln(&ctx, char_id);
-    assert_eq!(peeked, Some(t_race));
+    assert_eq!(peeked.map(|t| t.until_unix), Some(t_race));
     break_location_change_invulnerability(&ctx, char_id);
     let mut ev_race = sys.break_protection(ship_id, Some(char_id), crate::system_actor::ProtectionBreakReason::ModuleActivation, peeked, now_unix).await.unwrap();
     finalize_committed_location_change_invuln(&ctx, char_id, peeked, now_unix, &mut ev_race);
@@ -2025,40 +2025,60 @@ async fn break_ship_protection_with_location_invuln_concurrent_and_newer_grant_p
     assert!(!is_location_change_invulnerable(&ctx, char_id, now));
     assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
 
-    // 2. Stale `T1` / `None` preserves newer `T2 > T1`, and post-consumption `T1` never re-inserts.
+    // 2. Stale `T1` / `None` preserves newer `T2 > T1`, `t_new == t1`, and `t_new < t1` grants;
+    //    post-consumption stale `Grant`/`ClearUpTo` never re-inserts or erases newer grants.
     let (t1, t2, t3) = (now + 20, now + 90, now + 10);
     grant_location_change_invulnerability(&ctx, char_id, t1);
+    let tok1 = peek_active_location_change_invuln(&ctx, char_id).unwrap();
     let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
     grant_location_change_invulnerability(&ctx, char_id, t2);
     let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
 
-    for expected in [Some(t1), None] {
+    for expected in [Some(tok1), None] {
         let ev = sys.break_protection(ship_id, Some(char_id), Move, expected, now).await.unwrap();
         assert!(!ev.invuln_cancelled && !ev.location_invuln_already_consumed);
-        assert_eq!(peek_active_location_change_invuln(&ctx, char_id), Some(t2));
-        assert_eq!(
-            sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix,
-            Some(t2)
-        );
+        assert_eq!(peek_active_location_change_invuln(&ctx, char_id).map(|t| t.until_unix), Some(t2));
+        assert_eq!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(t2));
     }
 
     let ev_clear = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, Move).await;
     assert!(ev_clear.invuln_cancelled && peek_active_location_change_invuln(&ctx, char_id).is_none());
     assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
 
-    let ev_stale_post = sys.break_protection(ship_id, Some(char_id), Move, Some(t1), now).await.unwrap();
+    let ev_stale_post = sys.break_protection(ship_id, Some(char_id), Move, Some(tok1), now).await.unwrap();
     assert!(!ev_stale_post.invuln_cancelled && ev_stale_post.location_invuln_already_consumed);
     assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
 
-    // 3. Same-second shorter re-grant `t3 < t2` resets consumption watermark and consumes cleanly.
-    grant_location_change_invulnerability(&ctx, char_id, t3);
-    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
-    let ev_t3 = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, Move).await;
-    assert!(ev_t3.invuln_cancelled && !is_location_change_invulnerable(&ctx, char_id, now));
+    // 3. Same-second `t_new == t1` and shorter `t_new < t1` races keep the newer grant active across
+    //    `break_protection`, `finalize_committed_location_change_invuln`, and delayed `ClearUpTo`/`Grant`.
+    for (older_t, newer_t) in [(t3, t3), (t2, t3)] {
+        grant_location_change_invulnerability(&ctx, char_id, older_t);
+        let stale_tok = peek_active_location_change_invuln(&ctx, char_id).unwrap();
+        grant_location_change_invulnerability(&ctx, char_id, newer_t);
+        let newer_tok = peek_active_location_change_invuln(&ctx, char_id).unwrap();
+        assert!(newer_tok.seq > stale_tok.seq);
+        let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
 
-    // 4. Stale `ClearUpTo(t1)` arriving after `Grant(t2)` (`t2 > t1`) preserves newer actor grant and registry entry.
+        let mut ev_stale = sys.break_protection(ship_id, Some(char_id), Move, Some(stale_tok), now).await.unwrap();
+        finalize_committed_location_change_invuln(&ctx, char_id, Some(stale_tok), now, &mut ev_stale);
+        assert!(!ev_stale.invuln_cancelled);
+        sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo { seq: stale_tok.seq });
+        assert_eq!(peek_active_location_change_invuln(&ctx, char_id), Some(newer_tok));
+        assert_eq!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(newer_t));
+
+        let ev_cur = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, Move).await;
+        assert!(ev_cur.invuln_cancelled && !is_location_change_invulnerable(&ctx, char_id, now));
+        sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::Grant(stale_tok));
+        sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::Grant(newer_tok));
+        assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+    }
+
+    // 4. Stale `ClearUpTo` after `Grant` preserves newer actor grant even after `pop_active_location_change_invuln`.
+    grant_location_change_invulnerability(&ctx, char_id, t1);
+    let popped_tok = pop_active_location_change_invuln(&ctx, char_id).unwrap();
     grant_location_change_invulnerability(&ctx, char_id, t2);
-    sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo(t1));
+    sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo { seq: popped_tok.seq });
+    sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::Grant(popped_tok));
     assert_eq!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(t2));
-    assert_eq!(peek_active_location_change_invuln(&ctx, char_id), Some(t2));
+    assert_eq!(peek_active_location_change_invuln(&ctx, char_id).map(|t| t.until_unix), Some(t2));
 }

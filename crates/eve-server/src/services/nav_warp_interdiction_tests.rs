@@ -1118,7 +1118,7 @@ async fn warp_commit_preserves_newer_location_change_invuln_past_on_warp_initiat
     emit_movement_protection_events(&ctx, char_id, ship_id, false, protection_events);
     on_warp_initiated_hooks_with_options(&ctx, &sys_handle, char_id, ship_id, sys_id, false).await;
 
-    assert_eq!(peek_active_location_change_invuln(&ctx, char_id), Some(t2));
+    assert_eq!(peek_active_location_change_invuln(&ctx, char_id).map(|t| t.until_unix), Some(t2));
     assert_eq!(sys_handle.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(t2));
     assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 0);
 

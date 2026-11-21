@@ -103,24 +103,50 @@ pub fn check_session_change_timer_active(
     Some(timer.clone())
 }
 
+fn reconcile_location_invuln_entry(
+    ledger: &mut crate::system_actor::LocationInvulnLedger,
+    map: &std::collections::HashMap<i64, u64>,
+    char_id: i64,
+) -> Option<crate::system_actor::LocationInvulnToken> {
+    let Some(&until_unix) = map.get(&char_id) else {
+        ledger.by_char.remove(&char_id);
+        return None;
+    };
+    if let Some(&tok) = ledger.by_char.get(&char_id) {
+        if tok.until_unix == until_unix {
+            return Some(tok);
+        }
+    }
+    ledger.next_seq = ledger.next_seq.saturating_add(1);
+    let tok = crate::system_actor::LocationInvulnToken { seq: ledger.next_seq, until_unix };
+    ledger.by_char.insert(char_id, tok);
+    Some(tok)
+}
+
 pub fn grant_location_change_invulnerability(ctx: &ServerContext, char_id: i64, until_unix: u64) {
-    ctx.location_change_invuln
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(char_id, until_unix);
+    let tok = {
+        let mut ledger = ctx.systems.location_invuln_ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = ctx.location_change_invuln.lock().unwrap_or_else(|e| e.into_inner());
+        ledger.next_seq = ledger.next_seq.saturating_add(1);
+        let tok = crate::system_actor::LocationInvulnToken { seq: ledger.next_seq, until_unix };
+        ledger.by_char.insert(char_id, tok);
+        map.insert(char_id, until_unix);
+        tok
+    };
     ctx.systems.try_sync_location_change_invuln_for_char(
         char_id,
-        crate::system_actor::LocationChangeInvulnSyncOp::Grant(until_unix),
+        crate::system_actor::LocationChangeInvulnSyncOp::Grant(tok),
     );
 }
 
-pub(crate) fn peek_active_location_change_invuln(ctx: &ServerContext, char_id: i64) -> Option<u64> {
+pub(crate) fn peek_active_location_change_invuln(
+    ctx: &ServerContext,
+    char_id: i64,
+) -> Option<crate::system_actor::LocationInvulnToken> {
     let now = ctx.now_unix();
-    let map = ctx
-        .location_change_invuln
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    map.get(&char_id).copied().filter(|&until| now < until)
+    let mut ledger = ctx.systems.location_invuln_ledger.lock().unwrap_or_else(|e| e.into_inner());
+    let map = ctx.location_change_invuln.lock().unwrap_or_else(|e| e.into_inner());
+    reconcile_location_invuln_entry(&mut ledger, &map, char_id).filter(|tok| now < tok.until_unix)
 }
 
 /// Clears `ctx.location_change_invuln[char_id]` only after an actor-level protection break
@@ -128,30 +154,31 @@ pub(crate) fn peek_active_location_change_invuln(ctx: &ServerContext, char_id: i
 pub(crate) fn commit_cleared_location_change_invuln(
     ctx: &ServerContext,
     char_id: i64,
-    expected_until: Option<u64>,
+    expected: Option<crate::system_actor::LocationInvulnToken>,
     now_unix: u64,
 ) -> bool {
-    let mut map = ctx
-        .location_change_invuln
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let Some(&cur) = map.get(&char_id) else {
-        return false;
+    let cleared = {
+        let mut ledger = ctx.systems.location_invuln_ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = ctx.location_change_invuln.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(cur) = reconcile_location_invuln_entry(&mut ledger, &map, char_id) else {
+            return false;
+        };
+        let allow_clear = match expected {
+            Some(exp) => cur.until_unix <= now_unix || cur.seq == exp.seq,
+            None => cur.until_unix <= now_unix,
+        };
+        if !allow_clear {
+            return false;
+        }
+        map.remove(&char_id);
+        ledger.by_char.remove(&char_id);
+        cur
     };
-    let allow_clear = match expected_until {
-        Some(exp) => cur <= now_unix || cur <= exp,
-        None => cur <= now_unix,
-    };
-    if !allow_clear {
-        return false;
-    }
-    map.remove(&char_id);
-    drop(map);
     ctx.systems.try_sync_location_change_invuln_for_char(
         char_id,
-        crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo(cur),
+        crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo { seq: cleared.seq },
     );
-    now_unix < cur
+    now_unix < cleared.until_unix
 }
 
 /// Applies the `commit_cleared_location_change_invuln` CAS to `events` while honoring
@@ -160,31 +187,37 @@ pub(crate) fn commit_cleared_location_change_invuln(
 pub(crate) fn finalize_committed_location_change_invuln(
     ctx: &ServerContext,
     char_id: i64,
-    expected_until: Option<u64>,
+    expected: Option<crate::system_actor::LocationInvulnToken>,
     now_unix: u64,
     events: &mut crate::system_actor::ProtectionBreakEvents,
 ) {
-    if commit_cleared_location_change_invuln(ctx, char_id, expected_until, now_unix)
+    if commit_cleared_location_change_invuln(ctx, char_id, expected, now_unix)
         && !events.location_invuln_already_consumed
     {
         events.invuln_cancelled = true;
     }
 }
 
-pub(crate) fn pop_active_location_change_invuln(ctx: &ServerContext, char_id: i64) -> Option<u64> {
-    let removed = ctx
-        .location_change_invuln
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&char_id);
-    if let Some(cur) = removed {
+pub(crate) fn pop_active_location_change_invuln(
+    ctx: &ServerContext,
+    char_id: i64,
+) -> Option<crate::system_actor::LocationInvulnToken> {
+    let removed = {
+        let mut ledger = ctx.systems.location_invuln_ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = ctx.location_change_invuln.lock().unwrap_or_else(|e| e.into_inner());
+        let tok_opt = reconcile_location_invuln_entry(&mut ledger, &map, char_id);
+        map.remove(&char_id);
+        ledger.by_char.remove(&char_id);
+        tok_opt
+    };
+    if let Some(tok) = removed {
         ctx.systems.try_sync_location_change_invuln_for_char(
             char_id,
-            crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo(cur),
+            crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo { seq: tok.seq },
         );
     }
     let now = ctx.now_unix();
-    removed.filter(|&until| now < until)
+    removed.filter(|tok| now < tok.until_unix)
 }
 
 pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) {

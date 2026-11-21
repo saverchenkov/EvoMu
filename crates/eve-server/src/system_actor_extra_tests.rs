@@ -754,7 +754,7 @@ async fn activate_module_cycle_atomic_validates_preconditions_without_rollback_o
         allow_while_cloaked: false,
         break_protection: true,
         break_reason: ProtectionBreakReason::ModuleActivation,
-        location_change_invuln_until_unix: Some(2_000_000_000),
+        location_change_invuln: Some(LocationInvulnToken { seq: 1, until_unix: 2_000_000_000 }),
         real_now_unix: 1_999_999_990,
     };
 
@@ -901,7 +901,7 @@ async fn activate_module_cycle_atomic_validates_preconditions_without_rollback_o
             allow_while_cloaked: false,
             break_protection: true,
             break_reason: ProtectionBreakReason::ModuleActivation,
-            location_change_invuln_until_unix: None,
+            location_change_invuln: None,
             real_now_unix: 1_999_999_990,
         })
         .await
@@ -970,7 +970,7 @@ async fn activate_module_cycle_atomic_preserves_protection_when_break_false_and_
             allow_while_cloaked: true,
             break_protection: false,
             break_reason: ProtectionBreakReason::ModuleActivation,
-            location_change_invuln_until_unix: Some(2_000_000_000),
+            location_change_invuln: Some(LocationInvulnToken { seq: 1, until_unix: 2_000_000_000 }),
             real_now_unix: 1_999_999_990,
         })
         .await
@@ -1002,7 +1002,7 @@ async fn activate_module_cycle_atomic_preserves_protection_when_break_false_and_
             allow_while_cloaked: true,
             break_protection: true,
             break_reason: ProtectionBreakReason::ModuleActivation,
-            location_change_invuln_until_unix: None,
+            location_change_invuln: None,
             real_now_unix: 1_999_999_990,
         })
         .await
@@ -1083,7 +1083,7 @@ async fn atomic_cloak_activation_from_gate_cloak_non_11578_covert_sde_and_deact_
             ..ActiveModuleCycle::default()
         },
         allow_while_warping: false, allow_while_cloaked: true, break_protection: true,
-        break_reason: ProtectionBreakReason::ModuleActivation, location_change_invuln_until_unix: None, real_now_unix: now,
+        break_reason: ProtectionBreakReason::ModuleActivation, location_change_invuln: None, real_now_unix: now,
     }).await.unwrap();
     assert!(outcome.protection_events.gate_cloak_broken && outcome.protection_events.invuln_cancelled);
     let cs_proto = h.get_combat_state(ship_proto).await.unwrap().unwrap();

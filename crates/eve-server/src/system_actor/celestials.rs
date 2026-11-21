@@ -2061,7 +2061,7 @@ impl SystemHandle {
             }
         }
         let (tx, _rx) = oneshot::channel();
-        self.cmd_sender()
+        self.cmd_tx
             .try_send(SystemCommand::EmitDestinyEvent {
                 ball_id,
                 event,

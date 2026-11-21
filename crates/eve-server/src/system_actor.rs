@@ -334,6 +334,7 @@ pub struct SystemRegistry {
     /// Per-session `beyonce.UpdateStateRequest` cooldown guards owned by this `ServerContext` (`#1169`).
     pub(crate) explicit_update_state_guards:
         Arc<RankedMutex<HashMap<(u64, i64), types::ExplicitUpdateStateGuard>, RANK_LEAF>>,
+    pub(crate) location_invuln_ledger: RankedMutex<types::LocationInvulnLedger, { types::RANK_INVULN_LEDGER }>,
 }
 
 /// Lock-free RAII guard releasing a system's in-flight physics-step slot upon completion or panic.
@@ -377,6 +378,7 @@ impl SystemRegistry {
             physics_step_flags: RankedMutex::new(HashMap::new()),
             warp_tracking: types::SharedWarpTracking::default(),
             explicit_update_state_guards: Arc::new(RankedMutex::new(HashMap::new())),
+            location_invuln_ledger: RankedMutex::new(types::LocationInvulnLedger::default()),
         }
     }
 

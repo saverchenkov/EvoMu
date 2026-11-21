@@ -75,7 +75,7 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
             ship_id,
             Some(request.char_id),
             request.break_reason,
-            request.location_change_invuln_until_unix,
+            request.location_change_invuln,
             request.real_now_unix,
             None,
         )
@@ -118,7 +118,7 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
             ship_id,
             Some(request.char_id),
             request.break_reason,
-            request.location_change_invuln_until_unix,
+            request.location_change_invuln,
             request.real_now_unix,
             pre_snap,
         );
@@ -153,18 +153,9 @@ pub(crate) fn apply_fit_projection_in_actor(
     projection: eve_dogma::FitProjection,
 ) -> bool {
     let mut empty_cycles = Vec::new();
-    let empty_scram = HashMap::new();
-    let empty_core = HashMap::new();
+    let (empty_scram, empty_core) = (HashMap::new(), HashMap::new());
     apply_fit_projection_with_cycles_in_actor(
-        ballpark,
-        fit_projections,
-        &mut empty_cycles,
-        &empty_scram,
-        &empty_core,
-        &None,
-        None,
-        ship_id,
-        projection,
+        ballpark, fit_projections, &mut empty_cycles, &empty_scram, &empty_core, &None, None, ship_id, projection,
     )
 }
 
@@ -185,126 +176,64 @@ pub(crate) fn apply_fit_projection_with_cycles_in_actor(
     ship_id: BallId,
     projection: eve_dogma::FitProjection,
 ) -> bool {
-    if fit_projections
-        .get(&ship_id)
-        .is_some_and(|cur| projection.rev < cur.rev)
-    {
+    if fit_projections.get(&ship_id).is_some_and(|cur| projection.rev < cur.rev) {
         return false;
     }
     let prev_proj = fit_projections.get(&ship_id).cloned();
     let prev_baseline = prev_proj.as_ref().map(|p| p.baseline);
-    let hull_changed = prev_proj
-        .as_ref()
-        .is_some_and(|p| p.ship_type_id != projection.ship_type_id);
+    let hull_changed = prev_proj.as_ref().is_some_and(|p| p.ship_type_id != projection.ship_type_id);
     let baseline = projection.baseline;
     fit_projections.insert(ship_id, projection);
     let shield_boost_mult = {
-        let Some(cs) = ballpark.combat_states.get_mut(&ship_id) else {
-            return false;
-        };
-        let shield_regen_disabled =
-            cs.shield_recharge_time_ms <= 0.0 || cs.shield_recharge_time_ms >= 1.0e12;
+        let Some(cs) = ballpark.combat_states.get_mut(&ship_id) else { return false; };
+        let shield_regen_disabled = cs.shield_recharge_time_ms <= 0.0 || cs.shield_recharge_time_ms >= 1.0e12;
         let cap_regen_disabled = cs.capacitor_recharge_time_ms <= 0.0
             || cs.base_capacitor_recharge_time_ms.is_some_and(|b| b <= 0.0)
             || cs.capacitor_recharge_time_ms >= 1.0e12;
-        let keep_prev_or_override = |cur_base: Option<f64>, prev_val: Option<f64>, new_val: f64| -> bool {
-            !hull_changed
-                && prev_val.is_some_and(|pv| {
-                    (new_val - pv).abs() <= 1e-2
-                        && cur_base.is_some_and(|cb| (cb - pv).abs() > 1e-2)
-                })
+        let keep_prev = |cur_base: Option<f64>, prev_val: Option<f64>, new_val: f64| -> bool {
+            !hull_changed && prev_val.is_some_and(|pv| (new_val - pv).abs() <= 1e-2 && cur_base.is_some_and(|cb| (cb - pv).abs() > 1e-2))
         };
-        if !keep_prev_or_override(
-            cs.base_max_velocity,
-            prev_baseline.map(|p| p.max_velocity),
-            baseline.max_velocity,
-        ) {
+        if !keep_prev(cs.base_max_velocity, prev_baseline.map(|p| p.max_velocity), baseline.max_velocity) {
             cs.base_max_velocity = Some(baseline.max_velocity.max(0.0));
         }
-        if !keep_prev_or_override(cs.base_mass, prev_baseline.map(|p| p.mass), baseline.mass) {
+        if !keep_prev(cs.base_mass, prev_baseline.map(|p| p.mass), baseline.mass) {
             cs.base_mass = Some(baseline.mass.max(1.0));
         }
-        if !keep_prev_or_override(
-            cs.base_inertia,
-            prev_baseline.map(|p| p.agility),
-            baseline.agility,
-        ) {
+        if !keep_prev(cs.base_inertia, prev_baseline.map(|p| p.agility), baseline.agility) {
             cs.base_inertia = Some(baseline.agility.max(0.001));
         }
-        if !keep_prev_or_override(
-            cs.base_signature_radius,
-            prev_baseline.map(|p| p.signature_radius),
-            baseline.signature_radius,
-        ) {
+        if !keep_prev(cs.base_signature_radius, prev_baseline.map(|p| p.signature_radius), baseline.signature_radius) {
             cs.base_signature_radius = Some(baseline.signature_radius.max(0.0));
         }
         if !shield_regen_disabled {
             let sync_hp_base = |cur_hp: f64, base_hp: &mut Option<f64>, new_b: f64, prev_b: Option<f64>, env: f64| {
-                let overridden = prev_b.is_some_and(|pb| {
-                    !hull_changed && (new_b - pb).abs() <= 1e-2 && (cur_hp / env - pb).abs() > 1e-2
-                });
-                if overridden {
-                    *base_hp = Some((cur_hp / env).max(0.0));
-                } else if !(prev_b.is_none() && base_hp.is_some_and(|cb| cb > new_b + 1e-2)) {
-                    *base_hp = Some(new_b.max(0.0));
-                }
+                let overridden = prev_b.is_some_and(|pb| !hull_changed && (new_b - pb).abs() <= 1e-2 && (cur_hp / env - pb).abs() > 1e-2);
+                if overridden { *base_hp = Some((cur_hp / env).max(0.0)); }
+                else if !(prev_b.is_none() && base_hp.is_some_and(|cb| cb > new_b + 1e-2)) { *base_hp = Some(new_b.max(0.0)); }
             };
-            sync_hp_base(
-                cs.max_shield_hp,
-                &mut cs.base_max_shield_hp,
-                baseline.max_shield_hp,
-                prev_baseline.map(|p| p.max_shield_hp),
-                cs.env_max_shield_multiplier.unwrap_or(1.0).max(1e-6),
-            );
-            sync_hp_base(
-                cs.max_armor_hp,
-                &mut cs.base_max_armor_hp,
-                baseline.max_armor_hp,
-                prev_baseline.map(|p| p.max_armor_hp),
-                cs.env_max_armor_multiplier.unwrap_or(1.0).max(1e-6),
-            );
-            sync_hp_base(
-                cs.max_structure_hp,
-                &mut cs.base_max_structure_hp,
-                baseline.max_structure_hp,
-                prev_baseline.map(|p| p.max_structure_hp),
-                1.0,
-            );
+            sync_hp_base(cs.max_shield_hp, &mut cs.base_max_shield_hp, baseline.max_shield_hp, prev_baseline.map(|p| p.max_shield_hp), cs.env_max_shield_multiplier.unwrap_or(1.0).max(1e-6));
+            sync_hp_base(cs.max_armor_hp, &mut cs.base_max_armor_hp, baseline.max_armor_hp, prev_baseline.map(|p| p.max_armor_hp), cs.env_max_armor_multiplier.unwrap_or(1.0).max(1e-6));
+            sync_hp_base(cs.max_structure_hp, &mut cs.base_max_structure_hp, baseline.max_structure_hp, prev_baseline.map(|p| p.max_structure_hp), 1.0);
             cs.shield_recharge_time_ms = baseline.shield_recharge_time_ms.max(1.0);
         }
         if !cap_regen_disabled {
             let env_c = cs.env_max_cap_multiplier.unwrap_or(1.0).max(1e-6);
             let prev_cap_overridden = prev_baseline.is_some_and(|pb| {
-                !hull_changed
-                    && (baseline.max_capacitor - pb.max_capacitor).abs() <= 1e-2
+                !hull_changed && (baseline.max_capacitor - pb.max_capacitor).abs() <= 1e-2
                     && ((cs.max_capacitor / env_c - pb.max_capacitor).abs() > 1e-2
-                        || cs
-                            .base_max_capacitor
-                            .is_some_and(|cur_b| (cur_b - pb.max_capacitor).abs() > 1e-2))
+                        || cs.base_max_capacitor.is_some_and(|cur_b| (cur_b - pb.max_capacitor).abs() > 1e-2))
             });
             if prev_cap_overridden {
-                if (cs.max_capacitor / env_c - prev_baseline.map(|p| p.max_capacitor).unwrap_or(0.0))
-                    .abs()
-                    > 1e-2
-                {
+                if (cs.max_capacitor / env_c - prev_baseline.map(|p| p.max_capacitor).unwrap_or(0.0)).abs() > 1e-2 {
                     cs.base_max_capacitor = Some((cs.max_capacitor / env_c).max(0.0));
                 }
-            } else if prev_baseline.is_none()
-                && cs.base_max_capacitor.is_some_and(|cur_b| {
-                    (cs.max_capacitor / env_c - cur_b).abs() > 1e-2
-                        && cs.max_capacitor / env_c > baseline.max_capacitor + 1e-2
-                })
-            {
+            } else if prev_baseline.is_none() && cs.base_max_capacitor.is_some_and(|cur_b| (cs.max_capacitor / env_c - cur_b).abs() > 1e-2 && cs.max_capacitor / env_c > baseline.max_capacitor + 1e-2) {
                 cs.base_max_capacitor = Some((cs.max_capacitor / env_c).max(0.0));
             } else {
-                let init_cap_overridden = prev_baseline.is_none()
-                    && cs.base_max_capacitor.is_some_and(|cur_b| {
-                        (cur_b - baseline.max_capacitor).abs() > 1e-2
-                            && (cur_b > baseline.max_capacitor + 1e-2
-                                || ((cs.capacitor_recharge_time_ms - 120_000.0).abs() < 1e-2
-                                    && (baseline.capacitor_recharge_time_ms - 120_000.0).abs() > 1e-2
-                                    && (cur_b - 250.0).abs() > 1e-2))
-                    });
+                let init_cap_overridden = prev_baseline.is_none() && cs.base_max_capacitor.is_some_and(|cur_b| {
+                    (cur_b - baseline.max_capacitor).abs() > 1e-2 && (cur_b > baseline.max_capacitor + 1e-2
+                        || ((cs.capacitor_recharge_time_ms - 120_000.0).abs() < 1e-2 && (baseline.capacitor_recharge_time_ms - 120_000.0).abs() > 1e-2 && (cur_b - 250.0).abs() > 1e-2))
+                });
                 if !init_cap_overridden {
                     let cap_floor = if hull_changed { cs.capacitor } else { 0.0 };
                     cs.base_max_capacitor = Some(baseline.max_capacitor.max(cap_floor).max(0.0));
@@ -320,42 +249,18 @@ pub(crate) fn apply_fit_projection_with_cycles_in_actor(
 
     let mut synced_any_cycle = false;
     if let Some(new_proj) = fit_projections.get(&ship_id) {
-        for cycle in active_module_cycles.iter_mut() {
-            if cycle.ship_id != ship_id {
-                continue;
-            }
-            let overload_synced = prev_proj
-                .as_ref()
-                .and_then(|p| p.modules.get(&cycle.module_id))
-                .is_some_and(|old_cp| old_cp.is_overloaded != cycle.is_overloaded)
-                && new_proj
-                    .modules
-                    .get(&cycle.module_id)
-                    .is_some_and(|new_cp| new_cp.is_overloaded == cycle.is_overloaded);
-            let active_prop_matches = new_proj.propulsion.as_ref().is_some_and(|prop| {
-                prop.module_id == cycle.module_id && prop.is_overloaded == cycle.is_overloaded
-            });
-            if (overload_synced || active_prop_matches)
-                && cycles::sync_cycle_from_fit_projection_with_shield_boost_mult(
-                    cycle,
-                    fit_projections,
-                    shield_boost_mult,
-                )
-            {
+        for cycle in active_module_cycles.iter_mut().filter(|c| c.ship_id == ship_id) {
+            let overload_synced = prev_proj.as_ref().and_then(|p| p.modules.get(&cycle.module_id)).is_some_and(|old_cp| old_cp.is_overloaded != cycle.is_overloaded)
+                && new_proj.modules.get(&cycle.module_id).is_some_and(|new_cp| new_cp.is_overloaded == cycle.is_overloaded);
+            let active_prop_matches = new_proj.propulsion.as_ref().is_some_and(|prop| prop.module_id == cycle.module_id && prop.is_overloaded == cycle.is_overloaded);
+            if (overload_synced || active_prop_matches) && cycles::sync_cycle_from_fit_projection_with_shield_boost_mult(cycle, fit_projections, shield_boost_mult) {
                 synced_any_cycle = true;
             }
         }
     }
 
     if synced_any_cycle {
-        reconcile_tackle_and_bubbles(
-            ballpark,
-            active_module_cycles,
-            base_scramble_strengths,
-            base_core_strengths,
-            db_opt,
-            deactivation_hook,
-        );
+        reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths, db_opt, deactivation_hook);
     }
     ballpark.recompute_ball_attributes(ship_id);
     true
@@ -402,44 +307,23 @@ pub(crate) fn apply_set_movement_mode_command(
                 let new_evs: Vec<DestinyEvent> = ballpark.pending_events[pre_ev_len..].to_vec();
                 let deact_guard = read_hook();
                 for ev in &new_evs {
-                    if let DestinyEvent::OnTarget {
-                        mode: m,
-                        source_id,
-                        target_id,
-                    } = ev
-                    {
+                    if let DestinyEvent::OnTarget { mode: m, source_id, target_id } = ev {
                         if m == "lost" {
                             on_target_unlocked_in_actor(
-                                ballpark,
-                                active_module_cycles,
-                                base_scramble_strengths,
-                                base_core_strengths,
-                                db_opt,
-                                *source_id,
-                                Some(*target_id),
-                                deact_guard.as_ref(),
+                                ballpark, active_module_cycles, base_scramble_strengths,
+                                base_core_strengths, db_opt, *source_id, Some(*target_id), deact_guard.as_ref(),
                             );
                         }
                     }
                 }
                 cycles::flush_target_lost_notifications(
-                    ballpark,
-                    &new_evs,
-                    db_opt.as_ref(),
-                    pending_notifications_opt
-                        .as_deref()
-                        .map(|r| r as &dyn AnyRwLock<_>),
-                    notify_tx_opt.as_ref(),
+                    ballpark, &new_evs, db_opt.as_ref(),
+                    pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>), notify_tx_opt.as_ref(),
                 );
                 let mut idx = pre_ev_len;
                 while idx < ballpark.pending_events.len() {
-                    let drop_ev = matches!(
-                        &ballpark.pending_events[idx],
-                        DestinyEvent::TargetLockFailed { .. }
-                    ) || matches!(
-                        &ballpark.pending_events[idx],
-                        DestinyEvent::OnTarget { mode, .. } if mode == "lost"
-                    );
+                    let drop_ev = matches!(&ballpark.pending_events[idx], DestinyEvent::TargetLockFailed { .. })
+                        || matches!(&ballpark.pending_events[idx], DestinyEvent::OnTarget { mode, .. } if mode == "lost");
                     if drop_ev {
                         ballpark.pending_events.remove(idx);
                     } else {
@@ -519,7 +403,7 @@ fn run_movement_breaking_protection(
     ball_id: BallId,
     char_id: Option<CharacterId>,
     reason: ProtectionBreakReason,
-    location_invuln_until_unix: Option<u64>,
+    location_invuln: Option<LocationInvulnToken>,
     real_now_unix: u64,
     op: impl FnOnce(&mut ActorExecCtx<'_>) -> Result<u64, String>,
 ) -> Result<(u64, ProtectionBreakEvents), String> {
@@ -536,7 +420,7 @@ fn run_movement_breaking_protection(
             ball_id,
             char_id,
             reason,
-            location_invuln_until_unix,
+            location_invuln,
             real_now_unix,
             pre_snap,
         ),
@@ -586,7 +470,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             char_id,
             mode,
             reason,
-            location_invuln_until_unix,
+            location_invuln,
             real_now_unix,
             reply,
         } => {
@@ -595,7 +479,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 ball_id,
                 char_id,
                 reason,
-                location_invuln_until_unix,
+                location_invuln,
                 real_now_unix,
                 |ctx| run_set_movement_mode_from_ctx(ctx, ball_id, mode, None),
             );
@@ -608,7 +492,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             mode,
             provenance,
             reason,
-            location_invuln_until_unix,
+            location_invuln,
             real_now_unix,
             reply,
         } => {
@@ -617,7 +501,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 ball_id,
                 char_id,
                 reason,
-                location_invuln_until_unix,
+                location_invuln,
                 real_now_unix,
                 |ctx| run_set_movement_mode_from_ctx(ctx, ball_id, mode, Some(provenance)),
             );
@@ -643,7 +527,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             char_id,
             point,
             reason,
-            location_invuln_until_unix,
+            location_invuln,
             real_now_unix,
             reply,
         } => {
@@ -652,7 +536,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 ball_id,
                 char_id,
                 reason,
-                location_invuln_until_unix,
+                location_invuln,
                 real_now_unix,
                 |ctx| {
                     ctx.ballpark.goto_point(ball_id, point)?;
@@ -668,34 +552,16 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
-        SystemCommand::TrackModuleReloadSim {
-            module_id,
-            ship_id: _,
-            remaining_sim_s,
-        } => {
+        SystemCommand::TrackModuleReloadSim { module_id, ship_id: _, remaining_sim_s } => {
             if remaining_sim_s.is_finite() && remaining_sim_s > 0.0 {
-                let now_unix = exec_ctx
-                    .actor_st
-                    .db_opt
-                    .as_ref()
-                    .map(|db| db.clock().now_unix_secs())
-                    .unwrap_or(0);
-                let raw_tidi = f64::from_bits(
-                    exec_ctx
-                        .tidi_factor_bits_actor
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                );
-                let tidi = if raw_tidi.is_finite() {
-                    raw_tidi.clamp(0.10, 1.0)
-                } else {
-                    1.0
-                };
+                let now_unix = exec_ctx.actor_st.db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or(0);
+                let raw_tidi = f64::from_bits(exec_ctx.tidi_factor_bits_actor.load(std::sync::atomic::Ordering::Relaxed));
+                let tidi = if raw_tidi.is_finite() { raw_tidi.clamp(0.10, 1.0) } else { 1.0 };
                 exec_ctx.actor_st.module_reload_sim_remaining.insert(
                     module_id,
                     ModuleReloadSimEntry {
                         remaining_sim_s,
-                        min_wall_until_unix: now_unix
-                            .saturating_add(remaining_sim_s.ceil().max(1.0) as u64),
+                        min_wall_until_unix: now_unix.saturating_add(remaining_sim_s.ceil().max(1.0) as u64),
                         tidi_stretched: tidi < 0.995,
                     },
                 );
@@ -714,13 +580,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             None
         }
         SystemCommand::ModifyCombatState { ball_id, f, reply } => {
-            let Some(mut cs) = exec_ctx
-                .ballpark
-                .balls
-                .contains_key(&ball_id)
-                .then(|| exec_ctx.ballpark.combat_states.get(&ball_id).cloned())
-                .flatten()
-            else {
+            let Some(mut cs) = exec_ctx.ballpark.balls.contains_key(&ball_id).then(|| exec_ctx.ballpark.combat_states.get(&ball_id).cloned()).flatten() else {
                 defer_reply(exec_ctx.deferred_replies, reply, None);
                 return None;
             };
@@ -728,11 +588,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             commit_combat_state_update(exec_ctx, ball_id, cs);
             let updated = exec_ctx.ballpark.combat_states.get(&ball_id).cloned();
             if let (Some(db), Some(ref ucs)) = (&exec_ctx.actor_st.db_opt, &updated) {
-                crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
-                    db,
-                    exec_ctx.solar_system_id,
-                    std::iter::once((ball_id, ucs)),
-                );
+                crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(db, exec_ctx.solar_system_id, std::iter::once((ball_id, ucs)));
             }
             defer_reply(exec_ctx.deferred_replies, reply, updated);
             None
@@ -742,14 +598,8 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             let ship_id = cycle.ship_id;
             let deact_guard = super::protection::read_deact_hook(exec_ctx);
             let res = handle_add_module_cycle(
-                exec_ctx.ballpark,
-                &mut exec_ctx.actor_st.active_module_cycles,
-                &exec_ctx.actor_st.base_scramble_strengths,
-                &exec_ctx.actor_st.base_core_strengths,
-                &exec_ctx.actor_st.sde_opt,
-                &exec_ctx.actor_st.db_opt,
-                deact_guard.as_ref(),
-                cycle,
+                exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
+                &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.sde_opt, &exec_ctx.actor_st.db_opt, deact_guard.as_ref(), cycle,
             );
             if res.is_ok() {
                 exec_ctx.actor_st.weapon_cycle_start_modules.remove(&cyc_key);
@@ -765,39 +615,18 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
-        SystemCommand::RemoveModuleCycle {
-            ship_id,
-            module_id,
-            reply,
-        } => {
+        SystemCommand::RemoveModuleCycle { ship_id, module_id, reply } => {
             let mut remaining_cooldown = None;
-            exec_ctx
-                .actor_st
-                .weapon_cycle_start_modules
-                .remove(&(ship_id, module_id));
+            exec_ctx.actor_st.weapon_cycle_start_modules.remove(&(ship_id, module_id));
             super::protection::snapshot_tackle_totals_in_actor(exec_ctx);
-            if let Some(pos) = exec_ctx
-                .actor_st
-                .active_module_cycles
-                .iter()
-                .position(|c| c.ship_id == ship_id && c.module_id == module_id)
-            {
+            if let Some(pos) = exec_ctx.actor_st.active_module_cycles.iter().position(|c| c.ship_id == ship_id && c.module_id == module_id) {
                 let removed = exec_ctx.actor_st.active_module_cycles.remove(pos);
-                let rem_cycle = (removed.duration_s - removed.elapsed_s).max(0.0);
-                remaining_cooldown = Some(rem_cycle + removed.reactivation_delay_s);
-                cleanup_removed_module_cycle(
-                    exec_ctx.ballpark,
-                    &removed,
-                    &exec_ctx.actor_st.db_opt,
-                );
+                remaining_cooldown = Some((removed.duration_s - removed.elapsed_s).max(0.0) + removed.reactivation_delay_s);
+                cleanup_removed_module_cycle(exec_ctx.ballpark, &removed, &exec_ctx.actor_st.db_opt);
                 let deact_guard = super::protection::read_deact_hook(exec_ctx);
                 reconcile_tackle_and_bubbles(
-                    exec_ctx.ballpark,
-                    &mut exec_ctx.actor_st.active_module_cycles,
-                    &exec_ctx.actor_st.base_scramble_strengths,
-                    &exec_ctx.actor_st.base_core_strengths,
-                    &exec_ctx.actor_st.db_opt,
-                    deact_guard.as_ref(),
+                    exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
+                    &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.db_opt, deact_guard.as_ref(),
                 );
                 sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
             }
@@ -805,68 +634,26 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             defer_reply(exec_ctx.deferred_replies, reply, Ok(remaining_cooldown));
             None
         }
-        SystemCommand::RequestCycleDeactivation {
-            ship_id,
-            module_id,
-            reply,
-        } => {
-            let updated = if let Some(cycle) = exec_ctx
-                .actor_st
-                .active_module_cycles
-                .iter_mut()
-                .find(|c| c.ship_id == ship_id && c.module_id == module_id)
-            {
-                let is_sde_paid_group = exec_ctx
-                    .actor_st
-                    .sde_opt
-                    .as_ref()
-                    .and_then(|s| s.types.get(&cycle.module_type_id))
-                    .is_some_and(|t| {
-                        matches!(t.group_id, 62 | 63 | 68 | 201 | 325 | 585 | 1199 | 1698)
-                    });
-                if cycle.has_paid_end_of_cycle_effect() || is_sde_paid_group {
-                    cycle.repeat = 0;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
+        SystemCommand::RequestCycleDeactivation { ship_id, module_id, reply } => {
+            let updated = if let Some(cycle) = exec_ctx.actor_st.active_module_cycles.iter_mut().find(|c| c.ship_id == ship_id && c.module_id == module_id) {
+                let is_sde_paid_group = exec_ctx.actor_st.sde_opt.as_ref().and_then(|s| s.types.get(&cycle.module_type_id))
+                    .is_some_and(|t| matches!(t.group_id, 62 | 63 | 68 | 201 | 325 | 585 | 1199 | 1698));
+                if cycle.has_paid_end_of_cycle_effect() || is_sde_paid_group { cycle.repeat = 0; true } else { false }
+            } else { false };
             defer_reply(exec_ctx.deferred_replies, reply, updated);
             None
         }
-        SystemCommand::HasModuleCycle {
-            ship_id,
-            module_id,
-            reply,
-        } => {
-            let exists = exec_ctx
-                .actor_st
-                .active_module_cycles
-                .iter()
-                .any(|c| c.ship_id == ship_id && c.module_id == module_id);
+        SystemCommand::HasModuleCycle { ship_id, module_id, reply } => {
+            let exists = exec_ctx.actor_st.active_module_cycles.iter().any(|c| c.ship_id == ship_id && c.module_id == module_id);
             defer_reply(exec_ctx.deferred_replies, reply, exists);
             None
         }
-        SystemCommand::ReconcileModuleCycleBeforeActivate {
-            ship_id,
-            module_id,
-            now_unix,
-            reply,
-        } => {
+        SystemCommand::ReconcileModuleCycleBeforeActivate { ship_id, module_id, now_unix, reply } => {
             let deact_guard = super::protection::read_deact_hook(exec_ctx);
             let res = reconcile_module_cycle_before_activate_in_actor(
-                exec_ctx.ballpark,
-                &mut exec_ctx.actor_st.active_module_cycles,
-                &exec_ctx.actor_st.base_scramble_strengths,
-                &exec_ctx.actor_st.base_core_strengths,
-                &exec_ctx.actor_st.sde_opt,
-                &exec_ctx.actor_st.db_opt,
-                deact_guard.as_ref(),
-                ship_id,
-                module_id,
-                now_unix,
+                exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
+                &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.sde_opt, &exec_ctx.actor_st.db_opt,
+                deact_guard.as_ref(), ship_id, module_id, now_unix,
             );
             if res.1 {
                 super::protection::sync_active_ships_cache(exec_ctx);
@@ -875,24 +662,12 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
-        SystemCommand::UpdateModuleOverload {
-            ship_id,
-            module_id,
-            is_overloaded,
-            reply,
-        } => {
+        SystemCommand::UpdateModuleOverload { ship_id, module_id, is_overloaded, reply } => {
             let deact_guard = super::protection::read_deact_hook(exec_ctx);
             let updated = handle_update_module_overload(
-                exec_ctx.ballpark,
-                &mut exec_ctx.actor_st.active_module_cycles,
-                &exec_ctx.actor_st.base_scramble_strengths,
-                &exec_ctx.actor_st.base_core_strengths,
-                &exec_ctx.actor_st.sde_opt,
-                &exec_ctx.actor_st.db_opt,
-                deact_guard.as_ref(),
-                ship_id,
-                module_id,
-                is_overloaded,
+                exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
+                &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.sde_opt, &exec_ctx.actor_st.db_opt,
+                deact_guard.as_ref(), ship_id, module_id, is_overloaded,
             );
             defer_reply(exec_ctx.deferred_replies, reply, updated);
             None
@@ -900,19 +675,11 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
         SystemCommand::StopNonWarpModuleCycles { ship_id, reply } => {
             let deact_guard = super::protection::read_deact_hook(exec_ctx);
             remove_non_warp_ship_module_cycles(
-                exec_ctx.ballpark,
-                &mut exec_ctx.actor_st.active_module_cycles,
-                &exec_ctx.actor_st.base_scramble_strengths,
-                &exec_ctx.actor_st.base_core_strengths,
-                &exec_ctx.actor_st.db_opt,
-                ship_id,
-                deact_guard.as_ref(),
+                exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
+                &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.db_opt, ship_id, deact_guard.as_ref(),
             );
             let cycles = &exec_ctx.actor_st.active_module_cycles;
-            exec_ctx
-                .actor_st
-                .weapon_cycle_start_modules
-                .retain(|&(s_id, m_id)| cycles.iter().any(|c| c.ship_id == s_id && c.module_id == m_id));
+            exec_ctx.actor_st.weapon_cycle_start_modules.retain(|&(s_id, m_id)| cycles.iter().any(|c| c.ship_id == s_id && c.module_id == m_id));
             sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
             super::protection::sync_positions_and_active_ships(exec_ctx);
             defer_reply(exec_ctx.deferred_replies, reply, ());
@@ -921,20 +688,12 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
         SystemCommand::ApplyFitProjection { ship_id, projection, reply } => {
             let deact_guard = super::protection::read_deact_hook(exec_ctx);
             let applied = apply_fit_projection_with_cycles_in_actor(
-                exec_ctx.ballpark,
-                &mut exec_ctx.actor_st.fit_projections,
-                &mut exec_ctx.actor_st.active_module_cycles,
-                &exec_ctx.actor_st.base_scramble_strengths,
-                &exec_ctx.actor_st.base_core_strengths,
-                &exec_ctx.actor_st.db_opt,
-                deact_guard.as_ref(),
-                ship_id,
-                projection,
+                exec_ctx.ballpark, &mut exec_ctx.actor_st.fit_projections, &mut exec_ctx.actor_st.active_module_cycles,
+                &exec_ctx.actor_st.base_scramble_strengths, &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.db_opt,
+                deact_guard.as_ref(), ship_id, projection,
             );
             sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
-            if let Some(tx) = reply {
-                defer_reply(exec_ctx.deferred_replies, tx, applied);
-            }
+            if let Some(tx) = reply { defer_reply(exec_ctx.deferred_replies, tx, applied); }
             None
         }
         SystemCommand::CurrentTick { reply } => {
@@ -1004,12 +763,12 @@ impl SystemHandle {
         char_id: Option<CharacterId>,
         mode: MovementMode,
         reason: ProtectionBreakReason,
-        location_invuln_until_unix: Option<u64>,
+        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
     ) -> Result<(u64, ProtectionBreakEvents), String> {
         super::protection::call_actor_result(self, "SetMovementModeBreakingProtection", |reply| {
             SystemCommand::SetMovementModeBreakingProtection {
-                ball_id, char_id, mode, reason, location_invuln_until_unix, real_now_unix, reply,
+                ball_id, char_id, mode, reason, location_invuln, real_now_unix, reply,
             }
         }).await
     }
@@ -1023,14 +782,14 @@ impl SystemHandle {
         mode: MovementMode,
         provenance: WarpProvenance,
         reason: ProtectionBreakReason,
-        location_invuln_until_unix: Option<u64>,
+        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
     ) -> Result<(u64, ProtectionBreakEvents), String> {
         super::protection::call_actor_result(
             self,
             "SetWarpMovementModeBreakingProtection",
             |reply| SystemCommand::SetWarpMovementModeBreakingProtection {
-                ball_id, char_id, mode, provenance, reason, location_invuln_until_unix, real_now_unix, reply,
+                ball_id, char_id, mode, provenance, reason, location_invuln, real_now_unix, reply,
             },
         ).await
     }
@@ -1042,12 +801,12 @@ impl SystemHandle {
         char_id: Option<CharacterId>,
         point: DVec3,
         reason: ProtectionBreakReason,
-        location_invuln_until_unix: Option<u64>,
+        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
     ) -> Result<(u64, ProtectionBreakEvents), String> {
         super::protection::call_actor_result(self, "GotoPointBreakingProtection", |reply| {
             SystemCommand::GotoPointBreakingProtection {
-                ball_id, char_id, point, reason, location_invuln_until_unix, real_now_unix, reply,
+                ball_id, char_id, point, reason, location_invuln, real_now_unix, reply,
             }
         }).await
     }

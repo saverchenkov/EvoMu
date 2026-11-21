@@ -788,16 +788,33 @@ pub struct AtomicActivateCycleRequest {
     pub allow_while_cloaked: bool,
     pub break_protection: bool,
     pub break_reason: ProtectionBreakReason,
-    /// Optional caller-observed `location_change_invuln` expiry (`unix secs`) folded atomically.
-    pub location_change_invuln_until_unix: Option<u64>,
+    /// Optional caller-observed `location_change_invuln` token folded atomically.
+    pub location_change_invuln: Option<LocationInvulnToken>,
     pub real_now_unix: u64,
+}
+
+/// Lock rank for [`LocationInvulnLedger`], strictly between `RANK_WAL_LOCK (43)` and `RANK_LEAF (60)`.
+pub const RANK_INVULN_LEDGER: u16 = 55;
+
+/// Monotonically-sequenced `location_change_invuln` token (`#1486`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocationInvulnToken {
+    pub seq: u64,
+    pub until_unix: u64,
+}
+
+/// Authoritative sequence ledger pairing `ctx.location_change_invuln` with monotonic tokens (`#1486`).
+#[derive(Debug, Clone, Default)]
+pub struct LocationInvulnLedger {
+    pub next_seq: u64,
+    pub by_char: HashMap<CharacterId, LocationInvulnToken>,
 }
 
 /// Actor mirror sync operation for `location_change_invuln` (`#1486`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocationChangeInvulnSyncOp {
-    Grant(u64),
-    ClearUpTo(u64),
+    Grant(LocationInvulnToken),
+    ClearUpTo { seq: u64 },
 }
 
 /// Structured outcome returned by [`SystemCommand::ActivateModuleCycleAtomic`] (`#1486`).
@@ -811,8 +828,8 @@ pub struct AtomicActivateCycleOutcome {
 pub(crate) struct SystemActorState {
     pub active_module_cycles: Vec<ActiveModuleCycle>,
     pub protection_registry: HashMap<BallId, ActorShipProtection>,
-    pub location_invuln_by_char: HashMap<CharacterId, u64>,
-    pub location_invuln_consumed_until_by_char: HashMap<CharacterId, u64>,
+    pub location_invuln_by_char: HashMap<CharacterId, LocationInvulnToken>,
+    pub location_invuln_consumed_seq_by_char: HashMap<CharacterId, u64>,
     pub pending_anchoring_disruptors: Vec<PendingAnchoringDisruptor>,
     pub active_nanite_repairs: Vec<ActiveNaniteRepair>,
     pub ship_rack_heat: HashMap<BallId, [f64; 3]>,
@@ -1319,7 +1336,7 @@ pub enum SystemCommand {
         ball_id: BallId,
         char_id: Option<CharacterId>,
         reason: ProtectionBreakReason,
-        location_invuln_until_unix: Option<u64>,
+        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
         reply: oneshot::Sender<Result<ProtectionBreakEvents, String>>,
     },
@@ -1327,7 +1344,7 @@ pub enum SystemCommand {
         ball_id: BallId,
         char_id: Option<CharacterId>,
         reason: ProtectionBreakReason,
-        location_invuln_until_unix: Option<u64>,
+        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
         reply: oneshot::Sender<Result<ProtectionBreakEvents, String>>,
     },
@@ -1348,7 +1365,7 @@ pub enum SystemCommand {
         char_id: Option<CharacterId>,
         mode: MovementMode,
         reason: ProtectionBreakReason,
-        location_invuln_until_unix: Option<u64>,
+        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
         reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
     },
@@ -1358,7 +1375,7 @@ pub enum SystemCommand {
         mode: MovementMode,
         provenance: WarpProvenance,
         reason: ProtectionBreakReason,
-        location_invuln_until_unix: Option<u64>,
+        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
         reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
     },
@@ -1367,7 +1384,7 @@ pub enum SystemCommand {
         char_id: Option<CharacterId>,
         point: glam::DVec3,
         reason: ProtectionBreakReason,
-        location_invuln_until_unix: Option<u64>,
+        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
         reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
     },

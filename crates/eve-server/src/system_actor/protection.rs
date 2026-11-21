@@ -39,7 +39,7 @@ pub(crate) fn sync_ball_protection_in_actor(
         .and_then(|meta| meta.char_id)
         .filter(|&cid| cid > 0);
     let location_change_invuln_until_unix = owner_char_id
-        .and_then(|cid| actor_st.location_invuln_by_char.get(&cid).copied());
+        .and_then(|cid| actor_st.location_invuln_by_char.get(&cid).map(|tok| tok.until_unix));
     let has_active_cloak_cycle = actor_st
         .active_module_cycles
         .iter()
@@ -117,60 +117,67 @@ fn clear_protection_registry_location_invuln(
     }
 }
 
-/// Consumes an active `location_change_invuln` grant matching `expected_until` inside the actor.
+fn advance_location_invuln_consumed_seq(
+    actor_st: &mut SystemActorState,
+    cid: CharacterId,
+    seq: u64,
+) {
+    actor_st
+        .location_invuln_consumed_seq_by_char
+        .entry(cid)
+        .and_modify(|prev| *prev = (*prev).max(seq))
+        .or_insert(seq);
+}
+
+/// Consumes an active `location_change_invuln` grant matching `expected` token inside the actor.
 ///
 /// Returns `(cancelled_now, already_consumed_by_concurrent_command)` while never re-inserting
-/// stale peeked expirations or overwriting newer grants (`cur > exp`) (`#1486`).
+/// stale peeked tokens or overwriting newer grants (`cur.seq > exp.seq`) (`#1486`).
 fn consume_location_change_invuln(
     actor_st: &mut SystemActorState,
     owner_char_id: Option<CharacterId>,
-    expected_until: Option<u64>,
+    expected: Option<LocationInvulnToken>,
     real_now_unix: u64,
     clear_if_active: bool,
 ) -> (bool, bool) {
     if !clear_if_active {
         return (false, false);
     }
-    actor_st
-        .location_invuln_consumed_until_by_char
-        .retain(|_, until| *until > real_now_unix);
     let Some(cid) = owner_char_id else {
-        return (expected_until.is_some_and(|until| until > real_now_unix), false);
+        return (expected.is_some_and(|tok| tok.until_unix > real_now_unix), false);
     };
-    if let Some(cur) = actor_st.location_invuln_by_char.get(&cid).copied() {
-        if cur <= real_now_unix {
-            actor_st.location_invuln_by_char.remove(&cid);
-            clear_protection_registry_location_invuln(actor_st, cid);
-            return (false, false);
-        }
-        if expected_until.is_some_and(|exp| cur <= exp) {
-            let consumed_floor = expected_until.unwrap_or(cur).max(cur);
-            actor_st.location_invuln_by_char.remove(&cid);
-            actor_st
-                .location_invuln_consumed_until_by_char
-                .entry(cid)
-                .and_modify(|prev| *prev = (*prev).max(consumed_floor))
-                .or_insert(consumed_floor);
-            clear_protection_registry_location_invuln(actor_st, cid);
-            return (true, false);
-        }
-        return (false, false);
-    }
-    let Some(exp) = expected_until.filter(|&until| until > real_now_unix) else {
+    let Some(exp) = expected else {
         return (false, false);
     };
     let prev_consumed = actor_st
-        .location_invuln_consumed_until_by_char
+        .location_invuln_consumed_seq_by_char
         .get(&cid)
         .copied()
         .unwrap_or(0);
-    if prev_consumed >= exp {
+    if let Some(cur) = actor_st.location_invuln_by_char.get(&cid).copied() {
+        if cur.seq > exp.seq {
+            return (false, prev_consumed >= exp.seq);
+        }
+        actor_st.location_invuln_by_char.remove(&cid);
+        clear_protection_registry_location_invuln(actor_st, cid);
+        if cur.seq == exp.seq {
+            advance_location_invuln_consumed_seq(actor_st, cid, exp.seq);
+            return (cur.until_unix > real_now_unix, false);
+        }
+        if prev_consumed >= exp.seq {
+            return (false, true);
+        }
+        advance_location_invuln_consumed_seq(actor_st, cid, exp.seq);
+        return (exp.until_unix > real_now_unix, false);
+    }
+    if prev_consumed >= exp.seq {
         clear_protection_registry_location_invuln(actor_st, cid);
         return (false, true);
     }
-    actor_st
-        .location_invuln_consumed_until_by_char
-        .insert(cid, exp);
+    if exp.until_unix <= real_now_unix {
+        return (false, false);
+    }
+    advance_location_invuln_consumed_seq(actor_st, cid, exp.seq);
     clear_protection_registry_location_invuln(actor_st, cid);
     (true, false)
 }
@@ -313,31 +320,19 @@ fn strip_cloak_cycles_for_ship(
     }
     if !removed_cycles.is_empty() {
         reconcile_tackle_and_bubbles(
-            exec_ctx.ballpark,
-            &mut exec_ctx.actor_st.active_module_cycles,
-            &exec_ctx.actor_st.base_scramble_strengths,
-            &exec_ctx.actor_st.base_core_strengths,
-            &exec_ctx.actor_st.db_opt,
-            deact_guard.as_ref(),
+            exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles,
+            &exec_ctx.actor_st.base_scramble_strengths, &exec_ctx.actor_st.base_core_strengths,
+            &exec_ctx.actor_st.db_opt, deact_guard.as_ref(),
         );
         sync_active_ships_cache(exec_ctx);
     }
     removed_cycles
 }
 
-fn clear_slim_cloak_meta(
-    ballpark: &mut Ballpark,
-    ball_id: BallId,
-    deactivated_by_ballpark: bool,
-) -> bool {
-    if deactivated_by_ballpark {
-        return true;
-    }
+fn clear_slim_cloak_meta(ballpark: &mut Ballpark, ball_id: BallId, deactivated_by_ballpark: bool) -> bool {
+    if deactivated_by_ballpark { return true; }
     if let Some(mut meta) = ballpark.ball_slim_meta.get(&ball_id).cloned() {
-        if meta.is_cloaked {
-            meta.is_cloaked = false;
-            return ballpark.change_slim_item(ball_id, meta);
-        }
+        if meta.is_cloaked { meta.is_cloaked = false; return ballpark.change_slim_item(ball_id, meta); }
     }
     false
 }
@@ -350,7 +345,7 @@ pub(in crate::system_actor) fn break_protection_in_actor(
     ball_id: BallId,
     char_id: Option<CharacterId>,
     reason: ProtectionBreakReason,
-    location_invuln_until_unix: Option<u64>,
+    location_invuln: Option<LocationInvulnToken>,
     real_now_unix: u64,
     pre_existing_snapshot: Option<CombatProtectionSnapshot>,
 ) -> ProtectionBreakEvents {
@@ -359,7 +354,7 @@ pub(in crate::system_actor) fn break_protection_in_actor(
         ball_id,
         char_id,
         reason,
-        location_invuln_until_unix,
+        location_invuln,
         real_now_unix,
         pre_existing_snapshot,
         false,
@@ -372,7 +367,7 @@ fn break_protection_in_actor_impl(
     ball_id: BallId,
     char_id: Option<CharacterId>,
     reason: ProtectionBreakReason,
-    location_invuln_until_unix: Option<u64>,
+    location_invuln: Option<LocationInvulnToken>,
     real_now_unix: u64,
     pre_existing_snapshot: Option<CombatProtectionSnapshot>,
     force_all_cloaks: bool,
@@ -382,7 +377,7 @@ fn break_protection_in_actor_impl(
         consume_location_change_invuln(
             exec_ctx.actor_st,
             owner_char_id,
-            location_invuln_until_unix,
+            location_invuln,
             real_now_unix,
             reason.clears_invuln(),
         );
@@ -559,7 +554,7 @@ pub(in crate::system_actor) fn force_decloak_in_actor(
     ball_id: BallId,
     char_id: Option<CharacterId>,
     reason: ProtectionBreakReason,
-    location_invuln_until_unix: Option<u64>,
+    location_invuln: Option<LocationInvulnToken>,
     real_now_unix: u64,
 ) -> ProtectionBreakEvents {
     break_protection_in_actor_impl(
@@ -567,7 +562,7 @@ pub(in crate::system_actor) fn force_decloak_in_actor(
         ball_id,
         char_id,
         reason,
-        location_invuln_until_unix,
+        location_invuln,
         real_now_unix,
         None,
         true,
@@ -739,7 +734,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             ball_id,
             char_id,
             reason,
-            location_invuln_until_unix,
+            location_invuln,
             real_now_unix,
             reply,
         } => {
@@ -748,7 +743,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 ball_id,
                 char_id,
                 reason,
-                location_invuln_until_unix,
+                location_invuln,
                 real_now_unix,
                 None,
             );
@@ -759,7 +754,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             ball_id,
             char_id,
             reason,
-            location_invuln_until_unix,
+            location_invuln,
             real_now_unix,
             reply,
         } => {
@@ -768,7 +763,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 ball_id,
                 char_id,
                 reason,
-                location_invuln_until_unix,
+                location_invuln,
                 real_now_unix,
             );
             defer_reply(exec_ctx.deferred_replies, reply, Ok(events));
@@ -782,29 +777,36 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
         }
         SystemCommand::SyncLocationChangeInvuln { char_id, op } => {
             match op {
-                LocationChangeInvulnSyncOp::Grant(until) => {
-                    exec_ctx.actor_st.location_invuln_by_char.insert(char_id, until);
-                    exec_ctx.actor_st.location_invuln_consumed_until_by_char.remove(&char_id);
-                    for entry in exec_ctx.actor_st.protection_registry.values_mut() {
-                        if entry.owner_char_id == Some(char_id) {
-                            entry.location_change_invuln_until_unix = Some(until);
-                        }
-                    }
-                }
-                LocationChangeInvulnSyncOp::ClearUpTo(cleared_until) => {
-                    if !exec_ctx
+                LocationChangeInvulnSyncOp::Grant(tok) => {
+                    let consumed = exec_ctx
+                        .actor_st
+                        .location_invuln_consumed_seq_by_char
+                        .get(&char_id)
+                        .copied()
+                        .unwrap_or(0);
+                    let has_newer = exec_ctx
                         .actor_st
                         .location_invuln_by_char
                         .get(&char_id)
-                        .is_some_and(|&cur| cur > cleared_until)
+                        .is_some_and(|cur| cur.seq >= tok.seq);
+                    if tok.seq > consumed && !has_newer {
+                        exec_ctx.actor_st.location_invuln_by_char.insert(char_id, tok);
+                        for entry in exec_ctx.actor_st.protection_registry.values_mut() {
+                            if entry.owner_char_id == Some(char_id) {
+                                entry.location_change_invuln_until_unix = Some(tok.until_unix);
+                            }
+                        }
+                    }
+                }
+                LocationChangeInvulnSyncOp::ClearUpTo { seq } => {
+                    advance_location_invuln_consumed_seq(exec_ctx.actor_st, char_id, seq);
+                    if exec_ctx
+                        .actor_st
+                        .location_invuln_by_char
+                        .get(&char_id)
+                        .is_some_and(|cur| cur.seq <= seq)
                     {
                         exec_ctx.actor_st.location_invuln_by_char.remove(&char_id);
-                        exec_ctx
-                            .actor_st
-                            .location_invuln_consumed_until_by_char
-                            .entry(char_id)
-                            .and_modify(|prev| *prev = (*prev).max(cleared_until))
-                            .or_insert(cleared_until);
                         clear_protection_registry_location_invuln(exec_ctx.actor_st, char_id);
                     }
                 }
@@ -1160,11 +1162,11 @@ impl SystemHandle {
         ball_id: BallId,
         char_id: Option<CharacterId>,
         reason: ProtectionBreakReason,
-        location_invuln_until_unix: Option<u64>,
+        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
     ) -> Result<ProtectionBreakEvents, String> {
         call_actor_result(self, "BreakProtection", |reply| SystemCommand::BreakProtection {
-            ball_id, char_id, reason, location_invuln_until_unix, real_now_unix, reply,
+            ball_id, char_id, reason, location_invuln, real_now_unix, reply,
         }).await
     }
 
@@ -1175,11 +1177,11 @@ impl SystemHandle {
         ball_id: BallId,
         char_id: Option<CharacterId>,
         reason: ProtectionBreakReason,
-        location_invuln_until_unix: Option<u64>,
+        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
     ) -> Result<ProtectionBreakEvents, String> {
         call_actor_result(self, "ForceDecloak", |reply| SystemCommand::ForceDecloak {
-            ball_id, char_id, reason, location_invuln_until_unix, real_now_unix, reply,
+            ball_id, char_id, reason, location_invuln, real_now_unix, reply,
         }).await
     }
 
