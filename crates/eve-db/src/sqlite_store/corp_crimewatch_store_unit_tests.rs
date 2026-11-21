@@ -833,3 +833,366 @@ fn corp_crimewatch_fail_closed_load_preserves_snapshot_on_corrupt_row() {
     assert_eq!(snap.wh_polarizations.get(&(90_000_001, 31_000_001)), Some(&4242));
     assert_eq!(snap.war_state.next_negotiation_id, 5);
 }
+
+#[test]
+fn corp_crimewatch_all_substruct_fields_survive_tx_commit_and_sqlite_reopen() {
+    use crate::durable_domain_types::*;
+    use crate::persistence::WorldRepository;
+    use crate::tx_engine::TxError;
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+    let path = temp_corp_crimewatch_db_path("all_substruct_fields_roundtrip");
+    let _ = std::fs::remove_file(&path);
+    let repo = WorldRepository::open_sqlite(&path).expect("open_sqlite");
+
+    let expected_combat = PersistedCombatCrimewatchState {
+        sec_status_transactions: HashMap::from([(
+            90_000_001,
+            vec![PersistedSecStatusTransaction {
+                timestamp_unix: 1_700_000_100,
+                old_sec: 1.5,
+                new_sec: 1.25,
+                delta: -0.25,
+                reason: "pod_aggression".to_string(),
+                solar_system_id: 30_000_142,
+                event_type_id: 7,
+                other_owner_id: Some(90_000_002),
+                other_type_id: Some(587),
+            }],
+        )]),
+        safety_levels: HashMap::from([(90_000_001, 2)]),
+        drone_settings: HashMap::from([(90_000_001, (true, false))]),
+        limited_engagements: HashMap::from([(
+            90_000_001,
+            HashMap::from([(90_000_002, 1_700_000_900)]),
+        )]),
+        npc_timers: HashMap::from([(90_000_001, 1_700_000_300)]),
+        disapproval_flags: HashMap::from([(90_000_001, 1_700_000_400)]),
+        duel_challenges: HashMap::from([((90_000_001, 90_000_002), 1_700_000_500)]),
+        corp_aggression_settings: HashMap::from([(98_000_001, true)]),
+        player_bounty_pool: HashMap::from([(90_000_001, 125_000.5)]),
+        bounty_contributions: HashMap::from([(90_000_001, vec![(90_000_002, 25_000.25)])]),
+        bounty_hunter_claimed: HashMap::from([(90_000_003, 50_000.0)]),
+        kill_right_expires_unix: HashMap::from([(8001, 1_700_008_000)]),
+        kill_right_restricted_to: HashMap::from([(8001, 98_000_001)]),
+        detailed_killmails: HashMap::from([(
+            7001,
+            DetailedKillmail {
+                kill_id: 7001,
+                kill_time_unix: 1_700_000_600,
+                solar_system_id: 30_000_142,
+                victim_character_id: 90_000_001,
+                victim_corporation_id: 98_000_001,
+                victim_alliance_id: Some(99_000_001),
+                victim_ship_type_id: 587,
+                victim_damage_taken: 1_250.5,
+                victim_position: [10.0, 20.0, 30.0],
+                attackers: vec![KillmailAttackerEntry {
+                    character_id: 90_000_002,
+                    corporation_id: 98_000_002,
+                    alliance_id: None,
+                    ship_type_id: 588,
+                    weapon_type_id: 3041,
+                    damage_done: 1_250.5,
+                    final_blow: true,
+                    security_status: 2.5,
+                }],
+                dropped_items: vec![KillmailItemEntry {
+                    type_id: 587,
+                    flag: 0,
+                    qty_dropped: 1,
+                    qty_destroyed: 0,
+                    singleton: false,
+                }],
+                destroyed_items: vec![KillmailItemEntry {
+                    type_id: 3041,
+                    flag: 27,
+                    qty_dropped: 0,
+                    qty_destroyed: 2,
+                    singleton: false,
+                }],
+                total_value_isk: 450_000.0,
+                killmail_hash: "km-hash-7001".to_string(),
+            },
+        )]),
+        pending_bounty_ticks: HashMap::from([((30_000_142, 90_000_001), 15_000.0)]),
+        bounty_tick_next_flush_unix: HashMap::from([((30_000_142, 90_000_001), 1_700_001_200)]),
+        pending_bounty_tick_started_unix: HashMap::from([(
+            (30_000_142, 90_000_001),
+            1_700_000_000,
+        )]),
+        extended_runtime_json: "{\"bounty_flush\":1}".to_string(),
+    };
+
+    let expected_alliance_war = PersistedAllianceWarState {
+        alliances: HashMap::from([(
+            99_000_001,
+            PersistedAllianceMeta {
+                description: "Executor alliance".to_string(),
+                url: "https://example.invalid".to_string(),
+                logo: (1, 2, 3, 4),
+                emblem_entitlements: true,
+                dictatorial: false,
+                executor_votes: HashMap::from([(98_000_001, 98_000_001)]),
+                ..Default::default()
+            },
+        )]),
+        project_meta: HashMap::from([(401, ("Mineral Drive".to_string(), true, false))]),
+        project_details: HashMap::from([(
+            401,
+            PersistedProjectDetails {
+                wallet_division: 2,
+                status: "active".to_string(),
+                creator_id: 90_000_001,
+                created_unix: 1_700_000_050,
+                batch_size: 100,
+                initial_escrow: IskCents(50_000),
+                ..Default::default()
+            },
+        )]),
+    };
+
+    let expected_war = PersistedWarState {
+        wars: HashMap::from([(
+            500,
+            PersistedWarMeta {
+                war_hq_id: Some(60_003_760),
+                open_for_allies: true,
+                finish_at_unix: Some(1_800_000_000),
+            },
+        )]),
+        negotiations: vec![PersistedWarNegotiation {
+            id: 11,
+            war_id: 500,
+            kind: PersistedNegKind::Ally,
+            from_corp: 98_000_009,
+            isk: IskCents(25_000),
+            message: "Offering defense".to_string(),
+            status: "accepted".to_string(),
+            effective_unix: Some(1_700_050_000),
+        }],
+        next_negotiation_id: 12,
+        mutual_invites: HashMap::from([((98_000_001, 98_000_002), 1_700_060_000)]),
+        blocked_mutual_invites: HashMap::from([(98_000_003, true)]),
+        peace_treaties: vec![PersistedPeaceTreaty {
+            war_id: 499,
+            corp_a: 98_000_001,
+            corp_b: 98_000_004,
+            expiry_unix: 1_900_000_000,
+        }],
+        ally_expires_unix: HashMap::from([((500, 98_000_009), 1_750_000_000)]),
+    };
+
+    let expected_fw = PersistedFwState {
+        system_victory_points: HashMap::from([(30_000_142, 420)]),
+        system_advantage: HashMap::from([(30_000_142, (0.35, 0.15))]),
+        battlefield_instances: vec![PersistedBattlefieldRecord {
+            instance_id: 101,
+            solar_system_id: 30_000_142,
+            faction_id: 500_001,
+            name: "Caldari Battlefield".to_string(),
+            capture_progress: 0.5,
+            completed: false,
+        }],
+        battlefield_zones: HashMap::from([(101, [1, 2, 3])]),
+        battlefield_participants: HashMap::from([(101, vec![90_000_001])]),
+        battlefield_pilot_seconds: HashMap::from([(101, HashMap::from([(90_000_001, 45)]))]),
+        battlefield_waves: HashMap::from([(101, 2)]),
+        battlefield_respawn_unix: HashMap::from([(30_000_142, 1_700_002_000)]),
+        fw_complexes: HashMap::from([(201, (30_000_142, "novice".to_string(), 500_001, 0.25, false))]),
+        ihub_lp_donations: HashMap::from([(30_000_142, 5_000)]),
+        ihub_tiers: HashMap::from([(30_000_142, 3)]),
+        ihub_vulnerable: HashMap::from([(30_000_142, true)]),
+        ihub_vulnerable_since_unix: HashMap::from([(30_000_142, 1_700_000_200)]),
+        last_ihub_attacked_unix: HashMap::from([(30_000_142, 1_700_000_250)]),
+        pending_downtime_captures: HashMap::from([(30_000_143, 500_004)]),
+        corp_war_factions: HashMap::from([(98_000_001, 500_001)]),
+        complex_occupants: HashMap::from([(201, vec![(90_000_001, 500_001)])]),
+        supply_sites: HashMap::from([(301, (30_000_142, "depot".to_string(), 500_001))]),
+        direct_enlisted_chars: HashMap::from([(90_000_001, 500_001)]),
+        complex_last_step_unix: HashMap::from([(201, 1_700_000_300)]),
+        complex_capturing_faction: HashMap::from([(201, 500_001)]),
+        complex_seconds_elapsed: HashMap::from([(201, 120)]),
+        complex_guards_cleared: HashMap::from([(201, true)]),
+        complex_tier_cooldowns: HashMap::from([("30000142:novice".to_string(), 1_700_000_900)]),
+        battlefield_npc_waves: HashMap::from([(101, vec![10_001, 10_002])]),
+        stat_events: vec![PersistedFwStatEvent {
+            timestamp_unix: 1_700_000_400,
+            character_id: 90_000_001,
+            corporation_id: 98_000_001,
+            alliance_id: Some(99_000_001),
+            faction_id: 500_001,
+            kills: 3,
+            victory_points: 150,
+        }],
+        historical_char_totals: HashMap::from([(90_000_001, (3, 150))]),
+        historical_corp_totals: HashMap::from([(98_000_001, (3, 150))]),
+        historical_fac_totals: HashMap::from([(500_001, (3, 150))]),
+        historical_ally_totals: HashMap::from([(99_000_001, (3, 150))]),
+    };
+
+    let expected_sov = PersistedSovState {
+        fuel_access_groups: HashMap::from([(6001, 42)]),
+        hacked_hubs: HashMap::from([(6001, 1_700_001_000)]),
+        skyhook_reagents: HashMap::from([(6002, (81_143, 500))]),
+        skyhook_hackable: HashMap::from([(6002, true)]),
+        skyhook_active: BTreeMap::from([(6002, true)]),
+        skyhook_planets: HashMap::from([(6002, 40_009_082)]),
+        skyhook_theft_windows: HashMap::from([(6002, (1_700_000_100, 1_700_003_700))]),
+        sov_hubs: HashMap::from([(
+            6001,
+            PersistedSovHubData {
+                hub_id: 6001,
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 81_561,
+                    online: true,
+                    low_power: false,
+                }],
+                fuel: BTreeMap::from([(81_143, 250)]),
+                workforce: PersistedWorkforceMode::Import {
+                    sources: vec![30_000_142],
+                },
+                last_updated_unix: 1_700_000_500,
+            },
+        )]),
+        mercenary_dens: HashMap::from([(
+            6003,
+            PersistedMercenaryDen {
+                den_id: 6003,
+                type_id: 85_230,
+                owner_char_id: 90_000_001,
+                skyhook_id: 6002,
+                solar_system_id: 30_000_142,
+                planet_id: 40_009_082,
+                enabled: true,
+                cargo_extraction_enabled: false,
+                development_level: 2,
+                anarchy_level: 1,
+                infomorphs: 15,
+                simulated_at_unix: 1_700_000_600,
+                next_activity_generation_unix: 1_700_004_200,
+            },
+        )]),
+        mercenary_activities: BTreeMap::from([(
+            "act-1".to_string(),
+            PersistedMercenaryActivity {
+                uuid: vec![1, 2, 3, 4],
+                den_id: 6003,
+                solar_system_id: 30_000_142,
+                dungeon_id: 1234,
+                started: true,
+                started_by: 90_000_001,
+                expiry_unix: 1_700_005_000,
+                development_impact: 1,
+                anarchy_impact: -1,
+                infomorph_bonus: 5,
+            },
+        )]),
+        next_mercenary_activity_seq: 9,
+        skyhook_reagent_bays: HashMap::from([(6002, (81_143, 100, 50, 1_700_000_700))]),
+        mercenary_den_reinforcement: HashMap::from([(6003, (1_700_000_800, 1_700_004_400, 1))]),
+        mercenary_den_tax_pct: HashMap::from([(6003, 10)]),
+        command_nodes: HashMap::from([(7001, (6001, 30_000_142, 99_000_001))]),
+        sov_npc_kills: HashMap::from([(30_000_142, 75)]),
+        sov_mined_units: HashMap::from([(30_000_142, 12_500)]),
+        adm_vulnerability_windows: HashMap::from([(6001, (1_700_001_000, 1_700_011_800))]),
+        skyhook_maturity_rem: HashMap::from([(6002, (1_700_000_000, (1u128 << 80) + 42))]),
+        mercenary_den_evo_rem: HashMap::from([(6003, 600)]),
+        skyhook_last_harvest_unix: HashMap::from([(6002, 1_700_000_950)]),
+        skyhook_silo_links: HashMap::from([(6002, (6004, 98_000_001, 1_700_000_999, 0.75))]),
+        entosis_capture_progress: HashMap::from([(7001, (90_000_001, 98_000_001, 6001, 0.65, 1_700_001_100))]),
+        tenebrex_spool_ready_unix: HashMap::from([(6005, 1_700_001_300)]),
+        tenebrex_spool_notified: HashMap::from([(6005, true)]),
+        sov_claimed_since_unix: HashMap::from([(30_000_142, 1_690_000_000)]),
+        mto_site_balls: HashMap::from([(7002, "mto-beacon".to_string())]),
+        command_node_scores: HashMap::from([(7001, vec![(99_000_001, 40.5)])]),
+        sov_upgrade_combat_npcs: BTreeSet::from([80_001, 80_002]),
+        sov_dev_decay_last_unix: HashMap::from([(30_000_142, 1_700_001_400)]),
+        command_node_regen_last_unix: HashMap::from([(7001, 1_700_001_500)]),
+    };
+
+    let expected_insurgency = PersistedInsurgencyState {
+        campaigns: HashMap::from([(
+            901,
+            PersistedInsurgencyCampaign {
+                campaign_id: 901,
+                pirate_faction_id: 500_010,
+                target_faction_id: 500_001,
+                fob_solar_system_id: 30_000_142,
+                systems: vec![30_000_142, 30_000_143],
+                created_at_unix: 1_700_000_000,
+                forecasting_end_unix: 1_700_003_600,
+                active_end_unix: 1_700_086_400,
+                winddown_end_unix: 1_700_090_000,
+                corruption_points: HashMap::from([(30_000_142, 300)]),
+                suppression_points: HashMap::from([(30_000_142, 150)]),
+            },
+        )]),
+        insurgency_instances: vec![PersistedInsurgencySiteRecord {
+            instance_id: 902,
+            solar_system_id: 30_000_142,
+            site_type: "ambush".to_string(),
+            name: "Pirate Hideout".to_string(),
+            corruption_reward: 12.5,
+            completed: false,
+        }],
+        ice_heist_instances: vec![PersistedIceHeistRecord {
+            instance_id: 903,
+            solar_system_id: 30_000_143,
+            pirate_tankers_saved: 2,
+            empire_tankers_saved: 1,
+            completed: true,
+        }],
+        pirate_ambition_modifier: HashMap::from([(901, 2)]),
+        empire_ambition_modifier: HashMap::from([(901, 1)]),
+        fob_armor_reinforced_until: HashMap::from([(901, 1_700_040_000)]),
+        campaign_contributions: HashMap::from([(901, vec![(90_000_001, 100, 50)])]),
+        campaign_outcomes: HashMap::from([(900, "pirate_victory".to_string())]),
+        surrender_ihub_vulnerable_unix: HashMap::from([(30_000_142, 1_700_095_000)]),
+        active_state_notified: HashSet::from([901, 902]),
+    };
+
+    repo.tx("seed_all_substruct_fields", |wtx| -> Result<(), TxError> {
+        wtx.snap.combat_crimewatch_state = expected_combat.clone().into();
+        wtx.snap.alliance_war_state = expected_alliance_war.clone().into();
+        wtx.snap.war_state = expected_war.clone().into();
+        wtx.snap.fw_runtime = expected_fw.clone().into();
+        wtx.snap.sov_runtime = expected_sov.clone().into();
+        wtx.snap.insurgency_runtime = expected_insurgency.clone().into();
+        Ok(())
+    })
+    .expect("commit all family4 substruct fields");
+    drop(repo);
+
+    let reopened = WorldRepository::open_sqlite(&path).expect("reopen after substruct commit");
+    reopened.with_snapshot(|snap| {
+        assert_eq!(&*snap.combat_crimewatch_state, &expected_combat);
+        assert_eq!(&*snap.alliance_war_state, &expected_alliance_war);
+        assert_eq!(&*snap.war_state, &expected_war);
+        assert_eq!(&*snap.fw_runtime, &expected_fw);
+        assert_eq!(&*snap.sov_runtime, &expected_sov);
+        assert_eq!(&*snap.insurgency_runtime, &expected_insurgency);
+    });
+
+    // Reset persisted scalars back to Default and confirm deletions survive another reopen.
+    reopened
+        .tx("reset_substruct_scalars", |wtx| -> Result<(), TxError> {
+            wtx.snap.war_state.next_negotiation_id = 0;
+            wtx.snap.sov_runtime.next_mercenary_activity_seq = 0;
+            wtx.snap.combat_crimewatch_state.extended_runtime_json.clear();
+            Ok(())
+        })
+        .expect("reset scalars");
+    drop(reopened);
+
+    let reopened_after_reset = WorldRepository::open_sqlite(&path).expect("reopen after scalar reset");
+    reopened_after_reset.with_snapshot(|snap| {
+        assert_eq!(snap.war_state.next_negotiation_id, 0);
+        assert_eq!(snap.sov_runtime.next_mercenary_activity_seq, 0);
+        assert!(snap.combat_crimewatch_state.extended_runtime_json.is_empty());
+        assert_eq!(snap.war_state.ally_expires_unix, expected_war.ally_expires_unix);
+    });
+
+    drop(reopened_after_reset);
+    let _ = std::fs::remove_file(&path);
+}

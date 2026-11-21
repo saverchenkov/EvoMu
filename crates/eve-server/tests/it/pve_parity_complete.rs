@@ -5907,9 +5907,17 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
         (d.parse::<u32>().unwrap(), i.parse::<i64>().unwrap())
     });
     assert_ne!(crimson_did, 47, "Seasonal event site must not use hardcoded dungeon_id 47");
+    let crimson_dng = ctx
+        .sde
+        .dungeons
+        .get(&crimson_did)
+        .expect("Crimson Harvest dungeon must exist in SDE");
     assert!(
-        matches!(crimson_did, 8923 | 8926 | 9238 | 9241 | 8933),
-        "Crimson Harvest must select an authentic SDE seasonal dungeon (got {crimson_did})"
+        crimson_dng.archetype_id.is_some_and(|a| matches!(a, 24 | 31 | 45))
+            && (crimson_dng.name.to_lowercase().contains("crimson")
+                || crimson_dng.name.to_lowercase().contains("tetrimon")),
+        "Crimson Harvest must select an authentic SDE seasonal dungeon (got {crimson_did}: {})",
+        crimson_dng.name
     );
     assert!(
         jita_by_dng.iter().any(|(d, ids)| {
@@ -5975,6 +5983,12 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
     let sys_handle = ctx.systems.get_or_spawn(JITA);
     assert!(sys_handle.get_ball_snapshot(boss_bid).await.ok().flatten().is_some());
     assert!(sys_handle.get_ball_snapshot(details.relay_ball_id).await.ok().flatten().is_some());
+    eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        assert!(rt.npc_entities.contains_key(&boss_bid), "seasonal boss must be in rt.npc_entities");
+        for &ebid in &escort_bids {
+            assert!(rt.npc_entities.contains_key(&ebid), "seasonal escort {ebid} must be in rt.npc_entities");
+        }
+    });
 
     // 3. Approach & hack seasonal Data relay via live hackingMgr RPCs
     let boss_shield_pre = sys_handle
@@ -6005,7 +6019,7 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
         );
     }
 
-    // 4. Destroy seasonal boss via live combat destruction pipeline -> verify FSD loot, ISK, points & cleanup
+    // 4. Destroy seasonal boss first -> escorts remain alive and rewards wait for full objective completion
     let bal_before = ctx.db.with_snapshot(|s| s.characters[&PILOT_A].balance.0);
     let pts_before = ctx.db.with_snapshot(|s| load_season_state_from_blobs(s, PILOT_A).season_points);
     let (_, boss_dead, _) = sys_handle
@@ -6014,6 +6028,37 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
         .expect("damage")
         .expect("seasonal boss exists");
     assert!(boss_dead);
+    for &ebid in &escort_bids {
+        assert!(
+            sys_handle.get_ball_snapshot(ebid).await.ok().flatten().is_some(),
+            "seasonal escort {ebid} must not auto-despawn when boss dies"
+        );
+    }
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&PILOT_A].balance.0),
+        bal_before,
+        "ISK payout must wait until all escorts are also destroyed"
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| load_season_state_from_blobs(s, PILOT_A).season_points),
+        pts_before,
+        "season points must wait until full objective completion"
+    );
+
+    let (_, esc1_dead, _) = sys_handle
+        .apply_damage_with_attacker(escort_bids[0], lethal, Some(PILOT_A))
+        .await
+        .expect("escort 1 damage")
+        .expect("seasonal escort 1 exists");
+    assert!(esc1_dead);
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&PILOT_A].balance.0), bal_before);
+
+    let (_, esc2_dead, _) = sys_handle
+        .apply_damage_with_attacker(escort_bids[1], lethal, Some(PILOT_A))
+        .await
+        .expect("escort 2 damage")
+        .expect("seasonal escort 2 exists");
+    assert!(esc2_dead);
 
     let bal_after = ctx.db.with_snapshot(|s| s.characters[&PILOT_A].balance.0);
     let pts_after = ctx.db.with_snapshot(|s| load_season_state_from_blobs(s, PILOT_A).season_points);
@@ -6041,7 +6086,7 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
         });
         assert!(
             bonus_pool_deposited,
-            "Hacked SHK relay must unlock bonus FSD pool loot drops upon boss destruction"
+            "Hacked SHK relay must unlock bonus FSD pool loot drops upon full site completion"
         );
     }
 
@@ -6050,7 +6095,61 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
     }
     assert!(sys_handle.get_ball_snapshot(details.relay_ball_id).await.ok().flatten().is_none());
 
-    // 5. Switch season to Winter Nexus, verify distinct SDE archetype spawns, then expire window & verify despawn via live RPC
+    // R1482-R2-P1-1: Normal NPC teardown must run via `handle_npc_destroyed_in_space_with_ctx`
+    // without SDE `ENTITY_KILL_BOUNTY` double-bounty fallback or skipped cycle wrecks.
+    eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        assert!(!rt.npc_entities.contains_key(&boss_bid));
+        assert!(rt.bounty_credited_balls.contains(&boss_bid));
+        for &ebid in &escort_bids {
+            assert!(!rt.npc_entities.contains_key(&ebid));
+            assert!(rt.bounty_credited_balls.contains(&ebid));
+        }
+        assert_eq!(
+            rt.pending_bounty_ticks.get(&(JITA, PILOT_A)).copied().unwrap_or(0.0),
+            0.0,
+            "Seasonal NPCs must not accrue per-kill SDE BeltRat bounty ticks"
+        );
+    });
+    eve_server::services::combat_crimewatch::combat_npc_encounters::finalize_cycle_destroyed_npcs(
+        &ctx, JITA,
+    )
+    .await;
+    eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        assert!(!rt.destroyed_npc_cache.contains_key(&boss_bid));
+        assert_eq!(
+            rt.pending_bounty_ticks.get(&(JITA, PILOT_A)).copied().unwrap_or(0.0),
+            0.0
+        );
+    });
+
+    // 5. Verify per-system cooldown blocks immediate GetCombatAnomalyInstances respawn, then advance past cooldown for Winter Nexus
+    let now_ft_cooldown = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cfg = load_season_config(snap);
+        cfg.season_id = 2;
+        cfg.season_name = "Winter Nexus".into();
+        cfg.start_time_ft = now_ft_cooldown - 1_800 * 10_000_000;
+        cfg.end_time_ft = now_ft_cooldown + 7_200 * 10_000_000;
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
+    });
+    let _ = rpc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[])
+        .await
+        .expect("Cooldown GetCombatAnomalyInstances");
+    let respawned_during_cd = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&JITA)
+            .into_iter()
+            .flatten()
+            .any(|a| a.anomaly_type == "SeasonalEventSite" && !a.cleared)
+    });
+    assert!(
+        !respawned_during_cd,
+        "GetCombatAnomalyInstances must not respawn seasonal site before cooldown expires"
+    );
+
+    ctx.db.clock().advance_secs(
+        eve_server::services::pve_special_sites_combat::SEASONAL_RESPAWN_COOLDOWN_SECS + 5,
+    );
     let now_ft2 = ctx.now_blueos_filetime_ticks();
     ctx.db.with_mut_snapshot(|snap| {
         let mut cfg = load_season_config(snap);
@@ -6074,11 +6173,96 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
             .next()
             .expect("Winter Nexus seasonal site spawned")
     });
+    let winter_dng = ctx
+        .sde
+        .dungeons
+        .get(&winter_did)
+        .expect("Winter Nexus dungeon must exist in SDE");
     assert!(
-        matches!(winter_did, 9030 | 9046 | 9047 | 9029),
-        "Winter Nexus must spawn Winter Nexus SDE dungeon (got {winter_did})"
+        winter_dng.archetype_id.is_some_and(|a| matches!(a, 24 | 31 | 45))
+            && (winter_dng.name.to_lowercase().contains("wightstorm")
+                || winter_dng.name.to_lowercase().contains("winter")),
+        "Winter Nexus must spawn Winter Nexus SDE dungeon (got {winter_did}: {})",
+        winter_dng.name
     );
     assert_ne!(winter_did, crimson_did);
+
+    // Test missile/AoE destruction path + cycle-kill wreck + faction standing loss on Winter Nexus escorts.
+    let (w_esc0, w_esc1, w_esc_tid, w_faction_id) = with_pve_special_reg(&ctx, |reg| {
+        let s = reg.seasonal_event_sites[&JITA]
+            .iter()
+            .find(|s| !s.completed && s.dungeon_id == winter_did)
+            .expect("Winter Nexus site");
+        let d = get_seasonal_site_details(&ctx, s.instance_id).expect("Winter details");
+        (s.escort_ball_ids[0], s.escort_ball_ids[1], d.escort_type_id, d.faction_id)
+    });
+    let w_loss_spec = eve_server::services::agents_missions::resolve_npc_kill_standing_loss_spec(
+        &ctx.sde,
+        w_esc_tid,
+        Some(w_faction_id),
+        None,
+        JITA,
+    );
+    let w_standing_before = w_loss_spec.map(|(fid, _)| {
+        ctx.db.with_snapshot(|snap| (fid, snap.characters[&PILOT_A].standings.get(&fid).copied().unwrap_or(0.0)))
+    });
+    let w0_pos = sys_handle
+        .get_ball_snapshot(w_esc0)
+        .await
+        .ok()
+        .flatten()
+        .expect("Winter escort 0 ball")
+        .1
+        .position;
+    let (_, w0_dead, _) = sys_handle
+        .apply_damage_with_attacker(w_esc0, lethal, Some(PILOT_A))
+        .await
+        .expect("w_esc0 damage")
+        .expect("w_esc0 exists");
+    assert!(w0_dead);
+    eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        assert!(
+            rt.destroyed_npc_cache.contains_key(&w_esc0),
+            "destroyed seasonal escort must populate destroyed_npc_cache for cycle/missile wreck hooks"
+        );
+    });
+    eve_server::services::combat_crimewatch::handle_destroyed_ball_from_missile_or_aoe(
+        &ctx,
+        JITA,
+        PILOT_A,
+        w_esc0,
+        w_esc_tid,
+        w0_pos,
+        ctx.now_unix(),
+    )
+    .await;
+    let (_, w1_dead, _) = sys_handle
+        .apply_damage_with_attacker(w_esc1, lethal, Some(PILOT_A))
+        .await
+        .expect("w_esc1 damage")
+        .expect("w_esc1 exists");
+    assert!(w1_dead);
+    eve_server::services::combat_crimewatch::combat_npc_encounters::finalize_cycle_destroyed_npcs(
+        &ctx, JITA,
+    )
+    .await;
+    eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        assert!(!rt.destroyed_npc_cache.contains_key(&w_esc1));
+        assert_eq!(
+            rt.pending_bounty_ticks.get(&(JITA, PILOT_A)).copied().unwrap_or(0.0),
+            0.0,
+            "Missile/AoE and cycle finalization on seasonal NPCs must not double-credit SDE bounties"
+        );
+    });
+    if let Some((loss_fid, before_val)) = w_standing_before {
+        let after_val = ctx.db.with_snapshot(|snap| {
+            snap.characters[&PILOT_A].standings.get(&loss_fid).copied().unwrap_or(0.0)
+        });
+        assert!(
+            after_val < before_val,
+            "Seasonal NPC kill must apply faction standing loss for faction {loss_fid}: {before_val} -> {after_val}"
+        );
+    }
 
     ctx.db.clock().advance_secs(7_200);
     let _ = rpc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[])
@@ -6092,6 +6276,164 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
             .any(|a| a.anomaly_type == "SeasonalEventSite" && !a.cleared)
     });
     assert!(!any_active, "Expired seasonal event sites must despawn outside active window");
+}
+
+#[tokio::test]
+async fn test_pve_seasonal_sqlite_restart_hacking_and_repeat_hack_guard() {
+    use std::sync::Arc;
+
+    eve_testkit::attest(&["feat:pve.events-sites"]);
+
+    let tmp_db = std::env::temp_dir().join(format!(
+        "evomu_it_seasonal_sqlite_{}_{}.sqlite",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let cleanup_sqlite = |p: &std::path::Path| {
+        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_file(format!("{}-wal", p.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", p.display()));
+    };
+    cleanup_sqlite(&tmp_db);
+
+    let seed_ctx = new_ctx();
+    let sde = Arc::clone(&seed_ctx.sde);
+    let demo_snap = seed_ctx.db.with_snapshot(|s| s.clone());
+    drop(seed_ctx);
+
+    let base_unix = 1_776_100_000_u64;
+    let repo1 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp_db).expect("open sqlite repo1"));
+    repo1.with_mut_snapshot(|s| *s = demo_snap);
+    let ctx1 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&repo1));
+    ctx1.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(base_unix)));
+
+    let (mut sess1, _ship1) = setup_pilot(&ctx1, PILOT_A, JITA).await;
+    let now_ft = ctx1.now_blueos_filetime_ticks();
+    ctx1.db.with_mut_snapshot(|snap| {
+        let mut cfg = load_season_config(snap);
+        cfg.season_id = 1;
+        cfg.season_name = "Crimson Harvest".into();
+        cfg.start_time_ft = now_ft - 3_600 * 10_000_000;
+        cfg.end_time_ft = now_ft + 7_200 * 10_000_000;
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
+    });
+    let _ = rpc(&ctx1, &mut sess1, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[])
+        .await
+        .expect("spawn Crimson Harvest into SQLite");
+    let (iid, relay_bid, boss_bid) = with_pve_special_reg(&ctx1, |reg| {
+        let s = reg.seasonal_event_sites[&JITA]
+            .iter()
+            .find(|s| !s.completed)
+            .expect("seasonal site record");
+        let d = get_seasonal_site_details(&ctx1, s.instance_id).expect("details");
+        (s.instance_id, d.relay_ball_id, s.boss_npc_ball_id)
+    });
+    drop(sess1);
+    drop(ctx1);
+    drop(repo1);
+
+    // Reopen SQLite into fresh ServerContext: #[serde(skip)] transient_items is gone before GetCombatAnomalyInstances.
+    let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo2"));
+    repo2.with_snapshot(|snap| {
+        assert!(
+            snap.transient_items.get(&relay_bid).is_none(),
+            "#[serde(skip)] transient_items must not contain SHK relay right after SQLite reopen"
+        );
+    });
+    let ctx2 = ServerContext::with_sde_and_repository(sde, Arc::clone(&repo2));
+    ctx2.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(base_unix + 30)));
+    let (mut sess2, ship2) = setup_pilot(&ctx2, PILOT_A, JITA).await;
+    equip_data_analyzer_and_hacking(&ctx2, PILOT_A, JITA, ship2, 587);
+
+    let _ = rpc(&ctx2, &mut sess2, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[])
+        .await
+        .expect("GetCombatAnomalyInstances rehydrates SHK relay post-restart");
+    ctx2.db.with_snapshot(|snap| {
+        assert!(
+            snap.get_any_item(relay_bid).is_some(),
+            "SHK relay transient item must be restored before hackingMgr.StartNewGameInstance"
+        );
+    });
+
+    let anom_key = with_pve_special_reg(&ctx2, |reg| {
+        let s = reg.seasonal_event_sites[&JITA]
+            .iter()
+            .find(|s| s.instance_id == iid)
+            .expect("rehydrated seasonal site");
+        format!("dng-{}-{}", s.dungeon_id, s.instance_id)
+    });
+    rpc(
+        &ctx2,
+        &mut sess2,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([
+            ("contentID", PyRep::String(anom_key)),
+            ("instanceID", PyRep::Integer(iid)),
+        ])],
+    )
+    .await
+    .expect("warp_to_content after restart");
+    step_until_warp_landed_at(&ctx2, &mut sess2, JITA, ship2).await;
+    follow_until_within(&ctx2, &mut sess2, JITA, ship2, relay_bid, 1_800.0).await;
+
+    let sys2 = ctx2.systems.get_or_spawn(JITA);
+    let shield_before = sys2
+        .get_combat_state(boss_bid)
+        .await
+        .ok()
+        .flatten()
+        .expect("rehydrated boss combat state")
+        .shield_hp;
+
+    // Live hackingMgr RPC must succeed with rehydrated transient item + Ballpark relay ball.
+    let hack_win = hack_container_to_win_for_char(&ctx2, &mut sess2, PILOT_A, relay_bid).await;
+    assert_eq!(hack_win.dict_get("status").and_then(|v| v.as_str()), Some("Won"));
+
+    let shield_after_first = sys2
+        .get_combat_state(boss_bid)
+        .await
+        .ok()
+        .flatten()
+        .expect("boss combat state after first hack")
+        .shield_hp;
+    if shield_before > 20.0 {
+        assert!(
+            shield_after_first < shield_before,
+            "First SHK relay hack must weaken boss shield ({shield_before} -> {shield_after_first})"
+        );
+    }
+
+    // Repeated hacking attempt against already-hacked SHK relay is rejected and never drains again.
+    let repeat_err = rpc(
+        &ctx2,
+        &mut sess2,
+        "hackingMgr",
+        "StartNewGameInstance",
+        &[PyRep::Integer(relay_bid)],
+    )
+    .await
+    .expect_err("repeat hack on already-hacked SHK relay must fail");
+    assert_eq!(repeat_err.code, "HackingGameAlreadyFinished");
+    let shield_after_repeat = sys2
+        .get_combat_state(boss_bid)
+        .await
+        .ok()
+        .flatten()
+        .expect("boss combat state after repeat hack")
+        .shield_hp;
+    assert!(
+        (shield_after_repeat - shield_after_first).abs() < 1e-6,
+        "Repeat hack attempt must not drain boss shield again ({shield_after_first} -> {shield_after_repeat})"
+    );
+
+    drop(sys2);
+    drop(ctx2);
+    drop(repo2);
+    cleanup_sqlite(&tmp_db);
 }
 
 #[tokio::test]
