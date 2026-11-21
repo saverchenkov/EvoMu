@@ -124,11 +124,22 @@ fn has_corp_director_or_personnel_manager_role_at(
 }
 
 #[cfg(test)]
-fn has_corp_director_or_personnel_manager_role(
+pub(crate) fn has_corp_director_or_personnel_manager_role(
     snap: &eve_db::WorldStateSnapshot,
     caller_char_id: i64,
     target_corp_id: i64,
 ) -> bool {
+    let Some(corp) = snap.corporations.get(&target_corp_id) else {
+        return false;
+    };
+    if eve_db::is_excluded_corp_member(corp, caller_char_id)
+        || snap
+            .characters
+            .get(&caller_char_id)
+            .is_some_and(|c| c.corporation_id != target_corp_id)
+    {
+        return false;
+    }
     let (is_ceo, total_roles) =
         snap.effective_corp_roles_at_db(target_corp_id, caller_char_id, None, 0);
     is_ceo

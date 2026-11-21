@@ -66,6 +66,29 @@ fn save_store(snap: &mut eve_db::WorldStateSnapshot, store: &FwEnlistmentStore) 
     }
 }
 
+/// Queues a forced `warfactionid` session sync alongside its DB baseline at enqueue time so
+/// out-of-band DB mutations between queueing and the first `sync_character_session` still win.
+pub(crate) fn queue_forced_war_faction_sync(
+    ctx: &ServerContext,
+    char_id: i64,
+    war_faction_id: Option<i64>,
+) {
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+        s.forced_war_faction_sync_db_baseline
+            .insert(char_id, war_faction_id);
+    });
+    let already_queued = ctx.db.with_snapshot(|s| {
+        load_store(s).forced_war_faction_sync.get(&char_id).copied() == Some(war_faction_id)
+    });
+    if !already_queued {
+        ctx.db.with_mut_snapshot(|s| {
+            let mut st = load_store(s);
+            st.forced_war_faction_sync.insert(char_id, war_faction_id);
+            save_store(s, &st);
+        });
+    }
+}
+
 pub(crate) fn take_forced_war_faction_sync(ctx: &ServerContext, char_id: i64) -> Option<Option<i64>> {
     crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
         s.forced_war_faction_sync_db_baseline.remove(&char_id);
@@ -219,6 +242,8 @@ pub(crate) async fn sync_corp_militia_members_after_change(
         if session.character_id == Some(mid) {
             session.war_faction_id = eff;
             let _ = take_forced_war_faction_sync(ctx, mid);
+        } else {
+            queue_forced_war_faction_sync(ctx, mid, eff);
         }
         notify_member_war_faction_change(ctx, mid, old_wf, eff, direct_opt, corp_fac);
         if old_wf != eff && ship_id > 0 && ship_tid > 0 {
@@ -704,6 +729,8 @@ fn set_corp_allowed(ctx: &ServerContext, session: &mut SessionState, args: &[PyR
         if session.character_id == Some(mid) {
             session.war_faction_id = eff;
             let _ = take_forced_war_faction_sync(ctx, mid);
+        } else {
+            queue_forced_war_faction_sync(ctx, mid, eff);
         }
         notify_member_war_faction_change(ctx, mid, old_wf, eff, direct_opt, corp_fac);
         if old_wf != eff && ship_id > 0 && ship_tid > 0 {

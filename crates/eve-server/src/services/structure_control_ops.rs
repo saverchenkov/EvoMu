@@ -321,9 +321,15 @@ async fn engage_structure_control(
             if pilot != char_id {
                 let caller_is_manager = crate::services::station_structure::structure_lifecycle_rpc::has_structure_manager_role(snap, session, char_id, st.owner_corp_id);
                 let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-                let (pilot_is_ceo, pilot_roles) =
-                    snap.effective_corp_roles_at_db(st.owner_corp_id, pilot, Some(structure_id), now_unix);
-                let pilot_is_manager = pilot_is_ceo || (pilot_roles & req_roles) != 0;
+                let pilot_actor = eve_db::CorpActor::resolve_for_corp(
+                    snap,
+                    &ctx.sde,
+                    st.owner_corp_id,
+                    pilot,
+                    Some(structure_id),
+                    now_unix,
+                );
+                let pilot_is_manager = pilot_actor.has_any_role(req_roles);
                 let can_takeover = !board_mode && caller_is_manager && !pilot_is_manager;
                 if !can_takeover {
                     return Err(err(

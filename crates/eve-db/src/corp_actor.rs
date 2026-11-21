@@ -268,34 +268,14 @@ pub(crate) fn evaluate_corp_roles_for_record(
 /// Computes `(is_ceo, effective_roles)` purely from `snap` without any `session_roles` fallback.
 /// Location-scoped roles are evaluated only when an explicit `Some(location_id)` is provided.
 pub fn effective_corp_roles_at_db(
-    snap: &WorldStateSnapshot,
-    corp_id: i64,
-    char_id: i64,
-    location_id: Option<i64>,
-    now_unix: u64,
+    snap: &WorldStateSnapshot, corp_id: i64, char_id: i64, location_id: Option<i64>, now_unix: u64,
 ) -> (bool, u64) {
-    let Some(corp) = snap.corporations.get(&corp_id) else {
-        return (false, 0);
-    };
-    evaluate_corp_roles_for_record(
-        snap,
-        corp_id,
-        corp,
-        char_id,
-        location_id,
-        location_id.is_some(),
-        None,
-        now_unix,
-    )
+    let Some(corp) = snap.corporations.get(&corp_id) else { return (false, 0); };
+    evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, location_id.is_some(), None, now_unix)
 }
 
 pub(crate) fn effective_corp_roles_at_with_fallback(
-    snap: &WorldStateSnapshot,
-    corp_id: i64,
-    char_id: i64,
-    location_id: Option<i64>,
-    session_roles: u64,
-    now_unix: u64,
+    snap: &WorldStateSnapshot, corp_id: i64, char_id: i64, location_id: Option<i64>, session_roles: u64, now_unix: u64,
 ) -> (bool, u64) {
     let Some(corp) = snap.corporations.get(&corp_id) else {
         let mut roles = session_roles;
@@ -304,16 +284,7 @@ pub(crate) fn effective_corp_roles_at_with_fallback(
         }
         return (false, roles);
     };
-    evaluate_corp_roles_for_record(
-        snap,
-        corp_id,
-        corp,
-        char_id,
-        location_id,
-        true,
-        Some(session_roles),
-        now_unix,
-    )
+    evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, true, Some(session_roles), now_unix)
 }
 
 impl CorpActor {
@@ -365,31 +336,16 @@ impl CorpActor {
 
         if is_npc_corp {
             return Self {
-                char_id,
-                char_in_db,
-                corp_id,
-                alliance_id: None,
-                corp_exists,
-                is_npc_corp: true,
+                char_id, char_in_db, corp_id, alliance_id: None, corp_exists, is_npc_corp: true,
                 is_member: ch.is_some_and(|c| c.corporation_id == corp_id),
-                is_excluded: false,
-                is_ceo: false,
-                effective_roles: 0,
+                is_excluded: false, is_ceo: false, effective_roles: 0,
             };
         }
 
         let Some(corp) = corp_opt else {
             return Self {
-                char_id,
-                char_in_db,
-                corp_id,
-                alliance_id,
-                corp_exists: false,
-                is_npc_corp: false,
-                is_member: false,
-                is_excluded: false,
-                is_ceo: false,
-                effective_roles: 0,
+                char_id, char_in_db, corp_id, alliance_id, corp_exists: false, is_npc_corp: false,
+                is_member: false, is_excluded: false, is_ceo: false, effective_roles: 0,
             };
         };
 
@@ -401,31 +357,14 @@ impl CorpActor {
                     && (!corp.members.is_empty()
                         || ch.is_some_and(|c| c.corporation_id == corp_id)));
         let (is_ceo, effective_roles) = if is_member {
-            evaluate_corp_roles_for_record(
-                snap,
-                corp_id,
-                corp,
-                char_id,
-                location_id,
-                false,
-                None,
-                now_unix,
-            )
+            evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, false, None, now_unix)
         } else {
             (false, 0)
         };
 
         Self {
-            char_id,
-            char_in_db,
-            corp_id,
-            alliance_id,
-            corp_exists: true,
-            is_npc_corp: false,
-            is_member,
-            is_excluded,
-            is_ceo,
-            effective_roles,
+            char_id, char_in_db, corp_id, alliance_id, corp_exists: true, is_npc_corp: false,
+            is_member, is_excluded, is_ceo, effective_roles,
         }
     }
 

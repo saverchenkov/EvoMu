@@ -515,49 +515,19 @@ fn authz_88_select_character_loads_db_roles_and_corp_handlers_reject_stale_sessi
         }
         ch.user_id
     });
-    crate::services::fleet_social::fleet_social_persistence::queue_forced_corp_sync(
-        &ctx,
-        mem_id,
-        98_000_999,
-        None,
-        0,
-    );
+    crate::services::fleet_social::fleet_social_persistence::queue_forced_corp_sync(&ctx, mem_id, 98_000_999, None, 0);
 
     let kw = HashMap::new();
-    let mut sel_sess = SessionState {
-        session_id: 9_901,
-        user_id: Some(uid),
-        ..Default::default()
-    };
-    let _ = ctx
-        .db
-        .acquire_online_lock(uid, sel_sess.session_id, None, true, now);
-    crate::services::character_skills::character_gm_tools::handle_char_unbound(
-        &ctx,
-        &mut sel_sess,
-        "charUnboundMgr",
-        "SelectCharacterID",
-        &[PyRep::Integer(mem_id)],
-        &kw,
-    )
-    .unwrap()
-    .expect("SelectCharacterID succeeds");
+    let mut sel_sess = SessionState { session_id: 9_901, user_id: Some(uid), ..Default::default() };
+    let _ = ctx.db.acquire_online_lock(uid, sel_sess.session_id, None, true, now);
+    crate::services::character_skills::character_gm_tools::handle_char_unbound(&ctx, &mut sel_sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(mem_id)], &kw)
+        .unwrap()
+        .expect("SelectCharacterID succeeds");
 
-    assert_eq!(sel_sess.corporation_id, Some(corp_id));
-    assert_eq!(sel_sess.alliance_id, Some(ally_id));
-    assert_ne!(
-        sel_sess.corp_role & corp_roles::ROLE_ACCOUNTANT,
-        0,
-        "AUTHZ-88: SelectCharacterID must load DB corp roles"
-    );
-    assert_ne!(
-        sel_sess.corp_role & corp_roles::ROLE_DIRECTOR,
-        0,
-        "AUTHZ-88: SelectCharacterID must promote due pending role grants before loading corp_role"
-    );
-    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| {
-        assert!(!s.forced_session_corp_sync.contains_key(&mem_id));
-    });
+    assert_eq!((sel_sess.corporation_id, sel_sess.alliance_id), (Some(corp_id), Some(ally_id)));
+    assert_ne!(sel_sess.corp_role & corp_roles::ROLE_ACCOUNTANT, 0, "AUTHZ-88: SelectCharacterID must load DB corp roles");
+    assert_ne!(sel_sess.corp_role & corp_roles::ROLE_DIRECTOR, 0, "AUTHZ-88: SelectCharacterID must promote due pending role grants before loading corp_role");
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| { assert!(!s.forced_session_corp_sync.contains_key(&mem_id)); });
 
     // 2. Stale session.corp_role / session.corporation_id must NOT authorize DB-stripped or excluded caller.
     ctx.db.with_mut_snapshot(|snap| {
@@ -569,35 +539,15 @@ fn authz_88_select_character_loads_db_roles_and_corp_handlers_reject_stale_sessi
     mem_sess.corporation_id = Some(corp_id);
     mem_sess.corp_role = corp_roles::ROLE_DIRECTOR;
 
-    assert_eq!(
-        call_corps(
-            &ctx,
-            &mut mem_sess,
-            "corpmgr",
-            "AuditMember",
-            &[PyRep::Integer(mem_id)],
-            &kw,
-        )
-        .unwrap_err()
-        .code,
-        "CorpRoleDenied"
-    );
-    assert_eq!(
-        require_corp_caller(&ctx, &mut mem_sess, None)
-            .unwrap_err()
-            .code,
-        "CorpAccessDenied"
-    );
+    assert_eq!(call_corps(&ctx, &mut mem_sess, "corpmgr", "AuditMember", &[PyRep::Integer(mem_id)], &kw).unwrap_err().code, "CorpRoleDenied");
+    assert_eq!(require_corp_caller(&ctx, &mut mem_sess, None).unwrap_err().code, "CorpAccessDenied");
 
     // Restored non-director DB member with stale session.corporation_id converges to DB corp_id & alliance_id.
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.get_mut(&corp_id).unwrap().members.insert(mem_id);
-    });
+    ctx.db.with_mut_snapshot(|snap| { snap.corporations.get_mut(&corp_id).unwrap().members.insert(mem_id); });
     mem_sess.corporation_id = Some(98_999_999);
     let (db_corp, cid, has_dir) = require_corp_caller(&ctx, &mut mem_sess, None).unwrap();
     assert_eq!((db_corp, cid, has_dir), (corp_id, mem_id, false));
-    assert_eq!(mem_sess.corporation_id, Some(corp_id));
-    assert_eq!(mem_sess.alliance_id, Some(ally_id));
+    assert_eq!((mem_sess.corporation_id, mem_sess.alliance_id), (Some(corp_id), Some(ally_id)));
 }
 
 #[test]
@@ -634,4 +584,55 @@ fn bf03_global_corp_checks_ignore_docked_roles_and_respect_grant_clock() {
         snap.corp_governance.get_mut(&corp_id).unwrap().pending_role_grants.insert(mem_id, (corp_roles::ROLE_DIRECTOR, now - 1));
     });
     assert!(crate::services::character_lifecycle::handle(&ctx, &mut mem_sess, "charMgr", "GetPrivateInfoOnCorpChange", &[PyRep::Integer(ceo_id)], &kw).unwrap().is_ok());
+}
+
+#[test]
+fn bf_r2_01_r2_02_corp_caller_executor_and_lifecycle_fail_closed() {
+    let now = 1_800_050_000_u64;
+    let ctx = test_ctx_with_clock(now);
+    let (_ceo_sess, mut mem_sess) = seed_player_corps(&ctx);
+    let (corp_a, corp_b, mem_id, npc_corp, ally_a) = (98_000_001_i64, 98_000_099_i64, 90_000_002_i64, 1_000_009_i64, 99_000_001_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp2 = eve_db::CorporationRecord::default();
+        corp2.corporation_id = corp_b;
+        corp2.ceo_id = mem_id;
+        corp2.members.insert(mem_id);
+        corp2.member_roles.insert(mem_id, corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_b, corp2);
+        snap.corporations.get_mut(&corp_a).unwrap().alliance_id = Some(ally_a);
+        snap.alliances.insert(ally_a, eve_db::AllianceRecord { alliance_id: ally_a, executor_corp_id: corp_a, ..Default::default() });
+    });
+
+    // BF-R2-01 (require_corp_caller): jumping from Corp A to Corp B (as CEO) or NPC corp between snapshots must fail closed.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&mem_id).unwrap().corporation_id = corp_b;
+        assert_eq!(super::resolve_verified_corp_caller_in_snap(snap, &ctx.sde, corp_a, mem_id, now).unwrap_err().code, "CorpAccessDenied");
+        snap.characters.get_mut(&mem_id).unwrap().corporation_id = npc_corp;
+        assert_eq!(super::resolve_verified_corp_caller_in_snap(snap, &ctx.sde, corp_a, mem_id, now).unwrap_err().code, "CorpAccessDenied");
+        assert_eq!(super::resolve_verified_corp_caller_in_snap(snap, &ctx.sde, npc_corp, mem_id, now).unwrap(), (None, false));
+        assert_eq!(super::resolve_verified_corp_caller_in_snap(snap, &ctx.sde, npc_corp, 90_000_001, now).unwrap_err().code, "CorpAccessDenied");
+        snap.characters.get_mut(&mem_id).unwrap().corporation_id = corp_a;
+    });
+    ctx.db.with_mut_snapshot(|snap| { snap.corporations.get_mut(&corp_a).unwrap().members.remove(&mem_id); });
+    mem_sess.corporation_id = Some(corp_b);
+    assert_eq!(require_corp_caller(&ctx, &mut mem_sess, None).unwrap_err().code, "CorpAccessDenied");
+    assert_eq!(mem_sess.corporation_id, Some(corp_b), "failed Snapshot 2 must not overwrite session");
+
+    // BF-R2-02: excluded member and cross-corp char must be rejected even with stale director bits.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_a).unwrap().member_roles.insert(mem_id, corp_roles::ROLE_DIRECTOR);
+        assert!(!crate::services::character_lifecycle::has_corp_director_or_personnel_manager_role(snap, mem_id, corp_a));
+        snap.corporations.get_mut(&corp_a).unwrap().members.insert(mem_id);
+        snap.characters.get_mut(&mem_id).unwrap().corporation_id = corp_b;
+        assert!(!crate::services::character_lifecycle::has_corp_director_or_personnel_manager_role(snap, mem_id, corp_a));
+        snap.characters.get_mut(&mem_id).unwrap().corporation_id = corp_a;
+        snap.corporations.get_mut(&corp_a).unwrap().member_roles.insert(mem_id, 0);
+    });
+
+    // BF-R2-01 (require_executor): single-snapshot resolve ignores Corp B CEO, enforces executor Director & current executor.
+    assert_eq!(crate::services::corp_gov_delegation::require_executor(&ctx, &mem_sess).unwrap_err().code, "CorpRoleDenied");
+    ctx.db.with_mut_snapshot(|snap| { snap.corporations.get_mut(&corp_a).unwrap().member_roles.insert(mem_id, corp_roles::ROLE_DIRECTOR); });
+    assert_eq!(crate::services::corp_gov_delegation::require_executor(&ctx, &mem_sess).unwrap(), ally_a);
+    ctx.db.with_mut_snapshot(|snap| { snap.alliances.get_mut(&ally_a).unwrap().executor_corp_id = corp_b; });
+    assert_eq!(crate::services::corp_gov_delegation::require_executor(&ctx, &mem_sess).unwrap_err().code, "NotAllianceExecutor");
 }

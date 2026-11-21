@@ -1012,76 +1012,41 @@ fn sync_character_session_probe_is_non_destructive_and_tracks_db_alliance() {
     let ceo_id = 90_777_900_i64;
     let char_id = 90_777_901_i64;
     let ally_a = 99_777_901_i64;
-    let ally_b = 99_777_902_i64;
-    let old_ship = 9_800_901_i64;
-    let new_ship = 72_901_i64;
+    let (ally_b, old_ship, new_ship) = (99_777_902_i64, 9_800_901_i64, 72_901_i64);
 
     ctx.db.with_mut_snapshot(|snap| {
         let mut corp = CorporationRecord::default();
-        corp.corporation_id = corp_id;
-        corp.name = "AuthzSyncCorp".into();
-        corp.ticker = "AZS".into();
-        corp.ceo_id = ceo_id;
-        corp.alliance_id = Some(ally_a);
-        corp.members.insert(ceo_id);
-        corp.members.insert(char_id);
+        (corp.corporation_id, corp.name, corp.ticker, corp.ceo_id, corp.alliance_id, corp.members) =
+            (corp_id, "AuthzSyncCorp".into(), "AZS".into(), ceo_id, Some(ally_a), HashSet::from([ceo_id, char_id]));
         corp.member_roles.insert(ceo_id, u64::MAX);
         // Member has been demoted to 0 roles in DB.
         corp.member_roles.insert(char_id, 0);
         snap.corporations.insert(corp_id, corp);
 
         let mut ch = snap.characters.values().next().cloned().expect("demo char");
-        ch.character_id = char_id;
-        ch.corporation_id = corp_id;
-        ch.alliance_id = Some(ally_a);
-        ch.active_ship_id = new_ship;
-        ch.station_id = Some(60_003_760);
-        ch.structure_id = None;
-        ch.solar_system_id = 30_000_142;
-        ch.war_faction_id = None;
+        (ch.character_id, ch.corporation_id, ch.alliance_id, ch.active_ship_id, ch.station_id, ch.structure_id, ch.solar_system_id, ch.war_faction_id) =
+            (char_id, corp_id, Some(ally_a), new_ship, Some(60_003_760), None, 30_000_142, None);
         snap.characters.insert(char_id, ch);
 
         let mut fw = crate::services::fw_enlistment::load_store(snap);
         fw.forced_war_faction_sync.insert(char_id, Some(500_004));
         if let Ok(json) = serde_json::to_string(&fw) {
-            snap.item_custom_names
-                .insert(crate::services::fw_enlistment::FW_ENLISTMENT_STORE_KEY, json);
+            snap.item_custom_names.insert(crate::services::fw_enlistment::FW_ENLISTMENT_STORE_KEY, json);
         }
     });
 
-    crate::services::fleet_social::fleet_social_persistence::queue_forced_corp_sync(
-        &ctx,
-        char_id,
-        corp_id,
-        Some(ally_a),
-        0,
-    );
-    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| {
-        s.forced_session_ship_sync.insert(char_id, (old_ship, Some(new_ship)));
-    });
+    crate::services::fleet_social::fleet_social_persistence::queue_forced_corp_sync(&ctx, char_id, corp_id, Some(ally_a), 0);
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| { s.forced_session_ship_sync.insert(char_id, (old_ship, Some(new_ship))); });
 
-    let mut real_sess = make_session(
-        char_id,
-        corp_id,
-        30_000_142,
-        Some(old_ship),
-        None,
-        eve_db::corp_roles::ROLE_DIRECTOR,
-    );
+    let mut real_sess = make_session(char_id, corp_id, 30_000_142, Some(old_ship), None, eve_db::corp_roles::ROLE_DIRECTOR);
     // Throwaway macho probe runs first and must NOT drain pending forced sync state.
     let mut probe = real_sess.clone();
     sync_character_session(&ctx, &mut probe);
-    assert_eq!(probe.corp_role, 0);
-    assert_eq!(probe.alliance_id, Some(ally_a));
-    assert_eq!(probe.war_faction_id, Some(500_004));
-    assert_eq!(probe.ship_id, Some(new_ship));
+    assert_eq!((probe.corp_role, probe.alliance_id, probe.war_faction_id, probe.ship_id), (0, Some(ally_a), Some(500_004), Some(new_ship)));
 
     // Real session sync runs afterward and still receives every update.
     sync_character_session(&ctx, &mut real_sess);
-    assert_eq!(real_sess.corp_role, 0);
-    assert_eq!(real_sess.alliance_id, Some(ally_a));
-    assert_eq!(real_sess.war_faction_id, Some(500_004));
-    assert_eq!(real_sess.ship_id, Some(new_ship));
+    assert_eq!((real_sess.corp_role, real_sess.alliance_id, real_sess.war_faction_id, real_sess.ship_id), (0, Some(ally_a), Some(500_004), Some(new_ship)));
 
     // AUTHZ-80: alliance change in DB must propagate even with stale forced_session_corp_sync baseline.
     ctx.db.with_mut_snapshot(|snap| {
@@ -1092,9 +1057,7 @@ fn sync_character_session_probe_is_non_destructive_and_tracks_db_alliance() {
     assert_eq!(real_sess.alliance_id, Some(ally_b));
 
     // Leaving an alliance clears session.alliance_id even if ch.alliance_id remained stale.
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.get_mut(&corp_id).unwrap().alliance_id = None;
-    });
+    ctx.db.with_mut_snapshot(|snap| { snap.corporations.get_mut(&corp_id).unwrap().alliance_id = None; });
     sync_character_session(&ctx, &mut real_sess);
     assert_eq!(real_sess.alliance_id, None);
 }
@@ -1102,13 +1065,10 @@ fn sync_character_session_probe_is_non_destructive_and_tracks_db_alliance() {
 #[test]
 fn bf01_bf02_forced_fw_and_ship_sync_converge_across_direct_enlistment_leave_ship_and_relogin() {
     let ctx = test_ctx();
-    let sid = 1_000_891_100_i64;
-    let restored_ship = 9_881_201_i64;
+    let (sid, restored_ship) = (1_000_891_100_i64, 9_881_201_i64);
     let (char_id, corp_id, uid) = ctx.db.with_mut_snapshot(|snap| {
         let mut ch = snap.characters.values().next().cloned().expect("demo char");
-        let cid = ch.character_id;
-        let corp = ch.corporation_id;
-        let uid = if ch.user_id == 0 { 1 } else { ch.user_id };
+        let (cid, corp, uid) = (ch.character_id, ch.corporation_id, if ch.user_id == 0 { 1 } else { ch.user_id });
         ch.user_id = uid;
         ch.station_id = Some(60_003_760);
         ch.structure_id = None;
@@ -1116,63 +1076,41 @@ fn bf01_bf02_forced_fw_and_ship_sync_converge_across_direct_enlistment_leave_shi
         ch.war_faction_id = None;
         ch.active_ship_id = restored_ship;
         snap.characters.insert(cid, ch);
-        let mut fw = crate::services::fw_enlistment::load_store(snap);
-        fw.forced_war_faction_sync.insert(cid, None);
-        if let Ok(json) = serde_json::to_string(&fw) {
-            snap.item_custom_names
-                .insert(crate::services::fw_enlistment::FW_ENLISTMENT_STORE_KEY, json);
-        }
         (cid, corp, uid)
     });
-    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| {
-        s.forced_session_ship_sync.insert(char_id, (sid, Some(restored_ship)));
-    });
+    crate::services::fw_enlistment::queue_forced_war_faction_sync(&ctx, char_id, None);
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| { s.forced_session_ship_sync.insert(char_id, (sid, Some(restored_ship))); });
     let mut sess = make_session(char_id, corp_id, 30_000_142, None, Some(60_003_760), 0);
     sync_character_session(&ctx, &mut sess);
-    assert_eq!(sess.war_faction_id, None);
-    assert_eq!(sess.ship_id, Some(restored_ship));
+    assert_eq!((sess.war_faction_id, sess.ship_id), (None, Some(restored_ship)));
+
+    // Out-of-band DB change between queue_forced_war_faction_sync and first sync must converge to DB.
+    crate::services::fw_enlistment::queue_forced_war_faction_sync(&ctx, char_id, Some(500_001));
+    ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_002); });
+    sync_character_session(&ctx, &mut sess);
+    assert_eq!(sess.war_faction_id, Some(500_002));
+    ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&char_id).unwrap().war_faction_id = None; });
 
     // BF-01: CreateMyDirectEnlistment & RemoveMyDirectEnlistment must survive sync_character_session.
-    crate::services::fw_enlistment::handle(
-        &ctx, &mut sess, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[eve_proto::PyRep::Integer(500_001)],
-    ).unwrap().expect("CreateMyDirectEnlistment succeeds");
+    crate::services::fw_enlistment::handle(&ctx, &mut sess, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[eve_proto::PyRep::Integer(500_001)]).unwrap().expect("CreateMyDirectEnlistment succeeds");
     sync_character_session(&ctx, &mut sess);
     assert_eq!(sess.war_faction_id, Some(500_001));
-
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut fw = crate::services::fw_enlistment::load_store(snap);
-        fw.forced_war_faction_sync.insert(char_id, Some(500_001));
-        if let Ok(json) = serde_json::to_string(&fw) {
-            snap.item_custom_names.insert(crate::services::fw_enlistment::FW_ENLISTMENT_STORE_KEY, json);
-        }
-    });
+    crate::services::fw_enlistment::queue_forced_war_faction_sync(&ctx, char_id, Some(500_001));
     sync_character_session(&ctx, &mut sess);
-    crate::services::fw_enlistment::handle(
-        &ctx, &mut sess, "fwCharacterEnlistmentMgr", "RemoveMyDirectEnlistment", &[],
-    ).unwrap().expect("RemoveMyDirectEnlistment succeeds");
+    crate::services::fw_enlistment::handle(&ctx, &mut sess, "fwCharacterEnlistmentMgr", "RemoveMyDirectEnlistment", &[]).unwrap().expect("RemoveMyDirectEnlistment succeeds");
     sync_character_session(&ctx, &mut sess);
     assert_eq!(sess.war_faction_id, None);
 
     // BF-02: LeaveShip / active_ship_id == 0 and SelectCharacterID must never resurrect restored_ship.
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&char_id).unwrap().active_ship_id = 0;
-    });
+    ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&char_id).unwrap().active_ship_id = 0; });
     sess.ship_id = None;
     sync_character_session(&ctx, &mut sess);
     assert_eq!(sess.ship_id, None);
-
-    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| {
-        s.forced_session_ship_sync.insert(char_id, (sid, Some(restored_ship)));
-    });
-    let mut relogin = SessionState::new(sess.session_id + 1);
-    relogin.user_id = Some(uid);
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| { s.forced_session_ship_sync.insert(char_id, (sid, Some(restored_ship))); });
+    let mut relogin = SessionState { session_id: sess.session_id + 1, user_id: Some(uid), ..Default::default() };
     let _ = ctx.db.acquire_online_lock(uid, relogin.session_id, None, true, ctx.now_unix());
     let kw = HashMap::new();
-    crate::services::character_skills::character_gm_tools::handle_char_unbound(
-        &ctx, &mut relogin, "charUnboundMgr", "SelectCharacterID", &[eve_proto::PyRep::Integer(char_id)], &kw,
-    ).unwrap().expect("SelectCharacterID succeeds");
+    crate::services::character_skills::character_gm_tools::handle_char_unbound(&ctx, &mut relogin, "charUnboundMgr", "SelectCharacterID", &[eve_proto::PyRep::Integer(char_id)], &kw).unwrap().expect("SelectCharacterID succeeds");
     assert_eq!(relogin.ship_id, None);
-    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| {
-        assert!(!s.forced_session_ship_sync.contains_key(&char_id));
-    });
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| { assert!(!s.forced_session_ship_sync.contains_key(&char_id)); });
 }

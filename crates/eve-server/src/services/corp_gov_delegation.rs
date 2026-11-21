@@ -595,35 +595,44 @@ pub(crate) fn require_executor(
     session: &SessionState,
 ) -> Result<i64, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let (caller_corp, aid) = ctx.db.with_snapshot(|snap| {
-        let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, ctx.now_unix());
-        (actor.corp_id, actor.alliance_id.unwrap_or(0))
-    });
-    let exec = ctx
-        .db
-        .with_snapshot(|snap| snap.alliances.get(&aid).map(|a| a.executor_corp_id));
-    match exec {
-        Some(e) if e == caller_corp => {
-            let _ = require_corp_director(ctx, session)?;
-            Ok(aid)
+    let now_unix = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, now_unix);
+        match actor
+            .alliance_id
+            .filter(|&aid| aid > 0)
+            .and_then(|aid| snap.alliances.get(&aid).map(|a| (aid, a.executor_corp_id)))
+        {
+            Some((aid, exec_corp)) if actor.corp_id > 0 && exec_corp == actor.corp_id => {
+                if actor.is_director() {
+                    Ok(aid)
+                } else {
+                    let msg = "Director or CEO role is required";
+                    Err(BridgeRpcError::with_client_error(
+                        "CorpRoleDenied",
+                        msg,
+                        ClientError::CustomInfo(msg.into()),
+                    ))
+                }
+            }
+            Some(_) => {
+                let msg = "Only the executor corporation can manage the alliance";
+                Err(BridgeRpcError::with_client_error(
+                    "NotAllianceExecutor",
+                    msg,
+                    ClientError::CustomInfo(msg.into()),
+                ))
+            }
+            None => {
+                let msg = "Your corporation is not in an alliance";
+                Err(BridgeRpcError::with_client_error(
+                    "NotInAlliance",
+                    msg,
+                    ClientError::CustomInfo(msg.into()),
+                ))
+            }
         }
-        Some(_) => {
-            let msg = "Only the executor corporation can manage the alliance";
-            Err(BridgeRpcError::with_client_error(
-                "NotAllianceExecutor",
-                msg,
-                ClientError::CustomInfo(msg.into()),
-            ))
-        }
-        None => {
-            let msg = "Your corporation is not in an alliance";
-            Err(BridgeRpcError::with_client_error(
-                "NotInAlliance",
-                msg,
-                ClientError::CustomInfo(msg.into()),
-            ))
-        }
-    }
+    })
 }
 
 pub(crate) fn read_alliance_sov_cfg(

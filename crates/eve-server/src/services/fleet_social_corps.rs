@@ -275,6 +275,39 @@ pub(super) fn corp_actor_denied_error(
     }
 }
 
+pub(crate) fn resolve_verified_corp_caller_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    caller_corp: i64,
+    char_id: i64,
+    now_unix: u64,
+) -> Result<(Option<i64>, bool), BridgeRpcError> {
+    let actor =
+        eve_db::CorpActor::resolve_for_corp(snap, sde, caller_corp, char_id, None, now_unix);
+    if actor.is_npc_corp {
+        if !actor.char_in_db {
+            return Err(corp_actor_denied_error(
+                eve_db::CorpActorDenied::NoCorporation,
+                caller_corp,
+            ));
+        }
+        if !actor.is_member {
+            return Err(corp_actor_denied_error(
+                eve_db::CorpActorDenied::NotMember,
+                caller_corp,
+            ));
+        }
+        return Ok((None, false));
+    }
+    if let Err(denied) = actor.require_member() {
+        return Err(corp_actor_denied_error(denied, caller_corp));
+    }
+    Ok((
+        actor.alliance_id,
+        actor.is_director_or(corp_roles::ROLE_PERSONNEL_MANAGER),
+    ))
+}
+
 pub(crate) fn require_corp_caller(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -310,16 +343,7 @@ pub(crate) fn require_corp_caller(
     promote_due_pending_corp_grants(ctx, caller_corp);
     let now_unix = ctx.now_unix();
     let (alliance_id, has_director) = ctx.db.with_snapshot(|s| {
-        let actor = eve_db::CorpActor::resolve(s, &ctx.sde, char_id, now_unix);
-        if !actor.is_npc_corp {
-            if let Err(denied) = actor.require_member() {
-                return Err(corp_actor_denied_error(denied, caller_corp));
-            }
-        }
-        Ok((
-            actor.alliance_id,
-            actor.is_director_or(corp_roles::ROLE_PERSONNEL_MANAGER),
-        ))
+        resolve_verified_corp_caller_in_snap(s, &ctx.sde, caller_corp, char_id, now_unix)
     })?;
     session.corporation_id = Some(caller_corp);
     session.alliance_id = alliance_id;
