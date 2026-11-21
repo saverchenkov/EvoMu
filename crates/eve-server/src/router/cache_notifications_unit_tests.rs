@@ -1757,3 +1757,38 @@ async fn item_compare_tracks_dispatch_tick_and_neither_scopes() {
     let nd = &p["item_change"]["by_scope"];
     assert_eq!((nd["dispatch"]["matched"].as_u64(), nd["tick"]["projected_only"].as_u64(), nd["neither"]["hand_written_only"].as_u64(), p["explicit_in_tx_effects_by_scope"]["tick"].as_u64()), (Some(1), Some(1), Some(1), Some(1)));
 }
+
+#[test]
+fn item_compare_attributes_guided_missile_deployable_kill_to_tick_scope() {
+    use crate::router::delta_item_compare::{enter_compare_tick_sync_scope, flush_item_compare_summary, set_item_compare_override_for_test};
+    use crate::services::mobile_deployables::TYPE_MTU_STANDARD;
+    use crate::system_actor::{missiles::step_guided_missiles_in_actor, ActiveGuidedMissile};
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+    use eve_destiny::{Ball, Ballpark, CombatState, DamageVector, MovementMode};
+    use glam::DVec3;
+
+    let ctx = test_ctx();
+    set_item_compare_override_for_test(&ctx, Some(false), Some(None));
+    let (pilot_id, sys_id, mtu_id, missile_id) = (90_000_001_i64, 30_000_142_u32, 991_600_001_i64, 9_950_000_001_i64);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+    ctx.db.acquire_online_lock(uid, 9_306, Some(pilot_id), true, 1_700_000_500).expect("lock");
+    {
+        let _disabled_tick = enter_compare_tick_sync_scope(Some(&ctx.db));
+        ctx.db.with_mut_snapshot(|s| {
+            s.items.insert(mtu_id, InventoryItemRecord { item_id: mtu_id, type_id: TYPE_MTU_STANDARD, owner_id: pilot_id, location_id: sys_id as i64, quantity: 1, version: 1, flag: InventoryFlag::None, singleton: true, ..Default::default() });
+        });
+    }
+    set_item_compare_override_for_test(&ctx, Some(true), Some(None));
+    let mut bp = Ballpark::new(sys_id);
+    bp.current_tick = 5;
+    for (id, ty, r) in [(mtu_id, TYPE_MTU_STANDARD, 100.0), (missile_id, 209, 5.0)] {
+        bp.add_ball(Ball { id, type_id: ty, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 100.0, radius: r, speed_fraction: 0.0, mode: MovementMode::Stop });
+    }
+    bp.combat_states.insert(mtu_id, CombatState { structure_hp: 1.0, max_structure_hp: 100.0, signature_radius: 100.0, ..Default::default() });
+    let mut missiles = vec![ActiveGuidedMissile { ball_id: missile_id, spawn_tick: 1, char_id: pilot_id, attacker_ship_id: 991_600_000, target_ball_id: mtu_id, module_id: 991_600_002, module_type_id: 2410, ammo_type_id: 209, max_velocity_ms: 1000.0, flight_time_s: 10.0, elapsed_sim_s: 1.0, min_visual_sim_s: 1.0, impacted: true, explosion_radius_m: 100.0, explosion_velocity_ms: 100.0, drf: 1.0, damage_vector: DamageVector::new(1000.0, 0.0, 0.0, 0.0) }];
+    let (mut rah, mut actions, mut destroyed) = (std::collections::HashMap::new(), Vec::new(), Vec::new());
+    step_guided_missiles_in_actor(&mut bp, &mut missiles, &std::collections::HashMap::new(), &mut rah, &Some(Arc::clone(&ctx.sde)), &Some(Arc::clone(&ctx.db)), &mut actions, &mut destroyed, None, 1.0);
+    assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&mtu_id)), "missile kill removes MTU from snap.items");
+    let s = &flush_item_compare_summary(&ctx).item_change.by_scope;
+    assert!(s.tick.projected_only > 0 && s.neither.projected_only == 0 && s.dispatch.projected_only == 0, "expected tick-only attribution, got {s:?}");
+}

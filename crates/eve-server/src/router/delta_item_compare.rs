@@ -928,13 +928,28 @@ impl Drop for CompareTickSyncGuard {
     }
 }
 
-pub(crate) fn enter_compare_tick_sync_scope(db: Option<&eve_db::WorldRepository>) -> CompareTickSyncGuard {
+pub(crate) fn enter_compare_tick_sync_scope(
+    db: Option<&eve_db::WorldRepository>,
+) -> CompareTickSyncGuard {
     let tid = std::thread::current().id();
-    let bridges = db.map(|r| super::delta_commit_listener::item_compare_bridges_for_db(r.instance_id())).unwrap_or_default();
-    for bridge in &bridges {
-        *bridge.ledger.lock().unwrap_or_else(|e| e.into_inner()).tick_sync_depths_by_thread.entry(tid).or_insert(0) += 1;
+    let bridges = db
+        .map(|r| super::delta_commit_listener::item_compare_bridges_for_db(r.instance_id()))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|bridge| {
+            let mut ledger = bridge.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            if !ledger.is_enabled() {
+                return false;
+            }
+            *ledger.tick_sync_depths_by_thread.entry(tid).or_insert(0) += 1;
+            true
+        })
+        .collect();
+    CompareTickSyncGuard {
+        bridges,
+        tid,
+        _not_send: std::marker::PhantomData,
     }
-    CompareTickSyncGuard { bridges, tid, _not_send: std::marker::PhantomData }
 }
 
 fn resolve_compare_origin_scope(in_dispatch: bool, in_tick_sync: bool) -> CompareOriginScope {
