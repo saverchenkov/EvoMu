@@ -774,4 +774,305 @@ async fn returning_drones_abandon_on_ship_death_dock_cross_system_and_scoop_reje
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drone_return_and_scoop_use_surface_range_fail_closed_and_block_destroyed_resurrection() {
+    use super::step_returning_drones;
+    use crate::services::combat_crimewatch::combat_npcs_drones::{
+        apply_damage_to_drone_in_space, handle_npcs_drones,
+    };
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let char_id = 90_995_001i64;
+    let titan_ship = 955_000_001i64;
+    let d_sentry = 955_000_011i64;
+    let d_mobile = 955_000_012i64;
+    let d_scoop_ok = 955_000_013i64;
+    let d_scoop_far = 955_000_014i64;
+    let d_no_ball = 955_000_015i64;
+    let d_killed_claimed_ball = 955_000_016i64;
+    let d_killed_claimed_item = 955_000_116i64;
+    let d_killed_direct_ball = 955_000_017i64;
+    let d_killed_direct_item = 955_000_117i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut c = snap.characters[&90_000_001].clone();
+        c.character_id = char_id;
+        c.user_id = char_id as u64;
+        c.name = "TitanDronePilot".into();
+        c.solar_system_id = sys_id;
+        c.active_ship_id = titan_ship;
+        c.station_id = None;
+        c.structure_id = None;
+        snap.characters.insert(char_id, c);
+
+        // 593 Tristan carries a 40 m3 drone bay (enough for 5 m3 test drones) while spawned with radius 3_000 m.
+        snap.items.insert(
+            titan_ship,
+            InventoryItemRecord {
+                item_id: titan_ship,
+                type_id: 593,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for (iid, tid) in [
+            (d_sentry, 2454u32),
+            (d_mobile, 2454u32),
+            (d_scoop_ok, 2454u32),
+            (d_scoop_far, 2454u32),
+            (d_no_ball, 2454u32),
+            (d_killed_claimed_item, 2454u32),
+            (d_killed_direct_item, 2454u32),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        super::super::record_drone_ball_meta_in_snap(
+            snap,
+            d_killed_claimed_item,
+            d_killed_claimed_ball,
+        );
+        super::super::record_drone_ball_meta_in_snap(
+            snap,
+            d_killed_direct_item,
+            d_killed_direct_ball,
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    // `get_or_spawn` auto-hydrates in-space `snap.items` into ballpark; remove `d_no_ball` so its ball is genuinely absent.
+    let _ = sys_handle.remove_ball(d_no_ball).await;
+    assert!(sys_handle.get_ball_snapshot(d_no_ball).await.unwrap().is_none());
+    sys_handle.try_spawn_ball_with_combat(
+        Ball {
+            id: titan_ship,
+            type_id: 593,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 1.5,
+            mass: 50_000_000.0,
+            radius: 3_000.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState::default(),
+    );
+    // All within surface_distance <= 2_500 m (center_distance = 4_500 m > 2_500 m) except d_scoop_far (surface = 2_600 m)
+    spawn_ball(&ctx, sys_id, d_sentry, 2454, DVec3::new(4_500.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d_mobile, 2454, DVec3::new(4_500.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d_scoop_ok, 2454, DVec3::new(4_500.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d_scoop_far, 2454, DVec3::new(5_650.0, 0.0, 0.0));
+    // Give d_killed_claimed_ball and d_killed_direct_ball finite HP so apply_damage_to_drone_in_space destroys them.
+    for bid in [d_killed_claimed_ball, d_killed_direct_ball] {
+        sys_handle.try_spawn_ball_with_combat(
+            Ball {
+                id: bid,
+                type_id: 2454,
+                position: DVec3::new(3_500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 500.0,
+                inertia: 1.5,
+                mass: 5_000.0,
+                radius: 10.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 10.0,
+                max_shield_hp: 10.0,
+                armor_hp: 10.0,
+                max_armor_hp: 10.0,
+                structure_hp: 10.0,
+                max_structure_hp: 10.0,
+                ..CombatState::default()
+            },
+        );
+    }
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(
+            d_sentry,
+            make_drone_state(d_sentry, d_sentry, 2454, char_id, titan_ship, sys_id, true, 0),
+        );
+        rt.active_drones_in_space.insert(
+            d_mobile,
+            make_drone_state(d_mobile, d_mobile, 2454, char_id, titan_ship, sys_id, false, 4),
+        );
+        rt.active_drones_in_space.insert(
+            d_scoop_ok,
+            make_drone_state(d_scoop_ok, d_scoop_ok, 2454, char_id, titan_ship, sys_id, false, 0),
+        );
+        rt.active_drones_in_space.insert(
+            d_scoop_far,
+            make_drone_state(d_scoop_far, d_scoop_far, 2454, char_id, titan_ship, sys_id, false, 0),
+        );
+        rt.active_drones_in_space.insert(
+            d_no_ball,
+            make_drone_state(d_no_ball, d_no_ball, 2454, char_id, titan_ship, sys_id, false, 4),
+        );
+        rt.active_drones_in_space.insert(
+            d_killed_direct_ball,
+            make_drone_state(d_killed_direct_ball, d_killed_direct_item, 2454, char_id, titan_ship, sys_id, false, 0),
+        );
+    });
+
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        ship_id: Some(titan_ship),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+
+    // 1. Capital hull surface range allows immediate sentry return + mobile step_returning_drones scoop + ScoopToDroneBay
+    handle_cmd_return_bay(&ctx, &mut sess, &[PyRep::Integer(d_sentry)], &HashMap::new())
+        .await
+        .expect("sentry within 2500m hull surface of 3000m capital succeeds");
+    step_returning_drones(&ctx).await;
+
+    let scoop_ok_res = handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "ship",
+        "ScoopToDroneBay",
+        &[PyRep::Integer(d_scoop_ok)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect("ScoopToDroneBay within capital hull surface range succeeds");
+    assert_eq!(scoop_ok_res.dict_get("scoopedDroneItemID").and_then(PyRep::as_i64), Some(d_scoop_ok));
+
+    let scoop_far_err = handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "ship",
+        "ScoopToDroneBay",
+        &[PyRep::Integer(d_scoop_far)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(scoop_far_err.code, "OutOfScoopRange");
+
+    ctx.db.with_snapshot(|snap| {
+        for scooped in [d_sentry, d_mobile, d_scoop_ok] {
+            let it = &snap.items[&scooped];
+            assert_eq!(it.location_id, titan_ship);
+            assert_eq!(it.flag, InventoryFlag::DroneBay);
+        }
+        assert_eq!(snap.items[&d_scoop_far].flag, InventoryFlag::None);
+    });
+
+    // 2. try_atomic_scoop_drone fails closed when drone_ball_opt is None (never moves to DroneBay)
+    let no_ball_state = with_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space
+            .get(&d_no_ball)
+            .cloned()
+            .expect("d_no_ball must remain in active_drones_in_space when drone ball is absent")
+    });
+    assert!(!super::try_atomic_scoop_drone(&ctx, &sys_handle, &no_ball_state, titan_ship).await);
+    ctx.db.with_snapshot(|snap| {
+        let it = &snap.items[&d_no_ball];
+        assert_eq!(it.location_id, sys_id as i64);
+        assert_eq!(it.flag, InventoryFlag::None);
+    });
+
+    // 3a. Concurrent kill after active_drones_in_space claim still deletes DB item and marks item destroyed
+    let (_, claimed_destroyed) = apply_damage_to_drone_in_space(
+        &ctx,
+        sys_id,
+        d_killed_claimed_ball,
+        DamageVector::new(1_000.0, 1_000.0, 1_000.0, 1_000.0),
+    )
+    .await;
+    assert!(claimed_destroyed);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&d_killed_claimed_item), "destroyed drone item must be deleted even if claimed from runtime map");
+    });
+    with_combat_runtime(&ctx, |rt| {
+        assert!(rt.is_recently_destroyed_item_id(d_killed_claimed_ball));
+        assert!(rt.is_recently_destroyed_item_id(d_killed_claimed_item));
+    });
+
+    // 3b. ScoopToDroneBay and try_atomic_scoop_drone both refuse recently destroyed drones even if a stale item row remains
+    let (_, direct_destroyed) = apply_damage_to_drone_in_space(
+        &ctx,
+        sys_id,
+        d_killed_direct_ball,
+        DamageVector::new(1_000.0, 1_000.0, 1_000.0, 1_000.0),
+    )
+    .await;
+    assert!(direct_destroyed);
+
+    // Re-seed stale ball + item row for killed IDs to prove recently_destroyed gate rejects before DB move
+    spawn_ball(&ctx, sys_id, d_killed_direct_ball, 2454, DVec3::new(3_500.0, 0.0, 0.0));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            d_killed_direct_item,
+            InventoryItemRecord {
+                item_id: d_killed_direct_item,
+                type_id: 2454,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        super::super::record_drone_ball_meta_in_snap(snap, d_killed_direct_item, d_killed_direct_ball);
+    });
+    let scoop_killed_err = handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "ship",
+        "ScoopToDroneBay",
+        &[PyRep::Integer(d_killed_direct_ball)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(scoop_killed_err.code, "DroneNotInSpace");
+    let fake_claimed_state = make_drone_state(
+        d_killed_direct_ball,
+        d_killed_direct_item,
+        2454,
+        char_id,
+        titan_ship,
+        sys_id,
+        false,
+        4,
+    );
+    assert!(!super::try_atomic_scoop_drone(&ctx, &sys_handle, &fake_claimed_state, titan_ship).await);
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.items.get(&d_killed_direct_item).is_none_or(|it| it.flag != InventoryFlag::DroneBay),
+            "recently destroyed drone must never resurrect into DroneBay"
+        );
+    });
+}
+
 

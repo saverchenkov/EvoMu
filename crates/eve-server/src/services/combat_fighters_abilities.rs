@@ -308,23 +308,28 @@ fn rollback_fighter_ability_slot(
     reserved: &ReservedAbilitySlot,
 ) {
     let mut fg = ctx.fighters.write().unwrap();
-    if let Some(old_cd) = reserved.prev_cooldown {
-        fg.cooldown_state.insert((fighter_ball_id, slot_id), old_cd);
-    } else {
-        fg.cooldown_state.remove(&(fighter_ball_id, slot_id));
-    }
-    if reserved.spent_charge {
-        if let Some(used) = fg.charge_state.get_mut(&(fighter_ball_id, slot_id)) {
-            *used = used.saturating_sub(1);
-            if *used == 0 {
-                fg.charge_state.remove(&(fighter_ball_id, slot_id));
+    if fg.active_fighters.contains_key(&fighter_ball_id) {
+        if let Some(old_cd) = reserved.prev_cooldown {
+            fg.cooldown_state.insert((fighter_ball_id, slot_id), old_cd);
+        } else {
+            fg.cooldown_state.remove(&(fighter_ball_id, slot_id));
+        }
+        if reserved.spent_charge {
+            if let Some(used) = fg.charge_state.get_mut(&(fighter_ball_id, slot_id)) {
+                *used = used.saturating_sub(1);
+                if *used == 0 {
+                    fg.charge_state.remove(&(fighter_ball_id, slot_id));
+                }
             }
         }
-    }
-    if matches!(ability_id, 4 | 9 | 13) {
-        if let Some(live) = fg.active_fighters.get_mut(&fighter_ball_id) {
-            live.mwd_active = reserved.prev_mwd_active;
+        if matches!(ability_id, 4 | 9 | 13) {
+            if let Some(live) = fg.active_fighters.get_mut(&fighter_ball_id) {
+                live.mwd_active = reserved.prev_mwd_active;
+            }
         }
+    } else {
+        fg.cooldown_state.remove(&(fighter_ball_id, slot_id));
+        fg.charge_state.remove(&(fighter_ball_id, slot_id));
     }
 }
 
@@ -1166,8 +1171,23 @@ async fn activate_single_fighter_ability(
         match ability_id {
             5 => {
                 let mjd_dist = attr(2154).unwrap_or(100_000.0);
-                if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
-                    let _ = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await;
+                if !ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
+                    rollback_fighter_ability_slot(ctx, fighter_ball_id, slot_id, ability_id, &reserved);
+                    let message = format!("Fighter squadron {fighter_ball_id} is no longer in space");
+                    return Some(Err(BridgeRpcError::with_client_error(
+                        "FighterNotFound",
+                        message.clone(),
+                        eve_proto::ClientError::CustomInfo(message),
+                    )));
+                }
+                if let Err(err_msg) = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await {
+                    rollback_fighter_ability_slot(ctx, fighter_ball_id, slot_id, ability_id, &reserved);
+                    let message = format!("Fighter micro jump failed for {fighter_ball_id}: {err_msg}");
+                    return Some(Err(BridgeRpcError::with_client_error(
+                        "MicroJumpFailed",
+                        message.clone(),
+                        eve_proto::ClientError::CustomInfo(message),
+                    )));
                 }
             }
             4 | 9 | 13 => {
@@ -1204,12 +1224,27 @@ async fn activate_single_fighter_ability(
                 }
             }
             _ => {
-                if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
-                    if let Some(mjd_dist) = attr(2154) {
-                        let _ = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await;
-                    } else {
-                        let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
+                if !ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
+                    rollback_fighter_ability_slot(ctx, fighter_ball_id, slot_id, ability_id, &reserved);
+                    let message = format!("Fighter squadron {fighter_ball_id} is no longer in space");
+                    return Some(Err(BridgeRpcError::with_client_error(
+                        "FighterNotFound",
+                        message.clone(),
+                        eve_proto::ClientError::CustomInfo(message),
+                    )));
+                }
+                if let Some(mjd_dist) = attr(2154) {
+                    if let Err(err_msg) = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await {
+                        rollback_fighter_ability_slot(ctx, fighter_ball_id, slot_id, ability_id, &reserved);
+                        let message = format!("Fighter micro jump failed for {fighter_ball_id}: {err_msg}");
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "MicroJumpFailed",
+                            message.clone(),
+                            eve_proto::ClientError::CustomInfo(message),
+                        )));
                     }
+                } else {
+                    let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
                 }
             }
         }

@@ -48,7 +48,6 @@ pub async fn handle_cmd_return_bay(
             client_error: None,
         });
     };
-    let ship_pos = ship_ball.position;
     let max_ctrl_range = crate::services::combat_crimewatch::combat_npcs_drones::compute_drone_control_range(ctx, char_id, ship_id);
 
     let mut candidates: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
@@ -67,7 +66,7 @@ pub async fn handle_cmd_return_bay(
         let Some((_, drone_ball)) = sys_handle.get_ball_snapshot(d.ball_id).await.ok().flatten() else {
             continue;
         };
-        let dist = ship_pos.distance(drone_ball.position);
+        let dist = ship_ball.surface_distance(&drone_ball);
         if d.is_sentry && dist > 2_500.0 {
             return Err(BridgeRpcError {
                 code: "SentryDroneOutOfScoopRange".into(),
@@ -264,6 +263,11 @@ async fn try_atomic_scoop_drone(
     target_ship_id: i64,
 ) -> bool {
     let claimed = with_mut_combat_runtime(ctx, |rt| {
+        if rt.is_recently_destroyed_item_id(d.ball_id)
+            || rt.is_recently_destroyed_item_id(d.drone_item_id)
+        {
+            return None;
+        }
         let existing = rt.active_drones_in_space.get(&d.ball_id)?;
         if existing.is_abandoned || existing.solar_system_id != d.solar_system_id {
             return None;
@@ -289,26 +293,47 @@ async fn try_atomic_scoop_drone(
         .flatten()
         .map(|(_, b)| b);
 
-    if let Some(ref db) = drone_ball_opt {
-        let Some(ref sb) = ship_ball_opt else {
-            abandon_returning_drone_in_space(ctx, sys_handle, claimed_drone).await;
-            return false;
-        };
-        if sb.position.distance(db.position) > 2_500.0 {
-            let ship_valid = ctx.db.with_snapshot(|snap| {
-                is_ship_available_for_scoop_in_snap(
-                    snap,
-                    target_ship_id,
-                    claimed_drone.solar_system_id,
-                )
+    let Some(ref db) = drone_ball_opt else {
+        // Fail closed when the drone ball is no longer in space (destroyed/removed).
+        let _ = sys_handle
+            .remove_module_cycle(claimed_drone.ball_id, -claimed_drone.ball_id)
+            .await;
+        if with_combat_runtime(ctx, |rt| {
+            rt.is_recently_destroyed_item_id(claimed_drone.ball_id)
+                || rt.is_recently_destroyed_item_id(claimed_drone.drone_item_id)
+        }) {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.items.remove(&claimed_drone.drone_item_id);
+                snap.item_positions.remove(&claimed_drone.ball_id);
+                snap.item_positions.remove(&claimed_drone.drone_item_id);
+                snap.sp6_lifecycle
+                    .space_object_meta
+                    .remove(&claimed_drone.ball_id);
+                snap.sp6_lifecycle
+                    .space_object_meta
+                    .remove(&claimed_drone.drone_item_id);
             });
-            if ship_valid {
-                restore_claimed_drone_if_alive(ctx, claimed_drone).await;
-            } else {
-                abandon_returning_drone_in_space(ctx, sys_handle, claimed_drone).await;
-            }
-            return false;
         }
+        return false;
+    };
+    let Some(ref sb) = ship_ball_opt else {
+        abandon_returning_drone_in_space(ctx, sys_handle, claimed_drone).await;
+        return false;
+    };
+    if sb.surface_distance(db) > 2_500.0 {
+        let ship_valid = ctx.db.with_snapshot(|snap| {
+            is_ship_available_for_scoop_in_snap(
+                snap,
+                target_ship_id,
+                claimed_drone.solar_system_id,
+            )
+        });
+        if ship_valid {
+            restore_claimed_drone_if_alive(ctx, claimed_drone).await;
+        } else {
+            abandon_returning_drone_in_space(ctx, sys_handle, claimed_drone).await;
+        }
+        return false;
     }
 
     let drone_vol = ctx
@@ -323,8 +348,25 @@ async fn try_atomic_scoop_drone(
         BayFull,
         ShipUnavailable,
         ItemMissing,
+        Destroyed,
     }
     let outcome = ctx.db.with_mut_snapshot(|snap| {
+        if crate::services::combat_crimewatch::combat_npcs_drones::is_recently_destroyed_in_persisted(
+            &snap.combat_crimewatch_state,
+            claimed_drone.ball_id,
+            claimed_drone.drone_item_id,
+        ) {
+            snap.items.remove(&claimed_drone.drone_item_id);
+            snap.item_positions.remove(&claimed_drone.ball_id);
+            snap.item_positions.remove(&claimed_drone.drone_item_id);
+            snap.sp6_lifecycle
+                .space_object_meta
+                .remove(&claimed_drone.ball_id);
+            snap.sp6_lifecycle
+                .space_object_meta
+                .remove(&claimed_drone.drone_item_id);
+            return ScoopOutcome::Destroyed;
+        }
         if !is_ship_available_for_scoop_in_snap(snap, target_ship_id, claimed_drone.solar_system_id) {
             return ScoopOutcome::ShipUnavailable;
         }
@@ -380,7 +422,7 @@ async fn try_atomic_scoop_drone(
             abandon_returning_drone_in_space(ctx, sys_handle, claimed_drone).await;
             return false;
         }
-        ScoopOutcome::ItemMissing => {
+        ScoopOutcome::ItemMissing | ScoopOutcome::Destroyed => {
             let _ = sys_handle.remove_module_cycle(claimed_drone.ball_id, -claimed_drone.ball_id).await;
             let _ = sys_handle.remove_ball(claimed_drone.ball_id).await;
             return false;
@@ -473,10 +515,15 @@ pub async fn step_returning_drones(ctx: &ServerContext) {
 
     for d in returning_drones {
         let sys_handle = ctx.systems.get_or_spawn(d.solar_system_id);
-        let Some(dp) = sys_handle.get_ball_position_sync(d.ball_id) else {
+        let Some((_, drone_ball)) = sys_handle.get_ball_snapshot(d.ball_id).await.ok().flatten() else {
             continue;
         };
-        let ship_pos = sys_handle.get_ball_position_sync(d.parent_ship_id);
+        let ship_ball = sys_handle
+            .get_ball_snapshot(d.parent_ship_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| b);
         let ship_explicitly_invalid = ctx.db.with_snapshot(|snap| {
             let ship_bad = snap.items.get(&d.parent_ship_id).is_some_and(|sh| {
                 sh.location_id != d.solar_system_id as i64 || sh.flag != eve_db::InventoryFlag::None
@@ -489,7 +536,7 @@ pub async fn step_returning_drones(ctx: &ServerContext) {
             });
             ship_bad || pilot_bad
         });
-        if ship_pos.is_none() || ship_explicitly_invalid {
+        if ship_ball.is_none() || ship_explicitly_invalid {
             let claimed = with_mut_combat_runtime(ctx, |rt| {
                 let st = rt.active_drones_in_space.get(&d.ball_id)?;
                 if st.activity_state == 4
@@ -506,10 +553,10 @@ pub async fn step_returning_drones(ctx: &ServerContext) {
             }
             continue;
         }
-        let Some(sp) = ship_pos else {
+        let Some(ref sb) = ship_ball else {
             continue;
         };
-        if sp.distance(dp) > 2_500.0 {
+        if sb.surface_distance(&drone_ball) > 2_500.0 {
             continue;
         }
         let _ = try_atomic_scoop_drone(ctx, &sys_handle, &d, d.parent_ship_id).await;

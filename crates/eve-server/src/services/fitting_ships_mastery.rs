@@ -557,60 +557,45 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if method == "LeaveShip" {
-                if let Some(target_ship_id) = explicit_ship_id.filter(|&id| id != old_ship_id) {
-                    let owned_by_other = ctx.db.with_snapshot(|snap| {
-                        snap.items.get(&target_ship_id).is_some_and(|it| it.owner_id != char_id)
-                    });
-                    if owned_by_other {
-                        let message = format!("Ship {target_ship_id} is not owned by character {char_id}");
-                        return Some(Err(BridgeRpcError::with_client_error(
-                            "OwnershipViolation",
-                            message.clone(),
-                            eve_proto::ClientError::CustomInfo(message),
-                        )));
-                    }
-                    let message = format!(
-                        "LeaveShip target ship {target_ship_id} does not match active ship {old_ship_id}"
-                    );
-                    return Some(Err(BridgeRpcError::with_client_error(
-                        "InvalidShip",
-                        message.clone(),
-                        eve_proto::ClientError::CustomInfo(format!("InvalidShip: {message}")),
-                    )));
-                }
-                if old_ship_type_id.is_none() {
-                    return Some(Err(active_ship_not_found_err(old_ship_id)));
-                }
-                if old_ship_owner_id != Some(char_id) {
-                    let message = format!("Ship {old_ship_id} is not owned by character {char_id}");
+            if let Some(target_ship_id) = explicit_ship_id.filter(|&id| id != old_ship_id) {
+                let owned_by_other = ctx.db.with_snapshot(|snap| {
+                    snap.items.get(&target_ship_id).is_some_and(|it| it.owner_id != char_id)
+                });
+                if owned_by_other {
+                    let message = format!("Ship {target_ship_id} is not owned by character {char_id}");
                     return Some(Err(BridgeRpcError::with_client_error(
                         "OwnershipViolation",
                         message.clone(),
                         eve_proto::ClientError::CustomInfo(message),
                     )));
                 }
+                let message = format!(
+                    "{method} target ship {target_ship_id} does not match active ship {old_ship_id}"
+                );
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "InvalidShip",
+                    message.clone(),
+                    eve_proto::ClientError::CustomInfo(format!("InvalidShip: {message}")),
+                )));
+            }
+            if old_ship_type_id.is_none() {
+                return Some(Err(active_ship_not_found_err(old_ship_id)));
+            }
+            if old_ship_owner_id != Some(char_id) {
+                let message = format!("Ship {old_ship_id} is not owned by character {char_id}");
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "OwnershipViolation",
+                    message.clone(),
+                    eve_proto::ClientError::CustomInfo(message),
+                )));
             }
             if method == "Eject" {
-                if let Some(target_ship_id) = explicit_ship_id.filter(|&id| id != old_ship_id) {
-                    let message = format!(
-                        "Eject target ship {target_ship_id} does not match active ship {old_ship_id}"
-                    );
-                    return Some(Err(BridgeRpcError::with_client_error(
-                        "InvalidShip",
-                        message.clone(),
-                        eve_proto::ClientError::CustomInfo(format!("InvalidShip: {message}")),
-                    )));
-                }
                 if let Err(e) = crate::services::space_navigation_advanced::check_immobilizing_module_active(
                     ctx,
                     old_ship_id,
                     "eject",
                 ) {
                     return Some(Err(e));
-                }
-                if old_ship_type_id.is_none() {
-                    return Some(Err(active_ship_not_found_err(old_ship_id)));
                 }
                 let Some(sys_id) = sys_opt else {
                     return Some(Err(ship_not_in_space_err(format!(
@@ -705,7 +690,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 let Some(old_ship) = snap.items.get(&old_ship_id).cloned() else {
                     return Err(active_ship_not_found_err(old_ship_id));
                 };
-                if method == "LeaveShip" && old_ship.owner_id != char_id {
+                if old_ship.owner_id != char_id {
                     let message = format!("Ship {old_ship_id} is not owned by character {char_id}");
                     return Err(BridgeRpcError::with_client_error(
                         "OwnershipViolation",

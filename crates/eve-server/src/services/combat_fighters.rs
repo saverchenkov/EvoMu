@@ -117,19 +117,15 @@ pub async fn apply_damage_to_fighter_squadron(
         .unwrap_or(1_000.0)
         .max(250.0);
     let raw_dmg = damage.total().max(0.0);
-    let total_accum = with_mut_combat_runtime(ctx, |rt| {
+    let units_killed = with_mut_combat_runtime(ctx, |rt| {
         let entry = rt.fighter_unit_damage_accum.entry(fighter_ball_id).or_insert(0.0);
         *entry += raw_dmg;
-        *entry
+        let killed = (*entry / unit_hp).floor() as u32;
+        if killed > 0 {
+            *entry = (*entry - (killed as f64) * unit_hp).max(0.0);
+        }
+        killed
     });
-    let units_killed = (total_accum / unit_hp).floor() as u32;
-    if units_killed > 0 {
-        with_mut_combat_runtime(ctx, |rt| {
-            if let Some(entry) = rt.fighter_unit_damage_accum.get_mut(&fighter_ball_id) {
-                *entry = (*entry - (units_killed as f64) * unit_hp).max(0.0);
-            }
-        });
-    }
 
     let atomic_res = {
         let mut fg = ctx.fighters.write().unwrap();
@@ -161,6 +157,14 @@ pub async fn apply_damage_to_fighter_squadron(
         return (0, 0, false);
     };
 
+    if wiped_out {
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.fighter_unit_damage_accum.remove(&fighter_ball_id);
+            rt.record_destroyed_item_id(fighter_ball_id);
+            rt.record_destroyed_item_id(item_id);
+        });
+    }
+
     if wiped_out || lost > 0 {
         ctx.db.with_mut_snapshot(|snap| {
             let mut remove_item = false;
@@ -186,10 +190,6 @@ pub async fn apply_damage_to_fighter_squadron(
         for slot in 0..3 {
             ctx.remove_projected_ewar_by_module(parent_ship_id, -(fighter_ball_id * 10 + slot));
         }
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.fighter_unit_damage_accum.remove(&fighter_ball_id);
-            rt.record_destroyed_item_id(fighter_ball_id);
-        });
         let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
         let _ = sys_handle.remove_ball(fighter_ball_id).await;
         crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, fighter_ball_id);
@@ -1654,9 +1654,14 @@ async fn handle_execute_movement_command_on_fighters(
     }
     if cmd == "MJD" {
         let now_unix = ctx.now_unix();
-        for fid in fighter_ids {
-            let reserved = {
-                let mut fg = ctx.fighters.write().unwrap();
+        let reserved_batch: Result<Vec<(i64, u32, f64, Option<u64>)>, BridgeRpcError> = (|| {
+            let mut fg = ctx.fighters.write().unwrap();
+            let mut seen = std::collections::HashSet::with_capacity(fighter_ids.len());
+            let mut targets = Vec::with_capacity(fighter_ids.len());
+            for &fid in &fighter_ids {
+                if !seen.insert(fid) {
+                    continue;
+                }
                 let Some(f) = fg.active_fighters.get(&fid) else {
                     continue;
                 };
@@ -1678,11 +1683,11 @@ async fn handle_execute_movement_command_on_fighters(
                     let message = format!(
                         "Fighter squadron {fid} (type {ftype_id}) does not possess a Micro Jump Drive ability"
                     );
-                    return Some(Err(BridgeRpcError::with_client_error(
+                    return Err(BridgeRpcError::with_client_error(
                         "FighterLacksMjdAbility",
                         message.clone(),
                         eve_proto::ClientError::CustomInfo(message),
-                    )));
+                    ));
                 }
                 let slot_idx = mjd_slot_opt.map(|s| s.slot_index as u32).unwrap_or(1);
                 if let Some(&ready_at) = fg.cooldown_state.get(&(fid, slot_idx)) {
@@ -1690,11 +1695,11 @@ async fn handle_execute_movement_command_on_fighters(
                         let message = format!(
                             "Fighter MJD ability on squadron {fid} is on cooldown until {ready_at}"
                         );
-                        return Some(Err(BridgeRpcError::with_client_error(
+                        return Err(BridgeRpcError::with_client_error(
                             "AbilityOnCooldown",
                             message.clone(),
                             eve_proto::ClientError::CustomInfo(message),
-                        )));
+                        ));
                     }
                 }
                 let mjd_dist = mjd_dist_attr.unwrap_or(100_000.0);
@@ -1703,17 +1708,51 @@ async fn handle_execute_movement_command_on_fighters(
                     .map(|c| c.ceil() as u64)
                     .unwrap_or(60)
                     .max(1);
+                targets.push((fid, slot_idx, mjd_dist, cd_secs));
+            }
+            let mut committed = Vec::with_capacity(targets.len());
+            for (fid, slot_idx, mjd_dist, cd_secs) in targets {
                 let prev_cd = fg.cooldown_state.insert((fid, slot_idx), now_unix + cd_secs);
-                (slot_idx, mjd_dist, prev_cd)
-            };
-            let (slot_idx, mjd_dist, prev_cd) = reserved;
-            if sys_handle.micro_jump(fid, mjd_dist).await.is_err() {
-                let mut fg = ctx.fighters.write().unwrap();
-                if let Some(old) = prev_cd {
-                    fg.cooldown_state.insert((fid, slot_idx), old);
-                } else {
-                    fg.cooldown_state.remove(&(fid, slot_idx));
+                committed.push((fid, slot_idx, mjd_dist, prev_cd));
+            }
+            Ok(committed)
+        })();
+        let committed = match reserved_batch {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let mut first_err: Option<BridgeRpcError> = None;
+        let mut jumped_any = false;
+        for (fid, slot_idx, mjd_dist, prev_cd) in committed {
+            match sys_handle.micro_jump(fid, mjd_dist).await {
+                Ok(_) => {
+                    jumped_any = true;
                 }
+                Err(err_msg) => {
+                    let mut fg = ctx.fighters.write().unwrap();
+                    if fg.active_fighters.contains_key(&fid) {
+                        if let Some(old) = prev_cd {
+                            fg.cooldown_state.insert((fid, slot_idx), old);
+                        } else {
+                            fg.cooldown_state.remove(&(fid, slot_idx));
+                        }
+                    } else {
+                        fg.cooldown_state.remove(&(fid, slot_idx));
+                    }
+                    if first_err.is_none() {
+                        let message = format!("Fighter micro jump failed for {fid}: {err_msg}");
+                        first_err = Some(BridgeRpcError::with_client_error(
+                            "MicroJumpFailed",
+                            message.clone(),
+                            eve_proto::ClientError::CustomInfo(message),
+                        ));
+                    }
+                }
+            }
+        }
+        if !jumped_any {
+            if let Some(err) = first_err {
+                return Some(Err(err));
             }
         }
         return Some(Ok(PyRep::Bool(true)));

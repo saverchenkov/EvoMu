@@ -2101,5 +2101,105 @@ async fn leave_ship_enforces_ownership_for_active_and_explicit_ships() {
     let capsule_id = ok_leave.as_i64().expect("returns capsule ID");
     assert_ne!(capsule_id, own_ship_id);
     assert_eq!(sess.ship_id, Some(capsule_id));
+
+    // 4. Undock and verify ship.Eject also enforces ownership for active & explicit ship args
+    let space_sys = 30_000_142u32;
+    let sys_h = ctx.systems.get_or_spawn(space_sys);
+    let ship_a = 955_100_003i64;
+    let ship_b = 955_100_004i64;
+    for (sid, owner) in [(ship_a, char_a), (ship_b, char_b)] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: owner,
+                    location_id: i64::from(space_sys),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        sys_h.try_spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: sid,
+                type_id: 587,
+                position: glam::DVec3::new(10_000.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_100_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+            ctx.build_ship_slim_meta(owner, 587),
+        );
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_a) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = space_sys;
+            ch.active_ship_id = ship_b;
+        }
+    });
+    let mut ej_sess = SessionState::new(2);
+    ej_sess.user_id = Some(1);
+    ej_sess.character_id = Some(char_a);
+    ej_sess.solar_system_id = Some(space_sys);
+    ej_sess.ship_id = Some(ship_b);
+    let ej_active_err = handle_ships_mastery_and_fitting_ext(
+        &ctx, &mut ej_sess, None, "ship", "Eject", &[], &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(ej_active_err.code, "OwnershipViolation");
+    assert_eq!(ej_sess.ship_id, Some(ship_b));
+
+    ej_sess.ship_id = Some(ship_a);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_a) {
+            ch.active_ship_id = ship_a;
+        }
+    });
+    let ej_explicit_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut ej_sess,
+        None,
+        "ship",
+        "Eject",
+        &[PyRep::Integer(ship_b)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(ej_explicit_err.code, "OwnershipViolation");
+    assert_eq!(ej_sess.ship_id, Some(ship_a));
+
+    crate::services::space_destiny::clear_session_change_timer(&ctx, char_a);
+    let ej_ok = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut ej_sess,
+        None,
+        "ship",
+        "Eject",
+        &[PyRep::Integer(ship_a)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Eject with owned explicit active ship succeeds");
+    let ej_cap_id = ej_ok.dict_get("capsuleID").and_then(PyRep::as_i64).unwrap();
+    assert_ne!(ej_cap_id, ship_a);
+    assert_eq!(ej_sess.ship_id, Some(ej_cap_id));
 }
 

@@ -1285,9 +1285,10 @@ async fn fighter_r2_db_dock_structure_control_cloak_launch_and_movement_scoop_gu
     assert!(!sys_handle.get_combat_state(no_cs_carrier).await.unwrap().unwrap().is_tethered);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_fighter_ability_activations_and_death_never_double_spend_or_resurrect() {
-    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let (raw_ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let ctx = Arc::new(raw_ctx);
     let kw = HashMap::new();
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle
@@ -1393,11 +1394,22 @@ async fn concurrent_fighter_ability_activations_and_death_never_double_spend_or_
     assert_eq!(ok_count, 1, "strictly one concurrent activation on 1-charge slot may succeed");
     assert_eq!(ctx.fighter_charge_state.read().unwrap().get(&(fball, 2)).copied(), Some(6));
 
-    // 2. Concurrent damage hits split safely (no lost unit loss across join!) and wiping prevents ball resurrection via MWD
-    let ((l1, _, _), (l2, _, _)) = tokio::join!(
-        apply_damage_to_fighter_squadron(&ctx, sys_id, fball, DamageVector::new(2_000.0, 0.0, 0.0, 0.0)),
-        apply_damage_to_fighter_squadron(&ctx, sys_id, fball, DamageVector::new(3_000.0, 0.0, 0.0, 0.0)),
-    );
+    // 2. Concurrent multi-task damage hits via tokio::spawn split safely without double-counting
+    let dmg_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let ctx_a = Arc::clone(&ctx);
+    let b_a = Arc::clone(&dmg_barrier);
+    let t_a = tokio::spawn(async move {
+        b_a.wait().await;
+        apply_damage_to_fighter_squadron(&ctx_a, sys_id, fball, DamageVector::new(2_000.0, 0.0, 0.0, 0.0)).await
+    });
+    let ctx_b = Arc::clone(&ctx);
+    let b_b = Arc::clone(&dmg_barrier);
+    let t_b = tokio::spawn(async move {
+        b_b.wait().await;
+        apply_damage_to_fighter_squadron(&ctx_b, sys_id, fball, DamageVector::new(3_000.0, 0.0, 0.0, 0.0)).await
+    });
+    let (r1, r2) = tokio::join!(t_a, t_b);
+    let (l1, l2) = (r1.unwrap().0, r2.unwrap().0);
     assert_eq!(l1 + l2, 5);
     assert_eq!(ctx.active_fighters.read().unwrap()[&fball].squadron_size, 4);
     assert_eq!(ctx.db.get_item(fid).unwrap().quantity, 4);
@@ -1439,5 +1451,201 @@ async fn concurrent_fighter_ability_activations_and_death_never_double_spend_or_
     .unwrap_err();
     assert_eq!(err_move_mwd.code, "FighterNotFound");
     assert!(sys_handle.get_ball_snapshot(fball).await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fighter_mjd_batch_prevalidates_atomically_rolls_back_errors_and_multitask_damage_exact() {
+    let (raw_ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let ctx = Arc::new(raw_ctx);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let kw = HashMap::new();
+
+    let heavy_ok = 620_101i64;
+    let heavy_ok_item = 520_101i64;
+    let heavy_cd = 620_102i64;
+    let heavy_cd_item = 520_102i64;
+    let light_no_mjd = 620_103i64;
+    let light_no_mjd_item = 520_103i64;
+    let dmg_ball = 620_104i64;
+    let dmg_item = 520_104i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(heavy_ok_item, make_fighter_item(heavy_ok_item, 23_061, char_id, sys_id as i64, InventoryFlag::None, 6));
+        snap.items.insert(heavy_cd_item, make_fighter_item(heavy_cd_item, 23_061, char_id, sys_id as i64, InventoryFlag::None, 6));
+        snap.items.insert(light_no_mjd_item, make_fighter_item(light_no_mjd_item, 23_057, char_id, sys_id as i64, InventoryFlag::None, 9));
+        snap.items.insert(dmg_item, make_fighter_item(dmg_item, 23_057, char_id, sys_id as i64, InventoryFlag::None, 9));
+    });
+
+    for (bid, tid, pos, radius) in [
+        (ship_id, 23_915u32, DVec3::ZERO, 500.0),
+        (heavy_ok, 23_061u32, DVec3::new(1_000.0, 0.0, 0.0), 25.0),
+        (heavy_cd, 23_061u32, DVec3::new(2_000.0, 0.0, 0.0), 25.0),
+        (light_no_mjd, 23_057u32, DVec3::new(3_000.0, 0.0, 0.0), 25.0),
+        (dmg_ball, 23_057u32, DVec3::new(4_000.0, 0.0, 0.0), 25.0),
+    ] {
+        sys_handle
+            .spawn_ball(
+                Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 1_500.0,
+                    inertia: 1.0,
+                    mass: 25_000.0,
+                    radius,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    {
+        let mut fg = ctx.fighters.write().unwrap();
+        for (bid, iid, tid, sz, tube) in [
+            (heavy_ok, heavy_ok_item, 23_061u32, 6u32, 0usize),
+            (heavy_cd, heavy_cd_item, 23_061u32, 6u32, 1usize),
+            (light_no_mjd, light_no_mjd_item, 23_057u32, 9u32, 2usize),
+            (dmg_ball, dmg_item, 23_057u32, 9u32, 3usize),
+        ] {
+            fg.active_fighters.insert(
+                bid,
+                ActiveFighterSquadron {
+                    ball_id: bid,
+                    item_id: iid,
+                    type_id: tid,
+                    owner_char_id: char_id,
+                    parent_ship_id: ship_id,
+                    tube_index: tube,
+                    squadron_size: sz,
+                    target_id: None,
+                    is_abandoned: false,
+                    mwd_active: false,
+                },
+            );
+        }
+    }
+
+    // 1. Multi-task concurrent damage: 10 tokio::spawn hits x 500 dmg (5000 total / 1000 unit HP) kills strictly 5 units
+    let barrier = Arc::new(tokio::sync::Barrier::new(10));
+    let mut handles = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let c = Arc::clone(&ctx);
+        let b = Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            b.wait().await;
+            apply_damage_to_fighter_squadron(&c, sys_id, dmg_ball, DamageVector::new(500.0, 0.0, 0.0, 0.0)).await
+        }));
+    }
+    let mut total_lost = 0u32;
+    for h in handles {
+        total_lost += h.await.unwrap().0;
+    }
+    assert_eq!(total_lost, 5);
+    assert_eq!(ctx.active_fighters.read().unwrap()[&dmg_ball].squadron_size, 4);
+    assert_eq!(ctx.db.get_item(dmg_item).unwrap().quantity, 4);
+    let (lost_wipe, _, wiped) = apply_damage_to_fighter_squadron(
+        &ctx,
+        sys_id,
+        dmg_ball,
+        DamageVector::new(10_000.0, 0.0, 0.0, 0.0),
+    )
+    .await;
+    assert!(wiped && lost_wipe == 4);
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        assert!(rt.is_recently_destroyed_item_id(dmg_ball));
+        assert!(rt.is_recently_destroyed_item_id(dmg_item));
+    });
+
+    // 2. Batch "MJD" pre-validates FighterLacksMjdAbility without jumping heavy_ok or setting cooldown
+    let err_lack = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "ExecuteMovementCommandOnFighters",
+        &[
+            PyRep::List(vec![PyRep::Integer(heavy_ok), PyRep::Integer(light_no_mjd)]),
+            PyRep::String("MJD".into()),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_lack.code, "FighterLacksMjdAbility");
+    assert_eq!(sys_handle.get_ball_snapshot(heavy_ok).await.unwrap().unwrap().1.position, DVec3::new(1_000.0, 0.0, 0.0));
+    assert!(!ctx.fighter_cooldown_state.read().unwrap().contains_key(&(heavy_ok, 1)));
+
+    // 3. Batch "MJD" pre-validates AbilityOnCooldown without jumping heavy_ok or setting cooldown
+    ctx.fighter_cooldown_state
+        .write()
+        .unwrap()
+        .insert((heavy_cd, 1), ctx.now_unix() + 120);
+    let err_cd = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "ExecuteMovementCommandOnFighters",
+        &[
+            PyRep::List(vec![PyRep::Integer(heavy_ok), PyRep::Integer(heavy_cd)]),
+            PyRep::String("MJD".into()),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_cd.code, "AbilityOnCooldown");
+    assert_eq!(sys_handle.get_ball_snapshot(heavy_ok).await.unwrap().unwrap().1.position, DVec3::new(1_000.0, 0.0, 0.0));
+    assert!(!ctx.fighter_cooldown_state.read().unwrap().contains_key(&(heavy_ok, 1)));
+
+    // 4. Failed micro_jump (warp-scrambled fighter) in CmdActivateAbilitySlots and "MJD" propagates MicroJumpFailed and rolls back cooldown
+    sys_handle
+        .set_combat_state(heavy_ok, CombatState::default())
+        .await
+        .unwrap();
+    sys_handle
+        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            module_id: 99_901,
+            effect_name: "warp_scramble".to_string(),
+            target_id: Some(heavy_ok),
+            repeat: 1_000,
+            duration_s: 10.0,
+            warp_scramble_points: 2,
+            disables_target_mwd_mjd: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let err_slot_mjd = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "CmdActivateAbilitySlots",
+        &[PyRep::List(vec![PyRep::Integer(heavy_ok)]), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_slot_mjd.code, "MicroJumpFailed");
+    assert!(!ctx.fighter_cooldown_state.read().unwrap().contains_key(&(heavy_ok, 1)));
+
+    let err_move_mjd = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "ExecuteMovementCommandOnFighters",
+        &[PyRep::List(vec![PyRep::Integer(heavy_ok)]), PyRep::String("MJD".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_move_mjd.code, "MicroJumpFailed");
+    assert!(!ctx.fighter_cooldown_state.read().unwrap().contains_key(&(heavy_ok, 1)));
 }
 
