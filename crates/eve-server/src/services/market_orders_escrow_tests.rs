@@ -591,6 +591,7 @@ fn buy_multiple_items_and_price_history_queries() {
     .expect("PlaceMultiSellOrder with Integer(0) useCorp");
 
     let _ = ctx.drain_notifications_for_char(buyer_id);
+    let pre_self_trade_bal = ctx.db.get_character(buyer_id).unwrap().balance.to_wire_f64();
     let self_buy_reqs = PyRep::List(vec![PyRep::Tuple(vec![
         PyRep::Integer(34),
         PyRep::Integer(10),
@@ -613,9 +614,13 @@ fn buy_multiple_items_and_price_history_queries() {
         .filter(|n| n.event == "OnAccountChange")
         .filter_map(|n| n.args.get(2).and_then(PyRep::as_f64))
         .collect();
-    assert!(acct_bals.len() >= 2);
-    assert!(acct_bals[0] < acct_bals[1]);
-    assert!((acct_bals.last().copied().unwrap() - final_bal).abs() < 1e-2);
+    assert_eq!(
+        acct_bals.len(),
+        1,
+        "Transactional self-trade BuyMultipleItems must emit one coalesced OnAccountChange with final net balance: {acct_bals:?}"
+    );
+    assert!(acct_bals[0] < pre_self_trade_bal);
+    assert!((acct_bals[0] - final_bal).abs() < 1e-2);
 }
 
 fn call_escrow_kw(

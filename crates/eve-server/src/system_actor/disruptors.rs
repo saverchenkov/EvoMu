@@ -225,6 +225,7 @@ impl super::SystemHandle {
                 }
             }
             let res = (removed_cycle, db_opt.clone());
+            super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
             self.publish_view_from(&bp, Some(&st));
             res
         };

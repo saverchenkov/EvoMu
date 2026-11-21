@@ -266,7 +266,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                         .await;
                 }
                 match read_system_signatures_ready(ctx, sys_id, now_unix) {
-                    Some((ready_sigs, anom_ids)) if !anom_ids.is_empty() => ready_sigs,
+                    Some((ready_sigs, _)) => ready_sigs,
                     _ => ensure_system_signatures(ctx, sys_id).await,
                 }
             };
@@ -1715,6 +1715,7 @@ pub fn build_signal_tracker_signature_kv(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AnomalyDungeonMetadata {
     pub dungeon_id: u32,
+    pub dungeon_name_id: Option<u32>,
     pub archetype_id: u32,
     pub faction_id: u32,
     pub difficulty: u32,
@@ -1783,31 +1784,31 @@ pub(crate) fn resolve_anomaly_dungeon_metadata(
         })
     });
 
-    if let Some(d) = matched {
-        let archetype_id = d.archetype_id.unwrap_or(default_archetype_id);
-        let faction_id = d.faction_id.unwrap_or(default_faction_id);
-        let difficulty = d.difficulty.unwrap_or(default_difficulty).clamp(1, 5);
-        AnomalyDungeonMetadata {
-            dungeon_id: d.dungeon_id,
-            archetype_id,
-            faction_id,
-            difficulty,
-            scan_strength_attribute: scan_strength_attribute_for_anomaly(
-                &anom.anomaly_type,
-                archetype_id,
-            ),
-        }
+    let (dungeon_id, archetype_id, faction_id, difficulty) = if let Some(d) = matched {
+        (
+            d.dungeon_id,
+            d.archetype_id.unwrap_or(default_archetype_id),
+            d.faction_id.unwrap_or(default_faction_id),
+            d.difficulty.unwrap_or(default_difficulty).clamp(1, 5),
+        )
     } else {
-        AnomalyDungeonMetadata {
-            dungeon_id: parsed_dungeon_id.unwrap_or(default_dungeon_id),
-            archetype_id: default_archetype_id,
-            faction_id: default_faction_id,
-            difficulty: default_difficulty,
-            scan_strength_attribute: scan_strength_attribute_for_anomaly(
-                &anom.anomaly_type,
-                default_archetype_id,
-            ),
-        }
+        (
+            parsed_dungeon_id.unwrap_or(default_dungeon_id),
+            default_archetype_id,
+            default_faction_id,
+            default_difficulty,
+        )
+    };
+    AnomalyDungeonMetadata {
+        dungeon_id,
+        dungeon_name_id: sde.dungeon_name_id(dungeon_id),
+        archetype_id,
+        faction_id,
+        difficulty,
+        scan_strength_attribute: scan_strength_attribute_for_anomaly(
+            &anom.anomaly_type,
+            archetype_id,
+        ),
     }
 }
 
@@ -1825,7 +1826,11 @@ pub(crate) fn build_signal_tracker_anomaly_kv(
         ("dungeonID", PyRep::Integer(i64::from(meta.dungeon_id))),
         ("archetypeID", PyRep::Integer(i64::from(meta.archetype_id))),
         ("dungeonName", PyRep::String(anom.name.clone())),
-        ("dungeonNameID", PyRep::None),
+        (
+            "dungeonNameID",
+            meta.dungeon_name_id
+                .map_or(PyRep::None, |id| PyRep::Integer(i64::from(id))),
+        ),
         ("factionID", PyRep::Integer(i64::from(meta.faction_id))),
         ("scanStrengthAttribute", PyRep::Integer(meta.scan_strength_attribute)),
         ("allowedTypes", PyRep::None),

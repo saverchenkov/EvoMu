@@ -74,6 +74,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -95,6 +96,293 @@ HOOK_SCRIPT_PATH = HARNESS_DIR / "evomu_playtester_hook.py"
 SITE_SCRIPT_PATH = HARNESS_DIR / "evomu_site.py"
 HELPERS_SCRIPT_PATH = HARNESS_DIR / "evomu_inclient_helpers.py"
 SCENARIOS_DIR = HARNESS_DIR / "scenarios"
+if str(HARNESS_DIR) not in sys.path:
+    sys.path.insert(0, str(HARNESS_DIR))
+import guard_registry  # noqa: E402
+import gm_slash_utils  # noqa: E402
+
+
+class _GuardHitTracker:
+    """Deduplicating accumulator for client behaviour-guard hits across RPC payloads."""
+
+    def __init__(self, retain_all: bool = True, max_recent: int = 100) -> None:
+        self.retain_all = bool(retain_all)
+        self.max_recent = int(max_recent)
+        self.session_gen: int = 0
+        self.seen_seqs: set = set()
+        self.last_seq: int = 0
+        self.total_count: int = 0
+        self.by_guard: Dict[str, int] = {}
+        self.client_only_count: int = 0
+        self.client_only_by_guard: Dict[str, int] = {}
+        self.client_guards_off: Optional[bool] = None
+        self.hits: List[Dict[str, Any]] = []
+        self.recent_hits: List[Dict[str, Any]] = []
+
+    def reset_client_session(self) -> None:
+        """Reset client-session sequence tracking across EVE.app restarts/hot-reloads."""
+        self.session_gen += 1
+        self.last_seq = 0
+        self.seen_seqs.clear()
+
+    def absorb_hits(self, raw_hits: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw_hits, list):
+            return []
+        added: List[Dict[str, Any]] = []
+        for item in raw_hits:
+            if not isinstance(item, dict):
+                continue
+            seq_val = item.get("seq")
+            if isinstance(seq_val, int):
+                dedup_key: Any = (self.session_gen, "seq", seq_val)
+                if seq_val > self.last_seq:
+                    self.last_seq = seq_val
+            else:
+                dedup_key = (
+                    self.session_gen,
+                    "raw",
+                    str(item.get("guard") or ""),
+                    str(item.get("function") or ""),
+                    str(item.get("reason") or ""),
+                    item.get("time"),
+                )
+            if dedup_key in self.seen_seqs:
+                continue
+            self.seen_seqs.add(dedup_key)
+            if len(self.seen_seqs) > 10000:
+                self.seen_seqs = {
+                    k
+                    for k in self.seen_seqs
+                    if isinstance(k, tuple)
+                    and len(k) >= 3
+                    and k[0] == self.session_gen
+                    and k[1] == "seq"
+                    and k[2] > self.last_seq - 2000
+                }
+            gid = str(item.get("guard") or "unknown")
+            self.total_count += 1
+            self.by_guard[gid] = self.by_guard.get(gid, 0) + 1
+            if guard_registry.is_approved_client_only(gid):
+                self.client_only_count += 1
+                self.client_only_by_guard[gid] = self.client_only_by_guard.get(gid, 0) + 1
+            entry = dict(item)
+            added.append(entry)
+            if self.retain_all:
+                self.hits.append(entry)
+            self.recent_hits.append(entry)
+            if len(self.recent_hits) > self.max_recent:
+                self.recent_hits = self.recent_hits[-self.max_recent:]
+        return added
+
+    def absorb_payload(self, payload: Any) -> List[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        fr = payload.get("flight_recorder")
+        if isinstance(fr, dict):
+            fr_sum = fr.get("guard_summary")
+            if isinstance(fr_sum, dict) and isinstance(fr_sum.get("client_guards_off"), bool):
+                self.client_guards_off = fr_sum["client_guards_off"]
+        top_sum = payload.get("guard_summary")
+        if isinstance(top_sum, dict) and isinstance(top_sum.get("client_guards_off"), bool):
+            self.client_guards_off = top_sum["client_guards_off"]
+        if isinstance(payload.get("guard_hits"), list):
+            return self.absorb_hits(payload.get("guard_hits"))
+        if isinstance(fr, dict) and isinstance(fr.get("guard_hits"), list):
+            return self.absorb_hits(fr.get("guard_hits"))
+        return []
+
+    def poll_rpc(self, rpc_obj: Any, timeout: float = 2.0) -> List[Dict[str, Any]]:
+        if rpc_obj is None or not callable(getattr(rpc_obj, "call", None)):
+            return []
+        try:
+            resp = rpc_obj.call("get_guard_hits", {"since_seq": self.last_seq}, timeout=timeout)
+        except Exception:
+            return []
+        if not isinstance(resp, dict):
+            return []
+        if isinstance(resp.get("result"), dict):
+            resp = resp["result"]
+        if not isinstance(resp.get("guard_hits"), list) and not isinstance(resp.get("guard_summary"), dict):
+            return []
+        return self.absorb_payload(resp)
+
+    def summary(self, default_guards_off: bool = False) -> Dict[str, Any]:
+        guards_off = default_guards_off if self.client_guards_off is None else bool(self.client_guards_off)
+        ordered_by_guard = {gid: self.by_guard[gid] for gid in sorted(self.by_guard.keys())}
+        ordered_co_by_guard = {
+            gid: self.client_only_by_guard[gid]
+            for gid in sorted(self.client_only_by_guard.keys())
+        }
+        return {
+            "client_guards_off": guards_off,
+            "guard_hits_count": self.total_count,
+            "guard_hits_by_guard": ordered_by_guard,
+            "client_only_guard_hits": self.client_only_count,
+            "client_only_guard_hits_by_guard": ordered_co_by_guard,
+            "server_caused_guard_hits": self.total_count - self.client_only_count,
+        }
+
+
+class _SimTimeTracker:
+    """Deduplicating accumulator for host-side GM simulated-time injections."""
+
+    def __init__(self, retain_events: bool = True, max_recent: int = 200) -> None:
+        self.retain_events = bool(retain_events)
+        self.max_recent = int(max_recent)
+        self.seen_ids: set = set()
+        self._seen_order: deque = deque()
+        self.total_sec: float = 0.0
+        self.total_count: int = 0
+        self.events: List[Dict[str, Any]] = []
+        self.recent_events: List[Dict[str, Any]] = []
+
+    def absorb_events(self, raw_events: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw_events, list):
+            return []
+        added: List[Dict[str, Any]] = []
+        for idx, item in enumerate(raw_events):
+            if not isinstance(item, dict):
+                continue
+            eid = item.get("injection_id")
+            raw_seq = item.get("seq")
+            if isinstance(eid, str) and eid.strip():
+                key: Any = ("id", eid.strip())
+            elif isinstance(raw_seq, int) and not isinstance(raw_seq, bool):
+                key = (
+                    "seq",
+                    int(raw_seq),
+                    str(item.get("method") or ""),
+                    float(item.get("seconds") or 0.0),
+                )
+            else:
+                key = (
+                    "raw",
+                    str(item.get("source") or ""),
+                    str(item.get("method") or ""),
+                    float(item.get("seconds") or 0.0),
+                    int(item.get("target_char_id") or 0),
+                    item.get("ts"),
+                    idx,
+                )
+            if key in self.seen_ids:
+                continue
+            self.seen_ids.add(key)
+            self._seen_order.append(key)
+            while len(self.seen_ids) > 20000 and self._seen_order:
+                oldest = self._seen_order.popleft()
+                self.seen_ids.discard(oldest)
+            try:
+                sec = max(0.0, float(item.get("seconds") or 0.0))
+            except Exception:
+                sec = 0.0
+            self.total_sec = round(self.total_sec + sec, 6)
+            self.total_count += 1
+            entry = dict(item)
+            entry["seconds"] = sec
+            added.append(entry)
+            if self.retain_events:
+                self.events.append(entry)
+            self.recent_events.append(entry)
+            if len(self.recent_events) > self.max_recent:
+                self.recent_events = self.recent_events[-self.max_recent:]
+        return added
+
+    def absorb_payload(self, payload: Any) -> List[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        fr = payload.get("flight_recorder")
+        if isinstance(payload.get("sim_time_injections"), list):
+            return self.absorb_events(payload.get("sim_time_injections"))
+        if isinstance(fr, dict) and isinstance(fr.get("sim_time_injections"), list):
+            return self.absorb_events(fr.get("sim_time_injections"))
+        return []
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "total_sim_time_injected_sec": round(self.total_sec, 6),
+            "total_sim_time_injection_count": int(self.total_count),
+        }
+
+
+class _HostGmBridgeRpcServer:
+    """Loopback JSON-line TCP server routing in-client time-control requests to the host GM bridge."""
+
+    def __init__(self, handler_fn: Any) -> None:
+        self._handler_fn = handler_fn
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(16)
+        self.port = int(self._sock.getsockname()[1])
+        self._stop_evt = threading.Event()
+        self._thread = threading.Thread(
+            target=self._serve_loop,
+            name=f"HostGmBridge-{self.port}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _serve_loop(self) -> None:
+        self._sock.settimeout(0.5)
+        while not self._stop_evt.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            t = threading.Thread(
+                target=self._handle_conn,
+                args=(conn,),
+                daemon=True,
+            )
+            t.start()
+
+    def _handle_conn(self, conn: socket.socket) -> None:
+        try:
+            with conn:
+                conn.settimeout(30.0)
+                buf = b""
+                while not self._stop_evt.is_set():
+                    try:
+                        chunk = conn.recv(4096)
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        raw = line.decode("utf-8", errors="replace").strip()
+                        if not raw:
+                            continue
+                        try:
+                            req = json.loads(raw)
+                        except Exception as exc:
+                            resp: Dict[str, Any] = {"ok": False, "error": f"bad_json: {exc}"}
+                        else:
+                            try:
+                                resp = self._handler_fn(req)
+                                if not isinstance(resp, dict):
+                                    resp = {"ok": False, "error": "invalid_handler_response"}
+                            except Exception as exc:
+                                resp = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                        conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        self._stop_evt.set()
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+
 CLIENT_BRIDGE_DIR = REPO_ROOT / "client-bridge"
 
 DEFAULT_CACHE_ROOT = Path(
@@ -2121,6 +2409,7 @@ class PlaytesterMemory:
             "coverage_frontier": default_frontier,
             "recent_actions": [],
             "filed_incident_fingerprints": [],
+            "last_run_summary": None,
         }
 
     def save(self) -> None:
@@ -2338,12 +2627,24 @@ class PlaytesterMemory:
             "ok": bool(action_outcome.get("action_ok", True)),
             "action_error": action_outcome.get("action_error"),
             "state_diff": action_outcome.get("state_diff"),
+            "guard_hit_count": int(
+                action_outcome.get(
+                    "guard_hit_count",
+                    len(action_outcome.get("guard_hits") or []),
+                )
+                or 0
+            ),
+            "guard_hits": list(action_outcome.get("guard_hits") or [])[:25],
         }
         if action_outcome.get("slash_result"):
             recent_entry["slash_result"] = str(action_outcome["slash_result"])[:2000]
         recent.append(recent_entry)
         self.data["recent_actions"] = recent[-20:]
         self.maybe_rotate_persona()
+        self.save()
+
+    def update_run_summary(self, summary: Dict[str, Any]) -> None:
+        self.data["last_run_summary"] = dict(summary or {})
         self.save()
 
 
@@ -6594,6 +6895,14 @@ class PlaytesterRunner:
         self._session_flight_seqs: set = set()
         self._gm_bridge_conn: Any = None
         self._gm_bridge_sm: Any = None
+        self._gm_bridge_lock = threading.RLock()
+        self._host_gm_events_lock = threading.Lock()
+        self._host_gm_pending_events: List[Dict[str, Any]] = []
+        self._host_gm_server: Optional[_HostGmBridgeRpcServer] = None
+        self._host_gm_port: int = 0
+        self._sim_injection_seq: int = 0
+        self._active_step_allows_host_time_control: Optional[bool] = None
+        self._active_step_allows_host_gm_slash: Optional[bool] = None
 
         # Hybrid Planner + Executor + Direct Runner batch state
         self.batch_id: int = 0
@@ -6625,6 +6934,166 @@ class PlaytesterRunner:
             async_write=True,
         )
         self._refresh_oracle_handshake_builds()
+        self._guard_tracker = _GuardHitTracker(retain_all=False, max_recent=100)
+        self._sim_time_tracker = _SimTimeTracker(retain_events=False, max_recent=200)
+
+    def _ensure_run_guard_state(self) -> _GuardHitTracker:
+        tracker = getattr(self, "_guard_tracker", None)
+        if tracker is None:
+            tracker = _GuardHitTracker(retain_all=False, max_recent=100)
+            self._guard_tracker = tracker
+        return tracker
+
+    def _ensure_sim_time_state(self) -> _SimTimeTracker:
+        tracker = getattr(self, "_sim_time_tracker", None)
+        if tracker is None:
+            tracker = _SimTimeTracker(retain_events=False, max_recent=200)
+            self._sim_time_tracker = tracker
+        return tracker
+
+    def _get_gm_bridge_lock(self) -> threading.RLock:
+        lock = getattr(self, "_gm_bridge_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._gm_bridge_lock = lock
+        return lock
+
+    def _get_host_gm_events_lock(self) -> threading.Lock:
+        lock = getattr(self, "_host_gm_events_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._host_gm_events_lock = lock
+        return lock
+
+    def _next_sim_injection_id(self) -> str:
+        with self._get_host_gm_events_lock():
+            seq = int(getattr(self, "_sim_injection_seq", 0) or 0) + 1
+            self._sim_injection_seq = seq
+            run_id = getattr(self, "run_id", "run")
+            return f"pt-sim-{run_id}-{seq}"
+
+    def _record_host_gm_sim_event(
+        self,
+        seconds: Any,
+        target_char_id: int = 0,
+        *,
+        injection_id: Optional[str] = None,
+        source: str = "host_gm_bridge",
+        method: str = "AdvanceClock",
+    ) -> Dict[str, Any]:
+        try:
+            sec_f = max(0.0, float(seconds or 0.0))
+        except Exception:
+            sec_f = 0.0
+        inj_id = str(injection_id or self._next_sim_injection_id())
+        evt = {
+            "injection_id": inj_id,
+            "seconds": sec_f,
+            "target_char_id": int(target_char_id or 0),
+            "via": "gm_bridge",
+            "source": str(source or "host_gm_bridge"),
+            "method": str(method or "AdvanceClock"),
+            "ts": time.time(),
+        }
+        with self._get_host_gm_events_lock():
+            pending = getattr(self, "_host_gm_pending_events", None)
+            if not isinstance(pending, list):
+                pending = []
+                self._host_gm_pending_events = pending
+            pending.append(dict(evt))
+        return evt
+
+    def _drain_host_gm_sim_events(self) -> List[Dict[str, Any]]:
+        with self._get_host_gm_events_lock():
+            pending = list(getattr(self, "_host_gm_pending_events", []) or [])
+            self._host_gm_pending_events = []
+        return pending
+
+    def _absorb_step_sim_time(
+        self,
+        exec_res: Any,
+        *,
+        tracker: Optional[_SimTimeTracker] = None,
+        extra_events: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        run_tracker = tracker if tracker is not None else self._ensure_sim_time_state()
+        step_local = _SimTimeTracker(retain_events=True, max_recent=500)
+        step_local.absorb_payload(exec_res)
+        drained = self._drain_host_gm_sim_events()
+        if drained:
+            step_local.absorb_events(drained)
+        if extra_events:
+            step_local.absorb_events(extra_events)
+        run_tracker.absorb_events(step_local.events)
+        run_summary = run_tracker.summary()
+        step_sec = round(sum(float(e.get("seconds") or 0.0) for e in step_local.events), 6)
+        step_info = {
+            "sim_time_injected_sec": step_sec,
+            "sim_time_injection_count": len(step_local.events),
+            "sim_time_injections": list(step_local.events),
+            "total_sim_time_injected_sec": run_summary["total_sim_time_injected_sec"],
+            "total_sim_time_injection_count": run_summary["total_sim_time_injection_count"],
+        }
+        if isinstance(exec_res, dict):
+            exec_res["sim_time_injected_sec"] = step_info["sim_time_injected_sec"]
+            exec_res["sim_time_injection_count"] = step_info["sim_time_injection_count"]
+            exec_res["sim_time_injections"] = list(step_info["sim_time_injections"])
+            exec_res["sim_time_summary"] = dict(run_summary)
+        return step_info
+
+    def _record_step_guard_hits(
+        self, step_num: int, exec_res: Any
+    ) -> Dict[str, Any]:
+        tracker = self._ensure_run_guard_state()
+        has_inline_guards = isinstance(exec_res, dict) and (
+            isinstance(exec_res.get("guard_hits"), list)
+            or isinstance(exec_res.get("guard_summary"), dict)
+            or isinstance((exec_res.get("flight_recorder") or {}).get("guard_hits"), list)
+        )
+        step_hits = tracker.absorb_payload(exec_res)
+        if not has_inline_guards:
+            step_hits.extend(tracker.poll_rpc(getattr(self, "rpc", None), timeout=2.0))
+        run_summary = tracker.summary(default_guards_off=False)
+        if isinstance(exec_res, dict):
+            step_summary = guard_registry.summarize_guard_hits(
+                step_hits, client_guards_off=run_summary["client_guards_off"]
+            )
+            exec_res["guard_hits"] = step_hits
+            exec_res["guard_hit_count"] = len(step_hits)
+            exec_res["guard_hits_by_guard"] = step_summary["guard_hits_by_guard"]
+            exec_res["guard_summary"] = run_summary
+        return run_summary
+
+    def _write_run_summary(
+        self, step_num: int = 0, final: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        tracker = self._ensure_run_guard_state()
+        sim_tracker = self._ensure_sim_time_state()
+        sim_summary = sim_tracker.summary()
+        summary = tracker.summary(default_guards_off=False)
+        summary["step"] = int(step_num)
+        summary["final"] = bool(final)
+        summary["updated_at"] = utc_now_iso()
+        summary["recent_guard_hits"] = list(tracker.recent_hits)
+        summary["total_sim_time_injected_sec"] = sim_summary["total_sim_time_injected_sec"]
+        summary["total_sim_time_injection_count"] = sim_summary["total_sim_time_injection_count"]
+        summary["recent_sim_time_injections"] = list(sim_tracker.recent_events)
+        run_dir = getattr(self, "current_run_dir", None)
+        if isinstance(run_dir, Path):
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "run_summary.json").write_text(
+                    json.dumps(summary, indent=2), encoding="utf-8"
+                )
+            except Exception as exc:
+                log_warn(f"Failed writing run_summary.json: {exc}")
+        mem = getattr(self, "memory", None)
+        if isinstance(mem, PlaytesterMemory):
+            try:
+                mem.update_run_summary(summary)
+            except Exception as exc:
+                log_warn(f"Failed updating memory last_run_summary: {exc}")
+        return summary
 
     def _server_bin_mtime(self) -> Optional[float]:
         for rel in ("target/debug/eve-server", "target/release/eve-server"):
@@ -6785,6 +7254,7 @@ class PlaytesterRunner:
                 if isinstance(fr_resp.get("result"), dict):
                     fr_resp = fr_resp["result"]
                 self._record_session_flight_calls(fr_resp.get("macho_calls") or [])
+                self._ensure_run_guard_state().absorb_payload(fr_resp)
             except Exception:
                 pass
 
@@ -6876,17 +7346,15 @@ class PlaytesterRunner:
         ]
         # Never emit `[[admin_accounts]]` in TOML: `provision_gm_account` inserts a character before
         # `seed_demo` / `populate_demo_snapshot`, which would clobber `demo` (90000001) on fresh DBs.
-        # Keep `demo` at role = 0 with its seeded state intact; `--persona gm_tester` instead sets
-        # `EVOMU_ADMIN_TOKEN` via `_server_extra_env()` so `admin` (90000003) provisions post-seed
-        # and executes GM actions over the host-side GM bridge (`BF-1242-R1-03`).
+        # Keep `demo` at role = 0 with its seeded state intact; set `EVOMU_ADMIN_TOKEN` via
+        # `_server_extra_env()` so `admin` (90000003) provisions post-seed and executes all host-side
+        # GM & timeControl bridge ops (`#1539`, `BF-1242-R1-03`).
         _ = is_gm_persona
         cfg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return cfg_path
 
     def _server_extra_env(self) -> Dict[str, str]:
-        if self._active_persona_id() == GM_TESTER_PERSONA["id"]:
-            return {"EVOMU_ADMIN_TOKEN": PLAYTESTER_GM_ADMIN_SECRET}
-        return {}
+        return {"EVOMU_ADMIN_TOKEN": PLAYTESTER_GM_ADMIN_SECRET}
 
     def _default_target_char_id(self) -> int:
         return 90000001
@@ -6947,144 +7415,240 @@ class PlaytesterRunner:
         return bridge_conn, gm_sm
 
     def _ensure_gm_bridge(self) -> Any:
-        if (
-            self._gm_bridge_sm is not None
-            and self._gm_bridge_conn is not None
-            and getattr(self._gm_bridge_conn, "connected", True)
-        ):
-            return self._gm_bridge_sm
-        self._close_gm_bridge()
-        conn, gm_sm = self._connect_gm_bridge()
-        self._gm_bridge_conn = conn
-        self._gm_bridge_sm = gm_sm
-        return gm_sm
+        with self._get_gm_bridge_lock():
+            if (
+                self._gm_bridge_sm is not None
+                and self._gm_bridge_conn is not None
+                and getattr(self._gm_bridge_conn, "connected", True)
+            ):
+                return self._gm_bridge_sm
+            self._close_gm_bridge()
+            conn, gm_sm = self._connect_gm_bridge()
+            self._gm_bridge_conn = conn
+            self._gm_bridge_sm = gm_sm
+            return gm_sm
 
     def _close_gm_bridge(self) -> None:
-        conn = getattr(self, "_gm_bridge_conn", None)
-        self._gm_bridge_conn = None
-        self._gm_bridge_sm = None
+        with self._get_gm_bridge_lock():
+            conn = getattr(self, "_gm_bridge_conn", None)
+            self._gm_bridge_conn = None
+            self._gm_bridge_sm = None
         if conn is not None:
             try:
                 conn.close()
             except Exception:
                 pass
 
+    def _host_gm_requests_allowed(self) -> bool:
+        explicit = getattr(self, "_active_step_allows_host_time_control", None)
+        if explicit is not None:
+            return bool(explicit)
+        return True
+
+    def _gm_slash_requests_allowed(self) -> bool:
+        return True
+
+    def _ensure_host_gm_bridge_server(self) -> int:
+        srv = getattr(self, "_host_gm_server", None)
+        if srv is not None and int(getattr(srv, "port", 0) or 0) > 0:
+            self._host_gm_port = int(srv.port)
+            return self._host_gm_port
+        srv = _HostGmBridgeRpcServer(self._handle_host_gm_rpc_request)
+        self._host_gm_server = srv
+        self._host_gm_port = int(srv.port)
+        return self._host_gm_port
+
+    def _stop_host_gm_bridge_server(self) -> None:
+        srv = getattr(self, "_host_gm_server", None)
+        self._host_gm_server = None
+        self._host_gm_port = 0
+        if srv is not None:
+            try:
+                srv.close()
+            except Exception:
+                pass
+
+    def _host_gm_port_for_client(self, ensure: bool = False) -> int:
+        if ensure:
+            return self._ensure_host_gm_bridge_server()
+        return int(getattr(self, "_host_gm_port", 0) or 0)
+
+    def _clear_session_timer_via_gm_bridge(self, target_char_id: int = 0) -> bool:
+        tgt = int(target_char_id or self._default_target_char_id() or 0)
+        try:
+            with self._get_gm_bridge_lock():
+                gm_sm = self._ensure_gm_bridge()
+                if tgt > 0:
+                    gm_sm.RemoteSvc("timeControl").ClearSessionTimer(tgt)
+                else:
+                    gm_sm.RemoteSvc("timeControl").ClearSessionTimer()
+            return True
+        except Exception as exc:
+            log_warn(f"GM bridge ClearSessionTimer(target={tgt}) failed: {exc}")
+            return False
+
+    def _execute_gm_slash_with_system_context(
+        self,
+        gm_sm: Any,
+        rewritten: str,
+        target_solar_system_id: int = 0,
+    ) -> Any:
+        slash_svc = gm_sm.RemoteSvc("slash")
+        verb = rewritten.split()[0].lower() if str(rewritten).startswith("/") else ""
+        try:
+            target_sys = int(target_solar_system_id or 0)
+        except Exception:
+            target_sys = 0
+        home_sys = 30000142
+        home_dock = 60003760
+        if verb in ("/despawn", "/unspawn") and target_sys > 0 and target_sys != home_sys:
+            slash_svc.SlashCmd(f"/tr me {target_sys} noblock")
+            try:
+                return slash_svc.SlashCmd(rewritten)
+            finally:
+                try:
+                    slash_svc.SlashCmd(f"/tr me {home_dock} noblock")
+                except Exception:
+                    try:
+                        slash_svc.SlashCmd(f"/tr me {home_sys} noblock")
+                    except Exception:
+                        pass
+                try:
+                    gm_cid = int(self._gm_bridge_credentials()[2] or 0)
+                    if gm_cid > 0:
+                        gm_sm.RemoteSvc("timeControl").ClearSessionTimer(gm_cid)
+                    else:
+                        gm_sm.RemoteSvc("timeControl").ClearSessionTimer()
+                except Exception:
+                    pass
+                try:
+                    gm_sm.RemoteSvc("stationSvc").Dock(home_dock)
+                except Exception:
+                    pass
+        return slash_svc.SlashCmd(rewritten)
+
+    def _handle_host_gm_rpc_request(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(req, dict):
+            return {"ok": False, "error": "invalid_request"}
+        cmd = str(req.get("cmd") or "").strip().lower()
+        try:
+            tgt = int(req.get("target_char_id") or self._default_target_char_id() or 0)
+        except Exception:
+            tgt = int(self._default_target_char_id() or 0)
+        if cmd == "advance_clock":
+            if not self._host_gm_requests_allowed():
+                return {"ok": False, "reason": "host_time_control_disabled"}
+            try:
+                secs_i = max(0, int(req.get("secs") if req.get("secs") is not None else req.get("seconds", 0)))
+            except Exception:
+                secs_i = 0
+            call_res = self._advance_clock_via_gm_bridge(
+                secs_i,
+                target_char_id=tgt,
+                source="inclient_host_gm_bridge",
+            )
+            if call_res is None:
+                return {"ok": False, "error": f"gm_bridge AdvanceClock({secs_i}, {tgt}) failed"}
+            return {
+                "ok": True,
+                "via": "gm_bridge",
+                "target_char_id": call_res["target_char_id"],
+                "secs": secs_i,
+                "seconds": secs_i,
+                "injection_id": call_res["injection_id"],
+                "time": call_res.get("time"),
+            }
+        if cmd == "clear_session_timer":
+            if not self._host_gm_requests_allowed():
+                return {"ok": False, "reason": "host_time_control_disabled"}
+            ok = self._clear_session_timer_via_gm_bridge(target_char_id=tgt)
+            if not ok:
+                return {"ok": False, "error": f"gm_bridge ClearSessionTimer({tgt}) failed"}
+            return {"ok": True, "via": "gm_bridge", "target_char_id": tgt}
+        if cmd == "slash_cmd":
+            if not self._gm_slash_requests_allowed():
+                return {"ok": False, "handled": True, "reason": "host_gm_slash_disabled"}
+            raw_cmd = str(req.get("command") or "").strip()
+            if not raw_cmd.startswith("/"):
+                return {"ok": False, "handled": True, "error": f"invalid_slash_cmd:{raw_cmd}"}
+            rewritten = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
+            try:
+                tgt_sys = int(req.get("target_solar_system_id") or 0)
+            except Exception:
+                tgt_sys = 0
+            try:
+                with self._get_gm_bridge_lock():
+                    gm_sm = self._ensure_gm_bridge()
+                    res = self._execute_gm_slash_with_system_context(
+                        gm_sm,
+                        rewritten,
+                        target_solar_system_id=tgt_sys,
+                    )
+                sim_evt = self._maybe_record_slash_sim_time_event(
+                    rewritten,
+                    res,
+                    target_char_id=tgt,
+                    source="inclient_host_gm_bridge",
+                )
+                resp_payload: Dict[str, Any] = {
+                    "ok": True,
+                    "handled": True,
+                    "via": "gm_bridge",
+                    "command": rewritten,
+                    "target_char_id": tgt,
+                    "target_solar_system_id": tgt_sys,
+                    "result": res,
+                }
+                if sim_evt is not None:
+                    resp_payload["injection_id"] = sim_evt["injection_id"]
+                    resp_payload["sim_time_injected_sec"] = sim_evt["seconds"]
+                return resp_payload
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "handled": True,
+                    "via": "gm_bridge",
+                    "command": rewritten,
+                    "target_char_id": tgt,
+                    "target_solar_system_id": tgt_sys,
+                    "error": repr(exc),
+                }
+        return {"ok": False, "handled": False, "error": f"unsupported_cmd:{cmd}"}
+
+    def _maybe_record_slash_sim_time_event(
+        self,
+        cmd: str,
+        gm_res: Any,
+        *,
+        target_char_id: int = 0,
+        source: str = "host_gm_bridge",
+    ) -> Optional[Dict[str, Any]]:
+        adv_secs = gm_slash_utils.extract_slash_sim_advance_seconds(
+            cmd,
+            gm_res,
+            target_char_id=target_char_id,
+        )
+        if adv_secs is None:
+            return None
+        verb = str(cmd or "").strip().split()[0].lower()
+        return self._record_host_gm_sim_event(
+            adv_secs,
+            target_char_id=target_char_id,
+            source=source,
+            method=f"SlashCmd:{verb}",
+        )
+
     @staticmethod
     def _looks_like_char_id_token(tok: str, target_char_id: int) -> bool:
-        t = str(tok or "").strip()
-        if not t or not t.isdigit():
-            return False
-        n = int(t)
-        return n == int(target_char_id) or (90_000_000 <= n < 1_000_000_000)
+        return gm_slash_utils.looks_like_char_id_token(tok, target_char_id)
 
     @staticmethod
     def _looks_like_entity_or_location_token(tok: str, target_char_id: int) -> bool:
-        t = str(tok or "").strip()
-        if not t or not t.isdigit():
-            return False
-        n = int(t)
-        return (
-            n == int(target_char_id)
-            or (60_000_000 <= n < 70_000_000)
-            or (90_000_000 <= n < 1_000_000_000)
-            or n >= 1_000_000_000
-        )
+        return gm_slash_utils.looks_like_entity_or_location_token(tok, target_char_id)
 
     @classmethod
     def _rewrite_gm_slash_for_target(cls, cmd: str, target_char_id: int) -> str:
-        raw = str(cmd or "").strip()
-        if not raw.startswith("/") or target_char_id <= 0:
-            return raw
-        parts = raw.split()
-        verb = parts[0].lower()
-        rest = parts[1:]
-        tgt_s = str(int(target_char_id))
-        me_tokens = ("me", "myship", "self")
-
-        if verb == "/giveisk":
-            if len(rest) == 1:
-                return f"/giveisk {tgt_s} {rest[0]}"
-            if len(rest) >= 2 and rest[0].lower() in ("me", "self"):
-                return " ".join(["/giveisk", tgt_s] + rest[1:])
-        elif verb in ("/giveskill", "/setskill"):
-            if len(rest) == 2:
-                return f"{parts[0]} {tgt_s} {rest[0]} {rest[1]}"
-            if len(rest) >= 3 and rest[0].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + rest[1:])
-        elif verb == "/heal":
-            if not rest or rest[0].lower() in ("me", "self"):
-                return f"/heal {tgt_s}"
-        elif verb in ("/teleport", "/tr", "/translocate", "/moveme"):
-            noblock_tokens = [t for t in rest if t.lower() == "noblock"]
-            non_noblock = [t for t in rest if t.lower() != "noblock"]
-            if len(non_noblock) == 1:
-                return " ".join([parts[0], tgt_s, non_noblock[0]] + noblock_tokens)
-            if len(non_noblock) == 2:
-                if non_noblock[0].lower() in me_tokens:
-                    return " ".join([parts[0], tgt_s, non_noblock[1]] + noblock_tokens)
-                if non_noblock[1].lower() in me_tokens:
-                    return " ".join([parts[0], tgt_s, non_noblock[0]] + noblock_tokens)
-        elif verb in ("/giveitem", "/createitem", "/spawn", "/spawnnpc", "/spawnwreck", "/spawnanomaly"):
-            if not rest:
-                return f"{parts[0]} {tgt_s}"
-            if rest[0].lower() in me_tokens:
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if not cls._looks_like_char_id_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb in ("/load", "/fit"):
-            if len(rest) >= 2 and rest[0].lower() in me_tokens:
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if rest and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb == "/setattr":
-            if len(rest) >= 3 and rest[0].lower() in me_tokens:
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if len(rest) == 2 and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb == "/getattr":
-            if len(rest) >= 2 and rest[0].lower() in me_tokens:
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if len(rest) == 1 and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb in ("/energy", "/secstatus"):
-            if len(rest) == 1:
-                return f"{parts[0]} {tgt_s} {rest[0]}"
-            if len(rest) >= 2 and rest[0].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + rest[1:])
-        elif verb == "/cleartimers":
-            if not rest or rest[0].lower() in ("me", "self"):
-                return f"{parts[0]} {tgt_s}"
-        elif verb in ("/completeskills", "/trainskills", "/finishskills"):
-            if not rest:
-                return f"{parts[0]} {tgt_s} all"
-            if rest[0].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + (rest[1:] or ["all"]))
-            if not cls._looks_like_char_id_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb in (
-            "/completeindustry",
-            "/finishjobs",
-            "/industrytimer",
-            "/upwelltimer",
-            "/structuretimer",
-            "/finishstructure",
-        ):
-            if not rest:
-                return f"{parts[0]} {tgt_s}"
-            if rest[0].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if not cls._looks_like_char_id_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb in ("/advancetime", "/fastforward", "/ff"):
-            if not rest:
-                return f"{parts[0]} {tgt_s}"
-            if rest[0].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if len(rest) >= 2 and rest[-1].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + rest[:-1])
-            if not any(cls._looks_like_char_id_token(t, target_char_id) for t in rest):
-                return " ".join([parts[0], tgt_s] + rest)
-        return raw
+        return gm_slash_utils.rewrite_gm_slash_for_target(cmd, target_char_id)
 
     @staticmethod
     def _should_dispatch_via_gm_bridge(act: Dict[str, Any], act_type: str) -> bool:
@@ -7098,14 +7662,27 @@ class PlaytesterRunner:
             return True
         return False
 
-    def _advance_clock_via_gm_bridge(self, secs: int = 12, target_char_id: int = 0) -> Optional[Dict[str, Any]]:
+    def _advance_clock_via_gm_bridge(
+        self,
+        secs: Any = 12,
+        target_char_id: int = 0,
+        source: str = "host_gm_bridge",
+    ) -> Optional[Dict[str, Any]]:
         tgt = int(target_char_id or self._default_target_char_id() or 0)
+        secs_i = max(0, int(secs or 0))
         try:
-            gm_sm = self._ensure_gm_bridge()
-            if tgt > 0:
-                gm_sm.RemoteSvc("timeControl").AdvanceClock(max(0, int(secs)), tgt)
-            else:
-                gm_sm.RemoteSvc("timeControl").AdvanceClock(max(0, int(secs)))
+            with self._get_gm_bridge_lock():
+                gm_sm = self._ensure_gm_bridge()
+                if tgt > 0:
+                    res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs_i, tgt)
+                else:
+                    res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs_i)
+            evt = self._record_host_gm_sim_event(
+                secs_i,
+                target_char_id=tgt,
+                source=source,
+                method="AdvanceClock",
+            )
             return {
                 "seq": 0,
                 "service": "timeControl",
@@ -7113,6 +7690,9 @@ class PlaytesterRunner:
                 "ok": True,
                 "via": "gm_bridge",
                 "target_char_id": tgt,
+                "seconds": secs_i,
+                "injection_id": evt["injection_id"],
+                "time": res,
             }
         except Exception as exc:
             log_warn(f"GM bridge AdvanceClock({secs}) failed: {exc}")
@@ -7216,133 +7796,187 @@ class PlaytesterRunner:
     ) -> Dict[str, Any]:
         tgt = int(target_char_id or self._default_target_char_id() or 0)
         calls_recorded: List[Dict[str, Any]] = []
+        sim_events: List[Dict[str, Any]] = []
         pre_ok = False
         pre_scatters: Optional[List[str]] = None
         try:
-            gm_sm = self._ensure_gm_bridge()
-            pre_ok, pre_scatters = self._read_client_scatters()
-            gm_res: Any = None
-            if act_type == "advance_server_time":
-                raw_sec = act.get("seconds")
-                if raw_sec in (None, ""):
-                    raw_sec = act.get("target")
-                if raw_sec in (None, ""):
-                    raw_sec = act.get("amount")
-                if raw_sec in (None, ""):
-                    raw_sec = act.get("command")
-                try:
-                    secs = max(0, int(str(raw_sec).strip())) if raw_sec not in (None, "") else 12
-                except Exception:
-                    secs = 12
-                if tgt > 0:
-                    gm_res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs, tgt)
+            with self._get_gm_bridge_lock():
+                gm_sm = self._ensure_gm_bridge()
+                pre_ok, pre_scatters = self._read_client_scatters()
+                gm_res: Any = None
+                if act_type == "advance_server_time":
+                    raw_sec = act.get("seconds")
+                    if raw_sec in (None, ""):
+                        raw_sec = act.get("target")
+                    if raw_sec in (None, ""):
+                        raw_sec = act.get("amount")
+                    if raw_sec in (None, ""):
+                        raw_sec = act.get("command")
+                    try:
+                        secs = max(0, int(str(raw_sec).strip())) if raw_sec not in (None, "") else 12
+                    except Exception:
+                        secs = 12
+                    if tgt > 0:
+                        gm_res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs, tgt)
+                    else:
+                        gm_res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs)
+                    evt = self._record_host_gm_sim_event(
+                        secs,
+                        target_char_id=tgt,
+                        source="gm_action_bridge",
+                        method="AdvanceClock",
+                    )
+                    sim_events.append(evt)
+                    calls_recorded.append({
+                        "seq": 0,
+                        "service": "timeControl",
+                        "method": "AdvanceClock",
+                        "ok": True,
+                        "via": "gm_bridge",
+                        "target_char_id": tgt,
+                        "seconds": secs,
+                        "injection_id": evt["injection_id"],
+                    })
+                elif act_type == "clear_timers":
+                    if tgt > 0:
+                        gm_sm.RemoteSvc("timeControl").ClearSessionTimer(tgt)
+                    else:
+                        gm_sm.RemoteSvc("timeControl").ClearSessionTimer()
+                    calls_recorded.append({
+                        "seq": 0,
+                        "service": "timeControl",
+                        "method": "ClearSessionTimer",
+                        "ok": True,
+                        "via": "gm_bridge",
+                        "target_char_id": tgt,
+                    })
+                    clear_cmd = f"/cleartimers {tgt}" if tgt > 0 else "/cleartimers"
+                    gm_res = gm_sm.RemoteSvc("slash").SlashCmd(clear_cmd)
+                    calls_recorded.append({
+                        "seq": 0,
+                        "service": "slash",
+                        "method": "SlashCmd",
+                        "command": clear_cmd,
+                        "ok": True,
+                        "via": "gm_bridge",
+                        "target_char_id": tgt,
+                    })
+                elif act_type in ("complete_skills", "advance_upwell_timer", "complete_industry_jobs"):
+                    slash_map = {
+                        "complete_skills": ("/completeskills", "all"),
+                        "advance_upwell_timer": ("/upwelltimer", ""),
+                        "complete_industry_jobs": ("/completeindustry", ""),
+                    }
+                    base_cmd, default_arg = slash_map[act_type]
+                    arg = str(act.get("target") or act.get("command") or default_arg).strip()
+                    raw_cmd = arg if arg.startswith("/") else f"{base_cmd} {arg}".strip()
+                    cmd = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
+                    try:
+                        act_sys = int(act.get("target_solar_system_id") or 0)
+                    except Exception:
+                        act_sys = 0
+                    gm_res = self._execute_gm_slash_with_system_context(
+                        gm_sm,
+                        cmd,
+                        target_solar_system_id=act_sys,
+                    )
+                    sim_evt = self._maybe_record_slash_sim_time_event(
+                        cmd,
+                        gm_res,
+                        target_char_id=tgt,
+                        source="gm_action_bridge",
+                    )
+                    call_entry = {
+                        "seq": 0,
+                        "service": "slash",
+                        "method": "SlashCmd",
+                        "command": cmd,
+                        "ok": True,
+                        "via": "gm_bridge",
+                        "target_char_id": tgt,
+                    }
+                    if sim_evt is not None:
+                        sim_events.append(sim_evt)
+                        call_entry["sim_time_injected_sec"] = sim_evt["seconds"]
+                        call_entry["injection_id"] = sim_evt["injection_id"]
+                    calls_recorded.append(call_entry)
+                elif act_type == "train_skill" or (
+                    act_type == "station_command"
+                    and str(act.get("target") or "").strip().lower() == "inject_and_train_skill"
+                ):
+                    tid_raw = act.get("type_id")
+                    if tid_raw in (None, ""):
+                        cand_t = str(act.get("target") or "").strip()
+                        if cand_t.isdigit():
+                            tid_raw = int(cand_t)
+                    if tid_raw in (None, ""):
+                        cand_c = str(act.get("command") or "").strip()
+                        if cand_c.isdigit():
+                            tid_raw = int(cand_c)
+                    tid = int(tid_raw or 0)
+                    if tid <= 0:
+                        raise ValueError(f"train_skill missing numeric type_id: {act!r}")
+                    lvl = max(1, min(5, int(act.get("level", 1) or 1)))
+                    cmd = f"/giveskill {tgt} {tid} {lvl}"
+                    gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                    calls_recorded.append({
+                        "seq": 0,
+                        "service": "slash",
+                        "method": "SlashCmd",
+                        "command": cmd,
+                        "ok": True,
+                        "via": "gm_bridge",
+                        "target_char_id": tgt,
+                    })
                 else:
-                    gm_res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs)
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "timeControl",
-                    "method": "AdvanceClock",
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": tgt,
-                })
-            elif act_type == "clear_timers":
-                if tgt > 0:
-                    gm_sm.RemoteSvc("timeControl").ClearSessionTimer(tgt)
-                else:
-                    gm_sm.RemoteSvc("timeControl").ClearSessionTimer()
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "timeControl",
-                    "method": "ClearSessionTimer",
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": tgt,
-                })
-                clear_cmd = f"/cleartimers {tgt}" if tgt > 0 else "/cleartimers"
-                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(clear_cmd)
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "slash",
-                    "method": "SlashCmd",
-                    "command": clear_cmd,
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": tgt,
-                })
-            elif act_type in ("complete_skills", "advance_upwell_timer", "complete_industry_jobs"):
-                slash_map = {
-                    "complete_skills": ("/completeskills", "all"),
-                    "advance_upwell_timer": ("/upwelltimer", ""),
-                    "complete_industry_jobs": ("/completeindustry", ""),
-                }
-                base_cmd, default_arg = slash_map[act_type]
-                arg = str(act.get("target") or act.get("command") or default_arg).strip()
-                raw_cmd = arg if arg.startswith("/") else f"{base_cmd} {arg}".strip()
-                cmd = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
-                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "slash",
-                    "method": "SlashCmd",
-                    "command": cmd,
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": tgt,
-                })
-            elif act_type == "train_skill" or (
-                act_type == "station_command"
-                and str(act.get("target") or "").strip().lower() == "inject_and_train_skill"
-            ):
-                tid_raw = act.get("type_id")
-                if tid_raw in (None, ""):
-                    cand_t = str(act.get("target") or "").strip()
-                    if cand_t.isdigit():
-                        tid_raw = int(cand_t)
-                if tid_raw in (None, ""):
-                    cand_c = str(act.get("command") or "").strip()
-                    if cand_c.isdigit():
-                        tid_raw = int(cand_c)
-                tid = int(tid_raw or 0)
-                if tid <= 0:
-                    raise ValueError(f"train_skill missing numeric type_id: {act!r}")
-                lvl = max(1, min(5, int(act.get("level", 1) or 1)))
-                cmd = f"/giveskill {tgt} {tid} {lvl}"
-                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "slash",
-                    "method": "SlashCmd",
-                    "command": cmd,
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": tgt,
-                })
-            else:
-                raw_cmd = (
-                    _coerce_action_command(act)
-                    or str(act.get("slash_cmd") or act.get("target") or act.get("text") or act.get("input") or "").strip()
-                )
-                cmd = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
-                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "slash",
-                    "method": "SlashCmd",
-                    "command": cmd,
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": tgt,
-                })
+                    raw_cmd = (
+                        _coerce_action_command(act)
+                        or str(act.get("slash_cmd") or act.get("target") or act.get("text") or act.get("input") or "").strip()
+                    )
+                    cmd = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
+                    try:
+                        act_sys = int(act.get("target_solar_system_id") or 0)
+                    except Exception:
+                        act_sys = 0
+                    gm_res = self._execute_gm_slash_with_system_context(
+                        gm_sm,
+                        cmd,
+                        target_solar_system_id=act_sys,
+                    )
+                    sim_evt = self._maybe_record_slash_sim_time_event(
+                        cmd,
+                        gm_res,
+                        target_char_id=tgt,
+                        source="gm_action_bridge",
+                    )
+                    call_entry = {
+                        "seq": 0,
+                        "service": "slash",
+                        "method": "SlashCmd",
+                        "command": cmd,
+                        "ok": True,
+                        "via": "gm_bridge",
+                        "target_char_id": tgt,
+                    }
+                    if sim_evt is not None:
+                        sim_events.append(sim_evt)
+                        call_entry["sim_time_injected_sec"] = sim_evt["seconds"]
+                        call_entry["injection_id"] = sim_evt["injection_id"]
+                    calls_recorded.append(call_entry)
 
             scatters_observed = self._settle_gm_bridge_scatters(pre_ok, pre_scatters)
+            sim_sec = round(sum(float(e.get("seconds") or 0.0) for e in sim_events), 6)
             return {
                 "action_ok": True,
                 "via": "gm_bridge",
                 "gm_result": gm_res,
+                "sim_time_injected_sec": sim_sec,
+                "sim_time_injection_count": len(sim_events),
+                "sim_time_injections": list(sim_events),
                 "flight_recorder": {
                     "macho_calls": calls_recorded,
                     "scatters_observed": scatters_observed,
+                    "sim_time_injections": list(sim_events),
                     "log_exceptions": [],
                     "quasar_errors": [],
                     "macho_exceptions": [],
@@ -7381,6 +8015,7 @@ class PlaytesterRunner:
             "mode": "playtester",
             "playtester_port": self.ports["rpc"],
             "hook_port": self.ports["rpc"],
+            "host_gm_port": self._host_gm_port_for_client(ensure=False),
             "user": "demo",
             "password": "demo-secret",
             "char_id": 90000001,
@@ -7507,6 +8142,7 @@ class PlaytesterRunner:
         return False
 
     def stop_server(self) -> None:
+        self._stop_host_gm_bridge_server()
         self._close_gm_bridge()
         if self.server_proc and self.server_proc.poll() is None:
             log_info(f"Stopping eve-server (PID {self.server_proc.pid})...")
@@ -7529,6 +8165,7 @@ class PlaytesterRunner:
 
     def start_client(self) -> bool:
         self.stop_client()
+        host_gm_port = self._host_gm_port_for_client(ensure=True)
         inclient_cfg = self.write_inclient_cfg()
         stage_dir = stage_playtester_client(self.staged_app, inclient_cfg, self.ports["rpc"])
 
@@ -7548,12 +8185,18 @@ class PlaytesterRunner:
         client_logs_dir.mkdir(parents=True, exist_ok=True)
 
         env = os.environ.copy()
+        # Continuous playtester keeps server-caused guards enabled so hits are recorded.
+        env.pop(guard_registry.DISABLE_SERVER_GUARDS_ENV, None)
         env["EVE_PUBLIC_GATEWAY_ADDRESS"] = f"127.0.0.1:{self.ports['gateway']}"
         env["EVOMU_HARNESS_DIR"] = str(HARNESS_DIR)
         env["PYTHONPATH"] = str(stage_dir / "evomu_py_site")
         env["EVOMU_INCLIENT_CFG"] = str(inclient_cfg)
         env["EVOMU_PLAYTESTER_CFG"] = str(inclient_cfg)
         env["EVOMU_PLAYTESTER_PORT"] = str(self.ports["rpc"])
+        if host_gm_port > 0:
+            env["EVOMU_HOST_GM_PORT"] = str(host_gm_port)
+        else:
+            env.pop("EVOMU_HOST_GM_PORT", None)
 
         cmd = [
             str(exefile),
@@ -7603,6 +8246,7 @@ class PlaytesterRunner:
                 timeout=110.0,
             )
             self._sync_initial_session_flight_calls(boot)
+            self._ensure_run_guard_state().absorb_payload(boot)
             log_info(
                 f"Session ready: charid={boot.get('session', {}).get('charid')} "
                 f"view={boot.get('active_view')} stationid={boot.get('session', {}).get('stationid')} "
@@ -7615,6 +8259,7 @@ class PlaytesterRunner:
             return False
 
     def stop_client(self) -> None:
+        self._stop_host_gm_bridge_server()
         if self.client_proc:
             pid = self.client_proc.pid
             if self.client_proc.poll() is None:
@@ -7642,6 +8287,8 @@ class PlaytesterRunner:
             self._session_flight_calls.clear()
         if hasattr(self, "_session_flight_seqs"):
             self._session_flight_seqs.clear()
+        if getattr(self, "_guard_tracker", None) is not None:
+            self._guard_tracker.reset_client_session()
         oracle = getattr(self, "oracle", None)
         if oracle is not None:
             oracle.reset_session_telemetry(
@@ -8277,10 +8924,17 @@ class PlaytesterRunner:
                 except Exception:
                     pass
             else:
+                prev_allow_tc = getattr(self, "_active_step_allows_host_time_control", None)
+                explicit_tc = exec_action_payload.get("time_control")
+                self._active_step_allows_host_time_control = (
+                    bool(explicit_tc) if isinstance(explicit_tc, bool) else True
+                )
                 try:
                     exec_res = self.rpc.call("execute_action", {"action": exec_action_payload}, timeout=rpc_timeout)
                 except Exception as exc:
                     exec_res = {"action_ok": False, "action_error": str(exc), "flight_recorder": {}}
+                finally:
+                    self._active_step_allows_host_time_control = prev_allow_tc
         if isinstance(exec_res, dict):
             self._record_session_flight_calls((exec_res.get("flight_recorder") or {}).get("macho_calls"))
 
@@ -8335,6 +8989,9 @@ class PlaytesterRunner:
                     burst_paths.append(bp)
                 time.sleep(0.35)
 
+        self._record_step_guard_hits(step_num, exec_res)
+        self._absorb_step_sim_time(exec_res)
+        self._write_run_summary(step_num=step_num, final=False)
         (step_dir / "exec_result.json").write_text(
             json.dumps(exec_res, indent=2), encoding="utf-8"
         )
@@ -8524,6 +9181,7 @@ class PlaytesterRunner:
 
         step_num = int(self.memory.data.get("total_steps", 0))
         executed_this_invocation = 0
+        self._ensure_run_guard_state()
         last_origin_check = time.time()
         last_fr: Dict[str, Any] = {}
         last_burst: List[Path] = []
@@ -8599,6 +9257,11 @@ class PlaytesterRunner:
                 self.harvest_flight_recorder_anomalies(step_num=step_num)
             except Exception as exc:
                 log_warn(f"Flight-recorder anomaly harvest skipped due to error: {exc}")
+            try:
+                self._ensure_run_guard_state().poll_rpc(getattr(self, "rpc", None), timeout=2.0)
+                self._write_run_summary(step_num=step_num, final=True)
+            except Exception as exc:
+                log_warn(f"Final run_summary write skipped due to error: {exc}")
             if getattr(self, "agy_pool", None) is not None:
                 try:
                     self.agy_pool.shutdown()
@@ -10317,6 +10980,23 @@ class ScenarioRunner(PlaytesterRunner):
             return "admin", PLAYTESTER_GM_ADMIN_SECRET, 90000003
         return "evomu_scenario_gm", PLAYTESTER_GM_ADMIN_SECRET, 90000099
 
+    def _host_gm_requests_allowed(self) -> bool:
+        return bool(
+            self._scenario_requires_gm()
+            and getattr(self, "_active_step_allows_host_time_control", False)
+        )
+
+    def _gm_slash_requests_allowed(self) -> bool:
+        return bool(
+            self._scenario_requires_gm()
+            and getattr(self, "_active_step_allows_host_gm_slash", False)
+        )
+
+    def _host_gm_port_for_client(self, ensure: bool = False) -> int:
+        if not self._scenario_requires_gm():
+            return 0
+        return super()._host_gm_port_for_client(ensure=ensure)
+
     def write_server_config(self) -> Path:
         self.world_dir.mkdir(parents=True, exist_ok=True)
         self.current_run_dir.mkdir(parents=True, exist_ok=True)
@@ -10420,6 +11100,7 @@ class ScenarioRunner(PlaytesterRunner):
 
     def start_client(self) -> bool:
         self.stop_client()
+        host_gm_port = self._host_gm_port_for_client(ensure=True)
         inclient_cfg = self.write_inclient_cfg()
         stage_dir = stage_playtester_client(self.staged_app, inclient_cfg, self.ports["rpc"])
         exefile = stage_dir / "bin64" / "exefile"
@@ -10433,12 +11114,18 @@ class ScenarioRunner(PlaytesterRunner):
         client_logs_dir.mkdir(parents=True, exist_ok=True)
 
         env = os.environ.copy()
+        # Attestation scenarios disable all server-caused client guards so server bugs surface directly.
+        env[guard_registry.DISABLE_SERVER_GUARDS_ENV] = "1"
         env["EVE_PUBLIC_GATEWAY_ADDRESS"] = f"127.0.0.1:{self.ports['gateway']}"
         env["EVOMU_HARNESS_DIR"] = str(HARNESS_DIR)
         env["PYTHONPATH"] = str(stage_dir / "evomu_py_site")
         env["EVOMU_INCLIENT_CFG"] = str(inclient_cfg)
         env["EVOMU_PLAYTESTER_CFG"] = str(inclient_cfg)
         env["EVOMU_PLAYTESTER_PORT"] = str(self.ports["rpc"])
+        if host_gm_port > 0:
+            env["EVOMU_HOST_GM_PORT"] = str(host_gm_port)
+        else:
+            env.pop("EVOMU_HOST_GM_PORT", None)
 
         cmd = [
             str(exefile),
@@ -10653,6 +11340,45 @@ class ScenarioRunner(PlaytesterRunner):
         all_log_excs: List[Any] = list(init_fr.get("log_exceptions") or [])
         all_quasar_errs: List[Any] = list(init_fr.get("quasar_errors") or [])
         all_macho_excs: List[Any] = list(init_fr.get("macho_exceptions") or [])
+        all_guard_hits: List[Dict[str, Any]] = []
+        seen_guard_keys: set = set()
+        latest_guard_summary: Optional[Dict[str, Any]] = None
+        sim_wait_tracker = _SimTimeTracker(retain_events=True, max_recent=500)
+        sim_wait_tracker.absorb_payload(initial_res)
+
+        def _absorb_wait_guard_telemetry(res_obj: Optional[Dict[str, Any]]) -> None:
+            nonlocal latest_guard_summary
+            if not isinstance(res_obj, dict):
+                return
+            fr_obj = res_obj.get("flight_recorder") or {}
+            for cand in (res_obj.get("guard_summary"), fr_obj.get("guard_summary")):
+                if isinstance(cand, dict):
+                    latest_guard_summary = dict(cand)
+            raw_hits = res_obj.get("guard_hits")
+            if not isinstance(raw_hits, list):
+                raw_hits = fr_obj.get("guard_hits")
+            if not isinstance(raw_hits, list):
+                return
+            for gh in raw_hits:
+                if not isinstance(gh, dict):
+                    continue
+                seq_v = gh.get("seq")
+                if isinstance(seq_v, int):
+                    gkey: Any = ("seq", seq_v)
+                else:
+                    gkey = (
+                        "raw",
+                        str(gh.get("guard") or ""),
+                        str(gh.get("function") or ""),
+                        str(gh.get("reason") or ""),
+                        gh.get("time"),
+                    )
+                if gkey in seen_guard_keys:
+                    continue
+                seen_guard_keys.add(gkey)
+                all_guard_hits.append(dict(gh))
+
+        _absorb_wait_guard_telemetry(initial_res)
         latest_state = dict(initial_state) if isinstance(initial_state, dict) and initial_state else dict(step_pre_state)
         latest_res: Dict[str, Any] = dict(initial_res or {"action_ok": True, "flight_recorder": {}})
 
@@ -10679,6 +11405,16 @@ class ScenarioRunner(PlaytesterRunner):
                 gm_tick_call = self._advance_clock_via_gm_bridge(12, target_char_id=wait_target_cid)
                 if gm_tick_call is not None:
                     all_calls.append(gm_tick_call)
+                    sim_wait_tracker.absorb_events([
+                        {
+                            "injection_id": gm_tick_call.get("injection_id"),
+                            "seconds": gm_tick_call.get("seconds", 12),
+                            "target_char_id": gm_tick_call.get("target_char_id", wait_target_cid),
+                            "via": gm_tick_call.get("via", "gm_bridge"),
+                            "source": "wait_until_bridge",
+                            "method": "AdvanceClock",
+                        }
+                    ])
             tick_res = self.rpc.call(
                 "execute_action",
                 {
@@ -10697,19 +11433,43 @@ class ScenarioRunner(PlaytesterRunner):
             all_log_excs.extend(fr.get("log_exceptions") or [])
             all_quasar_errs.extend(fr.get("quasar_errors") or [])
             all_macho_excs.extend(fr.get("macho_exceptions") or [])
+            _absorb_wait_guard_telemetry(tick_res)
+            sim_wait_tracker.absorb_payload(tick_res)
             if isinstance(tick_res.get("post_state"), dict):
                 latest_state = tick_res["post_state"]
             merged_res = dict(initial_res or tick_res)
             if initial_res and tick_res.get("action_ok") is False:
                 merged_res["action_ok"] = False
                 merged_res["action_error"] = tick_res.get("action_error")
-            merged_res["flight_recorder"] = {
+            merged_res["guard_hits"] = list(all_guard_hits)
+            merged_res["guard_hit_count"] = len(all_guard_hits)
+            wait_sim_sum = sim_wait_tracker.summary()
+            merged_res["sim_time_injected_sec"] = wait_sim_sum["total_sim_time_injected_sec"]
+            merged_res["sim_time_injection_count"] = wait_sim_sum["total_sim_time_injection_count"]
+            merged_res["sim_time_injections"] = list(sim_wait_tracker.events)
+            merged_fr: Dict[str, Any] = {
                 "macho_calls": all_calls,
                 "scatters_observed": all_scatters,
                 "log_exceptions": all_log_excs,
                 "quasar_errors": all_quasar_errs,
                 "macho_exceptions": all_macho_excs,
+                "guard_hits": list(all_guard_hits),
+                "sim_time_injections": list(sim_wait_tracker.events),
             }
+            if isinstance(latest_guard_summary, dict):
+                has_bool_off = isinstance(latest_guard_summary.get("client_guards_off"), bool)
+                wait_guards_off = bool(latest_guard_summary["client_guards_off"]) if has_bool_off else False
+                merged_guard_summary = guard_registry.summarize_guard_hits(
+                    all_guard_hits,
+                    client_guards_off=wait_guards_off,
+                )
+                if not has_bool_off:
+                    merged_guard_summary.pop("client_guards_off", None)
+                merged_res["guard_summary"] = dict(merged_guard_summary)
+                merged_fr["guard_summary"] = dict(merged_guard_summary)
+            else:
+                merged_res.pop("guard_summary", None)
+            merged_res["flight_recorder"] = merged_fr
             latest_res = merged_res
             ok_until, until_fail_chk, until_fail_msg = evaluate_scenario_checks(
                 until_checks, step_pre_state, latest_state, merged_res, context=context
@@ -10778,6 +11538,9 @@ class ScenarioRunner(PlaytesterRunner):
         self._last_boot_result = {}
 
         t_scen_start = time.time()
+        guard_tracker = _GuardHitTracker(retain_all=True, max_recent=500)
+        sim_tracker = _SimTimeTracker(retain_events=True, max_recent=500)
+        self._drain_host_gm_sim_events()
         step_records: List[Dict[str, Any]] = []
         step_timings_ms: Dict[str, float] = {}
         step_rpcs: Dict[str, List[str]] = {}
@@ -10851,12 +11614,14 @@ class ScenarioRunner(PlaytesterRunner):
                         client_version = str(boot_state["client_version"])
 
                     startup_fr = (self._last_boot_result.get("flight_recorder") or {})
+                    guard_tracker.absorb_payload(self._last_boot_result)
                     startup_calls = list(startup_fr.get("macho_calls") or [])
                     if not startup_calls:
                         try:
                             fr_resp = self.rpc.call("get_flight_recorder", {"since_seq": 0}, timeout=8.0) or {}
                             if isinstance(fr_resp.get("result"), dict):
                                 fr_resp = fr_resp["result"]
+                            guard_tracker.absorb_payload(fr_resp)
                             startup_calls = list(fr_resp.get("macho_calls") or [])
                         except Exception:
                             startup_calls = []
@@ -10886,53 +11651,62 @@ class ScenarioRunner(PlaytesterRunner):
                             "check_server_unimplemented_rpc": self._check_server_unimplemented_rpc,
                             "expected_text": str(act.get("expected_ui_and_state_change") or ""),
                         }
-                        if act_type == "wait" and step.get("wait_until"):
-                            exec_res, post_state = self._execute_wait_until(step, pre_state, ctx)
-                        elif self._should_dispatch_via_gm_bridge(act, act_type):
-                            try:
-                                target_cid = int(
-                                    (pre_state.get("session") or {}).get("charid")
-                                    or (boot_state.get("session") or {}).get("charid")
-                                    or self._scenario_auth_params()[2]
-                                    or 90000001
-                                )
-                            except Exception:
-                                target_cid = int(self._scenario_auth_params()[2] or 90000001)
-                            exec_res = self._execute_gm_or_time_control_via_bridge(act, act_type, target_cid)
-                            try:
-                                obs = self.rpc.call("get_state", timeout=15.0) or {}
-                                post_state = _unwrap_state_payload(obs)
-                            except Exception:
-                                post_state = {}
-                            if step.get("wait_until"):
-                                exec_res, post_state = self._execute_wait_until(
-                                    step, pre_state, ctx, initial_res=exec_res, initial_state=post_state
-                                )
-                        else:
-                            payload = dict(act)
-                            payload["type"] = act_type
-                            payload["scenario_mode"] = True
-                            # Player session always stays role = 0; never invoke timeControl.* on it.
-                            payload["time_control"] = False
-                            try:
-                                exec_res = self.rpc.call(
-                                    "execute_action",
-                                    {"action": payload},
-                                    timeout=self._step_rpc_timeout(payload),
-                                ) or {}
-                            except Exception as exc:
-                                exec_res = {"action_ok": False, "action_error": str(exc), "flight_recorder": {}}
-                            post_state = _unwrap_state_payload(exec_res.get("post_state"))
-                            if not post_state:
+                        prev_allow_tc = getattr(self, "_active_step_allows_host_time_control", None)
+                        prev_allow_gm_slash = getattr(self, "_active_step_allows_host_gm_slash", None)
+                        self._active_step_allows_host_time_control = bool(step.get("time_control", False))
+                        self._active_step_allows_host_gm_slash = bool(step.get("setup", False))
+                        try:
+                            if act_type == "wait" and step.get("wait_until"):
+                                exec_res, post_state = self._execute_wait_until(step, pre_state, ctx)
+                            elif self._should_dispatch_via_gm_bridge(act, act_type):
+                                try:
+                                    target_cid = int(
+                                        (pre_state.get("session") or {}).get("charid")
+                                        or (boot_state.get("session") or {}).get("charid")
+                                        or self._scenario_auth_params()[2]
+                                        or 90000001
+                                    )
+                                except Exception:
+                                    target_cid = int(self._scenario_auth_params()[2] or 90000001)
+                                exec_res = self._execute_gm_or_time_control_via_bridge(act, act_type, target_cid)
                                 try:
                                     obs = self.rpc.call("get_state", timeout=15.0) or {}
                                     post_state = _unwrap_state_payload(obs)
                                 except Exception:
                                     post_state = {}
-                            if step.get("wait_until"):
-                                exec_res, post_state = self._execute_wait_until(
-                                    step, pre_state, ctx, initial_res=exec_res, initial_state=post_state
-                                )
+                                if step.get("wait_until"):
+                                    exec_res, post_state = self._execute_wait_until(
+                                        step, pre_state, ctx, initial_res=exec_res, initial_state=post_state
+                                    )
+                            else:
+                                payload = dict(act)
+                                payload["type"] = act_type
+                                payload["scenario_mode"] = True
+                                # Player session always stays role = 0; never invoke timeControl.* on it.
+                                payload["time_control"] = False
+                                payload["host_time_control"] = bool(step.get("time_control", False))
+                                try:
+                                    exec_res = self.rpc.call(
+                                        "execute_action",
+                                        {"action": payload},
+                                        timeout=self._step_rpc_timeout(payload),
+                                    ) or {}
+                                except Exception as exc:
+                                    exec_res = {"action_ok": False, "action_error": str(exc), "flight_recorder": {}}
+                                post_state = _unwrap_state_payload(exec_res.get("post_state"))
+                                if not post_state:
+                                    try:
+                                        obs = self.rpc.call("get_state", timeout=15.0) or {}
+                                        post_state = _unwrap_state_payload(obs)
+                                    except Exception:
+                                        post_state = {}
+                                if step.get("wait_until"):
+                                    exec_res, post_state = self._execute_wait_until(
+                                        step, pre_state, ctx, initial_res=exec_res, initial_state=post_state
+                                    )
+                        finally:
+                            self._active_step_allows_host_time_control = prev_allow_tc
+                            self._active_step_allows_host_gm_slash = prev_allow_gm_slash
 
                         elapsed_ms = round((time.time() - t_step) * 1000.0, 2)
                         self._record_session_flight_calls(
@@ -11015,6 +11789,16 @@ class ScenarioRunner(PlaytesterRunner):
                         if step_log_errs:
                             log_errors.extend(step_log_errs)
 
+                        has_inline_guards = isinstance(exec_res, dict) and (
+                            isinstance(exec_res.get("guard_hits"), list)
+                            or isinstance((exec_res.get("flight_recorder") or {}).get("guard_hits"), list)
+                        )
+                        step_guard_hits = guard_tracker.absorb_payload(exec_res)
+                        if not has_inline_guards:
+                            step_guard_hits.extend(
+                                guard_tracker.poll_rpc(getattr(self, "rpc", None), timeout=1.0)
+                            )
+                        step_sim = self._absorb_step_sim_time(exec_res, tracker=sim_tracker)
                         step_records.append({
                             "step_index": step_num,
                             "step_id": step_id,
@@ -11026,6 +11810,11 @@ class ScenarioRunner(PlaytesterRunner):
                             "rpcs": rpcs_for_step,
                             "setup": bool(step.get("setup", False)),
                             "time_control": bool(step.get("time_control", False)),
+                            "guard_hits": step_guard_hits,
+                            "guard_hits_count": len(step_guard_hits),
+                            "sim_time_injected_sec": step_sim["sim_time_injected_sec"],
+                            "sim_time_injection_count": step_sim["sim_time_injection_count"],
+                            "sim_time_injections": step_sim["sim_time_injections"],
                         })
                         if not ok_step:
                             shot_path = self._capture_failure_screenshot(scen_dir / f"failure_step_{step_num}_{step_id}.png")
@@ -11042,6 +11831,8 @@ class ScenarioRunner(PlaytesterRunner):
                             break
                         pre_state = dict(post_state) if isinstance(post_state, dict) else pre_state
         finally:
+            guard_tracker.poll_rpc(getattr(self, "rpc", None), timeout=1.0)
+            self._drain_host_gm_sim_events()
             self._close_gm_bridge()
             self.stop_client()
             self.stop_server()
@@ -11095,6 +11886,19 @@ class ScenarioRunner(PlaytesterRunner):
             "steps": step_records,
             "failure": failure_info,
         }
+        guard_summary = guard_tracker.summary(default_guards_off=False)
+        sim_summary = sim_tracker.summary()
+        journey_entry["client_guards_off"] = guard_summary["client_guards_off"]
+        journey_entry["guard_hits"] = list(guard_tracker.hits)
+        journey_entry["guard_hits_count"] = guard_summary["guard_hits_count"]
+        journey_entry["guard_hits_by_guard"] = guard_summary["guard_hits_by_guard"]
+        journey_entry["client_only_guard_hits"] = guard_summary["client_only_guard_hits"]
+        journey_entry["client_only_guard_hits_by_guard"] = guard_summary[
+            "client_only_guard_hits_by_guard"
+        ]
+        journey_entry["sim_time_injected_sec"] = sim_summary["total_sim_time_injected_sec"]
+        journey_entry["sim_time_injection_count"] = sim_summary["total_sim_time_injection_count"]
+        journey_entry["sim_time_injections"] = list(sim_tracker.events)
         meta = {
             "client_version": client_version,
             "client_build": client_build,
@@ -11136,6 +11940,23 @@ class ScenarioRunner(PlaytesterRunner):
             if meta["client_build"]:
                 client_build = _coerce_int_client_build(meta["client_build"])
 
+        all_guard_hits: List[Dict[str, Any]] = []
+        for entry_item in journeys.values():
+            if isinstance(entry_item.get("guard_hits"), list):
+                all_guard_hits.extend(entry_item["guard_hits"])
+        all_guards_off = (
+            all(bool(entry_item.get("client_guards_off", False)) for entry_item in journeys.values())
+            if journeys
+            else False
+        )
+        guard_rollup = guard_registry.summarize_guard_hits(
+            all_guard_hits, client_guards_off=all_guards_off
+        )
+        sim_rollup_tracker = _SimTimeTracker(retain_events=False, max_recent=200)
+        for entry_item in journeys.values():
+            sim_rollup_tracker.absorb_payload(entry_item)
+        sim_rollup = sim_rollup_tracker.summary()
+
         result_payload = {
             "journeys": journeys,
             "client_version": client_version,
@@ -11145,6 +11966,13 @@ class ScenarioRunner(PlaytesterRunner):
             "client_logs": all_client_logs,
             "log_errors": all_log_errors,
             "destiny_log_classification": last_destiny_cls,
+            "client_guards_off": guard_rollup["client_guards_off"],
+            "guard_hits_count": guard_rollup["guard_hits_count"],
+            "guard_hits_by_guard": guard_rollup["guard_hits_by_guard"],
+            "client_only_guard_hits": guard_rollup["client_only_guard_hits"],
+            "client_only_guard_hits_by_guard": guard_rollup["client_only_guard_hits_by_guard"],
+            "total_sim_time_injected_sec": sim_rollup["total_sim_time_injected_sec"],
+            "total_sim_time_injection_count": sim_rollup["total_sim_time_injection_count"],
         }
         result_path = self.out_dir / "result.json"
         result_path.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")

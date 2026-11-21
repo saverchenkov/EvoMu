@@ -552,7 +552,7 @@ fn self_inv_item(
 ) -> Result<PyRep, BridgeRpcError> {
     let allow_departed_location = bound_entry.is_some_and(|b| {
         b.object_id == object_id
-            && ctx.has_transition_grace_invbroker_binding(session, b.bound_id, object_id)
+            && ctx.authorize_departed_object_late_call(session, "invbroker", b.bound_id, object_id)
     });
     let header = DBRowDescriptor::inv_item_header();
     if let Some(item) = ctx.db.get_item(object_id).filter(|i| {

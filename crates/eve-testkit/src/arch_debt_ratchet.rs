@@ -1,12 +1,11 @@
-//! Falling repository-wide architecture-debt ratchet across production `eve-server` code (`#1197`).
+//! Falling repository-wide per-file architecture-debt ratchet across production `eve-server` code (`#1197`, `#1538`).
 //!
 //! Scans non-test `.rs` sources under `crates/eve-server/src/` (ignoring `#[cfg(test)]` items,
 //! comments, and—unless explicitly enabled per rule—string/char literals) for every tracked debt
-//! counter in `crates/eve-testkit/ratchets/arch_debt_ratchet.json`. Non-zero rules act as upper
-//! bounds (`exact: false`) for both occurrence counts and distinct file counts so parallel tracks
-//! lowering debt do not break each other, while `zero_required: true` rules remain strictly pinned
-//! at `0` (`exact: true`). Rules configured with `exact: true` also fail if counts drop below
-//! their configured floor without tightening the JSON baseline in the same commit.
+//! counter in `crates/eve-testkit/ratchets/arch_debt_ratchet.json` (schema version 2). Non-zero
+//! rules store per-file upper-bound ceilings (`observed <= baseline`, unlisted files default to
+//! `0`) so parallel tracks lowering debt never collide or trigger false failures, while
+//! `zero_required: true` rules remain strictly pinned at `0` across all files.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,14 +17,72 @@ use crate::notify_ratchet::{
     collect_rs_files_recursive, is_test_only_rel_path, strip_cfg_test_items,
 };
 
-/// Single rule specification loaded from `arch_debt_ratchet.json`.
+/// Validates a v2 per-file ratchet baseline map (non-empty prohibited when `zero_required`, and
+/// all baseline values must be positive integers).
+pub(crate) fn validate_per_file_baseline(
+    label: &str,
+    zero_required: bool,
+    baseline: &BTreeMap<String, usize>,
+) -> Result<(), String> {
+    if zero_required && !baseline.is_empty() {
+        return Err(format!(
+            "{label} has zero_required=true with non-empty per-file baseline ({} entries)",
+            baseline.len()
+        ));
+    }
+    for (rel_file, &max_count) in baseline {
+        if max_count == 0 {
+            return Err(format!(
+                "{label} baseline entry '{rel_file}' must be a positive integer (omit 0 entries)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validates a v2 per-file baseline and enforces `observed[file] <= baseline.get(file).unwrap_or(0)`
+/// (or `<= 0` when `zero_required` is true). Decreases and file removals are always permitted.
+pub(crate) fn validate_per_file_counts(
+    label: &str,
+    zero_required: bool,
+    baseline: &BTreeMap<String, usize>,
+    observed: &BTreeMap<String, usize>,
+) -> Result<(), String> {
+    validate_per_file_baseline(label, zero_required, baseline)?;
+    let mut violations = Vec::new();
+    for (rel_file, &obs_count) in observed {
+        if obs_count == 0 {
+            continue;
+        }
+        let max_count = if zero_required {
+            0
+        } else {
+            baseline.get(rel_file).copied().unwrap_or(0)
+        };
+        if obs_count > max_count {
+            violations.push(format!("{rel_file}: observed {obs_count} > max {max_count}"));
+        }
+    }
+    if !violations.is_empty() {
+        let shown: Vec<&str> = violations.iter().take(8).map(String::as_str).collect();
+        let extra = violations.len().saturating_sub(shown.len());
+        let suffix = if extra > 0 {
+            format!(" (+ {extra} more)")
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "{label} per-file ratchet regressed: [{}]{suffix}",
+            shown.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Single rule specification loaded from `arch_debt_ratchet.json` (version 2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArchDebtRule {
-    pub max_occurrences: usize,
-    pub max_files: usize,
-    #[serde(default)]
-    pub exact: bool,
     #[serde(default)]
     pub zero_required: bool,
     #[serde(default)]
@@ -40,6 +97,7 @@ pub struct ArchDebtRule {
     pub regex: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    pub files: BTreeMap<String, usize>,
 }
 
 /// Top-level `crates/eve-testkit/ratchets/arch_debt_ratchet.json` document.
@@ -91,6 +149,13 @@ impl ArchDebtRatchet {
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         let parsed: Self = serde_json::from_str(&raw)
             .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+        if parsed.version != 2 {
+            return Err(format!(
+                "Unsupported arch_debt_ratchet version {} in {} (expected 2)",
+                parsed.version,
+                path.display()
+            ));
+        }
         for (name, rule) in &parsed.patterns {
             let kind = PatternKind::from_name(name).ok_or_else(|| {
                 format!(
@@ -110,6 +175,11 @@ impl ArchDebtRatchet {
                     ));
                 }
             }
+            validate_per_file_baseline(
+                &format!("Architecture debt '{name}'"),
+                rule.zero_required,
+                &rule.files,
+            )?;
         }
         Ok(parsed)
     }
@@ -126,56 +196,26 @@ impl ArchDebtRatchet {
         Ok(report)
     }
 
-    /// Enforces all configured rules (`zero_required`, regression caps, and `exact` bounds)
+    /// Enforces all configured v2 rules (`zero_required` and per-file upper-bound ceilings)
     /// against `report`.
     pub fn assert_ratchet(&self, report: &ArchDebtScanReport) -> Result<(), String> {
+        if self.version != 2 {
+            return Err(format!(
+                "Unsupported arch_debt_ratchet version {} (expected 2)",
+                self.version
+            ));
+        }
         for (name, rule) in &self.patterns {
-            if rule.zero_required && (rule.max_occurrences > 0 || rule.max_files > 0) {
-                return Err(format!(
-                    "Arch debt rule '{name}' has zero_required=true with non-zero ceiling (max_occurrences={}, max_files={})",
-                    rule.max_occurrences, rule.max_files
-                ));
-            }
             let obs = report
                 .patterns
                 .get(name)
                 .ok_or_else(|| format!("Missing scan output for rule '{name}'"))?;
-            if obs.occurrences > rule.max_occurrences {
-                let sample: Vec<String> = obs
-                    .per_file
-                    .iter()
-                    .take(5)
-                    .map(|(f, c)| format!("{f}({c})"))
-                    .collect();
-                return Err(format!(
-                    "Architecture debt '{name}' regressed: {} occurrences (max {}), files={} (max {}). Top files: [{}]",
-                    obs.occurrences,
-                    rule.max_occurrences,
-                    obs.files,
-                    rule.max_files,
-                    sample.join(", ")
-                ));
-            }
-            if obs.files > rule.max_files {
-                return Err(format!(
-                    "Architecture debt '{name}' file count regressed: {} files (max {}), occurrences={} (max {}).",
-                    obs.files, rule.max_files, obs.occurrences, rule.max_occurrences
-                ));
-            }
-            if rule.exact {
-                if obs.occurrences < rule.max_occurrences {
-                    return Err(format!(
-                        "Architecture debt '{name}' dropped below exact ratchet ({} < {}); lower max_occurrences in arch_debt_ratchet.json in the same commit.",
-                        obs.occurrences, rule.max_occurrences
-                    ));
-                }
-                if obs.files < rule.max_files {
-                    return Err(format!(
-                        "Architecture debt '{name}' file count dropped below exact ratchet ({} < {}); lower max_files in arch_debt_ratchet.json in the same commit.",
-                        obs.files, rule.max_files
-                    ));
-                }
-            }
+            validate_per_file_counts(
+                &format!("Architecture debt '{name}'"),
+                rule.zero_required,
+                &rule.files,
+                &obs.per_file,
+            )?;
         }
         Ok(())
     }
@@ -189,9 +229,6 @@ pub fn scan_arch_debt_in_dir(dir: &Path) -> Result<ArchDebtScanReport, String> {
             (
                 k.as_str().to_string(),
                 ArchDebtRule {
-                    max_occurrences: usize::MAX,
-                    max_files: usize::MAX,
-                    exact: false,
                     zero_required: false,
                     owning_issue: None,
                     strip_literals: Some(k.default_strip_literals()),
@@ -199,6 +236,7 @@ pub fn scan_arch_debt_in_dir(dir: &Path) -> Result<ArchDebtScanReport, String> {
                     path_exclude_substring: None,
                     regex: k.expected_regex().map(str::to_string),
                     description: None,
+                    files: BTreeMap::new(),
                 },
             )
         })
@@ -429,12 +467,12 @@ impl PatternKind {
             Self::SlashCommandPrefixParse
             | Self::RouterBindingGraceHelpers
             | Self::BallparkLocksOutsideSystemActor => None,
-            Self::HandwrittenItemChangeEmitters => {
-                Some(r"\b(?:emit|notify)_item_change[A-Za-z0-9_]*\s*\(")
-            }
-            Self::HandwrittenAccountChangeEmitters => {
-                Some(r"\b(?:emit|notify)_[A-Za-z0-9_]*account_change[A-Za-z0-9_]*\s*\(")
-            }
+            Self::HandwrittenItemChangeEmitters => Some(
+                r"\b(?:(?:notify_item_mutation|emit_inv_item_change|emit_inv_item_deleted|emit_item_change_routed|emit_item_deleted_routed|notify_item_record_change|emit_market_item_change|emit_ship_charge_item_diffs|notify_item_change|emit_item_change_with_industry_refresh|notify_item_record_change_with_target|notify_fitted_item_trashed|emit_item_change_with_target|emit_item_changes|emit_item_changes_with_sink|emit_store_item_mutations|emit_mission_item_reward_notification)\s*\(|(?:OnItemChange|OnMultipleItemChange|OnBlueprintsUpdated)\s*\{)",
+            ),
+            Self::HandwrittenAccountChangeEmitters => Some(
+                r"\b(?:(?:notify_wallet_balance|emit_market_account_change|notify_account_change)\s*\(|OnAccountChange\s*\{)",
+            ),
             Self::SystemTimeNowInGameplay => Some(r"\bSystemTime\s*::\s*now\s*\("),
             Self::IsWriteLockedByCurrentThread => Some(r"\bis_write_locked_by_current_thread\b"),
         }
@@ -478,9 +516,19 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
                 )
             }
         }
-        PatternKind::HandwrittenItemChangeEmitters => count_handwritten_change_emitters(text, true),
+        PatternKind::HandwrittenItemChangeEmitters => {
+            if rel_key.contains("router/delta_") {
+                0
+            } else {
+                count_handwritten_change_emitters(text, true)
+            }
+        }
         PatternKind::HandwrittenAccountChangeEmitters => {
-            count_handwritten_change_emitters(text, false)
+            if rel_key.contains("router/delta_") {
+                0
+            } else {
+                count_handwritten_change_emitters(text, false)
+            }
         }
         PatternKind::SystemTimeNowInGameplay => count_system_time_now(text),
         PatternKind::IsWriteLockedByCurrentThread => {
@@ -862,16 +910,49 @@ fn count_router_binding_grace_helpers(text: &str) -> usize {
 }
 
 fn count_handwritten_change_emitters(text: &str, item_change: bool) -> usize {
-    let needle = if item_change { "item_change" } else { "account_change" };
-    if !text.contains(needle) {
+    const ITEM_HELPERS: &[&str] = &[
+        "notify_item_mutation",
+        "emit_inv_item_change",
+        "emit_inv_item_deleted",
+        "emit_item_change_routed",
+        "emit_item_deleted_routed",
+        "notify_item_record_change",
+        "emit_market_item_change",
+        "emit_ship_charge_item_diffs",
+        "notify_item_change",
+        "emit_item_change_with_industry_refresh",
+        "notify_item_record_change_with_target",
+        "notify_fitted_item_trashed",
+        "emit_item_change_with_target",
+        "emit_item_changes",
+        "emit_item_changes_with_sink",
+        "emit_store_item_mutations",
+        "emit_mission_item_reward_notification",
+    ];
+    const ITEM_STRUCTS: &[&str] = &["OnItemChange", "OnMultipleItemChange", "OnBlueprintsUpdated"];
+    const WALLET_HELPERS: &[&str] = &[
+        "notify_wallet_balance",
+        "emit_market_account_change",
+        "notify_account_change",
+    ];
+    const WALLET_STRUCTS: &[&str] = &["OnAccountChange"];
+
+    if !text.contains("emit_") && !text.contains("notify_") && !text.contains("On") {
         return 0;
     }
+    let (helpers, structs) = if item_change {
+        (ITEM_HELPERS, ITEM_STRUCTS)
+    } else {
+        (WALLET_HELPERS, WALLET_STRUCTS)
+    };
     let b = text.as_bytes();
     let mut count = 0usize;
-    for prefix in ["emit_", "notify_"] {
+    for prefix in ["emit_", "notify_", "On"] {
         if !text.contains(prefix) {
             continue;
         }
+        let want_delim = if prefix == "On" { b'{' } else { b'(' };
+        let candidates = if prefix == "On" { structs } else { helpers };
         for (i, _) in text.match_indices(prefix) {
             if !has_word_boundary_before(b, i) {
                 continue;
@@ -880,15 +961,10 @@ fn count_handwritten_change_emitters(text: &str, item_change: bool) -> usize {
             while ident_end < b.len() && is_ident_byte(b[ident_end]) {
                 ident_end += 1;
             }
-            if let Ok(tail) = std::str::from_utf8(&b[i + prefix.len()..ident_end]) {
-                let matches_kind = if item_change {
-                    tail.starts_with("item_change")
-                } else {
-                    tail.contains("account_change")
-                };
-                if matches_kind {
-                    let lp = skip_ws(b, ident_end);
-                    if lp < b.len() && b[lp] == b'(' {
+            if let Ok(ident) = std::str::from_utf8(&b[i..ident_end]) {
+                if candidates.contains(&ident) {
+                    let delim_pos = skip_ws(b, ident_end);
+                    if delim_pos < b.len() && b[delim_pos] == want_delim {
                         count += 1;
                     }
                 }
@@ -1126,8 +1202,9 @@ mod tests {
 
     #[test]
     fn arch_debt_ratchet_holds_and_forbids_unratcheted_growth() {
-        // 1. Live repository baseline must pass with every expected #1197 / scope-revision pattern.
+        // 1. Live repository baseline must pass with v2 per-file baselines and every expected pattern.
         let ratchet = ArchDebtRatchet::load_default().expect("load arch_debt_ratchet.json");
+        assert_eq!(ratchet.version, 2, "arch_debt_ratchet.json must be version 2");
         let report = ratchet
             .verify_default()
             .expect("live crates/eve-server/src must match arch_debt_ratchet.json");
@@ -1165,20 +1242,22 @@ mod tests {
         for (name, rule) in &ratchet.patterns {
             if rule.zero_required {
                 assert!(
-                    rule.exact && rule.max_occurrences == 0 && rule.max_files == 0,
-                    "zero_required rule '{name}' must remain pinned at 0 with exact=true: {rule:?}"
+                    rule.files.is_empty(),
+                    "zero_required rule '{name}' must have empty files baseline: {rule:?}"
                 );
             } else {
-                assert!(
-                    !rule.exact,
-                    "non-zero rule '{name}' must use upper-bound ceiling (exact=false): {rule:?}"
-                );
+                for (rel_file, &max_count) in &rule.files {
+                    assert!(
+                        max_count > 0,
+                        "rule '{name}' file '{rel_file}' must have positive integer baseline"
+                    );
+                }
             }
         }
 
-        // 2. Synthetic tempdir workspace verifies comment/cfg(test)/literal filtering, regression
-        //    blocking, upper-bound drops (exact=false), exact-drop rejection (exact=true, both
-        //    occurrence and file count), and zero_required guard.
+        // 2. Synthetic tempdir workspace verifies comment/cfg(test)/literal filtering, per-file
+        //    regression blocking (existing file increase and unlisted file addition), per-file
+        //    decrease tolerance without baseline edits, zero_required guard, and 0-entry guard.
         let tmp = make_temp_dir("synth");
         let src = tmp.join("src");
         std::fs::create_dir_all(src.join("router")).expect("create router dir");
@@ -1226,10 +1305,7 @@ pub fn grace_bound_object_for_inflight_invbroker() {}
         )
         .expect("write system_actor_loop.rs");
 
-        let mk_rule = |occ, files, exact, zero_req| ArchDebtRule {
-            max_occurrences: occ,
-            max_files: files,
-            exact,
+        let mk_rule = |files: &[(&str, usize)], zero_req| ArchDebtRule {
             zero_required: zero_req,
             owning_issue: Some(1197),
             strip_literals: None,
@@ -1237,30 +1313,43 @@ pub fn grace_bound_object_for_inflight_invbroker() {}
             path_exclude_substring: None,
             regex: None,
             description: None,
+            files: files
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), *v))
+                .collect(),
         };
         let mut rules = BTreeMap::new();
-        rules.insert("master_wallet".into(), mk_rule(0, 0, true, true));
-        rules.insert("direct_member_roles_get".into(), mk_rule(0, 0, true, true));
-        rules.insert("hardcoded_fallback_entity_ids".into(), mk_rule(1, 1, false, false));
-        rules.insert("positional_rpc_args_index".into(), mk_rule(1, 1, false, false));
-        rules.insert("slash_command_prefix_parse".into(), mk_rule(1, 1, false, false));
-        let mut grace_rule = mk_rule(1, 1, false, false);
+        rules.insert("master_wallet".into(), mk_rule(&[], true));
+        rules.insert("direct_member_roles_get".into(), mk_rule(&[], true));
+        rules.insert(
+            "hardcoded_fallback_entity_ids".into(),
+            mk_rule(&[("services/sample.rs", 1)], false),
+        );
+        rules.insert(
+            "positional_rpc_args_index".into(),
+            mk_rule(&[("services/sample.rs", 1)], false),
+        );
+        rules.insert(
+            "slash_command_prefix_parse".into(),
+            mk_rule(&[("services/sample.rs", 1)], false),
+        );
+        let mut grace_rule = mk_rule(&[("router/binding.rs", 1)], false);
         grace_rule.path_include = Some("router/binding.rs".into());
         rules.insert("router_binding_grace_helpers".into(), grace_rule);
-        let mut bp_rule = mk_rule(0, 0, false, false);
+        let mut bp_rule = mk_rule(&[], false);
         bp_rule.path_exclude_substring = Some("system_actor".into());
         rules.insert("ballpark_locks_outside_system_actor".into(), bp_rule);
 
         let synth_ratchet = ArchDebtRatchet {
-            version: 1,
+            version: 2,
             description: None,
-            patterns: rules.clone(),
+            patterns: rules,
         };
         synth_ratchet
             .verify_dir(&src)
             .expect("synthetic baseline must pass");
 
-        // Regression check: adding a master_wallet or ballpark lock outside system_actor must fail.
+        // Adding a site in an unlisted file must fail immediately.
         std::fs::write(
             src.join("services/extra.rs"),
             "pub fn bad(b: &Obj) { let _ = b.ballpark.write(); }\n",
@@ -1268,55 +1357,80 @@ pub fn grace_bound_object_for_inflight_invbroker() {}
         .expect("write extra.rs");
         let err = synth_ratchet.verify_dir(&src).unwrap_err();
         assert!(err.contains("ballpark_locks_outside_system_actor"), "{err}");
+        assert!(err.contains("services/extra.rs"), "{err}");
         std::fs::remove_file(src.join("services/extra.rs")).expect("remove extra.rs");
 
-        // Upper-bound drop check (exact=false): lowering occurrences and files passes without JSON edits.
+        // Adding a site to a zero_required rule must fail immediately.
+        std::fs::write(
+            src.join("services/zero_viol.rs"),
+            "pub fn bad() { let _ = master_wallet; }\n",
+        )
+        .expect("write zero_viol.rs");
+        let zero_hit_err = synth_ratchet.verify_dir(&src).unwrap_err();
+        assert!(zero_hit_err.contains("master_wallet"), "{zero_hit_err}");
+        std::fs::remove_file(src.join("services/zero_viol.rs")).expect("remove zero_viol.rs");
+
+        // Adding a second site in an already-baselined file (1 -> 2 > max 1) must fail, even
+        // though total global occurrences could stay flat if another file dropped!
+        std::fs::write(
+            src.join("services/sample2.rs"),
+            "pub fn f() { let _ = Some(1).unwrap_or(30_000_142); }\n",
+        )
+        .expect("write sample2.rs");
+        let per_file_rules = BTreeMap::from([(
+            "hardcoded_fallback_entity_ids".into(),
+            mk_rule(
+                &[("services/sample.rs", 2), ("services/sample2.rs", 1)],
+                false,
+            ),
+        )]);
+        let per_file_ratchet = ArchDebtRatchet {
+            version: 2,
+            description: None,
+            patterns: per_file_rules,
+        };
+        std::fs::write(
+            src.join("services/sample2.rs"),
+            "pub fn f() { let _ = Some(1).unwrap_or(30_000_142); let _ = Some(2).unwrap_or(30_000_142); }\n",
+        )
+        .expect("bump sample2.rs");
+        let split_err = per_file_ratchet.verify_dir(&src).unwrap_err();
+        assert!(
+            split_err.contains("services/sample2.rs: observed 2 > max 1"),
+            "{split_err}"
+        );
+        std::fs::remove_file(src.join("services/sample2.rs")).expect("remove sample2.rs");
+
+        // Decreasing counts or deleting all sites in a file passes without modifying baseline.
         std::fs::write(src.join("router/binding.rs"), "pub fn clean() {}\n")
             .expect("clean binding.rs");
         synth_ratchet
             .verify_dir(&src)
-            .expect("exact=false upper-bound rule must allow occurrence/file drops");
+            .expect("decreasing a per-file count or dropping a file to 0 must pass without JSON edits");
 
-        // Exact drop check (exact=true): lowering occurrences without tightening JSON fails.
-        let mut exact_ratchet = synth_ratchet.clone();
-        exact_ratchet
-            .patterns
-            .get_mut("router_binding_grace_helpers")
-            .expect("router_binding_grace_helpers rule")
-            .exact = true;
-        let drop_err = exact_ratchet.verify_dir(&src).unwrap_err();
-        assert!(
-            drop_err.contains("dropped below exact ratchet")
-                && drop_err.contains("router_binding_grace_helpers"),
-            "{drop_err}"
-        );
-
-        // File-count-only drop check (occurrences unchanged, files 2 -> 1).
-        let mut file_drop_rules = BTreeMap::new();
-        file_drop_rules.insert("master_wallet".into(), mk_rule(2, 2, true, false));
-        let file_drop_ratchet = ArchDebtRatchet {
-            version: 1,
-            description: None,
-            patterns: file_drop_rules,
-        };
-        std::fs::write(
-            src.join("services/sample.rs"),
-            "pub fn a() { let _ = (master_wallet, master_wallet); }\n",
-        )
-        .expect("rewrite sample.rs");
-        let file_err = file_drop_ratchet.verify_dir(&src).unwrap_err();
-        assert!(file_err.contains("file count dropped below exact ratchet"), "{file_err}");
-
-        // zero_required with non-zero ceiling must be rejected.
-        let mut bad_zero_rules = BTreeMap::new();
-        bad_zero_rules.insert("master_wallet".into(), mk_rule(2, 1, true, true));
+        // zero_required with non-empty baseline must be rejected.
         let bad_zero = ArchDebtRatchet {
-            version: 1,
+            version: 2,
             description: None,
-            patterns: bad_zero_rules,
+            patterns: BTreeMap::from([(
+                "master_wallet".into(),
+                mk_rule(&[("services/sample.rs", 1)], true),
+            )]),
         };
         let zero_err = bad_zero.verify_dir(&src).unwrap_err();
         assert!(zero_err.contains("zero_required=true"), "{zero_err}");
+
+        // Explicit 0 entry in baseline must be rejected.
+        let zero_entry = ArchDebtRatchet {
+            version: 2,
+            description: None,
+            patterns: BTreeMap::from([(
+                "hardcoded_fallback_entity_ids".into(),
+                mk_rule(&[("services/sample.rs", 0)], false),
+            )]),
+        };
+        let entry_err = zero_entry.verify_dir(&src).unwrap_err();
+        assert!(entry_err.contains("positive integer"), "{entry_err}");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1378,9 +1492,6 @@ pub fn member_base_roles() {}
         let lit_rules = BTreeMap::from([(
             "master_wallet".to_string(),
             ArchDebtRule {
-                max_occurrences: 2,
-                max_files: 2,
-                exact: false,
                 zero_required: false,
                 owning_issue: Some(1197),
                 strip_literals: Some(false),
@@ -1388,6 +1499,10 @@ pub fn member_base_roles() {}
                 path_exclude_substring: None,
                 regex: None,
                 description: None,
+                files: BTreeMap::from([
+                    ("services/lit_only.rs".to_string(), 1),
+                    ("services/variants.rs".to_string(), 1),
+                ]),
             },
         )]);
         let lit_report = scan_arch_debt_in_dir_for_rules(&src, &lit_rules)
@@ -1395,11 +1510,12 @@ pub fn member_base_roles() {}
         assert_eq!(lit_report.patterns["master_wallet"].occurrences, 2);
         assert_eq!(lit_report.patterns["master_wallet"].files, 2);
 
-        // 2. Unknown JSON fields and mismatched regex strings must fail load_from_path.
+        // 2. Unknown JSON fields, mismatched regex strings, v1 versions, and 0 file entries
+        //    must fail load_from_path.
         let bad_field_json = tmp.join("bad_field.json");
         std::fs::write(
             &bad_field_json,
-            r#"{"version":1,"patterns":{"master_wallet":{"max_occurrences":0,"max_files":0,"exact":true,"zero_required":true,"regex":"\\bmaster_wallet\\b","literal_regex":"dead"}}}"#,
+            r#"{"version":2,"patterns":{"master_wallet":{"zero_required":true,"regex":"\\bmaster_wallet\\b","files":{},"literal_regex":"dead"}}}"#,
         )
         .expect("write bad_field.json");
         assert!(ArchDebtRatchet::load_from_path(&bad_field_json).is_err());
@@ -1407,12 +1523,267 @@ pub fn member_base_roles() {}
         let bad_regex_json = tmp.join("bad_regex.json");
         std::fs::write(
             &bad_regex_json,
-            r#"{"version":1,"patterns":{"master_wallet":{"max_occurrences":0,"max_files":0,"exact":true,"zero_required":true,"regex":"\\bwrong\\b"}}}"#,
+            r#"{"version":2,"patterns":{"master_wallet":{"zero_required":true,"regex":"\\bwrong\\b","files":{}}}}"#,
         )
         .expect("write bad_regex.json");
         let rx_err = ArchDebtRatchet::load_from_path(&bad_regex_json).unwrap_err();
         assert!(rx_err.contains("regex mismatch"), "{rx_err}");
 
+        let v1_json = tmp.join("v1.json");
+        std::fs::write(
+            &v1_json,
+            r#"{"version":1,"patterns":{"master_wallet":{"zero_required":true,"regex":"\\bmaster_wallet\\b","files":{}}}}"#,
+        )
+        .expect("write v1.json");
+        assert!(ArchDebtRatchet::load_from_path(&v1_json).is_err());
+
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_scanners_cover_all_931_item_and_wallet_emitters_and_exclude_router_delta() {
+        let tmp = make_temp_dir("931_emitters");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("router")).expect("create router dir");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+
+        std::fs::write(
+            src.join("services/item_emitters.rs"),
+            r#"
+pub fn all_item_helpers_and_structs(ctx: &Ctx) {
+    ctx.notify_item_mutation(1);
+    ctx.emit_inv_item_change (2);
+    emit_inv_item_deleted(3);
+    ctx.emit_item_change_routed(4);
+    ctx.emit_item_deleted_routed(5);
+    ctx.notify_item_record_change(6);
+    emit_market_item_change(7);
+    emit_ship_charge_item_diffs(8);
+    ctx.notify_item_change(9);
+    ctx.emit_item_change_with_industry_refresh(10);
+    ctx.notify_item_record_change_with_target(11);
+    ctx.notify_fitted_item_trashed(12);
+    ctx.emit_item_change_with_target(13);
+    emit_item_changes(14);
+    emit_item_changes_with_sink(15);
+    emit_store_item_mutations(16);
+    emit_mission_item_reward_notification(17);
+    let _a = crate::router::notify_registry::OnItemChange { x: 1 };
+    let _b = OnMultipleItemChange
+    { x: 2 };
+    let _c = OnBlueprintsUpdated { owner_id: 3 };
+    // Near-misses and ignored sites:
+    let _ignored_comment = "// notify_item_mutation(1) OnItemChange {";
+    let _ignored_str = "emit_inv_item_change(1) OnMultipleItemChange {";
+    let _ignored_prefix = my_notify_item_mutation(1);
+    let _ignored_suffix = notify_item_mutation_extra(1);
+    let _ignored_other = emit_beacon_slim_item_change(1);
+    let _ignored_const = OnItemChange::EVENT;
+    let _ignored_ty: Option<OnItemChange> = None;
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ignored() {
+        notify_item_mutation(1);
+        let _ = OnItemChange { x: 1 };
+    }
+}
+"#,
+        )
+        .expect("write item_emitters.rs");
+
+        std::fs::write(
+            src.join("services/wallet_emitters.rs"),
+            r#"
+pub fn notify_special_site_account_changes(ctx: &Ctx) {
+    ctx.notify_wallet_balance(1);
+    emit_market_account_change (2);
+    ctx.notify_account_change(3);
+    let _d = crate::router::notify_registry::OnAccountChange { balance: 0.0 };
+    let _ignored = my_notify_account_change(4);
+    let _ignored_suffix = notify_wallet_balance_v2(5);
+    let _ignored_const = OnAccountChange::DEFAULT_ID_TYPE;
+}
+"#,
+        )
+        .expect("write wallet_emitters.rs");
+
+        // `router/delta_*` must be excluded; legacy `router/cache_notifications.rs` &
+        // `router/context.rs` must remain counted; `router/notify_registry.rs` macro arms must not match.
+        std::fs::write(
+            src.join("router/delta_projection.rs"),
+            "pub fn p() { let _ = OnItemChange {}; let _ = OnBlueprintsUpdated {}; let _ = OnAccountChange {}; }\n",
+        )
+        .expect("write delta_projection.rs");
+        std::fs::write(
+            src.join("router/delta_commit_listener.rs"),
+            "pub fn d(ctx: &Ctx) { ctx.notify_wallet_balance(1); let _ = OnAccountChange {}; }\n",
+        )
+        .expect("write delta_commit_listener.rs");
+        std::fs::write(
+            src.join("router/cache_notifications.rs"),
+            "pub fn c(ctx: &Ctx) { ctx.notify_item_mutation(1); }\n",
+        )
+        .expect("write cache_notifications.rs");
+        std::fs::write(
+            src.join("router/context.rs"),
+            "pub fn x(ctx: &Ctx) { ctx.notify_account_change(1); }\n",
+        )
+        .expect("write context.rs");
+        std::fs::write(
+            src.join("router/notify_registry.rs"),
+            "notify_def!(OnItemChange => \"OnItemChange\" (\"charid\") {}, OnAccountChange => \"OnAccountChange\" (\"charid\") {});\n",
+        )
+        .expect("write notify_registry.rs");
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan 931 emitters");
+        assert_eq!(report.patterns["handwritten_item_change_emitters"].occurrences, 21);
+        assert_eq!(report.patterns["handwritten_item_change_emitters"].files, 2);
+        assert_eq!(
+            report.patterns["handwritten_item_change_emitters"].per_file.get("services/item_emitters.rs"),
+            Some(&20)
+        );
+        assert_eq!(
+            report.patterns["handwritten_item_change_emitters"].per_file.get("router/cache_notifications.rs"),
+            Some(&1)
+        );
+        assert!(
+            !report.patterns["handwritten_item_change_emitters"].per_file.contains_key("router/delta_projection.rs")
+        );
+
+        assert_eq!(report.patterns["handwritten_account_change_emitters"].occurrences, 5);
+        assert_eq!(report.patterns["handwritten_account_change_emitters"].files, 2);
+        assert_eq!(
+            report.patterns["handwritten_account_change_emitters"].per_file.get("services/wallet_emitters.rs"),
+            Some(&4)
+        );
+        assert_eq!(
+            report.patterns["handwritten_account_change_emitters"].per_file.get("router/context.rs"),
+            Some(&1)
+        );
+        assert!(
+            !report.patterns["handwritten_account_change_emitters"].per_file.contains_key("router/delta_commit_listener.rs")
+        );
+        assert!(
+            !report.patterns["handwritten_account_change_emitters"].per_file.contains_key("router/delta_projection.rs")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rust_and_python_ratchet_scanners_agree_on_live_repo() {
+        let canonical_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonicalize repo root");
+        let root_str = canonical_root.to_string_lossy();
+        let repo_root = PathBuf::from(root_str.trim_start_matches(r"\\?\"));
+        let script_path =
+            repo_root.join(".agents/skills/evomu-adversarial-review/scripts/tighten_ratchets.py");
+        assert!(
+            script_path.is_file(),
+            "missing tighten_ratchets.py at {}",
+            script_path.display()
+        );
+
+        let output = ["python3", "python"]
+            .into_iter()
+            .find_map(|interp| {
+                match std::process::Command::new(interp)
+                    .arg(&script_path)
+                    .arg("--root")
+                    .arg(&repo_root)
+                    .arg("--dump-counts-json")
+                    .output()
+                {
+                    Ok(out) => Some(Ok(out)),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(err) => Some(Err(format!("failed to execute {interp}: {err}"))),
+                }
+            })
+            .expect("neither python3 nor python interpreter found in PATH")
+            .expect("invoke tighten_ratchets.py --dump-counts-json");
+        assert!(
+            output.status.success(),
+            "tighten_ratchets.py --dump-counts-json failed ({:?}):\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let py: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .expect("parse --dump-counts-json JSON output");
+
+        // 1. arch_debt per-rule per-file parity
+        let py_arch: BTreeMap<String, BTreeMap<String, usize>> =
+            serde_json::from_value(py["arch_debt"].clone()).expect("parse py arch_debt");
+        let arch_ratchet = ArchDebtRatchet::load_from_path(
+            &repo_root.join("crates/eve-testkit/ratchets/arch_debt_ratchet.json"),
+        )
+        .expect("load arch_debt_ratchet.json");
+        let rust_arch_report = arch_ratchet
+            .verify_dir(&repo_root.join("crates/eve-server/src"))
+            .expect("verify arch_debt on repo");
+        let rust_arch: BTreeMap<String, BTreeMap<String, usize>> = rust_arch_report
+            .patterns
+            .into_iter()
+            .map(|(k, v)| (k, v.per_file))
+            .collect();
+        assert_eq!(
+            rust_arch, py_arch,
+            "Rust vs Python arch_debt per-file scan mismatch"
+        );
+
+        // 2. client_compat per-counter per-file + allowlist set parity
+        let py_compat = &py["client_compat"];
+        let py_compat_counters: BTreeMap<String, BTreeMap<String, usize>> =
+            serde_json::from_value(py_compat["counters"].clone())
+                .expect("parse py client_compat.counters");
+        let py_known_rules: std::collections::BTreeSet<String> =
+            serde_json::from_value(py_compat["known_rules"].clone())
+                .expect("parse py client_compat.known_rules");
+        let py_svc_files: std::collections::BTreeSet<String> =
+            serde_json::from_value(py_compat["service_caller_trace_files"].clone())
+                .expect("parse py client_compat.service_caller_trace_files");
+        let py_it_files: std::collections::BTreeSet<String> =
+            serde_json::from_value(py_compat["it_dispatch_rpc_files"].clone())
+                .expect("parse py client_compat.it_dispatch_rpc_files");
+
+        let rust_compat = crate::client_compat_ratchet::scan_client_compat_in_dirs(
+            &repo_root.join("crates/eve-server"),
+            &repo_root.join("crates/eve-server/tests/it"),
+        )
+        .expect("scan client_compat in repo");
+        assert_eq!(
+            rust_compat.counters, py_compat_counters,
+            "Rust vs Python client_compat per-file counters mismatch"
+        );
+        assert_eq!(
+            rust_compat.known_rules, py_known_rules,
+            "Rust vs Python client_compat known_rules mismatch"
+        );
+        assert_eq!(
+            rust_compat.service_caller_trace_files, py_svc_files,
+            "Rust vs Python client_compat service_caller_trace_files mismatch"
+        );
+        assert_eq!(
+            rust_compat.it_dispatch_rpc_files, py_it_files,
+            "Rust vs Python client_compat it_dispatch_rpc_files mismatch"
+        );
+
+        // 3. untyped_user_error per-file parity
+        let py_untyped: BTreeMap<String, usize> =
+            serde_json::from_value(py["untyped_user_error"].clone())
+                .expect("parse py untyped_user_error");
+        let rust_untyped = crate::client_contract::scan_untyped_user_error_per_file(
+            &repo_root.join("crates/eve-server/src"),
+        )
+        .expect("scan untyped_user_error in repo");
+        assert_eq!(
+            rust_untyped, py_untyped,
+            "Rust vs Python untyped_user_error per-file counts mismatch"
+        );
     }
 }

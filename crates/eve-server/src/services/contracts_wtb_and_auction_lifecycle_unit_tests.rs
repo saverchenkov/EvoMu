@@ -278,7 +278,7 @@ fn want_to_buy_stack_split_auction_outbid_refund_and_delete_reject_fail_gm_expir
 
     ctx.db.with_mut_snapshot(|snap| {
         for a in snap.accounts.values_mut() {
-            a.role = corp_roles::ROLE_DIRECTOR;
+            a.role = eve_db::service_roles::ROLE_GM_MASK;
         }
     });
     let exp_auc = handle(
@@ -735,7 +735,7 @@ fn delete_reject_fail_gm_expire_corp_rbac_and_orig_flag_restoration() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(921_104, make_fighter_item(921_104, 34, corp_id, station_id, InventoryFlag::CorpSAG5, 8));
         for a in snap.accounts.values_mut() {
-            a.role = corp_roles::ROLE_DIRECTOR;
+            a.role = eve_db::service_roles::ROLE_GM_MASK;
         }
     });
     let auc_nobid = created_cid(

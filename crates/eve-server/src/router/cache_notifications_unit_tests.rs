@@ -1285,3 +1285,418 @@ async fn intermediate_insertion_preserves_monotonic_seq_ids_and_prevents_rpc_rep
     assert!(rt_snapshot[0].0 < rt_snapshot[1].0);
     let _ = ctx.drain_notifications_for_char(pilot_id);
 }
+
+#[test]
+fn item_compare_only_emits_zero_projected_notifs_and_tracks_per_helper_counts() {
+    use crate::router::delta_item_compare::{
+        flush_item_compare_summary, item_compare_summary, HelperCompareCounts,
+    };
+
+    let ctx = test_ctx();
+    let pilot_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let now = 1_700_000_100_u64;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+    ctx.db
+        .acquire_online_lock(uid, 9_301, Some(pilot_id), true, now)
+        .expect("online lock");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 1. Committed item insert does NOT push any OnItemChange/OnMultipleItemChange in compare-only mode.
+    let item_id = 991_100_001_i64;
+    let rec = eve_db::InventoryItemRecord {
+        item_id,
+        type_id: 34,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: eve_db::InventoryFlag::Hangar,
+        quantity: 100,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(item_id, rec.clone());
+    });
+    assert!(
+        ctx.drain_notifications_for_char(pilot_id).is_empty(),
+        "compare-only commit projection must not send OnItemChange"
+    );
+    let s1 = item_compare_summary(&ctx);
+    assert_eq!(s1.item_change.pending, 1);
+    assert_eq!(s1.item_change.matched, 0);
+
+    // Unrelated non-item DB commits must NEVER prune pending item compare entries (`#1537` rule).
+    for step in 0..40_i64 {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+                eve_db::IskCents::from_isk(200_000 + step);
+        });
+    }
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(item_compare_summary(&ctx).item_change.pending, 1);
+
+    // Matching hand-written emit resolves pending -> matched under helper name.
+    ctx.emit_item_change_routed(pilot_id, &rec, vec![(3, PyRep::Integer(0))]);
+    let sent1 = ctx.drain_notifications_for_char(pilot_id);
+    assert!(sent1.iter().any(|n| n.event == "OnItemChange"));
+    let s2 = item_compare_summary(&ctx);
+    assert_eq!(s2.item_change.pending, 0);
+    assert_eq!(s2.item_change.matched, 1);
+    assert_eq!(
+        s2.item_change.by_helper.get("emit_item_change_routed"),
+        Some(&HelperCompareCounts {
+            matched: 1,
+            hand_written_only: 0,
+            projected_only: 0,
+        })
+    );
+
+    // 2. Stack update matched via notify_item_record_change + delete matched via emit_item_deleted_routed.
+    let mut rec_updated = rec.clone();
+    rec_updated.quantity = 40;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&item_id).expect("item").quantity = 40;
+    });
+    let _ = ctx.notify_item_record_change(pilot_id, &rec_updated, vec![(9, PyRep::Integer(100))]);
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&item_id);
+    });
+    ctx.emit_item_deleted_routed(pilot_id, &rec_updated);
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 3. Virtual fitted-item trash with no DB mutation counts as hand_written_only under its helper.
+    let _ = ctx.notify_fitted_item_trashed(pilot_id, 991_100_999, 34, 1, 1_000_001, 27);
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 4. Mismatched hand-written qty + un-emitted DB commit test `hand_written_only` and `projected_only`.
+    let bad_id = 991_100_002_i64;
+    let bad_rec = eve_db::InventoryItemRecord {
+        item_id: bad_id,
+        type_id: 34,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: eve_db::InventoryFlag::Hangar,
+        quantity: 55,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    let unemitted_id = 991_100_003_i64;
+    let unemitted_rec = eve_db::InventoryItemRecord {
+        item_id: unemitted_id,
+        quantity: 77,
+        ..bad_rec.clone()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(bad_id, bad_rec.clone());
+        snap.items.insert(unemitted_id, unemitted_rec);
+    });
+    let mut wrong_rec = bad_rec;
+    wrong_rec.quantity = 999;
+    let wrong_row = crate::router::delta_projection::build_inv_item_dbrow(&wrong_rec, &ctx.sde, "");
+    let _ = ctx.notify_item_change(pilot_id, wrong_row, vec![(3, PyRep::Integer(0))]);
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    let flushed = flush_item_compare_summary(&ctx);
+    assert_eq!(flushed.item_change.pending, 0);
+    assert_eq!(flushed.item_change.matched, 3);
+    assert_eq!(flushed.item_change.hand_written_only, 2);
+    assert_eq!(flushed.item_change.projected_only, 2);
+    assert_eq!(
+        flushed.item_change.by_helper.get("notify_item_record_change"),
+        Some(&HelperCompareCounts {
+            matched: 1,
+            hand_written_only: 0,
+            projected_only: 0,
+        })
+    );
+    assert_eq!(
+        flushed.item_change.by_helper.get("emit_item_deleted_routed"),
+        Some(&HelperCompareCounts {
+            matched: 1,
+            hand_written_only: 0,
+            projected_only: 0,
+        })
+    );
+    assert_eq!(
+        flushed.item_change.by_helper.get("notify_fitted_item_trashed"),
+        Some(&HelperCompareCounts {
+            matched: 0,
+            hand_written_only: 1,
+            projected_only: 0,
+        })
+    );
+    assert_eq!(
+        flushed.item_change.by_helper.get("notify_item_change"),
+        Some(&HelperCompareCounts {
+            matched: 0,
+            hand_written_only: 1,
+            projected_only: 1,
+        })
+    );
+    assert_eq!(
+        flushed.item_change.by_helper.get("<no_helper>"),
+        Some(&HelperCompareCounts {
+            matched: 0,
+            hand_written_only: 0,
+            projected_only: 1,
+        })
+    );
+}
+
+#[test]
+fn item_compare_tracks_blueprints_and_explicit_in_tx_effects() {
+    use crate::router::delta_item_compare::{flush_item_compare_summary, HelperCompareCounts};
+
+    let ctx = test_ctx();
+    let pilot_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let now = 1_700_000_200_u64;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+    ctx.db
+        .acquire_online_lock(uid, 9_302, Some(pilot_id), true, now)
+        .expect("online lock");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 1. Blueprint creation compares both OnItemChange and OnBlueprintsUpdated.
+    let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type in SDE");
+    let bp_rec = eve_db::InventoryItemRecord {
+        item_id: 991_200_001,
+        type_id: bp_type_id,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: eve_db::InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        is_blueprint_copy: true,
+        blueprint_runs_remaining: Some(5),
+        version: 1,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(bp_rec.item_id, bp_rec.clone());
+    });
+    ctx.notify_item_mutation(pilot_id, None, Some(&bp_rec));
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 2. Explicit in-tx TxNotificationEffect skips compare pending expectations cleanly.
+    let tx_item = eve_db::InventoryItemRecord {
+        item_id: 991_200_002,
+        type_id: 34,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: eve_db::InventoryFlag::Hangar,
+        quantity: 300,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    let tx_row = crate::router::delta_projection::build_inv_item_dbrow(&tx_item, &ctx.sde, "");
+    let change_dict = PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]);
+    ctx.db
+        .tx("explicit_in_tx_item_effect_test", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(tx_item.item_id, tx_item.clone());
+            tx.effects.notify_character(
+                pilot_id,
+                "OnItemChange",
+                "charid",
+                vec![tx_row.clone(), change_dict.clone()],
+            );
+            Ok(())
+        })
+        .expect("tx");
+    let tx_sent = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(
+        tx_sent.iter().filter(|n| n.event == "OnItemChange").count(),
+        1
+    );
+
+    let flushed = flush_item_compare_summary(&ctx);
+    assert_eq!(flushed.explicit_in_tx_effects, 1);
+    assert_eq!(flushed.item_change.matched, 1);
+    assert_eq!(flushed.item_change.projected_only, 0);
+    assert_eq!(
+        flushed.blueprints_updated.by_helper.get("notify_item_mutation"),
+        Some(&HelperCompareCounts {
+            matched: 1,
+            hand_written_only: 0,
+            projected_only: 0,
+        })
+    );
+}
+
+#[test]
+fn item_compare_off_switch_skips_projection_and_recording() {
+    use crate::router::delta_item_compare::{
+        flush_item_compare_summary, item_compare_enabled_from_str, item_compare_summary,
+        log_item_compare_summary, set_item_compare_override_for_test,
+    };
+
+    assert!(item_compare_enabled_from_str(None));
+    assert!(item_compare_enabled_from_str(Some("")));
+    assert!(item_compare_enabled_from_str(Some("1")));
+    assert!(item_compare_enabled_from_str(Some("true")));
+    assert!(!item_compare_enabled_from_str(Some("0")));
+    assert!(!item_compare_enabled_from_str(Some("false")));
+    assert!(!item_compare_enabled_from_str(Some(" off ")));
+    assert!(!item_compare_enabled_from_str(Some("NO")));
+
+    let ctx = test_ctx();
+    set_item_compare_override_for_test(&ctx, Some(false), None);
+    let pilot_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+    ctx.db
+        .acquire_online_lock(uid, 9_303, Some(pilot_id), true, 1_700_000_300)
+        .expect("online lock");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    let rec = eve_db::InventoryItemRecord {
+        item_id: 991_300_001,
+        type_id: 34,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: eve_db::InventoryFlag::Hangar,
+        quantity: 25,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(rec.item_id, rec.clone());
+    });
+    assert_eq!(item_compare_summary(&ctx).item_change.pending, 0);
+
+    let _ = ctx.notify_item_record_change(pilot_id, &rec, vec![(3, PyRep::Integer(0))]);
+    let delivered = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(
+        delivered.iter().filter(|n| n.event == "OnItemChange").count(),
+        1,
+        "off-switch must not alter live hand-written notification delivery"
+    );
+    log_item_compare_summary(&ctx);
+    let summary = flush_item_compare_summary(&ctx);
+    assert_eq!(summary, crate::router::delta_item_compare::ItemCompareSummary::default());
+}
+
+#[test]
+fn item_compare_handles_on_multiple_item_change_without_double_counting_and_writes_ndjson() {
+    use crate::router::delta_item_compare::{
+        flush_item_compare_summary, log_item_compare_summary, set_item_compare_override_for_test,
+        HelperCompareCounts,
+    };
+
+    let report_path = std::env::temp_dir().join(format!(
+        "evomu_item_compare_test_{}_{:?}.ndjson",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&report_path);
+
+    {
+        let ctx = test_ctx();
+        set_item_compare_override_for_test(&ctx, Some(true), Some(Some(report_path.clone())));
+        let pilot_id = 90_000_001_i64;
+        let station_id = 60_003_760_i64;
+        let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+        ctx.db
+            .acquire_online_lock(uid, 9_304, Some(pilot_id), true, 1_700_000_400)
+            .expect("online lock");
+        let _ = ctx.drain_notifications_for_char(pilot_id);
+
+        // 1. Paired OnItemChange + OnMultipleItemChange via emit_item_change_routed must count once.
+        let single_rec = eve_db::InventoryItemRecord {
+            item_id: 991_400_001,
+            type_id: 34,
+            owner_id: pilot_id,
+            location_id: station_id,
+            flag: eve_db::InventoryFlag::Hangar,
+            quantity: 10,
+            singleton: false,
+            version: 1,
+            ..Default::default()
+        };
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(single_rec.item_id, single_rec.clone());
+        });
+        ctx.emit_item_change_routed(pilot_id, &single_rec, vec![(3, PyRep::Integer(0))]);
+        let routed_sent = ctx.drain_notifications_for_char(pilot_id);
+        assert!(routed_sent.iter().any(|n| n.event == "OnItemChange"));
+        assert!(routed_sent.iter().any(|n| n.event == "OnMultipleItemChange"));
+
+        // 2. Standalone OnMultipleItemChange (e.g. saved fitting multi-module fit) matches each row.
+        let multi_a = eve_db::InventoryItemRecord {
+            item_id: 991_400_002,
+            type_id: 34,
+            owner_id: pilot_id,
+            location_id: station_id,
+            flag: eve_db::InventoryFlag::Hangar,
+            quantity: 5,
+            singleton: false,
+            version: 1,
+            ..Default::default()
+        };
+        let multi_b = eve_db::InventoryItemRecord {
+            item_id: 991_400_003,
+            quantity: 7,
+            ..multi_a.clone()
+        };
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(multi_a.item_id, multi_a.clone());
+            snap.items.insert(multi_b.item_id, multi_b.clone());
+        });
+        let rows = vec![
+            crate::router::delta_projection::build_inv_item_dbrow(&multi_a, &ctx.sde, ""),
+            crate::router::delta_projection::build_inv_item_dbrow(&multi_b, &ctx.sde, ""),
+        ];
+        let _ = ctx.emit_typed(
+            NotificationTarget::Character(pilot_id),
+            crate::router::notify_registry::OnMultipleItemChange {
+                items: rows,
+                change: PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
+            },
+        );
+        let _ = ctx.drain_notifications_for_char(pilot_id);
+
+        log_item_compare_summary(&ctx);
+        let summary = flush_item_compare_summary(&ctx);
+        assert_eq!(summary.item_change.matched, 3);
+        assert_eq!(summary.item_change.hand_written_only, 0);
+        assert_eq!(summary.item_change.projected_only, 0);
+        assert_eq!(
+            summary.item_change.by_helper.get("emit_item_change_routed"),
+            Some(&HelperCompareCounts {
+                matched: 1,
+                hand_written_only: 0,
+                projected_only: 0,
+            })
+        );
+        assert_eq!(
+            summary.item_change.by_helper.get("OnMultipleItemChange"),
+            Some(&HelperCompareCounts {
+                matched: 2,
+                hand_written_only: 0,
+                projected_only: 0,
+            })
+        );
+    }
+
+    let raw = std::fs::read_to_string(&report_path).expect("read NDJSON report");
+    let lines: Vec<&str> = raw.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "shutdown log_item_compare_summary + drop must append once: {raw}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(lines[0]).expect("valid NDJSON line");
+    assert_eq!(parsed["item_change"]["matched"], 3);
+    assert_eq!(parsed["item_change"]["hand_written_only"], 0);
+    assert_eq!(parsed["item_change"]["projected_only"], 0);
+    assert_eq!(
+        parsed["item_change"]["by_helper"]["OnMultipleItemChange"]["matched"],
+        2
+    );
+    let _ = std::fs::remove_file(&report_path);
+}

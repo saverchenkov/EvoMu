@@ -36,15 +36,58 @@ sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 BRIDGE_DIR = os.path.join(REPO_ROOT, "client-bridge")
 if BRIDGE_DIR not in sys.path:
     sys.path.insert(0, BRIDGE_DIR)
 
 import evomu_bridge  # noqa: E402
+import gm_slash_utils  # noqa: E402
+import guard_registry  # noqa: E402
 
 DEFAULT_CLIENT_APP = os.path.expanduser(
     "~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app"
 )
+GM_ADMIN_SECRET = "evomu-scenario-gm-secret"
+
+
+_looks_like_char_id_token = gm_slash_utils.looks_like_char_id_token
+_looks_like_entity_or_location_token = gm_slash_utils.looks_like_entity_or_location_token
+_rewrite_gm_slash_for_target = gm_slash_utils.rewrite_gm_slash_for_target
+
+
+def _is_gm_transport_error(exc):
+    if isinstance(exc, (OSError, EOFError)):
+        return True
+    if isinstance(exc, RuntimeError):
+        msg = str(exc or "")
+        low = msg.lower()
+        if "evomu rpc error [" in low:
+            return False
+        return (
+            "bridge connection failed:" in low
+            or "not connected" in low
+            or "connection closed" in low
+        )
+    return False
+
+
+def _dedup_sim_time_injections(*batches):
+    merged = []
+    seen_ids = set()
+    for batch in batches:
+        for evt in (batch or ()):
+            if not isinstance(evt, dict):
+                continue
+            eid = evt.get("injection_id")
+            if eid:
+                key = ("id", str(eid))
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+            merged.append(dict(evt))
+    return merged
 JOURNEY_SPECS = {
     "structures": {
         "id": "structures",
@@ -549,10 +592,18 @@ class IpcCoordinator(object):
         self.sm2 = None
         self.b2 = None
         self.char2_id = 90000002
+        self.log_gm = None
+        self.sm_gm = None
+        self.b_gm = None
+        self.gm_char_id = 90000003
+        self.default_target_char_id = 90000001
+        self._gm_sim_seq = 0
+        self._gm_sim_injections = []
         self.c1_authenticated = False
         self.c2_authenticated = False
         self.client_pid = None
         self.progress_dict = progress_dict
+        self.boot_guard_telemetry = None
         self.driver_done = threading.Event()
         self.driver_error = None
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -636,22 +687,191 @@ class IpcCoordinator(object):
         self.sm2.RemoteSvc("charUnboundMgr").SelectCharacterID(self.char2_id)
         self.c2_authenticated = True
         try:
-            self.sm2.RemoteSvc("slash").SlashCmd("/giveisk 50000000")
+            self._gm_slash_cmd("/giveisk 50000000", target_char_id=self.char2_id)
         except Exception:
             pass
         self.log2.info("Client 2 ready char2_id=%d" % self.char2_id)
 
+    def _ensure_gm(self, force=False):
+        if not force and self.b_gm is not None and getattr(self.b_gm, "connected", False):
+            return self.sm_gm
+        if self.b_gm is not None:
+            try:
+                self.b_gm.close()
+            except Exception:
+                pass
+            self.b_gm = None
+        if not self.bridge_port or int(self.bridge_port) <= 0:
+            raise RuntimeError("GM bridge unavailable: bridge_port not configured")
+        if self.log_gm is None:
+            base_dir = self.out_dir or (
+                os.path.dirname(os.path.abspath(self.log2.path))
+                if getattr(self.log2, "path", "")
+                else ""
+            )
+            gm_log_path = os.path.join(base_dir, "client_gm.log") if base_dir else ""
+            self.log_gm = ClientLogger(gm_log_path, "client-gm") if gm_log_path else self.log2
+        evomu_bridge.DEFAULT_RPC_TIMEOUT = 30.0
+        self.sm_gm = HarnessSM(self.log_gm)
+        self.b_gm = evomu_bridge.install_service_manager_hook(
+            self.sm_gm, host=self.host, port=int(self.bridge_port)
+        )
+        self.sm_gm.RemoteSvc("authentication").Login("admin", GM_ADMIN_SECRET)
+        try:
+            chars_gm = self.sm_gm.RemoteSvc("charUnboundMgr").GetCharactersToSelect()
+            if chars_gm:
+                self.gm_char_id = int(chars_gm[0].characterID)
+        except Exception:
+            pass
+        self.sm_gm.RemoteSvc("charUnboundMgr").SelectCharacterID(self.gm_char_id)
+        return self.sm_gm
+
+    def _record_gm_sim_injection(self, secs, target_char_id, method, journey_id=None):
+        self._gm_sim_seq += 1
+        inj_id = "rj-gm-%d" % self._gm_sim_seq
+        sec_f = max(0.0, float(secs or 0.0))
+        evt = {
+            "seq": self._gm_sim_seq,
+            "injection_id": inj_id,
+            "seconds": sec_f,
+            "target_char_id": int(target_char_id or 0),
+            "journey_id": journey_id or self._active_span_jid,
+            "via": "gm_bridge",
+            "source": "run_journeys",
+            "method": method,
+            "ts": time.time(),
+        }
+        self._gm_sim_injections.append(evt)
+        return evt
+
+    def _gm_advance_clock(self, secs, target_char_id=0, journey_id=None):
+        secs_i = int(secs)
+        tgt = int(target_char_id or self.default_target_char_id or 90000001)
+        last_exc = None
+        for attempt in range(2):
+            try:
+                sm_gm = self._ensure_gm(force=(attempt > 0))
+                t_res = sm_gm.RemoteSvc("timeControl").AdvanceClock(secs_i, tgt)
+                evt = self._record_gm_sim_injection(
+                    secs_i,
+                    tgt,
+                    "AdvanceClock",
+                    journey_id=journey_id,
+                )
+                return {
+                    "ok": True,
+                    "time": t_res,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                    "injection_id": evt["injection_id"],
+                    "sim_time_injected_sec": evt["seconds"],
+                }
+            except (OSError, EOFError, RuntimeError) as exc:
+                last_exc = exc
+                if not _is_gm_transport_error(exc) or attempt > 0:
+                    raise
+        raise RuntimeError(str(last_exc) if last_exc is not None else "GM AdvanceClock failed")
+
+    def _gm_clear_session_timer(self, target_char_id=0):
+        tgt = int(target_char_id or self.default_target_char_id or 90000001)
+        last_exc = None
+        for attempt in range(2):
+            try:
+                sm_gm = self._ensure_gm(force=(attempt > 0))
+                sm_gm.RemoteSvc("timeControl").ClearSessionTimer(tgt)
+                return {"ok": True, "via": "gm_bridge", "target_char_id": tgt}
+            except (OSError, EOFError, RuntimeError) as exc:
+                last_exc = exc
+                if not _is_gm_transport_error(exc) or attempt > 0:
+                    raise
+        raise RuntimeError(str(last_exc) if last_exc is not None else "GM ClearSessionTimer failed")
+
+    def _execute_gm_slash_with_system_context(self, sm_gm, rewritten, target_solar_system_id=0):
+        slash_svc = sm_gm.RemoteSvc("slash")
+        verb = rewritten.split()[0].lower() if str(rewritten).startswith("/") else ""
+        try:
+            target_sys = int(target_solar_system_id or 0)
+        except Exception:
+            target_sys = 0
+        home_sys = 30000142
+        home_dock = 60003760
+        if verb in ("/despawn", "/unspawn") and target_sys > 0 and target_sys != home_sys:
+            slash_svc.SlashCmd("/tr me %d noblock" % target_sys)
+            try:
+                return slash_svc.SlashCmd(rewritten)
+            finally:
+                try:
+                    slash_svc.SlashCmd("/tr me %d noblock" % home_dock)
+                except Exception:
+                    try:
+                        slash_svc.SlashCmd("/tr me %d noblock" % home_sys)
+                    except Exception:
+                        pass
+                try:
+                    gm_cid = int(getattr(self, "gm_char_id", 0) or 0)
+                    if gm_cid > 0:
+                        sm_gm.RemoteSvc("timeControl").ClearSessionTimer(gm_cid)
+                    else:
+                        sm_gm.RemoteSvc("timeControl").ClearSessionTimer()
+                except Exception:
+                    pass
+                try:
+                    sm_gm.RemoteSvc("stationSvc").Dock(home_dock)
+                except Exception:
+                    pass
+        return slash_svc.SlashCmd(rewritten)
+
+    def _gm_slash_cmd(self, command, target_char_id=0, target_solar_system_id=0):
+        tgt = int(target_char_id or self.default_target_char_id or 90000001)
+        rewritten = _rewrite_gm_slash_for_target(command, tgt)
+        last_exc = None
+        for attempt in range(2):
+            try:
+                sm_gm = self._ensure_gm(force=(attempt > 0))
+                res = self._execute_gm_slash_with_system_context(
+                    sm_gm,
+                    rewritten,
+                    target_solar_system_id=target_solar_system_id,
+                )
+                resp = {
+                    "ok": True,
+                    "handled": True,
+                    "result": res,
+                    "command": rewritten,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                    "target_solar_system_id": int(target_solar_system_id or 0),
+                }
+                adv_secs = gm_slash_utils.extract_slash_sim_advance_seconds(
+                    rewritten,
+                    res,
+                    target_char_id=tgt,
+                )
+                if adv_secs is not None:
+                    verb = rewritten.split()[0].lower()
+                    evt = self._record_gm_sim_injection(
+                        adv_secs,
+                        tgt,
+                        "SlashCmd:%s" % verb,
+                    )
+                    resp["injection_id"] = evt["injection_id"]
+                    resp["sim_time_injected_sec"] = evt["seconds"]
+                return resp
+            except (OSError, EOFError, RuntimeError) as exc:
+                last_exc = exc
+                if not _is_gm_transport_error(exc) or attempt > 0:
+                    raise
+        raise RuntimeError(str(last_exc) if last_exc is not None else "GM SlashCmd failed")
+
     def _run_c2_cmd(self, cmd, req):
         if cmd == "ensure_client2_ready":
             return {"ok": True, "char2_id": self.char2_id}
-        if cmd == "advance_clock":
-            return {"ok": True, "time": self.sm2.RemoteSvc("timeControl").AdvanceClock(int(req.get("secs", 12)))}
         if cmd == "test_chat_with_c2":
             self.sm2.RemoteSvc("XmppChatMgr").ResyncSystemChannelAccess(30000142)
             return {"ok": True}
         if cmd == "c2_undock_jita":
             self.sm2.events.clear()
-            self.sm2.RemoteSvc("timeControl").ClearSessionTimer()
+            self._gm_clear_session_timer(target_char_id=self.char2_id)
             self.sm2.RemoteSvc("ship").Undock()
             return {"ok": True}
         if cmd == "c2_check_ball_and_dock":
@@ -666,17 +886,17 @@ class IpcCoordinator(object):
                     for entry in (arg if isinstance(arg, list) else [arg]):
                         if _destiny_update_contains_ball(entry, target_id):
                             saw = True
-            self.sm2.RemoteSvc("timeControl").ClearSessionTimer()
+            self._gm_clear_session_timer(target_char_id=self.char2_id)
             try:
-                self.sm2.RemoteSvc("slash").SlashCmd("/heal")
+                self._gm_slash_cmd("/heal", target_char_id=self.char2_id)
                 b2_nav.CmdWarpToStuff("item", 60003760, 0.0)
-                self.sm2.RemoteSvc("timeControl").AdvanceClock(240)
+                self._gm_advance_clock(240, target_char_id=self.char2_id)
             except Exception:
                 pass
-            self.sm2.RemoteSvc("timeControl").ClearSessionTimer()
+            self._gm_clear_session_timer(target_char_id=self.char2_id)
             self.sm2.RemoteSvc("stationSvc").Dock(60003760)
-            self.sm2.RemoteSvc("timeControl").AdvanceClock(60)
-            self.sm2.RemoteSvc("timeControl").ClearSessionTimer()
+            self._gm_advance_clock(60, target_char_id=self.char2_id)
+            self._gm_clear_session_timer(target_char_id=self.char2_id)
             return {"ok": True, "saw_ship": saw or len(updates2) > 0, "updates": len(updates2)}
         if cmd == "c2_complete_trade":
             tid = int(req.get("trade_id", 0))
@@ -741,6 +961,10 @@ class IpcCoordinator(object):
                 if req.get("id") and isinstance(req.get("entry"), dict):
                     self.progress_dict[req["id"]] = req["entry"]
                 return {"ok": True}
+            if cmd == "boot_guard_telemetry":
+                if isinstance(req.get("entry"), dict):
+                    self.boot_guard_telemetry = req["entry"]
+                return {"ok": True}
             if cmd == "capture_screenshot":
                 shot_path = str(req.get("path", ""))
                 ok = _host_capture_window(shot_path, self.client_pid)
@@ -752,10 +976,30 @@ class IpcCoordinator(object):
                 self.driver_error = req.get("error", "unknown")
                 self.driver_done.set()
                 return {"ok": True}
-            if cmd == "advance_clock" and not (
-                self.b2 is not None and getattr(self.b2, "connected", False)
-            ):
-                return {"ok": False, "reason": "c2_not_connected"}
+            if cmd == "advance_clock":
+                try:
+                    return self._gm_advance_clock(
+                        int(req.get("secs", 12)),
+                        target_char_id=int(req.get("target_char_id") or 0),
+                    )
+                except Exception as exc:
+                    return {"ok": False, "via": "gm_bridge", "error": repr(exc)}
+            if cmd == "clear_session_timer":
+                try:
+                    return self._gm_clear_session_timer(
+                        target_char_id=int(req.get("target_char_id") or 0),
+                    )
+                except Exception as exc:
+                    return {"ok": False, "via": "gm_bridge", "error": repr(exc)}
+            if cmd == "slash_cmd":
+                try:
+                    return self._gm_slash_cmd(
+                        str(req.get("command") or ""),
+                        target_char_id=int(req.get("target_char_id") or 0),
+                        target_solar_system_id=int(req.get("target_solar_system_id") or 0),
+                    )
+                except Exception as exc:
+                    return {"ok": False, "handled": True, "via": "gm_bridge", "error": repr(exc)}
             for attempt in range(2):
                 try:
                     self._ensure_c2(force=(attempt > 0))
@@ -804,6 +1048,16 @@ class IpcCoordinator(object):
         if self.b2 is not None:
             try:
                 self.b2.close()
+            except Exception:
+                pass
+        if self.b_gm is not None:
+            try:
+                self.b_gm.close()
+            except Exception:
+                pass
+        if self.log_gm is not None and self.log_gm is not self.log2:
+            try:
+                self.log_gm.close()
             except Exception:
                 pass
         self.log2.close()
@@ -856,6 +1110,8 @@ def launch_real_client(client_app, host, macho_port, login, log_path, auto_selec
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["EVOMU_HARNESS_DIR"] = HERE
+    # Attestation journeys disable all server-caused guards so server regressions surface directly.
+    env[guard_registry.DISABLE_SERVER_GUARDS_ENV] = "1"
     py_site = os.path.join(stage_dir, "evomu_py_site")
     env["PYTHONPATH"] = py_site
     if inclient_cfg_path:
@@ -953,19 +1209,72 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
     sm2 = HarnessSM(log2)
     b1 = None
     b2 = None
+    gm_dir = os.path.dirname(os.path.abspath(client_1_log_path)) if client_1_log_path else ""
+    log_gm = ClientLogger(os.path.join(gm_dir, "client_gm.log"), "client-gm") if gm_dir else log1
+    sm_gm_holder = {"sm": None, "b": None, "seq": 0, "injections": []}
     try:
         b1 = evomu_bridge.install_service_manager_hook(sm1, host=host, port=bridge_port)
         b2 = evomu_bridge.install_service_manager_hook(sm2, host=host, port=bridge_port)
     except Exception:
         if stats is not None:
             stats["connect_failed"] = True
-        for h in (b1, b2, log1, log2):
+        for h in (b1, b2, log1, log2, log_gm if log_gm is not log1 else None):
             try:
                 if h is not None:
                     h.close()
             except Exception:
                 pass
         raise
+
+    def _ensure_probe_gm():
+        if sm_gm_holder["b"] is not None and getattr(sm_gm_holder["b"], "connected", False):
+            return sm_gm_holder["sm"]
+        if sm_gm_holder["b"] is not None:
+            try:
+                sm_gm_holder["b"].close()
+            except Exception:
+                pass
+            sm_gm_holder["b"] = None
+        sm_gm = HarnessSM(log_gm)
+        b_gm = evomu_bridge.install_service_manager_hook(sm_gm, host=host, port=bridge_port)
+        sm_gm.RemoteSvc("authentication").Login("admin", GM_ADMIN_SECRET)
+        gm_cid = 90000003
+        try:
+            gm_chars = sm_gm.RemoteSvc("charUnboundMgr").GetCharactersToSelect()
+            if gm_chars:
+                gm_cid = int(gm_chars[0].characterID)
+        except Exception:
+            pass
+        sm_gm.RemoteSvc("charUnboundMgr").SelectCharacterID(gm_cid)
+        sm_gm_holder["sm"] = sm_gm
+        sm_gm_holder["b"] = b_gm
+        return sm_gm
+
+    def _probe_advance_clock(secs, target_char_id, journey_id=None):
+        secs_i = int(secs)
+        tgt = int(target_char_id)
+        sm_gm = _ensure_probe_gm()
+        res = sm_gm.RemoteSvc("timeControl").AdvanceClock(secs_i, tgt)
+        sm_gm_holder["seq"] += 1
+        sm_gm_holder["injections"].append(
+            {
+                "seq": sm_gm_holder["seq"],
+                "injection_id": "probe-gm-%d" % sm_gm_holder["seq"],
+                "seconds": float(secs_i),
+                "target_char_id": tgt,
+                "journey_id": journey_id,
+                "via": "gm_bridge",
+                "source": "bridge_probe",
+                "method": "AdvanceClock",
+                "ts": time.time(),
+            }
+        )
+        return res
+
+    def _probe_slash(cmd, target_char_id):
+        sm_gm = _ensure_probe_gm()
+        rewritten = _rewrite_gm_slash_for_target(cmd, int(target_char_id))
+        return sm_gm.RemoteSvc("slash").SlashCmd(rewritten)
 
     try:
         # Journey 1: launch_login on both concurrent clients
@@ -1052,13 +1361,13 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             stats["authenticated_clients"] = int(stats.get("authenticated_clients", 0)) + 1
         log2.info("charUnboundMgr.SelectCharacterID(%d) completed" % int(char2_id))
         try:
-            tr2 = sm2.RemoteSvc("slash").SlashCmd("/tr 30000142")
-            log2.info("slash.SlashCmd('/tr 30000142') -> %r" % (tr2,))
-            sm2.RemoteSvc("timeControl").AdvanceClock(12)
+            tr2 = _probe_slash("/tr 30000142", int(char2_id))
+            log2.info("gm slash.SlashCmd('/tr %d 30000142') -> %r" % (int(char2_id), tr2))
+            _probe_advance_clock(12, int(char2_id), journey_id="create_character")
             b2_nav, _ = sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
             try:
                 b2_nav.CmdWarpToStuff("item", 60003760)
-                sm2.RemoteSvc("timeControl").AdvanceClock(60)
+                _probe_advance_clock(60, int(char2_id), journey_id="create_character")
             except Exception:
                 pass
             sm2.RemoteSvc("stationSvc").Dock(60003760)
@@ -1354,7 +1663,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
 
         # Client 2 redocks at Jita 4-4 station (deterministic mock clock advance past 10s session timer)
         beyonce2.CmdStop()
-        sm2.RemoteSvc("timeControl").AdvanceClock(12)
+        _probe_advance_clock(12, int(char2_id), journey_id="multiplayer_presence")
         dock2 = sm2.RemoteSvc("stationSvc").Dock(60003760)
         log2.info("Client 2 redocked at 60003760 -> %r" % (dock2,))
 
@@ -1372,14 +1681,15 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         warp1 = beyonce1.CmdWarpToStuff("item", 40009082)
         log1.info("beyonce1.CmdWarpToStuff(40009082) -> %r" % (warp1,))
         time.sleep(0.2)
-        # Allow full Rifter align+warp (~20s) plus 10s post-warp invulnerability expiry before filament activation.
-        sm1.RemoteSvc("timeControl").AdvanceClock(35)
+        # Allow full Rifter align+warp (~20s), stop, then expire 10s post-warp invulnerability before filament activation.
+        _probe_advance_clock(35, int(char1_id), journey_id="wormholes_filaments")
         stop_warp = beyonce1.CmdStop()
         log1.info("beyonce1.CmdStop() after warp command -> %r" % (stop_warp,))
+        _probe_advance_clock(15, int(char1_id), journey_id="wormholes_filaments")
 
         # Activate Needlejack filament (53977 Noise-5 'Needlejack' Filament) from ship Cargo
         try:
-            sm1.RemoteSvc("slash").SlashCmd("/createitem 53977 1")
+            _probe_slash("/createitem 53977 1", int(char1_id))
         except Exception:
             pass
         fil_res = sm1.RemoteSvc("randomJumpMgr").ActivateRandomJumpFilament()
@@ -1457,6 +1767,22 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             "evidence": "Client 1 warped to Jita IV 40009082 (>1,000 km from stations/gates), activated Needlejack filament 53977, executed session change to nullsec system %d, and bound destination beyonce" % int(abyssal_sys),
         }
     finally:
+        if stats is not None:
+            stats["sim_time_injections"] = list(sm_gm_holder["injections"])
+            stats["sim_time_injected_sec"] = round(
+                sum(float(e.get("seconds", 0.0) or 0.0) for e in sm_gm_holder["injections"]),
+                6,
+            )
+        if sm_gm_holder["b"] is not None:
+            try:
+                sm_gm_holder["b"].close()
+            except Exception:
+                pass
+        if log_gm is not log1:
+            try:
+                log_gm.close()
+            except Exception:
+                pass
         b1.close()
         b2.close()
         log1.close()
@@ -1493,6 +1819,8 @@ def finalize_journey_run(
     bridge_harness_test=False,
     journey_byte_spans=None,
     driver_errors=None,
+    boot_guard_telemetry=None,
+    sim_time_injections=None,
 ):
     """Computes `result.json` with per-journey log attribution, real artifacts, and exit code."""
     journey_ids = [j["id"] for j in journey_list]
@@ -1559,6 +1887,43 @@ def finalize_journey_run(
             evidence_val = b_info["evidence"]
         else:
             evidence_val = "Not executed (real client did not run)."
+        if isinstance(rc_info.get("guard_hits"), list):
+            rc_guard_summary = guard_registry.summarize_guard_hits(
+                rc_info.get("guard_hits") or [],
+                client_guards_off=rc_info.get("client_guards_off", False),
+            )
+        else:
+            raw_by_guard = rc_info.get("guard_hits_by_guard")
+            by_guard = dict(raw_by_guard) if isinstance(raw_by_guard, dict) else {}
+            raw_co_by_guard = rc_info.get("client_only_guard_hits_by_guard")
+            co_by_guard = dict(raw_co_by_guard) if isinstance(raw_co_by_guard, dict) else {}
+            rc_guard_summary = {
+                "client_guards_off": bool(rc_info.get("client_guards_off", False)),
+                "guard_hits_count": int(
+                    rc_info.get("guard_hits_count", sum(by_guard.values())) or 0
+                ),
+                "guard_hits_by_guard": {k: by_guard[k] for k in sorted(by_guard.keys())},
+                "client_only_guard_hits": int(
+                    rc_info.get("client_only_guard_hits", sum(co_by_guard.values())) or 0
+                ),
+                "client_only_guard_hits_by_guard": {
+                    k: co_by_guard[k] for k in sorted(co_by_guard.keys())
+                },
+            }
+
+        rc_sim_injections = _dedup_sim_time_injections(
+            rc_info.get("sim_time_injections") or (),
+            [
+                evt
+                for evt in (sim_time_injections or ())
+                if isinstance(evt, dict) and evt.get("journey_id") == jid
+            ],
+        )
+        rc_sim_sec = round(
+            sum(float(evt.get("seconds", 0.0) or 0.0) for evt in rc_sim_injections),
+            6,
+        ) if rc_sim_injections else round(float(rc_info.get("sim_time_injected_sec", 0.0) or 0.0), 6)
+
         journeys_out[jid] = {
             "passed": rc_ok,
             "title": j.get("title", jid),
@@ -1573,7 +1938,102 @@ def finalize_journey_run(
             "client_log_excerpt": cli_ex,
             "server_log_excerpt": srv_ex,
             "evidence": evidence_val,
+            "client_guards_off": rc_guard_summary["client_guards_off"],
+            "guard_hits_count": rc_guard_summary["guard_hits_count"],
+            "guard_hits_by_guard": rc_guard_summary["guard_hits_by_guard"],
+            "client_only_guard_hits": rc_guard_summary["client_only_guard_hits"],
+            "client_only_guard_hits_by_guard": rc_guard_summary["client_only_guard_hits_by_guard"],
+            "sim_time_injected_sec": rc_sim_sec,
+            "sim_time_injection_count": len(rc_sim_injections) or int(rc_info.get("sim_time_injection_count", 0) or 0),
+            "sim_time_injections": rc_sim_injections,
         }
+
+    agg_hits_by_guard = {}
+    agg_co_by_guard = {}
+    agg_hits_count = 0
+    agg_co_count = 0
+    for j_entry in journeys_out.values():
+        agg_hits_count += int(j_entry.get("guard_hits_count", 0) or 0)
+        agg_co_count += int(j_entry.get("client_only_guard_hits", 0) or 0)
+        for gid, cnt in (j_entry.get("guard_hits_by_guard") or {}).items():
+            agg_hits_by_guard[gid] = agg_hits_by_guard.get(gid, 0) + int(cnt or 0)
+        for gid, cnt in (j_entry.get("client_only_guard_hits_by_guard") or {}).items():
+            agg_co_by_guard[gid] = agg_co_by_guard.get(gid, 0) + int(cnt or 0)
+
+    boot_entry = dict(boot_guard_telemetry) if isinstance(boot_guard_telemetry, dict) else None
+    attr_jid = boot_entry.get("attributed_to_journey") if boot_entry is not None else None
+    attr_outcome = real_outcomes.get(attr_jid) if isinstance(attr_jid, str) else None
+    attr_recorded = (
+        bool(attr_jid)
+        and attr_jid in journeys_out
+        and isinstance(attr_outcome, dict)
+        and (
+            isinstance(attr_outcome.get("guard_hits"), list)
+            or "guard_hits_count" in attr_outcome
+        )
+    )
+    boot_summary = None
+    if boot_entry is not None:
+        if isinstance(boot_entry.get("guard_hits"), list):
+            boot_summary = guard_registry.summarize_guard_hits(
+                boot_entry.get("guard_hits") or [],
+                client_guards_off=boot_entry.get("client_guards_off", False),
+            )
+        else:
+            raw_bg = boot_entry.get("guard_hits_by_guard")
+            bg = dict(raw_bg) if isinstance(raw_bg, dict) else {}
+            raw_cbg = boot_entry.get("client_only_guard_hits_by_guard")
+            cbg = dict(raw_cbg) if isinstance(raw_cbg, dict) else {}
+            boot_summary = {
+                "client_guards_off": bool(boot_entry.get("client_guards_off", False)),
+                "guard_hits_count": int(
+                    boot_entry.get("guard_hits_count", sum(bg.values())) or 0
+                ),
+                "guard_hits_by_guard": {k: bg[k] for k in sorted(bg.keys())},
+                "client_only_guard_hits": int(
+                    boot_entry.get("client_only_guard_hits", sum(cbg.values())) or 0
+                ),
+                "client_only_guard_hits_by_guard": {
+                    k: cbg[k] for k in sorted(cbg.keys())
+                },
+            }
+        if not attr_recorded:
+            agg_hits_count += int(boot_summary["guard_hits_count"] or 0)
+            agg_co_count += int(boot_summary["client_only_guard_hits"] or 0)
+            for gid, cnt in (boot_summary["guard_hits_by_guard"] or {}).items():
+                agg_hits_by_guard[gid] = agg_hits_by_guard.get(gid, 0) + int(cnt or 0)
+            for gid, cnt in (boot_summary["client_only_guard_hits_by_guard"] or {}).items():
+                agg_co_by_guard[gid] = agg_co_by_guard.get(gid, 0) + int(cnt or 0)
+
+    if journeys_out:
+        top_guards_off = all(
+            bool(j_entry.get("client_guards_off", False)) for j_entry in journeys_out.values()
+        )
+        if boot_summary is not None and not attr_recorded and "client_guards_off" in boot_entry:
+            top_guards_off = top_guards_off and bool(boot_summary["client_guards_off"])
+    elif boot_summary is not None:
+        top_guards_off = bool(boot_summary["client_guards_off"])
+    else:
+        top_guards_off = False
+
+    all_sim_injections = _dedup_sim_time_injections(
+        *[j_entry.get("sim_time_injections") or () for j_entry in journeys_out.values()],
+        (sim_time_injections or ()),
+    )
+    if all_sim_injections:
+        total_sim_time_injected_sec = round(
+            sum(float(evt.get("seconds", 0.0) or 0.0) for evt in all_sim_injections),
+            6,
+        )
+        total_sim_time_injection_count = len(all_sim_injections)
+    else:
+        total_sim_time_injected_sec = round(
+            sum(float(j_entry.get("sim_time_injected_sec", 0.0) or 0.0) for j_entry in journeys_out.values()),
+            6,
+        )
+        total_sim_time_injection_count = sum(
+            int(j_entry.get("sim_time_injection_count", 0) or 0) for j_entry in journeys_out.values()
+        )
 
     result = {
         "journeys": journeys_out,
@@ -1589,6 +2049,18 @@ def finalize_journey_run(
         "stale_errors": stale_list,
         "driver_errors": driver_list,
         "destiny_log_classification": destiny_log_classification,
+        "client_guards_off": top_guards_off,
+        "guard_hits_count": agg_hits_count,
+        "guard_hits_by_guard": {k: agg_hits_by_guard[k] for k in sorted(agg_hits_by_guard.keys())},
+        "client_only_guard_hits": agg_co_count,
+        "client_only_guard_hits_by_guard": {
+            k: agg_co_by_guard[k] for k in sorted(agg_co_by_guard.keys())
+        },
+        "boot_guard_telemetry": boot_entry,
+        "total_sim_time_injected_sec": total_sim_time_injected_sec,
+        "sim_time_injected_sec": total_sim_time_injected_sec,
+        "sim_time_injection_count": total_sim_time_injection_count,
+        "sim_time_injections": all_sim_injections,
     }
     res_path = os.path.join(out_dir, "result.json")
     with open(res_path, "w") as rf:
@@ -1739,11 +2211,7 @@ def main():
                     '[player_accounts.starter_character]\nname = "Demo Pilot"\n'
                     'bloodline_id = 1\ngender = 0\nancestry_id = 11\nschool_id = 17\n'
                     'solar_system_id = 30000142\nstation_id = 60003760\n'
-                    'initial_balance_isk = 1000000000\ninitial_balance_plex = 50000\n\n'
-                    '[[admin_accounts]]\nusername = "demo"\npassword_token = "demo-secret"\n'
-                    'character_id = 90000001\ncharacter_name = "Demo Pilot"\n\n'
-                    '[[admin_accounts]]\nusername = "other"\npassword_token = "other-secret"\n'
-                    'character_id = 90000004\ncharacter_name = "ISD Other"\n'
+                    'initial_balance_isk = 1000000000\ninitial_balance_plex = 50000\n'
                     % (macho_port, bridge_port, esi_port, quasar_grpc_port, xmpp_port, sde_path, db_path)
                 )
             srv_bin = find_server_binary(args.server_bin)
@@ -1756,6 +2224,7 @@ def main():
             srv_env["EVOMU_SDE_PATH"] = sde_path
             srv_env["EVOMU_QUASAR_DESCRIPTORS_PATH"] = qdesc_path
             srv_env["EVOMU_XMPP_PORT"] = str(xmpp_port)
+            srv_env["EVOMU_ADMIN_TOKEN"] = GM_ADMIN_SECRET
             with open(server_log_path, "a") as slog:
                 server_proc = subprocess.Popen(
                     [srv_bin],
@@ -1775,6 +2244,7 @@ def main():
                     sf.write("[harness] attached to live eve-server bridge on %s:%d\n" % (args.host, bridge_port))
 
         driver_errors = []
+        boot_guard_telemetry = None
         if should_launch_real_client and macho_port:
             ipc = IpcCoordinator(
                 args.host,
@@ -1862,6 +2332,19 @@ def main():
                     msg = "Failed to load real_client_outcomes.json: %s" % exc
                     driver_errors.append(msg)
                     sys.stderr.write("[run_journeys] %s\n" % msg)
+            boot_telemetry_file = os.path.join(out_dir, "real_client_boot_telemetry.json")
+            if os.path.exists(boot_telemetry_file):
+                try:
+                    with open(boot_telemetry_file, "r") as bf:
+                        loaded_boot = json.load(bf)
+                    if isinstance(loaded_boot, dict):
+                        boot_guard_telemetry = loaded_boot
+                except Exception as exc:
+                    msg = "Failed to load real_client_boot_telemetry.json: %s" % exc
+                    driver_errors.append(msg)
+                    sys.stderr.write("[run_journeys] %s\n" % msg)
+            if boot_guard_telemetry is None and isinstance(ipc.boot_guard_telemetry, dict):
+                boot_guard_telemetry = ipc.boot_guard_telemetry
             c1_authed = bool(ipc.c1_authenticated or real_outcomes)
             c2_authed = bool(ipc.c2_authenticated)
             concurrent_clients_tested = (1 if c1_authed else 0) + (1 if c2_authed else 0)
@@ -1969,6 +2452,12 @@ def main():
         bridge_harness_test=args.bridge_harness_test,
         journey_byte_spans=(ipc.journey_byte_spans if ipc is not None else None),
         driver_errors=driver_errors,
+        boot_guard_telemetry=boot_guard_telemetry,
+        sim_time_injections=(
+            ipc._gm_sim_injections
+            if ipc is not None
+            else bridge_stats.get("sim_time_injections")
+        ),
     )
     return exit_code
 

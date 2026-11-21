@@ -76,10 +76,37 @@ async fn drifter_hive_lookup_and_notify_account_changes() {
 
     let c1 = 91_000_001;
     let c2 = 91_000_002;
+    let u1 = 910_001_u64;
+    let u2 = 910_002_u64;
     seed_char(&ctx, c1, "Account One", 30_000_142);
     seed_char(&ctx, c2, "Account Two", 30_000_142);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&c1).unwrap().user_id = u1;
+        snap.characters.get_mut(&c2).unwrap().user_id = u2;
+        for uid in [u1, u2] {
+            snap.accounts.insert(
+                format!("user_{uid}"),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: format!("user_{uid}"),
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+    });
+    ctx.db
+        .acquire_online_lock(u1, 9_101, Some(c1), true, ctx.now_unix())
+        .expect("c1 online");
+    ctx.db
+        .acquire_online_lock(u2, 9_102, Some(c2), true, ctx.now_unix())
+        .expect("c2 online");
+    let _ = ctx.drain_notifications_for_char(c1);
+    let _ = ctx.drain_notifications_for_char(c2);
 
-    // Trigger queue truncation branch on c1 before notifying
+    // Trigger queue truncation branch on c1 before committing balance updates
     {
         let mut map = ctx.pending_notifications.write().unwrap();
         let q = map.entry(c1).or_default();
@@ -103,12 +130,10 @@ async fn drifter_hive_lookup_and_notify_account_changes() {
         }
     }
 
-    notify_special_site_account_changes(
-        &ctx.db,
-        &ctx.pending_notifications,
-        &ctx.notify_tx,
-        &[(c1, 500_000.0), (c2, 250_000.0)],
-    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&c1).unwrap().balance = IskCents::from_isk(500_000);
+        snap.characters.get_mut(&c2).unwrap().balance = IskCents::from_isk(250_000);
+    });
     let q1 = ctx.drain_notifications_for_char(c1);
     let q2 = ctx.drain_notifications_for_char(c2);
     assert_eq!(

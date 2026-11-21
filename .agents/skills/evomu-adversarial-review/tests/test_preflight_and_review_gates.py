@@ -264,12 +264,12 @@ fn t() {
             )
             self.assertEqual(ratchet_checks.check_all_ratchets(tmp, cache_path=os.path.join(tmp, "c.json")), [])
 
-            # Regress arch_debt_ratchet above max_occurrences and break exact client_compat ceiling
+            # Regress arch_debt_ratchet above max_occurrences and client_compat above max_rpc_rules (#1538 upper-bound)
             _write(
                 os.path.join(tmp, "crates/eve-server/src/services/market.rs"),
                 "pub fn charge(w: &Wallet) { let _ = w.master_wallet + w.master_wallet; }\n",
             )
-            compat_json["max_rpc_rules"] = rep["rpc_rules"] + 1
+            compat_json["max_rpc_rules"] = max(0, rep["rpc_rules"] - 1)
             _write(
                 os.path.join(tmp, "crates/eve-testkit/ratchets/client_compat_ratchet.json"),
                 json.dumps(compat_json, indent=2),
@@ -1151,20 +1151,19 @@ fn t() {
             self.assertEqual(len(unwired), 1)
             self.assertIn("unwired_mystery_rule", unwired[0][1])
 
-            # TT-10: `exact: true` enforced UNCONDITIONALLY (without EVOMU_ENFORCE_EXACT_ARCH_DEBT)
+            # #1538: zero_required rules stay strictly pinned at 0 (v2 rejects non-empty baseline or any occurrence),
+            # while lowering a non-zero per-file count passes without editing the baseline!
             _write(
                 os.path.join(tmp, "crates/eve-testkit/ratchets/arch_debt_ratchet.json"),
                 json.dumps({
-                    "version": 1,
+                    "version": 2,
                     "patterns": {
-                        "master_wallet": {"max_occurrences": 1, "max_files": 1, "exact": True, "regex": r"\bmaster_wallet\b"},
+                        "master_wallet": {"zero_required": True, "regex": r"\bmaster_wallet\b", "files": {"services/gm.rs": 1}},
                     },
                 }),
             )
-            clean_env = {k: v for k, v in os.environ.items() if k != "EVOMU_ENFORCE_EXACT_ARCH_DEBT"}
-            with mock.patch.dict(os.environ, clean_env, clear=True):
-                exact_viols = ratchet_checks.check_arch_debt_ratchet(tmp)
-            self.assertTrue(any("dropped below exact ratchet" in v[1] for v in exact_viols), exact_viols)
+            zero_viols = ratchet_checks.check_arch_debt_ratchet(tmp)
+            self.assertTrue(any("zero_required=true" in v[1] for v in zero_viols), zero_viols)
 
             # TT-11: Companion stringly BridgeRpcError bypass ratchet catches const ERR_*, non-literal code,
             #        helper defs, and helper calls!
@@ -1404,6 +1403,124 @@ fn t() {
         self.assertIn("EVOMU_FINAL_REVIEW_CHAIN", agents_txt)
         self.assertIn("tools/client-harness/", skill_txt)
         self.assertIn("tools/client-harness/", agents_txt)
+
+    def test_1538_per_file_ratchets_auto_tighten_and_no_nonzero_equality(self):
+        import tighten_ratchets  # noqa: E402
+
+        # 1. Acceptance criterion: zero non-zero equality comparisons remain in ratchet_checks.py
+        with open(os.path.join(SCRIPTS_DIR, "ratchet_checks.py"), encoding="utf-8") as fh:
+            rc_src = fh.read()
+        self.assertNotIn("dropped below exact ratchet", rc_src)
+        self.assertNotIn("dropped below falling ratchet", rc_src)
+        self.assertNotIn("without removing from", rc_src)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Build minimal synthetic repo with v2 arch_debt, v2 client_compat, v2 untyped_user_error, v2 stringly_bypass
+            _write(os.path.join(tmp, "crates/eve-server/src/router/client_compat.rs"), _minimal_client_compat_rs())
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/outbound_sequencer.rs"),
+                "pub fn restamp_frame() { let mut a = [0u8; 4]; a.copy_from_slice(&[1,2,3,4]); }\n",
+            )
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/services/alpha.rs"),
+                "pub fn a(x: &mut Map) {\n"
+                "  x.items.insert(1, 2);\n"
+                "  let _ = BridgeRpcError::user_error(\"A\", \"msg\");\n"
+                "  const ERR_A: &str = \"A\";\n"
+                "}\n",
+            )
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/services/beta.rs"),
+                "pub fn b(x: &mut Map) {\n"
+                "  x.items.insert(3, 4);\n"
+                "  x.items.insert(5, 6);\n"
+                "  let _ = BridgeRpcError::user_error(\"B\", \"msg\");\n"
+                "}\n",
+            )
+            # Start with v1 templates, migrate via migrate_v2 -> exact v2 baselines
+            _write(
+                os.path.join(tmp, "crates/eve-testkit/ratchets/arch_debt_ratchet.json"),
+                json.dumps({
+                    "version": 1,
+                    "patterns": {
+                        "master_wallet": {"max_occurrences": 0, "max_files": 0, "zero_required": True, "regex": r"\bmaster_wallet\b"},
+                        "items_insert": {"max_occurrences": 3, "max_files": 2, "owning_issue": 1194, "regex": r"\bitems\s*\.\s*insert\s*\("},
+                    },
+                }),
+            )
+            _write(
+                os.path.join(tmp, "crates/eve-testkit/ratchets/client_compat_ratchet.json"),
+                json.dumps({"version": 1, "max_transport_differing_replies": 7}),
+            )
+            _write(
+                os.path.join(tmp, ratchet_checks.STRINGLY_ERR_BYPASS_REL),
+                json.dumps({"version": 1, "owning_issue": 1195, "rules": {}}),
+            )
+            written = tighten_ratchets.migrate_v2(tmp)
+            self.assertEqual(len(written), 4)
+            self.assertEqual(ratchet_checks.check_all_ratchets(tmp, cache_path=os.path.join(tmp, "c.json")), [])
+
+            # Verify sequencer_set_state_rewrites was counted (1 restamp_ fn + 1 copy_from_slice = 2)
+            cc_v2 = ratchet_checks._read_json(os.path.join(tmp, "crates/eve-testkit/ratchets/client_compat_ratchet.json"))
+            self.assertEqual(cc_v2["version"], 2)
+            self.assertEqual(
+                cc_v2["counters"]["sequencer_set_state_rewrites"],
+                {"crates/eve-server/src/outbound_sequencer.rs": 2},
+            )
+            self.assertEqual(cc_v2["max_transport_differing_replies"], 7)
+
+            # 2. Two branches each removing different sites (alpha removes items.insert & user_error; beta lowers items.insert 2->1)
+            #    WITHOUT editing any baseline JSON -> passes cleanly with zero violations!
+            _write(os.path.join(tmp, "crates/eve-server/src/services/alpha.rs"), "pub fn a() {}\n")
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/services/beta.rs"),
+                "pub fn b(x: &mut Map) {\n"
+                "  x.items.insert(3, 4);\n"
+                "  let _ = BridgeRpcError::user_error(\"B\", \"msg\");\n"
+                "}\n",
+            )
+            self.assertEqual(ratchet_checks.check_all_ratchets(tmp, cache_path=os.path.join(tmp, "c.json")), [])
+
+            # 3. Auto-tightener lowers beta (2->1) and deletes alpha (1->0) across all affected v2 files mechanically!
+            changed, slack, regs = tighten_ratchets.tighten_ratchets(tmp, write=True)
+            self.assertEqual(regs, [])
+            self.assertGreater(slack, 0)
+            self.assertIn("crates/eve-testkit/ratchets/arch_debt_ratchet.json", changed)
+            self.assertIn("crates/eve-testkit/ratchets/untyped_user_error_ratchet.json", changed)
+            self.assertIn(ratchet_checks.STRINGLY_ERR_BYPASS_REL, changed)
+
+            ad_after = ratchet_checks._read_json(os.path.join(tmp, "crates/eve-testkit/ratchets/arch_debt_ratchet.json"))
+            self.assertEqual(ad_after["patterns"]["items_insert"]["files"], {"services/beta.rs": 1})
+            ue_after = ratchet_checks._read_json(os.path.join(tmp, "crates/eve-testkit/ratchets/untyped_user_error_ratchet.json"))
+            self.assertEqual(ue_after["files"], {"services/beta.rs": 1})
+            # Re-checking after tightening shows 0 slack
+            changed2, slack2, regs2 = tighten_ratchets.tighten_ratchets(tmp, write=False)
+            self.assertEqual((changed2, slack2, regs2), ([], 0, []))
+
+            # 4. Adding a site back to an unlisted file (alpha.rs, implicit baseline 0) fails hard,
+            #    and tighten_ratchets refuses to raise baselines!
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/services/alpha.rs"),
+                "pub fn a(x: &mut Map) { x.items.insert(9, 9); let _ = BridgeRpcError::user_error(\"Z\", \"m\"); }\n",
+            )
+            viols = ratchet_checks.check_all_ratchets(tmp, cache_path=os.path.join(tmp, "c.json"))
+            vcats = {v[0] for v in viols}
+            self.assertIn("RATCHET_ARCH_DEBT", vcats)
+            self.assertIn("RATCHET_UNTYPED_USER_ERROR", vcats)
+            _, _, regs3 = tighten_ratchets.tighten_ratchets(tmp, write=True)
+            self.assertGreaterEqual(len(regs3), 2)
+            # Baseline must NOT have been raised by tighten_ratchets
+            ad_still = ratchet_checks._read_json(os.path.join(tmp, "crates/eve-testkit/ratchets/arch_debt_ratchet.json"))
+            self.assertEqual(ad_still["patterns"]["items_insert"]["files"], {"services/beta.rs": 1})
+
+        # 5. Live repo verification: dump-counts-json & check_all_ratchets & stringly_error_bypass v2 tight
+        live_counts = tighten_ratchets.collect_all_counts(REPO_ROOT)
+        self.assertEqual(len(live_counts["arch_debt"]), 19)
+        self.assertEqual(set(live_counts["client_compat"]["counters"].keys()), set(ratchet_checks.CLIENT_COMPAT_COUNTER_KEYS))
+        self.assertGreater(sum(live_counts["untyped_user_error"].values()), 0)
+        self.assertEqual(ratchet_checks.check_all_ratchets(REPO_ROOT), [])
+        _, sb_slack, sb_regs = tighten_ratchets.tighten_ratchets(REPO_ROOT, write=False, targets=("stringly_error_bypass",))
+        self.assertEqual((sb_slack, sb_regs), (0, []))
 
 
 if __name__ == "__main__":

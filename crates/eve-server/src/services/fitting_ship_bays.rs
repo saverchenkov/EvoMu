@@ -351,16 +351,8 @@ pub(crate) async fn board_stored_ship(
         } else if let Some(old_id) = prev_ship_id {
             if !prev_is_capsule {
                 store_ops::cleanup_ship_leaving_space(ctx, sys_id, &sys, char_id, old_id).await;
-                let meta_opt = {
-                    let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
-                    if let Some(meta) = bp.ball_slim_meta.get_mut(&old_id) {
-                        meta.char_id = None;
-                        Some(meta.clone())
-                    } else {
-                        None
-                    }
-                };
-                if let Some(meta) = meta_opt {
+                if let Some(mut meta) = sys.view().slim_meta(old_id).cloned() {
+                    meta.char_id = None;
                     let _ = sys.change_slim_item(old_id, meta).await;
                 }
                 let slim_ev = eve_destiny::DestinyEvent::OnSlimItemChange { ball_id: old_id };

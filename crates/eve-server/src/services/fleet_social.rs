@@ -577,8 +577,6 @@ fn handle_office_manager(
                     .map(|s| s.owner_corporation_id)
                     .or(structure_owner_id)
                     .unwrap_or(1_000_035);
-                let mut tenant_account_notify: Option<eve_db::IskCents> = None;
-                let mut owner_credit: Option<(i64, eve_db::IskCents)> = None;
                 if fee.0 > 0 {
                     ensure_corp_wallet_take_access(
                         snap,
@@ -602,7 +600,7 @@ fn handle_office_manager(
                             client_error: None,
                         });
                     }
-                    let mut corp_bal_after = corp.division_balance(wallet_div);
+                    let corp_bal_after = corp.division_balance(wallet_div);
                     snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
                         owner_id: corp_id,
                         entry_type: "office_rental_fee",
@@ -625,14 +623,8 @@ fn handle_office_manager(
                                 meta: eve_db::ledger::JournalMeta::new(13, char_id, corp_id, now_unix)
                                     .with_account_key(1000),
                             });
-                            if owner_corp_id == corp_id && wallet_div == 1 {
-                                corp_bal_after = cred_bal_after;
-                            } else {
-                                owner_credit = Some((owner_corp_id, cred_bal_after));
-                            }
                         }
                     }
-                    tenant_account_notify = Some(corp_bal_after);
                 } else if !snap.corporations.contains_key(&corp_id) {
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
@@ -679,8 +671,6 @@ fn handle_office_manager(
                     station_id,
                     bill_notify,
                     quote,
-                    tenant_account_notify,
-                    owner_credit,
                     office_item,
                 ))
             });
@@ -691,8 +681,6 @@ fn handle_office_manager(
                     st_id,
                     bill_notify,
                     quote,
-                    tenant_account_notify,
-                    owner_credit,
                     office_item,
                 )) => {
                     if let Some((is_corp_debtor, bill_kv)) = bill_notify {
@@ -702,12 +690,6 @@ fn handle_office_manager(
                             is_corp_debtor,
                             bill_kv,
                         );
-                    }
-                    if let Some(corp_bal_after) = tenant_account_notify {
-                        ctx.notify_wallet_balance(true, corp_id, wallet_div, corp_bal_after);
-                    }
-                    if let Some((owner_corp_id, cred_bal_after)) = owner_credit {
-                        ctx.notify_wallet_balance(true, owner_corp_id, 1, cred_bal_after);
                     }
                     ctx.emit_item_change_with_target(
                         NotificationTarget::Corporation(corp_id),

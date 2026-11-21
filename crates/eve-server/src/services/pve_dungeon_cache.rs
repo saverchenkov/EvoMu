@@ -18,8 +18,8 @@
 
 use crate::router::ServerContext;
 use crate::services::mining_sites::{
-    derive_system_site_position_from_sde, displayed_security, resolve_gas_site, resolve_ore_site,
-    seed_system_mining_sites_from_sde, COSMIC_ORE_SITES, GAS_SITES,
+    resolve_gas_site, resolve_ore_site, seed_system_mining_sites_from_sde, COSMIC_ORE_SITES,
+    GAS_SITES,
 };
 use crate::services::pve_exploration::{
     anomaly_dungeons_for_system, ded_complex_for_rating, ensure_system_pve_sites_seeded,
@@ -31,7 +31,6 @@ use crate::services::pve_exploration_seeding::{
 use crate::services::pve_dungeon_editor::{
     ensure_dungeon_rooms_seeded, handle_gm_dungeon_editor_op,
 };
-use eve_db::CosmicAnomalyRecord;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SdeRegistry, SolarSystemId, TypeId};
@@ -109,91 +108,31 @@ pub fn eligible_ice_belts(sde: &SdeRegistry, displayed_sec: f64) -> Vec<(u32, f6
     out
 }
 
-/// Picks the ice-belt dungeon seeded in `sys_id`, if any.
+/// Picks the ice-belt dungeon for `sys_id` when `sys_id` is a designated ice system with a regional
+/// SDE ice-belt layout (`resolve_regional_ice_belt`).
 ///
-/// DERIVED: CCP's server-side ice-belt distribution is not part of the client SDE. EvoMu gives every
-/// known-space system one belt: among the eligible belts it keeps those with the tightest security
-/// ceiling (the richest ice the system's band allows) and picks one by `sys_id` modulo their count.
-/// Wormhole and Abyssal systems (IDs >= 31,000,000) get none.
+/// Only designated systems whose regional layout resolves (and can be spawned with real asteroids by
+/// `tick_ice_belt_respawn_sync`) expose an ice belt; non-designated systems (including Jita) and
+/// wormhole/abyssal/unbacked systems receive none.
 pub fn ice_belt_dungeon_for_system(ctx: &ServerContext, sys_id: SolarSystemId) -> Option<u32> {
-    if sys_id >= 31_000_000 {
+    if sys_id >= 31_000_000 || !crate::services::mining_sites::is_designated_ice_system(sys_id) {
         return None;
     }
-    let true_sec = ctx.sde.solar_systems.get(&sys_id)?.security_status;
-    let eligible = eligible_ice_belts(&ctx.sde, displayed_security(true_sec));
-    let tightest = eligible
-        .iter()
-        .map(|(_, c)| *c)
-        .fold(f64::INFINITY, f64::min);
-    let best: Vec<u32> = eligible
-        .iter()
-        .filter(|(_, c)| (*c - tightest).abs() < 1e-9)
-        .map(|(id, _)| *id)
-        .collect();
-    if best.is_empty() {
+    let Ok(site) = crate::services::mining_sites::resolve_regional_ice_belt(&ctx.sde, sys_id)?
+    else {
         return None;
-    }
-    Some(best[(sys_id as usize) % best.len()])
+    };
+    site.asteroids
+        .iter()
+        .all(|a| ctx.sde.types.contains_key(&a.type_id))
+        .then_some(site.dungeon_id)
 }
 
-/// Seeds the system's ice-belt anomaly once (idempotent). The record's `anomaly_id` is
-/// `DNG-<dungeonID>-<instanceID>` like the ore anomalies, and `ore_types` lists the belt's ice types
-/// from the SDE dungeon layout. Ice asteroid balls are not materialised here.
+/// Seeds or respawns the system's regional ice-belt anomaly and its asteroid balls when `sys_id`
+/// is a designated ice system and ready to spawn/respawn. Non-designated systems receive none and no
+/// asteroid-less placeholder anomaly is inserted.
 pub fn seed_system_ice_belt_from_sde(ctx: &ServerContext, sys_id: SolarSystemId) {
-    // Designated ice systems get the asteroid-backed regional belt first, so the anomaly
-    // listed to the client is minable (no asteroid-less placeholder shadowing it).
     crate::services::space_mining_harvest::tick_ice_belt_respawn_sync(ctx, sys_id);
-    let Some(dungeon_id) = ice_belt_dungeon_for_system(ctx, sys_id) else {
-        return;
-    };
-    let name = ctx
-        .sde
-        .dungeons
-        .get(&dungeon_id)
-        .map(|d| d.name.trim().to_string())
-        .unwrap_or_default();
-    let mut ice_types: Vec<TypeId> = ctx
-        .sde
-        .dungeon_asteroids
-        .get(&dungeon_id)
-        .map(|rows| rows.iter().map(|r| r.type_id).collect())
-        .unwrap_or_default();
-    ice_types.sort_unstable();
-    ice_types.dedup();
-    let position = derive_system_site_position_from_sde(ctx, sys_id, 3, 5.0);
-    let now = ctx.now_unix();
-    let already_seeded = ctx.db.with_snapshot(|snap| {
-        snap.cosmic_anomalies
-            .get(&sys_id)
-            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == ICE_BELT_ANOMALY_TYPE))
-    });
-    if already_seeded {
-        return;
-    }
-    ctx.db.with_mut_snapshot(|snap| {
-        let list = snap.cosmic_anomalies.entry(sys_id).or_default();
-        if list.iter().any(|a| a.anomaly_type == ICE_BELT_ANOMALY_TYPE) {
-            return;
-        }
-        snap.next_entity_id += 1;
-        let seq = snap.next_entity_id;
-        snap.cosmic_anomalies
-            .entry(sys_id)
-            .or_default()
-            .push(CosmicAnomalyRecord {
-                anomaly_id: format!("DNG-{dungeon_id}-{seq}"),
-                solar_system_id: sys_id,
-                name,
-                anomaly_type: ICE_BELT_ANOMALY_TYPE.into(),
-                position,
-                signal_strength: 1.0,
-                ore_types: ice_types,
-                remaining_volume: 0.0,
-                created_unix: now,
-                lifetime_seconds: 0,
-                cleared: false,
-            });
-    });
 }
 
 /// Parses `DNG-<dungeonID>-<instanceID>` (or lowercase `dng-`) site IDs used by SDE mining/ice/seasonal sites.
@@ -628,19 +567,7 @@ fn unseeded_ice_belt_dungeon_for_system(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
 ) -> Option<u32> {
-    let regional_did = if crate::services::mining_sites::is_designated_ice_system(sys_id) {
-        crate::services::mining_sites::resolve_regional_ice_belt(&ctx.sde, sys_id)
-            .and_then(|res| res.ok())
-            .filter(|site| {
-                site.asteroids
-                    .iter()
-                    .all(|a| ctx.sde.types.contains_key(&a.type_id))
-            })
-            .map(|site| site.dungeon_id)
-    } else {
-        None
-    };
-    regional_did.or_else(|| ice_belt_dungeon_for_system(ctx, sys_id))
+    ice_belt_dungeon_for_system(ctx, sys_id)
 }
 
 /// Reads SDE ore anomaly instances for `sys_id` strictly read-only without mutating DB state.
@@ -1281,7 +1208,9 @@ pub async fn handle(
                         PyRep::Integer(d.dungeon_id as i64),
                         PyRep::String(d.name.clone()),
                         PyRep::Integer(1), // dungeonStatus: 1 = RELEASE
-                        PyRep::None,      // dungeonNameID
+                        ctx.sde
+                            .dungeon_name_id(d.dungeon_id)
+                            .map_or(PyRep::None, |id| PyRep::Integer(i64::from(id))),
                         PyRep::Integer(d.faction_id.unwrap_or(0) as i64),
                         PyRep::Integer(d.archetype_id.unwrap_or(0) as i64),
                     ]

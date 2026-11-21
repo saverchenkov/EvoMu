@@ -1887,20 +1887,17 @@ async fn docked_synthetic_ore_and_ice_instance_ids_warp_before_and_after_seeding
         Arc::clone(&sde),
         Arc::new(WorldRepository::new_empty()),
     );
-    let non_designated_ice_sys = sde
-        .solar_systems
-        .keys()
-        .copied()
-        .filter(|&sid| {
-            !crate::services::mining_sites::is_designated_ice_system(sid)
-                && sde
-                    .solar_systems
-                    .get(&sid)
-                    .is_some_and(|s| s.region_id != 10_000_070)
-                && unseeded_ice_belt_dungeon_for_system(&probe_ctx, sid).is_some()
-        })
-        .min()
-        .expect("SDE contains non-designated known-space ice belt system");
+    let second_designated_ice_sys: SolarSystemId = 30_000_156;
+    assert!(unseeded_ice_belt_dungeon_for_system(&probe_ctx, second_designated_ice_sys).is_some());
+    assert!(unseeded_ice_belt_dungeon_for_system(&probe_ctx, 30_000_142).is_none());
+    assert!(ice_belt_dungeon_for_system(&probe_ctx, 30_000_142).is_none());
+    assert!(ice_belt_dungeon_for_system(&probe_ctx, 30_003_495).is_none());
+    seed_system_ice_belt_from_sde(&probe_ctx, 30_000_142);
+    seed_system_ice_belt_from_sde(&probe_ctx, 30_003_495);
+    assert!(probe_ctx.db.with_snapshot(|s| {
+        !s.cosmic_anomalies.contains_key(&30_000_142)
+            && !s.cosmic_anomalies.contains_key(&30_003_495)
+    }));
 
     async fn setup_space_session(
         sde: &Arc<SdeRegistry>,
@@ -2178,14 +2175,8 @@ async fn docked_synthetic_ore_and_ice_instance_ids_warp_before_and_after_seeding
         .await;
     }
 
-    // 2. Ice belts (designated AND non-designated), before & after seeding via docked synthetic instanceIDs.
-    for (idx, (sys_id, use_bare_before)) in [
-        (designated_ice_sys, false),
-        (non_designated_ice_sys, true),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    // 2. Designated ice belts before & after seeding via docked synthetic instanceIDs (plus empty non-designated Jita).
+    for (idx, (sys_id, use_bare_before)) in [(designated_ice_sys, false), (second_designated_ice_sys, true)].into_iter().enumerate() {
         let (ctx, mut sess, ship_id) =
             setup_space_session(&sde, sys_id, 90_099_400 + idx as i64, &format!("ice_iid_{idx}"))
                 .await;
@@ -2234,18 +2225,14 @@ async fn docked_synthetic_ore_and_ice_instance_ids_warp_before_and_after_seeding
         )
         .await;
 
-        assert_post_seed_synthetic_warps_no_reseed(
-            &ctx,
-            &mut sess,
-            sys_id,
-            ship_id,
-            ice_did,
-            ICE_BELT_ANOMALY_TYPE,
-            synth_ice_iid,
-            &kw,
-        )
-        .await;
+        assert_post_seed_synthetic_warps_no_reseed(&ctx, &mut sess, sys_id, ship_id, ice_did, ICE_BELT_ANOMALY_TYPE, synth_ice_iid, &kw).await;
+        assert!(ctx.db.with_snapshot(|s| s.asteroids.values().any(|a| a.solar_system_id == sys_id && a.belt_id == 0) && s.cosmic_anomalies.get(&sys_id).is_some_and(|l| l.iter().any(|a| a.anomaly_type == ICE_BELT_ANOMALY_TYPE && a.remaining_volume > 0.0))), "designated ice belt must materialize asteroids");
     }
+    let (j_ctx, mut j_sess, _) = setup_space_session(&sde, 30_000_142, 90_099_499, "jita_no_ice").await;
+    j_sess.station_id = None;
+    let j_ice = unpack_system_dungeon_instances(&handle(&j_ctx, &mut j_sess, "dungeonInstanceCacheMgr", "GetIceBeltInstances", &[], &kw).await.expect("handled").expect("jita ice"), 30_000_142);
+    assert!(j_ice.is_empty(), "Jita must not expose any IceBelt instance");
+    assert!(j_ctx.db.with_snapshot(|s| !s.cosmic_anomalies.contains_key(&30_000_142)));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

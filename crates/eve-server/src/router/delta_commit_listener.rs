@@ -1,9 +1,10 @@
-//! Commit-time wallet & PLEX Vault delta projection bridge (`#931` Track 1).
+//! Commit-time wallet/PLEX delivery & explicit in-transaction effect bridge (`#931` Tracks 1–2).
 //!
 //! Wires [`DeltaStateCache`] + [`DefaultDeltaProjection::wallets_only`] into
 //! `WorldRepository::register_post_commit_listener` so committed `ChangeSet` deltas on
 //! personal ISK (`"cash"`), corp divisions `1..=7` (`"cash"` / `"cash2".."cash7"`), and PLEX
-//! (`"plex"`) automatically materialize `OnAccountChange` notifications without hand-written emitters.
+//! (`"plex"`) materialize `OnAccountChange` notifications, while forwarding committed item
+//! changes to [`delta_item_compare::ItemCompareBridge`].
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +17,7 @@ use crate::router::cache_notifications::{
     MAX_PENDING_NOTIFICATIONS_PER_CHAR,
 };
 use crate::router::context::ServerContext;
+use crate::router::delta_item_compare::{ItemCompareBridge, TxItemEffectKeys};
 use crate::router::delta_projection::{
     materialize_pending_notifications, resolve_all_notifications, DefaultDeltaProjection,
     DeltaProjectionHook, DeltaSink, DeltaStateCache, OnlineCharacterLookup, PlexDelta,
@@ -33,7 +35,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 type BridgeKey = (u64, usize);
 const MAX_RECENT_COMMIT_EPOCH_LAG: u64 = 32;
-const MAX_RECENT_PROJECTED_RECORDS: usize = 256;
+const MAX_RECENT_PROJECTED_RECORDS: usize = 4096;
 
 #[derive(Debug, Clone)]
 struct ProjectedAccountRecord {
@@ -49,10 +51,71 @@ struct ProjectedAccountRecord {
 #[derive(Debug, Default)]
 struct EpochLedger {
     records: VecDeque<ProjectedAccountRecord>,
+    /// Monotonic commit counter per `(owner_id, account_key)` so unrelated DB
+    /// commits (career goals, telemetry, other wallets) never evict recent records.
+    wallet_epochs: HashMap<i64, HashMap<String, u64>>,
+}
+
+impl EpochLedger {
+    /// Record a batch of committed wallet account notifications under per-wallet
+    /// epochs and prune records older than `MAX_RECENT_COMMIT_EPOCH_LAG` for those keys.
+    fn record_batch(&mut self, mut committed_records: Vec<ProjectedAccountRecord>) {
+        if committed_records.is_empty() {
+            return;
+        }
+        let mut batch_epochs: HashMap<i64, HashMap<String, u64>> = HashMap::new();
+        for rec in &mut committed_records {
+            let next_epoch = if let Some(&epoch) = batch_epochs
+                .get(&rec.owner_id)
+                .and_then(|m| m.get(&rec.account_key))
+            {
+                epoch
+            } else {
+                let by_key = self.wallet_epochs.entry(rec.owner_id).or_default();
+                let next = if let Some(entry) = by_key.get_mut(&rec.account_key) {
+                    *entry = entry.saturating_add(1);
+                    *entry
+                } else {
+                    by_key.insert(rec.account_key.clone(), 1);
+                    1
+                };
+                batch_epochs
+                    .entry(rec.owner_id)
+                    .or_default()
+                    .insert(rec.account_key.clone(), next);
+                next
+            };
+            rec.commit_epoch = next_epoch;
+        }
+        self.records.retain(|r| {
+            let Some(&latest) = batch_epochs
+                .get(&r.owner_id)
+                .and_then(|m| m.get(&r.account_key))
+            else {
+                return true;
+            };
+            latest.saturating_sub(r.commit_epoch) <= MAX_RECENT_COMMIT_EPOCH_LAG
+        });
+        for rec in committed_records {
+            if self.records.len() >= MAX_RECENT_PROJECTED_RECORDS {
+                self.records.pop_front();
+            }
+            self.records.push_back(rec);
+        }
+    }
+
+    fn wallet_epoch(&self, owner_id: i64, account_key: &str) -> u64 {
+        self.wallet_epochs
+            .get(&owner_id)
+            .and_then(|m| m.get(account_key))
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 struct DeltaCommitBridgeState {
     recent_epoch: Mutex<EpochLedger>,
+    item_compare: Arc<ItemCompareBridge>,
 }
 
 static COMMIT_BRIDGES: OnceLock<Mutex<HashMap<BridgeKey, Weak<DeltaCommitBridgeState>>>> =
@@ -102,6 +165,12 @@ fn extract_account_change_fields(payload_args: &[PyRep]) -> Option<(String, i64,
         }
         _ => None,
     }
+}
+
+#[derive(Debug, Default)]
+struct EmittedEffectKeys {
+    account_keys: HashSet<(i64, Option<(String, i64)>)>,
+    item_effects: TxItemEffectKeys,
 }
 
 fn resolve_tx_effect_recipients(
@@ -160,8 +229,8 @@ fn dispatch_tx_effects(
     now_ft: i64,
     commit_epoch: u64,
     staging_scope_id: Option<u64>,
-) -> (HashSet<(i64, Option<(String, i64)>)>, Vec<ProjectedAccountRecord>) {
-    let mut emitted_account_effects = HashSet::new();
+) -> (EmittedEffectKeys, Vec<ProjectedAccountRecord>) {
+    let mut emitted_effects = EmittedEffectKeys::default();
     let mut records = Vec::new();
     let mut built = Vec::new();
 
@@ -189,7 +258,13 @@ fn dispatch_tx_effects(
                 now_ft,
             );
             if is_account_change {
-                emitted_account_effects.insert((cid, suppression_key.clone()));
+                emitted_effects
+                    .account_keys
+                    .insert((cid, suppression_key.clone()));
+            } else {
+                emitted_effects
+                    .item_effects
+                    .observe(cid, &effect.event, &effect.args);
             }
             if let Some((ref account_key, owner_id, balance)) = fields_opt {
                 records.push(ProjectedAccountRecord {
@@ -209,7 +284,7 @@ fn dispatch_tx_effects(
     if !built.is_empty() {
         enqueue_or_stage_pending_batch(pend, notify_tx, &built);
     }
-    (emitted_account_effects, records)
+    (emitted_effects, records)
 }
 
 fn dedup_resolved_account_changes(resolved: Vec<ResolvedNotification>) -> Vec<ResolvedNotification> {
@@ -243,8 +318,8 @@ fn project_wallet_notifs_for_commit(
 }
 
 /// Registers the authoritative DB post-commit listener on `ctx.db`, dispatching explicit
-/// `TxNotificationEffect`s and projecting committed wallet / corp-division / PLEX Vault deltas
-/// from each `ChangeSet` (`#931` Track 1).
+/// `TxNotificationEffect`s, projecting committed wallet / corp-division / PLEX Vault deltas
+/// (`OnAccountChange`), and wiring compare-only item/blueprint parity telemetry (`#931` Tracks 1–2).
 pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
     let pend_ptr = pending_notifications_ptr(&*ctx.pending_notifications);
     let bridge_key = (ctx.db.instance_id(), pend_ptr);
@@ -256,6 +331,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
         }
         let state = Arc::new(DeltaCommitBridgeState {
             recent_epoch: Mutex::new(EpochLedger::default()),
+            item_compare: Arc::new(ItemCompareBridge::new(ctx.db.instance_id())),
         });
         map.insert(bridge_key, Arc::downgrade(&state));
         state
@@ -287,13 +363,13 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
             };
             let now_ft = db.clock().now_blueos_filetime_ticks();
             let now_unix = db.now_unix_secs();
-            let commit_epoch = db.state_epoch();
+            // Assigned per `(owner_id, account_key)` inside `EpochLedger::record_batch`.
+            let commit_epoch = 0u64;
             let staging_scope_id =
                 current_dispatch_staging_scope_id(Some(&*pend), Some(&notify_tx));
 
-            let (emitted_account_effects, mut committed_records) = if effects.notifications.is_empty()
-            {
-                (HashSet::new(), Vec::new())
+            let (emitted_effects, mut committed_records) = if effects.notifications.is_empty() {
+                (EmittedEffectKeys::default(), Vec::new())
             } else {
                 dispatch_tx_effects(
                     &db,
@@ -320,11 +396,15 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 let filtered: Vec<ResolvedNotification> = resolved
                     .into_iter()
                     .filter(|r| {
-                        if emitted_account_effects.contains(&(r.recipient_char_id, None)) {
+                        if emitted_effects
+                            .account_keys
+                            .contains(&(r.recipient_char_id, None))
+                        {
                             return false;
                         }
                         if let Some((key, owner_id, _)) = extract_account_change_fields(&r.args) {
-                            if emitted_account_effects
+                            if emitted_effects
+                                .account_keys
                                 .contains(&(r.recipient_char_id, Some((key, owner_id))))
                             {
                                 return false;
@@ -354,15 +434,21 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 }
             }
 
-            let mut ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
-            ledger.records.retain(|r| {
-                commit_epoch.saturating_sub(r.commit_epoch) <= MAX_RECENT_COMMIT_EPOCH_LAG
-            });
-            for rec in committed_records {
-                if ledger.records.len() >= MAX_RECENT_PROJECTED_RECORDS {
-                    ledger.records.pop_front();
-                }
-                ledger.records.push_back(rec);
+            bridge.item_compare.on_commit(
+                snap,
+                changes,
+                &sde,
+                now_unix,
+                &*db,
+                &emitted_effects.item_effects,
+            );
+
+            if !committed_records.is_empty() {
+                bridge
+                    .recent_epoch
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record_batch(committed_records);
             }
         },
     ));
@@ -477,6 +563,22 @@ fn insert_before_pos_with_cap(
     queue.insert(pos, notif);
 }
 
+fn lookup_commit_bridge(ctx: &ServerContext) -> Option<Arc<DeltaCommitBridgeState>> {
+    let bridge_key = (
+        ctx.db.instance_id(),
+        pending_notifications_ptr(&*ctx.pending_notifications),
+    );
+    commit_bridges()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&bridge_key)
+        .and_then(Weak::upgrade)
+}
+
+pub(crate) fn item_compare_bridge(ctx: &ServerContext) -> Option<Arc<ItemCompareBridge>> {
+    lookup_commit_bridge(ctx).map(|b| Arc::clone(&b.item_compare))
+}
+
 /// Coordinates remaining unlocked manual `OnAccountChange` calls with same-epoch commit-projected
 /// `OnAccountChange` notifications: deduplicates identical committed balances and preserves
 /// pre-settlement intermediate balances ahead of the committed final balance.
@@ -491,26 +593,19 @@ pub(crate) fn try_handle_legacy_account_change_emit(
         return None;
     }
     let (account_key, owner_id, manual_bal) = extract_account_change_fields(payload_args)?;
-    let bridge_key = (
-        ctx.db.instance_id(),
-        pending_notifications_ptr(&*ctx.pending_notifications),
-    );
-    let bridge = commit_bridges()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&bridge_key)
-        .and_then(Weak::upgrade)?;
-    let current_epoch = ctx.db.state_epoch();
+    let bridge = lookup_commit_bridge(ctx)?;
     let staging_scope_id =
         current_dispatch_staging_scope_id(Some(&*ctx.pending_notifications), Some(&ctx.notify_tx));
     let matching: Vec<ProjectedAccountRecord> = {
         let ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+        let current_wallet_epoch = ledger.wallet_epoch(owner_id, &account_key);
         ledger
             .records
             .iter()
             .filter(|r| {
                 r.staging_scope_id == staging_scope_id
-                    && current_epoch.saturating_sub(r.commit_epoch) <= MAX_RECENT_COMMIT_EPOCH_LAG
+                    && current_wallet_epoch.saturating_sub(r.commit_epoch)
+                        <= MAX_RECENT_COMMIT_EPOCH_LAG
                     && r.account_key == account_key
                     && r.owner_id == owner_id
             })

@@ -13,10 +13,16 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 import traceback
 
 sys.dont_write_bytecode = True
+
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR and _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+import guard_registry as _guard_registry
 
 _HOOKED_LOGMODULE = False
 _HOOKED_TARGETS = set()
@@ -33,6 +39,90 @@ _EXC_LINE_RE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Exit|Interrupt|Iteration|Failure)(?:\s*:.*)?$"
 )
 _CAMERA_MAX_SAFE_COORD = 1e16
+_GUARD_LOCK = threading.RLock()
+_GUARD_HITS = []
+_GUARD_HIT_SEQ = 0
+_GUARD_HIT_COUNTS = {}
+_MAX_GUARD_HITS_BUFFER = 2000
+
+
+def is_server_guards_disabled():
+    return _guard_registry.is_server_guards_disabled()
+
+
+def _is_guard_enabled(guard_id):
+    return _guard_registry.is_guard_enabled(guard_id)
+
+
+def _record_guard_hit(guard, function, reason, ts=None):
+    global _GUARD_HIT_SEQ
+    now_ts = time.time() if ts is None else float(ts)
+    guard_name = str(guard)
+    entry = {
+        "guard": guard_name,
+        "function": str(function),
+        "reason": str(reason),
+        "time": round(now_ts, 3),
+    }
+    with _GUARD_LOCK:
+        _GUARD_HIT_SEQ += 1
+        entry["seq"] = _GUARD_HIT_SEQ
+        _GUARD_HIT_COUNTS[guard_name] = _GUARD_HIT_COUNTS.get(guard_name, 0) + 1
+        _GUARD_HITS.append(entry)
+        if len(_GUARD_HITS) > _MAX_GUARD_HITS_BUFFER:
+            del _GUARD_HITS[:-_MAX_GUARD_HITS_BUFFER]
+    return entry
+
+
+def get_guard_hit_seq():
+    with _GUARD_LOCK:
+        return int(_GUARD_HIT_SEQ)
+
+
+def get_guard_hits(since_seq=0):
+    seq_cutoff = int(since_seq or 0)
+    with _GUARD_LOCK:
+        return [dict(item) for item in _GUARD_HITS if item["seq"] > seq_cutoff]
+
+
+def get_guard_hit_summary(since_seq=None, client_guards_off=None):
+    if since_seq is not None:
+        return _guard_registry.summarize_guard_hits(
+            get_guard_hits(since_seq=since_seq),
+            client_guards_off=client_guards_off,
+        )
+    with _GUARD_LOCK:
+        counts = dict(_GUARD_HIT_COUNTS)
+        total = int(_GUARD_HIT_SEQ)
+    by_guard = {}
+    client_only_by_guard = {}
+    client_only_total = 0
+    for gid in sorted(counts.keys()):
+        cnt = int(counts[gid])
+        if cnt <= 0:
+            continue
+        by_guard[gid] = cnt
+        if _guard_registry.is_approved_client_only(gid):
+            client_only_total += cnt
+            client_only_by_guard[gid] = cnt
+    guards_off = is_server_guards_disabled() if client_guards_off is None else bool(client_guards_off)
+    return {
+        "client_guards_off": guards_off,
+        "guard_hits_count": total,
+        "guard_hits_by_guard": by_guard,
+        "client_only_guard_hits": client_only_total,
+        "client_only_guard_hits_by_guard": client_only_by_guard,
+        "server_caused_guard_hits": total - client_only_total,
+    }
+
+
+def reset_guard_hits():
+    global _GUARD_HIT_SEQ
+    with _GUARD_LOCK:
+        del _GUARD_HITS[:]
+        _GUARD_HIT_SEQ = 0
+        _GUARD_HIT_COUNTS.clear()
+        globals()["_PT_CONSUMED_GUARD_SEQ"] = 0
 
 
 def _is_exc_noise_line(ln):
@@ -678,14 +768,19 @@ def _sanitize_camera_state(cam):
 
 def _sanitize_present_camera_state(cam):
     if hasattr(cam, "_eyePosition") or hasattr(cam, "_atPosition"):
-        _sanitize_camera_state(cam)
+        return _sanitize_camera_state(cam)
+    return False
 
 
 def _sanitize_base_space_anchor_state(cam):
+    changed = False
     anchor_offset = getattr(cam, "_anchorOffset", None)
     if anchor_offset is not None and not _is_finite_safe_vec3(anchor_offset):
         _clear_camera_anchor_state(cam)
-    _sanitize_present_camera_state(cam)
+        changed = True
+    if _sanitize_present_camera_state(cam):
+        changed = True
+    return changed
 
 
 def _resolve_base_space_get_ball_position(orig_func):
@@ -702,7 +797,7 @@ def _make_reset_anchor_pos_guard(orig_fn):
     orig_func = getattr(orig_fn, "__func__", orig_fn)
 
     def _wrapped_reset_anchor_pos(self):
-        _sanitize_base_space_anchor_state(self)
+        cleared = bool(_sanitize_base_space_anchor_state(self))
         anchor_offset = getattr(self, "_anchorOffset", None)
         if anchor_offset:
             eye_pos = getattr(self, "eyePosition", None)
@@ -713,6 +808,9 @@ def _make_reset_anchor_pos_guard(orig_fn):
                 or not _is_finite_safe_vec3(at_pos)
             ):
                 _clear_camera_anchor_state(self)
+                cleared = True
+        if cleared:
+            _record_guard_hit("base_space_camera_guard", "BaseSpaceCamera.ResetAnchorPos", "cleared_non_finite_anchor_state")
         return orig_func(self)
 
     _wrapped_reset_anchor_pos.__name__ = getattr(orig_func, "__name__", "ResetAnchorPos")
@@ -725,27 +823,33 @@ def _make_update_anchor_offset_guard(orig_fn):
     orig_func = getattr(orig_fn, "__func__", orig_fn)
 
     def _wrapped_update_anchor_offset(self):
-        _sanitize_base_space_anchor_state(self)
+        cleared = bool(_sanitize_base_space_anchor_state(self))
         anchor_ball = getattr(self, "_anchorBall", None)
         if anchor_ball:
             if hasattr(anchor_ball, "ballpark") and getattr(anchor_ball, "ballpark", None) is None:
                 _clear_camera_anchor_state(self)
+                cleared = True
             else:
                 get_ball_pos = _resolve_base_space_get_ball_position(orig_func)
                 if get_ball_pos is not None:
                     pos = get_ball_pos(anchor_ball)
                     if not _is_finite_safe_vec3(pos):
                         _clear_camera_anchor_state(self)
+                        cleared = True
+        if cleared:
+            _record_guard_hit("base_space_camera_guard", "BaseSpaceCamera.UpdateAnchorOffset", "cleared_stale_anchor_ball")
         try:
             res = orig_func(self)
-        except Exception:
+        except Exception as exc:
             cur_offset = getattr(self, "_anchorOffset", None)
             if cur_offset is not None and not _is_finite_safe_vec3(cur_offset):
                 _clear_camera_anchor_state(self)
                 _sanitize_present_camera_state(self)
+                _record_guard_hit("base_space_camera_guard", "BaseSpaceCamera.UpdateAnchorOffset", "caught:%s" % exc)
                 return None
             raise
-        _sanitize_base_space_anchor_state(self)
+        if _sanitize_base_space_anchor_state(self) and not cleared:
+            _record_guard_hit("base_space_camera_guard", "BaseSpaceCamera.UpdateAnchorOffset", "sanitized_post_anchor_state")
         return res
 
     _wrapped_update_anchor_offset.__name__ = getattr(orig_func, "__name__", "UpdateAnchorOffset")
@@ -759,7 +863,7 @@ def _make_get_track_position_guard(orig_fn):
 
     def _wrapped_get_track_position(self, *args, **kwargs):
         ball = args[0] if args else kwargs.get("ball")
-        _sanitize_base_space_anchor_state(self)
+        sanitized = bool(_sanitize_base_space_anchor_state(self))
         res = orig_func(self, *args, **kwargs)
         if not _is_finite_safe_vec3(res):
             cur_offset = getattr(self, "_anchorOffset", None)
@@ -768,8 +872,11 @@ def _make_get_track_position_guard(orig_fn):
             ):
                 _clear_camera_anchor_state(self)
             _sanitize_present_camera_state(self)
+            _record_guard_hit("base_space_camera_guard", "BaseSpaceCamera.GetTrackPosition", "non_finite_track_position")
             at_pos = getattr(self, "_atPosition", getattr(self, "atPosition", (0.0, 0.0, 0.0)))
             return tuple(_vec3_tuple(at_pos, (0.0, 0.0, 0.0)))
+        if sanitized:
+            _record_guard_hit("base_space_camera_guard", "BaseSpaceCamera.GetTrackPosition", "sanitized_pre_anchor_state")
         return res
 
     _wrapped_get_track_position.__name__ = getattr(orig_func, "__name__", "GetTrackPosition")
@@ -779,6 +886,8 @@ def _make_get_track_position_guard(orig_fn):
 
 def _install_base_space_camera_guard():
     """Guard BaseSpaceCamera anchor offset/position teardown against -FLT_MAX / non-finite balls (#1340)."""
+    if not _is_guard_enabled("base_space_camera_guard"):
+        return False
     return _wrap_cls_methods_table(
         "baseSpaceCamera",
         "eve.client.script.ui.camera.baseSpaceCamera",
@@ -848,11 +957,12 @@ def _is_docked_or_ballpark_missing(svc_or_self=None, mod=None):
     return False
 
 
-def _make_arrival_method_guard(orig_fn, mod=None, clear_tracked=False):
+def _make_arrival_method_guard(orig_fn, mod=None, clear_tracked=False, fn_name="LocationArrival.method"):
     def _wrapped(self, *args, **kwargs):
         if _is_docked_or_ballpark_missing(self, mod):
             if clear_tracked and hasattr(self, "tracked_slim_item"):
                 self.tracked_slim_item = None
+            _record_guard_hit("camera_dock_guard", fn_name, "docked_or_ballpark_missing")
             return None
         try:
             return orig_fn(self, *args, **kwargs)
@@ -860,6 +970,7 @@ def _make_arrival_method_guard(orig_fn, mod=None, clear_tracked=False):
             if _is_docked_or_ballpark_missing(self, mod) or "NoneType" in str(exc):
                 if clear_tracked and hasattr(self, "tracked_slim_item"):
                     self.tracked_slim_item = None
+                _record_guard_hit("camera_dock_guard", fn_name, "caught:TypeError:%s" % exc)
                 return None
             raise
 
@@ -870,6 +981,7 @@ def _make_arrival_method_guard(orig_fn, mod=None, clear_tracked=False):
 def _patch_location_arrival_cls(cls, mod=None):
     if cls is None:
         return False
+    cls_label = getattr(cls, "__name__", "LocationArrival")
     patched = False
     for method_name, clear_tracked in (
         ("on_warp_finished", True),
@@ -882,7 +994,12 @@ def _patch_location_arrival_cls(cls, mod=None):
         if orig_attr is None or getattr(orig_attr, "_evomu_camera_guard", False):
             continue
         orig_func = getattr(orig_attr, "__func__", orig_attr)
-        wrapped = _make_arrival_method_guard(orig_func, mod=mod, clear_tracked=clear_tracked)
+        wrapped = _make_arrival_method_guard(
+            orig_func,
+            mod=mod,
+            clear_tracked=clear_tracked,
+            fn_name="%s.%s" % (cls_label, method_name),
+        )
         setattr(cls, method_name, wrapped)
         patched = True
         if method_name == "on_warp_finished":
@@ -925,11 +1042,13 @@ def _patch_location_arrival_module(mod):
     ):
         def _wrapped_helper(*args, **kwargs):
             if _is_docked_or_ballpark_missing(None, mod):
+                _record_guard_hit("camera_dock_guard", "LocationArrival.get_nearest_celestial_to_player", "docked_or_ballpark_missing")
                 return None
             try:
                 return orig_helper(*args, **kwargs)
             except TypeError as exc:
                 if _is_docked_or_ballpark_missing(None, mod) or "NoneType" in str(exc):
+                    _record_guard_hit("camera_dock_guard", "LocationArrival.get_nearest_celestial_to_player", "caught:TypeError:%s" % exc)
                     return None
                 raise
 
@@ -941,231 +1060,262 @@ def _patch_location_arrival_module(mod):
 
 def _install_camera_dock_guard():
     """Guard against V24 TacticalCamera NaN/1e35 overflow, dock races (#996/#1051), and HangarView teardown races (#1154)."""
-    vss_mod = sys.modules.get("eve.client.script.ui.services.viewStateSvc")
-    if vss_mod is not None and "viewStateSvc" not in _HOOKED_CAMERA_GUARD_TARGETS:
-        vss_cls = getattr(vss_mod, "ViewStateSvc", None)
-        orig_open_view = getattr(vss_cls, "_OpenView", None) if vss_cls is not None else None
-        if orig_open_view is not None and not getattr(orig_open_view, "_evomu_camera_guard", False):
-            def _wrapped_open_view(self, viewInfo, reopen=False, cameraID=None, **kwargs):
-                view_type_enum = getattr(vss_mod, "ViewType", None)
-                view_type_primary = getattr(view_type_enum, "Primary", None) if view_type_enum is not None else None
-                view_type_secondary = getattr(view_type_enum, "Secondary", None) if view_type_enum is not None else None
-                old_view = getattr(self, "primaryInfo", None)
-                active_view = getattr(self, "activeViewInfo", None)
-                is_secondary_active = (
-                    view_type_secondary is not None
-                    and active_view is not None
-                    and hasattr(active_view, "GetViewType")
-                    and active_view.GetViewType() == view_type_secondary
-                )
-                if (
-                    is_secondary_active
-                    and view_type_primary is not None
-                    and viewInfo is not None
-                    and hasattr(viewInfo, "GetViewType")
-                    and viewInfo.GetViewType() == view_type_primary
-                    and getattr(old_view, "name", None) == "inflight"
-                    and getattr(viewInfo, "name", None) != "inflight"
-                ):
-                    sm = getattr(__builtin__, "sm", None)
-                    if sm is not None and hasattr(sm, "IsServiceRunning") and sm.IsServiceRunning("sceneManager"):
-                        scene_mgr = sm.GetService("sceneManager")
-                        curr_cam = scene_mgr.GetActivePrimaryCamera() if hasattr(scene_mgr, "GetActivePrimaryCamera") else None
-                        if curr_cam is not None and getattr(curr_cam, "isActive", False) and hasattr(scene_mgr, "DeactivateFISCamera"):
-                            scene_mgr.DeactivateFISCamera()
-                _install_hangar_view_teardown_guard()
-                _install_hangar_transition_guard()
-                _install_skill_plan_panel_signal_guard()
-                return orig_open_view(self, viewInfo, reopen=reopen, cameraID=cameraID, **kwargs)
-            _wrapped_open_view._evomu_camera_guard = True
-            vss_cls._OpenView = _wrapped_open_view
-        orig_activate_view = getattr(vss_cls, "ActivateView", None) if vss_cls is not None else None
-        if orig_activate_view is not None and not getattr(orig_activate_view, "_evomu_camera_guard", False):
-            def _wrapped_activate_view(self, *args, **kwargs):
-                _install_hangar_view_teardown_guard()
-                _install_hangar_transition_guard()
-                _install_skill_plan_panel_signal_guard()
-                return orig_activate_view(self, *args, **kwargs)
-            _wrapped_activate_view._evomu_camera_guard = True
-            vss_cls.ActivateView = _wrapped_activate_view
-        _HOOKED_CAMERA_GUARD_TARGETS.add("viewStateSvc")
-
-    base_cam_mod = sys.modules.get("eve.client.script.ui.camera.baseCamera")
-    if base_cam_mod is not None and "baseCamera" not in _HOOKED_CAMERA_GUARD_TARGETS:
-        cam_cls = getattr(base_cam_mod, "Camera", None)
-        if cam_cls is not None:
-            orig_dir_offset = getattr(cam_cls, "GetLookAtDirectionWithOffset", None)
-            if orig_dir_offset is not None and not getattr(orig_dir_offset, "_evomu_camera_guard", False):
-                def _wrapped_get_look_at_dir_with_offset(self):
-                    _sanitize_camera_state(self)
-                    eye_pos = getattr(self, "_eyePosition", (0.0, 500.0, 1000.0))
-                    at_pos = getattr(self, "_atPosition", (0.0, 0.0, 0.0))
-                    eye_off = getattr(self, "_eyeOffset", None)
-                    at_off = getattr(self, "_atOffset", None)
-                    if not (
-                        _is_finite_safe_vec3(eye_pos)
-                        and _is_finite_safe_vec3(at_pos)
-                        and (eye_off is None or _is_finite_safe_vec3(eye_off))
-                        and (at_off is None or _is_finite_safe_vec3(at_off))
+    if _is_guard_enabled("camera_dock_guard"):
+        vss_mod = sys.modules.get("eve.client.script.ui.services.viewStateSvc")
+        if vss_mod is not None and "viewStateSvc" not in _HOOKED_CAMERA_GUARD_TARGETS:
+            vss_cls = getattr(vss_mod, "ViewStateSvc", None)
+            orig_open_view = getattr(vss_cls, "_OpenView", None) if vss_cls is not None else None
+            if orig_open_view is not None and not getattr(orig_open_view, "_evomu_camera_guard", False):
+                def _wrapped_open_view(self, viewInfo, reopen=False, cameraID=None, **kwargs):
+                    view_type_enum = getattr(vss_mod, "ViewType", None)
+                    view_type_primary = getattr(view_type_enum, "Primary", None) if view_type_enum is not None else None
+                    view_type_secondary = getattr(view_type_enum, "Secondary", None) if view_type_enum is not None else None
+                    old_view = getattr(self, "primaryInfo", None)
+                    active_view = getattr(self, "activeViewInfo", None)
+                    is_secondary_active = (
+                        view_type_secondary is not None
+                        and active_view is not None
+                        and hasattr(active_view, "GetViewType")
+                        and active_view.GetViewType() == view_type_secondary
+                    )
+                    if (
+                        is_secondary_active
+                        and view_type_primary is not None
+                        and viewInfo is not None
+                        and hasattr(viewInfo, "GetViewType")
+                        and viewInfo.GetViewType() == view_type_primary
+                        and getattr(old_view, "name", None) == "inflight"
+                        and getattr(viewInfo, "name", None) != "inflight"
                     ):
-                        return _safe_direction_vec3(eye_pos, at_pos)
-                    res = orig_dir_offset(self)
-                    if not _is_finite_safe_vec3(res, limit=2.0):
-                        return _safe_direction_vec3(eye_pos, at_pos)
-                    return res
-                _wrapped_get_look_at_dir_with_offset._evomu_camera_guard = True
-                cam_cls.GetLookAtDirectionWithOffset = _wrapped_get_look_at_dir_with_offset
+                        sm = getattr(__builtin__, "sm", None)
+                        if sm is not None and hasattr(sm, "IsServiceRunning") and sm.IsServiceRunning("sceneManager"):
+                            scene_mgr = sm.GetService("sceneManager")
+                            curr_cam = scene_mgr.GetActivePrimaryCamera() if hasattr(scene_mgr, "GetActivePrimaryCamera") else None
+                            if curr_cam is not None and getattr(curr_cam, "isActive", False) and hasattr(scene_mgr, "DeactivateFISCamera"):
+                                scene_mgr.DeactivateFISCamera()
+                                _record_guard_hit("camera_dock_guard", "ViewStateSvc._OpenView", "deactivate_fis_camera_on_dock")
+                    _install_hangar_view_teardown_guard()
+                    _install_hangar_transition_guard()
+                    _install_skill_plan_panel_signal_guard()
+                    return orig_open_view(self, viewInfo, reopen=reopen, cameraID=cameraID, **kwargs)
+                _wrapped_open_view._evomu_camera_guard = True
+                vss_cls._OpenView = _wrapped_open_view
+            orig_activate_view = getattr(vss_cls, "ActivateView", None) if vss_cls is not None else None
+            if orig_activate_view is not None and not getattr(orig_activate_view, "_evomu_camera_guard", False):
+                def _wrapped_activate_view(self, *args, **kwargs):
+                    _install_hangar_view_teardown_guard()
+                    _install_hangar_transition_guard()
+                    _install_skill_plan_panel_signal_guard()
+                    return orig_activate_view(self, *args, **kwargs)
+                _wrapped_activate_view._evomu_camera_guard = True
+                vss_cls.ActivateView = _wrapped_activate_view
+            _HOOKED_CAMERA_GUARD_TARGETS.add("viewStateSvc")
 
-            orig_dir = getattr(cam_cls, "GetLookAtDirection", None)
-            if orig_dir is not None and not getattr(orig_dir, "_evomu_camera_guard", False):
-                def _wrapped_get_look_at_dir(self):
-                    _sanitize_camera_state(self)
-                    eye_pos = getattr(self, "_eyePosition", (0.0, 500.0, 1000.0))
-                    zoom_pt = self.GetZoomToPoint() if hasattr(self, "GetZoomToPoint") else getattr(self, "_atPosition", (0.0, 0.0, 0.0))
-                    if not (_is_finite_safe_vec3(eye_pos) and _is_finite_safe_vec3(zoom_pt)):
-                        return _safe_direction_vec3(eye_pos, getattr(self, "_atPosition", (0.0, 0.0, 0.0)))
-                    res = orig_dir(self)
-                    if not _is_finite_safe_vec3(res, limit=2.0):
-                        return _safe_direction_vec3(eye_pos, zoom_pt)
-                    return res
-                _wrapped_get_look_at_dir._evomu_camera_guard = True
-                cam_cls.GetLookAtDirection = _wrapped_get_look_at_dir
-        _HOOKED_CAMERA_GUARD_TARGETS.add("baseCamera")
+        base_cam_mod = sys.modules.get("eve.client.script.ui.camera.baseCamera")
+        if base_cam_mod is not None and "baseCamera" not in _HOOKED_CAMERA_GUARD_TARGETS:
+            cam_cls = getattr(base_cam_mod, "Camera", None)
+            if cam_cls is not None:
+                orig_dir_offset = getattr(cam_cls, "GetLookAtDirectionWithOffset", None)
+                if orig_dir_offset is not None and not getattr(orig_dir_offset, "_evomu_camera_guard", False):
+                    def _wrapped_get_look_at_dir_with_offset(self):
+                        sanitized = bool(_sanitize_camera_state(self))
+                        eye_pos = getattr(self, "_eyePosition", (0.0, 500.0, 1000.0))
+                        at_pos = getattr(self, "_atPosition", (0.0, 0.0, 0.0))
+                        eye_off = getattr(self, "_eyeOffset", None)
+                        at_off = getattr(self, "_atOffset", None)
+                        if not (
+                            _is_finite_safe_vec3(eye_pos)
+                            and _is_finite_safe_vec3(at_pos)
+                            and (eye_off is None or _is_finite_safe_vec3(eye_off))
+                            and (at_off is None or _is_finite_safe_vec3(at_off))
+                        ):
+                            _record_guard_hit("camera_dock_guard", "Camera.GetLookAtDirectionWithOffset", "non_finite_camera_coords")
+                            return _safe_direction_vec3(eye_pos, at_pos)
+                        res = orig_dir_offset(self)
+                        if not _is_finite_safe_vec3(res, limit=2.0):
+                            _record_guard_hit("camera_dock_guard", "Camera.GetLookAtDirectionWithOffset", "non_finite_direction_result")
+                            return _safe_direction_vec3(eye_pos, at_pos)
+                        if sanitized:
+                            _record_guard_hit("camera_dock_guard", "Camera.GetLookAtDirectionWithOffset", "sanitized_camera_state")
+                        return res
+                    _wrapped_get_look_at_dir_with_offset._evomu_camera_guard = True
+                    cam_cls.GetLookAtDirectionWithOffset = _wrapped_get_look_at_dir_with_offset
 
-    tac_mod = sys.modules.get("eve.client.script.ui.camera.tacticalCamera")
-    if tac_mod is not None and "tacticalCamera" not in _HOOKED_CAMERA_GUARD_TARGETS:
-        tac_cls = getattr(tac_mod, "TacticalCamera", None)
-        if tac_cls is not None:
-            orig_on_activated = getattr(tac_cls, "OnActivated", None)
-            if orig_on_activated is not None and not getattr(orig_on_activated, "_evomu_camera_guard", False):
-                def _wrapped_on_activated(self, **kwargs):
-                    _sanitize_camera_state(self)
-                    last_cam = kwargs.get("lastCamera")
-                    if last_cam is not None:
-                        _sanitize_camera_state(last_cam)
-                    return orig_on_activated(self, **kwargs)
-                _wrapped_on_activated._evomu_camera_guard = True
-                tac_cls.OnActivated = _wrapped_on_activated
+                orig_dir = getattr(cam_cls, "GetLookAtDirection", None)
+                if orig_dir is not None and not getattr(orig_dir, "_evomu_camera_guard", False):
+                    def _wrapped_get_look_at_dir(self):
+                        sanitized = bool(_sanitize_camera_state(self))
+                        eye_pos = getattr(self, "_eyePosition", (0.0, 500.0, 1000.0))
+                        zoom_pt = self.GetZoomToPoint() if hasattr(self, "GetZoomToPoint") else getattr(self, "_atPosition", (0.0, 0.0, 0.0))
+                        if not (_is_finite_safe_vec3(eye_pos) and _is_finite_safe_vec3(zoom_pt)):
+                            _record_guard_hit("camera_dock_guard", "Camera.GetLookAtDirection", "non_finite_camera_coords")
+                            return _safe_direction_vec3(eye_pos, getattr(self, "_atPosition", (0.0, 0.0, 0.0)))
+                        res = orig_dir(self)
+                        if not _is_finite_safe_vec3(res, limit=2.0):
+                            _record_guard_hit("camera_dock_guard", "Camera.GetLookAtDirection", "non_finite_direction_result")
+                            return _safe_direction_vec3(eye_pos, zoom_pt)
+                        if sanitized:
+                            _record_guard_hit("camera_dock_guard", "Camera.GetLookAtDirection", "sanitized_camera_state")
+                        return res
+                    _wrapped_get_look_at_dir._evomu_camera_guard = True
+                    cam_cls.GetLookAtDirection = _wrapped_get_look_at_dir
+            _HOOKED_CAMERA_GUARD_TARGETS.add("baseCamera")
 
-            orig_on_deactivated = getattr(tac_cls, "OnDeactivated", None)
-            if orig_on_deactivated is not None and not getattr(orig_on_deactivated, "_evomu_camera_guard", False):
-                def _wrapped_on_deactivated(self):
-                    res = orig_on_deactivated(self)
-                    _sanitize_camera_state(self)
-                    return res
-                _wrapped_on_deactivated._evomu_camera_guard = True
-                tac_cls.OnDeactivated = _wrapped_on_deactivated
+        tac_mod = sys.modules.get("eve.client.script.ui.camera.tacticalCamera")
+        if tac_mod is not None and "tacticalCamera" not in _HOOKED_CAMERA_GUARD_TARGETS:
+            tac_cls = getattr(tac_mod, "TacticalCamera", None)
+            if tac_cls is not None:
+                orig_on_activated = getattr(tac_cls, "OnActivated", None)
+                if orig_on_activated is not None and not getattr(orig_on_activated, "_evomu_camera_guard", False):
+                    def _wrapped_on_activated(self, **kwargs):
+                        sanitized = bool(_sanitize_camera_state(self))
+                        last_cam = kwargs.get("lastCamera")
+                        if last_cam is not None and _sanitize_camera_state(last_cam):
+                            sanitized = True
+                        if sanitized:
+                            _record_guard_hit("camera_dock_guard", "TacticalCamera.OnActivated", "sanitized_camera_state")
+                        return orig_on_activated(self, **kwargs)
+                    _wrapped_on_activated._evomu_camera_guard = True
+                    tac_cls.OnActivated = _wrapped_on_activated
 
-            orig_get_new_dir = getattr(tac_cls, "_GetNewDirection", None)
-            if orig_get_new_dir is not None and not getattr(orig_get_new_dir, "_evomu_camera_guard", False):
-                def _wrapped_get_new_direction(self, direction):
-                    if not _is_finite_safe_vec3(direction):
-                        return _safe_tactical_new_direction(direction)
-                    res = orig_get_new_dir(self, direction)
-                    if not _is_finite_safe_vec3(res, limit=2.0):
-                        return _safe_tactical_new_direction(direction)
-                    return res
-                _wrapped_get_new_direction._evomu_camera_guard = True
-                tac_cls._GetNewDirection = _wrapped_get_new_direction
+                orig_on_deactivated = getattr(tac_cls, "OnDeactivated", None)
+                if orig_on_deactivated is not None and not getattr(orig_on_deactivated, "_evomu_camera_guard", False):
+                    def _wrapped_on_deactivated(self):
+                        res = orig_on_deactivated(self)
+                        if _sanitize_camera_state(self):
+                            _record_guard_hit("camera_dock_guard", "TacticalCamera.OnDeactivated", "sanitized_camera_state")
+                        return res
+                    _wrapped_on_deactivated._evomu_camera_guard = True
+                    tac_cls.OnDeactivated = _wrapped_on_deactivated
 
-            orig_reset_eye_at = getattr(tac_cls, "_ResetEyeAndAtPosition", None)
-            if orig_reset_eye_at is not None and not getattr(orig_reset_eye_at, "_evomu_camera_guard", False):
-                def _wrapped_reset_eye_and_at(self, eyePos0, atPos0, distance, animate=True, duration=None):
-                    _sanitize_camera_state(self)
-                    if not _is_finite_safe_vec3(atPos0):
-                        atPos0 = list(_vec3_tuple(getattr(self, "default_atPosition", (0.0, 0.0, 0.0)), (0.0, 0.0, 0.0)))
-                        animate = False
-                    if not _is_finite_safe_vec3(eyePos0):
-                        eyePos0 = list(_vec3_tuple(getattr(self, "default_eyePosition", (0.0, 500.0, 1000.0)), (0.0, 500.0, 1000.0)))
-                        animate = False
-                    if _vec3_tuple(eyePos0, (0.0, 500.0, 1000.0)) == _vec3_tuple(atPos0, (0.0, 0.0, 0.0)):
-                        eyePos0 = [atPos0[0], atPos0[1] + 500.0, atPos0[2] + 1000.0]
-                        animate = False
-                    return orig_reset_eye_at(self, eyePos0, atPos0, distance, animate, duration)
-                _wrapped_reset_eye_and_at._evomu_camera_guard = True
-                tac_cls._ResetEyeAndAtPosition = _wrapped_reset_eye_and_at
+                orig_get_new_dir = getattr(tac_cls, "_GetNewDirection", None)
+                if orig_get_new_dir is not None and not getattr(orig_get_new_dir, "_evomu_camera_guard", False):
+                    def _wrapped_get_new_direction(self, direction):
+                        if not _is_finite_safe_vec3(direction):
+                            _record_guard_hit("camera_dock_guard", "TacticalCamera._GetNewDirection", "non_finite_direction_arg")
+                            return _safe_tactical_new_direction(direction)
+                        res = orig_get_new_dir(self, direction)
+                        if not _is_finite_safe_vec3(res, limit=2.0):
+                            _record_guard_hit("camera_dock_guard", "TacticalCamera._GetNewDirection", "non_finite_direction_result")
+                            return _safe_tactical_new_direction(direction)
+                        return res
+                    _wrapped_get_new_direction._evomu_camera_guard = True
+                    tac_cls._GetNewDirection = _wrapped_get_new_direction
 
-            orig_set_fixed = getattr(tac_cls, "SetAtPosToFixedDistance", None)
-            if orig_set_fixed is not None and not getattr(orig_set_fixed, "_evomu_camera_guard", False):
-                def _wrapped_set_fixed_dist(self):
-                    _sanitize_camera_state(self)
-                    return orig_set_fixed(self)
-                _wrapped_set_fixed_dist._evomu_camera_guard = True
-                tac_cls.SetAtPosToFixedDistance = _wrapped_set_fixed_dist
+                orig_reset_eye_at = getattr(tac_cls, "_ResetEyeAndAtPosition", None)
+                if orig_reset_eye_at is not None and not getattr(orig_reset_eye_at, "_evomu_camera_guard", False):
+                    def _wrapped_reset_eye_and_at(self, eyePos0, atPos0, distance, animate=True, duration=None):
+                        intervened = bool(_sanitize_camera_state(self))
+                        if not _is_finite_safe_vec3(atPos0):
+                            atPos0 = list(_vec3_tuple(getattr(self, "default_atPosition", (0.0, 0.0, 0.0)), (0.0, 0.0, 0.0)))
+                            animate = False
+                            intervened = True
+                        if not _is_finite_safe_vec3(eyePos0):
+                            eyePos0 = list(_vec3_tuple(getattr(self, "default_eyePosition", (0.0, 500.0, 1000.0)), (0.0, 500.0, 1000.0)))
+                            animate = False
+                            intervened = True
+                        if _vec3_tuple(eyePos0, (0.0, 500.0, 1000.0)) == _vec3_tuple(atPos0, (0.0, 0.0, 0.0)):
+                            eyePos0 = [atPos0[0], atPos0[1] + 500.0, atPos0[2] + 1000.0]
+                            animate = False
+                            intervened = True
+                        if intervened:
+                            _record_guard_hit("camera_dock_guard", "TacticalCamera._ResetEyeAndAtPosition", "sanitized_eye_at_pos")
+                        return orig_reset_eye_at(self, eyePos0, atPos0, distance, animate, duration)
+                    _wrapped_reset_eye_and_at._evomu_camera_guard = True
+                    tac_cls._ResetEyeAndAtPosition = _wrapped_reset_eye_and_at
 
-            orig_set_rot = getattr(tac_cls, "SetAppropriateAtPositionForRotation", None)
-            if orig_set_rot is not None and not getattr(orig_set_rot, "_evomu_camera_guard", False):
-                def _wrapped_set_appropriate_at_pos(self, atPos):
-                    _sanitize_camera_state(self)
-                    if not _is_finite_safe_vec3(atPos):
-                        atPos = getattr(self, "_atPosition", [0.0, 0.0, 0.0])
-                    return orig_set_rot(self, atPos)
-                _wrapped_set_appropriate_at_pos._evomu_camera_guard = True
-                tac_cls.SetAppropriateAtPositionForRotation = _wrapped_set_appropriate_at_pos
-        _HOOKED_CAMERA_GUARD_TARGETS.add("tacticalCamera")
+                orig_set_fixed = getattr(tac_cls, "SetAtPosToFixedDistance", None)
+                if orig_set_fixed is not None and not getattr(orig_set_fixed, "_evomu_camera_guard", False):
+                    def _wrapped_set_fixed_dist(self):
+                        if _sanitize_camera_state(self):
+                            _record_guard_hit("camera_dock_guard", "TacticalCamera.SetAtPosToFixedDistance", "sanitized_camera_state")
+                        return orig_set_fixed(self)
+                    _wrapped_set_fixed_dist._evomu_camera_guard = True
+                    tac_cls.SetAtPosToFixedDistance = _wrapped_set_fixed_dist
 
-    _install_base_space_camera_guard()
+                orig_set_rot = getattr(tac_cls, "SetAppropriateAtPositionForRotation", None)
+                if orig_set_rot is not None and not getattr(orig_set_rot, "_evomu_camera_guard", False):
+                    def _wrapped_set_appropriate_at_pos(self, atPos):
+                        intervened = bool(_sanitize_camera_state(self))
+                        if not _is_finite_safe_vec3(atPos):
+                            atPos = getattr(self, "_atPosition", [0.0, 0.0, 0.0])
+                            intervened = True
+                        if intervened:
+                            _record_guard_hit("camera_dock_guard", "TacticalCamera.SetAppropriateAtPositionForRotation", "sanitized_at_pos")
+                        return orig_set_rot(self, atPos)
+                    _wrapped_set_appropriate_at_pos._evomu_camera_guard = True
+                    tac_cls.SetAppropriateAtPositionForRotation = _wrapped_set_appropriate_at_pos
+            _HOOKED_CAMERA_GUARD_TARGETS.add("tacticalCamera")
 
-    michelle_mod = sys.modules.get("eve.client.script.remote.michelle")
-    if michelle_mod is not None and "michelle" not in _HOOKED_CAMERA_GUARD_TARGETS:
-        michelle_cls = getattr(michelle_mod, "Michelle", None)
-        if michelle_cls is not None:
-            orig_balls_slims = getattr(michelle_cls, "GetBallsAndSlimItems", None)
-            if orig_balls_slims is not None and not getattr(orig_balls_slims, "_evomu_camera_guard", False):
-                def _wrapped_get_balls_and_slim_items(self, *args, **kwargs):
-                    if _michelle_ballpark_missing(self):
-                        return []
-                    try:
-                        res = orig_balls_slims(self, *args, **kwargs)
-                    except TypeError as exc:
-                        if _michelle_ballpark_missing(self) or "NoneType" in str(exc):
+        michelle_mod = sys.modules.get("eve.client.script.remote.michelle")
+        if michelle_mod is not None and "michelle" not in _HOOKED_CAMERA_GUARD_TARGETS:
+            michelle_cls = getattr(michelle_mod, "Michelle", None)
+            if michelle_cls is not None:
+                orig_balls_slims = getattr(michelle_cls, "GetBallsAndSlimItems", None)
+                if orig_balls_slims is not None and not getattr(orig_balls_slims, "_evomu_camera_guard", False):
+                    def _wrapped_get_balls_and_slim_items(self, *args, **kwargs):
+                        if _michelle_ballpark_missing(self):
+                            _record_guard_hit("camera_dock_guard", "Michelle.GetBallsAndSlimItems", "ballpark_missing")
                             return []
-                        raise
-                    return [] if res is None else res
-                _wrapped_get_balls_and_slim_items._evomu_camera_guard = True
-                michelle_cls.GetBallsAndSlimItems = _wrapped_get_balls_and_slim_items
-        _HOOKED_CAMERA_GUARD_TARGETS.add("michelle")
+                        try:
+                            res = orig_balls_slims(self, *args, **kwargs)
+                        except TypeError as exc:
+                            if _michelle_ballpark_missing(self) or "NoneType" in str(exc):
+                                _record_guard_hit("camera_dock_guard", "Michelle.GetBallsAndSlimItems", "caught:TypeError:%s" % exc)
+                                return []
+                            raise
+                        if res is None:
+                            _record_guard_hit("camera_dock_guard", "Michelle.GetBallsAndSlimItems", "none_result_coerced_to_empty")
+                            return []
+                        return res
+                    _wrapped_get_balls_and_slim_items._evomu_camera_guard = True
+                    michelle_cls.GetBallsAndSlimItems = _wrapped_get_balls_and_slim_items
+            _HOOKED_CAMERA_GUARD_TARGETS.add("michelle")
 
-    for target_key, mod_name in (
-        ("mining.locationArrivalIndicationService", "mining.client.location_arrival_indication_service"),
-        ("infoPanels.locationArrivalIndicationSvc", "eve.client.script.ui.shared.infoPanels.locationArrivalIndicationSvc"),
-    ):
-        arr_mod = sys.modules.get(mod_name)
-        if arr_mod is not None and target_key not in _HOOKED_CAMERA_GUARD_TARGETS:
-            _patch_location_arrival_module(arr_mod)
-            _HOOKED_CAMERA_GUARD_TARGETS.add(target_key)
+        for target_key, mod_name in (
+            ("mining.locationArrivalIndicationService", "mining.client.location_arrival_indication_service"),
+            ("infoPanels.locationArrivalIndicationSvc", "eve.client.script.ui.shared.infoPanels.locationArrivalIndicationSvc"),
+        ):
+            arr_mod = sys.modules.get(mod_name)
+            if arr_mod is not None and target_key not in _HOOKED_CAMERA_GUARD_TARGETS:
+                _patch_location_arrival_module(arr_mod)
+                _HOOKED_CAMERA_GUARD_TARGETS.add(target_key)
 
-    sm = getattr(__builtin__, "sm", None)
-    services = getattr(sm, "services", None) if sm is not None else None
-    if isinstance(services, dict):
-        for svc_name in ("locationArrivalIndicationSvc", "locationArrivalIndication"):
-            svc = services.get(svc_name)
-            if svc is not None:
-                svc_cls = getattr(svc, "__class__", None)
-                svc_mod = sys.modules.get(getattr(svc_cls, "__module__", "")) if svc_cls is not None else None
-                if isinstance(svc_cls, type) and svc_cls is not object:
-                    _patch_location_arrival_cls(svc_cls, mod=svc_mod)
-                if "on_warp_finished" in getattr(svc, "__dict__", {}):
-                    inst_fn = svc.__dict__["on_warp_finished"]
-                    if callable(inst_fn) and not getattr(inst_fn, "_evomu_camera_guard", False):
-                        def _make_inst_guard(fn, inst, mod):
-                            def _wrapped_inst(*args, **kwargs):
-                                if _is_docked_or_ballpark_missing(inst, mod):
-                                    if hasattr(inst, "tracked_slim_item"):
-                                        inst.tracked_slim_item = None
-                                    return None
-                                try:
-                                    return fn(*args, **kwargs)
-                                except TypeError as exc:
-                                    if _is_docked_or_ballpark_missing(inst, mod) or "NoneType" in str(exc):
+        sm = getattr(__builtin__, "sm", None)
+        services = getattr(sm, "services", None) if sm is not None else None
+        if isinstance(services, dict):
+            for svc_name in ("locationArrivalIndicationSvc", "locationArrivalIndication"):
+                svc = services.get(svc_name)
+                if svc is not None:
+                    svc_cls = getattr(svc, "__class__", None)
+                    svc_mod = sys.modules.get(getattr(svc_cls, "__module__", "")) if svc_cls is not None else None
+                    if isinstance(svc_cls, type) and svc_cls is not object:
+                        _patch_location_arrival_cls(svc_cls, mod=svc_mod)
+                    if "on_warp_finished" in getattr(svc, "__dict__", {}):
+                        inst_fn = svc.__dict__["on_warp_finished"]
+                        if callable(inst_fn) and not getattr(inst_fn, "_evomu_camera_guard", False):
+                            inst_label = "%s.on_warp_finished" % getattr(svc_cls, "__name__", svc_name)
+                            def _make_inst_guard(fn, inst, mod, fn_label):
+                                def _wrapped_inst(*args, **kwargs):
+                                    if _is_docked_or_ballpark_missing(inst, mod):
                                         if hasattr(inst, "tracked_slim_item"):
                                             inst.tracked_slim_item = None
+                                        _record_guard_hit("camera_dock_guard", fn_label, "docked_or_ballpark_missing")
                                         return None
-                                    raise
-                            _wrapped_inst._evomu_camera_guard = True
-                            return _wrapped_inst
-                        svc.on_warp_finished = _make_inst_guard(inst_fn, svc, svc_mod)
+                                    try:
+                                        return fn(*args, **kwargs)
+                                    except TypeError as exc:
+                                        if _is_docked_or_ballpark_missing(inst, mod) or "NoneType" in str(exc):
+                                            if hasattr(inst, "tracked_slim_item"):
+                                                inst.tracked_slim_item = None
+                                            _record_guard_hit("camera_dock_guard", fn_label, "caught:TypeError:%s" % exc)
+                                            return None
+                                        raise
+                                _wrapped_inst._evomu_camera_guard = True
+                                return _wrapped_inst
+                            svc.on_warp_finished = _make_inst_guard(inst_fn, svc, svc_mod, inst_label)
 
+    _install_base_space_camera_guard()
     _install_hangar_view_teardown_guard()
     _install_hangar_transition_guard()
     _install_live_client_sync_guards()
@@ -1263,6 +1413,7 @@ def _make_hangar_clear_scene_guard(orig_fn):
             return orig_fn(self, *args, **kwargs)
         except AttributeError as exc:
             if _is_none_clear_refs_error(exc) or _is_hangar_view_torn_down(self):
+                _record_guard_hit("hangar_view_teardown_guard", "HangarView.ClearScene", "caught:AttributeError:%s" % exc)
                 return None
             raise
         finally:
@@ -1277,6 +1428,7 @@ def _make_hangar_clear_scene_guard(orig_fn):
 def _make_hangar_replace_guard(orig_fn):
     def _wrapped_replace_existing_ship_model(self, *args, **kwargs):
         if _is_hangar_view_torn_down(self):
+            _record_guard_hit("hangar_view_teardown_guard", "HangarView.ReplaceExistingShipModel", "hangar_view_torn_down")
             return None
         gens_by_key = getattr(self, "_evomu_replace_gens", None)
         if not isinstance(gens_by_key, dict):
@@ -1290,9 +1442,11 @@ def _make_hangar_replace_guard(orig_fn):
             try:
                 return orig_fn(self, *args, **kwargs)
             except _HangarViewTornDown:
+                _record_guard_hit("hangar_view_teardown_guard", "HangarView.ReplaceExistingShipModel", "caught:_HangarViewTornDown")
                 return None
-            except AttributeError:
+            except AttributeError as exc:
                 if _is_hangar_view_stale(self, expected_gen=gen):
+                    _record_guard_hit("hangar_view_teardown_guard", "HangarView.ReplaceExistingShipModel", "caught:AttributeError:%s" % exc)
                     return None
                 raise
         finally:
@@ -1304,18 +1458,23 @@ def _make_hangar_replace_guard(orig_fn):
     return _wrapped_replace_existing_ship_model
 
 
-def _make_hangar_teardown_guard(orig_fn, abort_replace=False, check_after=False):
+def _make_hangar_teardown_guard(orig_fn, abort_replace=False, check_after=False, fn_name=None):
+    fn_label = fn_name or ("HangarView.%s" % getattr(orig_fn, "__name__", "method"))
+
     def _wrapped_hangar_method(self, *args, **kwargs):
         if _is_hangar_view_stale(self):
+            _record_guard_hit("hangar_view_teardown_guard", fn_label, "hangar_view_stale")
             return _abort_hangar_call_or_noop(self, abort_replace)
         gen_before = getattr(self, "_evomu_hangar_gen", 0)
         try:
             result = orig_fn(self, *args, **kwargs)
-        except AttributeError:
+        except AttributeError as exc:
             if _is_hangar_view_stale(self, expected_gen=gen_before):
+                _record_guard_hit("hangar_view_teardown_guard", fn_label, "caught:AttributeError:%s" % exc)
                 return _abort_hangar_call_or_noop(self, abort_replace)
             raise
         if check_after and _is_hangar_view_stale(self, expected_gen=gen_before):
+            _record_guard_hit("hangar_view_teardown_guard", fn_label, "hangar_view_stale_after_call")
             return _abort_hangar_call_or_noop(self, abort_replace)
         return result
 
@@ -1331,15 +1490,19 @@ def _is_hangar_session_undocked():
     return getattr(sess, "stationid", None) is None and getattr(sess, "structureid", None) is None
 
 
-def _make_hangar_undock_guard(orig_fn):
+def _make_hangar_undock_guard(orig_fn, fn_name=None):
     """Guard HangarView methods against undocking mid-reload / /moveme (#1163)."""
+    fn_label = fn_name or ("HangarView.%s" % getattr(orig_fn, "__name__", "method"))
+
     def _wrapped_hangar_undock_method(self, *args, **kwargs):
         if _is_hangar_session_undocked():
+            _record_guard_hit("hangar_view_teardown_guard", fn_label, "session_undocked")
             return None
         try:
             return orig_fn(self, *args, **kwargs)
-        except Exception:
+        except Exception as exc:
             if _is_hangar_session_undocked():
+                _record_guard_hit("hangar_view_teardown_guard", fn_label, "caught:%s" % exc)
                 return None
             raise
 
@@ -1370,10 +1533,16 @@ def _is_hangar_skin_change_stale(view, args, kwargs):
 
 def _make_hangar_skin_change_guard(orig_fn):
     """Guard HangarView.OnActiveShipSkinChange against teardown and stale ship-switch races (#1154, #1286)."""
-    teardown_wrapped = _make_hangar_teardown_guard(orig_fn, abort_replace=False, check_after=True)
+    teardown_wrapped = _make_hangar_teardown_guard(
+        orig_fn,
+        abort_replace=False,
+        check_after=True,
+        fn_name="HangarView.OnActiveShipSkinChange",
+    )
 
     def _wrapped_on_active_ship_skin_change(self, *args, **kwargs):
         if _is_hangar_skin_change_stale(self, args, kwargs):
+            _record_guard_hit("hangar_view_teardown_guard", "HangarView.OnActiveShipSkinChange", "stale_ship_skin_change")
             return None
         return teardown_wrapped(self, *args, **kwargs)
 
@@ -1383,10 +1552,11 @@ def _make_hangar_skin_change_guard(orig_fn):
 
 def _make_hangar_reload_guard(orig_fn):
     """Mark HangarView reload pending until ActivateView/ReloadView finishes while keeping undock protection (#1163, #1286)."""
-    undock_wrapped = _make_hangar_undock_guard(orig_fn)
+    undock_wrapped = _make_hangar_undock_guard(orig_fn, fn_name="HangarView.ReloadView")
 
     def _wrapped_reload_view(self, *args, **kwargs):
         if _is_hangar_session_undocked():
+            _record_guard_hit("hangar_view_teardown_guard", "HangarView.ReloadView", "session_undocked")
             return None
         self._evomu_hangar_reload_pending = True
         try:
@@ -1432,6 +1602,8 @@ def _call_base_transition_method(base_transition_cls, method_name, transition, f
 
 def _install_hangar_transition_guard():
     """Guard HangarToHangarTransition against mid-fade undock / /moveme (#1163)."""
+    if not _is_guard_enabled("hangar_transition_guard"):
+        return False
     if "hangarTransition" in _HOOKED_CAMERA_GUARD_TARGETS:
         return False
     trans_mod = sys.modules.get("eve.client.script.ui.view.transitions")
@@ -1458,13 +1630,15 @@ def _install_hangar_transition_guard():
                 if callable(clear_fn):
                     clear_fn()
                 _call_base_transition_method(base_transition_cls, "StartTransition", self, fromView, toView)
+                _record_guard_hit("hangar_transition_guard", "HangarToHangarTransition.StartTransition", "session_undocked")
                 return None
             self._evomu_aborted_undocked = False
             try:
                 return orig_start(self, fromView, toView)
-            except Exception:
+            except Exception as exc:
                 if _is_hangar_session_undocked():
                     self._evomu_aborted_undocked = True
+                    _record_guard_hit("hangar_transition_guard", "HangarToHangarTransition.StartTransition", "caught:%s" % exc)
                     return None
                 raise
             finally:
@@ -1479,6 +1653,7 @@ def _install_hangar_transition_guard():
         def _wrapped_end_transition(self, fromView, toView):
             if getattr(self, "_evomu_aborted_undocked", False) or _is_hangar_session_undocked():
                 _close_transition_fade_layer(self)
+                _record_guard_hit("hangar_transition_guard", "HangarToHangarTransition.EndTransition", "aborted_or_undocked")
                 return _call_base_transition_method(base_transition_cls, "EndTransition", self, fromView, toView)
             return orig_end(self, fromView, toView)
 
@@ -1491,6 +1666,8 @@ def _install_hangar_transition_guard():
 
 def _install_hangar_view_teardown_guard():
     """Guard HangarView ship-model calls against ClearScene/UnloadView teardown races (#1154)."""
+    if not _is_guard_enabled("hangar_view_teardown_guard"):
+        return False
     if "hangarView" in _HOOKED_CAMERA_GUARD_TARGETS:
         return False
     hangar_mod = sys.modules.get("eve.client.script.ui.view.hangarView")
@@ -1517,7 +1694,12 @@ def _install_hangar_view_teardown_guard():
             setattr(
                 hangar_cls,
                 method_name,
-                _make_hangar_teardown_guard(wrapped_fn, abort_replace=abort_replace, check_after=check_after),
+                _make_hangar_teardown_guard(
+                    wrapped_fn,
+                    abort_replace=abort_replace,
+                    check_after=check_after,
+                    fn_name="HangarView.%s" % method_name,
+                ),
             )
 
     for method_name in _HANGAR_VIEW_UNDOCK_METHODS:
@@ -1577,44 +1759,48 @@ def _maybe_populate_empty_modular_docks(view):
     """Ensure docks exist after scene application when background LoadView deferred them (#1318)."""
     sb = getattr(view, "shipBehaviour", None)
     if sb is None:
-        return
+        return False
     small_docks = getattr(sb, "smallDocks", None)
     big_docks = getattr(sb, "bigDocks", None)
     if small_docks is None or big_docks is None or small_docks or big_docks:
-        return
+        return False
     hangar_model = getattr(view, "activeHangarModel", None)
     hangar_scene = getattr(view, "activeHangarScene", None)
     set_anchor = getattr(sb, "SetAnchorPoint", None)
     if hangar_model is not None and hangar_scene is not None and callable(set_anchor):
         set_anchor(hangar_model, hangar_scene)
+        return True
+    return False
 
 
 def _ensure_hangar_faded_in(view):
     if getattr(view, "_starting_boarding_moment", False):
-        return
+        return False
     if getattr(view, "_retriggerableFadeFromBlackTasklet", None) is not None:
-        return
+        return False
     fade_fn = getattr(view, "_FadeFromBlackHandler", None)
     if callable(fade_fn):
         fade_fn(0.5, False)
+        return True
+    return False
 
 
 def _schedule_modular_ship_retry(view, event_type, item_id, type_id):
     """Schedule a bounded one-shot retry if modular PlaceShip left activeShipModel as None (#1318)."""
     if not item_id or not type_id:
-        return
+        return False
     if getattr(view, "_evomu_ship_retry_count", 0) >= 2 or getattr(view, "_evomu_ship_retry_pending", False):
-        return
+        return False
     hangar_mod = sys.modules.get("eve.client.script.ui.view.hangarView")
     replace_update = getattr(hangar_mod, "REPLACE_UPDATE", None) if hangar_mod is not None else None
     replace_switch = getattr(hangar_mod, "REPLACE_SWITCHSHIPS", None) if hangar_mod is not None else None
     allowed = tuple(val for val in (replace_update, replace_switch) if val is not None)
     if allowed and event_type not in allowed:
-        return
+        return False
     uthread2 = sys.modules.get("uthread2")
     delay_fn = getattr(uthread2, "call_after_simtime_delay", None) if uthread2 is not None else None
     if not callable(delay_fn):
-        return
+        return False
 
     def _retry_place_ship():
         view._evomu_ship_retry_pending = False
@@ -1636,16 +1822,24 @@ def _schedule_modular_ship_retry(view, event_type, item_id, type_id):
     view._evomu_ship_retry_pending = True
     try:
         delay_fn(_retry_place_ship, 0.5)
+        return True
     except Exception:
         view._evomu_ship_retry_pending = False
+        return False
 
 
 def _make_modular_replace_guard(orig_fn):
     """Guard HangarView._ReplaceExistingShipModelModular against unready docks/camera and fade-black hangs (#1318)."""
     def _wrapped_modular_replace(self, *args, **kwargs):
         _install_modular_hangar_camera_guard()
-        _maybe_populate_empty_modular_docks(self)
+        populated_docks = _maybe_populate_empty_modular_docks(self)
         override_cam, _ = _begin_null_camera_override(self)
+        if populated_docks or override_cam:
+            _record_guard_hit(
+                "hangar_view_teardown_guard",
+                "HangarView._ReplaceExistingShipModelModular",
+                "populated_docks_or_null_camera",
+            )
         try:
             res = orig_fn(self, *args, **kwargs)
         finally:
@@ -1654,7 +1848,7 @@ def _make_modular_replace_guard(orig_fn):
             if getattr(self, "activeShipModel", None) is not None:
                 self._evomu_ship_retry_count = 0
             else:
-                _ensure_hangar_faded_in(self)
+                faded = _ensure_hangar_faded_in(self)
                 event_type = args[0] if args else kwargs.get("eventType")
                 item_id = args[1] if len(args) > 1 else kwargs.get("itemID")
                 type_id = args[2] if len(args) > 2 else kwargs.get("typeID")
@@ -1662,7 +1856,13 @@ def _make_modular_replace_guard(orig_fn):
                     item_id = self.GetActiveShipItemID()
                 if not type_id and callable(getattr(self, "GetActiveShipTypeID", None)):
                     type_id = self.GetActiveShipTypeID()
-                _schedule_modular_ship_retry(self, event_type, item_id, type_id)
+                retried = _schedule_modular_ship_retry(self, event_type, item_id, type_id)
+                if (faded or retried) and not (populated_docks or override_cam):
+                    _record_guard_hit(
+                        "hangar_view_teardown_guard",
+                        "HangarView._ReplaceExistingShipModelModular",
+                        "faded_in_or_scheduled_retry",
+                    )
         return res
 
     _wrapped_modular_replace._evomu_camera_guard = True
@@ -1774,6 +1974,8 @@ def _is_stale_inventory_controller_for_session(inv_cont, sess):
 
 def _install_inventory_transition_guard():
     """Guard V24 Inventory/InvContCapacityGauge/invCacheContainer across transitions (#1267, #1333)."""
+    if not _is_guard_enabled("inventory_transition_guard"):
+        return False
     changed = False
     inv_mod = sys.modules.get("eve.client.script.ui.shared.inventory.invWindow")
     inv_cls = getattr(inv_mod, "Inventory", None) if inv_mod is not None else None
@@ -1796,6 +1998,7 @@ def _install_inventory_transition_guard():
                     if win_id.startswith(
                         ("InventoryStructure", "InventoryStation", "StructureItems", "StructureShips")
                     ):
+                        _record_guard_hit("inventory_transition_guard", "Inventory._IsCurrentInventoryValid", "undocked_window_id")
                         return False
                     if curr_inv_id:
                         inv_head = (
@@ -1804,13 +2007,16 @@ def _install_inventory_transition_guard():
                             else str(curr_inv_id)
                         )
                         if inv_head.startswith(("Structure", "Station")):
+                            _record_guard_hit("inventory_transition_guard", "Inventory._IsCurrentInventoryValid", "undocked_curr_inv_id")
                             return False
                     if _is_stale_inventory_controller_for_session(getattr(self, "invCont", None), sess):
+                        _record_guard_hit("inventory_transition_guard", "Inventory._IsCurrentInventoryValid", "stale_inventory_controller")
                         return False
                 try:
                     return orig_valid(self, *args, **kwargs)
                 except Exception as exc:
                     if isinstance(exc, (KeyError, RuntimeError)) or _is_container_inaccessible_error(exc):
+                        _record_guard_hit("inventory_transition_guard", "Inventory._IsCurrentInventoryValid", "caught:%s" % exc)
                         return False
                     raise
 
@@ -1826,6 +2032,7 @@ def _install_inventory_transition_guard():
                     callable(valid_fn) and not valid_fn()
                 ):
                     self.updateSelectedItemsPending = None
+                    _record_guard_hit("inventory_transition_guard", "Inventory.OnSessionChanged", "cleared_pending_selection_update")
                 return res
 
             _wrapped_on_session_changed._evomu_camera_guard = True
@@ -1837,14 +2044,17 @@ def _install_inventory_transition_guard():
                 sess = getattr(__builtin__, "session", None)
                 if getattr(self, "destroyed", False) or getattr(sess, "mutating", False):
                     self.updateSelectedItemsPending = None
+                    _record_guard_hit("inventory_transition_guard", "Inventory._UpdateSelectedItems", "destroyed_or_mutating")
                     return None
                 valid_fn = getattr(self, "_IsCurrentInventoryValid", None)
                 if callable(valid_fn) and not valid_fn():
                     self.updateSelectedItemsPending = None
+                    _record_guard_hit("inventory_transition_guard", "Inventory._UpdateSelectedItems", "inventory_invalid")
                     return None
                 inv_cont = getattr(self, "invCont", None)
                 if _is_stale_inventory_controller_for_session(inv_cont, sess):
                     self.updateSelectedItemsPending = None
+                    _record_guard_hit("inventory_transition_guard", "Inventory._UpdateSelectedItems", "stale_inventory_controller")
                     return None
                 try:
                     return orig_update(self)
@@ -1859,6 +2069,7 @@ def _install_inventory_transition_guard():
                         )
                     ):
                         self.updateSelectedItemsPending = None
+                        _record_guard_hit("inventory_transition_guard", "Inventory._UpdateSelectedItems", "caught:%s" % exc)
                         return None
                     raise
 
@@ -1878,6 +2089,7 @@ def _install_inventory_transition_guard():
                         raise
                     if not _present_user_error_dialog(exc, inv_mod=inv_mod):
                         raise
+                    _record_guard_hit("inventory_transition_guard", "Inventory._MoveItems", "caught_user_error:%s" % exc)
                     return None
 
             _wrapped_move_items._evomu_camera_guard = True
@@ -1896,7 +2108,7 @@ def _install_inventory_transition_guard():
         for meth_name in ("SetSecondaryVolume", "UpdateLabel"):
             orig_meth = getattr(gauge_cls, meth_name, None)
             if callable(orig_meth) and not getattr(orig_meth, "_evomu_camera_guard", False):
-                def _make_gauge_guard(orig_fn):
+                def _make_gauge_guard(orig_fn, fn_label):
                     def _wrapped_gauge_method(self, *args, **kwargs):
                         sess = getattr(__builtin__, "session", None)
                         inv_cont = getattr(self, "invCont", None)
@@ -1907,6 +2119,7 @@ def _install_inventory_transition_guard():
                             or getattr(sess, "mutating", False)
                             or _is_stale_inventory_controller_for_session(inv_cont, sess)
                         ):
+                            _record_guard_hit("inventory_transition_guard", fn_label, "stale_or_destroyed_gauge")
                             return None
                         try:
                             return orig_fn(self, *args, **kwargs)
@@ -1922,13 +2135,14 @@ def _install_inventory_transition_guard():
                                     )
                                 )
                             ):
+                                _record_guard_hit("inventory_transition_guard", fn_label, "caught:%s" % exc)
                                 return None
                             raise
 
                     _wrapped_gauge_method._evomu_camera_guard = True
                     return _wrapped_gauge_method
 
-                setattr(gauge_cls, meth_name, _make_gauge_guard(orig_meth))
+                setattr(gauge_cls, meth_name, _make_gauge_guard(orig_meth, "InvContCapacityGauge.%s" % meth_name))
         _HOOKED_CAMERA_GUARD_TARGETS.add("invContainer")
         changed = True
 
@@ -1949,11 +2163,13 @@ def _install_inventory_transition_guard():
 
             def _wrapped_inv_cache_container_list(self, *args, **kwargs):
                 if getattr(self, "moniker", None) is None:
+                    _record_guard_hit("inventory_transition_guard", "invCacheContainer.List", "moniker_is_none")
                     return []
                 try:
                     return orig_list_func(self, *args, **kwargs)
-                except AttributeError:
+                except AttributeError as exc:
                     if getattr(self, "moniker", None) is None:
+                        _record_guard_hit("inventory_transition_guard", "invCacheContainer.List", "caught:AttributeError:%s" % exc)
                         return []
                     raise
 
@@ -2116,12 +2332,14 @@ def _is_stale_ship_dogma_key_error(exc, controller=None, initial_ship_ids=None):
     return False
 
 
-def _make_fitting_panel_stale_ship_guard(orig_fn, controller_attr="controller"):
+def _make_fitting_panel_stale_ship_guard(orig_fn, controller_attr="controller", cls_name="FittingPanel"):
     """Guard fitting panel stat refresh methods against unloaded stale ship KeyErrors (#1410)."""
     orig_func = getattr(orig_fn, "__func__", orig_fn)
+    fn_label = "%s.%s" % (cls_name, getattr(orig_func, "__name__", "UpdateStats"))
 
     def _wrapped_fitting_panel_update(self, *args, **kwargs):
         if getattr(self, "destroyed", False):
+            _record_guard_hit("fitting_active_ship_guard", fn_label, "panel_destroyed")
             return None
         controller = getattr(self, controller_attr, None)
         initial_ship_ids = _snapshot_fitting_ship_ids(controller)
@@ -2134,6 +2352,7 @@ def _make_fitting_panel_stale_ship_guard(orig_fn, controller_attr="controller"):
                 controller=live_controller,
                 initial_ship_ids=initial_ship_ids,
             ):
+                _record_guard_hit("fitting_active_ship_guard", fn_label, "caught:KeyError:%s" % exc)
                 return None
             raise
 
@@ -2146,6 +2365,8 @@ def _make_fitting_panel_stale_ship_guard(orig_fn, controller_attr="controller"):
 
 def _install_fitting_active_ship_guard():
     """Guard fittingSvc/fittingWarnings/StatsPanel/DronePanel against dock & ship-swap races (#1254, #1410, #1443)."""
+    if not _is_guard_enabled("fitting_active_ship_guard"):
+        return False
     changed = False
     fsvc_mod = sys.modules.get("eve.client.script.environment.fittingSvc")
     fsvc_cls = None
@@ -2168,6 +2389,7 @@ def _install_fitting_active_ship_guard():
                         sess = getattr(__builtin__, "session", None)
                         active_ship = getattr(sess, "shipid", None)
                     if active_ship is None:
+                        _record_guard_hit("fitting_active_ship_guard", "FittingSvc.GetFittingDictForActiveShip", "no_active_ship_raised")
                         raise RuntimeError("No active ship")
                     return orig_get(self, *args, **kwargs)
 
@@ -2188,6 +2410,7 @@ def _install_fitting_active_ship_guard():
                     except IndexError as exc:
                         sess = getattr(__builtin__, "session", None)
                         if getattr(sess, "shipid", None) is None or "None" in str(exc):
+                            _record_guard_hit("fitting_active_ship_guard", "FittingWarnings.EvaluateFit", "caught:IndexError:%s" % exc)
                             return None
                         raise
                     except KeyError as exc:
@@ -2196,6 +2419,7 @@ def _install_fitting_active_ship_guard():
                             controller=fittingController,
                             initial_ship_ids=initial_ship_ids,
                         ):
+                            _record_guard_hit("fitting_active_ship_guard", "FittingWarnings.EvaluateFit", "caught:KeyError:%s" % exc)
                             return None
                         raise
 
@@ -2218,6 +2442,7 @@ def _install_fitting_active_ship_guard():
 
                 def _wrapped_update_icon_thread(self):
                     if getattr(self, "destroyed", False):
+                        _record_guard_hit("fitting_active_ship_guard", "WarningIconCont.__UpdateIcon_thread", "panel_destroyed")
                         return None
                     controller = getattr(self, "fittingController", None)
                     initial_ship_ids = _snapshot_fitting_ship_ids(controller)
@@ -2226,6 +2451,7 @@ def _install_fitting_active_ship_guard():
                     except IndexError as exc:
                         sess = getattr(__builtin__, "session", None)
                         if getattr(sess, "shipid", None) is None or "None" in str(exc):
+                            _record_guard_hit("fitting_active_ship_guard", "WarningIconCont.__UpdateIcon_thread", "caught:IndexError:%s" % exc)
                             return None
                         raise
                     except KeyError as exc:
@@ -2235,6 +2461,7 @@ def _install_fitting_active_ship_guard():
                             controller=live_controller,
                             initial_ship_ids=initial_ship_ids,
                         ):
+                            _record_guard_hit("fitting_active_ship_guard", "WarningIconCont.__UpdateIcon_thread", "caught:KeyError:%s" % exc)
                             return None
                         raise
 
@@ -2248,8 +2475,8 @@ def _install_fitting_active_ship_guard():
         "eve.client.script.ui.shared.fittingScreen.statsPanel",
         "StatsPanel",
         (
-            ("UpdateStats", _make_fitting_panel_stale_ship_guard),
-            ("UpdateDroneStats", _make_fitting_panel_stale_ship_guard),
+            ("UpdateStats", lambda fn: _make_fitting_panel_stale_ship_guard(fn, cls_name="StatsPanel")),
+            ("UpdateDroneStats", lambda fn: _make_fitting_panel_stale_ship_guard(fn, cls_name="StatsPanel")),
         ),
     ):
         changed = True
@@ -2258,21 +2485,27 @@ def _install_fitting_active_ship_guard():
         "dronePanel",
         "eve.client.script.ui.shared.fittingScreen.fittingPanels.dronePanel",
         "DronePanel",
-        (("UpdateDroneStats", _make_fitting_panel_stale_ship_guard),),
+        (("UpdateDroneStats", lambda fn: _make_fitting_panel_stale_ship_guard(fn, cls_name="DronePanel")),),
     ):
         changed = True
 
     return changed
 
 
-def _make_modular_skin_change_guard(orig_fn):
+def _make_modular_skin_change_guard(
+    orig_fn,
+    guard_id="modular_capital_hangar_guard",
+    fn_name="ModularCapitalHangarShipBehaviour.ProcessSkinChange",
+):
     """Skip ProcessSkinChange when playerShipItemID is unset or stale vs session.shipid (#1286)."""
     def _wrapped_process_skin_change(self, newModel, *args, **kwargs):
         player_ship_id = getattr(self, "playerShipItemID", None)
         if not player_ship_id:
+            _record_guard_hit(guard_id, fn_name, "unset_player_ship_item_id")
             return None
         sess_ship = _session_ship_id()
         if sess_ship is not None and player_ship_id != sess_ship:
+            _record_guard_hit(guard_id, fn_name, "stale_player_ship_item_id")
             return None
         return orig_fn(self, newModel, *args, **kwargs)
 
@@ -2284,9 +2517,11 @@ def _make_hangar_ship_damage_guard(orig_fn):
     """Skip BaseHangarShipBehaviour.SetShipDamage for unset, stale, or undocked ships (#1286)."""
     def _wrapped_set_ship_damage(self, itemID, model, *args, **kwargs):
         if not itemID or _is_hangar_session_undocked():
+            _record_guard_hit("base_hangar_behaviour_guard", "BaseHangarShipBehaviour.SetShipDamage", "unset_item_or_undocked")
             return False
         sess_ship = _session_ship_id()
         if sess_ship is not None and itemID != sess_ship:
+            _record_guard_hit("base_hangar_behaviour_guard", "BaseHangarShipBehaviour.SetShipDamage", "stale_ship_id")
             return False
         return orig_fn(self, itemID, model, *args, **kwargs)
 
@@ -2326,6 +2561,8 @@ def _install_cls_method_guard(target_key, mod_name, cls_name, method_name, wrapp
 
 def _install_base_hangar_behaviour_guard():
     """Guard BaseHangarShipBehaviour.SetShipDamage against stale unboarded ship IDs (#1286)."""
+    if not _is_guard_enabled("base_hangar_behaviour_guard"):
+        return False
     return _install_cls_method_guard(
         "baseHangarBehaviours",
         "eve.client.script.ui.view.hangarBehaviours.baseHangarBehaviours",
@@ -2337,6 +2574,8 @@ def _install_base_hangar_behaviour_guard():
 
 def _install_modular_capital_hangar_guard():
     """Guard ModularCapitalHangarShipBehaviour.ProcessSkinChange against stale ship IDs (#1286)."""
+    if not _is_guard_enabled("modular_capital_hangar_guard"):
+        return False
     return _install_cls_method_guard(
         "modularHangarCapitalBehaviours",
         "eve.client.script.ui.view.hangarBehaviours.modularHangarCapitalBehaviours",
@@ -2348,6 +2587,8 @@ def _install_modular_capital_hangar_guard():
 
 def _install_modular_hangar_teardown_guard():
     """Guard ModularHangarShipBehaviour against CleanScene None-camera (#1218) and stale ProcessSkinChange (#1286)."""
+    if not _is_guard_enabled("modular_hangar_teardown_guard"):
+        return False
     if "modularHangarBehaviours" in _HOOKED_CAMERA_GUARD_TARGETS:
         return False
     mhb_mod = sys.modules.get("eve.client.script.ui.view.hangarBehaviours.modularHangarBehaviours")
@@ -2360,42 +2601,62 @@ def _install_modular_hangar_teardown_guard():
             continue
         orig_clean = getattr(cls, "CleanScene", None)
         if callable(orig_clean) and not getattr(orig_clean, "_evomu_camera_guard", False):
-            def _make_clean_guard(orig_fn):
+            def _make_clean_guard(orig_fn, fn_label):
                 def _wrapped_clean_scene(self):
+                    intervened = False
                     if getattr(self, "smallDocks", None) is None:
                         self.smallDocks = []
+                        intervened = True
                     if getattr(self, "bigDocks", None) is None:
                         self.bigDocks = []
+                        intervened = True
                     override_cam, cam_val = _begin_null_camera_override(self)
+                    if override_cam:
+                        intervened = True
                     try:
-                        return orig_fn(self)
+                        res = orig_fn(self)
                     except AttributeError as exc:
                         if _is_none_clear_refs_error(exc) or ("ClearRefs" in str(exc) and cam_val is None):
+                            _record_guard_hit("modular_hangar_teardown_guard", fn_label, "caught:AttributeError:%s" % exc)
                             return None
                         raise
                     finally:
                         _end_null_camera_override(self, override_cam)
+                    if intervened:
+                        _record_guard_hit("modular_hangar_teardown_guard", fn_label, "sanitized_null_camera_or_docks")
+                    return res
 
                 _wrapped_clean_scene._evomu_camera_guard = True
                 return _wrapped_clean_scene
 
-            cls.CleanScene = _make_clean_guard(orig_clean)
+            cls.CleanScene = _make_clean_guard(orig_clean, "%s.CleanScene" % cls_name)
             hooked = True
         if cls_name == "ModularHangarShipBehaviour":
-            if _wrap_cls_method_if_present(cls, "ProcessSkinChange", _make_modular_skin_change_guard):
+            if _wrap_cls_method_if_present(
+                cls,
+                "ProcessSkinChange",
+                lambda fn: _make_modular_skin_change_guard(
+                    fn,
+                    guard_id="modular_hangar_teardown_guard",
+                    fn_name="ModularHangarShipBehaviour.ProcessSkinChange",
+                ),
+            ):
                 hooked = True
     if hooked:
         _HOOKED_CAMERA_GUARD_TARGETS.add("modularHangarBehaviours")
     return hooked
 
 
-def _make_wreck_none_model_guard(orig_fn):
+def _make_wreck_none_model_guard(orig_fn, fn_label=None):
     """Guard Wreck Prepare/rotation methods when async model loading or Release() leaves self.model None (#1217)."""
+    method_label = fn_label or ("Wreck.%s" % getattr(orig_fn, "__name__", "method"))
+
     def _wrapped_wreck_method(self, *args, **kwargs):
         try:
             return orig_fn(self, *args, **kwargs)
-        except AttributeError:
+        except AttributeError as exc:
             if getattr(self, "model", None) is None:
+                _record_guard_hit("wreck_rotation_guard", method_label, "caught:AttributeError:model_is_none:%s" % exc)
                 return None
             raise
 
@@ -2416,15 +2677,17 @@ def _make_space_mgr_wreck_guard(orig_fn):
 
 def _install_wreck_rotation_guard():
     """Guard Wreck.Prepare/rotation methods when self.model is None on persisted or unloaded wrecks (#1217)."""
+    if not _is_guard_enabled("wreck_rotation_guard"):
+        return False
     hooked_wreck = _wrap_cls_methods_table(
         "wreck",
         "eve.client.script.environment.spaceObject.wreck",
         "Wreck",
         (
-            ("Prepare", _make_wreck_none_model_guard),
-            ("SetRandomRotation", _make_wreck_none_model_guard),
-            ("SetDungeonRotation", _make_wreck_none_model_guard),
-            ("SetBallRotation", _make_wreck_none_model_guard),
+            ("Prepare", lambda fn: _make_wreck_none_model_guard(fn, "Wreck.Prepare")),
+            ("SetRandomRotation", lambda fn: _make_wreck_none_model_guard(fn, "Wreck.SetRandomRotation")),
+            ("SetDungeonRotation", lambda fn: _make_wreck_none_model_guard(fn, "Wreck.SetDungeonRotation")),
+            ("SetBallRotation", lambda fn: _make_wreck_none_model_guard(fn, "Wreck.SetBallRotation")),
         ),
     )
     hooked_space_mgr = _wrap_cls_methods_table(
@@ -2442,6 +2705,8 @@ def _install_wreck_rotation_guard():
 
 def _install_slots_container_sync_guard():
     """Ensure SlotsContainer rebuilds HUD slots on OnModuleFitted / late ProcessShipEffect (#1252)."""
+    if not _is_guard_enabled("slots_container_sync_guard"):
+        return False
     if "slotsContainer" in _HOOKED_CAMERA_GUARD_TARGETS:
         return False
     sc_mod = sys.modules.get("eve.client.script.ui.inflight.shipHud.slotsContainer")
@@ -2451,10 +2716,12 @@ def _install_slots_container_sync_guard():
 
     def _schedule_slots_refresh(cont):
         if getattr(cont, "destroyed", False):
-            return
+            return False
         init_delayed = getattr(cont, "InitSlotsDelayed", None)
         if callable(init_delayed):
             init_delayed()
+            return True
+        return False
 
     notify_events = getattr(sc_cls, "__notifyevents__", None)
     if isinstance(notify_events, (list, tuple)) and "OnModuleFitted" not in notify_events:
@@ -2465,7 +2732,8 @@ def _install_slots_container_sync_guard():
 
     if not getattr(getattr(sc_cls, "OnModuleFitted", None), "_evomu_camera_guard", False):
         def _on_module_fitted(self, *args, **kwargs):
-            _schedule_slots_refresh(self)
+            if _schedule_slots_refresh(self):
+                _record_guard_hit("slots_container_sync_guard", "SlotsContainer.OnModuleFitted", "injected_on_module_fitted_refresh")
 
         _on_module_fitted._evomu_camera_guard = True
         sc_cls.OnModuleFitted = _on_module_fitted
@@ -2483,7 +2751,8 @@ def _install_slots_container_sync_guard():
                     if callable(get_mods):
                         for m in get_mods() or ():
                             if getattr(m, "itemID", None) == item_id:
-                                _schedule_slots_refresh(self)
+                                if _schedule_slots_refresh(self):
+                                    _record_guard_hit("slots_container_sync_guard", "SlotsContainer.ProcessShipEffect", "missing_module_slot_refresh")
                                 break
             return res
 
@@ -2507,7 +2776,8 @@ def _install_slots_container_sync_guard():
                 ):
                     is_fit_flag = getattr(sc_mod, "IsShipFittingFlag", None)
                     if callable(is_fit_flag) and is_fit_flag(getattr(item, "flagID", None)):
-                        _schedule_slots_refresh(self)
+                        if _schedule_slots_refresh(self):
+                            _record_guard_hit("slots_container_sync_guard", "SlotsContainer.OnInvChange", "missing_module_slot_refresh")
             return res
 
         _wrapped_on_inv_change._evomu_camera_guard = True
@@ -2553,11 +2823,13 @@ def _can_run_sensor_gfx_swipe(gfx_handler):
 def _make_sensor_start_gfx_swipe_guard(orig_fn):
     def _wrapped_start_gfx_swipe(self, *args, **kwargs):
         if not _can_run_sensor_gfx_swipe(self):
+            _record_guard_hit("sensor_suite_gfx_guard", "GfxHandler.StartGfxSwipe", "cannot_run_sensor_gfx_swipe")
             return None
         try:
             return orig_fn(self, *args, **kwargs)
         except RuntimeError as exc:
             if _is_sensor_gfx_load_error(exc) and getattr(self, "gfxSensorSwipe", None) is None:
+                _record_guard_hit("sensor_suite_gfx_guard", "GfxHandler.StartGfxSwipe", "caught:RuntimeError:%s" % exc)
                 return None
             raise
 
@@ -2571,6 +2843,7 @@ def _make_sensor_gfx_swipe_thread_guard(orig_fn):
             return orig_fn(self, *args, **kwargs)
         except RuntimeError as exc:
             if _is_sensor_gfx_load_error(exc) and getattr(self, "gfxSensorSwipe", None) is None:
+                _record_guard_hit("sensor_suite_gfx_guard", "GfxHandler._GfxSwipeThread", "caught:RuntimeError:%s" % exc)
                 return None
             raise
         finally:
@@ -2583,6 +2856,8 @@ def _make_sensor_gfx_swipe_thread_guard(orig_fn):
 
 def _install_sensor_suite_gfx_guard():
     """Guard sensorsuite.overlay.gfxhandler.GfxHandler against jump/scene-reload races (#1292, #1293)."""
+    if not _is_guard_enabled("sensor_suite_gfx_guard"):
+        return False
     if "sensorGfxHandler" in _HOOKED_CAMERA_GUARD_TARGETS:
         return False
     gfx_mod = sys.modules.get("sensorsuite.overlay.gfxhandler")
@@ -2603,10 +2878,13 @@ def _noop_camera_method(self, *args, **kwargs):
     return None
 
 
-def _make_none_model_guard(orig_fn, fallback_fn):
+def _make_none_model_guard(orig_fn, fallback_fn, fn_name=None):
     """Return ``fallback_fn`` when ``self.model is None``, otherwise run ``orig_fn`` unmasked (#1318)."""
+    fn_label = fn_name or ("ModularHangarCamera.%s" % getattr(orig_fn, "__name__", "method"))
+
     def _wrapped_none_model_method(self, *args, **kwargs):
         if getattr(self, "model", None) is None:
+            _record_guard_hit("modular_hangar_camera_guard", fn_label, "model_is_none")
             return fallback_fn(self, *args, **kwargs)
         return orig_fn(self, *args, **kwargs)
 
@@ -2679,6 +2957,7 @@ def _make_modular_anim_enter_guard(orig_fn):
                 set_eye(target)
             self.yaw = 0
             self.pitch = 0
+            _record_guard_hit("modular_hangar_camera_guard", "ModularHangarCamera.AnimEnterHangar", "model_is_none")
             return None
         return orig_fn(self, *args, **kwargs)
 
@@ -2703,6 +2982,7 @@ def _make_capital_anim_enter_guard(orig_fn):
             set_eye = getattr(self, "SetEyePosition", None)
             if callable(set_eye):
                 set_eye(target)
+            _record_guard_hit("modular_hangar_camera_guard", "ModularHangarCapitalCamera.AnimEnterHangar", "model_is_none")
             return None
         return orig_fn(self, *args, **kwargs)
 
@@ -2714,6 +2994,7 @@ def _make_capital_start_locations_guard(orig_fn):
     """Downgrade wasOrbiting when model is None so _configureCameraStartLocations skips modelWorldPosition (#1318)."""
     def _wrapped_configure_start_locations(self, typeID, wasOrbiting=False, *args, **kwargs):
         if getattr(self, "model", None) is None and (wasOrbiting or kwargs.get("wasOrbiting")):
+            _record_guard_hit("modular_hangar_camera_guard", "ModularHangarCapitalCamera._configureCameraStartLocations", "downgraded_was_orbiting")
             return orig_fn(self, typeID, False)
         return orig_fn(self, typeID, wasOrbiting, *args, **kwargs)
 
@@ -2726,12 +3007,14 @@ def _make_capital_orbit_thread_guard(orig_fn):
     def _wrapped_capital_orbit_thread(self, *args, **kwargs):
         if getattr(self, "model", None) is None and not getattr(self, "lerpingIntoPosition", True):
             self.orbitUpdateThread = None
+            _record_guard_hit("modular_hangar_camera_guard", "ModularHangarCapitalCamera.CapitalOrbitUpdateThread", "model_is_none_not_lerping")
             return None
         try:
             return orig_fn(self, *args, **kwargs)
-        except AttributeError:
+        except AttributeError as exc:
             if getattr(self, "model", None) is None:
                 self.orbitUpdateThread = None
+                _record_guard_hit("modular_hangar_camera_guard", "ModularHangarCapitalCamera.CapitalOrbitUpdateThread", "caught:AttributeError:%s" % exc)
                 return None
             raise
 
@@ -2741,15 +3024,17 @@ def _make_capital_orbit_thread_guard(orig_fn):
 
 def _install_modular_hangar_camera_guard():
     """Guard ModularHangarCamera and ModularHangarCapitalCamera against None ship models (#1318)."""
+    if not _is_guard_enabled("modular_hangar_camera_guard"):
+        return False
     hooked_std = _wrap_cls_methods_table(
         "modularHangarCamera",
         "eve.client.script.ui.camera.modularHangarCamera",
         "ModularHangarCamera",
         (
             ("AnimEnterHangar", _make_modular_anim_enter_guard),
-            ("CalculateTargetPoint", lambda fn: _make_none_model_guard(fn, _safe_modular_target_point)),
-            ("GetSizeDependantZoomConstants", lambda fn: _make_none_model_guard(fn, _safe_modular_zoom_constants)),
-            ("_updateShipChangeLocations", lambda fn: _make_none_model_guard(fn, _noop_camera_method)),
+            ("CalculateTargetPoint", lambda fn: _make_none_model_guard(fn, _safe_modular_target_point, "ModularHangarCamera.CalculateTargetPoint")),
+            ("GetSizeDependantZoomConstants", lambda fn: _make_none_model_guard(fn, _safe_modular_zoom_constants, "ModularHangarCamera.GetSizeDependantZoomConstants")),
+            ("_updateShipChangeLocations", lambda fn: _make_none_model_guard(fn, _noop_camera_method, "ModularHangarCamera._updateShipChangeLocations")),
         ),
     )
     hooked_cap = _wrap_cls_methods_table(
@@ -2758,8 +3043,8 @@ def _install_modular_hangar_camera_guard():
         "ModularHangarCapitalCamera",
         (
             ("AnimEnterHangar", _make_capital_anim_enter_guard),
-            ("CalculateOrbitTarget", lambda fn: _make_none_model_guard(fn, _safe_capital_orbit_target)),
-            ("Orbit", lambda fn: _make_none_model_guard(fn, _noop_camera_method)),
+            ("CalculateOrbitTarget", lambda fn: _make_none_model_guard(fn, _safe_capital_orbit_target, "ModularHangarCapitalCamera.CalculateOrbitTarget")),
+            ("Orbit", lambda fn: _make_none_model_guard(fn, _noop_camera_method, "ModularHangarCapitalCamera.Orbit")),
             ("_configureCameraStartLocations", _make_capital_start_locations_guard),
             ("CapitalOrbitUpdateThread", _make_capital_orbit_thread_guard),
         ),
@@ -2830,45 +3115,95 @@ def _prune_empty_signal_methods(methods_map, obj, funcs):
 
 
 def _discard_panel_slot_from_signal(sig, panel, slot, orig_func=None):
-    """Idempotently disconnect *panel*'s slot (and any pre-wrap function) from *sig* (#1332)."""
+    """Idempotently disconnect *panel*'s slot (and any pre-wrap function) from *sig* and return removed count (#1332)."""
+    slot_func = getattr(slot, "__func__", None) if slot is not None else None
+    methods_map = getattr(sig, "_methods", None)
+    before_has_slot = False
+    before_has_orig = False
+    if methods_map is not None and hasattr(methods_map, "get"):
+        try:
+            pre_funcs = methods_map.get(panel)
+        except Exception:
+            pre_funcs = None
+        if pre_funcs is not None:
+            try:
+                before_has_slot = slot_func is not None and slot_func in pre_funcs
+            except Exception:
+                before_has_slot = False
+            try:
+                before_has_orig = (
+                    orig_func is not None and orig_func is not slot_func and orig_func in pre_funcs
+                )
+            except Exception:
+                before_has_orig = False
+
     disconnect_fn = getattr(sig, "disconnect", None)
     if slot is not None and callable(disconnect_fn):
         try:
             disconnect_fn(slot)
         except Exception:
             pass
-    methods_map = getattr(sig, "_methods", None)
     if methods_map is None or not hasattr(methods_map, "get"):
-        return
+        return 0
     try:
         funcs = methods_map.get(panel)
     except Exception:
-        return
-    if funcs is None or not hasattr(funcs, "discard"):
-        return
-    slot_func = getattr(slot, "__func__", None) if slot is not None else None
-    if slot_func is not None:
-        funcs.discard(slot_func)
-    if orig_func is not None:
-        funcs.discard(orig_func)
-    _prune_empty_signal_methods(methods_map, panel, funcs)
+        funcs = None
+    if funcs is not None and hasattr(funcs, "discard"):
+        if slot_func is not None:
+            funcs.discard(slot_func)
+        if orig_func is not None:
+            funcs.discard(orig_func)
+        _prune_empty_signal_methods(methods_map, panel, funcs)
+
+    removed = 0
+    try:
+        post_funcs = methods_map.get(panel)
+    except Exception:
+        post_funcs = None
+    if before_has_slot:
+        try:
+            still_has_slot = post_funcs is not None and slot_func in post_funcs
+        except Exception:
+            still_has_slot = False
+        if not still_has_slot:
+            removed += 1
+    if before_has_orig:
+        try:
+            still_has_orig = post_funcs is not None and orig_func in post_funcs
+        except Exception:
+            still_has_orig = False
+        if not still_has_orig:
+            removed += 1
+    return removed
 
 
 def _disconnect_skill_plan_panel_signals(panel, panel_mod=None, orig_slot_funcs=None):
-    """Disconnect all 12 SkillPlanPanel bound signal slots on panel teardown (#1332)."""
+    """Disconnect all 12 SkillPlanPanel bound signal slots on panel teardown and record cleanup hits (#1332)."""
     if panel is None:
-        return
+        return 0
     live_panel_mod = sys.modules.get("eve.client.script.ui.skillPlan.skillPlanPanel") or panel_mod
+    removed_total = 0
     for sig, method_name in _iter_skill_plan_panel_signals(live_panel_mod):
         slot = getattr(panel, method_name, None)
         orig_func = orig_slot_funcs.get(method_name) if orig_slot_funcs else None
-        _discard_panel_slot_from_signal(sig, panel, slot, orig_func=orig_func)
+        removed_total += _discard_panel_slot_from_signal(sig, panel, slot, orig_func=orig_func)
+    if removed_total > 0:
+        _record_guard_hit(
+            "skill_plan_panel_signal_guard",
+            "SkillPlanPanel.Close",
+            "disconnected_leaked_signals:%d" % removed_total,
+        )
+    return removed_total
 
 
-def _make_skill_plan_panel_slot_guard(orig_fn):
+def _make_skill_plan_panel_slot_guard(orig_fn, slot_name=None):
     """Guard a SkillPlanPanel global signal slot so destroyed instances no-op (#1332)."""
+    fn_label = "SkillPlanPanel.%s" % (slot_name or getattr(orig_fn, "__name__", "slot"))
+
     def _wrapped_skill_plan_panel_slot(self, *args, **kwargs):
         if getattr(self, "destroyed", False):
+            _record_guard_hit("skill_plan_panel_signal_guard", fn_label, "panel_destroyed")
             return None
         return orig_fn(self, *args, **kwargs)
 
@@ -2882,7 +3217,8 @@ def _make_skill_plan_panel_slot_guard(orig_fn):
 def _migrate_skill_plan_signal_slots(panel_mod, wrapped_slots):
     """Migrate pre-existing Signal._methods slots to guarded wrappers and purge destroyed panels (#1332)."""
     if not wrapped_slots:
-        return
+        return 0
+    purged_destroyed = 0
     for sig, method_name in _iter_skill_plan_panel_signals(panel_mod):
         pair = wrapped_slots.get(method_name)
         if pair is None:
@@ -2902,15 +3238,33 @@ def _migrate_skill_plan_signal_slots(panel_mod, wrapped_slots):
                 has_orig = orig_func in funcs
             except Exception:
                 has_orig = False
+            try:
+                has_new = new_func in funcs
+            except Exception:
+                has_new = False
             if has_orig:
                 funcs.discard(orig_func)
-                if not getattr(obj, "destroyed", False) and hasattr(funcs, "add"):
+                if getattr(obj, "destroyed", False):
+                    purged_destroyed += 1
+                elif hasattr(funcs, "add"):
                     funcs.add(new_func)
+            elif has_new and getattr(obj, "destroyed", False):
+                funcs.discard(new_func)
+                purged_destroyed += 1
             _prune_empty_signal_methods(methods_map, obj, funcs)
+    if purged_destroyed > 0:
+        _record_guard_hit(
+            "skill_plan_panel_signal_guard",
+            "SkillPlanPanel._migrate_skill_plan_signal_slots",
+            "purged_destroyed_panel_slots:%d" % purged_destroyed,
+        )
+    return purged_destroyed
 
 
 def _install_skill_plan_panel_signal_guard():
     """Disconnect SkillPlanPanel global signals on Close and guard slots when destroyed (#1332)."""
+    if not _is_guard_enabled("skill_plan_panel_signal_guard"):
+        return False
     if "skillPlanPanel" in _HOOKED_CAMERA_GUARD_TARGETS:
         return False
     panel_mod = sys.modules.get("eve.client.script.ui.skillPlan.skillPlanPanel")
@@ -2926,7 +3280,7 @@ def _install_skill_plan_panel_signal_guard():
             orig_attr = getattr(panel_cls, method_name, None)
             if callable(orig_attr) and not getattr(orig_attr, "_evomu_camera_guard", False):
                 orig_func = getattr(orig_attr, "__func__", orig_attr)
-                wrapped = _make_skill_plan_panel_slot_guard(orig_func)
+                wrapped = _make_skill_plan_panel_slot_guard(orig_func, slot_name=method_name)
                 setattr(panel_cls, method_name, wrapped)
                 new_attr = getattr(panel_cls, method_name, wrapped)
                 new_func = getattr(new_attr, "__func__", wrapped)
@@ -2988,6 +3342,8 @@ def _is_unknown_probe_id(tracker, probe_id):
 
 def _install_probe_tracker_guard():
     """Guard ProbeTracker against unknown probeIDs on jump/reconnect notification races (#1334)."""
+    if not _is_guard_enabled("probe_tracker_guard"):
+        return False
     if "probeTracker" in _HOOKED_CAMERA_GUARD_TARGETS:
         return False
     pt_mod = sys.modules.get("probescanning.probeTracker")
@@ -3005,6 +3361,7 @@ def _install_probe_tracker_guard():
             probe_data = getattr(self, "probeData", _PROBE_DATA_MISSING)
             filtered = probes
             input_probe_ids = set()
+            filtered_count = 0
             if probes is not None:
                 try:
                     seq = list(probes)
@@ -3020,6 +3377,13 @@ def _install_probe_tracker_guard():
                             kept.append(item)
                     if probe_data is not _PROBE_DATA_MISSING:
                         filtered = tuple(kept) if isinstance(probes, tuple) else kept
+                        filtered_count = len(seq) - len(kept)
+                        if filtered_count > 0:
+                            _record_guard_hit(
+                                "probe_tracker_guard",
+                                "ProbeTracker.OnProbesIdle",
+                                "filtered_unknown_probes:%d" % filtered_count,
+                            )
             try:
                 return orig_on_idle_func(self, filtered, *args, **kwargs)
             except KeyError as exc:
@@ -3028,6 +3392,7 @@ def _install_probe_tracker_guard():
                     and exc.args[0] in input_probe_ids
                     and _is_unknown_probe_id(self, exc.args[0])
                 ):
+                    _record_guard_hit("probe_tracker_guard", "ProbeTracker.OnProbesIdle", "caught:KeyError:%s" % exc)
                     return None
                 raise
 
@@ -3041,10 +3406,11 @@ def _install_probe_tracker_guard():
         if callable(orig_meth) and not getattr(orig_meth, "_evomu_camera_guard", False):
             orig_meth_func = getattr(orig_meth, "__func__", orig_meth)
 
-            def _make_probe_id_guard(orig_fn, name):
+            def _make_probe_id_guard(orig_fn, name, fn_label):
                 def _wrapped_probe_method(self, *args, **kwargs):
                     probe_id = args[0] if args else kwargs.get("probeID")
                     if _is_unknown_probe_id(self, probe_id):
+                        _record_guard_hit("probe_tracker_guard", fn_label, "unknown_probe_id")
                         return None
                     try:
                         return orig_fn(self, *args, **kwargs)
@@ -3054,6 +3420,7 @@ def _install_probe_tracker_guard():
                             and exc.args[0] == probe_id
                             and _is_unknown_probe_id(self, exc.args[0])
                         ):
+                            _record_guard_hit("probe_tracker_guard", fn_label, "caught:KeyError:%s" % exc)
                             return None
                         raise
 
@@ -3064,7 +3431,11 @@ def _install_probe_tracker_guard():
             setattr(
                 pt_cls,
                 meth_name,
-                _make_probe_id_guard(orig_meth_func, getattr(orig_meth_func, "__name__", meth_name)),
+                _make_probe_id_guard(
+                    orig_meth_func,
+                    getattr(orig_meth_func, "__name__", meth_name),
+                    "ProbeTracker.%s" % meth_name,
+                ),
             )
             hooked = True
 
@@ -3129,18 +3500,18 @@ class _EvomuMetaHook(object):
         _install_fsd_typelist_preload_hook(preload_typelist=False)
         _install_camera_dock_guard()
         _install_live_client_sync_guards()
-        for target_mod, target_key, install_fn in (
-            ("eve.client.script.ui.camera.baseSpaceCamera", "baseSpaceCamera", _install_base_space_camera_guard),
-            ("eve.client.script.environment.spaceObject.wreck", "wreck", _install_wreck_rotation_guard),
-            ("eve.client.script.ui.skillPlan.skillPlanPanel", "skillPlanPanel", _install_skill_plan_panel_signal_guard),
-            ("eve.client.script.environment.invCache", "invCacheContainer", _install_inventory_transition_guard),
-            ("probescanning.probeTracker", "probeTracker", _install_probe_tracker_guard),
-            ("shipfitting.fittingWarnings", "fittingWarnings", _install_fitting_active_ship_guard),
-            ("eve.client.script.ui.shared.fittingScreen.warningIconCont", "warningIconCont", _install_fitting_active_ship_guard),
-            ("eve.client.script.ui.shared.fittingScreen.statsPanel", "statsPanel", _install_fitting_active_ship_guard),
-            ("eve.client.script.ui.shared.fittingScreen.fittingPanels.dronePanel", "dronePanel", _install_fitting_active_ship_guard),
+        for guard_id, target_mod, target_key, install_fn in (
+            ("base_space_camera_guard", "eve.client.script.ui.camera.baseSpaceCamera", "baseSpaceCamera", _install_base_space_camera_guard),
+            ("wreck_rotation_guard", "eve.client.script.environment.spaceObject.wreck", "wreck", _install_wreck_rotation_guard),
+            ("skill_plan_panel_signal_guard", "eve.client.script.ui.skillPlan.skillPlanPanel", "skillPlanPanel", _install_skill_plan_panel_signal_guard),
+            ("inventory_transition_guard", "eve.client.script.environment.invCache", "invCacheContainer", _install_inventory_transition_guard),
+            ("probe_tracker_guard", "probescanning.probeTracker", "probeTracker", _install_probe_tracker_guard),
+            ("fitting_active_ship_guard", "shipfitting.fittingWarnings", "fittingWarnings", _install_fitting_active_ship_guard),
+            ("fitting_active_ship_guard", "eve.client.script.ui.shared.fittingScreen.warningIconCont", "warningIconCont", _install_fitting_active_ship_guard),
+            ("fitting_active_ship_guard", "eve.client.script.ui.shared.fittingScreen.statsPanel", "statsPanel", _install_fitting_active_ship_guard),
+            ("fitting_active_ship_guard", "eve.client.script.ui.shared.fittingScreen.fittingPanels.dronePanel", "dronePanel", _install_fitting_active_ship_guard),
         ):
-            if fullname == target_mod and target_key not in _HOOKED_CAMERA_GUARD_TARGETS:
+            if fullname == target_mod and target_key not in _HOOKED_CAMERA_GUARD_TARGETS and _is_guard_enabled(guard_id):
                 uthread_mod = sys.modules.get("uthread")
                 uthread_new = getattr(uthread_mod, "new", None) if uthread_mod is not None else None
                 if callable(uthread_new):

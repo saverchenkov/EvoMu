@@ -974,4 +974,165 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
             .count(),
         1
     );
+
+    // 5. Actor-level movement rejection inside SystemActor (`StructureCannotNavigate` via immobile
+    // slim category on `GotoPointBreakingProtection` and `SetWarpMovementModeBreakingProtection`)
+    // preserves `location_change_invuln`, gate cloak, and undock invuln with zero notifications.
+    sys_handle
+        .spawn_ball_with_meta(
+            start_ball.clone(),
+            CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 25,
+                undock_invulnerable_remaining_ticks: 25,
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                ..Default::default()
+            },
+            eve_destiny::SlimItemMeta {
+                char_id: Some(char_id),
+                category_id: 23,
+                is_cloaked: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    arm_safe_logoff_and_location_invuln(&ctx, char_id, ship_id, sys_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let err_move = execute_subwarp_goto_point(
+        &ctx,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        &start_ball,
+        star_pos + DVec3::new(10_000.0, 0.0, 0.0),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_move.code, ERR_DESTINY_COMMAND_FAILED);
+    assert!(
+        err_move.message.contains("StructureCannotNavigate"),
+        "expected actor-level rejection, got {err_move:?}"
+    );
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(
+        &ctx,
+        char_id,
+        ctx.now_unix(),
+    ));
+    let cs_err = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_err.gate_cloak_remaining_ticks, 25);
+    assert_eq!(cs_err.undock_invulnerable_remaining_ticks, 25);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    let err_warp = execute_agency_content_warp(
+        &ctx,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        &start_ball,
+        star_pos + DVec3::new(500_000.0, 0.0, 0.0),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_warp.code, ERR_DESTINY_COMMAND_FAILED);
+    assert!(
+        err_warp.message.contains("StructureCannotNavigate"),
+        "expected actor-level warp rejection, got {err_warp:?}"
+    );
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(
+        &ctx,
+        char_id,
+        ctx.now_unix(),
+    ));
+    let cs_warp_err = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_warp_err.gate_cloak_remaining_ticks, 25);
+    assert_eq!(cs_warp_err.undock_invulnerable_remaining_ticks, 25);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warp_commit_preserves_newer_location_change_invuln_past_on_warp_initiated_hooks() {
+    use crate::services::space_destiny::{
+        finalize_committed_location_change_invuln, grant_location_change_invulnerability,
+        is_location_change_invulnerable, peek_active_location_change_invuln,
+    };
+    use eve_destiny::{CombatState, SlimItemMeta, WarpPhase};
+
+    let ctx = test_ctx();
+    let (sys_id, char_id, ship_id, now) = (30_000_142_u32, 91_486_002_i64, 1_091_486_002_i64, ctx.now_unix());
+    let star_pos = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .find(|c| c.group_id == 6)
+        .map(|c| c.position)
+        .unwrap_or(DVec3::ZERO);
+    register_online_test_character(&ctx, char_id, "WarpStalePeekPilot", sys_id, ship_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let start_ball = make_test_ball(ship_id, star_pos, 300.0, MovementMode::Stop);
+    sys_handle
+        .spawn_ball_with_meta(
+            start_ball.clone(),
+            CombatState { capacitor: 1_000.0, max_capacitor: 1_000.0, ..Default::default() },
+            SlimItemMeta { char_id: Some(char_id), owner_id: char_id, category_id: 6, group_id: 25, ..Default::default() },
+        )
+        .await
+        .unwrap();
+
+    // 1. Stale `t1` warp commit + `on_warp_initiated_hooks_with_options(..., false)` preserves `t2 > t1`.
+    let (t1, t2) = (now + 15, now + 120);
+    grant_location_change_invulnerability(&ctx, char_id, t1);
+    let peeked_t1 = peek_active_location_change_invuln(&ctx, char_id);
+    let _ = sys_handle.get_protection_snapshot(ship_id).await.unwrap();
+    grant_location_change_invulnerability(&ctx, char_id, t2);
+    let _ = sys_handle.get_protection_snapshot(ship_id).await.unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let dest = star_pos + DVec3::new(1_000_000.0, 0.0, 0.0);
+    let warp_mode = MovementMode::Warp {
+        origin: start_ball.position,
+        destination: dest,
+        warp_speed_au_s: 3.0,
+        total_distance: start_ball.position.distance(dest),
+        phase: WarpPhase::Aligning,
+        elapsed_warp_time: 0.0,
+    };
+    let (_tick, mut protection_events) = sys_handle
+        .set_warp_movement_mode_breaking_protection(
+            ship_id,
+            Some(char_id),
+            warp_mode,
+            crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+            crate::system_actor::ProtectionBreakReason::WarpInitiation,
+            peeked_t1,
+            now,
+        )
+        .await
+        .unwrap();
+    finalize_committed_location_change_invuln(&ctx, char_id, peeked_t1, now, &mut protection_events);
+    assert!(!protection_events.invuln_cancelled);
+    emit_movement_protection_events(&ctx, char_id, ship_id, false, protection_events);
+    on_warp_initiated_hooks_with_options(&ctx, &sys_handle, char_id, ship_id, sys_id, false).await;
+
+    assert_eq!(peek_active_location_change_invuln(&ctx, char_id).map(|t| t.until_unix), Some(t2));
+    assert_eq!(sys_handle.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(t2));
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 0);
+
+    // 2. `execute_agency_content_warp` clears `t2` once; legacy `on_warp_initiated_hooks` (`true`) clears once.
+    sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
+    execute_agency_content_warp(&ctx, &sys_handle, char_id, ship_id, sys_id, &start_ball, star_pos + DVec3::new(5_000_000.0, 0.0, 0.0)).await.unwrap();
+    assert!(!is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(sys_handle.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+
+    grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 45);
+    let _ = sys_handle.get_protection_snapshot(ship_id).await.unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    on_warp_initiated_hooks(&ctx, &sys_handle, char_id, ship_id, sys_id).await;
+    assert!(!is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
 }

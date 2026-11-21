@@ -1,17 +1,19 @@
-//! Falling structural ratchet for `crates/eve-server/src/router/client_compat.rs`,
+//! Falling per-file structural ratchet for `crates/eve-server/src/router/client_compat.rs`,
 //! `crates/eve-server/src/outbound_sequencer.rs` post-producer `SetState` rewrites (`RT-92`),
-//! and `:26000` wire-transport bypass guards (`#1189`, `RFC-3 C-9`).
+//! and `:26000` wire-transport bypass guards (`#1189`, `RFC-3 C-9`, `#1538`).
 //!
-//! Pins structural rule counts, production line count, transport conditionals,
-//! `outbound_sequencer` `SetState` rewrites, `services/` `caller_trace` usage,
-//! direct-layer test calls, allowed rule identifiers, and forbids introducing
-//! `ctx.dispatch_rpc(` into new `crates/eve-server/tests/it/*.rs` files.
+//! Stores per-file upper-bound ceilings (`counters`) and subset-only allowlists (`known_rules`,
+//! `allowed_service_caller_trace_files`, `allowed_it_dispatch_rpc_files`) under schema version 2
+//! so deletions/reductions never fail while `service_caller_trace_comparisons` remains strictly
+//! pinned at `0` across all files and introducing `ctx.dispatch_rpc(` into new
+//! `crates/eve-server/tests/it/*.rs` files is forbidden.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::arch_debt_ratchet::{validate_per_file_baseline, validate_per_file_counts};
 use crate::client_harness::{
     is_ident_byte, scan_raw_dispatch_calls_in_dir, strip_rust_comments_and_literals,
 };
@@ -27,6 +29,20 @@ const DIRECT_LAYER_FNS: &[&str] = &[
     "should_suppress_macho_notification",
 ];
 
+/// Required counter keys in v2 `client_compat_ratchet.json`.
+pub const CLIENT_COMPAT_COUNTER_KEYS: [&str; 10] = [
+    "rpc_rules",
+    "suppress_rules",
+    "notify_arms",
+    "destiny_rewrites",
+    "production_lines",
+    "transport_conditionals",
+    "direct_layer_test_calls",
+    "service_caller_trace_comparisons",
+    "service_caller_trace_params",
+    "sequencer_set_state_rewrites",
+];
+
 /// Static scan summary for `crates/eve-server` and `crates/eve-server/tests/it`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClientCompatScanReport {
@@ -40,26 +56,22 @@ pub struct ClientCompatScanReport {
     pub service_caller_trace_comparisons: usize,
     pub service_caller_trace_params: usize,
     pub sequencer_set_state_rewrites: usize,
+    pub counters: BTreeMap<String, BTreeMap<String, usize>>,
     pub known_rules: BTreeSet<String>,
     pub service_caller_trace_files: BTreeSet<String>,
     pub it_dispatch_rpc_files: BTreeSet<String>,
 }
 
-/// Falling ratchet stored in `crates/eve-testkit/ratchets/client_compat_ratchet.json`.
+/// Falling v2 per-file ratchet stored in `crates/eve-testkit/ratchets/client_compat_ratchet.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientCompatRatchet {
     pub version: u32,
-    pub max_rpc_rules: usize,
-    pub max_suppress_rules: usize,
-    pub max_notify_arms: usize,
-    pub max_destiny_rewrites: usize,
-    pub max_production_lines: usize,
-    pub max_transport_conditionals: usize,
-    pub max_direct_layer_test_calls: usize,
-    pub max_service_caller_trace_comparisons: usize,
-    pub max_service_caller_trace_params: usize,
     #[serde(default)]
-    pub max_sequencer_set_state_rewrites: Option<usize>,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub owning_issue: Option<u64>,
+    pub counters: BTreeMap<String, BTreeMap<String, usize>>,
     pub max_transport_differing_replies: Option<usize>,
     pub known_rules: Vec<String>,
     pub allowed_service_caller_trace_files: Vec<String>,
@@ -89,12 +101,22 @@ impl ClientCompatRatchet {
         Self::load_from_path(&Self::default_path())
     }
 
-    /// Loads a [`ClientCompatRatchet`] from `path`.
+    /// Loads a [`ClientCompatRatchet`] from `path` and validates v2 schema invariants.
     pub fn load_from_path(path: &Path) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        serde_json::from_str(&raw)
-            .map_err(|e| format!("failed to parse {}: {e}", path.display()))
+        let parsed: Self = serde_json::from_str(&raw)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+        parsed.validate_schema()?;
+        Ok(parsed)
+    }
+
+    /// Returns the summed baseline across all files for `counter_key`.
+    pub fn counter_sum(&self, counter_key: &str) -> usize {
+        self.counters
+            .get(counter_key)
+            .map(|m| m.values().sum())
+            .unwrap_or(0)
     }
 
     /// Scans `crates/eve-server` and `crates/eve-server/tests/it` and validates all caps
@@ -114,11 +136,13 @@ impl ClientCompatRatchet {
         Ok(report)
     }
 
-    /// Enforces strict falling-ratchet invariants on `report`:
-    /// - numeric counters must match the pinned cap (neither grow nor drop unlowered);
-    /// - `known_rules` and `allowed_service_caller_trace_files` must match exactly;
-    /// - `it_dispatch_rpc_files` must not include files outside `allowed_it_dispatch_rpc_files`.
-    pub fn assert_ratchet(&self, report: &ClientCompatScanReport) -> Result<(), String> {
+    fn validate_schema(&self) -> Result<(), String> {
+        if self.version != 2 {
+            return Err(format!(
+                "Unsupported client_compat_ratchet version {} (expected 2)",
+                self.version
+            ));
+        }
         assert_sorted_unique("known_rules", &self.known_rules)?;
         assert_sorted_unique(
             "allowed_service_caller_trace_files",
@@ -128,103 +152,84 @@ impl ClientCompatRatchet {
             "allowed_it_dispatch_rpc_files",
             &self.allowed_it_dispatch_rpc_files,
         )?;
+        for key in CLIENT_COMPAT_COUNTER_KEYS {
+            let baseline = self.counters.get(key).ok_or_else(|| {
+                format!("client_compat_ratchet.json missing required counter '{key}'")
+            })?;
+            validate_per_file_baseline(
+                &format!("client_compat counter '{key}'"),
+                is_zero_required_compat_counter(key),
+                baseline,
+            )?;
+        }
+        for key in self.counters.keys() {
+            if !CLIENT_COMPAT_COUNTER_KEYS.contains(&key.as_str()) {
+                return Err(format!(
+                    "client_compat_ratchet.json contains unknown counter '{key}'"
+                ));
+            }
+        }
+        Ok(())
+    }
 
-        assert_exact_counter("max_rpc_rules", report.rpc_rules, self.max_rpc_rules)?;
-        assert_exact_counter(
-            "max_suppress_rules",
-            report.suppress_rules,
-            self.max_suppress_rules,
-        )?;
-        assert_exact_counter("max_notify_arms", report.notify_arms, self.max_notify_arms)?;
-        assert_exact_counter(
-            "max_destiny_rewrites",
-            report.destiny_rewrites,
-            self.max_destiny_rewrites,
-        )?;
-        assert_exact_counter(
-            "max_production_lines",
-            report.production_lines,
-            self.max_production_lines,
-        )?;
-        assert_exact_counter(
-            "max_transport_conditionals",
-            report.transport_conditionals,
-            self.max_transport_conditionals,
-        )?;
-        assert_exact_counter(
-            "max_direct_layer_test_calls",
-            report.direct_layer_test_calls,
-            self.max_direct_layer_test_calls,
-        )?;
-        assert_exact_counter(
-            "max_service_caller_trace_comparisons",
-            report.service_caller_trace_comparisons,
-            self.max_service_caller_trace_comparisons,
-        )?;
-        assert_exact_counter(
-            "max_service_caller_trace_params",
-            report.service_caller_trace_params,
-            self.max_service_caller_trace_params,
-        )?;
-        if let Some(cap) = self.max_sequencer_set_state_rewrites {
-            assert_exact_counter(
-                "max_sequencer_set_state_rewrites",
-                report.sequencer_set_state_rewrites,
-                cap,
+    /// Enforces v2 falling-ratchet invariants on `report`:
+    /// - per-file counter caps (`observed[file] <= baseline[file]`, `0` if unlisted);
+    /// - `service_caller_trace_comparisons` remains strictly `0` across all files;
+    /// - `known_rules`, `service_caller_trace_files`, and `it_dispatch_rpc_files` must be subsets
+    ///   of their allowlists (removals are permitted; additions are rejected).
+    pub fn assert_ratchet(&self, report: &ClientCompatScanReport) -> Result<(), String> {
+        self.validate_schema()?;
+
+        let empty = BTreeMap::new();
+        for key in CLIENT_COMPAT_COUNTER_KEYS {
+            let baseline = self
+                .counters
+                .get(key)
+                .expect("validated by validate_schema");
+            let observed = report.counters.get(key).unwrap_or(&empty);
+            validate_per_file_counts(
+                &format!("client_compat counter '{key}'"),
+                is_zero_required_compat_counter(key),
+                baseline,
+                observed,
             )?;
         }
 
-        let expected_rules: BTreeSet<String> = self.known_rules.iter().cloned().collect();
-        let added_rules: Vec<&String> = report.known_rules.difference(&expected_rules).collect();
-        if !added_rules.is_empty() {
-            return Err(format!(
-                "Unlisted client_compat rules added without updating client_compat_ratchet.json: {added_rules:?}"
-            ));
-        }
-        let removed_rules: Vec<&String> = expected_rules.difference(&report.known_rules).collect();
-        if !removed_rules.is_empty() {
-            return Err(format!(
-                "client_compat rules were deleted without removing them from client_compat_ratchet.json in the same commit: {removed_rules:?}"
-            ));
-        }
-
-        let expected_service_files: BTreeSet<String> = self
-            .allowed_service_caller_trace_files
-            .iter()
-            .cloned()
-            .collect();
-        let added_service_files: Vec<&String> = report
-            .service_caller_trace_files
-            .difference(&expected_service_files)
-            .collect();
-        if !added_service_files.is_empty() {
-            return Err(format!(
-                "New caller_trace usage appeared in crates/eve-server/src/services/: {added_service_files:?}"
-            ));
-        }
-        let removed_service_files: Vec<&String> = expected_service_files
-            .difference(&report.service_caller_trace_files)
-            .collect();
-        if !removed_service_files.is_empty() {
-            return Err(format!(
-                "caller_trace was removed from services files without updating allowed_service_caller_trace_files in client_compat_ratchet.json: {removed_service_files:?}"
-            ));
-        }
-
-        let allowed_it_files: BTreeSet<String> =
-            self.allowed_it_dispatch_rpc_files.iter().cloned().collect();
-        let disallowed_it_files: Vec<&String> = report
-            .it_dispatch_rpc_files
-            .difference(&allowed_it_files)
-            .collect();
-        if !disallowed_it_files.is_empty() {
-            return Err(format!(
-                "Integration test files outside allowed_it_dispatch_rpc_files contain .dispatch_rpc(: {disallowed_it_files:?}. Use ClientHarness instead."
-            ));
-        }
+        assert_allowlist_subset(
+            &report.known_rules,
+            &self.known_rules,
+            "Unlisted client_compat rules added without updating client_compat_ratchet.json",
+        )?;
+        assert_allowlist_subset(
+            &report.service_caller_trace_files,
+            &self.allowed_service_caller_trace_files,
+            "New caller_trace usage appeared in crates/eve-server/src/services/",
+        )?;
+        assert_allowlist_subset(
+            &report.it_dispatch_rpc_files,
+            &self.allowed_it_dispatch_rpc_files,
+            "Integration test files outside allowed_it_dispatch_rpc_files contain .dispatch_rpc( (use ClientHarness instead)",
+        )?;
 
         Ok(())
     }
+}
+
+fn is_zero_required_compat_counter(key: &str) -> bool {
+    key == "service_caller_trace_comparisons"
+}
+
+fn assert_allowlist_subset(
+    observed: &BTreeSet<String>,
+    allowed: &[String],
+    msg_prefix: &str,
+) -> Result<(), String> {
+    let allowed_set: BTreeSet<String> = allowed.iter().cloned().collect();
+    let unexpected: Vec<&String> = observed.difference(&allowed_set).collect();
+    if !unexpected.is_empty() {
+        return Err(format!("{msg_prefix}: {unexpected:?}"));
+    }
+    Ok(())
 }
 
 fn assert_sorted_unique(field: &str, items: &[String]) -> Result<(), String> {
@@ -239,20 +244,6 @@ fn assert_sorted_unique(field: &str, items: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn assert_exact_counter(field: &str, observed: usize, expected: usize) -> Result<(), String> {
-    if observed > expected {
-        return Err(format!(
-            "{field} regressed above falling ratchet: observed {observed}, {field}={expected}. Do not add new normalization rules or :26000 bypasses."
-        ));
-    }
-    if observed < expected {
-        return Err(format!(
-            "{field} dropped below falling ratchet ({observed} < {expected}): lower {field} to {observed} in client_compat_ratchet.json in the same commit."
-        ));
-    }
-    Ok(())
-}
-
 /// Scans `server_dir` (`crates/eve-server`) and `it_dir` (`crates/eve-server/tests/it`)
 /// and builds a [`ClientCompatScanReport`].
 pub fn scan_client_compat_in_dirs(
@@ -260,11 +251,31 @@ pub fn scan_client_compat_in_dirs(
     it_dir: &Path,
 ) -> Result<ClientCompatScanReport, String> {
     let mut report = ClientCompatScanReport::default();
+    for key in CLIENT_COMPAT_COUNTER_KEYS {
+        report.counters.insert(key.to_string(), BTreeMap::new());
+    }
 
     let compat_path = server_dir.join("src/router/client_compat.rs");
     let compat_raw = std::fs::read_to_string(&compat_path)
         .map_err(|e| format!("failed to read {}: {e}", compat_path.display()))?;
     scan_client_compat_source(&compat_raw, &mut report)?;
+
+    let compat_rel = "crates/eve-server/src/router/client_compat.rs";
+    for (key, val) in [
+        ("rpc_rules", report.rpc_rules),
+        ("suppress_rules", report.suppress_rules),
+        ("notify_arms", report.notify_arms),
+        ("destiny_rewrites", report.destiny_rewrites),
+        ("production_lines", report.production_lines),
+    ] {
+        if val > 0 {
+            report
+                .counters
+                .get_mut(key)
+                .expect("initialized counter")
+                .insert(compat_rel.to_string(), val);
+        }
+    }
 
     let sequencer_path = server_dir.join("src/outbound_sequencer.rs");
     if sequencer_path.is_file() {
@@ -272,8 +283,18 @@ pub fn scan_client_compat_in_dirs(
             .map_err(|e| format!("failed to read {}: {e}", sequencer_path.display()))?;
         let sequencer_clean = strip_rust_comments_and_literals(&sequencer_raw);
         let sequencer_prod = strip_cfg_test_items(&sequencer_clean);
-        report.sequencer_set_state_rewrites =
-            count_sequencer_set_state_rewrites(&sequencer_prod);
+        let seq_count = count_sequencer_set_state_rewrites(&sequencer_prod);
+        report.sequencer_set_state_rewrites = seq_count;
+        if seq_count > 0 {
+            report
+                .counters
+                .get_mut("sequencer_set_state_rewrites")
+                .expect("initialized counter")
+                .insert(
+                    "crates/eve-server/src/outbound_sequencer.rs".to_string(),
+                    seq_count,
+                );
+        }
     }
 
     let src_dir = server_dir.join("src");
@@ -290,17 +311,37 @@ pub fn scan_client_compat_in_dirs(
         let clean = strip_rust_comments_and_literals(&raw);
         let prod = strip_cfg_test_items(&clean);
 
-        report.transport_conditionals += count_caller_trace_comparisons(&prod);
+        let full_rel = format!("crates/eve-server/src/{rel_in_src}");
+        let cmp = count_caller_trace_comparisons(&prod);
+        if cmp > 0 {
+            report.transport_conditionals += cmp;
+            report
+                .counters
+                .get_mut("transport_conditionals")
+                .expect("initialized counter")
+                .insert(full_rel.clone(), cmp);
+        }
 
         if rel_in_src.starts_with("services/") {
-            let cmp = count_caller_trace_comparisons(&prod);
             let params = count_caller_trace_params(&prod);
-            if cmp > 0 || params > 0 {
+            if cmp > 0 {
                 report.service_caller_trace_comparisons += cmp;
+                report
+                    .counters
+                    .get_mut("service_caller_trace_comparisons")
+                    .expect("initialized counter")
+                    .insert(full_rel.clone(), cmp);
+            }
+            if params > 0 {
                 report.service_caller_trace_params += params;
                 report
-                    .service_caller_trace_files
-                    .insert(format!("crates/eve-server/src/{rel_in_src}"));
+                    .counters
+                    .get_mut("service_caller_trace_params")
+                    .expect("initialized counter")
+                    .insert(full_rel.clone(), params);
+            }
+            if cmp > 0 || params > 0 {
+                report.service_caller_trace_files.insert(full_rel);
             }
         }
     }
@@ -313,13 +354,21 @@ pub fn scan_client_compat_in_dirs(
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         let clean = strip_rust_comments_and_literals(&raw);
-        if is_test_only_rel_path(&rel_in_server) {
-            report.direct_layer_test_calls += count_direct_layer_calls(&clean);
+        let dl = if is_test_only_rel_path(&rel_in_server) {
+            count_direct_layer_calls(&clean)
         } else {
             let prod = strip_cfg_test_items(&clean);
             let total = count_direct_layer_calls(&clean);
             let prod_only = count_direct_layer_calls(&prod);
-            report.direct_layer_test_calls += total.saturating_sub(prod_only);
+            total.saturating_sub(prod_only)
+        };
+        if dl > 0 {
+            report.direct_layer_test_calls += dl;
+            report
+                .counters
+                .get_mut("direct_layer_test_calls")
+                .expect("initialized counter")
+                .insert(format!("crates/eve-server/{rel_in_server}"), dl);
         }
     }
 
@@ -1215,39 +1264,54 @@ mod tests {{
     #[test]
     fn repo_client_compat_ratchet_matches_baseline() {
         let ratchet = ClientCompatRatchet::load_default().expect("load client_compat_ratchet.json");
+        assert_eq!(ratchet.version, 2, "client_compat_ratchet.json must be v2");
+        assert!(
+            ratchet.max_transport_differing_replies.is_some(),
+            "max_transport_differing_replies must remain populated for rpc_client_contracts callers"
+        );
         let report = ratchet
             .verify_default()
             .expect("client_compat_ratchet.json must match repository baseline");
-        assert_eq!(report.rpc_rules, ratchet.max_rpc_rules);
-        assert_eq!(report.suppress_rules, ratchet.max_suppress_rules);
-        assert_eq!(report.notify_arms, ratchet.max_notify_arms);
-        assert_eq!(report.destiny_rewrites, ratchet.max_destiny_rewrites);
-        assert_eq!(report.production_lines, ratchet.max_production_lines);
-        assert_eq!(
-            report.transport_conditionals,
-            ratchet.max_transport_conditionals
-        );
-        assert_eq!(
-            report.direct_layer_test_calls,
-            ratchet.max_direct_layer_test_calls
-        );
+        for (key, observed_total) in [
+            ("rpc_rules", report.rpc_rules),
+            ("suppress_rules", report.suppress_rules),
+            ("notify_arms", report.notify_arms),
+            ("destiny_rewrites", report.destiny_rewrites),
+            ("production_lines", report.production_lines),
+            ("transport_conditionals", report.transport_conditionals),
+            ("direct_layer_test_calls", report.direct_layer_test_calls),
+            ("service_caller_trace_params", report.service_caller_trace_params),
+            (
+                "sequencer_set_state_rewrites",
+                report.sequencer_set_state_rewrites,
+            ),
+        ] {
+            let cap = ratchet.counter_sum(key);
+            assert!(
+                observed_total <= cap,
+                "client_compat counter '{key}' exceeded baseline: {observed_total} > {cap}"
+            );
+            let per_file_sum: usize = report.counters[key].values().sum();
+            assert_eq!(
+                observed_total, per_file_sum,
+                "internal scalar vs per-file sum mismatch for '{key}'"
+            );
+        }
         assert_eq!(
             report.service_caller_trace_comparisons,
-            ratchet.max_service_caller_trace_comparisons
+            0,
+            "service_caller_trace_comparisons must stay strictly 0"
         );
-        assert_eq!(
-            report.service_caller_trace_params,
-            ratchet.max_service_caller_trace_params
-        );
-        assert_eq!(
-            Some(report.sequencer_set_state_rewrites),
-            ratchet.max_sequencer_set_state_rewrites
-        );
+        assert!(ratchet
+            .counters
+            .get("service_caller_trace_comparisons")
+            .expect("counter exists")
+            .is_empty());
         assert!(!report.it_dispatch_rpc_files.contains("client_shape_pins.rs"));
     }
 
     #[test]
-    fn assert_ratchet_rejects_regressions_unlowered_drops_and_new_it_dispatch_rpc() {
+    fn assert_ratchet_enforces_per_file_caps_subset_allowlists_and_zero_pins() {
         let ratchet = ClientCompatRatchet::load_default().expect("load client_compat_ratchet.json");
         let base_report = scan_client_compat_in_dirs(
             &ClientCompatRatchet::default_server_dir(),
@@ -1256,79 +1320,79 @@ mod tests {{
         .expect("scan default dirs");
         ratchet.assert_ratchet(&base_report).expect("baseline ok");
 
-        // Regression on each counter fails naming the counter.
-        let mut regressed = base_report.clone();
-        regressed.rpc_rules += 1;
-        let err = ratchet.assert_ratchet(&regressed).unwrap_err();
-        assert!(err.contains("max_rpc_rules"), "unexpected error: {err}");
+        // Regression on each existing baselined file fails naming the counter and file.
+        for key in CLIENT_COMPAT_COUNTER_KEYS {
+            let mut regressed = base_report.clone();
+            let map = regressed.counters.entry(key.to_string()).or_default();
+            if let Some((_file, count)) = map.iter_mut().next() {
+                *count += 1;
+            } else {
+                map.insert("crates/eve-server/src/services/extra.rs".to_string(), 1);
+            }
+            let err = ratchet.assert_ratchet(&regressed).unwrap_err();
+            assert!(
+                err.contains(key),
+                "expected counter '{key}' in error: {err}"
+            );
+        }
 
-        let mut regressed = base_report.clone();
-        regressed.suppress_rules += 1;
-        assert!(ratchet
-            .assert_ratchet(&regressed)
-            .unwrap_err()
-            .contains("max_suppress_rules"));
+        // Regression on an unlisted file also fails even when another baselined file drops.
+        let mut unlisted_file = base_report.clone();
+        if let Some(map) = unlisted_file.counters.get_mut("direct_layer_test_calls") {
+            if let Some(first_key) = map.keys().next().cloned() {
+                map.remove(&first_key);
+            }
+            map.insert("crates/eve-server/tests/it/brand_new.rs".to_string(), 1);
+            let err = ratchet.assert_ratchet(&unlisted_file).unwrap_err();
+            assert!(err.contains("brand_new.rs"), "err={err}");
+        }
 
-        let mut regressed = base_report.clone();
-        regressed.notify_arms += 1;
-        assert!(ratchet
-            .assert_ratchet(&regressed)
-            .unwrap_err()
-            .contains("max_notify_arms"));
-
-        let mut regressed = base_report.clone();
-        regressed.destiny_rewrites += 1;
-        assert!(ratchet
-            .assert_ratchet(&regressed)
-            .unwrap_err()
-            .contains("max_destiny_rewrites"));
-
-        let mut regressed = base_report.clone();
-        regressed.transport_conditionals += 1;
-        assert!(ratchet
-            .assert_ratchet(&regressed)
-            .unwrap_err()
-            .contains("max_transport_conditionals"));
-
-        let mut regressed = base_report.clone();
-        regressed.direct_layer_test_calls += 1;
-        assert!(ratchet
-            .assert_ratchet(&regressed)
-            .unwrap_err()
-            .contains("max_direct_layer_test_calls"));
-
-        let mut regressed = base_report.clone();
-        regressed.service_caller_trace_comparisons += 1;
-        assert!(ratchet
-            .assert_ratchet(&regressed)
-            .unwrap_err()
-            .contains("max_service_caller_trace_comparisons"));
-
-        let mut regressed = base_report.clone();
-        regressed.sequencer_set_state_rewrites += 1;
-        assert!(ratchet
-            .assert_ratchet(&regressed)
-            .unwrap_err()
-            .contains("max_sequencer_set_state_rewrites"));
-
-        // Drop without lowering JSON fails.
+        // Decreasing any non-zero per-file counter or removing a file passes without JSON edits.
         let mut lowered = base_report.clone();
-        lowered.rpc_rules -= 1;
-        let err = ratchet.assert_ratchet(&lowered).unwrap_err();
-        assert!(err.contains("dropped below falling ratchet"), "err={err}");
+        if let Some(rpc_map) = lowered.counters.get_mut("rpc_rules") {
+            if let Some(v) = rpc_map.values_mut().next() {
+                *v = v.saturating_sub(1);
+            }
+        }
+        if let Some(dl_map) = lowered.counters.get_mut("direct_layer_test_calls") {
+            if let Some(first_key) = dl_map.keys().next().cloned() {
+                dl_map.remove(&first_key);
+            }
+        }
+        ratchet
+            .assert_ratchet(&lowered)
+            .expect("per-file decreases and deletions must pass without modifying baseline");
 
-        // Unlisted rule fails.
+        // Unlisted rule fails; deleting an allowed rule passes without modifying baseline.
         let mut unlisted = base_report.clone();
         unlisted.known_rules.insert("rpc:fakeSvc.FakeMethod".into());
         let err = ratchet.assert_ratchet(&unlisted).unwrap_err();
         assert!(err.contains("Unlisted client_compat rules"), "err={err}");
 
-        // Deleted rule without updating known_rules fails.
         let mut deleted_rule = base_report.clone();
         let first_rule = deleted_rule.known_rules.iter().next().unwrap().clone();
         deleted_rule.known_rules.remove(&first_rule);
-        let err = ratchet.assert_ratchet(&deleted_rule).unwrap_err();
-        assert!(err.contains("deleted without removing"), "err={err}");
+        ratchet
+            .assert_ratchet(&deleted_rule)
+            .expect("deleting an allowlisted rule must pass (subset-only)");
+
+        // Adding a service caller_trace file fails; removing one passes (subset-only).
+        let mut added_svc = base_report.clone();
+        added_svc
+            .service_caller_trace_files
+            .insert("crates/eve-server/src/services/unlisted_service.rs".into());
+        assert!(ratchet
+            .assert_ratchet(&added_svc)
+            .unwrap_err()
+            .contains("unlisted_service.rs"));
+
+        if let Some(first_svc) = base_report.service_caller_trace_files.iter().next().cloned() {
+            let mut removed_svc = base_report.clone();
+            removed_svc.service_caller_trace_files.remove(&first_svc);
+            ratchet
+                .assert_ratchet(&removed_svc)
+                .expect("removing a service from allowed_service_caller_trace_files must pass");
+        }
 
         // Brand-new tests/it/*.rs introducing ctx.dispatch_rpc( fails.
         let mut new_it = base_report.clone();
@@ -1349,6 +1413,36 @@ mod tests {{
                 .assert_ratchet(&migrated_it)
                 .expect("migrating existing IT file away from dispatch_rpc must pass");
         }
+
+        // Non-empty zero_required counter baseline must fail validation.
+        let mut bad_zero_ratchet = ratchet.clone();
+        bad_zero_ratchet
+            .counters
+            .get_mut("service_caller_trace_comparisons")
+            .unwrap()
+            .insert("crates/eve-server/src/services/foo.rs".into(), 1);
+        let zero_err = bad_zero_ratchet.validate_schema().unwrap_err();
+        assert!(zero_err.contains("zero_required=true"), "{zero_err}");
+
+        // Schema loader must reject v1 versions and unknown legacy v1 fields.
+        let tmp = make_temp_tree("schema_errs");
+        let v1_path = tmp.join("v1.json");
+        let mut v1_ratchet = ratchet.clone();
+        v1_ratchet.version = 1;
+        std::fs::write(&v1_path, serde_json::to_string(&v1_ratchet).unwrap()).unwrap();
+        assert!(ClientCompatRatchet::load_from_path(&v1_path)
+            .unwrap_err()
+            .contains("expected 2"));
+
+        let legacy_path = tmp.join("legacy.json");
+        let mut legacy_val = serde_json::to_value(&ratchet).unwrap();
+        legacy_val
+            .as_object_mut()
+            .unwrap()
+            .insert("max_rpc_rules".into(), serde_json::json!(10));
+        std::fs::write(&legacy_path, serde_json::to_string(&legacy_val).unwrap()).unwrap();
+        assert!(ClientCompatRatchet::load_from_path(&legacy_path).is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

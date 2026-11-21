@@ -935,6 +935,7 @@ fn clone_jump_emits_wallet_and_clone_update_notifications_and_credits_upwell_own
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&jumper_cid).unwrap().balance = IskCents::from_isk(5_000_000);
     });
+    let _ = ctx.drain_notifications_for_char(jumper_cid);
     let npc_ok = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(9601)])
         .unwrap()
         .expect("funded NPC clone jump must succeed");

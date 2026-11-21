@@ -1527,6 +1527,33 @@ def _auto_position_structure_deployment(w):
         _clear_py2_exc()
 
 
+def _is_effectively_opaque(node, root=None, max_depth=24):
+    """Return True when node and ancestors up to root are visible and cumulative opacity > 0.01."""
+    cur = node
+    eff = 1.0
+    for _ in range(max_depth):
+        if cur is None:
+            return True
+        try:
+            if not _is_visible(cur):
+                return False
+            op = getattr(cur, "opacity", None)
+            if op is not None and not isinstance(op, bool) and isinstance(op, _PY_INT_TYPES + (float,)):
+                fop = float(op)
+                if math.isnan(fop) or math.isinf(fop):
+                    return False
+                eff *= min(1.0, fop)
+                if eff <= 0.01:
+                    return False
+            if root is not None and cur is root:
+                return True
+            cur = getattr(cur, "parent", None)
+        except Exception:
+            _clear_py2_exc()
+            return False
+    return True
+
+
 def _inspect_window_content(w):
     """Inspect bounded visible tabs, rows, loading indicators, and sample text labels inside a window."""
     summary = {
@@ -1564,7 +1591,10 @@ def _inspect_window_content(w):
         visited += 1
         nname = _safe_str(getattr(node, "name", ""), 64).lower()
         cls_l = cls_n.lower()
-        if "loadingwheel" in cls_l or nname in ("loading", "loadingwheel", "loadingindicator", "busyindicator"):
+        if (
+            "loadingwheel" in cls_l
+            or nname in ("loading", "loadingwheel", "loadingindicator", "busyindicator")
+        ) and _is_effectively_opaque(node, w):
             summary["has_loading"] = True
         if hasattr(node, "GetNodes"):
             try:
@@ -1587,7 +1617,8 @@ def _inspect_window_content(w):
             low_txt = clean_txt.lower()
             if clean_txt:
                 if low_txt in ("loading", "loading...", "please wait", "loading data..."):
-                    summary["has_loading"] = True
+                    if _is_effectively_opaque(node, w):
+                        summary["has_loading"] = True
                 elif any(err_k in low_txt for err_k in ("error loading", "failed to load", "unable to load", "unexpected error")):
                     summary["has_error"] = True
                 elif low_txt != wcap and low_txt not in ("x", "?", "-", "_"):
@@ -3841,10 +3872,18 @@ def _get_state_snapshot(sm):
         space_info["in_space"] = True
         space_info["ego"] = _sample_ego_warp_state(sm)
         nearby = []
+        slims_by_id = {}
+        nearby_by_id = {}
         try:
             michelle = getattr(sm, "services", {}).get("michelle")
             bp = michelle.GetBallpark() if michelle is not None else None
             sid = sess_dict.get("shipid", 0)
+            sid_int = None
+            try:
+                if sid is not None and not isinstance(sid, bool):
+                    sid_int = int(sid)
+            except (TypeError, ValueError):
+                sid_int = None
             if bp is not None:
                 now_sim = None
                 try:
@@ -3859,13 +3898,20 @@ def _get_state_snapshot(sm):
                         pass
                 slims = getattr(bp, "slimItems", {}) or {}
                 for bid, slim in list(slims.items()):
-                    if int(bid) == int(sid):
+                    try:
+                        if isinstance(bid, bool):
+                            continue
+                        bid_int = int(bid)
+                    except (TypeError, ValueError):
+                        continue
+                    slims_by_id[bid_int] = slim
+                    if sid_int is not None and bid_int == sid_int:
                         continue
                     b = bp.GetBall(bid)
                     dist = _resolve_ball_surface_dist(bp, sid, bid, ball=b, now_sim=now_sim, ego_ball=ego_ball)
                     raw_bname = _resolve_ball_name(slim, bid)
                     ball_entry = {
-                        "item_id": int(bid),
+                        "item_id": bid_int,
                         "type_id": int(getattr(slim, "typeID", 0) or 0),
                         "group_id": int(getattr(slim, "groupID", 0) or 0),
                         "category_id": int(getattr(slim, "categoryID", 0) or 0),
@@ -3875,14 +3921,15 @@ def _get_state_snapshot(sm):
                     }
                     try:
                         if hasattr(bp, "GetDamageState"):
-                            b_ds = bp.GetDamageState(int(bid))
+                            b_ds = bp.GetDamageState(bid_int)
                             if isinstance(b_ds, (tuple, list)) and len(b_ds) >= 3 and b_ds[0] is not None:
                                 sh, ar, hu = round(float(b_ds[0]), 3), round(float(b_ds[1]), 3), round(float(b_ds[2]), 3)
-                                if sh < 1.0 or ar < 1.0 or hu < 1.0 or int(bid) in locked_targets:
+                                if sh < 1.0 or ar < 1.0 or hu < 1.0 or bid_int in locked_targets:
                                     ball_entry["damage_state"] = {"shield": sh, "armor": ar, "hull": hu}
                     except Exception:
                         pass
                     nearby.append(ball_entry)
+                    nearby_by_id[bid_int] = ball_entry
                 nearby.sort(key=lambda x: x["distance_m"])
                 stargates = [b for b in nearby if int(b.get("group_id") or 0) == 10][:10]
                 stations = [b for b in nearby if int(b.get("category_id") or 0) in (3, 65)][:8]
@@ -3905,7 +3952,7 @@ def _get_state_snapshot(sm):
         if selected_id is not None:
             try:
                 sel_id_i = int(selected_id)
-                sel_ball = next((b for b in nearby if int(b.get("item_id", 0)) == sel_id_i), None)
+                sel_ball = nearby_by_id.get(sel_id_i)
                 space_info["selected_item"] = dict(sel_ball) if sel_ball is not None else {"item_id": sel_id_i}
             except Exception:
                 pass
@@ -3922,29 +3969,81 @@ def _get_state_snapshot(sm):
                 scroll_ov = getattr(ov_w, "scroll", None)
                 if scroll_ov is not None and hasattr(scroll_ov, "GetNodes"):
                     for nd in list(scroll_ov.GetNodes() or [])[:40]:
-                        bid_ov = getattr(nd, "itemID", None)
-                        slim_ov = getattr(nd, "slimItem", None) or getattr(nd, "ball", None)
-                        if bid_ov is None and slim_ov is not None:
-                            bid_ov = getattr(slim_ov, "itemID", None)
-                        gid_ov = int(getattr(slim_ov, "groupID", 0) or 0) if slim_ov is not None else 0
-                        cid_ov = int(getattr(slim_ov, "categoryID", 0) or 0) if slim_ov is not None else 0
-                        name_ov = _strip_tags(_safe_str(getattr(nd, "label", "") or getattr(nd, "name", "") or _resolve_ball_name(slim_ov, bid_ov), 64))
-                        dist_ov = getattr(nd, "distance", None)
-                        if bid_ov is not None or name_ov:
-                            overview_entries.append({
-                                "item_id": int(bid_ov) if bid_ov is not None else None,
-                                "name": name_ov,
-                                "group_id": gid_ov,
-                                "category_id": cid_ov,
-                                "distance_m": round(float(dist_ov), 1) if isinstance(dist_ov, (int, float)) else None,
-                            })
+                        try:
+                            bid_ov = getattr(nd, "itemID", None)
+                            slim_ov = getattr(nd, "slimItem", None) or getattr(nd, "ball", None)
+                            if bid_ov is None and slim_ov is not None:
+                                bid_ov = getattr(slim_ov, "itemID", None)
+                            bid_int = None
+                            if bid_ov is not None:
+                                if isinstance(bid_ov, bool):
+                                    continue
+                                try:
+                                    bid_int = int(bid_ov)
+                                except (TypeError, ValueError):
+                                    continue
+                            if slim_ov is None and bid_int is not None:
+                                slim_ov = slims_by_id.get(bid_int)
+                            nb_ov = nearby_by_id.get(bid_int) if bid_int is not None else None
+                            try:
+                                gid_ov = int(
+                                    (getattr(slim_ov, "groupID", 0) if slim_ov is not None else 0)
+                                    or getattr(nd, "groupID", 0)
+                                    or (nb_ov.get("group_id") if nb_ov else 0)
+                                    or 0
+                                )
+                            except (TypeError, ValueError):
+                                gid_ov = 0
+                            try:
+                                cid_ov = int(
+                                    (getattr(slim_ov, "categoryID", 0) if slim_ov is not None else 0)
+                                    or getattr(nd, "categoryID", 0)
+                                    or (nb_ov.get("category_id") if nb_ov else 0)
+                                    or 0
+                                )
+                            except (TypeError, ValueError):
+                                cid_ov = 0
+                            name_ov = _strip_tags(
+                                _safe_str(
+                                    getattr(nd, "label", "")
+                                    or getattr(nd, "name", "")
+                                    or (nb_ov.get("name") if nb_ov else "")
+                                    or _resolve_ball_name(slim_ov, bid_int if bid_int is not None else bid_ov),
+                                    64,
+                                )
+                            )
+                            num_types = _PY_INT_TYPES + (float,)
+                            dist_ov = getattr(nd, "distance", None)
+                            if not isinstance(dist_ov, num_types) or isinstance(dist_ov, bool):
+                                dist_ov = getattr(nd, "rawDistance", None)
+                            if not isinstance(dist_ov, num_types) or isinstance(dist_ov, bool):
+                                dist_ov = getattr(nd, "surfaceDist", None)
+                            if (not isinstance(dist_ov, num_types) or isinstance(dist_ov, bool)) and nb_ov is not None:
+                                dist_ov = nb_ov.get("distance_m")
+                            dist_val = None
+                            if isinstance(dist_ov, num_types) and not isinstance(dist_ov, bool):
+                                fdist = float(dist_ov)
+                                if not (math.isnan(fdist) or math.isinf(fdist)):
+                                    dist_val = round(fdist, 1)
+                            if bid_int is not None or name_ov:
+                                overview_entries.append({
+                                    "item_id": bid_int,
+                                    "name": name_ov,
+                                    "group_id": gid_ov,
+                                    "category_id": cid_ov,
+                                    "distance_m": dist_val,
+                                })
+                        except Exception:
+                            _clear_py2_exc()
+                            continue
         except Exception:
             pass
         space_info["overview_entries"] = overview_entries[:30]
         space_info["overview_count"] = len(overview_entries)
+        resolved_overview = [b for b in overview_entries if int(b.get("group_id") or 0) > 0]
         space_info["celestials_in_overview"] = any(
             int(b.get("group_id") or 0) in (6, 7, 8, 9, 10, 15)
-            for b in (overview_entries or nearby)
+            for b in (resolved_overview or nearby)
         )
 
     new_flights = [e for e in _FLIGHT_RECORDER if e["seq"] > _LAST_OBSERVED_SEQ]
@@ -5294,8 +5393,8 @@ def _open_client_window(sm, target, require_open=False):
 
 
 def _run_gm_slash(sm, scmd):
-    slash_svc = sm.GetService("slash")
-    if scmd == "/" and hasattr(slash_svc, "FetchRemoteCommandList"):
+    slash_svc = sm.GetService("slash") if sm is not None else None
+    if scmd == "/" and slash_svc is not None and hasattr(slash_svc, "FetchRemoteCommandList"):
         try:
             if hasattr(slash_svc, "remoteCommandList"):
                 delattr(slash_svc, "remoteCommandList")
@@ -5306,16 +5405,16 @@ def _run_gm_slash(sm, scmd):
         if cmds:
             return "Commands: [%s]" % (", ".join(repr(str(c)) for c in cmds))
         try:
-            sm.RemoteSvc("slash").SlashCmd("/")
+            H._try_slash(sm, "/", raise_on_error=True)
         except Exception as exc:
             args = getattr(exc, "args", None)
             if isinstance(args, tuple) and len(args) >= 2 and isinstance(args[1], dict) and args[1].get("reason"):
                 return _safe_str(args[1]["reason"], 2000)
             return _safe_str(repr(exc), 2000)
         return "FetchRemoteCommandList OK (empty)"
-    # Pre-seed remoteCommandList if absent so svc_slash._SlashCmd never blocks on the
+    # Pre-seed remoteCommandList if absent so client-side helpers never block on the
     # "Hmmm: Unable to acquire server slash command list" modal dialog during automated playtesting.
-    if not hasattr(slash_svc, "remoteCommandList") or getattr(slash_svc, "remoteCommandList", None) is None:
+    if slash_svc is not None and (not hasattr(slash_svc, "remoteCommandList") or getattr(slash_svc, "remoteCommandList", None) is None):
         try:
             setattr(
                 slash_svc,
@@ -5347,7 +5446,7 @@ def _run_gm_slash(sm, scmd):
             )
         except Exception:
             pass
-    return sm.RemoteSvc("slash").SlashCmd(scmd)
+    return H._try_slash(sm, scmd, raise_on_error=True)
 
 
 def _invoke_text_submit_candidates(candidates, result):
@@ -5586,9 +5685,19 @@ def _execute_action(sm, action):
             since_exc_seq = int(since_exc_seq or 0)
             if cur_exc_seq < since_exc_seq:
                 since_exc_seq = 0
+        cur_guard_seq = int(getattr(_es, "_GUARD_HIT_SEQ", 0) or 0)
+        since_guard_seq = getattr(_es, "_PT_CONSUMED_GUARD_SEQ", None)
+        if since_guard_seq is None:
+            since_guard_seq = 0
+        else:
+            since_guard_seq = int(since_guard_seq or 0)
+            if cur_guard_seq < since_guard_seq:
+                since_guard_seq = 0
     except Exception:
         _es = None
         since_exc_seq = 0
+        since_guard_seq = 0
+    since_sim_seq = H.snapshot_sim_time_cursor() if hasattr(H, "snapshot_sim_time_cursor") else 0
 
     raw_atype = _to_utf8(action.get("type", "") or "").strip()
     raw_target = _to_utf8(action.get("target") or "").strip()
@@ -5682,7 +5791,14 @@ def _execute_action(sm, action):
         else min(max(int(wait_ms), 0), 5000)
     )
 
-    allow_time_control = bool(action.get("time_control", not action.get("scenario_mode", False)))
+    if action.get("scenario_mode", False):
+        allow_time_control = bool(
+            action.get("host_time_control", action.get("time_control", False))
+        )
+    else:
+        allow_time_control = bool(
+            action.get("host_time_control", action.get("time_control", True))
+        )
     uicore = _get_uicore()
     layers = getattr(uicore, "layer", None) if uicore is not None else None
     result = {"ok": True, "action_ok": True, "action_type": raw_atype, "target": raw_target}
@@ -6800,11 +6916,8 @@ def _execute_action(sm, action):
                 try:
                     res = _run_gm_slash(sm, scmd)
                     if scmd.strip().lower().split()[:1] == ["/cleartimers"]:
-                        try:
-                            if sm is not None:
-                                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                        except Exception:
-                            pass
+                        if hasattr(H, "_clear_session_timer"):
+                            H._clear_session_timer(sm, raise_on_error=False)
                         if sess is not None and hasattr(sess, "nextSessionChange"):
                             try:
                                 # Keep a Python 2 long(0) so both DoSimClockRebase (+= delta_long) and FmtDateEng (requires long) work.
@@ -7075,19 +7188,29 @@ def _execute_action(sm, action):
                             or _WARP_TELEMETRY.get("in_warp")
                             or (getattr(H, "_WARP_SIGNAL_STATE", None) or {}).get("in_warp")
                         ):
+                            pre_warp_tc_ok = (
+                                bool(H._advance_clock(sm, None, 2, raise_on_error=False))
+                                if allow_time_control
+                                else False
+                            )
                             H._wait_warp_fx_settled(
                                 sm,
-                                timeout_sec=(12.0 if not allow_time_control else 6.0),
-                                allow_time_control=allow_time_control,
+                                timeout_sec=(6.0 if pre_warp_tc_ok else 12.0),
+                                allow_time_control=bool(allow_time_control and pre_warp_tc_ok),
                             )
                         H._wait_view_settled(sm)
-                        if allow_time_control:
-                            try:
-                                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                            except Exception:
-                                pass
+                        pre_clear_ok = (
+                            bool(H._clear_session_timer(sm, raise_on_error=False))
+                            if allow_time_control
+                            else False
+                        )
                         dock_started_at = time.time()
-                        dock_loop_deadline = dock_started_at + (35.0 if not allow_time_control else 18.5)
+                        tc_state = {
+                            "short_loop": bool(pre_clear_ok),
+                            "clear_ok": bool(pre_clear_ok),
+                        }
+                        def _dock_loop_deadline():
+                            return dock_started_at + (18.5 if tc_state["short_loop"] else 35.0)
                         def _dock_surf_dist():
                             cur_bp = mich_d.GetBallpark() if (sid_d and mich_d is not None) else bp_d
                             if cur_bp is None or not hasattr(cur_bp, "GetBall"):
@@ -7115,28 +7238,25 @@ def _execute_action(sm, action):
                             beyonce.CmdFollowBall(dock_id, 0.0)
                             cur_sd = _dock_surf_dist()
                             steps = 0
-                            iter_cap = max(max_iters, 50) if not allow_time_control else max_iters
-                            for _ in range(iter_cap):
-                                if time.time() >= dock_loop_deadline:
+                            while steps < (max_iters if tc_state["short_loop"] else max(max_iters, 50)):
+                                if time.time() >= _dock_loop_deadline():
                                     break
                                 if cur_sd is not None and cur_sd <= float(limit_m):
                                     break
                                 if allow_time_control:
                                     adv_secs = 15 if (cur_sd is not None and cur_sd > 12000.0) else (10 if (cur_sd is not None and cur_sd > 4500.0) else 8)
-                                    try:
-                                        sm.RemoteSvc("timeControl").AdvanceClock(adv_secs)
-                                    except Exception:
-                                        pass
-                                    H._sleep_sim_ms(200)
+                                    adv_ok = bool(H._advance_clock(sm, None, adv_secs, raise_on_error=False))
+                                    tc_state["short_loop"] = adv_ok
+                                    H._sleep_sim_ms(200 if adv_ok else 500)
                                 else:
                                     H._sleep_sim_ms(500)
                                 steps += 1
                                 cur_sd = _dock_surf_dist()
-                            if allow_time_control:
-                                try:
-                                    sm.RemoteSvc("timeControl").ClearSessionTimer()
-                                except Exception:
-                                    pass
+                            tc_state["clear_ok"] = (
+                                bool(H._clear_session_timer(sm, raise_on_error=False))
+                                if allow_time_control
+                                else False
+                            )
                             return steps
                         def _already_docked():
                             s_cur = getattr(__builtin__, "session", None)
@@ -7166,22 +7286,23 @@ def _execute_action(sm, action):
                                     else:
                                         warp_too_short = True
                                 if not warp_too_short and not _already_docked():
-                                    if allow_time_control:
-                                        try:
-                                            sm.RemoteSvc("timeControl").AdvanceClock(180)
-                                        except Exception:
-                                            pass
+                                    warp_adv_ok = (
+                                        bool(H._advance_clock(sm, None, 180, raise_on_error=False))
+                                        if allow_time_control
+                                        else False
+                                    )
+                                    tc_state["short_loop"] = warp_adv_ok
                                     H._sleep_sim_ms(400)
                                     H._wait_warp_fx_settled(
                                         sm,
-                                        timeout_sec=(35.0 if not allow_time_control else 8.0),
-                                        allow_time_control=allow_time_control,
+                                        timeout_sec=(8.0 if warp_adv_ok else 35.0),
+                                        allow_time_control=bool(allow_time_control and warp_adv_ok),
                                     )
                                     surf_d = _dock_surf_dist()
                             if not _already_docked():
                                 if warp_too_short or (surf_d is not None and surf_d > 2400.0):
                                     _approach_dock_within(2200.0, 12)
-                                if not allow_time_control:
+                                if not allow_time_control or not tc_state["clear_ok"]:
                                     H._wait_session_timer_clear(max_wait_sec=12.0)
                                 try:
                                     sm.RemoteSvc("stationSvc").Dock(dock_id)
@@ -7203,19 +7324,19 @@ def _execute_action(sm, action):
                                         # large stations) while server perimeter check still rejects Dock.
                                         # Advance simulation with CmdFollowBall active and retry Dock
                                         # within dock_loop_deadline instead of stopping at 0 iterations.
-                                        for _ in range(16 if not allow_time_control else 8):
-                                            if time.time() >= dock_loop_deadline:
+                                        retry_idx = 0
+                                        while retry_idx < (8 if tc_state["short_loop"] else 16):
+                                            retry_idx += 1
+                                            if time.time() >= _dock_loop_deadline():
                                                 break
                                             if allow_time_control:
-                                                try:
-                                                    sm.RemoteSvc("timeControl").AdvanceClock(12)
-                                                except Exception:
-                                                    pass
-                                                H._sleep_sim_ms(200)
-                                                try:
-                                                    sm.RemoteSvc("timeControl").ClearSessionTimer()
-                                                except Exception:
-                                                    pass
+                                                adv_ok = bool(H._advance_clock(sm, None, 12, raise_on_error=False))
+                                                tc_state["short_loop"] = adv_ok
+                                                H._sleep_sim_ms(200 if adv_ok else 600)
+                                                clear_ok = bool(H._clear_session_timer(sm, raise_on_error=False))
+                                                tc_state["clear_ok"] = clear_ok
+                                                if not clear_ok:
+                                                    H._wait_session_timer_clear(max_wait_sec=4.0)
                                             else:
                                                 H._sleep_sim_ms(600)
                                                 H._wait_session_timer_clear(max_wait_sec=4.0)
@@ -7229,7 +7350,7 @@ def _execute_action(sm, action):
                                                 pending_dock_exc = retry_exc
                                     if pending_dock_exc is not None:
                                         raise pending_dock_exc
-                        dl_d = time.time() + (16.0 if not allow_time_control else 10.0)
+                        dl_d = time.time() + (10.0 if (allow_time_control and tc_state["clear_ok"]) else 16.0)
                         while time.time() < dl_d:
                             sess_d = getattr(__builtin__, "session", None)
                             if (
@@ -7240,10 +7361,7 @@ def _execute_action(sm, action):
                                 break
                             H._sleep_ms(100)
                         if allow_time_control:
-                            try:
-                                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                            except Exception:
-                                pass
+                            H._clear_session_timer(sm, raise_on_error=False)
                         H._ensure_view(sm, "hangar")
                     elif sub == "jump_gate":
                         sess_j = getattr(__builtin__, "session", None)
@@ -7308,6 +7426,8 @@ def _execute_action(sm, action):
                                 except Exception:
                                     surf_j = None
                             warp_too_short_j = False
+                            warp_adv_ok_j = bool(allow_time_control)
+                            did_warp_j = False
                             if (bp_j is not None and target_ball_j is None) or (surf_j is not None and surf_j >= 150000.0):
                                 try:
                                     beyonce.CmdWarpToStuff("item", gate_id, 0.0)
@@ -7316,16 +7436,17 @@ def _execute_action(sm, action):
                                         raise
                                     warp_too_short_j = True
                                 if not warp_too_short_j:
-                                    if allow_time_control:
-                                        try:
-                                            sm.RemoteSvc("timeControl").AdvanceClock(180)
-                                        except Exception:
-                                            pass
+                                    did_warp_j = True
+                                    warp_adv_ok_j = (
+                                        bool(H._advance_clock(sm, None, 180, raise_on_error=False))
+                                        if allow_time_control
+                                        else False
+                                    )
                                     H._sleep_sim_ms(400)
                                     H._wait_warp_fx_settled(
                                         sm,
-                                        timeout_sec=(35.0 if not allow_time_control else 8.0),
-                                        allow_time_control=allow_time_control,
+                                        timeout_sec=(8.0 if warp_adv_ok_j else 35.0),
+                                        allow_time_control=bool(allow_time_control and warp_adv_ok_j),
                                     )
                                     bp_j = mich_j.GetBallpark() if mich_j is not None else None
                                     target_ball_j = bp_j.GetBall(gate_id) if (bp_j is not None and hasattr(bp_j, "GetBall")) else None
@@ -7340,17 +7461,17 @@ def _execute_action(sm, action):
                                             surf_j = None
                             if warp_too_short_j or surf_j is None or surf_j > 2400.0:
                                 beyonce.CmdFollowBall(gate_id, 0.0)
-                                gate_approach_dl = time.time() + (25.0 if not allow_time_control else 18.0)
-                                gate_iters = 50 if not allow_time_control else 14
-                                for _ in range(gate_iters):
-                                    if time.time() >= gate_approach_dl:
+                                approach_tc_ok = bool(warp_adv_ok_j) if did_warp_j else bool(allow_time_control)
+                                gate_started_at = time.time()
+                                gate_step = 0
+                                while gate_step < (14 if approach_tc_ok else 50):
+                                    if time.time() >= gate_started_at + (18.0 if approach_tc_ok else 25.0):
                                         break
+                                    gate_step += 1
                                     if allow_time_control:
-                                        try:
-                                            sm.RemoteSvc("timeControl").AdvanceClock(8)
-                                        except Exception:
-                                            pass
-                                        H._sleep_sim_ms(200)
+                                        step_adv_ok = bool(H._advance_clock(sm, None, 8, raise_on_error=False))
+                                        approach_tc_ok = step_adv_ok
+                                        H._sleep_sim_ms(200 if step_adv_ok else 500)
                                     else:
                                         H._sleep_sim_ms(500)
                                     target_ball_j = bp_j.GetBall(gate_id) if (bp_j is not None and hasattr(bp_j, "GetBall")) else None
@@ -7365,15 +7486,15 @@ def _execute_action(sm, action):
                                                 break
                                         except Exception:
                                             pass
-                            if allow_time_control:
-                                try:
-                                    sm.RemoteSvc("timeControl").ClearSessionTimer()
-                                except Exception:
-                                    pass
-                            else:
+                            jump_clear_ok = (
+                                bool(H._clear_session_timer(sm, raise_on_error=False))
+                                if allow_time_control
+                                else False
+                            )
+                            if not jump_clear_ok:
                                 H._wait_session_timer_clear(max_wait_sec=12.0)
                             beyonce.CmdStargateJump(gate_id)
-                            dl_j = time.time() + (18.0 if not allow_time_control else 12.0)
+                            dl_j = time.time() + (12.0 if jump_clear_ok else 18.0)
                             post_sys = pre_sys
                             while time.time() < dl_j:
                                 sess_now = getattr(__builtin__, "session", None)
@@ -7391,10 +7512,7 @@ def _execute_action(sm, action):
                                     break
                                 H._sleep_sim_ms(200)
                             if allow_time_control:
-                                try:
-                                    sm.RemoteSvc("timeControl").ClearSessionTimer()
-                                except Exception:
-                                    pass
+                                H._clear_session_timer(sm, raise_on_error=False)
                             H._wait_view_settled(sm)
                             for _ in range(20):
                                 bp_done = mich_j.GetBallpark() if mich_j is not None else None
@@ -8100,10 +8218,57 @@ def _execute_action(sm, action):
             new_log_excs = []
             suppressed_log_excs = []
 
+    action_guard_hits = []
+    guard_summary = {
+        "client_guards_off": False,
+        "guard_hits_count": 0,
+        "guard_hits_by_guard": {},
+        "client_only_guard_hits": 0,
+        "client_only_guard_hits_by_guard": {},
+        "server_caused_guard_hits": 0,
+    }
+    if _es is not None:
+        try:
+            get_hits_fn = getattr(_es, "get_guard_hits", None)
+            if callable(get_hits_fn):
+                action_guard_hits = list(get_hits_fn(since_seq=since_guard_seq))
+            else:
+                raw_ghits = list(getattr(_es, "_GUARD_HITS", []) or [])
+                action_guard_hits = [
+                    dict(gh)
+                    for gh in raw_ghits
+                    if int(gh.get("seq", 0) or 0) > since_guard_seq
+                ]
+            max_gseq = since_guard_seq
+            for gh in action_guard_hits:
+                gseq = int(gh.get("seq", 0) or 0)
+                if gseq > max_gseq:
+                    max_gseq = gseq
+            cur_gseq = int(getattr(_es, "_GUARD_HIT_SEQ", 0) or 0)
+            setattr(_es, "_PT_CONSUMED_GUARD_SEQ", max(max_gseq, cur_gseq))
+            sum_fn = getattr(_es, "get_guard_hit_summary", None)
+            if callable(sum_fn):
+                guard_summary = dict(sum_fn(since_seq=since_guard_seq))
+            else:
+                guard_summary["guard_hits_count"] = len(action_guard_hits)
+        except Exception:
+            action_guard_hits = []
+
+    sim_info = (
+        H.collect_sim_time_telemetry(since_sim_seq)
+        if hasattr(H, "collect_sim_time_telemetry")
+        else {"sim_time_injected_sec": 0.0, "sim_time_injection_count": 0, "sim_time_injections": []}
+    )
     macho_excs = [e for e in err_flights if e.get("status") == "ERR" and e.get("kind") == "macho"]
     quasar_errs = [e for e in err_flights if e.get("status") == "ERR" and e.get("kind") == "quasar"]
     _tgt_id = action.get("item_id") or (raw_target if raw_target.isdigit() else None)
     result["state_diff"] = _compute_state_diff(pre_state, post_state, new_scatters, target_item_id=_tgt_id)
+    result["guard_hits"] = action_guard_hits
+    result["guard_hit_count"] = len(action_guard_hits)
+    result["guard_summary"] = guard_summary
+    result["sim_time_injected_sec"] = sim_info.get("sim_time_injected_sec", 0.0)
+    result["sim_time_injection_count"] = int(sim_info.get("sim_time_injection_count", 0) or 0)
+    result["sim_time_injections"] = list(sim_info.get("sim_time_injections") or [])
     result["flight_recorder"] = {
         "macho_calls": new_flights[-80:],
         "macho_exceptions": macho_excs,
@@ -8112,8 +8277,56 @@ def _execute_action(sm, action):
         "suppressed_log_exceptions": suppressed_log_excs[-5:],
         "scatters_observed": [s.get("event") for s in new_scatters],
         "modals_opened": new_modals,
+        "guard_hits": action_guard_hits,
+        "guard_summary": guard_summary,
+        "sim_time_injected_sec": sim_info.get("sim_time_injected_sec", 0.0),
+        "sim_time_injection_count": int(sim_info.get("sim_time_injection_count", 0) or 0),
+        "sim_time_injections": list(sim_info.get("sim_time_injections") or []),
     }
     return result
+
+
+def _collect_hook_guard_telemetry(since_seq=0, advance_cursor=False):
+    hits = []
+    summary = {
+        "client_guards_off": False,
+        "guard_hits_count": 0,
+        "guard_hits_by_guard": {},
+        "client_only_guard_hits": 0,
+        "client_only_guard_hits_by_guard": {},
+        "server_caused_guard_hits": 0,
+    }
+    cumulative = dict(summary)
+    try:
+        import evomu_site as _es
+        hits_fn = getattr(_es, "get_guard_hits", None)
+        if callable(hits_fn):
+            hits = list(hits_fn(since_seq=since_seq))
+        else:
+            raw_hits = list(getattr(_es, "_GUARD_HITS", []) or [])
+            hits = [dict(h) for h in raw_hits if int(h.get("seq", 0) or 0) > int(since_seq or 0)]
+        sum_fn = getattr(_es, "get_guard_hit_summary", None)
+        if callable(sum_fn):
+            summary = dict(sum_fn(since_seq=since_seq))
+            cumulative = dict(sum_fn())
+        else:
+            summary["guard_hits_count"] = len(hits)
+            cumulative = dict(summary)
+        if advance_cursor:
+            max_gseq = int(getattr(_es, "_PT_CONSUMED_GUARD_SEQ", 0) or 0)
+            for gh in hits:
+                gseq = int(gh.get("seq", 0) or 0)
+                if gseq > max_gseq:
+                    max_gseq = gseq
+            cur_gseq = int(getattr(_es, "_GUARD_HIT_SEQ", 0) or 0)
+            setattr(_es, "_PT_CONSUMED_GUARD_SEQ", max(max_gseq, cur_gseq))
+    except Exception:
+        pass
+    return {
+        "guard_hits": hits,
+        "guard_summary": summary,
+        "cumulative_summary": cumulative,
+    }
 
 
 class PlaytesterRpcServer(object):
@@ -8133,10 +8346,14 @@ class PlaytesterRpcServer(object):
         self.sock.setblocking(0)
         self.port = self.sock.getsockname()[1]
         self.running = True
+        if hasattr(H, "_configure_host_gm_bridge"):
+            H._configure_host_gm_bridge(cfg=cfg)
         try:
             import evomu_site as _es
             if not hasattr(_es, "_PT_CONSUMED_EXC_SEQ"):
                 setattr(_es, "_PT_CONSUMED_EXC_SEQ", int(getattr(_es, "_EXC_SEQ", 0) or 0))
+            if not hasattr(_es, "_PT_CONSUMED_GUARD_SEQ"):
+                setattr(_es, "_PT_CONSUMED_GUARD_SEQ", int(getattr(_es, "_GUARD_HIT_SEQ", 0) or 0))
         except Exception:
             pass
 
@@ -8219,6 +8436,8 @@ class PlaytesterRpcServer(object):
                         globals()[k] = v
                 if hasattr(mod, "PlaytesterRpcServer"):
                     self.__class__ = mod.PlaytesterRpcServer
+                if hasattr(H, "_configure_host_gm_bridge"):
+                    H._configure_host_gm_bridge(cfg=self.cfg)
                 _install_flight_recorder_hooks(self.sm)
             return {"ok": True, "reloaded": True, "ts": time.time()}
         if cmd in ("bootstrap_session", "ensure_logged_in"):
@@ -8251,27 +8470,54 @@ class PlaytesterRpcServer(object):
             globals()["_LAST_SNAPSHOT"] = st
             globals()["_LAST_SNAPSHOT_SM"] = self.sm
             globals()["_LAST_SNAPSHOT_TS"] = time.time()
+            gt = _collect_hook_guard_telemetry(0, advance_cursor=True)
+            boot_fr = {
+                "macho_calls": list(_FLIGHT_RECORDER[-80:]),
+                "scatters_observed": [s.get("event") for s in _RECENT_SCATTERS[-60:]],
+                "guard_hits": gt["guard_hits"],
+                "guard_summary": gt["cumulative_summary"],
+            }
+            boot_result = dict(st) if isinstance(st, dict) else {}
+            boot_result["char_id"] = int(cid or 0)
+            boot_result["guard_hits"] = gt["guard_hits"]
+            boot_result["guard_summary"] = gt["cumulative_summary"]
+            boot_result["flight_recorder"] = boot_fr
             return {
                 "ok": True,
-                "result": st,
+                "result": boot_result,
                 "char_id": int(cid or 0),
                 "state": st,
-                "flight_recorder": {
-                    "macho_calls": list(_FLIGHT_RECORDER[-80:]),
-                    "scatters_observed": [s.get("event") for s in _RECENT_SCATTERS[-60:]],
-                },
+                "guard_hits": gt["guard_hits"],
+                "guard_summary": gt["cumulative_summary"],
+                "flight_recorder": dict(boot_fr),
+            }
+        if cmd == "get_guard_hits":
+            since_seq = int(params.get("since_seq", 0) or 0)
+            gt = _collect_hook_guard_telemetry(since_seq)
+            return {
+                "ok": True,
+                "result": gt,
+                "guard_hits": gt["guard_hits"],
+                "guard_summary": gt["guard_summary"],
+                "cumulative_summary": gt["cumulative_summary"],
             }
         if cmd == "get_flight_recorder":
             since_seq = int(params.get("since_seq", 0) or 0)
+            since_guard_seq = int(params.get("since_guard_seq", 0) or 0)
+            gt = _collect_hook_guard_telemetry(since_guard_seq)
             fr_payload = {
                 "macho_calls": [e for e in _FLIGHT_RECORDER if int(e.get("seq", 0) or 0) > since_seq][-120:],
                 "scatters_observed": [s.get("event") for s in _RECENT_SCATTERS[-60:]],
+                "guard_hits": gt["guard_hits"],
+                "guard_summary": gt["guard_summary"],
             }
             return {
                 "ok": True,
                 "result": fr_payload,
                 "macho_calls": fr_payload["macho_calls"],
                 "scatters_observed": fr_payload["scatters_observed"],
+                "guard_hits": gt["guard_hits"],
+                "guard_summary": gt["guard_summary"],
             }
         if cmd in ("get_state", "observe"):
             st = _get_state_snapshot(self.sm)

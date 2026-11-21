@@ -3,7 +3,9 @@
 #![forbid(unsafe_code)]
 
 use super::{BallparkHandle, SystemHandle};
-use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
+use eve_db::lock_rank::{
+    assert_locks_below, held_lock_ranks, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
+};
 use eve_destiny::{BallId, Ballpark};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
@@ -13,6 +15,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 struct DbBallparkEntry {
     ballpark: std::sync::Weak<BallparkHandle>,
+    actor_state: std::sync::Weak<RankedRwLock<crate::system_actor::SystemActorState, RANK_ACTOR_STATE>>,
     ball_positions: std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
 }
@@ -37,6 +40,7 @@ pub(crate) fn register_db_system_ballpark(
         (db.instance_id(), solar_system_id),
         DbBallparkEntry {
             ballpark: Arc::downgrade(&handle.ballpark),
+            actor_state: Arc::downgrade(&handle.actor_state),
             ball_positions: Arc::downgrade(&handle.ball_positions),
             scrambled_balls: Arc::downgrade(&handle.scrambled_balls),
         },
@@ -285,18 +289,37 @@ pub fn try_remove_ball_for_db(
             entry.ball_positions.upgrade(),
             entry.scrambled_balls.upgrade(),
         ) {
-            let apply_remove = |bp: &mut Ballpark| {
-                let _ = bp.remove_ball(ball_id);
-                sync_ball_positions(bp, &pos_arc, &scram_arc);
-            };
-            if eve_db::lock_rank::held_lock_ranks().contains(&eve_db::lock_rank::RANK_BALLPARK) {
-                eve_db::lock_rank::assert_locks_below(eve_db::lock_rank::RANK_BALLPARK + 1);
+            let st_opt = entry.actor_state.upgrade();
+            let held = held_lock_ranks();
+            let remove_with =
+                |bp: &mut Ballpark, st_opt: Option<&mut crate::system_actor::SystemActorState>| {
+                    let _ = bp.remove_ball(ball_id);
+                    if let Some(st) = st_opt {
+                        st.protection_registry.remove(&ball_id);
+                    }
+                };
+            if held.iter().any(|&r| r >= RANK_BALLPARK) {
+                assert_locks_below(RANK_ACTOR_STATE + 1);
                 if let Ok(mut bp) = bp_arc.try_write_unranked() {
-                    apply_remove(&mut bp);
+                    if let Some(st_arc) = st_opt.as_ref() {
+                        let Ok(mut st) = st_arc.try_write_unranked() else {
+                            return;
+                        };
+                        remove_with(&mut bp, Some(&mut st));
+                    } else {
+                        remove_with(&mut bp, None);
+                    }
+                    sync_ball_positions(&bp, &pos_arc, &scram_arc);
                 }
             } else {
                 let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
-                apply_remove(&mut bp);
+                if let Some(st_arc) = st_opt.as_ref() {
+                    let mut st = st_arc.write().unwrap_or_else(|e| e.into_inner());
+                    remove_with(&mut bp, Some(&mut st));
+                } else {
+                    remove_with(&mut bp, None);
+                }
+                sync_ball_positions(&bp, &pos_arc, &scram_arc);
             }
         }
     }

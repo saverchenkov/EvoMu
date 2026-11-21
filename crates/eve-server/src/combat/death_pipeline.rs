@@ -1839,6 +1839,16 @@ pub fn on_ball_destroyed_sync(
     } else {
         None
     };
+    crate::combat::npc_ai_weapons_loot::clear_extended_npc_weapon_runtime(ctx, sys_id, &[ball_id]);
+    if let Some(ref ext_npc) = removed_ext_npc {
+        if ext_npc.solar_system_id != sys_id {
+            crate::combat::npc_ai_weapons_loot::clear_extended_npc_weapon_runtime(
+                ctx,
+                ext_npc.solar_system_id,
+                &[ball_id],
+            );
+        }
+    }
     if let Some(ext_npc) = removed_ext_npc {
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.remove(&ball_id);

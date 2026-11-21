@@ -938,7 +938,7 @@ fn contract_notify_delta_acl_deposit_courier_expiry_break_wrap_and_search_edges(
     assert!(mate_sw.iter().any(|n| n.event == "OnItemChange"));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&ie_untracked_item].location_id, station_id);
-        assert_eq!(snap.items[&ie_untracked_item].flag, InventoryFlag::Hangar);
+        assert_eq!(snap.items[&ie_untracked_item].flag, InventoryFlag::CorpDeliveries);
         assert_eq!(snap.contracts[&sweep_zero_exp_cid].status, "Outstanding");
     });
 }
