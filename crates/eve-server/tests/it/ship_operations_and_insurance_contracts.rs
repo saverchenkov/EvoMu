@@ -554,9 +554,9 @@ async fn test_ship_bays_scoop_store_board_space_and_password() {
 
     // Verify SetShipPassword persisted
     let saved_pw = ctx.db.with_snapshot(|snap| {
-        snap.owner_notes.get(&-8_400_000_000_000)
-            .and_then(|n| serde_json::from_str::<serde_json::Value>(&n.note).ok())
-            .and_then(|v| v.get("ship_passwords")?.get(&orca_id.to_string())?.as_str().map(|s| s.to_string()))
+        snap.kv(eve_db::Ns::ShipAccessConfig)
+            .get::<eve_db::ShipAccessConfigRecord>(orca_id, "")
+            .and_then(|cfg| cfg.password)
     });
     assert_eq!(saved_pw, Some("orca-pass".into()));
 

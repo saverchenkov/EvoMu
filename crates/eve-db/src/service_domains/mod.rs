@@ -1529,4 +1529,108 @@ fn migrate_legacy_entity_kv(snap: &mut WorldStateSnapshot) {
             migrate_kv_if_absent(snap, Ns::CacheSetting, 0, sub, &val, default_unix);
         }
     }
+
+    // 4e. Legacy global `owner_notes[-8_400_000_000_000]` ContainerShipRuntimeState JSON blob -> per-entity `entity_kv` (`#1180`).
+    migrate_legacy_container_ship_state(snap);
+}
+
+const LEGACY_CONTAINER_SHIP_NOTE_ID: i64 = -8_400_000_000_000;
+
+#[derive(Default, Deserialize)]
+struct LegacyContainerShipRuntimeState {
+    #[serde(default)]
+    container_passwords: HashMap<i64, String>,
+    #[serde(default)]
+    container_config_passwords: HashMap<i64, String>,
+    #[serde(default)]
+    unlocked_containers: HashSet<(i64, i64)>,
+    #[serde(default)]
+    alsc_locked_items: HashSet<i64>,
+    #[serde(default)]
+    alsc_logs: HashMap<i64, Vec<AlscLogEntryRecord>>,
+    #[serde(default)]
+    ship_configs: HashMap<i64, ShipAccessConfigRecord>,
+    #[serde(default)]
+    custom_item_flags: HashMap<i64, u16>,
+    #[serde(default)]
+    ship_passwords: HashMap<i64, String>,
+    #[serde(default)]
+    container_configs: HashMap<i64, ContainerConfigRecord>,
+}
+
+fn migrate_legacy_container_ship_state(snap: &mut WorldStateSnapshot) {
+    let Some(rec) = snap.owner_notes.remove(&LEGACY_CONTAINER_SHIP_NOTE_ID) else {
+        return;
+    };
+    let legacy: LegacyContainerShipRuntimeState = match serde_json::from_str(&rec.note) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            tracing::warn!(error = %err, "ignoring unreadable legacy CONTAINER_SHIP_NOTE_ID note on migration");
+            return;
+        }
+    };
+    let updated_unix = rec.timestamp_unix;
+
+    for (&cid, pw) in &legacy.container_passwords {
+        if !pw.is_empty() {
+            migrate_kv_if_absent(snap, Ns::ContainerPassword, cid, "1", pw, updated_unix);
+        }
+    }
+    for (&cid, pw) in &legacy.container_config_passwords {
+        if !pw.is_empty() {
+            migrate_kv_if_absent(snap, Ns::ContainerPassword, cid, "2", pw, updated_unix);
+        }
+    }
+    for (&cid, cfg) in &legacy.container_configs {
+        migrate_kv_if_absent(snap, Ns::ContainerConfig, cid, "", cfg, updated_unix);
+    }
+    for &item_id in &legacy.alsc_locked_items {
+        migrate_kv_if_absent(snap, Ns::AlscLockedItem, item_id, "", &true, updated_unix);
+    }
+    for (&cid, entries) in &legacy.alsc_logs {
+        if entries.is_empty() {
+            continue;
+        }
+        let mut bounded = entries.clone();
+        trim_alsc_logs_to_budget(&mut bounded);
+        migrate_kv_if_absent(snap, Ns::ContainerAlscLogs, cid, "", &bounded, updated_unix);
+    }
+    for (&item_id, &flag_u16) in &legacy.custom_item_flags {
+        migrate_kv_if_absent(snap, Ns::CustomItemFlag, item_id, "", &flag_u16, updated_unix);
+    }
+
+    let ship_ids: BTreeSet<i64> = legacy
+        .ship_configs
+        .keys()
+        .chain(legacy.ship_passwords.keys())
+        .copied()
+        .collect();
+    for sid in ship_ids {
+        let mut cfg = legacy.ship_configs.get(&sid).cloned().unwrap_or_default();
+        if cfg.password.as_deref().is_none_or(str::is_empty) {
+            if let Some(pw) = legacy.ship_passwords.get(&sid) {
+                if !pw.is_empty() {
+                    cfg.password = Some(pw.clone());
+                }
+            }
+        }
+        migrate_kv_if_absent(snap, Ns::ShipAccessConfig, sid, "", &cfg, updated_unix);
+    }
+
+    for &(a, b) in &legacy.unlocked_containers {
+        let is_reversed_ship_pair = !legacy.container_passwords.contains_key(&a)
+            && !legacy.container_configs.contains_key(&a)
+            && (legacy.ship_configs.contains_key(&b)
+                || legacy.ship_passwords.contains_key(&b)
+                || (snap.characters.contains_key(&a) && !snap.characters.contains_key(&b)));
+        let (target_id, char_id) = if is_reversed_ship_pair { (b, a) } else { (a, b) };
+        migrate_kv_if_absent(
+            snap,
+            Ns::ContainerUnlockedChar,
+            target_id,
+            &char_id.to_string(),
+            &true,
+            updated_unix,
+        );
+    }
 }

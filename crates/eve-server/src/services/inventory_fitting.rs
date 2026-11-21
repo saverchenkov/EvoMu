@@ -1294,12 +1294,11 @@ async fn handle_invbroker_add(
                     let p_cat = ctx.sde.types.get(&parent.type_id).map(|t| t.category_id).unwrap_or(0);
                     if is_storage_auth_and_near(parent.item_id) {
                         if parent.owner_id != char_id && !session.has_gm_role() {
-                            let st = fitting_containers_ships::read_container_ship_state_snap(snap);
-                            if let Some(req_pw) = st.container_passwords.get(&parent.item_id).cloned() {
-                                if !req_pw.is_empty() && !st.unlocked_containers.contains(&(parent.item_id, char_id)) {
-                                    if supplied_pw != Some(req_pw.as_str()) {
-                                        return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to take items from container {}", parent.item_id), client_error: None });
-                                    }
+                            if let Some(req_pw) = fitting_containers_ships::container_password_snap(snap, parent.item_id, 1) {
+                                if !fitting_containers_ships::is_container_unlocked_snap(snap, parent.item_id, char_id)
+                                    && supplied_pw != Some(req_pw.as_str())
+                                {
+                                    return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to take items from container {}", parent.item_id), client_error: None });
                                 }
                             }
                         }
@@ -1366,12 +1365,11 @@ async fn handle_invbroker_add(
                         is_loc_colocated(new_loc)
                     } else if is_storage_auth_and_near(dest.item_id) {
                         if dest.owner_id != char_id && !session.has_gm_role() {
-                            let st = fitting_containers_ships::read_container_ship_state_snap(snap);
-                            if let Some(req_pw) = st.container_passwords.get(&dest.item_id).cloned() {
-                                if !req_pw.is_empty() && !st.unlocked_containers.contains(&(dest.item_id, char_id)) {
-                                    if supplied_pw != Some(req_pw.as_str()) {
-                                        return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to move items into container {}", dest.item_id), client_error: None });
-                                    }
+                            if let Some(req_pw) = fitting_containers_ships::container_password_snap(snap, dest.item_id, 1) {
+                                if !fitting_containers_ships::is_container_unlocked_snap(snap, dest.item_id, char_id)
+                                    && supplied_pw != Some(req_pw.as_str())
+                                {
+                                    return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to move items into container {}", dest.item_id), client_error: None });
                                 }
                             }
                         }
@@ -1991,6 +1989,15 @@ async fn handle_invbroker_add(
                                     .get("password")
                                     .and_then(|v| v.as_str())
                                     .or_else(|| args.iter().find_map(|a| a.as_str()));
+                                let now_unix = ctx.now_unix_secs();
+                                let clear_ids = split_qty_opt.is_none().then_some(effective_item_id);
+                                fitting_containers_ships::apply_add_move_kv_side_effects_in_snap(
+                                    snap,
+                                    pending_alsc_take.as_ref(),
+                                    clear_ids.as_slice(),
+                                    None,
+                                    now_unix,
+                                )?;
                                 fitting_containers_ships::record_ship_bay_unlock_for_ancestors_snap(
                                     ctx,
                                     snap,
@@ -2000,7 +2007,7 @@ async fn handle_invbroker_add(
                                     orig_item.location_id,
                                     orig_item.flag as u16,
                                     supplied_pw,
-                                );
+                                )?;
                                 return Ok(AddTxOutcome::Merged {
                                     merged_item: merged_snapshot,
                                     prev_qty,
@@ -2150,6 +2157,17 @@ async fn handle_invbroker_add(
                     .get("password")
                     .and_then(|v| v.as_str())
                     .or_else(|| args.iter().find_map(|a| a.as_str()));
+                let now_unix = ctx.now_unix_secs();
+                let mut custom_flag_ids = Vec::with_capacity(1 + unfitted_charges.len());
+                custom_flag_ids.push(effective_item_id);
+                custom_flag_ids.extend(unfitted_charges.iter().map(|(_, post_c)| post_c.item_id));
+                fitting_containers_ships::apply_add_move_kv_side_effects_in_snap(
+                    snap,
+                    pending_alsc_take.as_ref(),
+                    &custom_flag_ids,
+                    matches!(flag_u16, 90 | 155).then_some(flag_u16),
+                    now_unix,
+                )?;
                 fitting_containers_ships::record_ship_bay_unlock_for_ancestors_snap(
                     ctx,
                     snap,
@@ -2159,7 +2177,7 @@ async fn handle_invbroker_add(
                     old_loc_id,
                     old_flag_id as u16,
                     supplied_pw,
-                );
+                )?;
 
                 Ok(AddTxOutcome::Moved {
                     updated,
@@ -2196,11 +2214,7 @@ async fn handle_invbroker_add(
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, orig_source_loc_id).await;
                     }
                     fitting_containers_ships::record_container_add_log(ctx, char_id, item_id, moved_tid, moved_qty, new_loc);
-                    if let Some((cid, entry)) = pending_alsc_take {
-                        fitting_containers_ships::write_container_ship_state(ctx, |st| {
-                            st.alsc_logs.entry(cid).or_default().push(entry);
-                        });
-                    } else if orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
+                    if pending_alsc_take.is_none() && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
                         fitting_containers_ships::record_container_take_log(ctx, char_id, item_id, moved_tid, moved_qty, orig_source_loc_id);
                         crate::services::pve_dungeon_runtime::on_dungeon_item_looted(ctx, char_id, session.solar_system_id, orig_source_loc_id, moved_tid).await;
                     }
@@ -2378,22 +2392,6 @@ async fn handle_invbroker_add(
                             );
                         }
                     }
-                    write_container_ship_state(ctx, |st| {
-                        if let Some((cid, entry)) = pending_alsc_take {
-                            st.alsc_logs.entry(cid).or_default().push(entry);
-                        }
-                        if matches!(flag_u16, 90 | 155) {
-                            st.custom_item_flags.insert(item_id, flag_u16);
-                            for (_, post_c) in &unfitted_charges {
-                                st.custom_item_flags.insert(post_c.item_id, flag_u16);
-                            }
-                        } else {
-                            st.custom_item_flags.remove(&item_id);
-                            for (_, post_c) in &unfitted_charges {
-                                st.custom_item_flags.remove(&post_c.item_id);
-                            }
-                        }
-                    });
                     if looted_foreign_jetcan {
                         super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);
                     }

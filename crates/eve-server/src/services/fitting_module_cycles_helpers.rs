@@ -519,8 +519,9 @@ pub(crate) fn handle_unload_ammo(
                     return Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Container unload requires Cargo (5) or Unlocked (64) flag".into(), client_error: None });
                 }
                 crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, d)?;
-                let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
-                if st.container_passwords.get(&dest_loc_id).is_some_and(|pw| !pw.is_empty() && !st.unlocked_containers.contains(&(dest_loc_id, char_id))) {
+                if crate::services::fitting_containers_ships::container_password_snap(snap, dest_loc_id, 1).is_some()
+                    && !crate::services::fitting_containers_ships::is_container_unlocked_snap(snap, dest_loc_id, char_id)
+                {
                     return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to move items into container {dest_loc_id}"), client_error: None });
                 }
                 is_owned_container_target = true;
@@ -610,17 +611,18 @@ pub(crate) fn handle_unload_ammo(
             }
         }
         if !diffs.is_empty() {
-            crate::services::fitting_containers_ships::write_container_ship_state_snap(snap, |st| {
-                for (_, post_opt) in &diffs {
-                    if let Some(post) = post_opt {
-                        if dest_loc_id == ship_id && dest_flag_raw_opt == Some(155) {
-                            st.custom_item_flags.insert(post.item_id, 155);
-                        } else {
-                            st.custom_item_flags.remove(&post.item_id);
-                        }
-                    }
+            let now_unix = ctx.now_unix_secs();
+            for (_, post_opt) in &diffs {
+                if let Some(post) = post_opt {
+                    let flag_opt = (dest_loc_id == ship_id && dest_flag_raw_opt == Some(155)).then_some(155);
+                    crate::services::fitting_containers_ships::set_custom_item_flag_snap(
+                        snap,
+                        post.item_id,
+                        flag_opt,
+                        now_unix,
+                    )?;
                 }
-            });
+            }
         }
         Ok(diffs)
     })?;

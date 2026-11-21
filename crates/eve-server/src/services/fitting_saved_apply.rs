@@ -843,7 +843,6 @@ pub(crate) fn validate_and_apply_fitting(
     let mut missing: HashMap<TypeId, i64> = HashMap::new();
     let mut moved_items: Vec<eve_db::InventoryItemRecord> = Vec::new();
     let char_skills = ctx.character_skill_levels(char_id);
-    let alsc_locked = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx).alsc_locked_items;
     ctx.db.with_mut_snapshot(|snap| {
         for &ship_id in target_ship_ids {
             let ship_type_id = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
@@ -887,7 +886,7 @@ pub(crate) fn validate_and_apply_fitting(
                             && i.type_id == tid
                             && i.type_id != 60
                             && i.quantity > 0
-                            && !alsc_locked.contains(&i.item_id)
+                            && !snap.is_item_in_alsc_lock(i.item_id)
                             && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
                     })
                     .map(|i| (i.item_id, i.quantity))

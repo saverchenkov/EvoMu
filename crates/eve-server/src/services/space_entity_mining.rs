@@ -1198,32 +1198,38 @@ fn check_corp_division_deposit_access(
 
 fn check_container_lock_and_password(
     snap: &eve_db::WorldStateSnapshot,
-    cs_state: &crate::services::inventory_fitting::fitting_containers_ships::ContainerShipRuntimeState,
     cont: &InventoryItemRecord,
     char_id: i64,
 ) -> Result<(), BridgeRpcError> {
     crate::services::inventory_fitting::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
         snap, cont,
     )?;
-    if cont.flag == InventoryFlag::Locked || cs_state.alsc_locked_items.contains(&cont.item_id) {
+    if cont.flag == InventoryFlag::Locked || snap.is_item_in_alsc_lock(cont.item_id) {
         return Err(BridgeRpcError {
             code: "ItemLocked".into(),
             message: format!("Container {} is locked", cont.item_id),
             client_error: None,
         });
     }
-    let cfg = cs_state
-        .container_configs
-        .get(&cont.item_id)
-        .cloned()
-        .unwrap_or_default();
-    let need_pw_check =
-        cfg.password_per_action || !cs_state.unlocked_containers.contains(&(cont.item_id, char_id));
+    let cfg =
+        crate::services::inventory_fitting::fitting_containers_ships::container_config_snap(
+            snap,
+            cont.item_id,
+        );
+    let unlocked =
+        crate::services::inventory_fitting::fitting_containers_ships::is_container_unlocked_snap(
+            snap,
+            cont.item_id,
+            char_id,
+        );
+    let need_pw_check = cfg.password_per_action || !unlocked;
     if need_pw_check
-        && cs_state
-            .container_passwords
-            .get(&cont.item_id)
-            .is_some_and(|pw| !pw.is_empty())
+        && crate::services::inventory_fitting::fitting_containers_ships::container_password_snap(
+            snap,
+            cont.item_id,
+            1,
+        )
+        .is_some()
     {
         return Err(BridgeRpcError {
             code: "ALSCPasswordRequired".into(),
@@ -1438,7 +1444,6 @@ fn resolve_ship_hold_dest(
 fn resolve_station_container_dest(
     sde: &eve_sde::SdeRegistry,
     snap: &eve_db::WorldStateSnapshot,
-    cs_state: &crate::services::inventory_fitting::fitting_containers_ships::ContainerShipRuntimeState,
     parsed: &ParsedReprocessArgs,
     dest_item: &InventoryItemRecord,
     dest_type: &eve_sde::InvType,
@@ -1509,7 +1514,7 @@ fn resolve_station_container_dest(
                 client_error: None,
             });
         }
-        check_container_lock_and_password(snap, cs_state, cur, char_id)?;
+        check_container_lock_and_password(snap, cur, char_id)?;
         if cur.owner_id != dest_item.owner_id {
             return Err(BridgeRpcError {
                 code: "OwnershipOrLocationViolation".into(),
@@ -1649,7 +1654,6 @@ fn resolve_station_container_dest(
 fn resolve_reprocess_output_dest(
     sde: &eve_sde::SdeRegistry,
     snap: &eve_db::WorldStateSnapshot,
-    cs_state: &crate::services::inventory_fitting::fitting_containers_ships::ContainerShipRuntimeState,
     char_skills: &std::collections::HashMap<TypeId, u8>,
     parsed: &ParsedReprocessArgs,
     source_item: &InventoryItemRecord,
@@ -1742,7 +1746,7 @@ fn resolve_reprocess_output_dest(
     crate::services::inventory_fitting::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
         snap, dest_item,
     )?;
-    if dest_item.flag == InventoryFlag::Locked || cs_state.alsc_locked_items.contains(&target_loc) {
+    if dest_item.flag == InventoryFlag::Locked || snap.is_item_in_alsc_lock(target_loc) {
         return Err(BridgeRpcError {
             code: "ItemLocked".into(),
             message: format!("Output destination {target_loc} is locked"),
@@ -1767,7 +1771,6 @@ fn resolve_reprocess_output_dest(
     resolve_station_container_dest(
         sde,
         snap,
-        cs_state,
         parsed,
         dest_item,
         dest_type,
@@ -1969,7 +1972,6 @@ pub async fn handle(
                     .get(&char_id)
                     .map(|c| c.corporation_id)
                     .unwrap_or(0);
-                let cs_state = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state_snap(snap);
 
                 // Phase 1: Validate every input item, output destination, cumulative ISK tax,
                 // and cumulative m³ capacity before mutating snapshot items or balances.
@@ -2147,7 +2149,6 @@ pub async fn handle(
                     let dest = resolve_reprocess_output_dest(
                         &ctx.sde,
                         snap,
-                        &cs_state,
                         &char_skills,
                         &parsed,
                         &item,

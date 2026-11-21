@@ -348,16 +348,32 @@ async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
     let _ = drain_notif_events(&ctx, PILOT);
-    for _ in 0..9 {
-        let (nid, nsys, npos) = ctx.db.with_snapshot(|s| {
-            let (&nid, &(_, nsys, _)) = s.sov_runtime.command_nodes.iter().find(|(_, &(hid, _, _))| hid == hub_id).unwrap();
-            (nid, nsys, s.item_positions[&nid])
-        });
+    for _ in 0..14 {
+        if ctx.db.with_snapshot(|s| s.structures[&hub_id].state == "Destroyed") {
+            break;
+        }
+        let Some((nid, nsys, npos)) = ctx.db.with_snapshot(|s| {
+            s.sov_runtime
+                .command_nodes
+                .iter()
+                .filter(|(_, &(hid, _, _))| hid == hub_id)
+                .min_by_key(|(&nid, _)| nid)
+                .map(|(&nid, &(_, nsys, _))| (nid, nsys, s.item_positions[&nid]))
+        }) else {
+            ctx.advance_secs(60);
+            eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+            continue;
+        };
         let prev = s_hostile.solar_system_id.unwrap();
         if prev != nsys {
             let _ = ctx.systems.get_or_spawn(prev).remove_ball(100_000_113).await;
         }
         set_pilot_location(&ctx, &mut s_hostile, nsys, None);
+        ctx.db.with_mut_snapshot(|s| {
+            if let Some(ship) = s.items.get_mut(&100_000_113) {
+                ship.location_id = i64::from(nsys);
+            }
+        });
         place_ship_ball(&ctx, nsys, 90_000_113, 100_000_113, 621, DVec3::from_array(npos) + DVec3::new(3_000.0, 0.0, 0.0)).await;
         lock_target_via_rpc(&ctx, &mut s_hostile, nsys, 100_000_113, nid).await;
         rpc_call(&ctx, &mut s_hostile, "dogmaIM", "Activate", &[PyRep::Integer(980_010), PyRep::String("default".into()), PyRep::Integer(nid)])
