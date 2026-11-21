@@ -1160,7 +1160,12 @@ pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
     let gm_uids: BTreeSet<u64> = ctx.db.with_snapshot(|snap| {
         snap.accounts
             .values()
-            .filter(|a| (a.role & eve_db::service_roles::ROLE_GM_MASK) != 0)
+            .filter(|a| {
+            crate::router::ServerContext::has_gm_role_mask(
+                a.role,
+                crate::router::ServerContext::ROLE_GM_CANONICAL_MASK,
+            )
+        })
             .map(|a| a.user_id)
             .collect()
     });
@@ -1734,7 +1739,7 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
 /// Enforces GM or Admin privileges on administrative `machoNet` / `cluster` RPCs (`#432`).
 pub fn require_gm_or_admin(session: &SessionState) -> Result<(), BridgeRpcError> {
     ServerContext::require_auth(session)?;
-    if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+    if !crate::router::ServerContext::has_canonical_gm_role(session) {
         return Err(BridgeRpcError {
             code: "InsufficientRole".into(),
             message: "Cluster administration RPC requires GM or Admin role".into(),
