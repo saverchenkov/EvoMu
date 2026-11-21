@@ -2000,19 +2000,19 @@ async fn handle_scoop_abandoned_fighter(
             client_error: None,
         }));
     }
-    let f_pos = sys_handle
+    let f_ball = sys_handle
         .get_ball_snapshot(squad.ball_id)
         .await
         .ok()
         .flatten()
-        .map(|(_, b)| b.position);
-    let s_pos = sys_handle
+        .map(|(_, b)| b);
+    let s_ball = sys_handle
         .get_ball_snapshot(ship_id)
         .await
         .ok()
         .flatten()
-        .map(|(_, b)| b.position);
-    let Some(f_pos) = f_pos else {
+        .map(|(_, b)| b);
+    let Some(f_ball) = f_ball else {
         let ball_id = squad.ball_id;
         restore_squad(squad);
         return Some(Err(BridgeRpcError {
@@ -2021,7 +2021,7 @@ async fn handle_scoop_abandoned_fighter(
             client_error: None,
         }));
     };
-    let Some(s_pos) = s_pos else {
+    let Some(s_ball) = s_ball else {
         restore_squad(squad);
         return Some(Err(BridgeRpcError {
             code: "ShipNotInSystem".into(),
@@ -2029,12 +2029,12 @@ async fn handle_scoop_abandoned_fighter(
             client_error: None,
         }));
     };
-    let dist = (f_pos - s_pos).length();
+    let dist = s_ball.surface_distance(&f_ball);
     if dist > 2500.0 {
         restore_squad(squad);
         return Some(Err(BridgeRpcError {
             code: "FighterOutOfRange".into(),
-            message: format!("Fighter squadron is {dist:.1}m away, must be within 2500m to scoop"),
+            message: format!("Fighter squadron is {dist:.1}m from ship hull, must be within 2500m to scoop"),
             client_error: None,
         }));
     }

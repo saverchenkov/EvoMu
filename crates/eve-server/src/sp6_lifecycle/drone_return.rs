@@ -110,7 +110,6 @@ pub async fn handle_cmd_return_bay(
             continue;
         }
         if dist > 2_500.0 {
-            let _ = sys_handle.remove_module_cycle(d.ball_id, -d.ball_id).await;
             let still_controlled = with_mut_combat_runtime(ctx, |rt| {
                 if let Some(st) = rt.active_drones_in_space.get_mut(&d.ball_id) {
                     if !st.is_abandoned
@@ -130,6 +129,7 @@ pub async fn handle_cmd_return_bay(
             if !still_controlled {
                 continue;
             }
+            let _ = sys_handle.remove_module_cycle(d.ball_id, -d.ball_id).await;
             // Mobile drone returning from > 2500m: restore full speed fraction (e.g. if previously Stopped)
             // before Follow so the drone does not remain stuck at 0.0 m/s.
             let _ = sys_handle.set_speed_fraction(d.ball_id, 1.0).await;

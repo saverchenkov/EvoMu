@@ -242,16 +242,6 @@ pub(crate) fn is_recently_destroyed_in_persisted(
     rt.is_recently_destroyed_item_id(ball_id) || rt.is_recently_destroyed_item_id(item_id)
 }
 
-/// Parses `"drone_web:{parent_ship_id}:{drone_item_id}"` synthetic module cycle identifiers.
-#[allow(dead_code)] // Wired into `system_actor/cycles_tackle.rs` once file lock releases.
-pub(crate) fn parse_drone_web_ids(effect_name: &str) -> Option<(i64, i64)> {
-    let rest = effect_name.strip_prefix("drone_web:")?;
-    let (parent_s, item_s) = rest.split_once(':')?;
-    let parent_ship_id = parent_s.parse::<i64>().ok()?;
-    let drone_item_id = item_s.parse::<i64>().ok()?;
-    Some((parent_ship_id, drone_item_id))
-}
-
 /// Deletes the backing DB item and space metadata when a drone ball is destroyed,
 /// even if its active runtime entry was concurrently claimed by a scoop attempt.
 pub(crate) fn cleanup_destroyed_drone_db_item(
@@ -296,9 +286,16 @@ pub(crate) async fn apply_drone_web_cycle(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
     d: &DroneSpaceState,
+    drone_ball: &eve_destiny::Ball,
     target_id: i64,
+    target_ball: &eve_destiny::Ball,
 ) -> bool {
     if d.web_speed_factor >= 0.0 {
+        return false;
+    }
+    let max_range_m = d.effective_optimal_range(ctx);
+    if drone_ball.surface_distance(target_ball) > max_range_m {
+        clear_drone_web_cycle(sys_handle, d.ball_id).await;
         return false;
     }
     let still_controlled = with_combat_runtime(ctx, |rt| {
@@ -306,17 +303,19 @@ pub(crate) async fn apply_drone_web_cycle(
             !st.is_abandoned
                 && st.solar_system_id == d.solar_system_id
                 && st.parent_ship_id == d.parent_ship_id
+                && st.activity_state == 1
+                && st.target_id == Some(target_id)
         })
     });
     if !still_controlled {
+        clear_drone_web_cycle(sys_handle, d.ball_id).await;
         return false;
     }
     let mult = (1.0 + d.web_speed_factor / 100.0).clamp(0.1, 1.0);
     let synth_id = -d.ball_id;
     let dur_s = d.cycle_duration_secs(ctx).max(1) as f64;
-    let max_range_m = d.effective_optimal_range(ctx);
     let _ = sys_handle.remove_module_cycle(d.ball_id, synth_id).await;
-    sys_handle
+    if sys_handle
         .add_module_cycle(crate::system_actor::ActiveModuleCycle {
             ship_id: d.ball_id,
             module_id: synth_id,
@@ -331,7 +330,19 @@ pub(crate) async fn apply_drone_web_cycle(
             ..Default::default()
         })
         .await
-        .is_ok()
+        .is_err()
+    {
+        return false;
+    }
+    sys_handle
+        .actor_state
+        .read()
+        .map(|st| {
+            st.active_module_cycles.iter().any(|c| {
+                c.ship_id == d.ball_id && c.module_id == synth_id && c.target_id == Some(target_id)
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Atomically reconciles an engaged drone's post-cycle state without overwriting concurrent
@@ -549,10 +560,36 @@ pub async fn step_engaged_drones(ctx: &ServerContext, now_unix: u64) {
                         && st.target_id == Some(target_id)
                 })
             });
+            let in_web_range =
+                drone_ball.surface_distance(&target_ball) <= d.effective_optimal_range(ctx);
             if !still_targeting
-                || drone_ball.surface_distance(&target_ball) > d.effective_optimal_range(ctx)
+                || !in_web_range
+                || is_target_immune_to_drone_ewar(ctx, &sys_handle, target_id, target_ball.type_id)
+                    .await
             {
                 clear_drone_web_cycle(&sys_handle, d.ball_id).await;
+            } else if apply_drone_web_cycle(
+                ctx,
+                &sys_handle,
+                &d,
+                &drone_ball,
+                target_id,
+                &target_ball,
+            )
+            .await
+            {
+                record_killmail_assist_action(
+                    ctx,
+                    target_id,
+                    d.owner_char_id,
+                    d.type_id,
+                    d.type_id,
+                    0.0,
+                    true,
+                    now_unix,
+                );
+                let victim_char_opt = resolve_victim_character_for_ball(ctx, target_id);
+                renew_drone_aggression_timers(ctx, d.owner_char_id, victim_char_opt, now_unix);
             }
         }
         let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, d.solar_system_id)
@@ -755,6 +792,36 @@ pub async fn step_drone_auto_aggression_and_assist(
     engaged_drone_balls
 }
 
+/// Cleans up runtime/actor/DB artifacts for a destroyed drone caught during scoop and returns `DroneNotInSpace`.
+async fn reject_destroyed_drone_scoop(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    drone_ball_id: i64,
+    item_id_opt: Option<i64>,
+    purge_db: bool,
+    msg: String,
+) -> BridgeRpcError {
+    if purge_db {
+        cleanup_destroyed_drone_db_item(ctx, drone_ball_id, item_id_opt);
+    }
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.record_destroyed_item_id(drone_ball_id);
+        if let Some(id) = item_id_opt {
+            rt.record_destroyed_item_id(id);
+        }
+        rt.active_drones_in_space.remove(&drone_ball_id);
+        rt.drone_next_ready_unix.remove(&drone_ball_id);
+        rt.active_drone_miners.remove(&drone_ball_id);
+    });
+    clear_drone_web_cycle(sys_handle, drone_ball_id).await;
+    let _ = sys_handle.remove_ball(drone_ball_id).await;
+    BridgeRpcError::with_client_error(
+        "DroneNotInSpace",
+        msg.clone(),
+        eve_proto::ClientError::CustomInfo(msg),
+    )
+}
+
 /// Atomically scoops a drone ball from space into the pilot's DroneBay (`ship.ScoopToDroneBay`).
 pub(crate) async fn handle_scoop_to_drone_bay(
     ctx: &ServerContext,
@@ -782,14 +849,17 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             eve_proto::ClientError::CustomInfo(msg),
         ));
     }
-    let claimed_drone = with_mut_combat_runtime(ctx, |rt| {
+    enum RuntimeScoopClaim {
+        Active(Option<DroneSpaceState>),
+        Destroyed { item_id: Option<i64>, msg: String },
+    }
+    let claimed_drone = match with_mut_combat_runtime(ctx, |rt| {
         if rt.is_recently_destroyed_item_id(drone_ball_id) {
-            let msg = format!("Drone ball {drone_ball_id} was destroyed");
-            return Err(BridgeRpcError::with_client_error(
-                "DroneNotInSpace",
-                msg.clone(),
-                eve_proto::ClientError::CustomInfo(msg),
-            ));
+            let stale_item = rt.active_drones_in_space.remove(&drone_ball_id).map(|d| d.drone_item_id);
+            return Ok(RuntimeScoopClaim::Destroyed {
+                item_id: stale_item,
+                msg: format!("Drone ball {drone_ball_id} was destroyed"),
+            });
         }
         if let Some(drone_st) = rt.active_drones_in_space.get(&drone_ball_id) {
             if !drone_st.is_abandoned && drone_st.owner_char_id != char_id {
@@ -801,19 +871,31 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 ));
             }
             if rt.is_recently_destroyed_item_id(drone_st.drone_item_id) {
-                let msg = format!("Drone item {} was destroyed", drone_st.drone_item_id);
-                return Err(BridgeRpcError::with_client_error(
-                    "DroneNotInSpace",
-                    msg.clone(),
-                    eve_proto::ClientError::CustomInfo(msg),
-                ));
+                let removed = rt.active_drones_in_space.remove(&drone_ball_id);
+                let item_id = removed.map(|d| d.drone_item_id);
+                return Ok(RuntimeScoopClaim::Destroyed {
+                    item_id,
+                    msg: format!("Drone item {} was destroyed", item_id.unwrap_or(drone_ball_id)),
+                });
             }
-            Ok(rt.active_drones_in_space.remove(&drone_ball_id))
+            Ok(RuntimeScoopClaim::Active(rt.active_drones_in_space.remove(&drone_ball_id)))
         } else {
-            Ok(None)
+            Ok(RuntimeScoopClaim::Active(None))
         }
-    })?;
-    let db_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
+    })? {
+        RuntimeScoopClaim::Active(st) => st,
+        RuntimeScoopClaim::Destroyed { item_id, msg } => {
+            return Err(
+                reject_destroyed_drone_scoop(ctx, &sys_handle, drone_ball_id, item_id, true, msg)
+                    .await,
+            );
+        }
+    };
+    enum ScoopDbOutcome {
+        Scooped(i64),
+        DestroyedPurged(i64),
+    }
+    let db_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<ScoopDbOutcome, BridgeRpcError> {
         if let Some(ch) = snap.characters.get(&char_id) {
             if ch.station_id.is_some()
                 || ch.structure_id.is_some()
@@ -956,12 +1038,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             drone_item_id,
         ) {
             super::purge_destroyed_drone_from_snap(snap, Some(drone_item_id), drone_ball_id);
-            let msg = format!("Drone {drone_item_id} was destroyed");
-            return Err(BridgeRpcError::with_client_error(
-                "DroneNotInSpace",
-                msg.clone(),
-                eve_proto::ClientError::CustomInfo(msg),
-            ));
+            return Ok(ScoopDbOutcome::DestroyedPurged(drone_item_id));
         }
         let _ = super::move_drone_item_to_bay_in_snap(
             snap,
@@ -971,10 +1048,23 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             ship_id,
             false,
         );
-        Ok(drone_item_id)
+        Ok(ScoopDbOutcome::Scooped(drone_item_id))
     });
     let drone_item_id = match db_res {
-        Ok(id) => id,
+        Ok(ScoopDbOutcome::Scooped(id)) => id,
+        Ok(ScoopDbOutcome::DestroyedPurged(id)) => {
+            return Err(
+                reject_destroyed_drone_scoop(
+                    ctx,
+                    &sys_handle,
+                    drone_ball_id,
+                    Some(id),
+                    false,
+                    format!("Drone {id} was destroyed"),
+                )
+                .await,
+            );
+        }
         Err(e) => {
             if let Some(drone_st) = claimed_drone {
                 with_mut_combat_runtime(ctx, |rt| {

@@ -1056,6 +1056,16 @@ async fn drone_return_and_scoop_use_surface_range_fail_closed_and_block_destroye
     .unwrap()
     .unwrap_err();
     assert_eq!(scoop_killed_err.code, "DroneNotInSpace");
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.items.contains_key(&d_killed_direct_item),
+            "ScoopToDroneBay must persist destroyed drone purge rather than rolling back"
+        );
+        assert!(
+            !snap.sp6_lifecycle.space_object_meta.contains_key(&d_killed_direct_item),
+            "ScoopToDroneBay must persist destroyed drone space_object_meta purge"
+        );
+    });
     let fake_claimed_state = make_drone_state(
         d_killed_direct_ball,
         d_killed_direct_item,
@@ -1071,6 +1081,54 @@ async fn drone_return_and_scoop_use_surface_range_fail_closed_and_block_destroye
         assert!(
             snap.items.get(&d_killed_direct_item).is_none_or(|it| it.flag != InventoryFlag::DroneBay),
             "recently destroyed drone must never resurrect into DroneBay"
+        );
+    });
+
+    // Exercise the in-transaction DestroyedPurged commit branch directly: an un-claimed/abandoned
+    // drone ball whose resolved `drone_item_id` (not `drone_ball_id`) is in persisted tombstones
+    // bypasses the pre-tx runtime ball check and must still commit its DB purge on `DroneNotInSpace`.
+    let d_persisted_ball = d_killed_direct_ball + 10;
+    let d_persisted_item = d_killed_direct_item + 10;
+    spawn_ball(&ctx, sys_id, d_persisted_ball, 2454, DVec3::new(3_500.0, 0.0, 0.0));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            d_persisted_item,
+            InventoryItemRecord {
+                item_id: d_persisted_item,
+                type_id: 2454,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        super::super::record_drone_ball_meta_in_snap(snap, d_persisted_item, d_persisted_ball);
+    });
+    with_mut_combat_runtime(&ctx, |rt| rt.record_destroyed_item_id(d_persisted_item));
+    let persisted_scoop_err = handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "ship",
+        "ScoopToDroneBay",
+        &[PyRep::Integer(d_persisted_ball)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(persisted_scoop_err.code, "DroneNotInSpace");
+    assert!(sys_handle.get_ball_snapshot(d_persisted_ball).await.unwrap().is_none());
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.items.contains_key(&d_persisted_item),
+            "ScoopToDroneBay DestroyedPurged branch must commit destroyed drone item purge"
+        );
+        assert!(
+            !snap.sp6_lifecycle.space_object_meta.contains_key(&d_persisted_item),
+            "ScoopToDroneBay DestroyedPurged branch must commit destroyed drone meta purge"
         );
     });
 }

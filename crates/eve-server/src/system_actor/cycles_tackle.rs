@@ -46,6 +46,12 @@ pub(crate) fn parse_drone_web_ids(effect_name: &str) -> Option<(BallId, i64)> {
     parse_minion_cycle_ids("drone_web:", effect_name)
 }
 
+fn parse_minion_cycle_parent(effect_name: &str) -> Option<BallId> {
+    parse_siren_tackle_ids(effect_name)
+        .or_else(|| parse_drone_web_ids(effect_name))
+        .map(|(parent_id, _)| parent_id)
+}
+
 pub(crate) fn active_tackle_and_core_deltas(
     ball_id: BallId,
     cs: &CombatState,
@@ -425,9 +431,8 @@ pub(crate) fn reconcile_tackle_and_bubbles(
     //    minion ball, parent ship, or target ball leaves space, and deactivate targeted
     //    cycles whose balls have drifted beyond `max_effective_range_m`.
     for idx in (0..active_module_cycles.len()).rev() {
-        let minion_ids = parse_siren_tackle_ids(&active_module_cycles[idx].effect_name)
-            .or_else(|| parse_drone_web_ids(&active_module_cycles[idx].effect_name));
-        let minion_missing = minion_ids.is_some_and(|(parent_ship_id, _minion_item_id)| {
+        let minion_parent = parse_minion_cycle_parent(&active_module_cycles[idx].effect_name);
+        let minion_missing = minion_parent.is_some_and(|parent_ship_id| {
             !ballpark.balls.contains_key(&active_module_cycles[idx].ship_id)
                 || !ballpark.balls.contains_key(&parent_ship_id)
                 || !active_module_cycles[idx]
@@ -452,7 +457,7 @@ pub(crate) fn reconcile_tackle_and_bubbles(
         if out_of_range {
             let shut_down = active_module_cycles.remove(idx);
             cleanup_removed_module_cycle(ballpark, &shut_down, effective_db);
-            if minion_ids.is_none() {
+            if minion_parent.is_none() {
                 aborted_cycles.push(shut_down);
             }
         }
@@ -751,7 +756,8 @@ pub(crate) fn on_target_unlocked_in_actor(
     target_id_opt: Option<BallId>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
 ) {
-    let mut removed_cycles = Vec::new();
+    let mut removed_any = false;
+    let mut deactivation_notify_cycles = Vec::new();
     for idx in (0..active_module_cycles.len()).rev() {
         let matches_target = match target_id_opt {
             Some(tid) => active_module_cycles[idx].target_id == Some(tid),
@@ -762,19 +768,19 @@ pub(crate) fn on_target_unlocked_in_actor(
                     .is_some_and(|locks| locks.iter().any(|l| l.target_id == tid))
             }),
         };
-        if (active_module_cycles[idx].ship_id == source_id
-            || parse_siren_tackle_ids(&active_module_cycles[idx].effect_name)
-                .is_some_and(|(parent_id, _)| parent_id == source_id)
-            || parse_drone_web_ids(&active_module_cycles[idx].effect_name)
-                .is_some_and(|(parent_id, _)| parent_id == source_id))
+        let minion_parent = parse_minion_cycle_parent(&active_module_cycles[idx].effect_name);
+        if (active_module_cycles[idx].ship_id == source_id || minion_parent == Some(source_id))
             && matches_target
         {
             let removed = active_module_cycles.swap_remove(idx);
             cleanup_removed_module_cycle(ballpark, &removed, db_opt);
-            removed_cycles.push(removed);
+            removed_any = true;
+            if minion_parent.is_none() {
+                deactivation_notify_cycles.push(removed);
+            }
         }
     }
-    if !removed_cycles.is_empty() {
+    if removed_any {
         reconcile_tackle_and_bubbles(
             ballpark,
             active_module_cycles,
@@ -783,7 +789,7 @@ pub(crate) fn on_target_unlocked_in_actor(
             db_opt,
             deactivation_hook,
         );
-        for removed in &removed_cycles {
+        for removed in &deactivation_notify_cycles {
             emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
         }
     }

@@ -1974,10 +1974,22 @@ pub async fn handle_npcs_drones(
                         .await;
                         let mut this_drone_ewar = false;
                         if !immune {
-                            if cycle_ops::apply_drone_web_cycle(ctx, &sys_handle, &d, target_id).await {
+                            if cycle_ops::apply_drone_web_cycle(
+                                ctx,
+                                &sys_handle,
+                                &d,
+                                &drone_ball,
+                                target_id,
+                                &target_ball,
+                            )
+                            .await
+                            {
                                 this_drone_ewar = true;
                             }
-                            if d.neut_amount > 0.0 {
+                            let ewar_dist = drone_ball.surface_distance(&target_ball);
+                            let ewar_max_falloff_range =
+                                d.effective_optimal_range(ctx) + d.effective_falloff_range(ctx);
+                            if d.neut_amount > 0.0 && ewar_dist <= ewar_max_falloff_range {
                                 let neut = d.neut_amount;
                                 if sys_handle
                                     .modify_combat_state(target_id, move |tcs| {
@@ -1991,7 +2003,7 @@ pub async fn handle_npcs_drones(
                                     this_drone_ewar = true;
                                 }
                             }
-                            if d.tp_sig_bonus_pct > 0.0 {
+                            if d.tp_sig_bonus_pct > 0.0 && ewar_dist <= ewar_max_falloff_range {
                                 let tp_pct = d.tp_sig_bonus_pct;
                                 let t_ball = target_ball.clone();
                                 if sys_handle

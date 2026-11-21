@@ -3485,11 +3485,45 @@ fn drone_web_cycle_parsing_range_orphan_pruning_and_parent_unlock() {
     assert!(cycles.is_empty(), "drone_web must be pruned when drone ball leaves space");
     assert!((bp.combat_states[&target_id].web_velocity_multiplier - 1.0).abs() < 1e-6);
 
-    // 4. Parent unlocking target clears drone_web and restores target speed
+    // 4. Parent unlocking target clears drone_web & siren_tackle without invoking ModuleDeactivationHook
+    //    for synthetic minion cycles, while still notifying real ship module cycles.
     spawn_triad(&mut bp, &mut cycles, &mut base_scram, &mut base_core);
+    let siren_id = 7002i64;
+    bp.add_ball(make_tackle_ball(siren_id, 40560, DVec3::new(1_200.0, 0.0, 0.0)));
+    let hook_calls = Arc::new(std::sync::Mutex::new(Vec::<(i64, i64, String)>::new()));
+    let hook_calls_ref = Arc::clone(&hook_calls);
+    let rec_hook: ModuleDeactivationHook = Arc::new(move |cid, cyc| {
+        hook_calls_ref
+            .lock()
+            .unwrap()
+            .push((cid, cyc.module_id, cyc.effect_name.clone()));
+    });
     cycles.push(make_web_cycle());
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    cycles.push(ActiveModuleCycle {
+        ship_id: siren_id,
+        module_id: -siren_id,
+        effect_name: format!("siren_tackle:{parent_id}:9002"),
+        target_id: Some(target_id),
+        repeat: 1_000,
+        duration_s: 12.0,
+        warp_scramble_points: 2,
+        max_effective_range_m: Some(25_000.0),
+        ..ActiveModuleCycle::default()
+    });
+    cycles.push(ActiveModuleCycle {
+        ship_id: parent_id,
+        owner_char_id: Some(42_001),
+        module_id: 8001,
+        effect_name: "modulePoint".into(),
+        target_id: Some(target_id),
+        repeat: 1_000,
+        duration_s: 10.0,
+        warp_scramble_points: 1,
+        ..ActiveModuleCycle::default()
+    });
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, Some(&rec_hook));
     assert!((bp.combat_states[&target_id].web_velocity_multiplier - 0.5).abs() < 1e-6);
+    assert!(bp.combat_states[&target_id].is_warp_scrambled());
     on_target_unlocked_in_actor(
         &mut bp,
         &mut cycles,
@@ -3498,9 +3532,16 @@ fn drone_web_cycle_parsing_range_orphan_pruning_and_parent_unlock() {
         &None,
         parent_id,
         Some(target_id),
-        None,
+        Some(&rec_hook),
     );
-    assert!(cycles.is_empty(), "parent unlock must clear drone_web");
+    assert!(cycles.is_empty(), "parent unlock must clear ship module, siren_tackle, and drone_web cycles");
     assert!((bp.combat_states[&target_id].web_velocity_multiplier - 1.0).abs() < 1e-6);
     assert!((bp.balls[&target_id].max_velocity - 300.0).abs() < 1e-3);
+    assert!(!bp.combat_states[&target_id].is_warp_scrambled());
+    let recorded = hook_calls.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec![(42_001, 8001, "modulePoint".to_string())],
+        "ModuleDeactivationHook must fire ONLY for real ship modules, never synthetic drone_web or siren_tackle cycles"
+    );
 }
