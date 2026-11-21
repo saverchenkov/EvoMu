@@ -480,7 +480,11 @@ fn combat_anomaly_instances_readonly(
         by_dungeon = unseeded_agency_anomaly_instances(ctx, sys_id);
     }
     if include_seasonal {
-        for (did, iids) in anomaly_instances(ctx, sys_id, "SeasonalEventSite") {
+        for (did, iids) in
+            crate::services::pve_special_sites_combat::active_seasonal_anomaly_instances_readonly(
+                ctx, sys_id,
+            )
+        {
             by_dungeon.entry(did).or_default().extend(iids);
         }
     }
@@ -1917,7 +1921,11 @@ pub async fn handle(
                 )
                 .await;
                 let mut out = registry_instances(ctx, sys_id, false);
-                for (did, iids) in anomaly_instances(ctx, sys_id, "SeasonalEventSite") {
+                for (did, iids) in
+                    crate::services::pve_special_sites_combat::active_seasonal_anomaly_instances_readonly(
+                        ctx, sys_id,
+                    )
+                {
                     out.entry(did).or_default().extend(iids);
                 }
                 out
