@@ -1163,21 +1163,23 @@ impl ServerContext {
             match self.verify_bound_object(session, bid) {
                 Ok(entry) => Some(entry),
                 Err(err) if err.code == "InvalidBoundObject" => {
-                    if let Some(grace_entry) =
-                        self.grace_bound_object_for_inflight_transition(session, bid, method, args)
-                    {
-                        tracing::debug!(
-                            session_id = session.session_id,
-                            char_id = ?session.character_id,
-                            bound_id = bid,
-                            object_id = grace_entry.object_id,
-                            service = %grace_entry.service,
-                            method,
-                            "Dispatching in-flight read-only metadata call via transition disconnect grace (#1146, #1150)"
-                        );
-                        Some(grace_entry)
-                    } else {
-                        return Err(err);
+                    match self.resolve_late_call_with_policy(session, bid, method, args, kwargs) {
+                        crate::router::binding::LateCallResolution::DispatchWithBinding(entry) => {
+                            tracing::debug!(
+                                session_id = session.session_id,
+                                char_id = ?session.character_id,
+                                bound_id = bid,
+                                object_id = entry.object_id,
+                                service = %entry.service,
+                                method,
+                                "Dispatching late RPC via scene-epoch policy (#1146, #1150, #1190)"
+                            );
+                            Some(entry)
+                        }
+                        crate::router::binding::LateCallResolution::RespondImmediate(rep) => {
+                            return Ok(rep);
+                        }
+                        crate::router::binding::LateCallResolution::RejectStale => return Err(err),
                     }
                 }
                 Err(err) => return Err(err),
@@ -1554,25 +1556,16 @@ impl ServerContext {
             let (bid, bound_in_map) = match self.bind_object(session, effective_service, obj_id) {
                 Ok(bid) => (bid, true),
                 Err(err) if err.code == "BindAuthorizationDenied" => {
-                    let grace_bid = match (effective_service, &parsed_piggyback) {
-                        ("ship", Ok(Some((sub_method, sub_args, _))))
-                            if *sub_method == "GetDirtTimestamp" =>
-                        {
-                            self.allocate_transition_grace_ship_dirt_binding(
+                    let grace_bid = match &parsed_piggyback {
+                        Ok(Some((sub_method, sub_args, sub_kwargs))) => self
+                            .allocate_late_call_grace_binding(
                                 session,
+                                effective_service,
                                 obj_id,
+                                sub_method,
                                 sub_args,
-                            )
-                        }
-                        ("crimewatch", Ok(Some((sub_method, sub_args, _))))
-                            if *sub_method == "GetClientStates" =>
-                        {
-                            self.allocate_transition_grace_crimewatch_binding(
-                                session,
-                                obj_id,
-                                sub_args,
-                            )
-                        }
+                                sub_kwargs,
+                            ),
                         _ => None,
                     };
                     if let Some(grace_bid) = grace_bid {
