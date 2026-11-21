@@ -319,6 +319,8 @@ async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
             item_id: gunner_ship, type_id: 606, owner_id: gunner_char, location_id: st_id, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
         });
         if let Some(corp) = s.corporations.get_mut(&corp_id) {
+            corp.members.insert(gunner_char);
+            corp.members.insert(90_000_303);
             corp.member_roles.insert(gunner_char, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
             corp.member_roles.insert(90_000_303, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
         }

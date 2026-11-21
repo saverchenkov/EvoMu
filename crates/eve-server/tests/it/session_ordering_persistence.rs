@@ -1332,13 +1332,18 @@ async fn test_1085_hull_item_change_before_session_change_vs_space_and_structure
     let carrier_id = 100_990_001_i64;
     let stored_frig_id = 100_990_002_i64;
     let stack_ship_id = 100_990_003_i64;
-    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    let corp_id = 98_085_002_i64;
     let struct_id = 1_046_000_000_102_i64;
     let struct_pos = DVec3::new(150_000.0, 0.0, 0.0);
 
     seed_owned_structure(&ctx, struct_id, sys_id, corp_id, struct_pos);
     ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::new(corp_id, "Session Order Corp", "SOC", char_id);
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
             ch.clone_grade = 2;
         }
         let sk = snap.skills.entry(char_id).or_default();
