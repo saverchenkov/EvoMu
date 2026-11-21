@@ -103,9 +103,22 @@ def _find_hangar_item(sm, station_id, type_id, exclude_id=0, min_qty=1, reverse=
         if int(_get_field(it, "typeID", 0)) != int(type_id):
             continue
         iid = int(_get_field(it, "itemID", 0))
-        qty = int(_get_field(it, "quantity", 1) or 1)
         if exclude_id and iid == int(exclude_id):
             continue
+        raw_qty = _get_field(it, "quantity", None)
+        raw_stack = _get_field(it, "stacksize", None)
+        singleton = int(_get_field(it, "singleton", 0) or 0)
+        if raw_qty is None:
+            qty = int(raw_stack) if raw_stack is not None else 1
+        else:
+            qty = int(raw_qty)
+        if qty < 0:
+            # invbroker.List() encodes singleton items with quantity == -1 (EVE convention).
+            qty = (
+                max(1, int(raw_stack or 1))
+                if (singleton != 0 or raw_stack is None or int(raw_stack or 0) > 0)
+                else 0
+            )
         if qty >= int(min_qty):
             return iid, it
     return 0, None
@@ -1730,11 +1743,95 @@ def _execute_all_journeys(cfg, ipc):
     if out_dir and not os.path.isdir(out_dir):
         os.makedirs(out_dir)
     outcomes_path = os.path.join(out_dir, "real_client_outcomes.json") if out_dir else ""
+    boot_telemetry_path = os.path.join(out_dir, "real_client_boot_telemetry.json") if out_dir else ""
 
+    def _read_guard_cursor():
+        try:
+            import evomu_site as _es
+            fn = getattr(_es, "get_guard_hit_seq", None)
+            if callable(fn):
+                return int(fn() or 0)
+            return int(getattr(_es, "_GUARD_HIT_SEQ", 0) or 0)
+        except Exception:
+            return 0
+
+    def _collect_guard_telemetry(since_seq, max_seq=None):
+        client_guards_off = False
+        hits = []
+        try:
+            import guard_registry as _gr
+            client_guards_off = bool(_gr.is_server_guards_disabled())
+        except Exception:
+            _gr = None
+            raw_off = str(os.environ.get("EVOMU_DISABLE_SERVER_GUARDS", "")).strip().lower()
+            client_guards_off = raw_off in ("1", "true", "yes", "on")
+        try:
+            import evomu_site as _es
+            off_fn = getattr(_es, "is_server_guards_disabled", None)
+            if callable(off_fn):
+                client_guards_off = bool(off_fn())
+            hits_fn = getattr(_es, "get_guard_hits", None)
+            if callable(hits_fn):
+                hits = list(hits_fn(since_seq=since_seq))
+            else:
+                raw_hits = list(getattr(_es, "_GUARD_HITS", []) or [])
+                hits = [dict(h) for h in raw_hits if int(h.get("seq", 0) or 0) > int(since_seq or 0)]
+            if max_seq is not None:
+                hits = [h for h in hits if int(h.get("seq", 0) or 0) <= int(max_seq)]
+            sum_fn = getattr(_es, "get_guard_hit_summary", None)
+            if max_seq is None and callable(sum_fn):
+                summary = dict(sum_fn(since_seq=since_seq, client_guards_off=client_guards_off))
+            elif _gr is not None:
+                summary = dict(_gr.summarize_guard_hits(hits, client_guards_off=client_guards_off))
+            else:
+                summary = None
+        except Exception:
+            summary = None
+        if summary is None:
+            by_guard = {}
+            for h in hits:
+                gid = str(h.get("guard") or "unknown")
+                by_guard[gid] = by_guard.get(gid, 0) + 1
+            summary = {
+                "client_guards_off": client_guards_off,
+                "guard_hits_count": len(hits),
+                "guard_hits_by_guard": by_guard,
+                "client_only_guard_hits": 0,
+                "client_only_guard_hits_by_guard": {},
+            }
+        return {
+            "client_guards_off": bool(summary.get("client_guards_off", client_guards_off)),
+            "guard_hits": hits,
+            "guard_hits_count": int(summary.get("guard_hits_count", len(hits))),
+            "guard_hits_by_guard": dict(summary.get("guard_hits_by_guard") or {}),
+            "client_only_guard_hits": int(summary.get("client_only_guard_hits", 0)),
+            "client_only_guard_hits_by_guard": dict(summary.get("client_only_guard_hits_by_guard") or {}),
+        }
+
+    boot_guard_cursor = _read_guard_cursor()
+    will_run_launch_login = any(
+        jid == "launch_login" and (only_set is None or jid in only_set)
+        for jid, _ in _JOURNEY_HANDLERS
+    )
+    boot_entry = _collect_guard_telemetry(0, max_seq=boot_guard_cursor)
+    boot_entry["boot_guard_cursor"] = int(boot_guard_cursor)
+    boot_entry["attributed_to_journey"] = "launch_login" if will_run_launch_login else None
+    if boot_telemetry_path:
+        _atomic_write_json(boot_telemetry_path, boot_entry)
+    ipc.notify({"cmd": "boot_guard_telemetry", "entry": boot_entry})
+
+    first_journey = True
     for jid, handler in _JOURNEY_HANDLERS:
         if only_set is not None and jid not in only_set:
             continue
 
+        if jid == "launch_login":
+            guard_seq_before = 0
+        elif first_journey:
+            guard_seq_before = boot_guard_cursor
+        else:
+            guard_seq_before = _read_guard_cursor()
+        first_journey = False
         pre_reset_tb = None
         try:
             _reset_baseline_state(sm, ipc, ctx["baseline"], char_id=ctx["char_id"])
@@ -1755,6 +1852,7 @@ def _execute_all_journeys(cfg, ipc):
             if not cfg.get("silent", False):
                 shot_path = _capture_inclient_screenshot(out_dir, jid, ipc=ipc)
             metrics = {"pre_reset_failed": True}
+            guard_info = _collect_guard_telemetry(guard_seq_before)
             entry = {
                 "passed": False,
                 "bridge_verified": False,
@@ -1765,6 +1863,7 @@ def _execute_all_journeys(cfg, ipc):
                 "traceback": pre_reset_tb,
                 "evidence": _format_evidence(False, [], metrics, shot_path, pre_reset_tb),
             }
+            entry.update(guard_info)
             outcomes[jid] = entry
             if outcomes_path:
                 _atomic_write_json(outcomes_path, outcomes)
@@ -1817,6 +1916,7 @@ def _execute_all_journeys(cfg, ipc):
             metrics["post_reset_failed"] = True
             tb_str = ("%s\n%s" % (tb_str, post_tb)) if tb_str else post_tb
 
+        guard_info = _collect_guard_telemetry(guard_seq_before)
         entry = {
             "passed": bool(passed),
             "bridge_verified": bool(passed),
@@ -1827,6 +1927,7 @@ def _execute_all_journeys(cfg, ipc):
             "traceback": tb_str,
             "evidence": _format_evidence(bool(passed), j_rpcs, metrics, shot_path, tb_str),
         }
+        entry.update(guard_info)
         outcomes[jid] = entry
         if outcomes_path:
             _atomic_write_json(outcomes_path, outcomes)

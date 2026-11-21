@@ -22,8 +22,21 @@ import subprocess
 
 import review_lib as rl
 
-RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v4.json"
-RATCHET_STAT_FILENAME = "ratchet_stat_index_v4.json"
+RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v6.json"
+RATCHET_STAT_FILENAME = "ratchet_stat_index_v6.json"
+UNTYPED_USER_ERROR_REL = "crates/eve-testkit/ratchets/untyped_user_error_ratchet.json"
+CLIENT_COMPAT_COUNTER_KEYS = (
+    "rpc_rules",
+    "suppress_rules",
+    "notify_arms",
+    "destiny_rewrites",
+    "production_lines",
+    "sequencer_set_state_rewrites",
+    "transport_conditionals",
+    "direct_layer_test_calls",
+    "service_caller_trace_comparisons",
+    "service_caller_trace_params",
+)
 
 # Protected open RFC/architecture umbrella trackers (plus #933 until all C-9 ratchets reach 0).
 DEFAULT_UMBRELLA_ISSUES = frozenset({898, 899, 900, 901, 916, 921, 922, 923, 931, 932, 933})
@@ -500,7 +513,7 @@ def _scan_server_src_file(path, rel_in_src, src_cache, stat_src=None):
             stat_src[rel_in_src] = {"sig": sig, "rec": cached}
         return cached, False, stat_src is not None
     raw = raw_bytes.decode("utf-8", errors="replace")
-    needs_clean = any(
+    needs_clean = rel_in_src == "outbound_sequencer.rs" or any(
         s in raw
         for s in (
             "encode_",
@@ -521,6 +534,7 @@ def _scan_server_src_file(path, rel_in_src, src_cache, stat_src=None):
     ct_cmp = 0
     ct_params = 0
     direct_layer_test = 0
+    seq_rw = 0
 
     if needs_clean:
         clean = strip_rust_comments_and_literals(raw)
@@ -531,6 +545,8 @@ def _scan_server_src_file(path, rel_in_src, src_cache, stat_src=None):
                 direct_layer_test = count_direct_layer_calls(clean)
         else:
             prod = strip_cfg_test_items(clean)
+            if rel_in_src == "outbound_sequencer.rs":
+                seq_rw = _count_sequencer_set_state_rewrites(prod)
             if not is_plumbing and any(
                 s in raw for s in (".notify", ".push_notification", "build_macho_notification_packet", "notify_char")
             ):
@@ -550,6 +566,8 @@ def _scan_server_src_file(path, rel_in_src, src_cache, stat_src=None):
         "ct_cmp": ct_cmp,
         "ct_params": ct_params,
         "dl_test": direct_layer_test,
+        "seq_rw": seq_rw,
+        "ue": 0 if "test" in os.path.basename(path) else raw.count("BridgeRpcError::user_error("),
     }
     src_cache[ckey] = rec
     if stat_src is not None:
@@ -1313,6 +1331,194 @@ def _scan_client_compat_rs(compat_path):
     }
 
 
+def _count_sequencer_set_state_rewrites(prod_clean):
+    """Exact Python mirror of `client_compat_ratchet.rs::count_sequencer_set_state_rewrites`."""
+    prefixes = (b"restamp_", b"rewrite_set_state", b"patch_set_state")
+    b = prod_clean.encode("utf-8", errors="replace")
+    n = len(b)
+    count = 0
+    idx = 0
+    while idx < n:
+        if not (_is_ident_b(b[idx]) and (idx == 0 or not _is_ident_b(b[idx - 1]))):
+            idx += 1
+            continue
+        end = idx + 1
+        while end < n and _is_ident_b(b[end]):
+            end += 1
+        ident = b[idx:end]
+        after = end
+        while after < n and chr(b[after]).isspace():
+            after += 1
+        if any(ident.startswith(p) for p in prefixes):
+            if _is_fn_def_header_b(b, idx) or (after < n and b[after] == 40):
+                count += 1
+        elif ident == b"copy_from_slice" and after < n and b[after] == 40:
+            before = idx
+            while before > 0 and chr(b[before - 1]).isspace():
+                before -= 1
+            if before > 0 and b[before - 1] == 46 and (before == 1 or b[before - 2] != 46):
+                count += 1
+        idx = end
+    return count
+
+
+def _validate_per_file_map(category, label, rel_path, baseline_map, observed_map, zero_required=False):
+    """Validate a v2 per-file ratchet map (`observed[file] <= baseline.get(file, 0)`).
+
+    Missing keys imply baseline 0. Never raises on `observed < baseline` for non-zero baselines (#1538)."""
+    viols = []
+    if not isinstance(baseline_map, dict):
+        return [(category, "%s in %s must be a JSON object mapping file -> positive count" % (label, rel_path), rel_path, 1)]
+    keys = list(baseline_map.keys())
+    if any(not isinstance(k, str) for k in keys) or any(keys[i] >= keys[i + 1] for i in range(len(keys) - 1)):
+        viols.append((category, "%s file keys in %s must be strictly sorted and deduplicated" % (label, rel_path), rel_path, 1))
+    cleaned = {}
+    for k, v in baseline_map.items():
+        if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
+            viols.append((category, "%s entry %r in %s must have a positive integer count (got %r)" % (label, k, rel_path, v), rel_path, 1))
+        else:
+            cleaned[k] = v
+    if zero_required and cleaned:
+        viols.append((category, "%s marks zero_required=true with non-empty baseline files (%d entries)" % (label, len(cleaned)), rel_path, 1))
+        return viols
+    for rel_f in sorted(observed_map):
+        obs_c = int(observed_map[rel_f] or 0)
+        if obs_c <= 0:
+            continue
+        base_c = 0 if zero_required else cleaned.get(rel_f, 0)
+        if obs_c > base_c:
+            viols.append((
+                category,
+                "%s regressed in %s: observed %d > baseline %d (per-file ratchet #1538)"
+                % (label, rel_f, obs_c, base_c),
+                rel_path,
+                1,
+            ))
+    return viols
+
+
+def scan_untyped_user_error_per_file(root):
+    """Exact per-file mirror of `client_contract.rs::count_untyped_user_error_call_sites`."""
+    src_dir = os.path.join(root, "crates", "eve-server", "src")
+    if not os.path.isdir(src_dir):
+        return {}
+    out = {}
+    for p in sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)):
+        if "test" in os.path.basename(p):
+            continue
+        c = _read_text(p).count("BridgeRpcError::user_error(")
+        if c > 0:
+            out[os.path.relpath(p, src_dir).replace("\\", "/")] = c
+    return out
+
+
+def check_untyped_user_error_ratchet(root, rel_path=UNTYPED_USER_ERROR_REL, observed_per_file=None):
+    """Validate v2 per-file `untyped_user_error_ratchet.json` (#929 / #1538) when present."""
+    full_path = os.path.join(root, rel_path)
+    if not os.path.isfile(full_path):
+        return []
+    try:
+        doc = _read_json(full_path)
+    except (OSError, ValueError) as e:
+        return [("RATCHET_UNTYPED_USER_ERROR", "Failed to parse %s: %s" % (rel_path, e), rel_path, 1)]
+    if not isinstance(doc, dict) or not isinstance(doc.get("files"), dict):
+        return [("RATCHET_UNTYPED_USER_ERROR", "%s missing `files` per-file baseline map" % rel_path, rel_path, 1)]
+    obs = scan_untyped_user_error_per_file(root) if observed_per_file is None else observed_per_file
+    return _validate_per_file_map(
+        "RATCHET_UNTYPED_USER_ERROR",
+        "untyped_user_error",
+        rel_path,
+        doc["files"],
+        obs,
+        zero_required=False,
+    )
+
+
+def scan_client_compat_per_file(root, src_cache=None, it_cache=None, stat_src=None, stat_it=None):
+    """Scan all 10 `client_compat_ratchet` counters per file + allowlist sets (exact Rust parity)."""
+    src_cache = {} if src_cache is None else src_cache
+    it_cache = {} if it_cache is None else it_cache
+    src_dir = os.path.join(root, "crates", "eve-server", "src")
+    it_dir = os.path.join(root, "crates", "eve-server", "tests", "it")
+    compat_rel = "crates/eve-server/src/router/client_compat.rs"
+    seq_rel = "crates/eve-server/src/outbound_sequencer.rs"
+    compat_rs = os.path.join(root, compat_rel)
+    seq_rs = os.path.join(root, seq_rel)
+
+    counters = {k: {} for k in CLIENT_COMPAT_COUNTER_KEYS}
+    known_rules = set()
+    if os.path.isfile(compat_rs):
+        crep = _scan_client_compat_rs(compat_rs)
+        known_rules = set(crep["known_rules"])
+        for k in ("rpc_rules", "suppress_rules", "notify_arms", "destiny_rewrites", "production_lines"):
+            if crep[k] > 0:
+                counters[k][compat_rel] = crep[k]
+    if os.path.isfile(seq_rs):
+        seq_prod = strip_cfg_test_items(strip_rust_comments_and_literals(_read_text(seq_rs)))
+        seq_cnt = _count_sequencer_set_state_rewrites(seq_prod)
+        if seq_cnt > 0:
+            counters["sequencer_set_state_rewrites"][seq_rel] = seq_cnt
+
+    dirty = False
+    stat_dirty = False
+    service_ct_files = set()
+    it_dispatch_files = set()
+    if os.path.isdir(src_dir):
+        for p in sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)):
+            rel_in_src = os.path.relpath(p, src_dir).replace("\\", "/")
+            rec, chg, st_chg = _scan_server_src_file(p, rel_in_src, src_cache, stat_src=stat_src)
+            dirty = dirty or chg
+            stat_dirty = stat_dirty or st_chg
+            repo_rel = "crates/eve-server/src/" + rel_in_src
+            if rec["ct_cmp"] > 0:
+                counters["transport_conditionals"][repo_rel] = rec["ct_cmp"]
+            if rec["dl_test"] > 0:
+                counters["direct_layer_test_calls"][repo_rel] = rec["dl_test"]
+            if rel_in_src.startswith("services/") and (rec["ct_cmp"] > 0 or rec["ct_params"] > 0):
+                service_ct_files.add(repo_rel)
+                if rec["ct_cmp"] > 0:
+                    counters["service_caller_trace_comparisons"][repo_rel] = rec["ct_cmp"]
+                if rec["ct_params"] > 0:
+                    counters["service_caller_trace_params"][repo_rel] = rec["ct_params"]
+
+    if os.path.isdir(it_dir):
+        for p in sorted(glob.glob(os.path.join(it_dir, "**", "*.rs"), recursive=True)):
+            rel_in_it = os.path.relpath(p, it_dir).replace("\\", "/")
+            rec, chg, st_chg = _scan_it_file(p, rel_in_it, it_cache, stat_it=stat_it)
+            dirty = dirty or chg
+            stat_dirty = stat_dirty or st_chg
+            if rec["has_disp"]:
+                it_dispatch_files.add(rel_in_it)
+            if rec["dl_test"] > 0:
+                counters["direct_layer_test_calls"]["crates/eve-server/tests/it/" + rel_in_it] = rec["dl_test"]
+
+    server_dir = os.path.join(root, "crates", "eve-server")
+    if os.path.isdir(server_dir):
+        for p in sorted(glob.glob(os.path.join(server_dir, "**", "*.rs"), recursive=True)):
+            rel_in_srv = os.path.relpath(p, server_dir).replace("\\", "/")
+            if rel_in_srv.startswith(("src/", "tests/it/")):
+                continue
+            raw = _read_text(p)
+            if "normalize_macho_" in raw or "should_suppress_macho_notification" in raw:
+                clean = strip_rust_comments_and_literals(raw)
+                if is_test_only_rel_path(rel_in_srv):
+                    dl = count_direct_layer_calls(clean)
+                else:
+                    dl = max(0, count_direct_layer_calls(clean) - count_direct_layer_calls(strip_cfg_test_items(clean)))
+                if dl > 0:
+                    counters["direct_layer_test_calls"]["crates/eve-server/" + rel_in_srv] = dl
+
+    sorted_counters = {k: dict(sorted(v.items())) for k, v in counters.items()}
+    return {
+        "counters": sorted_counters,
+        "known_rules": sorted(known_rules),
+        "service_caller_trace_files": sorted(service_ct_files),
+        "it_dispatch_rpc_files": sorted(it_dispatch_files),
+        "_dirty": dirty,
+        "_stat_dirty": stat_dirty,
+    }
+
+
 def _iter_arch_debt_entries(doc):
     """Normalize supported `arch_debt_ratchet.json` layouts into `(name, spec_dict)` pairs."""
     if not isinstance(doc, dict):
@@ -1358,13 +1564,64 @@ def _scan_stringly_error_bypass_file(prod):
     }
 
 
+STRINGLY_ERR_BYPASS_KEYS = (
+    "const_err_str_defs",
+    "bridge_rpc_error_nonlit_code",
+    "bridge_rpc_error_helper_defs",
+    "bridge_rpc_error_helper_calls",
+)
+
+
+def scan_stringly_error_bypass_per_file(root, bypass_cache=None, stat_bypass=None):
+    """Scan companion stringly BridgeRpcError bypass metrics per file under `crates/eve-server/src`."""
+    src_dir = os.path.join(root, "crates", "eve-server", "src")
+    per_file = {k: {} for k in STRINGLY_ERR_BYPASS_KEYS}
+    if not os.path.isdir(src_dir):
+        return per_file, False, False
+    dirty = False
+    stat_dirty = False
+    for p in sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)):
+        rel = os.path.relpath(p, src_dir).replace("\\", "/")
+        if is_test_only_rel_path(rel):
+            continue
+        rec = None
+        sig = _file_sig(p) if stat_bypass is not None else None
+        if stat_bypass is not None:
+            st_hit = stat_bypass.get(rel)
+            if st_hit and st_hit.get("sig") == sig and isinstance(st_hit.get("rec"), dict):
+                rec = st_hit["rec"]
+        if rec is None:
+            raw_bytes = _read_bytes(p)
+            ckey = "%s:%s" % (rel, hashlib.sha1(raw_bytes).hexdigest()) if bypass_cache is not None else None
+            if bypass_cache is not None and isinstance(bypass_cache.get(ckey), dict):
+                rec = bypass_cache[ckey]
+            else:
+                raw = raw_bytes.decode("utf-8", errors="replace")
+                if "ERR" not in raw and "BridgeRpcError" not in raw:
+                    rec = {k: 0 for k in STRINGLY_ERR_BYPASS_KEYS}
+                else:
+                    prod = strip_cfg_test_items(strip_rust_comments_and_literals(raw))
+                    rec = _scan_stringly_error_bypass_file(prod)
+                if bypass_cache is not None:
+                    bypass_cache[ckey] = rec
+                    dirty = True
+            if stat_bypass is not None:
+                stat_bypass[rel] = {"sig": sig, "rec": rec}
+                stat_dirty = True
+        for k in STRINGLY_ERR_BYPASS_KEYS:
+            c = int(rec.get(k, 0) or 0)
+            if c > 0:
+                per_file[k][rel] = c
+    return per_file, dirty, stat_dirty
+
+
 def _check_stringly_error_bypass_cached(
     root,
     rel_path=STRINGLY_ERR_BYPASS_REL,
     bypass_cache=None,
     stat_bypass=None,
 ):
-    """Validate companion stringly BridgeRpcError bypass ratchet (TT-11 / #1195)."""
+    """Validate companion stringly BridgeRpcError bypass ratchet (TT-11 / #1195 / #1538, v1 + v2)."""
     full_path = os.path.join(root, rel_path)
     if not os.path.isfile(full_path):
         # For pre-rebase real worktrees that have `.agents/` and `arch_debt_ratchet.json`,
@@ -1399,76 +1656,52 @@ def _check_stringly_error_bypass_cached(
     if not os.path.isdir(src_dir):
         return [], False, False
 
-    known_keys = (
-        "const_err_str_defs",
-        "bridge_rpc_error_nonlit_code",
-        "bridge_rpc_error_helper_defs",
-        "bridge_rpc_error_helper_calls",
-    )
     violations = []
     for k in rules:
-        if k not in known_keys:
+        if k not in STRINGLY_ERR_BYPASS_KEYS:
             violations.append(("RATCHET_ARCH_DEBT", "Unknown stringly-error bypass rule '%s'" % k, rel_path, 1))
 
-    obs = {k: [0, 0] for k in known_keys}
-    dirty = False
-    stat_dirty = False
-    for p in sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)):
-        rel = os.path.relpath(p, src_dir).replace("\\", "/")
-        if is_test_only_rel_path(rel):
-            continue
-        rec = None
-        sig = _file_sig(p) if stat_bypass is not None else None
-        if stat_bypass is not None:
-            st_hit = stat_bypass.get(rel)
-            if st_hit and st_hit.get("sig") == sig and isinstance(st_hit.get("rec"), dict):
-                rec = st_hit["rec"]
-        if rec is None:
-            raw_bytes = _read_bytes(p)
-            ckey = "%s:%s" % (rel, hashlib.sha1(raw_bytes).hexdigest()) if bypass_cache is not None else None
-            if bypass_cache is not None and isinstance(bypass_cache.get(ckey), dict):
-                rec = bypass_cache[ckey]
-            else:
-                raw = raw_bytes.decode("utf-8", errors="replace")
-                if "ERR" not in raw and "BridgeRpcError" not in raw:
-                    rec = {k: 0 for k in known_keys}
-                else:
-                    prod = strip_cfg_test_items(strip_rust_comments_and_literals(raw))
-                    rec = _scan_stringly_error_bypass_file(prod)
-                if bypass_cache is not None:
-                    bypass_cache[ckey] = rec
-                    dirty = True
-            if stat_bypass is not None:
-                stat_bypass[rel] = {"sig": sig, "rec": rec}
-                stat_dirty = True
-        for k in known_keys:
-            c = int(rec.get(k, 0) or 0)
-            if c > 0:
-                obs[k][0] += c
-                obs[k][1] += 1
+    per_file, dirty, stat_dirty = scan_stringly_error_bypass_per_file(
+        root, bypass_cache=bypass_cache, stat_bypass=stat_bypass
+    )
+    is_v2 = int(doc.get("version", 1) or 1) >= 2
 
     for k, spec in rules.items():
-        if k not in obs or not isinstance(spec, dict):
+        if k not in per_file or not isinstance(spec, dict):
             continue
-        got_occ, got_files = obs[k]
-        max_occ = spec.get("max_occurrences")
-        max_files = spec.get("max_files")
-        if max_occ is not None and got_occ > max_occ:
-            violations.append((
-                "RATCHET_ARCH_DEBT",
-                "Stringly BridgeRpcError bypass metric '%s' regressed above ratchet: found %d occurrences (max %d)"
-                % (k, got_occ, max_occ),
-                rel_path,
-                1,
-            ))
-        if max_files is not None and got_files > max_files:
-            violations.append((
-                "RATCHET_ARCH_DEBT",
-                "Stringly BridgeRpcError bypass metric '%s' file count regressed above ratchet: found %d files (max %d)"
-                % (k, got_files, max_files),
-                rel_path,
-                1,
-            ))
+        obs_pf = per_file[k]
+        if is_v2 or isinstance(spec.get("files"), dict):
+            violations.extend(
+                _validate_per_file_map(
+                    "RATCHET_ARCH_DEBT",
+                    "Stringly BridgeRpcError bypass metric '%s'" % k,
+                    rel_path,
+                    spec.get("files"),
+                    obs_pf,
+                    zero_required=bool(spec.get("zero_required") is True),
+                )
+            )
+        else:
+            got_occ = sum(obs_pf.values())
+            got_files = len(obs_pf)
+            max_occ = spec.get("max_occurrences")
+            max_files = spec.get("max_files")
+            if max_occ is not None and got_occ > max_occ:
+                violations.append((
+                    "RATCHET_ARCH_DEBT",
+                    "Stringly BridgeRpcError bypass metric '%s' regressed above ratchet: found %d occurrences (max %d)"
+                    % (k, got_occ, max_occ),
+                    rel_path,
+                    1,
+                ))
+            if max_files is not None and got_files > max_files:
+                violations.append((
+                    "RATCHET_ARCH_DEBT",
+                    "Stringly BridgeRpcError bypass metric '%s' file count regressed above ratchet: found %d files (max %d)"
+                    % (k, got_files, max_files),
+                    rel_path,
+                    1,
+                ))
     return violations, dirty, stat_dirty
 
 
@@ -1478,49 +1711,35 @@ def check_stringly_error_bypass_ratchet(root, rel_path=STRINGLY_ERR_BYPASS_REL):
     return viols
 
 
-def _check_arch_debt_ratchet_cached(
-    root,
-    rel_path="crates/eve-testkit/ratchets/arch_debt_ratchet.json",
-    arch_cache=None,
-    stat_arch=None,
-):
-    """Conditionally validate `arch_debt_ratchet.json` (#1197) when present.
-
-    Enforces ALL configured rules — including custom non-regex scanners (`slash_command_prefix_parse`,
-    `router_binding_grace_helpers`, `ballpark_locks_outside_system_actor`), fails hard on any rule
-    without a compiled scanner/regex/literals (TT-09), and enforces `exact: true` unconditionally (TT-10)."""
-    full_path = os.path.join(root, rel_path)
-    if not os.path.isfile(full_path):
-        return [], False, False
-    try:
-        doc = _read_json(full_path)
-    except (OSError, ValueError) as e:
-        return [("RATCHET_ARCH_DEBT", "Failed to parse %s: %s" % (rel_path, e), rel_path, 1)], False, False
-
+def scan_arch_debt_per_file(root, doc, rel_path="crates/eve-testkit/ratchets/arch_debt_ratchet.json", arch_cache=None, stat_arch=None):
+    """Compile and scan all rules in an `arch_debt_ratchet.json` document (v1 or v2), returning per-file counts."""
     entries = _iter_arch_debt_entries(doc)
+    is_v2 = isinstance(doc, dict) and int(doc.get("version", 1) or 1) >= 2
     compiled = []
     violations = []
     needs_keep_literals = False
     for name, spec in entries:
+        uses_per_file = is_v2 or isinstance(spec.get("files"), dict)
         max_occ = spec.get("max_occurrences", spec.get("max_calls", spec.get("max_count")))
         max_files = spec.get("max_files")
-        if max_occ is not None and (not isinstance(max_occ, int) or isinstance(max_occ, bool) or max_occ < 0):
-            violations.append(("RATCHET_ARCH_DEBT", "%s has invalid max_occurrences=%r" % (name, max_occ), rel_path, 1))
-            continue
-        if max_files is not None and (not isinstance(max_files, int) or isinstance(max_files, bool) or max_files < 0):
-            violations.append(("RATCHET_ARCH_DEBT", "%s has invalid max_files=%r" % (name, max_files), rel_path, 1))
-            continue
-        if spec.get("zero_required") is True and ((max_occ or 0) > 0 or (max_files or 0) > 0):
-            violations.append((
-                "RATCHET_ARCH_DEBT",
-                "%s marks zero_required=true while max ceiling is non-zero (max_occurrences=%r, max_files=%r)"
-                % (name, max_occ, max_files),
-                rel_path,
-                1,
-            ))
-            continue
-        if max_occ is None and max_files is None:
-            continue
+        if not uses_per_file:
+            if max_occ is not None and (not isinstance(max_occ, int) or isinstance(max_occ, bool) or max_occ < 0):
+                violations.append(("RATCHET_ARCH_DEBT", "%s has invalid max_occurrences=%r" % (name, max_occ), rel_path, 1))
+                continue
+            if max_files is not None and (not isinstance(max_files, int) or isinstance(max_files, bool) or max_files < 0):
+                violations.append(("RATCHET_ARCH_DEBT", "%s has invalid max_files=%r" % (name, max_files), rel_path, 1))
+                continue
+            if spec.get("zero_required") is True and ((max_occ or 0) > 0 or (max_files or 0) > 0):
+                violations.append((
+                    "RATCHET_ARCH_DEBT",
+                    "%s marks zero_required=true while max ceiling is non-zero (max_occurrences=%r, max_files=%r)"
+                    % (name, max_occ, max_files),
+                    rel_path,
+                    1,
+                ))
+                continue
+            if max_occ is None and max_files is None:
+                continue
 
         counter = None
         rule_key_sig = None
@@ -1569,22 +1788,19 @@ def _check_arch_debt_ratchet_cached(
             if spec.get("path_exclude_substring") is not None
             else default_path_exc
         )
-        compiled.append((name, spec, counter, max_occ, max_files, keep_literals, path_inc, path_exc, rule_key_sig))
+        compiled.append((name, spec, counter, max_occ, max_files, keep_literals, path_inc, path_exc, rule_key_sig, uses_per_file))
 
-    if not compiled:
-        return violations, False, False
-
+    per_file = {name: {} for name, *_ in compiled}
     src_dir = os.path.join(root, "crates", "eve-server", "src")
-    if not os.path.isdir(src_dir):
-        return violations, False, False
+    if not compiled or not os.path.isdir(src_dir):
+        return per_file, compiled, violations, False, False
 
     rules_sig_raw = json.dumps(
-        [(n, kl, pi, pe, rks) for n, _, _, _, _, kl, pi, pe, rks in compiled],
+        [(n, kl, pi, pe, rks) for n, _, _, _, _, kl, pi, pe, rks, _ in compiled],
         sort_keys=True,
     )
     rules_sig = hashlib.sha1(rules_sig_raw.encode("utf-8")).hexdigest()[:16]
 
-    obs = {name: [0, 0] for name, *_ in compiled}
     dirty = False
     stat_dirty = False
     for p in sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)):
@@ -1621,7 +1837,7 @@ def _check_arch_debt_ratchet_cached(
                     else None
                 )
                 file_counts = {}
-                for name, _, counter, _, _, keep_literals, path_inc, path_exc, _ in compiled:
+                for name, _, counter, _, _, keep_literals, path_inc, path_exc, _, _ in compiled:
                     if path_inc is not None and rel != path_inc:
                         continue
                     if path_exc is not None and path_exc in rel:
@@ -1637,12 +1853,54 @@ def _check_arch_debt_ratchet_cached(
                 stat_arch[rel] = {"sig": sig, "rsig": rules_sig, "counts": file_counts}
                 stat_dirty = True
         for name, c in file_counts.items():
-            if name in obs and c > 0:
-                obs[name][0] += c
-                obs[name][1] += 1
+            if name in per_file and c > 0:
+                per_file[name][rel] = c
 
-    for name, spec, _, max_occ, max_files, _, _, _, _ in compiled:
-        got_occ, got_files = obs[name]
+    return per_file, compiled, violations, dirty, stat_dirty
+
+
+def _check_arch_debt_ratchet_cached(
+    root,
+    rel_path="crates/eve-testkit/ratchets/arch_debt_ratchet.json",
+    arch_cache=None,
+    stat_arch=None,
+):
+    """Conditionally validate `arch_debt_ratchet.json` (#1197 / #1538, v1 + v2 per-file).
+
+    Enforces ALL configured rules — including custom non-regex scanners (`slash_command_prefix_parse`,
+    `router_binding_grace_helpers`, `ballpark_locks_outside_system_actor`) and fails hard on any rule
+    without a compiled scanner/regex/literals (TT-09). Zero-required rules stay pinned at 0; non-zero
+    rules enforce upper bounds (per-file in v2, aggregate in v1) with NO non-zero equality pins (#1538)."""
+    full_path = os.path.join(root, rel_path)
+    if not os.path.isfile(full_path):
+        return [], False, False
+    try:
+        doc = _read_json(full_path)
+    except (OSError, ValueError) as e:
+        return [("RATCHET_ARCH_DEBT", "Failed to parse %s: %s" % (rel_path, e), rel_path, 1)], False, False
+
+    per_file, compiled, violations, dirty, stat_dirty = scan_arch_debt_per_file(
+        root, doc, rel_path=rel_path, arch_cache=arch_cache, stat_arch=stat_arch
+    )
+    if not compiled or not os.path.isdir(os.path.join(root, "crates", "eve-server", "src")):
+        return violations, dirty, stat_dirty
+
+    for name, spec, _, max_occ, max_files, _, _, _, _, uses_per_file in compiled:
+        obs_pf = per_file[name]
+        if uses_per_file:
+            violations.extend(
+                _validate_per_file_map(
+                    "RATCHET_ARCH_DEBT",
+                    "Architecture debt pattern '%s'" % name,
+                    rel_path,
+                    spec.get("files"),
+                    obs_pf,
+                    zero_required=bool(spec.get("zero_required") is True),
+                )
+            )
+            continue
+        got_occ = sum(obs_pf.values())
+        got_files = len(obs_pf)
         if max_occ is not None and got_occ > max_occ:
             violations.append((
                 "RATCHET_ARCH_DEBT",
@@ -1659,23 +1917,6 @@ def _check_arch_debt_ratchet_cached(
                 rel_path,
                 1,
             ))
-        if spec.get("exact") is True:
-            if max_occ is not None and got_occ < max_occ:
-                violations.append((
-                    "RATCHET_ARCH_DEBT",
-                    "Architecture debt pattern '%s' dropped below exact ratchet (%d < %d); lower %s in the same commit"
-                    % (name, got_occ, max_occ, rel_path),
-                    rel_path,
-                    1,
-                ))
-            if max_files is not None and got_files < max_files:
-                violations.append((
-                    "RATCHET_ARCH_DEBT",
-                    "Architecture debt pattern '%s' file count dropped below exact ratchet (%d < %d); lower %s in the same commit"
-                    % (name, got_files, max_files, rel_path),
-                    rel_path,
-                    1,
-                ))
     return violations, dirty, stat_dirty
 
 
@@ -1715,41 +1956,54 @@ def check_all_ratchets(root, cache_path=None):
     notify_ratchet_rel = "crates/eve-testkit/ratchets/raw_notify_ratchet.json"
     dispatch_ratchet_rel = "crates/eve-testkit/ratchets/raw_dispatch_ratchet.json"
     compat_ratchet_rel = "crates/eve-testkit/ratchets/client_compat_ratchet.json"
+    untyped_ue_rel = UNTYPED_USER_ERROR_REL
 
     has_enc = os.path.isfile(os.path.join(root, enc_ratchet_rel))
     has_notify = os.path.isfile(os.path.join(root, notify_ratchet_rel))
     has_dispatch = os.path.isfile(os.path.join(root, dispatch_ratchet_rel))
     has_compat = os.path.isfile(os.path.join(root, compat_ratchet_rel))
+    has_untyped_ue = os.path.isfile(os.path.join(root, untyped_ue_rel))
 
     src_dir = os.path.join(root, "crates", "eve-server", "src")
     it_dir = os.path.join(root, "crates", "eve-server", "tests", "it")
 
     enc_calls = enc_files = 0
     notify_calls = notify_files = 0
-    transport_conditionals = 0
-    service_ct_cmp = 0
-    service_ct_params = 0
+    transport_conditionals_pf = {}
+    service_ct_cmp_pf = {}
+    service_ct_params_pf = {}
     service_ct_files = set()
-    direct_layer_test_calls = 0
+    direct_layer_test_calls_pf = {}
+    ue_per_file = {}
+    seq_cnt = 0
 
-    if (has_enc or has_notify or has_compat) and os.path.isdir(src_dir):
+    if (has_enc or has_notify or has_compat or has_untyped_ue) and os.path.isdir(src_dir):
         for p in sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)):
             rel_in_src = os.path.relpath(p, src_dir).replace("\\", "/")
             rec, chg, st_chg = _scan_server_src_file(p, rel_in_src, src_cache, stat_src=stat_src)
             dirty = dirty or chg
             stat_dirty = stat_dirty or st_chg
+            repo_rel = "crates/eve-server/src/" + rel_in_src
             if rec["enc"] > 0:
                 enc_calls += rec["enc"]
                 enc_files += 1
             if rec["notify"] > 0:
                 notify_calls += rec["notify"]
                 notify_files += 1
-            transport_conditionals += rec["ct_cmp"]
-            direct_layer_test_calls += rec["dl_test"]
+            if rec["ct_cmp"] > 0:
+                transport_conditionals_pf[repo_rel] = rec["ct_cmp"]
+            if rec["dl_test"] > 0:
+                direct_layer_test_calls_pf[repo_rel] = rec["dl_test"]
+            if rel_in_src == "outbound_sequencer.rs":
+                seq_cnt = int(rec.get("seq_rw", 0) or 0)
             if rel_in_src.startswith("services/") and (rec["ct_cmp"] > 0 or rec["ct_params"] > 0):
-                service_ct_cmp += rec["ct_cmp"]
-                service_ct_params += rec["ct_params"]
-                service_ct_files.add("crates/eve-server/src/" + rel_in_src)
+                if rec["ct_cmp"] > 0:
+                    service_ct_cmp_pf[repo_rel] = rec["ct_cmp"]
+                if rec["ct_params"] > 0:
+                    service_ct_params_pf[repo_rel] = rec["ct_params"]
+                service_ct_files.add(repo_rel)
+            if rec.get("ue", 0) > 0:
+                ue_per_file[rel_in_src] = rec["ue"]
 
     disp_none_calls = disp_none_files = 0
     it_dispatch_files = set()
@@ -1764,16 +2018,27 @@ def check_all_ratchets(root, cache_path=None):
                 disp_none_files += 1
             if rec["has_disp"]:
                 it_dispatch_files.add(rel_in_it)
-            direct_layer_test_calls += rec["dl_test"]
+            if rec["dl_test"] > 0:
+                direct_layer_test_calls_pf["crates/eve-server/tests/it/" + rel_in_it] = rec["dl_test"]
 
-    # Also check any non-`it` integration tests under `crates/eve-server/tests/*.rs` for `client_compat`
+    # Also check top-level `crates/eve-server/*.rs` and `crates/eve-server/tests/*.rs` for `client_compat`
     if has_compat:
-        extra_tests_dir = os.path.join(root, "crates", "eve-server", "tests")
-        if os.path.isdir(extra_tests_dir):
-            for p in sorted(glob.glob(os.path.join(extra_tests_dir, "*.rs"))):
-                raw = _read_text(p)
-                if "normalize_macho_" in raw or "should_suppress_macho_notification" in raw:
-                    direct_layer_test_calls += count_direct_layer_calls(strip_rust_comments_and_literals(raw))
+        server_dir = os.path.join(root, "crates", "eve-server")
+        extra_paths = sorted(
+            glob.glob(os.path.join(server_dir, "*.rs"))
+            + glob.glob(os.path.join(server_dir, "tests", "*.rs"))
+        )
+        for p in extra_paths:
+            rel_in_srv = os.path.relpath(p, server_dir).replace("\\", "/")
+            raw = _read_text(p)
+            if "normalize_macho_" in raw or "should_suppress_macho_notification" in raw:
+                clean = strip_rust_comments_and_literals(raw)
+                if is_test_only_rel_path(rel_in_srv):
+                    dl = count_direct_layer_calls(clean)
+                else:
+                    dl = max(0, count_direct_layer_calls(clean) - count_direct_layer_calls(strip_cfg_test_items(clean)))
+                if dl > 0:
+                    direct_layer_test_calls_pf["crates/eve-server/" + rel_in_srv] = dl
 
     if has_enc:
         try:
@@ -1852,10 +2117,13 @@ def check_all_ratchets(root, cache_path=None):
     dirty = dirty or lr_dirty
 
     if has_compat:
-        compat_rs = os.path.join(root, "crates", "eve-server", "src", "router", "client_compat.rs")
+        compat_rel = "crates/eve-server/src/router/client_compat.rs"
+        seq_rel = "crates/eve-server/src/outbound_sequencer.rs"
+        compat_rs = os.path.join(root, compat_rel)
         try:
             cr = _read_json(os.path.join(root, compat_ratchet_rel))
             compat_rep = _scan_client_compat_rs(compat_rs)
+
             for field in ("known_rules", "allowed_service_caller_trace_files", "allowed_it_dispatch_rpc_files"):
                 arr = cr.get(field, [])
                 if not isinstance(arr, list) or any(arr[i] >= arr[i + 1] for i in range(len(arr) - 1)):
@@ -1865,38 +2133,77 @@ def check_all_ratchets(root, cache_path=None):
                         compat_ratchet_rel,
                         1,
                     ))
-            exact_pairs = (
-                ("max_rpc_rules", compat_rep["rpc_rules"]),
-                ("max_suppress_rules", compat_rep["suppress_rules"]),
-                ("max_notify_arms", compat_rep["notify_arms"]),
-                ("max_destiny_rewrites", compat_rep["destiny_rewrites"]),
-                ("max_production_lines", compat_rep["production_lines"]),
-                ("max_transport_conditionals", transport_conditionals),
-                ("max_direct_layer_test_calls", direct_layer_test_calls),
-                ("max_service_caller_trace_comparisons", service_ct_cmp),
-                ("max_service_caller_trace_params", service_ct_params),
-            )
-            for fname, obs_val in exact_pairs:
-                exp_val = int(cr[fname])
-                if obs_val > exp_val:
+
+            is_v2 = int(cr.get("version", 1) or 1) >= 2 or isinstance(cr.get("counters"), dict)
+            if is_v2:
+                obs_counters = {
+                    "rpc_rules": {compat_rel: compat_rep["rpc_rules"]} if compat_rep["rpc_rules"] > 0 else {},
+                    "suppress_rules": {compat_rel: compat_rep["suppress_rules"]} if compat_rep["suppress_rules"] > 0 else {},
+                    "notify_arms": {compat_rel: compat_rep["notify_arms"]} if compat_rep["notify_arms"] > 0 else {},
+                    "destiny_rewrites": {compat_rel: compat_rep["destiny_rewrites"]} if compat_rep["destiny_rewrites"] > 0 else {},
+                    "production_lines": {compat_rel: compat_rep["production_lines"]} if compat_rep["production_lines"] > 0 else {},
+                    "sequencer_set_state_rewrites": {seq_rel: seq_cnt} if seq_cnt > 0 else {},
+                    "transport_conditionals": transport_conditionals_pf,
+                    "direct_layer_test_calls": direct_layer_test_calls_pf,
+                    "service_caller_trace_comparisons": service_ct_cmp_pf,
+                    "service_caller_trace_params": service_ct_params_pf,
+                }
+                base_counters = cr.get("counters")
+                if not isinstance(base_counters, dict):
                     violations.append((
                         "RATCHET_CLIENT_COMPAT",
-                        "%s regressed above falling ratchet: observed %d, %s=%d"
-                        % (fname, obs_val, fname, exp_val),
+                        "%s v2 missing `counters` map" % compat_ratchet_rel,
                         compat_ratchet_rel,
                         1,
                     ))
-                elif obs_val < exp_val:
-                    violations.append((
-                        "RATCHET_CLIENT_COMPAT",
-                        "%s dropped below falling ratchet (%d < %d): lower %s to %d in %s in the same commit"
-                        % (fname, obs_val, exp_val, fname, obs_val, compat_ratchet_rel),
-                        compat_ratchet_rel,
-                        1,
-                    ))
+                else:
+                    for cname in CLIENT_COMPAT_COUNTER_KEYS:
+                        if cname not in base_counters:
+                            violations.append((
+                                "RATCHET_CLIENT_COMPAT",
+                                "%s v2 missing counter `%s`" % (compat_ratchet_rel, cname),
+                                compat_ratchet_rel,
+                                1,
+                            ))
+                            continue
+                        violations.extend(
+                            _validate_per_file_map(
+                                "RATCHET_CLIENT_COMPAT",
+                                "client_compat counter '%s'" % cname,
+                                compat_ratchet_rel,
+                                base_counters[cname],
+                                obs_counters[cname],
+                                zero_required=(cname == "service_caller_trace_comparisons"),
+                            )
+                        )
+            else:
+                upper_pairs = [
+                    ("max_rpc_rules", compat_rep["rpc_rules"]),
+                    ("max_suppress_rules", compat_rep["suppress_rules"]),
+                    ("max_notify_arms", compat_rep["notify_arms"]),
+                    ("max_destiny_rewrites", compat_rep["destiny_rewrites"]),
+                    ("max_production_lines", compat_rep["production_lines"]),
+                    ("max_transport_conditionals", sum(transport_conditionals_pf.values())),
+                    ("max_direct_layer_test_calls", sum(direct_layer_test_calls_pf.values())),
+                    ("max_service_caller_trace_comparisons", sum(service_ct_cmp_pf.values())),
+                    ("max_service_caller_trace_params", sum(service_ct_params_pf.values())),
+                ]
+                if cr.get("max_sequencer_set_state_rewrites") is not None:
+                    upper_pairs.append(("max_sequencer_set_state_rewrites", seq_cnt))
+                for fname, obs_val in upper_pairs:
+                    exp_val = int(cr[fname])
+                    if obs_val > exp_val:
+                        violations.append((
+                            "RATCHET_CLIENT_COMPAT",
+                            "%s regressed above falling ratchet: observed %d, %s=%d"
+                            % (fname, obs_val, fname, exp_val),
+                            compat_ratchet_rel,
+                            1,
+                        ))
+
+            # Allowlist sets enforce subset-only (`observed <= allowed`): deletions never collide (#1538).
             exp_rules = set(cr.get("known_rules", ()))
             added_rules = sorted(compat_rep["known_rules"] - exp_rules)
-            removed_rules = sorted(exp_rules - compat_rep["known_rules"])
             if added_rules:
                 violations.append((
                     "RATCHET_CLIENT_COMPAT",
@@ -1904,20 +2211,12 @@ def check_all_ratchets(root, cache_path=None):
                     compat_ratchet_rel,
                     1,
                 ))
-            if removed_rules:
-                violations.append((
-                    "RATCHET_CLIENT_COMPAT",
-                    "client_compat rules deleted without removing from %s in same commit: %s"
-                    % (compat_ratchet_rel, removed_rules[:10]),
-                    compat_ratchet_rel,
-                    1,
-                ))
             exp_svc = set(cr.get("allowed_service_caller_trace_files", ()))
-            if service_ct_files != exp_svc:
+            added_svc = sorted(service_ct_files - exp_svc)
+            if added_svc:
                 violations.append((
                     "RATCHET_CLIENT_COMPAT",
-                    "services/ caller_trace file set %s != allowed_service_caller_trace_files %s"
-                    % (sorted(service_ct_files), sorted(exp_svc)),
+                    "New caller_trace usage appeared in crates/eve-server/src/services/: %s" % added_svc[:10],
                     compat_ratchet_rel,
                     1,
                 ))
@@ -1933,6 +2232,9 @@ def check_all_ratchets(root, cache_path=None):
                 ))
         except (OSError, ValueError, KeyError, TypeError) as e:
             violations.append(("RATCHET_CLIENT_COMPAT", "Invalid client_compat ratchet state: %s" % e, compat_ratchet_rel, 1))
+
+    if has_untyped_ue:
+        violations.extend(check_untyped_user_error_ratchet(root, rel_path=untyped_ue_rel, observed_per_file=ue_per_file))
 
     ad_viol, ad_dirty, ad_sdirty = _check_arch_debt_ratchet_cached(
         root, arch_cache=arch_cache, stat_arch=stat_arch
@@ -1996,18 +2298,33 @@ def protected_umbrella_issues(root):
         try:
             cr = _read_json(compat_path)
             er = _read_json(enc_path)
-            compat_counters = [
-                int(cr.get(k, 1) or 0)
-                for k in (
-                    "max_rpc_rules",
-                    "max_suppress_rules",
-                    "max_notify_arms",
-                    "max_destiny_rewrites",
-                    "max_transport_conditionals",
-                    "max_service_caller_trace_comparisons",
-                    "max_service_caller_trace_params",
-                )
-            ]
+            if isinstance(cr.get("counters"), dict):
+                compat_counters = [
+                    sum(int(v or 0) for v in (cr["counters"].get(k) or {}).values())
+                    for k in (
+                        "rpc_rules",
+                        "suppress_rules",
+                        "notify_arms",
+                        "destiny_rewrites",
+                        "sequencer_set_state_rewrites",
+                        "transport_conditionals",
+                        "service_caller_trace_comparisons",
+                        "service_caller_trace_params",
+                    )
+                ]
+            else:
+                compat_counters = [
+                    int(cr.get(k, 1) or 0)
+                    for k in (
+                        "max_rpc_rules",
+                        "max_suppress_rules",
+                        "max_notify_arms",
+                        "max_destiny_rewrites",
+                        "max_transport_conditionals",
+                        "max_service_caller_trace_comparisons",
+                        "max_service_caller_trace_params",
+                    )
+                ]
             if int(er.get("max_raw_encode_field_calls", 1)) == 0 and sum(compat_counters) == 0:
                 protected.pop(933, None)
             else:
@@ -2022,8 +2339,11 @@ def protected_umbrella_issues(root):
             ad = _read_json(arch_path)
             by_issue = {}
             for name, spec in _iter_arch_debt_entries(ad):
-                cnt = spec.get("max_occurrences", spec.get("max_calls", spec.get("max_count", 0)))
-                cnt_i = int(cnt) if isinstance(cnt, int) and not isinstance(cnt, bool) else 0
+                if isinstance(spec.get("files"), dict):
+                    cnt_i = sum(int(v or 0) for v in spec["files"].values())
+                else:
+                    cnt = spec.get("max_occurrences", spec.get("max_calls", spec.get("max_count", 0)))
+                    cnt_i = int(cnt) if isinstance(cnt, int) and not isinstance(cnt, bool) else 0
                 for iss in _parse_issue_numbers(spec.get("owning_issue", spec.get("owning_issues"))):
                     by_issue.setdefault(iss, []).append((name, cnt_i))
             for iss, items in by_issue.items():

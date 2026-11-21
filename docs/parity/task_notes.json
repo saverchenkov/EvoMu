@@ -301,7 +301,7 @@
   },
   "PVE-4": {
     "assessment": "NOT STARTED",
-    "note": "Paused during Foundation-First Wave F1/F2 (#1398): resumes after #1494+#1396 -> #1495+#1480 prerequisites land; loads anomalies, complexes, expeditions & chemical labs."
+    "note": "Paused during Wave F1/F2 (#1398): resumes after #1494+#1396 -> #1495 (typed site ID + runtime upgrade)+#1480 land; loads anomalies, complexes, expeditions & chemical labs."
   },
   "PVE-5": {
     "assessment": "NOT STARTED",
@@ -481,7 +481,7 @@
   },
   "T-6": {
     "assessment": "PARTIAL",
-    "note": "Client journey runner and simulated two-client harness in place; real V24 client journey execution pending."
+    "note": "Real-client harness & playtester active; #1539 Track 1 underway (attestation journeys run with server-caused client guards OFF; continuous playtester keeps guards ON and logs hits)."
   },
   "T-7": {
     "assessment": "DONE",
@@ -517,7 +517,7 @@
   },
   "Z-6": {
     "assessment": "NOT STARTED",
-    "note": "Real-client journeys require execution via the V24 client journey harness."
+    "note": "Real-client journeys require execution via the V24 client harness with server-caused client guards OFF (#1539; 7-scenario smoke interim -> 29/29 full_z6)."
   },
   "Z-7": {
     "assessment": "PARTIAL",

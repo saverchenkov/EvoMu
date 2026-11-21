@@ -51,23 +51,24 @@ def active_priority_lines():
 
 def plan_structure():
     phases, cur, titles = [], None, {}
-    for ln in open(PLAN, encoding="utf-8"):
-        h = re.match(r"^## (Phase [^:]+):?\s*(.*)$", ln)
-        if h:
-            cur = [h.group(1).strip() + (": " + h.group(2).strip() if h.group(2) else ""), []]
-            phases.append(cur)
-            continue
-        if ln.startswith("## "):
-            cur = None
-            continue
-        m = re.match(r"^\|\s*\**`?(" + ID_RE + r")`?\**\s*\|\s*([^|]*)\|", ln)
-        if m and cur is not None:
-            tid = m.group(1)
-            if tid not in cur[1]:
-                cur[1].append(tid)
-            t = re.sub(r"[*`]", "", m.group(2)).strip()
-            t = re.sub(r"\s*\([^()]*\.(?:rs|py|md|json|sql|cpp|h)(?::[\d,\- ]+)?[^()]*\)", "", t).strip()
-            titles.setdefault(tid, (t[:80] + "…") if len(t) > 80 else t)
+    with open(PLAN, encoding="utf-8") as fh:
+        for ln in fh:
+            h = re.match(r"^## (Phase [^:]+):?\s*(.*)$", ln)
+            if h:
+                cur = [h.group(1).strip() + (": " + h.group(2).strip() if h.group(2) else ""), []]
+                phases.append(cur)
+                continue
+            if ln.startswith("## "):
+                cur = None
+                continue
+            m = re.match(r"^\|\s*\**`?(" + ID_RE + r")`?\**\s*\|\s*([^|]*)\|", ln)
+            if m and cur is not None:
+                tid = m.group(1)
+                if tid not in cur[1]:
+                    cur[1].append(tid)
+                t = re.sub(r"[*`]", "", m.group(2)).strip()
+                t = re.sub(r"\s*\([^()]*\.(?:rs|py|md|json|sql|cpp|h)(?::[\d,\- ]+)?[^()]*\)", "", t).strip()
+                titles.setdefault(tid, (t[:80] + "…") if len(t) > 80 else t)
     return [p for p in phases if p[1]], titles
 
 

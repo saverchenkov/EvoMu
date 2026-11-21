@@ -1,5 +1,6 @@
 //! Unit and mutation-killing tests for `router::binding`.
 
+use crate::router::context::BoundObjectEntry;
 use crate::router::{ServerContext, SessionCleanupGuard};
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord, WorldRepository};
 use eve_destiny::{Ball, CombatState, MovementMode};
@@ -9,7 +10,32 @@ use eve_machonet::service_roles::ROLE_GML;
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 use glam::DVec3;
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+
+fn alloc_grace(
+    ctx: &ServerContext,
+    sess: &SessionState,
+    svc: &str,
+    oid: i64,
+    method: &str,
+    args: &[PyRep],
+) -> Option<u64> {
+    ctx.allocate_late_call_grace_binding(sess, svc, oid, method, args, &HashMap::new())
+}
+
+fn resolve_grace(
+    ctx: &ServerContext,
+    sess: &SessionState,
+    bid: u64,
+    method: &str,
+    args: &[PyRep],
+) -> Option<BoundObjectEntry> {
+    match ctx.resolve_late_call_with_policy(sess, bid, method, args, &HashMap::new()) {
+        super::LateCallResolution::DispatchWithBinding(entry) => Some(entry),
+        _ => None,
+    }
+}
 
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
@@ -109,21 +135,13 @@ fn transition_grace_ship_dirt_binding_lifecycle_and_security_boundaries() {
     sess.ship_id = Some(ship_a);
 
     // Before recording dock departure, transition grace refuses station binding.
-    assert!(
-        ctx.allocate_transition_grace_ship_dirt_binding(
-            &sess,
-            st_id,
-            &[PyRep::Integer(ship_a)],
-        )
-        .is_none()
-    );
+    assert!(alloc_grace(&ctx, &sess, "ship", st_id, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none());
 
     // Simulate departing `st_id` into space (`station_id: Some(st_id) -> None`).
     ctx.update_transition_departed_dock(&sess, Some(st_id), None);
 
     // 1. Owned ship dirt binding allocates grace-only bound ID (NOT inserted into active bound_objects).
-    let grace_bid = ctx
-        .allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
+    let grace_bid = alloc_grace(&ctx, &sess, "ship", st_id, "GetDirtTimestamp", &[PyRep::Integer(ship_a)])
         .expect("grace bid within 30s");
     assert!(
         !ctx.bound_objects.read().unwrap().contains_key(&grace_bid),
@@ -134,13 +152,7 @@ fn transition_grace_ship_dirt_binding_lifecycle_and_security_boundaries() {
         "InvalidBoundObject"
     );
 
-    let resolved = ctx
-        .grace_bound_object_for_inflight_transition(
-            &sess,
-            grace_bid,
-            "GetDirtTimestamp",
-            &[PyRep::Integer(ship_a)],
-        )
+    let resolved = resolve_grace(&ctx, &sess, grace_bid, "GetDirtTimestamp", &[PyRep::Integer(ship_a)])
         .expect("GetDirtTimestamp grace authorized");
     assert_eq!(resolved.service, "ship");
     assert_eq!(resolved.object_id, st_id);
@@ -156,144 +168,51 @@ fn transition_grace_ship_dirt_binding_lifecycle_and_security_boundaries() {
         "GetSelfInvItem",
     ] {
         assert!(
-            ctx.grace_bound_object_for_inflight_transition(
-                &sess,
-                grace_bid,
-                blocked,
-                &[PyRep::Integer(ship_a)],
-            )
-            .is_none(),
+            resolve_grace(&ctx, &sess, grace_bid, blocked, &[PyRep::Integer(ship_a)]).is_none(),
             "{blocked} must be rejected on ship transition grace"
         );
     }
-    assert!(
-        ctx.allocate_transition_grace_ship_dirt_binding(
-            &sess,
-            st_id,
-            &[PyRep::Integer(foreign_ship)],
-        )
-        .is_none()
-    );
-    assert!(
-        ctx.allocate_transition_grace_ship_dirt_binding(
-            &sess,
-            st_id,
-            &[PyRep::Integer(non_ship_item)],
-        )
-        .is_none()
-    );
-    assert!(
-        ctx.allocate_transition_grace_ship_dirt_binding(
-            &sess,
-            other_st_id,
-            &[PyRep::Integer(ship_a)],
-        )
-        .is_none()
-    );
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(
-            &sess,
-            grace_bid,
-            "GetDirtTimestamp",
-            &[PyRep::Integer(foreign_ship)],
-        )
-        .is_none()
-    );
+    assert!(alloc_grace(&ctx, &sess, "ship", st_id, "GetDirtTimestamp", &[PyRep::Integer(foreign_ship)]).is_none());
+    assert!(alloc_grace(&ctx, &sess, "ship", st_id, "GetDirtTimestamp", &[PyRep::Integer(non_ship_item)]).is_none());
+    assert!(alloc_grace(&ctx, &sess, "ship", other_st_id, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none());
+    assert!(resolve_grace(&ctx, &sess, grace_bid, "GetDirtTimestamp", &[PyRep::Integer(foreign_ship)]).is_none());
 
     // 3. Wrong session, wrong user, wrong character, and displaced online lock are rejected.
     let mut wrong_sid = sess.clone();
     wrong_sid.session_id = sid + 1;
-    assert!(
-        ctx.allocate_transition_grace_ship_dirt_binding(
-            &wrong_sid,
-            st_id,
-            &[PyRep::Integer(ship_a)],
-        )
-        .is_none()
-    );
+    assert!(alloc_grace(&ctx, &wrong_sid, "ship", st_id, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none());
     let mut wrong_user = sess.clone();
     wrong_user.user_id = Some(user_id + 1);
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(
-            &wrong_user,
-            grace_bid,
-            "GetDirtTimestamp",
-            &[PyRep::Integer(ship_a)],
-        )
-        .is_none()
-    );
+    assert!(resolve_grace(&ctx, &wrong_user, grace_bid, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none());
     let mut wrong_char = sess.clone();
     wrong_char.character_id = Some(other_char);
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(
-            &wrong_char,
-            grace_bid,
-            "GetDirtTimestamp",
-            &[PyRep::Integer(ship_a)],
-        )
-        .is_none()
-    );
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(
-            &sess,
-            grace_bid,
-            "GetDirtTimestamp",
-            &[PyRep::Integer(ship_a)],
-        )
-        .is_some()
-    );
+    assert!(resolve_grace(&ctx, &wrong_char, grace_bid, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none());
+    assert!(resolve_grace(&ctx, &sess, grace_bid, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_some());
 
     // 4. Verify 20s validity and >30s expiry, plus dock-back clearing and session purge.
     ctx.advance_secs(20);
-    assert!(
-        ctx.allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
-            .is_some()
-    );
+    assert!(alloc_grace(&ctx, &sess, "ship", st_id, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_some());
     ctx.advance_secs(12);
-    assert!(
-        ctx.allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
-            .is_none()
-    );
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(
-            &sess,
-            grace_bid,
-            "GetDirtTimestamp",
-            &[PyRep::Integer(ship_a)],
-        )
-        .is_none()
-    );
+    assert!(alloc_grace(&ctx, &sess, "ship", st_id, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none());
+    assert!(resolve_grace(&ctx, &sess, grace_bid, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none());
 
     ctx.update_transition_departed_dock(&sess, Some(st_id), None);
     ctx.update_transition_departed_dock(&sess, None, Some(st_id));
     assert!(
-        ctx.allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
-            .is_none(),
+        alloc_grace(&ctx, &sess, "ship", st_id, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none(),
         "docking back into st_id clears departed dock grace"
     );
 
     ctx.update_transition_departed_dock(&sess, Some(st_id), None);
-    let active_bid = ctx
-        .allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
+    let active_bid = alloc_grace(&ctx, &sess, "ship", st_id, "GetDirtTimestamp", &[PyRep::Integer(ship_a)])
         .expect("fresh grace bid");
 
     // 5. Displaced online lock immediately rejects both allocation and in-flight grace.
     ctx.db
         .acquire_online_lock(user_id, sid + 99, Some(char_id), true, ctx.now_unix())
         .expect("displace lock");
-    assert!(
-        ctx.allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
-            .is_none()
-    );
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(
-            &sess,
-            active_bid,
-            "GetDirtTimestamp",
-            &[PyRep::Integer(ship_a)],
-        )
-        .is_none()
-    );
+    assert!(alloc_grace(&ctx, &sess, "ship", st_id, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none());
+    assert!(resolve_grace(&ctx, &sess, active_bid, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none());
 
     // 6. Session purge clears grace entries on fresh session.
     let sid_clean = sid + 100;
@@ -303,19 +222,10 @@ fn transition_grace_ship_dirt_binding_lifecycle_and_security_boundaries() {
     let mut sess_clean = sess.clone();
     sess_clean.session_id = sid_clean;
     ctx.update_transition_departed_dock(&sess_clean, Some(st_id), None);
-    let purged_bid = ctx
-        .allocate_transition_grace_ship_dirt_binding(&sess_clean, st_id, &[PyRep::Integer(ship_a)])
+    let purged_bid = alloc_grace(&ctx, &sess_clean, "ship", st_id, "GetDirtTimestamp", &[PyRep::Integer(ship_a)])
         .expect("fresh session grace bid");
     ctx.purge_transition_grace_for_session(sid_clean);
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(
-            &sess_clean,
-            purged_bid,
-            "GetDirtTimestamp",
-            &[PyRep::Integer(ship_a)],
-        )
-        .is_none()
-    );
+    assert!(resolve_grace(&ctx, &sess_clean, purged_bid, "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none());
 }
 
 #[test]
@@ -1348,61 +1258,38 @@ fn transition_grace_retains_inflight_invbroker_metadata_and_enforces_expiry_and_
     }));
 
     // In-flight read-only metadata calls on invalidated invbroker stay authorized inside 30s grace.
-    let grace_self = ctx
-        .grace_bound_object_for_inflight_invbroker(&sess, b_prev_ship, "GetSelfInvItem")
+    let grace_self = resolve_grace(&ctx, &sess, b_prev_ship, "GetSelfInvItem", &[])
         .expect("GetSelfInvItem grace within 30s");
     assert_eq!(grace_self.object_id, ship_a);
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_prev_ship, "GetAvailableTurretSlots")
-            .is_some()
-    );
-    assert!(ctx.has_transition_grace_invbroker_binding(&sess, b_prev_ship, ship_a));
+    assert!(resolve_grace(&ctx, &sess, b_prev_ship, "GetAvailableTurretSlots", &[]).is_some());
+    assert!(ctx.authorize_departed_object_late_call(&sess, "invbroker", b_prev_ship, ship_a));
 
     // Mutating / container listing / non-invbroker bindings must NEVER enter grace.
     for blocked in ["List", "ListByFlags", "Add", "MultiAdd", "Remove"] {
         assert!(
-            ctx.grace_bound_object_for_inflight_invbroker(&sess, b_prev_ship, blocked)
-                .is_none(),
+            resolve_grace(&ctx, &sess, b_prev_ship, blocked, &[]).is_none(),
             "{blocked} must remain rejected"
         );
     }
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_beyonce, "GetSelfInvItem")
-            .is_none()
-    );
-    assert!(!ctx.has_transition_grace_invbroker_binding(&sess, b_prev_ship, ship_b));
+    assert!(resolve_grace(&ctx, &sess, b_beyonce, "GetSelfInvItem", &[]).is_none());
+    assert!(!ctx.authorize_departed_object_late_call(&sess, "invbroker", b_prev_ship, ship_b));
 
     // Wrong session, wrong user, or wrong character is rejected.
     let mut wrong_sid = sess.clone();
     wrong_sid.session_id = sid + 1;
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&wrong_sid, b_prev_ship, "GetSelfInvItem")
-            .is_none()
-    );
+    assert!(resolve_grace(&ctx, &wrong_sid, b_prev_ship, "GetSelfInvItem", &[]).is_none());
     let mut wrong_user = sess.clone();
     wrong_user.user_id = Some(user_id + 99);
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&wrong_user, b_prev_ship, "GetSelfInvItem")
-            .is_none()
-    );
+    assert!(resolve_grace(&ctx, &wrong_user, b_prev_ship, "GetSelfInvItem", &[]).is_none());
     let mut wrong_char = sess.clone();
     wrong_char.character_id = Some(other_char);
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&wrong_char, b_prev_ship, "GetSelfInvItem")
-            .is_none()
-    );
+    assert!(resolve_grace(&ctx, &wrong_char, b_prev_ship, "GetSelfInvItem", &[]).is_none());
 
     // Grace remains valid at 20s and expires after 31s.
     ctx.advance_secs(20);
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_prev_ship, "GetSelfInvItem")
-            .is_some()
-    );
+    assert!(resolve_grace(&ctx, &sess, b_prev_ship, "GetSelfInvItem", &[]).is_some());
     ctx.advance_secs(11);
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_prev_ship, "GetSelfInvItem")
-            .is_none()
-    );
+    assert!(resolve_grace(&ctx, &sess, b_prev_ship, "GetSelfInvItem", &[]).is_none());
 
     // Explicit client release, logout transition, release_session_bindings, and
     // release_user_bindings each purge grace entries immediately.
@@ -1415,43 +1302,25 @@ fn transition_grace_retains_inflight_invbroker_metadata_and_enforces_expiry_and_
     let b_c1 = ctx.bind_object(&sess, "invbroker", ship_c).expect("bind ship_c");
     let c1_oid = ctx.verify_bound_object(&sess, b_c1).unwrap().oid_str;
     ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c1, "GetSelfInvItem")
-            .is_some()
-    );
+    assert!(resolve_grace(&ctx, &sess, b_c1, "GetSelfInvItem", &[]).is_some());
     ctx.release_bound_objects_from_pyrep(sid, &PyRep::List(vec![PyRep::ascii_bytes(c1_oid)]));
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c1, "GetSelfInvItem")
-            .is_none()
-    );
+    assert!(resolve_grace(&ctx, &sess, b_c1, "GetSelfInvItem", &[]).is_none());
 
     let b_c2 = ctx.bind_object(&sess, "invbroker", ship_c).expect("bind ship_c #2");
     ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c2, "GetSelfInvItem")
-            .is_some()
-    );
+    assert!(resolve_grace(&ctx, &sess, b_c2, "GetSelfInvItem", &[]).is_some());
     ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "logout");
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c2, "GetSelfInvItem")
-            .is_none()
-    );
+    assert!(resolve_grace(&ctx, &sess, b_c2, "GetSelfInvItem", &[]).is_none());
 
     let b_c3 = ctx.bind_object(&sess, "invbroker", ship_c).expect("bind ship_c #3");
     ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
     ctx.release_session_bindings(sid);
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c3, "GetSelfInvItem")
-            .is_none()
-    );
+    assert!(resolve_grace(&ctx, &sess, b_c3, "GetSelfInvItem", &[]).is_none());
 
     let b_c4 = ctx.bind_object(&sess, "invbroker", ship_c).expect("bind ship_c #4");
     ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
     ctx.release_user_bindings(user_id);
-    assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c4, "GetSelfInvItem")
-            .is_none()
-    );
+    assert!(resolve_grace(&ctx, &sess, b_c4, "GetSelfInvItem", &[]).is_none());
 
     // Per-session cap (256) evicts oldest grace entries cleanly across batches.
     let mut batch1 = Vec::new();
@@ -1466,13 +1335,11 @@ fn transition_grace_retains_inflight_invbroker_metadata_and_enforces_expiry_and_
     }
     ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
     assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, batch1[0], "GetSelfInvItem")
-            .is_none(),
+        resolve_grace(&ctx, &sess, batch1[0], "GetSelfInvItem", &[]).is_none(),
         "oldest grace entries above 256 per-session cap must be evicted"
     );
     assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, batch2[149], "GetSelfInvItem")
-            .is_some(),
+        resolve_grace(&ctx, &sess, batch2[149], "GetSelfInvItem", &[]).is_some(),
         "newest grace entries within 256 per-session cap must remain"
     );
 
@@ -1481,8 +1348,7 @@ fn transition_grace_retains_inflight_invbroker_metadata_and_enforces_expiry_and_
         .acquire_online_lock(user_id, sid + 50, Some(char_id), true, ctx.now_unix())
         .expect("displace online lock");
     assert!(
-        ctx.grace_bound_object_for_inflight_invbroker(&sess, batch2[149], "GetSelfInvItem")
-            .is_none(),
+        resolve_grace(&ctx, &sess, batch2[149], "GetSelfInvItem", &[]).is_none(),
         "displaced session must lose transition grace immediately"
     );
 }
@@ -1540,10 +1406,7 @@ fn transition_grace_crimewatch_binding_lifecycle_and_security_boundaries() {
     sess.ship_id = Some(ship_a);
 
     // Before recording any departure, crimewatch grace refuses unvisited solar systems.
-    assert!(
-        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(perimeter_sys), &[])
-            .is_none()
-    );
+    assert!(alloc_grace(&ctx, &sess, "crimewatch", i64::from(perimeter_sys), "GetClientStates", &[]).is_none());
 
     // 1. Overlapping /tr simulation: Perimeter (30000144) -> Jita (30000142) records departed solar system
     //    even if crimewatch(30000144) was never bound prior to departure (#1209, #1211).
@@ -1555,8 +1418,7 @@ fn transition_grace_crimewatch_binding_lifecycle_and_security_boundaries() {
         None,
     );
 
-    let grace_bid = ctx
-        .allocate_transition_grace_crimewatch_binding(&sess, i64::from(perimeter_sys), &[])
+    let grace_bid = alloc_grace(&ctx, &sess, "crimewatch", i64::from(perimeter_sys), "GetClientStates", &[])
         .expect("crimewatch grace allocated within 30s");
     assert!(
         !ctx.bound_objects.read().unwrap().contains_key(&grace_bid),
@@ -1570,41 +1432,20 @@ fn transition_grace_crimewatch_binding_lifecycle_and_security_boundaries() {
         ctx.transition_grace_service_for_bound_id(&sess, grace_bid).as_deref(),
         Some("crimewatch")
     );
-    let resolved = ctx
-        .grace_bound_object_for_inflight_transition(&sess, grace_bid, "GetClientStates", &[])
+    let resolved = resolve_grace(&ctx, &sess, grace_bid, "GetClientStates", &[])
         .expect("GetClientStates grace authorized");
     assert_eq!(resolved.service, "crimewatch");
     assert_eq!(resolved.object_id, i64::from(perimeter_sys));
 
     // Disjoint boundary preservation: departed SolarSystem does NOT grant ship.GetDirtTimestamp dock grace.
     assert!(
-        ctx.allocate_transition_grace_ship_dirt_binding(
-            &sess,
-            i64::from(perimeter_sys),
-            &[PyRep::Integer(ship_a)],
-        )
-        .is_none(),
+        alloc_grace(&ctx, &sess, "ship", i64::from(perimeter_sys), "GetDirtTimestamp", &[PyRep::Integer(ship_a)]).is_none(),
         "departed solar system must not grant ship dock grace"
     );
 
     // Non-empty args and non-GetClientStates crimewatch/other methods must be rejected.
-    assert!(
-        ctx.allocate_transition_grace_crimewatch_binding(
-            &sess,
-            i64::from(perimeter_sys),
-            &[PyRep::Integer(1)],
-        )
-        .is_none()
-    );
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(
-            &sess,
-            grace_bid,
-            "GetClientStates",
-            &[PyRep::Integer(1)],
-        )
-        .is_none()
-    );
+    assert!(alloc_grace(&ctx, &sess, "crimewatch", i64::from(perimeter_sys), "GetClientStates", &[PyRep::Integer(1)]).is_none());
+    assert!(resolve_grace(&ctx, &sess, grace_bid, "GetClientStates", &[PyRep::Integer(1)]).is_none());
     for blocked in [
         "SetSafetyLevel",
         "StartDuelChallenge",
@@ -1617,75 +1458,48 @@ fn transition_grace_crimewatch_binding_lifecycle_and_security_boundaries() {
         "GetSelfInvItem",
     ] {
         assert!(
-            ctx.grace_bound_object_for_inflight_transition(&sess, grace_bid, blocked, &[])
-                .is_none(),
+            resolve_grace(&ctx, &sess, grace_bid, blocked, &[]).is_none(),
             "{blocked} must be rejected on crimewatch transition grace"
         );
     }
     assert!(
-        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(amarr_sys), &[])
-            .is_none(),
+        alloc_grace(&ctx, &sess, "crimewatch", i64::from(amarr_sys), "GetClientStates", &[]).is_none(),
         "unvisited solar system must be denied"
     );
 
     // Wrong session/user/char are rejected.
     let mut wrong_sid = sess.clone();
     wrong_sid.session_id = sid + 1;
-    assert!(
-        ctx.allocate_transition_grace_crimewatch_binding(
-            &wrong_sid,
-            i64::from(perimeter_sys),
-            &[],
-        )
-        .is_none()
-    );
+    assert!(alloc_grace(&ctx, &wrong_sid, "crimewatch", i64::from(perimeter_sys), "GetClientStates", &[]).is_none());
     let mut wrong_user = sess.clone();
     wrong_user.user_id = Some(user_id + 1);
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(&wrong_user, grace_bid, "GetClientStates", &[])
-            .is_none()
-    );
+    assert!(resolve_grace(&ctx, &wrong_user, grace_bid, "GetClientStates", &[]).is_none());
     let mut wrong_char = sess.clone();
     wrong_char.character_id = Some(other_char);
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(&wrong_char, grace_bid, "GetClientStates", &[])
-            .is_none()
-    );
+    assert!(resolve_grace(&ctx, &wrong_char, grace_bid, "GetClientStates", &[]).is_none());
 
     // 2. TTL boundary: valid at 20s, expired past 30s.
     ctx.advance_secs(20);
-    assert!(
-        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(perimeter_sys), &[])
-            .is_some()
-    );
+    assert!(alloc_grace(&ctx, &sess, "crimewatch", i64::from(perimeter_sys), "GetClientStates", &[]).is_some());
     ctx.advance_secs(12);
-    assert!(
-        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(perimeter_sys), &[])
-            .is_none()
-    );
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(&sess, grace_bid, "GetClientStates", &[])
-            .is_none()
-    );
+    assert!(alloc_grace(&ctx, &sess, "crimewatch", i64::from(perimeter_sys), "GetClientStates", &[]).is_none());
+    assert!(resolve_grace(&ctx, &sess, grace_bid, "GetClientStates", &[]).is_none());
 
     // 3. Undocking from st_id also authorizes crimewatch grace against departed dock st_id,
     //    and returning to a previously departed location clears that location's grace.
     ctx.update_transition_departed_locations(&sess, Some(jita_sys), Some(st_id), Some(jita_sys), None);
     assert!(
-        ctx.allocate_transition_grace_crimewatch_binding(&sess, st_id, &[])
-            .is_some(),
+        alloc_grace(&ctx, &sess, "crimewatch", st_id, "GetClientStates", &[]).is_some(),
         "departed dock should authorize crimewatch.GetClientStates grace"
     );
     ctx.update_transition_departed_locations(&sess, Some(jita_sys), None, Some(perimeter_sys), None);
     ctx.update_transition_departed_locations(&sess, Some(perimeter_sys), None, Some(jita_sys), None);
     assert!(
-        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(jita_sys), &[])
-            .is_none(),
+        alloc_grace(&ctx, &sess, "crimewatch", i64::from(jita_sys), "GetClientStates", &[]).is_none(),
         "returning to jita_sys clears jita_sys from departed locations"
     );
     assert!(
-        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(perimeter_sys), &[])
-            .is_some(),
+        alloc_grace(&ctx, &sess, "crimewatch", i64::from(perimeter_sys), "GetClientStates", &[]).is_some(),
         "perimeter_sys departed in return jump remains valid"
     );
 
@@ -1702,26 +1516,20 @@ fn transition_grace_crimewatch_binding_lifecycle_and_security_boundaries() {
         "slash_teleport",
     );
     assert!(
-        ctx.grace_bound_object_for_inflight_transition(&sess, active_cw_bid, "GetClientStates", &[])
-            .is_some(),
+        resolve_grace(&ctx, &sess, active_cw_bid, "GetClientStates", &[]).is_some(),
         "evicted crimewatch binding retained for GetClientStates grace"
     );
     assert!(
-        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(jita_sys), &[])
-            .is_some(),
+        alloc_grace(&ctx, &sess, "crimewatch", i64::from(jita_sys), "GetClientStates", &[]).is_some(),
         "evicted crimewatch system also records departed solar system"
     );
     ctx.release_bound_objects_from_pyrep(sid, &PyRep::List(vec![PyRep::ascii_bytes(active_cw_oid)]));
-    assert!(
-        ctx.grace_bound_object_for_inflight_transition(&sess, active_cw_bid, "GetClientStates", &[])
-            .is_none()
-    );
+    assert!(resolve_grace(&ctx, &sess, active_cw_bid, "GetClientStates", &[]).is_none());
 
     sess.solar_system_id = Some(jita_sys);
     ctx.invalidate_bound_objects_for_session_transition(char_id, perimeter_sys, None, "logout");
     assert!(
-        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(jita_sys), &[])
-            .is_none(),
+        alloc_grace(&ctx, &sess, "crimewatch", i64::from(jita_sys), "GetClientStates", &[]).is_none(),
         "logout must purge departed location grace"
     );
 }
