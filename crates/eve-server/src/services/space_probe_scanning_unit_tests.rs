@@ -2619,3 +2619,284 @@ async fn anomaly_payloads_populate_dungeon_name_id_and_jita_skips_synthetic_ore(
             && n.args.first().and_then(|v| v.dict_get("dungeonNameID")) == Some(&PyRep::None)
     }));
 }
+
+#[tokio::test]
+async fn zero_anomaly_system_read_paths_stay_readonly_after_initialization() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let sys_id = 30_000_142u32;
+    let char_id = 90_000_001i64;
+    let ship_id = 100_000_001i64;
+    let now_unix = ctx.now_unix();
+    let kw = HashMap::new();
+
+    // Pre-mark PvE exploration seeded for Jita with zero active anomalies, and pre-insert only a
+    // non-native DNG- signature so readiness gating still rejects uninitialized native signatures.
+    crate::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.insert(sys_id, true);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_anomalies.insert(sys_id, Vec::new());
+        snap.cosmic_signatures.insert(
+            sys_id,
+            vec![CosmicSignatureRecord {
+                signature_id: "DNG-999-ONLY".into(),
+                solar_system_id: sys_id,
+                sig_group: "Ore Site".into(),
+                type_name: "Dummy".into(),
+                position: [1_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                wormhole_type_id: None,
+                destination_system_id: None,
+                created_unix: now_unix,
+                lifetime_seconds: 86_400,
+                max_mass_kg: 0.0,
+                remaining_mass_kg: 0.0,
+                max_jump_mass_kg: 0.0,
+                collapsed: false,
+            }],
+        );
+    });
+
+    // First GetSystemScanMgr initializes native signatures (readiness gate must still catch
+    // DNG-only uninitialized state) while keeping cosmic_anomalies empty.
+    let e_pre_init = ctx.db.state_epoch();
+    let c_pre_init = ctx.db.tx_commit_count();
+    let first_mgr = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "GetSystemScanMgr",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("initial GetSystemScanMgr");
+    assert_eq!(
+        first_mgr.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(sys_id as i64))
+    );
+    assert!(ctx.db.state_epoch() > e_pre_init);
+    assert!(ctx.db.tx_commit_count() > c_pre_init);
+
+    // Ensure zero-anomaly system with absent cosmic_anomalies map entry, register SignalTracker
+    // subscriber once, and seed one synced active scanner probe for RequestScans.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_anomalies.remove(&sys_id);
+    });
+    let first_reg = crate::services::fleet_social::handle(
+        &ctx,
+        &mut sess,
+        "scanMgr",
+        "SignalTrackerRegister",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("initial SignalTrackerRegister");
+    assert_eq!(first_reg.dict_get("anomalyCount"), Some(&PyRep::Integer(0)));
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap();
+        map.insert(
+            890_500_011,
+            ActiveScannerProbe {
+                probe_id: 890_500_011,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [1_000.0, 0.0, 0.0],
+                destination: [1_000.0, 0.0, 0.0],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 3_600.0,
+                launched_at_unix: now_unix,
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+    }
+    sync_scanner_probes_to_db(&ctx);
+
+    let bound = BoundObjectEntry {
+        bound_id: 11,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("scanMgr:{sys_id}"),
+        ref_id: 11,
+    };
+
+    // Repeated GetSystemScanMgr, SignalTrackerRegister, GetSignatures, GetAnomalies, and
+    // GetFullState calls on initialized zero-anomaly Jita must stay on the read-only fast path.
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+    for _ in 0..2 {
+        let mgr = handle_scan_and_wormhole_extras(
+            &ctx,
+            &mut sess,
+            None,
+            "scanMgr",
+            "GetSystemScanMgr",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("repeated GetSystemScanMgr");
+        assert_eq!(mgr.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_id as i64)));
+
+        let reg = crate::services::fleet_social::handle(
+            &ctx,
+            &mut sess,
+            "scanMgr",
+            "SignalTrackerRegister",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("repeated SignalTrackerRegister");
+        assert_eq!(reg.dict_get("anomalyCount"), Some(&PyRep::Integer(0)));
+        assert!(
+            matches!(reg.dict_get("signatureCount"), Some(&PyRep::Integer(n)) if n > 0),
+            "expected native signatures on read-only SignalTrackerRegister fast path"
+        );
+
+        let sigs_rep = crate::services::fleet_social::handle(
+            &ctx,
+            &mut sess,
+            "scanMgr",
+            "GetSignatures",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("GetSignatures");
+        assert!(
+            matches!(&sigs_rep, PyRep::Rowset { rows, .. } if !rows.is_empty()),
+            "expected non-empty GetSignatures rowset on read-only path, got {sigs_rep:?}"
+        );
+
+        let anoms = handle_scan_and_wormhole_extras(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "scanMgr",
+            "GetAnomalies",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("GetAnomalies");
+        assert_eq!(anoms, PyRep::List(Vec::new()));
+
+        let full = handle_scan_and_wormhole_extras(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "scanMgr",
+            "GetFullState",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("GetFullState");
+        assert!(matches!(full, PyRep::Tuple(parts) if parts.len() == 4));
+    }
+    assert_eq!(ctx.db.state_epoch(), e0, "read paths must not bump state_epoch");
+    assert_eq!(ctx.db.tx_commit_count(), c0, "read paths must not commit DB writes");
+
+    // RequestScans on zero-anomaly Jita skips ensure_system_signatures_and_anomalies fallback
+    // (same DB commit/epoch delta as a system whose cosmic_anomalies map has an active anomaly,
+    // and leaves cosmic_anomalies absent without synthesizing fake ANO- rows).
+    let sig_ids_before: Vec<String> = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_signatures
+            .get(&sys_id)
+            .into_iter()
+            .flatten()
+            .map(|s| s.signature_id.clone())
+            .collect()
+    });
+    let e_scan0 = ctx.db.state_epoch();
+    let c_scan0 = ctx.db.tx_commit_count();
+    let scan_zero = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "RequestScans",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("RequestScans on zero-anomaly Jita");
+    assert!(matches!(scan_zero, PyRep::List(_)));
+    let zero_anom_e_delta = ctx.db.state_epoch() - e_scan0;
+    let zero_anom_c_delta = ctx.db.tx_commit_count() - c_scan0;
+    assert!(
+        ctx.db.with_snapshot(|s| !s.cosmic_anomalies.contains_key(&sys_id)),
+        "RequestScans must not synthesize cosmic_anomalies on zero-anomaly Jita"
+    );
+    let sig_ids_after: Vec<String> = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_signatures
+            .get(&sys_id)
+            .into_iter()
+            .flatten()
+            .map(|s| s.signature_id.clone())
+            .collect()
+    });
+    assert_eq!(sig_ids_after, sig_ids_before);
+
+    // Baseline comparison: reset probe to IDLE and insert one active anomaly; RequestScans must
+    // execute the exact same commit count (no extra ensure_system_signatures_and_anomalies write).
+    if let Some(p) = ctx.active_scanner_probes.write().unwrap().get_mut(&890_500_011) {
+        p.state = PROBE_STATE_IDLE;
+    }
+    sync_scanner_probes_to_db(&ctx);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_anomalies.insert(
+            sys_id,
+            vec![eve_db::CosmicAnomalyRecord {
+                anomaly_id: "DNG-1344-1".into(),
+                solar_system_id: sys_id,
+                anomaly_type: "Ore".into(),
+                name: "Veldspar Deposit".into(),
+                position: [5_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                ore_types: vec![1230],
+                remaining_volume: 100.0,
+                created_unix: now_unix,
+                lifetime_seconds: 86_400,
+                cleared: false,
+            }],
+        );
+    });
+    let e_scan1 = ctx.db.state_epoch();
+    let c_scan1 = ctx.db.tx_commit_count();
+    let scan_anom = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "RequestScans",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("RequestScans baseline with populated anomaly");
+    assert!(matches!(scan_anom, PyRep::List(_)));
+    assert_eq!(ctx.db.state_epoch() - e_scan1, zero_anom_e_delta);
+    assert_eq!(ctx.db.tx_commit_count() - c_scan1, zero_anom_c_delta);
+}

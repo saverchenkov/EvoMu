@@ -266,7 +266,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                         .await;
                 }
                 match read_system_signatures_ready(ctx, sys_id, now_unix) {
-                    Some((ready_sigs, anom_ids)) if !anom_ids.is_empty() => ready_sigs,
+                    Some((ready_sigs, _)) => ready_sigs,
                     _ => ensure_system_signatures(ctx, sys_id).await,
                 }
             };

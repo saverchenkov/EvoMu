@@ -245,7 +245,11 @@ fn read_system_signatures_and_anomalies_ready(
         if any_sig_expired {
             return None;
         }
-        let anoms = snap.cosmic_anomalies.get(&sys_id)?;
+        let anoms = snap
+            .cosmic_anomalies
+            .get(&sys_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let any_anom_expired = anoms.iter().any(|a| {
             !a.cleared
                 && a.lifetime_seconds > 0
@@ -254,7 +258,7 @@ fn read_system_signatures_and_anomalies_ready(
         if any_anom_expired {
             return None;
         }
-        Some((sigs.clone(), anoms.clone()))
+        Some((sigs.clone(), anoms.to_vec()))
     })
 }
 
