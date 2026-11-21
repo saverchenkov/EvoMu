@@ -2856,7 +2856,7 @@ fn test_1531_v24_remove_ball_rewrites_to_remove_balls_across_batches_and_notific
     );
     assert_eq!(
         destiny_entry_action(&direct_entries[2]).map(|(n, _)| n),
-        Some("CloakBall")
+        Some("UncloakBall")
     );
 
     let batched_updates = build_typed_notification(
@@ -2901,12 +2901,31 @@ fn test_1531_v24_remove_ball_rewrites_to_remove_balls_across_batches_and_notific
     assert_eq!(
         batches[1],
         PyRep::Tuple(vec![
-            PyRep::Integer(306),
-            PyRep::Tuple(vec![
-                PyRep::String("RemoveBalls".into()),
-                PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(scout_id)])]),
-            ]),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(306),
+                PyRep::Tuple(vec![
+                    PyRep::String("RemoveBalls".into()),
+                    PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(scout_id)])]),
+                ]),
+            ])]),
+            PyRep::Bool(false),
         ])
+    );
+
+    let mut raw_batches = vec![PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(307),
+        PyRep::Tuple(vec![
+            PyRep::String("RemoveBall".into()),
+            PyRep::Tuple(vec![PyRep::Integer(scout_id)]),
+        ]),
+    ])])];
+    normalize_v24_destiny_notification_args("DoDestinyUpdates", &mut raw_batches);
+    assert_eq!(
+        collect_destiny_actions_from_list(&raw_batches[0]),
+        vec![(
+            "RemoveBalls".into(),
+            vec![PyRep::List(vec![PyRep::Integer(scout_id)])],
+        )]
     );
 }
 
@@ -3134,7 +3153,9 @@ async fn test_1531_wire_live_ball_removal_and_destruction_with_active_fx_emit_re
     let notif_remove_balls: Vec<_> = notif_frames
         .iter()
         .filter_map(|f| match f {
-            OutFrame::Notification { event, args } if event == "DoDestinyUpdate" => {
+            crate::outbound_sequencer::OutFrame::Notification { event, args }
+                if event == "DoDestinyUpdate" =>
+            {
                 Some(collect_destiny_actions_from_list(&args[0]))
             }
             _ => None,
