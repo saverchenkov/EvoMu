@@ -90,6 +90,9 @@ impl std::fmt::Display for CompareOriginScope {
 fn is_valid_rpc_segment(seg: &str) -> bool {
     !seg.is_empty()
         && seg.len() <= 64
+        && seg != crate::flight_recorder::UNKNOWN_RPC_LABEL
+        && seg != OTHER_RPC_BUCKET
+        && seg != OTHER_CLASS_BUCKET
         && !seg
             .bytes()
             .any(|b| b.is_ascii_control() || b.is_ascii_whitespace() || b == b'.')
@@ -584,21 +587,9 @@ fn select_best_cross_scope_index<T>(
     items: &VecDeque<T>,
     mut candidate: impl FnMut(&T) -> Option<(bool, bool)>,
 ) -> Option<usize> {
-    let mut field_match_idx = None;
-    let mut any_match_idx = None;
-    for (idx, item) in items.iter().enumerate() {
-        if let Some((fields_match, id_type_match)) = candidate(item) {
-            if fields_match && id_type_match {
-                return Some(idx);
-            }
-            if fields_match && field_match_idx.is_none() {
-                field_match_idx = Some(idx);
-            } else if any_match_idx.is_none() {
-                any_match_idx = Some(idx);
-            }
-        }
-    }
-    field_match_idx.or(any_match_idx)
+    items
+        .iter()
+        .position(|item| matches!(candidate(item), Some((true, true))))
 }
 
 type ItemBeforeAfter<'a> = (
@@ -1025,7 +1016,12 @@ impl ItemCompareLedger {
                     dispatch_method: effective_dispatch_method.clone(),
                     mismatched_helper: None,
                 },
-                |p| p.char_id == char_id && p.id_type == id_type && p.fields.item_id == item_id,
+                |p| {
+                    p.scope == scope
+                        && p.char_id == char_id
+                        && p.id_type == id_type
+                        && p.fields.item_id == item_id
+                },
                 |old| retired_items.push(old),
             );
         }
@@ -1044,7 +1040,7 @@ impl ItemCompareLedger {
                     dispatch_method: effective_dispatch_method.clone(),
                     mismatched_helper: None,
                 },
-                |p| p.char_id == char_id && p.owner_id == owner_id,
+                |p| p.scope == scope && p.char_id == char_id && p.owner_id == owner_id,
                 |old| retired_bps.push(old),
             );
         }
