@@ -316,26 +316,7 @@ async fn load_system_signatures_and_anomalies_readonly(
     let (sigs, anoms) = ctx.db.with_snapshot(|snap| {
         let mut sigs = snap.cosmic_signatures.get(&sys_id).cloned().unwrap_or_default();
         sigs.retain(|s| is_signature_active(s, now_unix));
-        let mut anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_else(|| {
-            let wh_class = system_wormhole_profile_sde(&ctx.sde, sys_id).0;
-            if wh_class == 0 {
-                vec![CosmicAnomalyRecord {
-                    anomaly_id: format!("ANO-{}", 100 + (sys_id % 900)),
-                    solar_system_id: sys_id,
-                    name: "Dense Veldspar Deposit".into(),
-                    anomaly_type: "Ore".into(),
-                    position: [4.0 * AU_IN_METERS, 3.0 * AU_IN_METERS, -2.0 * AU_IN_METERS],
-                    signal_strength: 1.0,
-                    ore_types: vec![1230, 1228],
-                    remaining_volume: 50_000.0,
-                    created_unix: now_unix,
-                    lifetime_seconds: 86_400,
-                    cleared: false,
-                }]
-            } else {
-                Vec::new()
-            }
-        });
+        let mut anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_default();
         anoms.retain(|a| is_anomaly_active(a, now_unix));
         (sigs, anoms)
     });

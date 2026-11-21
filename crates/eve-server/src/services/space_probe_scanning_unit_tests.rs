@@ -258,7 +258,8 @@ async fn activate_scan_probe_launcher_and_scan_mgr_rpcs_end_to_end() {
         Some(&PyRep::Integer(8))
     );
 
-    // 4. GetSystemScanMgr, GetAnomalies, GetFullState, SetActivityState
+    // 4. GetSystemScanMgr, GetAnomalies, GetFullState, SetActivityState (seed real PvE anomaly; no synthetic ANO-)
+    crate::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, sys_id).await;
     let scan_mgr = handle_scan_and_wormhole_extras(
         &ctx,
         &mut sess,
@@ -1791,7 +1792,7 @@ async fn scan_mgr_negative_guards_and_read_purity_across_probes_and_getters() {
     let e0 = ctx.db.state_epoch();
     let c0 = ctx.db.tx_commit_count();
 
-    // 1. Unseeded read getters (GetAnomalies, GetFullState) return default data transiently without mutating DB or expiring probes.
+    // 1. Unseeded read getters (GetAnomalies, GetFullState) do not mutate DB or synthesize fake ANO- ore anomalies in Jita.
     let PyRep::List(anom_rows) = handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&own_bound), "scanMgr", "GetAnomalies", &[], &kw)
         .await
         .unwrap()
@@ -1799,7 +1800,7 @@ async fn scan_mgr_negative_guards_and_read_purity_across_probes_and_getters() {
     else {
         panic!("expected anomalies list");
     };
-    assert!(!anom_rows.is_empty(), "transient anomaly readout should include system ore anomaly");
+    assert!(anom_rows.is_empty(), "unseeded Jita must not synthesize fake zero-asteroid ANO- anomaly");
     let PyRep::Tuple(full_parts) = handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&own_bound), "scanMgr", "GetFullState", &[], &kw)
         .await
         .unwrap()
@@ -2467,4 +2468,154 @@ async fn set_activity_state_enforces_8_probe_cap_across_relaunch_per_probe_and_b
     for pid in expected_still_inactive {
         assert!(!state_notifs.contains(pid), "capped probe {pid} must not emit OnProbeStateChanged");
     }
+}
+
+#[tokio::test]
+async fn anomaly_payloads_populate_dungeon_name_id_and_jita_skips_synthetic_ore() {
+    let mut sde = eve_sde::SdeRegistry::default();
+    let mut buf = vec![0u8; 72];
+    buf[40..48].copy_from_slice(&1u64.to_le_bytes());
+    buf[48..56].copy_from_slice(&1u64.to_le_bytes());
+    buf[56..64].copy_from_slice(&((72 - 32) as u64).to_le_bytes());
+    buf[64..72].copy_from_slice(&1u64.to_le_bytes());
+    buf.extend_from_slice(&[0u8; 120]);
+    buf[72..76].copy_from_slice(&1344u32.to_le_bytes());
+    buf[152..156].copy_from_slice(&112_326u32.to_le_bytes());
+    let path = std::env::temp_dir().join(format!(
+        "evomu_anom_nid_{}.fsdbinary",
+        std::process::id()
+    ));
+    std::fs::write(&path, &buf).unwrap();
+    sde.resources.insert(
+        "res:/staticdata/dungeons.fsdbinary".into(),
+        eve_sde::SdeResourceInfo {
+            res_path: "res:/staticdata/dungeons.fsdbinary".into(),
+            cdn_relative_path: path.display().to_string(),
+            md5: String::new(),
+            byte_size: buf.len() as u64,
+            format: "cfsd".into(),
+            record_count: 1,
+            spot: String::new(),
+        },
+    );
+
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    db.provision_gm_account("nid_p", "pw", 90_153_401, "NidP");
+    let uid = db.with_mut_snapshot(|s| {
+        let c = s.characters.get_mut(&90_153_401).unwrap();
+        c.station_id = None;
+        c.solar_system_id = 30_000_142;
+        c.user_id
+    });
+    db.acquire_online_lock(uid, 1534, Some(90_153_401), true, 1)
+        .unwrap();
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(Arc::new(sde), db));
+
+    assert!(
+        crate::services::space_destiny::ensure_system_signatures_and_anomalies(&ctx, 30_000_142)
+            .await
+            .1
+            .is_empty(),
+        "unseeded Jita must not synthesize fake zero-asteroid ore anomalies"
+    );
+
+    let rec = eve_db::CosmicAnomalyRecord {
+        anomaly_id: "DNG-1344-1".into(),
+        solar_system_id: 30_000_142,
+        name: "Average Hedbergite Deposit".into(),
+        anomaly_type: "Ore".into(),
+        position: [1e9, 0.0, 0.0],
+        signal_strength: 1.0,
+        ore_types: vec![21],
+        remaining_volume: 100.0,
+        created_unix: 1,
+        lifetime_seconds: 0,
+        cleared: false,
+    };
+    let unknown_rec = eve_db::CosmicAnomalyRecord {
+        anomaly_id: "DNG-999-1".into(),
+        name: "Unknown Ore Deposit".into(),
+        ..rec.clone()
+    };
+    assert_eq!(
+        crate::services::fleet_social::fleet_social_scanning::build_signal_tracker_anomaly_kv(
+            &ctx.sde, &rec,
+        )
+        .dict_get("dungeonNameID"),
+        Some(&PyRep::Integer(112_326))
+    );
+    assert_eq!(
+        crate::services::fleet_social::fleet_social_scanning::build_signal_tracker_anomaly_kv(
+            &ctx.sde,
+            &unknown_rec,
+        )
+        .dict_get("dungeonNameID"),
+        Some(&PyRep::None)
+    );
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.cosmic_anomalies
+            .entry(30_000_142)
+            .or_default()
+            .extend([rec, unknown_rec]);
+    });
+    let _ = ctx.drain_notifications_for_char(90_153_401);
+    crate::services::notify_emitters_tournaments_anomalies::emit_signal_tracker_full_state_for_system(
+        &ctx,
+        90_153_401,
+        30_000_142,
+        &[],
+    );
+    crate::services::notify_emitters_tournaments_anomalies::emit_cosmic_anomaly_added_for_system(
+        &ctx,
+        30_000_142,
+        "DNG-1344-1",
+        1,
+        1344,
+        "Average Hedbergite Deposit",
+    );
+    crate::services::notify_emitters_tournaments_anomalies::emit_cosmic_anomaly_added_for_system(
+        &ctx,
+        30_000_142,
+        "DNG-999-1",
+        2,
+        999,
+        "Unknown Ore Deposit",
+    );
+    let evs = ctx.drain_notifications_for_char(90_153_401);
+    let _ = std::fs::remove_file(&path);
+
+    let full_state_anoms = evs
+        .iter()
+        .find(|n| n.event == "OnSignalTrackerFullState")
+        .and_then(|n| match n.args.get(1) {
+            Some(PyRep::Tuple(parts)) => parts.first(),
+            _ => None,
+        })
+        .expect("OnSignalTrackerFullState full_state anomalies dict");
+    assert_eq!(
+        full_state_anoms
+            .dict_get("DNG-1344-1")
+            .and_then(|kv| kv.dict_get("dungeonNameID")),
+        Some(&PyRep::Integer(112_326))
+    );
+    assert_eq!(
+        full_state_anoms
+            .dict_get("DNG-999-1")
+            .and_then(|kv| kv.dict_get("dungeonNameID")),
+        Some(&PyRep::None)
+    );
+    assert!(evs.iter().any(|n| {
+        n.event == "OnCosmicAnomalyAdded"
+            && n.args.first().and_then(|v| v.dict_get("targetID"))
+                == Some(&PyRep::String("DNG-1344-1".into()))
+            && n.args.first().and_then(|v| v.dict_get("dungeonNameID"))
+                == Some(&PyRep::Integer(112_326))
+    }));
+    assert!(evs.iter().any(|n| {
+        n.event == "OnCosmicAnomalyAdded"
+            && n.args.first().and_then(|v| v.dict_get("targetID"))
+                == Some(&PyRep::String("DNG-999-1".into()))
+            && n.args.first().and_then(|v| v.dict_get("dungeonNameID")) == Some(&PyRep::None)
+    }));
 }
