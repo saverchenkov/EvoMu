@@ -309,7 +309,7 @@ fn want_to_buy_stack_split_auction_outbid_refund_and_delete_reject_fail_gm_expir
 
 #[test]
 fn accept_corp_item_exchange_role_flags_wallet_and_requested_item_filtering() {
-    use crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state;
+    use crate::services::inventory_fitting::fitting_containers_ships::set_alsc_item_locked_snap;
     use crate::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state, AssetSafetyWrapRecord};
     use eve_db::{CorporationRecord, InventoryItemRecord, IskCents};
 
@@ -413,9 +413,7 @@ fn accept_corp_item_exchange_role_flags_wallet_and_requested_item_filtering() {
             },
         );
         save_ext_state(snap, &ext);
-    });
-    write_container_ship_state(&ctx, |cs| {
-        cs.alsc_locked_items.insert(920_205);
+        set_alsc_item_locked_snap(snap, 920_205, true, 0).unwrap();
     });
 
     // 1. Missing ROLE_CONTRACT_MANAGER -> CrpAccessDenied

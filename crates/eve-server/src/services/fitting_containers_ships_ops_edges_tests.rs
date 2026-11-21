@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::router::BoundObjectEntry;
-use crate::services::fitting_containers_ships::write_container_ship_state_snap;
+use crate::services::fitting_containers_ships::set_container_password_snap;
 use crate::system_actor::ActiveModuleCycle;
 use eve_db::{
     corp_roles, CustomsOfficeRecord, InventoryFlag, InventoryItemRecord, IskCents,
@@ -668,10 +668,8 @@ async fn retrieve_password_validates_type_roles_container_group_and_unlocks() {
                 ..Default::default()
             },
         );
-        write_container_ship_state_snap(snap, |st| {
-            st.set_container_password(cont_id, 1, "sec1".into());
-            st.set_container_password(cont_id, 2, "cfg1".into());
-        });
+        set_container_password_snap(snap, cont_id, 1, "sec1", 0).unwrap();
+        set_container_password_snap(snap, cont_id, 2, "cfg1", 0).unwrap();
     });
 
     // Corp-owned container rejected without EquipmentConfig/Director role
@@ -858,9 +856,7 @@ async fn import_by_item_id_multistack_by_type_id_retrieve_pw_or_role_and_clear_c
                 ..Default::default()
             },
         );
-        write_container_ship_state_snap(snap, |st| {
-            st.set_container_password(cont_id, 1, "pw_or_test".into());
-        });
+        set_container_password_snap(snap, cont_id, 1, "pw_or_test", 0).unwrap();
         snap.items.insert(
             mod_id,
             InventoryItemRecord {
