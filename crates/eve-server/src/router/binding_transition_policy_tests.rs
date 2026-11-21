@@ -1906,3 +1906,183 @@ fn return_visit_to_departed_system_and_dock_grants_fresh_grace_after_reentry() {
         )
         .is_none());
 }
+
+#[test]
+fn live_apply_db_false_dock_purges_departed_dock_grace_and_grants_fresh_window() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let sid = 880_014_u64;
+    let jita_sys = 30_000_142_u32;
+    let jita_station = 60_003_760_i64;
+    let ship_a = 1_897_400_801_i64;
+
+    seed_ships_for_policy_tests(
+        &ctx,
+        char_id,
+        other_char,
+        jita_station,
+        &[ship_a],
+        1_897_400_898,
+        1_897_400_899,
+    );
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_id);
+
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::CharacterLogin {
+                solar_system_id: jita_sys,
+                dock_id: Some((jita_station, false)),
+                ship_id: Some(ship_a),
+            },
+            "login",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("character login");
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::Undock {
+                solar_system_id: jita_sys,
+            },
+            "undock",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("undock");
+
+    let kw = HashMap::new();
+    let pre_dock_bid = ctx
+        .allocate_late_call_grace_binding(
+            &sess,
+            "ship",
+            jita_station,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        )
+        .expect("departed dock grace active after undock");
+
+    // Mirror live `stationSvc.Dock` / `beyonce.CmdDock`: mutate DB first, then call `apply_db(false)`.
+    ctx.advance_secs(10);
+    ctx.db
+        .dock_character_if_in_space(char_id, jita_sys, jita_station, false)
+        .expect("dock_character_if_in_space");
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::Dock {
+                dock_id: jita_station,
+                is_structure: false,
+            },
+            "dock",
+        )
+        .with_apply_db(false)
+        .with_cleanup_departing_space(false)
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("live apply_db(false) dock");
+
+    // Departed-dock grace must be immediately purged while docked at Jita 4-4.
+    assert!(matches!(
+        ctx.resolve_late_call_with_policy(
+            &sess,
+            pre_dock_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        ),
+        LateCallResolution::RejectStale
+    ));
+    assert!(ctx
+        .allocate_late_call_grace_binding(
+            &sess,
+            "ship",
+            jita_station,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        )
+        .is_none());
+    ctx.read_context_grace_store(|s| {
+        let st = s.expect("grace store present");
+        assert!(
+            !st.departed_locations
+                .contains_key(&(sid, DepartedLocationKind::Dock, jita_station)),
+            "apply_db(false) dock must purge departed dock location"
+        );
+    });
+    let dock_rec = ctx
+        .current_transition_epoch_record(sid)
+        .expect("dock epoch record");
+    assert_eq!(dock_rec.departed_dock_id, None);
+    assert_eq!(dock_rec.entered_dock_id, Some(jita_station));
+
+    // Departing again via out-of-band sync still <30s after the initial undock must grant a fresh 30s TTL.
+    ctx.advance_secs(5);
+    let prev = sess.clone();
+    sess.station_id = None;
+    ctx.sync_transition_grace_on_session_change(&prev, &sess);
+
+    let fresh_bid = ctx
+        .allocate_late_call_grace_binding(
+            &sess,
+            "ship",
+            jita_station,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        )
+        .expect("fresh dock grace after live apply_db(false) dock + out-of-band departure");
+
+    // At +20s after re-departure (+35s after initial Undock), the fresh 30s window must still hold.
+    ctx.advance_secs(20);
+    assert!(matches!(
+        ctx.resolve_late_call_with_policy(
+            &sess,
+            fresh_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        ),
+        LateCallResolution::DispatchWithBinding(entry) if entry.object_id == jita_station
+    ));
+
+    // At +31s after re-departure, the fresh window expires cleanly.
+    ctx.advance_secs(11);
+    assert!(matches!(
+        ctx.resolve_late_call_with_policy(
+            &sess,
+            fresh_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        ),
+        LateCallResolution::RejectStale
+    ));
+    assert!(ctx
+        .allocate_late_call_grace_binding(
+            &sess,
+            "ship",
+            jita_station,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        )
+        .is_none());
+}

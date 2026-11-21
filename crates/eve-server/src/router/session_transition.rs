@@ -1164,15 +1164,12 @@ fn apply_spec_destination_to_character_copy(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn finalize_transition_session_and_epoch(
     ctx: &ServerContext,
     mut session: Option<&mut SessionState>,
     prev_session: &SessionState,
     updated_ch: Option<&CharacterRecord>,
     spec: &SessionTransitionSpec,
-    fallback_old_sys: u32,
-    fallback_old_dock: Option<i64>,
 ) -> (HashMap<String, (PyRep, PyRep)>, u64) {
     let override_ship = (spec.preserve_session_ship && prev_session.ship_id.is_some())
         .then_some(prev_session.ship_id);
@@ -1216,8 +1213,8 @@ fn finalize_transition_session_and_epoch(
         reason: spec.reason,
         is_logout,
         is_login,
-        prev_sys: prev_session.solar_system_id.or((fallback_old_sys != 0).then_some(fallback_old_sys)),
-        prev_dock: prev_session.station_id.or(prev_session.structure_id).or(fallback_old_dock),
+        prev_sys: prev_session.solar_system_id.filter(|&id| id != 0),
+        prev_dock: prev_session.station_id.or(prev_session.structure_id),
         next_sys: next_snapshot.solar_system_id,
         next_dock: next_snapshot.station_id.or(next_snapshot.structure_id),
         can_record_departed,
@@ -1350,8 +1347,6 @@ impl ServerContext {
             &prev_session,
             updated_ch.as_ref(),
             &spec,
-            old_sys,
-            old_dock,
         );
 
         Ok(SessionTransitionResult {
@@ -1540,8 +1535,6 @@ impl ServerContext {
             &prev_session,
             updated_ch.as_ref(),
             &spec,
-            old_sys,
-            old_dock,
         );
 
         Ok(SessionTransitionResult {
