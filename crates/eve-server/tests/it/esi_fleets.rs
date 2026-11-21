@@ -334,8 +334,13 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
     let invite_notifs = ctx.drain_notifications_for_char(wingman_id);
     assert!(
         invite_notifs.iter().any(|n| n.event == "OnFleetInvite"
-            && n.args == vec![PyRep::Integer(fleet_id), PyRep::Integer(boss_id), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(4)]),
-        "Invitee must receive OnFleetInvite with fleetID, inviterID, wingID, squadID, and role"
+            && n.args == vec![
+                PyRep::Integer(fleet_id),
+                PyRep::Integer(boss_id),
+                PyRep::String("AskJoinFleet".into()),
+                PyRep::Dict(vec![(PyRep::String("autoAccept".into()), PyRep::Bool(false))]),
+            ]),
+        "Invitee must receive 4-arg OnFleetInvite (fleetID, inviterID, msgName, msgDict)"
     );
 
     // Wingman accepts the fleet invitation via fleetObjectHandler.AcceptInvite

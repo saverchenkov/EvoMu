@@ -18,10 +18,13 @@ pub mod delta_projection;
 pub mod destiny_delivery_policy;
 pub mod dispatch;
 pub mod notify_registry;
+pub mod notify_types;
 pub mod reply_registry;
 pub mod rpc_args;
 pub mod session;
 pub mod session_transition;
+#[cfg(any(test, feature = "testkit"))]
+pub mod test_context;
 
 pub use binding::{alloc_transport_session_id, SessionCleanupGuard, NEXT_TRANSPORT_SESSION_ID};
 pub use cache_notifications::*;
@@ -30,6 +33,8 @@ pub use delta_item_compare::{
     flush_item_compare_summary, is_item_compare_enabled, item_compare_summary,
     log_item_compare_summary, HelperCompareCounts, ItemCompareEventSummary, ItemCompareSummary,
 };
+#[cfg(any(test, feature = "testkit"))]
+pub use test_context::TestContext;
 pub use delta_projection::{
     materialize_pending_notifications, project_fit_attribute_diff, resolve_all_notifications,
     resolve_projected_recipients, DefaultDeltaProjection, DefaultGodmaFitHook, DeltaProjection,

@@ -28,6 +28,15 @@ fn load_client_notify_spec_map() -> serde_json::Map<String, Value> {
         .expect("client_expectations JSON must contain top-level 'notify' object")
 }
 
+fn check_normalized_notification_contract(
+    notify_map: &serde_json::Map<String, Value>,
+    event: &str,
+    args: Vec<PyRep>,
+) -> (Vec<String>, bool) {
+    let normalized = normalize_macho_notification_with_sde(event, args, None);
+    validate_notification_contract_with_metrics(None, notify_map, event, &normalized)
+}
+
 #[test]
 fn typed_notification_registry_matches_client_expectations_and_is_non_vacuous() {
     let notify_map = load_client_notify_spec_map();
@@ -78,13 +87,8 @@ fn typed_notification_registry_matches_client_expectations_and_is_non_vacuous() 
                 ));
                 continue;
             }
-            let normalized = normalize_macho_notification_with_sde(entry.event, sample, None);
-            let (violations, had_unexercised) = validate_notification_contract_with_metrics(
-                None,
-                &notify_map,
-                entry.event,
-                &normalized,
-            );
+            let (violations, had_unexercised) =
+                check_normalized_notification_contract(&notify_map, entry.event, sample);
             if !violations.is_empty() {
                 failures.push(format!(
                     "{} sample[{idx}]: contract violations: {:?}",
@@ -129,6 +133,104 @@ fn typed_notification_validator_rejects_mismatched_arity_and_bad_shape() {
         !bad_crimewatch_violations.is_empty(),
         "OnCrimewatchEngagementEnded with 2 args must fail 1-arg contract validation"
     );
+}
+
+#[test]
+fn typed_issue_1562_and_sibling_notification_contracts() {
+    use super::notify_registry::{
+        FleetInviteMsgDict, FleetInviteMsgName, OnFittingAdded, OnFittingsUpdated, OnFleetInvite,
+        OnShipJumpCloneInstallationDone, OnShipJumpCloneInstallationOffered, OnSlimItemChange,
+        ShipJumpCloneInstallationArgs, SlimItemKeyVal, SpaceShipSlimFields, UpdatedFittingKeyVal,
+        UpdatedFittingPayload,
+    };
+    let notify_map = load_client_notify_spec_map();
+    let payloads = [
+        (
+            OnFittingsUpdated::EVENT,
+            OnFittingsUpdated {
+                fitting: UpdatedFittingPayload::Fitting(UpdatedFittingKeyVal {
+                    fitting_id: 42,
+                    owner_id: 90_000_001,
+                    ship_type_id: 587,
+                    name: "Rifter".into(),
+                    description: String::new(),
+                    fit_data: vec![(3170, 12, 1)],
+                }),
+            }
+            .into_args(),
+        ),
+        (
+            OnFittingsUpdated::EVENT,
+            OnFittingsUpdated {
+                fitting: UpdatedFittingPayload::Cleared,
+            }
+            .into_args(),
+        ),
+        (
+            OnFittingAdded::EVENT,
+            OnFittingAdded {
+                owner_id: 90_000_001,
+                fit_ids: vec![42],
+            }
+            .into_args(),
+        ),
+        (
+            OnShipJumpCloneInstallationOffered::EVENT,
+            OnShipJumpCloneInstallationOffered {
+                args: ShipJumpCloneInstallationArgs {
+                    offering_char_id: 90_000_001,
+                    target_char_id: 90_000_002,
+                    ship_id: 100_000_001,
+                    offered: true,
+                },
+            }
+            .into_args(),
+        ),
+        (
+            OnShipJumpCloneInstallationDone::EVENT,
+            OnShipJumpCloneInstallationDone {
+                args: ShipJumpCloneInstallationArgs {
+                    offering_char_id: 90_000_001,
+                    target_char_id: 90_000_002,
+                    ship_id: 100_000_001,
+                    offered: true,
+                },
+            }
+            .into_args(),
+        ),
+        (
+            OnSlimItemChange::EVENT,
+            OnSlimItemChange {
+                old_slim: PyRep::Integer(100_000_001),
+                new_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
+                    item_id: 100_000_001,
+                    type_id: 587,
+                    group_id: 25,
+                    category_id: 6,
+                    owner_id: 90_000_001,
+                    char_id: Some(90_000_001),
+                    corp_id: Some(98_000_001),
+                    alliance_id: None,
+                    name: "Wolfpack".into(),
+                }),
+            }
+            .into_args(),
+        ),
+        (
+            OnFleetInvite::EVENT,
+            OnFleetInvite {
+                fleet_id: 1,
+                invite_id: 90_000_001,
+                msg_name: FleetInviteMsgName::AskJoinFleet,
+                msg_dict: FleetInviteMsgDict { auto_accept: false },
+            }
+            .into_args(),
+        ),
+    ];
+    for (event, args) in payloads {
+        let (violations, _) = check_normalized_notification_contract(&notify_map, event, args);
+        assert!(violations.is_empty(), "{event} violations: {violations:?}");
+    }
 }
 
 #[test]

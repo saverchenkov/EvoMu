@@ -874,9 +874,8 @@ fn fleet_routes_machonet_notifications_db_sync_and_none_boundaries() {
         vec![
             PyRep::Integer(1),
             PyRep::Integer(boss_id),
-            PyRep::Integer(new_wing_id),
-            PyRep::Integer(new_squad_id),
-            PyRep::Integer(4),
+            PyRep::String("AskJoinFleet".into()),
+            PyRep::Dict(vec![(PyRep::String("autoAccept".into()), PyRep::Bool(false))]),
         ]
     );
 

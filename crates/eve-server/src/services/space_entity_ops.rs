@@ -134,7 +134,7 @@ pub async fn handle(
                             )
                             .await;
                         let build_slim_kv = |owner: i64| {
-                            PyRep::keyval([
+                            crate::router::notify_registry::SlimItemKeyVal::from_pairs([
                                 ("itemID", PyRep::Integer(tid)),
                                 ("typeID", PyRep::Integer(type_id as i64)),
                                 ("groupID", PyRep::Integer(grp as i64)),
@@ -151,7 +151,7 @@ pub async fn handle(
                             crate::router::NotificationTarget::SolarSystem(sys_id),
                             "clientID",
                             crate::router::notify_registry::OnSlimItemChange {
-                                old_slim: build_slim_kv(prev_owner_id),
+                                old_slim: crate::router::notify_registry::ToNotifyArg::into_notify_arg(build_slim_kv(prev_owner_id)),
                                 new_slim: build_slim_kv(0),
                             },
                         );

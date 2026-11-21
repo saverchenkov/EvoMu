@@ -1385,7 +1385,7 @@ pub async fn broadcast_ship_skin_cosmetic_change(
         );
         let group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(25);
         let build_slim = |skin_rep: PyRep, mat_rep: PyRep| {
-            PyRep::keyval([
+            crate::router::notify_registry::SlimItemKeyVal::from_pairs([
                 ("itemID", PyRep::Integer(ship_id)),
                 ("typeID", PyRep::Integer(i64::from(ship_type_id))),
                 ("groupID", PyRep::Integer(i64::from(group_id))),
@@ -1402,7 +1402,10 @@ pub async fn broadcast_ship_skin_cosmetic_change(
         ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
             crate::router::notify_registry::OnSlimItemChange {
-                old_slim: build_slim(prev_skin_rep, to_rep(prev_mat)),
+                old_slim: crate::router::notify_registry::ToNotifyArg::into_notify_arg(build_slim(
+                    prev_skin_rep,
+                    to_rep(prev_mat),
+                )),
                 new_slim: build_slim(new_skin_rep, to_rep(new_mat)),
             },
         );

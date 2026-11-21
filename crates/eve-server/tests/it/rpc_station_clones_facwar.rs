@@ -1140,9 +1140,15 @@ async fn test_home_station_and_jump_clones_parity() {
     let n_offer = ctx.drain_notifications_for_char(PILOT2);
     let offer_events = events_from(&n_offer, "OnShipJumpCloneInstallationOffered");
     assert_eq!(offer_events.len(), 1);
-    assert_eq!(offer_events[0][0], PyRep::Integer(PILOT1));
-    assert_eq!(offer_events[0][1], PyRep::Integer(PILOT2));
-    assert_eq!(offer_events[0][2], PyRep::Integer(host_ship_id));
+    assert_eq!(
+        offer_events[0],
+        vec![PyRep::Tuple(vec![
+            PyRep::Integer(PILOT1),
+            PyRep::Integer(PILOT2),
+            PyRep::Integer(host_ship_id),
+            PyRep::Bool(true),
+        ])]
+    );
 
     let cancel_rep = rpc(&ctx, &mut s1, "jumpCloneSvc", "CancelShipCloneInstallation", &[])
         .await

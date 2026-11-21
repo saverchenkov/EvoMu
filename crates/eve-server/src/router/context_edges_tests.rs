@@ -585,11 +585,10 @@ async fn now_system_sim_filetime_ticks_stays_client_anchored_with_tidi_and_advan
 async fn rpc_rate_budget_default_enabled_and_test_disable_toggle() {
     use eve_machonet::{service_roles, SessionState};
     use std::sync::atomic::Ordering;
-
-    let ctx_a = edge_ctx(1_750_000_000);
-    let ctx_b = edge_ctx(1_750_000_000);
-    assert!(!ctx_a.rpc_rate_budget_disabled.load(Ordering::Acquire));
-    assert!(!ctx_b.rpc_rate_budget_disabled.load(Ordering::Acquire));
+    let ctx_a = crate::router::TestContext::from_server(edge_ctx(1_750_000_000));
+    let ctx_b = crate::router::TestContext::from_server(edge_ctx(1_750_000_000));
+    assert!(!ctx_a.is_rpc_rate_budget_disabled());
+    assert!(!ctx_b.is_rpc_rate_budget_disabled());
 
     let t0 = std::time::Instant::now();
     let sid_unit = 9_501_u64;
@@ -642,8 +641,8 @@ async fn rpc_rate_budget_default_enabled_and_test_disable_toggle() {
     assert!(saw_rate_limited, "default context must enforce RateLimited in dispatch_rpc");
 
     let buckets_before = ctx_a.rpc_rate_bucket_count();
-    ctx_a.disable_rpc_rate_budget_for_test();
-    assert!(ctx_a.rpc_rate_budget_disabled.load(Ordering::Acquire));
+    ctx_a.disable_rpc_rate_budget();
+    assert!(ctx_a.is_rpc_rate_budget_disabled());
 
     // Exhausted bucket and previously unseen sessions both bypass without inserting buckets.
     assert!(ctx_a.try_consume_rpc_token_at(sid_unit, t0, false));
@@ -663,7 +662,7 @@ async fn rpc_rate_budget_default_enabled_and_test_disable_toggle() {
     assert!(upgraded.try_consume_rpc_token_at(sid_unit, t0, false));
 
     // Separate ServerContext remains rate-limited by default.
-    assert!(!ctx_b.rpc_rate_budget_disabled.load(Ordering::Acquire));
+    assert!(!ctx_b.is_rpc_rate_budget_disabled());
     for _ in 0..burst {
         assert!(ctx_b.try_consume_rpc_token_at(sid_unit, t0, false));
     }

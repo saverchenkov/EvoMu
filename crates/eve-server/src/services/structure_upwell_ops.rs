@@ -390,7 +390,12 @@ fn handle_structure_rename(ctx: &ServerContext, session: &mut SessionState, args
         crate::router::NotificationTarget::Corporation(st.owner_corp_id),
         crate::router::notify_registry::OnCorporationStructuresUpdated {},
     );
-    let slim_kv = PyRep::keyval([("itemID", PyRep::Integer(structure_id)), ("typeID", PyRep::Integer(i64::from(st.type_id))), ("ownerID", PyRep::Integer(st.owner_corp_id)), ("name", PyRep::String(new_name.clone()))]);
+    let slim_kv = crate::router::notify_registry::SlimItemKeyVal::from_pairs([
+        ("itemID", PyRep::Integer(structure_id)),
+        ("typeID", PyRep::Integer(i64::from(st.type_id))),
+        ("ownerID", PyRep::Integer(st.owner_corp_id)),
+        ("name", PyRep::String(new_name.clone())),
+    ]);
     ctx.emit_typed(
         crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
         crate::router::notify_registry::OnSlimItemChange {
