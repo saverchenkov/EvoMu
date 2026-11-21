@@ -2822,13 +2822,13 @@ def _can_run_sensor_gfx_swipe(gfx_handler):
 def _make_sensor_start_gfx_swipe_guard(orig_fn):
     def _wrapped_start_gfx_swipe(self, *args, **kwargs):
         if not _can_run_sensor_gfx_swipe(self):
-            _record_guard_hit("sensor_suite_gfx_guard", "SensorSuiteHandler.StartGfxSwipe", "cannot_run_sensor_gfx_swipe")
+            _record_guard_hit("sensor_suite_gfx_guard", "GfxHandler.StartGfxSwipe", "cannot_run_sensor_gfx_swipe")
             return None
         try:
             return orig_fn(self, *args, **kwargs)
         except RuntimeError as exc:
             if _is_sensor_gfx_load_error(exc) and getattr(self, "gfxSensorSwipe", None) is None:
-                _record_guard_hit("sensor_suite_gfx_guard", "SensorSuiteHandler.StartGfxSwipe", "caught:RuntimeError:%s" % exc)
+                _record_guard_hit("sensor_suite_gfx_guard", "GfxHandler.StartGfxSwipe", "caught:RuntimeError:%s" % exc)
                 return None
             raise
 
@@ -2842,7 +2842,7 @@ def _make_sensor_gfx_swipe_thread_guard(orig_fn):
             return orig_fn(self, *args, **kwargs)
         except RuntimeError as exc:
             if _is_sensor_gfx_load_error(exc) and getattr(self, "gfxSensorSwipe", None) is None:
-                _record_guard_hit("sensor_suite_gfx_guard", "SensorSuiteHandler._GfxSwipeThread", "caught:RuntimeError:%s" % exc)
+                _record_guard_hit("sensor_suite_gfx_guard", "GfxHandler._GfxSwipeThread", "caught:RuntimeError:%s" % exc)
                 return None
             raise
         finally:
@@ -3114,39 +3114,86 @@ def _prune_empty_signal_methods(methods_map, obj, funcs):
 
 
 def _discard_panel_slot_from_signal(sig, panel, slot, orig_func=None):
-    """Idempotently disconnect *panel*'s slot (and any pre-wrap function) from *sig* (#1332)."""
+    """Idempotently disconnect *panel*'s slot (and any pre-wrap function) from *sig* and return removed count (#1332)."""
+    slot_func = getattr(slot, "__func__", None) if slot is not None else None
+    methods_map = getattr(sig, "_methods", None)
+    before_has_slot = False
+    before_has_orig = False
+    if methods_map is not None and hasattr(methods_map, "get"):
+        try:
+            pre_funcs = methods_map.get(panel)
+        except Exception:
+            pre_funcs = None
+        if pre_funcs is not None:
+            try:
+                before_has_slot = slot_func is not None and slot_func in pre_funcs
+            except Exception:
+                before_has_slot = False
+            try:
+                before_has_orig = (
+                    orig_func is not None and orig_func is not slot_func and orig_func in pre_funcs
+                )
+            except Exception:
+                before_has_orig = False
+
     disconnect_fn = getattr(sig, "disconnect", None)
     if slot is not None and callable(disconnect_fn):
         try:
             disconnect_fn(slot)
         except Exception:
             pass
-    methods_map = getattr(sig, "_methods", None)
     if methods_map is None or not hasattr(methods_map, "get"):
-        return
+        return 0
     try:
         funcs = methods_map.get(panel)
     except Exception:
-        return
-    if funcs is None or not hasattr(funcs, "discard"):
-        return
-    slot_func = getattr(slot, "__func__", None) if slot is not None else None
-    if slot_func is not None:
-        funcs.discard(slot_func)
-    if orig_func is not None:
-        funcs.discard(orig_func)
-    _prune_empty_signal_methods(methods_map, panel, funcs)
+        funcs = None
+    if funcs is not None and hasattr(funcs, "discard"):
+        if slot_func is not None:
+            funcs.discard(slot_func)
+        if orig_func is not None:
+            funcs.discard(orig_func)
+        _prune_empty_signal_methods(methods_map, panel, funcs)
+
+    removed = 0
+    try:
+        post_funcs = methods_map.get(panel)
+    except Exception:
+        post_funcs = None
+    if before_has_slot:
+        try:
+            still_has_slot = post_funcs is not None and slot_func in post_funcs
+        except Exception:
+            still_has_slot = False
+        if not still_has_slot:
+            removed += 1
+    if before_has_orig:
+        try:
+            still_has_orig = post_funcs is not None and orig_func in post_funcs
+        except Exception:
+            still_has_orig = False
+        if not still_has_orig:
+            removed += 1
+    return removed
 
 
 def _disconnect_skill_plan_panel_signals(panel, panel_mod=None, orig_slot_funcs=None):
-    """Disconnect all 12 SkillPlanPanel bound signal slots on panel teardown (#1332)."""
+    """Disconnect all 12 SkillPlanPanel bound signal slots on panel teardown and record cleanup hits (#1332)."""
     if panel is None:
-        return
+        return 0
     live_panel_mod = sys.modules.get("eve.client.script.ui.skillPlan.skillPlanPanel") or panel_mod
+    removed_total = 0
     for sig, method_name in _iter_skill_plan_panel_signals(live_panel_mod):
         slot = getattr(panel, method_name, None)
         orig_func = orig_slot_funcs.get(method_name) if orig_slot_funcs else None
-        _discard_panel_slot_from_signal(sig, panel, slot, orig_func=orig_func)
+        removed_total += _discard_panel_slot_from_signal(sig, panel, slot, orig_func=orig_func)
+    if removed_total > 0:
+        _record_guard_hit(
+            "skill_plan_panel_signal_guard",
+            "SkillPlanPanel.Close",
+            "disconnected_leaked_signals:%d" % removed_total,
+        )
+    return removed_total
 
 
 def _make_skill_plan_panel_slot_guard(orig_fn, slot_name=None):
@@ -3169,7 +3216,8 @@ def _make_skill_plan_panel_slot_guard(orig_fn, slot_name=None):
 def _migrate_skill_plan_signal_slots(panel_mod, wrapped_slots):
     """Migrate pre-existing Signal._methods slots to guarded wrappers and purge destroyed panels (#1332)."""
     if not wrapped_slots:
-        return
+        return 0
+    purged_destroyed = 0
     for sig, method_name in _iter_skill_plan_panel_signals(panel_mod):
         pair = wrapped_slots.get(method_name)
         if pair is None:
@@ -3189,11 +3237,27 @@ def _migrate_skill_plan_signal_slots(panel_mod, wrapped_slots):
                 has_orig = orig_func in funcs
             except Exception:
                 has_orig = False
+            try:
+                has_new = new_func in funcs
+            except Exception:
+                has_new = False
             if has_orig:
                 funcs.discard(orig_func)
-                if not getattr(obj, "destroyed", False) and hasattr(funcs, "add"):
+                if getattr(obj, "destroyed", False):
+                    purged_destroyed += 1
+                elif hasattr(funcs, "add"):
                     funcs.add(new_func)
+            elif has_new and getattr(obj, "destroyed", False):
+                funcs.discard(new_func)
+                purged_destroyed += 1
             _prune_empty_signal_methods(methods_map, obj, funcs)
+    if purged_destroyed > 0:
+        _record_guard_hit(
+            "skill_plan_panel_signal_guard",
+            "SkillPlanPanel._migrate_skill_plan_signal_slots",
+            "purged_destroyed_panel_slots:%d" % purged_destroyed,
+        )
+    return purged_destroyed
 
 
 def _install_skill_plan_panel_signal_guard():

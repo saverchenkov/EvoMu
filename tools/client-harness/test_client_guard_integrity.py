@@ -249,8 +249,9 @@ class TestGuardRegistryAndRatchets(unittest.TestCase):
 
         self.assertEqual(len(rows), len(guard_registry.BEHAVIOUR_GUARDS))
         by_id = dict(guard_registry.BEHAVIOUR_GUARDS_BY_ID)
+        targets_by_id = {}
         for cells in rows:
-            gid, installer, classification, open_issue_cell, named_cell, fix_cell, approved_cell, _ = cells
+            gid, installer, classification, open_issue_cell, named_cell, fix_cell, approved_cell, targets_cell = cells[:8]
             self.assertIn(gid, by_id)
             spec = by_id[gid]
             self.assertEqual(installer, spec["installer"])
@@ -260,8 +261,12 @@ class TestGuardRegistryAndRatchets(unittest.TestCase):
             self.assertEqual(named_cell, expected_named)
             self.assertEqual(fix_cell, spec["server_fix_status"])
             self.assertEqual(approved_cell, "yes" if spec["owner_approved"] else "no")
+            targets_by_id[gid] = targets_cell
 
         site_src = (HARNESS_DIR / "evomu_site.py").read_text(encoding="utf-8")
+        self.assertNotIn("SensorSuiteHandler", site_src)
+        self.assertNotIn("SensorSuiteHandler", md_text)
+
         site_ast = ast.parse(site_src)
         defined_fns = {
             node.name for node in site_ast.body if isinstance(node, ast.FunctionDef)
@@ -289,6 +294,45 @@ class TestGuardRegistryAndRatchets(unittest.TestCase):
             re.findall(r'_record_guard_hit\(\s*["\']([a-z0-9_]+)["\']', site_src)
         )
         self.assertEqual(referenced_ids, set(by_id.keys()))
+
+        # Cross-check guard_registry targets 1:1 against evomu_site.py and CLIENT_GUARDS.md.
+        summarized_method_guards = {
+            "camera_dock_guard",
+            "inventory_transition_guard",
+            "fitting_active_ship_guard",
+            "skill_plan_panel_signal_guard",
+        }
+        for gid, spec in by_id.items():
+            targets = list(spec.get("targets") or ())
+            self.assertTrue(targets, f"{gid} missing targets")
+            self.assertEqual(len(targets), len(set(targets)), f"Duplicate targets in {gid}")
+            md_targets_cell = targets_by_id[gid]
+            for tgt in targets:
+                self.assertIn(".", tgt)
+                cls_name, meth_name = tgt.split(".", 1)
+                self.assertIn(cls_name, site_src, f"{gid} target class {cls_name} missing in evomu_site.py")
+                self.assertIn(meth_name, site_src, f"{gid} target method {meth_name} missing in evomu_site.py")
+                self.assertIn(cls_name, md_targets_cell, f"{gid} class {cls_name} missing in CLIENT_GUARDS.md")
+                if gid not in summarized_method_guards:
+                    self.assertIn(meth_name, md_targets_cell, f"{gid} method {meth_name} missing in CLIENT_GUARDS.md")
+
+        static_hit_aliases = {
+            ("fitting_active_ship_guard", "WarningIconCont.__UpdateIcon_thread"):
+                "WarningIconCont._WarningIconCont__UpdateIcon_thread",
+            ("skill_plan_panel_signal_guard", "SkillPlanPanel._migrate_skill_plan_signal_slots"):
+                "SkillPlanPanel.Close",
+        }
+        for gid, fn_label in re.findall(
+            r'_record_guard_hit\(\s*["\']([a-z0-9_]+)["\']\s*,\s*["\']([^"\']+)["\']',
+            site_src,
+        ):
+            if "." in fn_label:
+                mapped = static_hit_aliases.get((gid, fn_label), fn_label)
+                self.assertIn(
+                    mapped,
+                    by_id[gid]["targets"],
+                    f"Hit label {fn_label!r} in evomu_site.py missing from {gid} targets",
+                )
 
     def test_benign_user_error_markers_monotonic_ratchet(self):
         markers = playtester.PlaytesterBugOracle.BENIGN_USER_ERROR_MARKERS
@@ -908,25 +952,14 @@ class TestAllFifteenGuardsHitRecording(unittest.TestCase):
             w7._UpdateSelectedItems()
             seq = self._assert_new_hit(seq, "inventory_transition_guard", "Inventory._UpdateSelectedItems", "stale_inventory_controller")
 
-            w8 = FakeInventory(curr_inv=("ShipCargo", 101))
-            w8._raise_upd = True
-            w8._IsCurrentInventoryValid = lambda: False
-            orig_upd = FakeInventory._UpdateSelectedItems
-            # Trigger caught path by becoming invalid/mutating during orig_upd
-            sess_ref = sess
-            def _mutating_upd(self):
-                sess_ref.mutating = True
-                raise _DummyUserError("OutOfRange", {})
-            w8_cls = type("FakeMutInv", (FakeInventory,), {"_UpdateSelectedItems": lambda self: orig_upd.__closure__[0].cell_contents(self)})
-            # Simpler: set sess.mutating inside valid custom instance where pre-checks passed:
-            w_mut = FakeInventory(curr_inv=("ShipCargo", 101))
-            w_mut._UpdateSelectedItems()  # clean pass
-            w_mut._IsCurrentInventoryValid = lambda: True
-            # Replace wrapped method's underlying call cleanly by subclassing? No, test directly via FakeInventory where _valid drops inside call:
             class FakeDropInv(FakeInventory):
                 pass
+
             evomu_site._HOOKED_CAMERA_GUARD_TARGETS.discard("invWindow")
-            FakeDropInv._UpdateSelectedItems = lambda self: (setattr(sess, "mutating", True), (_ for _ in ()).throw(_DummyUserError("OutOfRange", {})))
+            FakeDropInv._UpdateSelectedItems = lambda self: (
+                setattr(sess, "mutating", True),
+                (_ for _ in ()).throw(_DummyUserError("OutOfRange", {})),
+            )
             sys.modules["eve.client.script.ui.shared.inventory.invWindow"].Inventory = FakeDropInv
             evomu_site._install_inventory_transition_guard()
             w_drop = FakeDropInv(curr_inv=("ShipCargo", 101))
@@ -1321,14 +1354,14 @@ class TestAllFifteenGuardsHitRecording(unittest.TestCase):
             # #12 sensor_suite_gfx_guard
             gfx = FakeGfxHandler()
             gfx.StartGfxSwipe()
-            seq = self._assert_new_hit(seq, "sensor_suite_gfx_guard", "SensorSuiteHandler.StartGfxSwipe", "cannot_run_sensor_gfx_swipe")
+            seq = self._assert_new_hit(seq, "sensor_suite_gfx_guard", "GfxHandler.StartGfxSwipe", "cannot_run_sensor_gfx_swipe")
             sess_in_space = _make_fake_session(stationid=None, structureid=None, solarsystemid=30000142)
             builtins.session = sess_in_space
             gfx.sceneManager = types.SimpleNamespace(GetRegisteredScene=lambda name: "default_scene")
             gfx.StartGfxSwipe()
-            seq = self._assert_new_hit(seq, "sensor_suite_gfx_guard", "SensorSuiteHandler.StartGfxSwipe", "caught:RuntimeError:")
+            seq = self._assert_new_hit(seq, "sensor_suite_gfx_guard", "GfxHandler.StartGfxSwipe", "caught:RuntimeError:")
             gfx._GfxSwipeThread()
-            seq = self._assert_new_hit(seq, "sensor_suite_gfx_guard", "SensorSuiteHandler._GfxSwipeThread", "caught:RuntimeError:")
+            seq = self._assert_new_hit(seq, "sensor_suite_gfx_guard", "GfxHandler._GfxSwipeThread", "caught:RuntimeError:")
             builtins.session = sess
 
             # #13 modular_hangar_camera_guard
@@ -1364,7 +1397,35 @@ class TestAllFifteenGuardsHitRecording(unittest.TestCase):
             seq = self._assert_new_hit(seq, "skill_plan_panel_signal_guard", "SkillPlanPanel.OnSkillPlanCreated", "panel_destroyed")
             spp.OnCreateNewPersonalSkillPlanButton()
             seq = self._assert_new_hit(seq, "skill_plan_panel_signal_guard", "SkillPlanPanel.OnCreateNewPersonalSkillPlanButton", "panel_destroyed")
+            fake_sig._methods[spp] = {FakeSkillPlanPanel.OnSkillPlanCreated}
             spp.Close()
+            seq = self._assert_new_hit(seq, "skill_plan_panel_signal_guard", "SkillPlanPanel.Close", "disconnected_leaked_signals:1")
+            self.assertNotIn(spp, fake_sig._methods)
+            spp.Close()
+            self.assertEqual(evomu_site.get_guard_hit_seq(), seq)
+
+            class FakeSkillPlanPanel2:
+                destroyed = False
+
+                def OnSkillPlanCreated(self):
+                    return "ok"
+
+                def Close(self):
+                    return "closed"
+
+            destroyed_pre = FakeSkillPlanPanel2()
+            destroyed_pre.destroyed = True
+            fake_sig._methods[destroyed_pre] = {FakeSkillPlanPanel2.OnSkillPlanCreated}
+            evomu_site._HOOKED_CAMERA_GUARD_TARGETS.discard("skillPlanPanel")
+            sys.modules["eve.client.script.ui.skillPlan.skillPlanPanel"].SkillPlanPanel = FakeSkillPlanPanel2
+            evomu_site._install_skill_plan_panel_signal_guard()
+            seq = self._assert_new_hit(
+                seq,
+                "skill_plan_panel_signal_guard",
+                "SkillPlanPanel._migrate_skill_plan_signal_slots",
+                "purged_destroyed_panel_slots:1",
+            )
+            self.assertNotIn(destroyed_pre, fake_sig._methods)
 
             # #15 probe_tracker_guard
             pt = FakeProbeTracker()
@@ -1647,11 +1708,24 @@ class TestTelemetryPropagationEndToEnd(unittest.TestCase):
                 with (
                     mock.patch.object(hook, "_install_flight_recorder_hooks"),
                     mock.patch.object(hook, "_install_warp_telemetry"),
+                    mock.patch.object(hook, "_ensure_windowed_mode"),
                     mock.patch.object(hook, "_get_state_snapshot", return_value=snap),
                     mock.patch.object(hook, "_compute_state_diff", return_value={"ui_changed": False, "view_changed": False}),
                     mock.patch.object(hook, "_settle_secondary_view_transition"),
                     mock.patch.object(hook.H, "_sleep_sim_ms", create=True),
+                    mock.patch.object(
+                        hook.__builtin__,
+                        "session",
+                        _make_fake_session(stationid=60003760, shipid=2002),
+                        create=True,
+                    ),
                 ):
+                    boot = srv._dispatch({"method": "bootstrap_session", "params": {}})
+                    self.assertTrue(boot["ok"])
+                    self.assertEqual(len(boot["guard_hits"]), 1)
+                    self.assertEqual(boot["guard_hits"][0]["guard"], "camera_dock_guard")
+                    self.assertEqual(evomu_site._PT_CONSUMED_GUARD_SEQ, 1)
+
                     def _step1_sleep(_ms):
                         evomu_site._record_guard_hit("wreck_rotation_guard", "Wreck.Prepare", "step1_hit")
 
@@ -1783,6 +1857,108 @@ class TestTelemetryPropagationEndToEnd(unittest.TestCase):
             mem_disk = json.loads((mem_dir / "memory.json").read_text(encoding="utf-8"))
             self.assertEqual(mem_disk["recent_actions"][-1]["guard_hit_count"], 1)
             self.assertEqual(mem_disk["last_run_summary"]["guard_hits_count"], 2)
+
+    def test_playtester_runner_resets_guard_tracker_across_client_restart(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            mem_dir = root / "runtime"
+            run_dir = root / "run_02"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            stage_dir = root / "staged_client"
+            (stage_dir / "bin64").mkdir(parents=True, exist_ok=True)
+            (stage_dir / "bin64" / "exefile").write_text("#!/bin/sh\n", encoding="utf-8")
+
+            runner = playtester.PlaytesterRunner.__new__(playtester.PlaytesterRunner)
+            runner.worktree_dir = root
+            runner.runtime_dir = mem_dir
+            runner.current_run_dir = run_dir
+            runner.staged_app = root / "EVE.app"
+            runner.args = types.SimpleNamespace(silent=True)
+            runner.ports = {"gateway": 26005, "http": 26004, "macho": 26000, "rpc": 26997}
+            runner.client_proc = None
+            runner.memory = playtester.PlaytesterMemory(mem_dir, git_head="abc123", server_bin_mtime=1.0)
+            runner.write_inclient_cfg = lambda: run_dir / "inclient.json"
+            runner._sync_initial_session_flight_calls = lambda boot: None
+            runner._crashmon_pids = lambda: set()
+
+            class DummyProc:
+                pid = 4343
+                returncode = None
+
+                def poll(self):
+                    return None
+
+            session_idx = [0]
+            runner.rpc = mock.MagicMock()
+            runner.rpc.ping.return_value = True
+
+            def _rpc_side_effect(cmd, params=None, timeout=20.0):
+                if cmd == "bootstrap_session":
+                    session_idx[0] += 1
+                    return {
+                        "session": {"charid": 90000001},
+                        "active_view": "hangar",
+                        "flight_recorder": {
+                            "guard_hits": [
+                                {
+                                    "seq": 1,
+                                    "guard": "camera_dock_guard",
+                                    "function": "Boot.Session%d" % session_idx[0],
+                                    "reason": "r",
+                                    "time": float(session_idx[0]),
+                                }
+                            ],
+                            "guard_summary": {"client_guards_off": False},
+                        },
+                    }
+                return {"guard_hits": [], "guard_summary": {"client_guards_off": False}}
+
+            runner.rpc.call.side_effect = _rpc_side_effect
+
+            with (
+                mock.patch.object(playtester, "stage_playtester_client", return_value=stage_dir),
+                mock.patch.object(playtester, "mint_sso_jwt_via_server", return_value="tok"),
+                mock.patch.object(playtester.subprocess, "Popen", return_value=DummyProc()),
+            ):
+                self.assertTrue(runner.start_client())
+                runner._record_step_guard_hits(
+                    1,
+                    {
+                        "action_ok": True,
+                        "guard_hits": [
+                            {"seq": 2, "guard": "wreck_rotation_guard", "function": "Wreck.Prepare", "reason": "m", "time": 2.0}
+                        ],
+                        "guard_summary": {"client_guards_off": False},
+                    },
+                )
+                self.assertEqual(runner._guard_tracker.total_count, 2)
+                self.assertEqual(runner._guard_tracker.last_seq, 2)
+
+                # Restart client: process closes, seq resets back to 1 in the new client.
+                runner.client_proc = None
+                runner.stop_client()
+                self.assertEqual(runner._guard_tracker.session_gen, 1)
+                self.assertEqual(runner._guard_tracker.last_seq, 0)
+
+                self.assertTrue(runner.start_client())
+                runner._record_step_guard_hits(
+                    2,
+                    {
+                        "action_ok": True,
+                        "guard_hits": [
+                            {"seq": 2, "guard": "wreck_rotation_guard", "function": "Wreck.Prepare", "reason": "m2", "time": 3.0}
+                        ],
+                        "guard_summary": {"client_guards_off": False},
+                    },
+                )
+                runner._write_run_summary(step_num=2, final=True)
+
+            run_sum = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_sum["guard_hits_count"], 4)
+            self.assertEqual(
+                run_sum["guard_hits_by_guard"],
+                {"camera_dock_guard": 2, "wreck_rotation_guard": 2},
+            )
 
     def test_scenario_runner_disables_server_guards_and_records_result_json(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1938,6 +2114,191 @@ class TestTelemetryPropagationEndToEnd(unittest.TestCase):
             self.assertEqual(j["client_only_guard_hits"], 1)
             self.assertEqual(j["steps"][0]["guard_hits_count"], 1)
 
+    def test_scenario_runner_wait_until_and_timeout_retain_guard_hits(self):
+        runner = playtester.ScenarioRunner.__new__(playtester.ScenarioRunner)
+        runner._default_target_char_id = lambda: 90000001
+        runner.rpc = mock.MagicMock()
+        tick_responses = iter([
+            {
+                "action_ok": True,
+                "post_state": {"active_view": "hangar", "open_windows": []},
+                "flight_recorder": {
+                    "macho_calls": [],
+                    "scatters_observed": [],
+                    "log_exceptions": [],
+                    "quasar_errors": [],
+                    "macho_exceptions": [],
+                },
+                "guard_hits": [
+                    {"seq": 2, "guard": "wreck_rotation_guard", "function": "Wreck.Prepare", "reason": "tick1", "time": 2.0}
+                ],
+                "guard_summary": {"client_guards_off": True},
+            },
+            {
+                "action_ok": True,
+                "post_state": {"active_view": "space", "open_windows": ["space_hud"]},
+                "flight_recorder": {
+                    "macho_calls": [],
+                    "scatters_observed": [],
+                    "log_exceptions": [],
+                    "quasar_errors": [],
+                    "macho_exceptions": [],
+                },
+                "guard_hits": [
+                    {"seq": 3, "guard": "probe_tracker_guard", "function": "ProbeTracker.OnProbesIdle", "reason": "tick2", "time": 3.0}
+                ],
+                "guard_summary": {"client_guards_off": True},
+            },
+        ])
+        runner.rpc.call.side_effect = lambda cmd, params=None, timeout=20.0: next(tick_responses)
+        initial_res = {
+            "action_ok": True,
+            "flight_recorder": {
+                "macho_calls": [],
+                "scatters_observed": [],
+                "log_exceptions": [],
+                "quasar_errors": [],
+                "macho_exceptions": [],
+            },
+            "guard_hits": [
+                {"seq": 1, "guard": "camera_dock_guard", "function": "ViewStateSvc._OpenView", "reason": "init", "time": 1.0}
+            ],
+            "guard_summary": {"client_guards_off": True},
+        }
+        step_wait = {"wait_until": {"checks": {"expect_window_open": "space_hud"}, "timeout_ms": 5000, "poll_interval_ms": 250}}
+        merged_res, merged_state = runner._execute_wait_until(
+            step_wait,
+            {"active_view": "hangar", "open_windows": []},
+            {},
+            initial_res=initial_res,
+            initial_state={"active_view": "hangar", "open_windows": []},
+        )
+        self.assertEqual(merged_state["active_view"], "space")
+        self.assertEqual(merged_res["guard_hit_count"], 3)
+        self.assertEqual(
+            [h["guard"] for h in merged_res["guard_hits"]],
+            ["camera_dock_guard", "wreck_rotation_guard", "probe_tracker_guard"],
+        )
+        self.assertEqual(merged_res["guard_summary"]["guard_hits_count"], 3)
+        self.assertEqual(merged_res["flight_recorder"]["guard_summary"]["guard_hits_count"], 3)
+
+        # Timeout path must also retain both initial_res and tick hits.
+        runner.rpc.call.side_effect = lambda cmd, params=None, timeout=20.0: {
+            "action_ok": True,
+            "post_state": {"active_view": "hangar", "open_windows": []},
+            "flight_recorder": {
+                "macho_calls": [],
+                "scatters_observed": [],
+                "log_exceptions": [],
+                "quasar_errors": [],
+                "macho_exceptions": [],
+            },
+            "guard_hits": [
+                {"seq": 2, "guard": "wreck_rotation_guard", "function": "Wreck.Prepare", "reason": "timeout_tick", "time": 2.0}
+            ],
+            "guard_summary": {"client_guards_off": True},
+        }
+        timed_res, _ = runner._execute_wait_until(
+            {"wait_until": {"checks": {"expect_window_open": "never_opens"}, "timeout_ms": 1, "poll_interval_ms": 250}},
+            {"active_view": "hangar", "open_windows": []},
+            {},
+            initial_res=initial_res,
+            initial_state={"active_view": "hangar", "open_windows": []},
+        )
+        self.assertFalse(timed_res["action_ok"])
+        self.assertTrue(timed_res["wait_until_timed_out"])
+        self.assertEqual(timed_res["guard_hit_count"], 2)
+        self.assertEqual(timed_res["flight_recorder"]["guard_summary"]["guard_hits_count"], 2)
+
+        # run_scenarios failing step must still poll get_guard_hits in finally before stop_client().
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen_path = root / "fail_scen.json"
+            scen_path.write_text(
+                json.dumps({
+                    "id": "timeout_poll_check",
+                    "title": "Timeout Poll Check",
+                    "steps": [
+                        {
+                            "id": "s_fail",
+                            "action": {"type": "wait", "target": "10"},
+                            "checks": {"expect_window_open": "impossible_wnd"},
+                        }
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            scen = playtester.load_scenario_file(scen_path)
+            scen["path"] = scen_path
+            out_dir = root / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            run_dir = root / "run"
+            (run_dir / "client_logs").mkdir(parents=True, exist_ok=True)
+            (run_dir / "server.log").write_text("", encoding="utf-8")
+
+            sr = playtester.ScenarioRunner.__new__(playtester.ScenarioRunner)
+            sr.worktree_dir = root
+            sr.current_run_dir = run_dir
+            sr.out_dir = out_dir
+            sr.staged_app = root / "EVE.app"
+            sr.world_db_path = root / "missing.sqlite"
+            sr.args = types.SimpleNamespace(silent=True, foreground=False)
+            sr.screenshot_max_dim = 1024
+            sr.ports = {"gateway": 26005, "http": 26004, "macho": 26000, "rpc": 26996}
+            sr.client_proc = None
+            sr.server_proc = None
+            sr._session_flight_calls = []
+            sr._session_flight_seqs = set()
+            sr._active_declared_setup_steps = []
+            sr._active_expected_characters = []
+            sr._active_starting_state = {}
+            sr._last_boot_result = {
+                "ok": True,
+                "session": {"charid": 90000001},
+                "active_view": "hangar",
+                "flight_recorder": {"macho_calls": [], "guard_hits": [], "guard_summary": {"client_guards_off": True}},
+            }
+            sr._scenario_auth_params = lambda: ("demo", "demo-secret", 90000001, "Demo Pilot")
+            sr.start_server = lambda *a, **kw: True
+            sr.start_client = lambda *a, **kw: True
+            sr.stop_client = lambda: None
+            sr.stop_server = lambda: None
+            sr._close_gm_bridge = lambda: None
+            sr._ensure_starting_state = lambda scen_cfg: []
+            sr._record_session_flight_calls = lambda calls: None
+            sr._capture_failure_screenshot = lambda p: None
+            sr._run_destiny_parity_check = lambda logs: None
+            sr.rpc = mock.MagicMock()
+            rpc_cmds = []
+
+            def _sr_rpc(cmd, params=None, timeout=20.0):
+                rpc_cmds.append(cmd)
+                if cmd == "execute_action":
+                    return {
+                        "action_ok": True,
+                        "post_state": {"active_view": "hangar", "client_build": "9990001"},
+                        "flight_recorder": {"macho_calls": [], "scatters_observed": [], "log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                        "guard_hits": [{"seq": 1, "guard": "camera_dock_guard", "function": "ViewStateSvc._OpenView", "reason": "step", "time": 1.0}],
+                        "guard_summary": {"client_guards_off": True},
+                    }
+                if cmd == "get_guard_hits":
+                    return {
+                        "ok": True,
+                        "guard_hits": [{"seq": 2, "guard": "probe_tracker_guard", "function": "ProbeTracker.OnProbesIdle", "reason": "after_fail", "time": 2.0}],
+                        "guard_summary": {"client_guards_off": True},
+                    }
+                return {"ok": True}
+
+            sr.rpc.call.side_effect = _sr_rpc
+            scen_res, _meta = sr.run_single_scenario(scen)
+            self.assertFalse(scen_res["passed"])
+            self.assertIn("get_guard_hits", rpc_cmds)
+            self.assertEqual(scen_res["guard_hits_count"], 2)
+            self.assertEqual(
+                scen_res["guard_hits_by_guard"],
+                {"camera_dock_guard": 1, "probe_tracker_guard": 1},
+            )
+
     def test_inclient_driver_and_run_journeys_attestation_telemetry(self):
         drv = _load_py2_harness_module("evomu_inclient_driver.py", stub_helpers=False)
         rj = _load_run_journeys_module()
@@ -1991,7 +2352,14 @@ class TestTelemetryPropagationEndToEnd(unittest.TestCase):
                     sm_obj=sm,
                 ),
                 mock.patch.dict(guard_registry.BEHAVIOUR_GUARDS_BY_ID, {"base_hangar_behaviour_guard": approved_entry}),
-                mock.patch.object(drv, "_wait_for_session", return_value=90000001),
+                mock.patch.object(
+                    drv,
+                    "_wait_for_session",
+                    side_effect=lambda *a, **kw: (
+                        evomu_site._record_guard_hit("camera_dock_guard", "ViewStateSvc._OpenView", "boot_wait_hit"),
+                        90000001,
+                    )[1],
+                ),
                 mock.patch.object(drv, "_sync_quasar_gateway", return_value=types.SimpleNamespace()),
                 mock.patch.object(drv, "_install_rpc_recorder", return_value=[None]),
                 mock.patch.object(drv, "_snapshot_ship_fitted_item_ids", return_value=set()),
@@ -2021,8 +2389,16 @@ class TestTelemetryPropagationEndToEnd(unittest.TestCase):
                         fake_ipc,
                     )
 
+                boot_file = drv_out / "real_client_boot_telemetry.json"
+                self.assertTrue(boot_file.exists())
+                boot_data = json.loads(boot_file.read_text(encoding="utf-8"))
+                self.assertEqual(boot_data["guard_hits_count"], 1)
+                self.assertEqual(boot_data["attributed_to_journey"], "launch_login")
+                self.assertTrue(any(m.get("cmd") == "boot_guard_telemetry" for m in ipc_msgs))
+
                 self.assertTrue(outcomes["launch_login"]["client_guards_off"])
-                self.assertEqual(outcomes["launch_login"]["guard_hits_count"], 1)
+                self.assertEqual(outcomes["launch_login"]["guard_hits_count"], 2)
+                self.assertEqual(outcomes["launch_login"]["guard_hits_by_guard"], {"base_hangar_behaviour_guard": 1, "camera_dock_guard": 1})
                 self.assertEqual(outcomes["launch_login"]["client_only_guard_hits"], 1)
                 self.assertEqual(outcomes["station_ui"]["guard_hits_count"], 0)
 
@@ -2049,16 +2425,98 @@ class TestTelemetryPropagationEndToEnd(unittest.TestCase):
                     True,
                     outcomes,
                     {},
+                    boot_guard_telemetry=boot_data,
                 )
 
                 self.assertEqual(rc, 0)
                 self.assertTrue(result["client_guards_off"])
-                self.assertEqual(result["guard_hits_count"], 1)
-                self.assertEqual(result["guard_hits_by_guard"], {"base_hangar_behaviour_guard": 1})
+                # Must equal 2 (boot hit attributed to launch_login + launch_login hit), never double-counted.
+                self.assertEqual(result["guard_hits_count"], 2)
+                self.assertEqual(
+                    result["guard_hits_by_guard"],
+                    {"base_hangar_behaviour_guard": 1, "camera_dock_guard": 1},
+                )
                 self.assertEqual(result["client_only_guard_hits"], 1)
                 self.assertEqual(result["client_only_guard_hits_by_guard"], {"base_hangar_behaviour_guard": 1})
                 self.assertEqual(result["journeys"]["launch_login"]["client_only_guard_hits"], 1)
                 self.assertEqual(result["journeys"]["station_ui"]["guard_hits_count"], 0)
+
+                # When launch_login is skipped via only_journeys, boot hits remain isolated from station_ui
+                # and are folded into top-level totals from real_client_boot_telemetry.json.
+                evomu_site._reset_guard_hits_for_test() if hasattr(evomu_site, "_reset_guard_hits_for_test") else None
+                evomu_site._GUARD_HITS[:] = []
+                evomu_site._GUARD_HIT_SEQ = 0
+                drv_out2 = root / "driver_out_filtered"
+                with mock.patch.object(
+                    drv,
+                    "_JOURNEY_HANDLERS",
+                    [("launch_login", _fake_launch), ("station_ui", _fake_station)],
+                ):
+                    outcomes2 = drv._execute_all_journeys(
+                        {
+                            "out_dir": str(drv_out2),
+                            "only_journeys": ["station_ui"],
+                            "char_id": 90000001,
+                        },
+                        fake_ipc,
+                    )
+                boot_data2 = json.loads((drv_out2 / "real_client_boot_telemetry.json").read_text(encoding="utf-8"))
+                self.assertIsNone(boot_data2["attributed_to_journey"])
+                self.assertEqual(boot_data2["guard_hits_count"], 1)
+                self.assertEqual(outcomes2["station_ui"]["guard_hits_count"], 0)
+                rj_out2 = root / "rj_out_filtered"
+                rj_out2.mkdir(parents=True, exist_ok=True)
+                result2, rc2 = rj.finalize_journey_run(
+                    str(rj_out2),
+                    [{"id": "station_ui", "title": "Station"}],
+                    str(srv_log),
+                    [str(cli_log)],
+                    "/tmp/EVE.app",
+                    {"build": "9990001", "version": "V24.02"},
+                    1,
+                    True,
+                    outcomes2,
+                    {},
+                    boot_guard_telemetry=boot_data2,
+                )
+                self.assertEqual(rc2, 0)
+                self.assertEqual(result2["guard_hits_count"], 1)
+                self.assertEqual(result2["guard_hits_by_guard"], {"camera_dock_guard": 1})
+                self.assertEqual(result2["journeys"]["station_ui"]["guard_hits_count"], 0)
+
+            # IpcCoordinator must accept boot_guard_telemetry directly without contacting Client 2.
+            ipc_coord = rj.IpcCoordinator(
+                "127.0.0.1",
+                1,
+                str(root / "c2.log"),
+                {},
+                server_log_path=str(root / "server.log"),
+                out_dir=str(root),
+            )
+            try:
+                ack = ipc_coord._handle_cmd({"cmd": "boot_guard_telemetry", "entry": {"guard_hits_count": 3}})
+                self.assertEqual(ack, {"ok": True})
+                self.assertEqual(ipc_coord.boot_guard_telemetry, {"guard_hits_count": 3})
+            finally:
+                ipc_coord.close()
+
+            # P2-3: Unreported/empty outcomes must default client_guards_off to False, even if should_launch_real_client=True.
+            rj_out3 = root / "rj_out_empty"
+            rj_out3.mkdir(parents=True, exist_ok=True)
+            empty_result, _ = rj.finalize_journey_run(
+                str(rj_out3),
+                [{"id": "launch_login", "title": "Launch"}],
+                str(root / "server.log"),
+                [],
+                "/tmp/EVE.app",
+                {"build": "9990001", "version": "V24.02"},
+                0,
+                True,
+                {},
+                {},
+            )
+            self.assertFalse(empty_result["client_guards_off"])
+            self.assertFalse(empty_result["journeys"]["launch_login"]["client_guards_off"])
 
 
 if __name__ == "__main__":

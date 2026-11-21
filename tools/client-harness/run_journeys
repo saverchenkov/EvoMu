@@ -556,6 +556,7 @@ class IpcCoordinator(object):
         self.c2_authenticated = False
         self.client_pid = None
         self.progress_dict = progress_dict
+        self.boot_guard_telemetry = None
         self.driver_done = threading.Event()
         self.driver_error = None
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -743,6 +744,10 @@ class IpcCoordinator(object):
             if cmd == "journey_progress":
                 if req.get("id") and isinstance(req.get("entry"), dict):
                     self.progress_dict[req["id"]] = req["entry"]
+                return {"ok": True}
+            if cmd == "boot_guard_telemetry":
+                if isinstance(req.get("entry"), dict):
+                    self.boot_guard_telemetry = req["entry"]
                 return {"ok": True}
             if cmd == "capture_screenshot":
                 shot_path = str(req.get("path", ""))
@@ -1498,6 +1503,7 @@ def finalize_journey_run(
     bridge_harness_test=False,
     journey_byte_spans=None,
     driver_errors=None,
+    boot_guard_telemetry=None,
 ):
     """Computes `result.json` with per-journey log attribution, real artifacts, and exit code."""
     journey_ids = [j["id"] for j in journey_list]
@@ -1567,9 +1573,7 @@ def finalize_journey_run(
         if isinstance(rc_info.get("guard_hits"), list):
             rc_guard_summary = guard_registry.summarize_guard_hits(
                 rc_info.get("guard_hits") or [],
-                client_guards_off=rc_info.get(
-                    "client_guards_off", bool(should_launch_real_client)
-                ),
+                client_guards_off=rc_info.get("client_guards_off", False),
             )
         else:
             raw_by_guard = rc_info.get("guard_hits_by_guard")
@@ -1577,9 +1581,7 @@ def finalize_journey_run(
             raw_co_by_guard = rc_info.get("client_only_guard_hits_by_guard")
             co_by_guard = dict(raw_co_by_guard) if isinstance(raw_co_by_guard, dict) else {}
             rc_guard_summary = {
-                "client_guards_off": bool(
-                    rc_info.get("client_guards_off", bool(should_launch_real_client))
-                ),
+                "client_guards_off": bool(rc_info.get("client_guards_off", False)),
                 "guard_hits_count": int(
                     rc_info.get("guard_hits_count", sum(by_guard.values())) or 0
                 ),
@@ -1624,11 +1626,62 @@ def finalize_journey_run(
             agg_hits_by_guard[gid] = agg_hits_by_guard.get(gid, 0) + int(cnt or 0)
         for gid, cnt in (j_entry.get("client_only_guard_hits_by_guard") or {}).items():
             agg_co_by_guard[gid] = agg_co_by_guard.get(gid, 0) + int(cnt or 0)
-    top_guards_off = (
-        all(bool(j_entry.get("client_guards_off", False)) for j_entry in journeys_out.values())
-        if journeys_out
-        else bool(should_launch_real_client)
+
+    boot_entry = dict(boot_guard_telemetry) if isinstance(boot_guard_telemetry, dict) else None
+    attr_jid = boot_entry.get("attributed_to_journey") if boot_entry is not None else None
+    attr_outcome = real_outcomes.get(attr_jid) if isinstance(attr_jid, str) else None
+    attr_recorded = (
+        bool(attr_jid)
+        and attr_jid in journeys_out
+        and isinstance(attr_outcome, dict)
+        and (
+            isinstance(attr_outcome.get("guard_hits"), list)
+            or "guard_hits_count" in attr_outcome
+        )
     )
+    boot_summary = None
+    if boot_entry is not None:
+        if isinstance(boot_entry.get("guard_hits"), list):
+            boot_summary = guard_registry.summarize_guard_hits(
+                boot_entry.get("guard_hits") or [],
+                client_guards_off=boot_entry.get("client_guards_off", False),
+            )
+        else:
+            raw_bg = boot_entry.get("guard_hits_by_guard")
+            bg = dict(raw_bg) if isinstance(raw_bg, dict) else {}
+            raw_cbg = boot_entry.get("client_only_guard_hits_by_guard")
+            cbg = dict(raw_cbg) if isinstance(raw_cbg, dict) else {}
+            boot_summary = {
+                "client_guards_off": bool(boot_entry.get("client_guards_off", False)),
+                "guard_hits_count": int(
+                    boot_entry.get("guard_hits_count", sum(bg.values())) or 0
+                ),
+                "guard_hits_by_guard": {k: bg[k] for k in sorted(bg.keys())},
+                "client_only_guard_hits": int(
+                    boot_entry.get("client_only_guard_hits", sum(cbg.values())) or 0
+                ),
+                "client_only_guard_hits_by_guard": {
+                    k: cbg[k] for k in sorted(cbg.keys())
+                },
+            }
+        if not attr_recorded:
+            agg_hits_count += int(boot_summary["guard_hits_count"] or 0)
+            agg_co_count += int(boot_summary["client_only_guard_hits"] or 0)
+            for gid, cnt in (boot_summary["guard_hits_by_guard"] or {}).items():
+                agg_hits_by_guard[gid] = agg_hits_by_guard.get(gid, 0) + int(cnt or 0)
+            for gid, cnt in (boot_summary["client_only_guard_hits_by_guard"] or {}).items():
+                agg_co_by_guard[gid] = agg_co_by_guard.get(gid, 0) + int(cnt or 0)
+
+    if journeys_out:
+        top_guards_off = all(
+            bool(j_entry.get("client_guards_off", False)) for j_entry in journeys_out.values()
+        )
+        if boot_summary is not None and not attr_recorded and "client_guards_off" in boot_entry:
+            top_guards_off = top_guards_off and bool(boot_summary["client_guards_off"])
+    elif boot_summary is not None:
+        top_guards_off = bool(boot_summary["client_guards_off"])
+    else:
+        top_guards_off = False
 
     result = {
         "journeys": journeys_out,
@@ -1651,6 +1704,7 @@ def finalize_journey_run(
         "client_only_guard_hits_by_guard": {
             k: agg_co_by_guard[k] for k in sorted(agg_co_by_guard.keys())
         },
+        "boot_guard_telemetry": boot_entry,
     }
     res_path = os.path.join(out_dir, "result.json")
     with open(res_path, "w") as rf:
@@ -1837,6 +1891,7 @@ def main():
                     sf.write("[harness] attached to live eve-server bridge on %s:%d\n" % (args.host, bridge_port))
 
         driver_errors = []
+        boot_guard_telemetry = None
         if should_launch_real_client and macho_port:
             ipc = IpcCoordinator(
                 args.host,
@@ -1924,6 +1979,19 @@ def main():
                     msg = "Failed to load real_client_outcomes.json: %s" % exc
                     driver_errors.append(msg)
                     sys.stderr.write("[run_journeys] %s\n" % msg)
+            boot_telemetry_file = os.path.join(out_dir, "real_client_boot_telemetry.json")
+            if os.path.exists(boot_telemetry_file):
+                try:
+                    with open(boot_telemetry_file, "r") as bf:
+                        loaded_boot = json.load(bf)
+                    if isinstance(loaded_boot, dict):
+                        boot_guard_telemetry = loaded_boot
+                except Exception as exc:
+                    msg = "Failed to load real_client_boot_telemetry.json: %s" % exc
+                    driver_errors.append(msg)
+                    sys.stderr.write("[run_journeys] %s\n" % msg)
+            if boot_guard_telemetry is None and isinstance(ipc.boot_guard_telemetry, dict):
+                boot_guard_telemetry = ipc.boot_guard_telemetry
             c1_authed = bool(ipc.c1_authenticated or real_outcomes)
             c2_authed = bool(ipc.c2_authenticated)
             concurrent_clients_tested = (1 if c1_authed else 0) + (1 if c2_authed else 0)
@@ -2031,6 +2099,7 @@ def main():
         bridge_harness_test=args.bridge_harness_test,
         journey_byte_spans=(ipc.journey_byte_spans if ipc is not None else None),
         driver_errors=driver_errors,
+        boot_guard_telemetry=boot_guard_telemetry,
     )
     return exit_code
 

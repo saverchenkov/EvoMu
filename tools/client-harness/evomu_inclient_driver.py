@@ -1730,6 +1730,7 @@ def _execute_all_journeys(cfg, ipc):
     if out_dir and not os.path.isdir(out_dir):
         os.makedirs(out_dir)
     outcomes_path = os.path.join(out_dir, "real_client_outcomes.json") if out_dir else ""
+    boot_telemetry_path = os.path.join(out_dir, "real_client_boot_telemetry.json") if out_dir else ""
 
     def _read_guard_cursor():
         try:
@@ -1741,7 +1742,7 @@ def _execute_all_journeys(cfg, ipc):
         except Exception:
             return 0
 
-    def _collect_guard_telemetry(since_seq):
+    def _collect_guard_telemetry(since_seq, max_seq=None):
         client_guards_off = False
         hits = []
         try:
@@ -1762,8 +1763,10 @@ def _execute_all_journeys(cfg, ipc):
             else:
                 raw_hits = list(getattr(_es, "_GUARD_HITS", []) or [])
                 hits = [dict(h) for h in raw_hits if int(h.get("seq", 0) or 0) > int(since_seq or 0)]
+            if max_seq is not None:
+                hits = [h for h in hits if int(h.get("seq", 0) or 0) <= int(max_seq)]
             sum_fn = getattr(_es, "get_guard_hit_summary", None)
-            if callable(sum_fn):
+            if max_seq is None and callable(sum_fn):
                 summary = dict(sum_fn(since_seq=since_seq, client_guards_off=client_guards_off))
             elif _gr is not None:
                 summary = dict(_gr.summarize_guard_hits(hits, client_guards_off=client_guards_off))
@@ -1792,11 +1795,23 @@ def _execute_all_journeys(cfg, ipc):
             "client_only_guard_hits_by_guard": dict(summary.get("client_only_guard_hits_by_guard") or {}),
         }
 
+    boot_guard_cursor = _read_guard_cursor()
+    will_run_launch_login = any(
+        jid == "launch_login" and (only_set is None or jid in only_set)
+        for jid, _ in _JOURNEY_HANDLERS
+    )
+    boot_entry = _collect_guard_telemetry(0, max_seq=boot_guard_cursor)
+    boot_entry["boot_guard_cursor"] = int(boot_guard_cursor)
+    boot_entry["attributed_to_journey"] = "launch_login" if will_run_launch_login else None
+    if boot_telemetry_path:
+        _atomic_write_json(boot_telemetry_path, boot_entry)
+    ipc.notify({"cmd": "boot_guard_telemetry", "entry": boot_entry})
+
     for jid, handler in _JOURNEY_HANDLERS:
         if only_set is not None and jid not in only_set:
             continue
 
-        guard_seq_before = _read_guard_cursor()
+        guard_seq_before = 0 if jid == "launch_login" else _read_guard_cursor()
         pre_reset_tb = None
         try:
             _reset_baseline_state(sm, ipc, ctx["baseline"], char_id=ctx["char_id"])

@@ -106,6 +106,7 @@ class _GuardHitTracker:
     def __init__(self, retain_all: bool = True, max_recent: int = 100) -> None:
         self.retain_all = bool(retain_all)
         self.max_recent = int(max_recent)
+        self.session_gen: int = 0
         self.seen_seqs: set = set()
         self.last_seq: int = 0
         self.total_count: int = 0
@@ -116,6 +117,12 @@ class _GuardHitTracker:
         self.hits: List[Dict[str, Any]] = []
         self.recent_hits: List[Dict[str, Any]] = []
 
+    def reset_client_session(self) -> None:
+        """Reset client-session sequence tracking across EVE.app restarts/hot-reloads."""
+        self.session_gen += 1
+        self.last_seq = 0
+        self.seen_seqs.clear()
+
     def absorb_hits(self, raw_hits: Any) -> List[Dict[str, Any]]:
         if not isinstance(raw_hits, list):
             return []
@@ -125,11 +132,12 @@ class _GuardHitTracker:
                 continue
             seq_val = item.get("seq")
             if isinstance(seq_val, int):
-                dedup_key: Any = ("seq", seq_val)
+                dedup_key: Any = (self.session_gen, "seq", seq_val)
                 if seq_val > self.last_seq:
                     self.last_seq = seq_val
             else:
                 dedup_key = (
+                    self.session_gen,
                     "raw",
                     str(item.get("guard") or ""),
                     str(item.get("function") or ""),
@@ -143,7 +151,11 @@ class _GuardHitTracker:
                 self.seen_seqs = {
                     k
                     for k in self.seen_seqs
-                    if isinstance(k, tuple) and k[0] == "seq" and k[1] > self.last_seq - 2000
+                    if isinstance(k, tuple)
+                    and len(k) >= 3
+                    and k[0] == self.session_gen
+                    and k[1] == "seq"
+                    and k[2] > self.last_seq - 2000
                 }
             gid = str(item.get("guard") or "unknown")
             self.total_count += 1
@@ -7827,6 +7839,8 @@ class PlaytesterRunner:
             self._session_flight_calls.clear()
         if hasattr(self, "_session_flight_seqs"):
             self._session_flight_seqs.clear()
+        if getattr(self, "_guard_tracker", None) is not None:
+            self._guard_tracker.reset_client_session()
         oracle = getattr(self, "oracle", None)
         if oracle is not None:
             oracle.reset_session_telemetry(
@@ -10848,6 +10862,43 @@ class ScenarioRunner(PlaytesterRunner):
         all_log_excs: List[Any] = list(init_fr.get("log_exceptions") or [])
         all_quasar_errs: List[Any] = list(init_fr.get("quasar_errors") or [])
         all_macho_excs: List[Any] = list(init_fr.get("macho_exceptions") or [])
+        all_guard_hits: List[Dict[str, Any]] = []
+        seen_guard_keys: set = set()
+        latest_guard_summary: Optional[Dict[str, Any]] = None
+
+        def _absorb_wait_guard_telemetry(res_obj: Optional[Dict[str, Any]]) -> None:
+            nonlocal latest_guard_summary
+            if not isinstance(res_obj, dict):
+                return
+            fr_obj = res_obj.get("flight_recorder") or {}
+            for cand in (res_obj.get("guard_summary"), fr_obj.get("guard_summary")):
+                if isinstance(cand, dict):
+                    latest_guard_summary = dict(cand)
+            raw_hits = res_obj.get("guard_hits")
+            if not isinstance(raw_hits, list):
+                raw_hits = fr_obj.get("guard_hits")
+            if not isinstance(raw_hits, list):
+                return
+            for gh in raw_hits:
+                if not isinstance(gh, dict):
+                    continue
+                seq_v = gh.get("seq")
+                if isinstance(seq_v, int):
+                    gkey: Any = ("seq", seq_v)
+                else:
+                    gkey = (
+                        "raw",
+                        str(gh.get("guard") or ""),
+                        str(gh.get("function") or ""),
+                        str(gh.get("reason") or ""),
+                        gh.get("time"),
+                    )
+                if gkey in seen_guard_keys:
+                    continue
+                seen_guard_keys.add(gkey)
+                all_guard_hits.append(dict(gh))
+
+        _absorb_wait_guard_telemetry(initial_res)
         latest_state = dict(initial_state) if isinstance(initial_state, dict) and initial_state else dict(step_pre_state)
         latest_res: Dict[str, Any] = dict(initial_res or {"action_ok": True, "flight_recorder": {}})
 
@@ -10892,18 +10943,34 @@ class ScenarioRunner(PlaytesterRunner):
             all_log_excs.extend(fr.get("log_exceptions") or [])
             all_quasar_errs.extend(fr.get("quasar_errors") or [])
             all_macho_excs.extend(fr.get("macho_exceptions") or [])
+            _absorb_wait_guard_telemetry(tick_res)
             if isinstance(tick_res.get("post_state"), dict):
                 latest_state = tick_res["post_state"]
             merged_res = dict(initial_res or tick_res)
             if initial_res and tick_res.get("action_ok") is False:
                 merged_res["action_ok"] = False
                 merged_res["action_error"] = tick_res.get("action_error")
+            wait_guards_off = (
+                bool(latest_guard_summary.get("client_guards_off"))
+                if isinstance(latest_guard_summary, dict)
+                and isinstance(latest_guard_summary.get("client_guards_off"), bool)
+                else False
+            )
+            merged_guard_summary = guard_registry.summarize_guard_hits(
+                all_guard_hits,
+                client_guards_off=wait_guards_off,
+            )
+            merged_res["guard_hits"] = list(all_guard_hits)
+            merged_res["guard_hit_count"] = len(all_guard_hits)
+            merged_res["guard_summary"] = dict(merged_guard_summary)
             merged_res["flight_recorder"] = {
                 "macho_calls": all_calls,
                 "scatters_observed": all_scatters,
                 "log_exceptions": all_log_excs,
                 "quasar_errors": all_quasar_errs,
                 "macho_exceptions": all_macho_excs,
+                "guard_hits": list(all_guard_hits),
+                "guard_summary": dict(merged_guard_summary),
             }
             latest_res = merged_res
             ok_until, until_fail_chk, until_fail_msg = evaluate_scenario_checks(
@@ -11243,8 +11310,7 @@ class ScenarioRunner(PlaytesterRunner):
                             break
                         pre_state = dict(post_state) if isinstance(post_state, dict) else pre_state
         finally:
-            if not (failure_info and "timeout" in str(failure_info.get("reason") or "").lower()):
-                guard_tracker.poll_rpc(getattr(self, "rpc", None), timeout=2.0)
+            guard_tracker.poll_rpc(getattr(self, "rpc", None), timeout=1.0)
             self._close_gm_bridge()
             self.stop_client()
             self.stop_server()

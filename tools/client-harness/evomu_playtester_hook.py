@@ -8166,7 +8166,7 @@ def _execute_action(sm, action):
     return result
 
 
-def _collect_hook_guard_telemetry(since_seq=0):
+def _collect_hook_guard_telemetry(since_seq=0, advance_cursor=False):
     hits = []
     summary = {
         "client_guards_off": False,
@@ -8192,6 +8192,14 @@ def _collect_hook_guard_telemetry(since_seq=0):
         else:
             summary["guard_hits_count"] = len(hits)
             cumulative = dict(summary)
+        if advance_cursor:
+            max_gseq = int(getattr(_es, "_PT_CONSUMED_GUARD_SEQ", 0) or 0)
+            for gh in hits:
+                gseq = int(gh.get("seq", 0) or 0)
+                if gseq > max_gseq:
+                    max_gseq = gseq
+            cur_gseq = int(getattr(_es, "_GUARD_HIT_SEQ", 0) or 0)
+            setattr(_es, "_PT_CONSUMED_GUARD_SEQ", max(max_gseq, cur_gseq))
     except Exception:
         pass
     return {
@@ -8338,7 +8346,7 @@ class PlaytesterRpcServer(object):
             globals()["_LAST_SNAPSHOT"] = st
             globals()["_LAST_SNAPSHOT_SM"] = self.sm
             globals()["_LAST_SNAPSHOT_TS"] = time.time()
-            gt = _collect_hook_guard_telemetry(0)
+            gt = _collect_hook_guard_telemetry(0, advance_cursor=True)
             return {
                 "ok": True,
                 "result": st,
