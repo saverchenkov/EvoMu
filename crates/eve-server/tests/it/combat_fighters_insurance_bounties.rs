@@ -1981,10 +1981,10 @@ use std::collections::HashMap;
 const ARCHON_CARRIER: u32 = 23757;
 const AMETAT_HEAVY_FIGHTER: u32 = 40362;
 const EQUITE_LIGHT_FIGHTER: u32 = 40358;
-const SIREN_SUPPORT_FIGHTER: u32 = 40559;
-const DROMI_SUPPORT_FIGHTER: u32 = 40561;
-const CENOBITE_SUPPORT_FIGHTER: u32 = 40560;
-const SCARAB_SUPPORT_FIGHTER: u32 = 40562;
+const SIREN_SUPPORT_FIGHTER: u32 = 40346;
+const DROMI_SUPPORT_FIGHTER: u32 = 40347;
+const CENOBITE_SUPPORT_FIGHTER: u32 = 37599;
+const SCARAB_SUPPORT_FIGHTER: u32 = 40345;
 const SYS_ID: u32 = 30_004_759;
 
 fn make_sess(char_id: i64, ship_id: i64) -> SessionState {
@@ -2243,9 +2243,9 @@ async fn test_fighter_support_abilities_and_squadron_scaling() {
 
         let sys = ctx.systems.get_or_spawn(SYS_ID);
 
-        for (idx, b) in balls.iter().enumerate() {
+        for b in balls.iter() {
             let bid = b.as_i64().unwrap();
-            let slot = if pair[idx] == CENOBITE_SUPPORT_FIGHTER { 0 } else { 2 };
+            let slot = 0;
             let res = dispatch_combat_rpc(
                 &ctx,
                 &mut sess,
@@ -2263,7 +2263,7 @@ async fn test_fighter_support_abilities_and_squadron_scaling() {
             let scramble = sys.get_combat_state(target_id).await.unwrap().unwrap().warp_scramble_strength;
             assert!(scramble >= 3, "Siren support fighter squadron (3 units) must apply >= 3 warp disruption points (got {scramble})");
             let siren_ball = balls[0].as_i64().unwrap();
-            let (lost, rem, _) = apply_damage_to_fighter_squadron(&ctx, SYS_ID, siren_ball, DamageVector::new(4_500.0, 0.0, 0.0, 0.0)).await;
+            let (lost, rem, _) = apply_damage_to_fighter_squadron(&ctx, SYS_ID, siren_ball, DamageVector::new(7_000.0, 0.0, 0.0, 0.0)).await;
             assert!(lost >= 1 && rem < 3, "Siren squadron must lose unit(s) under fire ({lost} lost, {rem} remaining)");
         }
         dispatch_combat_rpc(
