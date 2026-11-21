@@ -1419,11 +1419,25 @@ pub fn handle_contract_delete_multiple(
                 } else {
                     c.issuer_id
                 };
-                let mut prev_states: Vec<(i64, i64, i64, eve_db::InventoryFlag)> = c
+                let escrow_item_ids: Vec<i64> = c
                     .item_ids
                     .iter()
                     .copied()
-                    .filter(|iid| !restored_ids.contains(iid))
+                    .filter(|iid| {
+                        !restored_ids.contains(iid)
+                            && snap.items.get(iid).is_some_and(|it| {
+                                it.location_id == cid
+                                    || (it.location_id == c.start_station_id
+                                        && it.flag == eve_db::InventoryFlag::Locked
+                                        && (it.owner_id == c.issuer_id
+                                            || (c.for_corp && it.owner_id == c.issuer_corp_id)
+                                            || it.owner_id == 0))
+                            })
+                    })
+                    .collect();
+                let mut prev_states: Vec<(i64, i64, i64, eve_db::InventoryFlag)> = escrow_item_ids
+                    .iter()
+                    .copied()
                     .filter_map(|iid| snap.items.get(&iid).map(|it| (iid, it.owner_id, it.location_id, it.flag)))
                     .collect();
                 for it in snap.items.values() {
@@ -1436,7 +1450,7 @@ pub fn handle_contract_delete_multiple(
                 }
                 transferred_ids.extend(snap.settle_contract_escrow_items(
                     cid,
-                    &c.item_ids,
+                    &escrow_item_ids,
                     restore_owner,
                     c.start_station_id,
                     None,

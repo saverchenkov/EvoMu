@@ -286,7 +286,7 @@ fn plex_sell_hangar_margin_cover_order_history_inference_and_corp_auction_finish
     let ctx = test_ctx();
     let seller_id = 90_000_001_i64;
     let buyer_id = 90_000_002_i64;
-    let corp_id = ctx.db.with_snapshot(|s| s.characters[&seller_id].corporation_id);
+    let corp_id = 98_000_001_i64;
     let mut sess = jita_session(seller_id, corp_id);
     let kw = HashMap::new();
     let now = ctx.now_unix();
@@ -294,6 +294,7 @@ fn plex_sell_hangar_margin_cover_order_history_inference_and_corp_auction_finish
     let (auction_cid, auction_item_id, courier_cid, courier_box_id) = ctx.db.with_mut_snapshot(|s| {
         s.market_orders.clear();
         if let Some(ch) = s.characters.get_mut(&seller_id) {
+            ch.corporation_id = corp_id;
             ch.balance = IskCents::from_isk(50_000_000);
         }
         let cur_vault = s.plex_vault_balance(seller_id);

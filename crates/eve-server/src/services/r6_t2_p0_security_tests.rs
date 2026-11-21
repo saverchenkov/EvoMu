@@ -225,9 +225,16 @@ fn r6_t2_02_issue_371_contract_delete_multiple_security() {
     let (cid_corp, cid_personal, cid_expired, corp_item, escrow_item, victim_item) = ctx.db.with_mut_snapshot(|snap| {
         seed_corp(snap, corp_id, 90_000_009, None);
         snap.corporations.entry(corp_id).and_modify(|c| {
+            c.members.insert(issuer_id);
+            c.members.insert(line_id);
             c.member_roles.insert(issuer_id, ROLE_CONTRACT_MANAGER);
             c.member_roles.insert(line_id, 0);
         });
+        for ch_id in [issuer_id, line_id] {
+            if let Some(ch) = snap.characters.get_mut(&ch_id) {
+                ch.corporation_id = corp_id;
+            }
+        }
         let corp_item = 88_100_001_i64;
         snap.items.insert(corp_item, InventoryItemRecord { item_id: corp_item, type_id: 587, owner_id: corp_id, location_id: 77_100_001, flag: InventoryFlag::Locked, quantity: 1, singleton: true, version: 1, ..Default::default() });
         let escrow_item = 88_100_002_i64;
