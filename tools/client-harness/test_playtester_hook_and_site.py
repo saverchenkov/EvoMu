@@ -1169,6 +1169,153 @@ class TestHookDockAndFlightRecorderAndEncoding(unittest.TestCase):
             )
             self.assertEqual(len(gpcs.calls), 4)
 
+    def test_bound_object_calls_resolve_canonical_service_names_safely(self):
+        import types
+
+        hook = _load_hook_with_py2_stubs()
+        carbon_mod = types.ModuleType("carbon")
+        carbon_common = types.ModuleType("carbon.common")
+        carbon_script = types.ModuleType("carbon.common.script")
+        carbon_net = types.ModuleType("carbon.common.script.net")
+        sc_gpcs_mod = types.ModuleType("carbon.common.script.net.ServiceCallGPCS")
+        mon_mod = types.ModuleType("carbon.common.script.net.moniker")
+        oc_mod = types.ModuleType("carbon.common.script.net.ObjectCallGPCS")
+
+        class FakeBoundProxyWithSideEffectingGetattr(object):
+            def __init__(self, oid, pid=None):
+                object.__setattr__(self, "objectID", oid)
+                if pid is not None:
+                    object.__setattr__(self, "__persistantObjectID__", pid)
+                object.__setattr__(self, "_getattr_calls", [])
+
+            def __getattr__(self, name):
+                getattr_calls = object.__getattribute__(self, "_getattr_calls")
+                getattr_calls.append(name)
+                if name != "MultiAdd":
+                    raise AssertionError("hook must not trigger __getattr__ for %r" % (name,))
+                return lambda *args, **kwargs: FakeBoundObjectCallWrapper(
+                    object.__getattribute__(self, "objectID"),
+                    object.__getattribute__(self, "__dict__").get("__persistantObjectID__"),
+                    name,
+                )(*args, **kwargs)
+
+        class FakeSlottedBoundProxy(object):
+            __slots__ = ("objectID",)
+
+            def __init__(self, oid):
+                self.objectID = oid
+
+        class FakeBoundObjectCallWrapper(object):
+            def __init__(self, oid, pid, method, fail=False):
+                self.objectID = oid
+                self.persistantObjectID = pid
+                self.method = method
+                self._fail = fail
+
+            def __call__(self, *args, **kwargs):
+                if self._fail:
+                    raise RuntimeError("bound err")
+                if self.method == "GetInventoryFromId":
+                    return FakeBoundProxyWithSideEffectingGetattr("N=888444:10023")
+                return "ok:" + str(self.method)
+
+        class FakeMoniker(object):
+            def __init__(self, svc_name, bound_obj=None):
+                self._Moniker__serviceName = svc_name
+                if bound_obj is not None:
+                    self._Moniker__boundObject = bound_obj
+
+            def Bind(self):
+                return FakeBoundProxyWithSideEffectingGetattr("N=888444:10022")
+
+            def MonikeredCall(self, call, *args, **kwargs):
+                meth = call[0]
+                if meth == "GetInventory":
+                    return FakeSlottedBoundProxy(b"N=888444:10024")
+                return "mon:" + str(meth)
+
+        class FakeCoreServiceCall(object):
+            def RemoteServiceCallWithoutTheStars(self, sess, nodeID, service, method, args=(), keywords=None):
+                if method == "MachoBindObject":
+                    return (FakeBoundProxyWithSideEffectingGetattr("N=888444:10084"), "sub")
+                return "ok:" + str(method)
+
+        class FakeRemoteSvcInner(object):
+            def __init__(self, svc):
+                self._svc = svc
+
+            def GetInventoryFromId(self, item_id, passive):
+                return FakeBoundProxyWithSideEffectingGetattr("N=888444:10023")
+
+        def raw_remote(name):
+            return FakeRemoteSvcInner(name)
+
+        sc_gpcs_mod.CoreServiceCall = FakeCoreServiceCall
+        mon_mod.Moniker = FakeMoniker
+        oc_mod.MachoObjectCallWrapper = FakeBoundObjectCallWrapper
+        carbon_net.ServiceCallGPCS = sc_gpcs_mod
+        carbon_net.moniker = mon_mod
+        carbon_net.ObjectCallGPCS = oc_mod
+
+        fake_mods = {
+            "carbon": carbon_mod,
+            "carbon.common": carbon_common,
+            "carbon.common.script": carbon_script,
+            "carbon.common.script.net": carbon_net,
+            "carbon.common.script.net.ServiceCallGPCS": sc_gpcs_mod,
+            "carbon.common.script.net.moniker": mon_mod,
+            "carbon.common.script.net.ObjectCallGPCS": oc_mod,
+        }
+        fake_sm = types.SimpleNamespace(RemoteSvc=raw_remote, ProxySvc=raw_remote)
+
+        with mock.patch.dict(sys.modules, fake_mods), \
+             mock.patch.object(hook, "_HOOKED_REMOTESVC", False), \
+             mock.patch.object(hook, "_HOOK_RELOAD_GEN", 1), \
+             mock.patch.object(hook, "_FLIGHT_RECORDER", []), \
+             mock.patch.object(hook, "_BOUND_OID_SERVICE_MAP", {}), \
+             mock.patch.object(hook, "_MACHO_CALL_TASKLET_DEPTH", {}):
+            hook._install_flight_recorder_hooks(fake_sm)
+
+            # 1) sm.RemoteSvc("invbroker").GetInventoryFromId returns remote proxy cleanly without triggering __getattr__
+            inv = fake_sm.RemoteSvc("invbroker").GetInventoryFromId(12345, 0)
+            self.assertEqual(object.__getattribute__(inv, "_getattr_calls"), [])
+            self.assertEqual(inv.MultiAdd([1, 2], 12345), "ok:MultiAdd")
+            self.assertEqual(object.__getattribute__(inv, "_getattr_calls"), ["MultiAdd"])
+
+            # 2) Moniker.Bind, Moniker.MonikeredCall (bytes slotted OID), and MachoBindObject tuple propagation
+            mon = FakeMoniker("invbroker")
+            mon.Bind()
+            bound_lvl1 = FakeBoundObjectCallWrapper("N=888444:10022", None, "GetInventoryFromId")
+            self.assertIsNotNone(bound_lvl1(12345, 0))
+            mon.MonikeredCall(("GetInventory", (1,)))
+            slotted_call = FakeBoundObjectCallWrapper("N=888444:10024", None, "StackAll")
+            self.assertEqual(slotted_call(), "ok:StackAll")
+
+            CoreSC = FakeCoreServiceCall()
+            CoreSC.RemoteServiceCallWithoutTheStars(None, 888444, "skillMgr2", "MachoBindObject")
+            skill_err_call = FakeBoundObjectCallWrapper("N=888444:10084", None, "SaveNewQueue", fail=True)
+            with self.assertRaises(RuntimeError):
+                skill_err_call()
+
+            # 3) Unmapped bound OID falls back to OID cleanly
+            unknown_call = FakeBoundObjectCallWrapper("N=888444:99999", None, "List")
+            self.assertEqual(unknown_call(), "ok:List")
+
+            recorded = [(r["service"], r["method"], r["status"]) for r in hook._FLIGHT_RECORDER]
+            self.assertEqual(
+                recorded,
+                [
+                    ("invbroker", "GetInventoryFromId", "OK"),
+                    ("invbroker", "MultiAdd", "OK"),
+                    ("invbroker", "GetInventoryFromId", "OK"),
+                    ("invbroker", "GetInventory", "OK"),
+                    ("invbroker", "StackAll", "OK"),
+                    ("skillMgr2", "MachoBindObject", "OK"),
+                    ("skillMgr2", "SaveNewQueue", "ERR"),
+                    ("N=888444:99999", "List", "OK"),
+                ],
+            )
+
     def test_settle_secondary_view_transition_waits_for_skinr_page_container_then_stabilizes(self):
         import types
 
