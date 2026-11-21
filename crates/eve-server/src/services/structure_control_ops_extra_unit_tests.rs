@@ -1090,16 +1090,19 @@ fn bf01_bf02_forced_fw_and_ship_sync_converge_across_direct_enlistment_leave_shi
 #[test]
 fn bf_r3_01_02_npc_and_dissolved_corp_reset_session_roles_and_block_stale_defense_acl() {
     let ctx = test_ctx();
-    let (char_id, npc_corp, corp_a, dissolved_corp, stale_ally, owner_corp, grp_id, sid) =
-        (90_888_001_i64, 1_000_009_i64, 98_888_001_i64, 98_888_777_i64, 99_888_001_i64, 98_888_999_i64, 7_701_i64, 1_000_891_900_i64);
+    let (char_id, excl_id, ceo_id, npc_corp, corp_a, dissolved_corp, stale_ally, owner_corp, grp_id, sid) =
+        (90_888_001_i64, 90_888_002_i64, 90_888_003_i64, 1_000_009_i64, 98_888_001_i64, 98_888_777_i64, 99_888_001_i64, 98_888_999_i64, 7_701_i64, 1_000_891_900_i64);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(corp_a, { let mut c = CorporationRecord::default(); (c.corporation_id, c.ceo_id, c.alliance_id, c.members) = (corp_a, char_id, Some(stale_ally), HashSet::from([char_id])); c });
-        let mut ch = snap.characters.values().next().cloned().expect("demo char");
-        (ch.character_id, ch.corporation_id, ch.alliance_id, ch.station_id, ch.structure_id, ch.active_ship_id) =
-            (char_id, npc_corp, Some(stale_ally), Some(60_003_760), None, 0);
-        snap.characters.insert(char_id, ch);
+        snap.corporations.insert(corp_a, { let mut c = CorporationRecord::default(); (c.corporation_id, c.ceo_id, c.alliance_id, c.members) = (corp_a, ceo_id, Some(stale_ally), HashSet::from([ceo_id, char_id])); c });
+        let base_ch = snap.characters.values().next().cloned().expect("demo char");
+        for (cid, corp) in [(char_id, npc_corp), (excl_id, corp_a)] {
+            let mut ch = base_ch.clone();
+            (ch.character_id, ch.corporation_id, ch.alliance_id, ch.station_id, ch.structure_id, ch.active_ship_id) =
+                (cid, corp, Some(stale_ally), Some(60_003_760), None, 0);
+            snap.characters.insert(cid, ch);
+        }
     });
-    // BF-R3-01: no split_fixture_ally bypass; always reset stale session.corp_role for NPC & dissolved corps (even when !corp_changed).
+    // BF-R3-01 / BF-T1B-01: reset stale corp_role & alliance_id for NPC, dissolved-corp, and excluded members.
     let mut sess = make_session(char_id, corp_a, 30_000_142, None, Some(60_003_760), eve_db::corp_roles::ROLE_DIRECTOR);
     sess.alliance_id = Some(stale_ally);
     sync_character_session(&ctx, &mut sess);
@@ -1108,21 +1111,31 @@ fn bf_r3_01_02_npc_and_dissolved_corp_reset_session_roles_and_block_stale_defens
     sync_character_session(&ctx, &mut sess);
     assert_eq!((sess.corporation_id, sess.alliance_id, sess.corp_role), (Some(npc_corp), None, 0));
     ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&char_id).unwrap().corporation_id = dissolved_corp; });
-    (sess.corporation_id, sess.corp_role) = (Some(dissolved_corp), eve_db::corp_roles::ROLE_DIRECTOR);
+    (sess.corporation_id, sess.alliance_id, sess.corp_role) = (Some(dissolved_corp), Some(stale_ally), eve_db::corp_roles::ROLE_DIRECTOR);
     sync_character_session(&ctx, &mut sess);
-    assert_eq!((sess.corporation_id, sess.corp_role), (Some(dissolved_corp), 0));
-    // BF-R3-02: NPC corp with stale ch.alliance_id is denied alliance defense ACL; corp_a member is allowed.
+    assert_eq!((sess.corporation_id, sess.alliance_id, sess.corp_role), (Some(dissolved_corp), None, 0));
+    let mut excl_sess = make_session(excl_id, corp_a, 30_000_142, None, Some(60_003_760), eve_db::corp_roles::ROLE_DIRECTOR);
+    excl_sess.alliance_id = Some(stale_ally);
+    sync_character_session(&ctx, &mut excl_sess);
+    assert_eq!((excl_sess.corporation_id, excl_sess.alliance_id, excl_sess.corp_role), (Some(corp_a), None, 0));
+    // BF-R3-02 / BF-T1B-01: NPC, dissolved-corp, and excluded pilots cannot match corp or alliance defense ACLs (character ACL still works).
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&char_id).unwrap().corporation_id = npc_corp;
         let mut ext = load_ext_state(snap);
-        ext.owner_groups.insert(grp_id, AccessGroupRecord { group_id: grp_id, creator_id: 90_000_001, owner_corp_id: owner_corp, name: "AllyDef".into(), description: String::new(), members: HashMap::from([(stale_ally, 1)]) });
+        ext.owner_groups.insert(grp_id, AccessGroupRecord { group_id: grp_id, creator_id: 90_000_001, owner_corp_id: owner_corp, name: "AllyCorpDef".into(), description: String::new(), members: HashMap::from([(stale_ally, 1), (corp_a, 1)]) });
         let mut prof = StructureAccessProfile { profile_id: 801, owner_corp_id: owner_corp, ..Default::default() };
         prof.defense_group_ids.insert(grp_id);
         let st = UpwellStructureRecord { structure_id: sid, owner_corp_id: owner_corp, ..Default::default() };
-        assert!(!super::super::has_defense_acl_permission(snap, &ext, Some(&prof), char_id).unwrap());
-        assert!(!super::super::has_defense_acl_permission_with_sde(snap, Some(&ctx.sde), &ext, Some(&prof), char_id).unwrap());
-        assert_eq!(super::super::verify_control_acl_or_role_with_profile_at(snap, &ext, &st, Some(&prof), char_id, 0).unwrap_err().code, "DefenseAccessDenied");
+        for corp in [dissolved_corp, npc_corp] {
+            snap.characters.get_mut(&char_id).unwrap().corporation_id = corp;
+            for denied_id in [char_id, excl_id] {
+                assert!(!super::super::has_defense_acl_permission_with_sde(snap, None, &ext, Some(&prof), denied_id).unwrap());
+                assert!(!super::super::has_defense_acl_permission_with_sde(snap, Some(&ctx.sde), &ext, Some(&prof), denied_id).unwrap());
+                assert_eq!(super::super::verify_control_acl_or_role_with_profile_at(snap, Some(&ctx.sde), &ext, &st, Some(&prof), denied_id, 0).unwrap_err().code, "DefenseAccessDenied");
+            }
+        }
         snap.characters.get_mut(&char_id).unwrap().corporation_id = corp_a;
         assert!(super::super::has_defense_acl_permission_with_sde(snap, Some(&ctx.sde), &ext, Some(&prof), char_id).unwrap());
+        prof.defense_allowed_characters.insert(excl_id);
+        assert!(super::super::has_defense_acl_permission_with_sde(snap, Some(&ctx.sde), &ext, Some(&prof), excl_id).unwrap());
     });
 }

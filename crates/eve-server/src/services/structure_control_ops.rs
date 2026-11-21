@@ -84,71 +84,48 @@ fn verify_control_acl_or_role_with_profile(
     prof_opt: Option<&ops::StructureAccessProfile>,
     char_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    verify_control_acl_or_role_with_profile_at(snap, ext, st, prof_opt, char_id, 0)
+    verify_control_acl_or_role_with_profile_at(snap, None, ext, st, prof_opt, char_id, 0)
 }
 
-fn resolve_defense_acl_alliance_id(
-    snap: &WorldStateSnapshot, sde_opt: Option<&eve_sde::SdeRegistry>,
-    caller_corp: i64, ch_opt: Option<&eve_db::CharacterRecord>,
-) -> i64 {
+fn resolve_verified_defense_acl_corp_and_alliance(
+    snap: &WorldStateSnapshot, sde_opt: Option<&eve_sde::SdeRegistry>, char_id: i64,
+) -> (i64, i64) {
     if let Some(sde) = sde_opt {
-        return eve_db::corp_actor::resolve_corp_alliance_id(snap, sde, caller_corp, ch_opt).unwrap_or(0);
+        let actor = eve_db::CorpActor::resolve(snap, sde, char_id, 0);
+        return if actor.is_player_corp_member() { (actor.corp_id, actor.alliance_id.unwrap_or(0)) } else { (0, 0) };
     }
-    if caller_corp <= 0 || (1_000_000..2_000_000).contains(&caller_corp) { return 0; }
-    let ally_fallback = || {
-        snap.alliances.values().find(|a| a.member_corp_ids.contains(&caller_corp)).map(|a| a.alliance_id)
-    };
-    if let Some(corp) = snap.corporations.get(&caller_corp) {
-        corp.alliance_id.or_else(ally_fallback).filter(|&id| id > 0).unwrap_or(0)
-    } else {
-        ch_opt.and_then(|c| (c.corporation_id == caller_corp).then_some(c.alliance_id).flatten())
-            .or_else(ally_fallback).filter(|&id| id > 0).unwrap_or(0)
-    }
-}
-
-fn has_defense_acl_permission(
-    snap: &WorldStateSnapshot,
-    ext: &ops::StructureExtendedState,
-    prof_opt: Option<&ops::StructureAccessProfile>,
-    char_id: i64,
-) -> Result<bool, BridgeRpcError> {
-    has_defense_acl_permission_with_sde(snap, None, ext, prof_opt, char_id)
+    let Some(ch) = snap.characters.get(&char_id) else { return (0, 0); };
+    let corp_id = ch.corporation_id;
+    if corp_id <= 0 || (1_000_000..2_000_000).contains(&corp_id) { return (0, 0); }
+    let Some(corp) = snap.corporations.get(&corp_id) else { return (0, 0); };
+    if eve_db::is_excluded_corp_member(corp, char_id) { return (0, 0); }
+    let ally = corp.alliance_id
+        .or_else(|| snap.alliances.values().find(|a| a.member_corp_ids.contains(&corp_id)).map(|a| a.alliance_id))
+        .filter(|&id| id > 0).unwrap_or(0);
+    (corp_id, ally)
 }
 
 fn has_defense_acl_permission_with_sde(
-    snap: &WorldStateSnapshot,
-    sde_opt: Option<&eve_sde::SdeRegistry>,
-    ext: &ops::StructureExtendedState,
-    prof_opt: Option<&ops::StructureAccessProfile>,
-    char_id: i64,
+    snap: &WorldStateSnapshot, sde_opt: Option<&eve_sde::SdeRegistry>, ext: &ops::StructureExtendedState,
+    prof_opt: Option<&ops::StructureAccessProfile>, char_id: i64,
 ) -> Result<bool, BridgeRpcError> {
-    let Some(p) = prof_opt else {
-        return Ok(false);
-    };
-    let ch_opt = snap.characters.get(&char_id);
-    let caller_corp = ch_opt.map(|c| c.corporation_id).unwrap_or(0);
-    let caller_ally = resolve_defense_acl_alliance_id(snap, sde_opt, caller_corp, ch_opt);
-    if p.blocked_characters.contains(&char_id)
-        || p.defense_blocked_characters.contains(&char_id)
-        || (caller_corp > 0 && p.blocked_corporations.contains(&caller_corp))
-        || (caller_ally > 0 && p.blocked_alliances.contains(&caller_ally))
+    let Some(p) = prof_opt else { return Ok(false); };
+    let raw_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+    let (verified_corp, verified_ally) = resolve_verified_defense_acl_corp_and_alliance(snap, sde_opt, char_id);
+    if p.blocked_characters.contains(&char_id) || p.defense_blocked_characters.contains(&char_id)
+        || (raw_corp > 0 && p.blocked_corporations.contains(&raw_corp))
+        || (verified_ally > 0 && p.blocked_alliances.contains(&verified_ally))
     {
-        return Err(err(
-            "DefenseAccessDenied",
-            format!("Character {char_id} (corp {caller_corp}, alliance {caller_ally}) is blocked by structure profile"),
-        ));
+        return Err(err("DefenseAccessDenied", format!("Character {char_id} (corp {raw_corp}, alliance {verified_ally}) is blocked by structure profile")));
     }
     use crate::services::structure_acl_defense_rules::{is_acl_role_allowed, is_acl_role_excluded};
     for &gid in &p.defense_group_ids {
         if let Some(grp) = ext.owner_groups.get(&gid) {
             if grp.members.get(&char_id).copied().is_some_and(is_acl_role_excluded)
-                || (caller_corp > 0 && grp.members.get(&caller_corp).copied().is_some_and(is_acl_role_excluded))
-                || (caller_ally > 0 && grp.members.get(&caller_ally).copied().is_some_and(is_acl_role_excluded))
+                || (raw_corp > 0 && grp.members.get(&raw_corp).copied().is_some_and(is_acl_role_excluded))
+                || (verified_ally > 0 && grp.members.get(&verified_ally).copied().is_some_and(is_acl_role_excluded))
             {
-                return Err(err(
-                    "DefenseAccessDenied",
-                    format!("Character {char_id} is blocked in defense access group {gid}"),
-                ));
+                return Err(err("DefenseAccessDenied", format!("Character {char_id} is blocked in defense access group {gid}")));
             }
         }
     }
@@ -157,21 +134,22 @@ fn has_defense_acl_permission_with_sde(
             ext.owner_groups.get(gid).is_some_and(|g| {
                 g.members.get(&0).copied().is_some_and(is_acl_role_allowed)
                     || g.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
-                    || (caller_corp > 0 && g.members.get(&caller_corp).copied().is_some_and(is_acl_role_allowed))
-                    || (caller_ally > 0 && g.members.get(&caller_ally).copied().is_some_and(is_acl_role_allowed))
+                    || (verified_corp > 0 && g.members.get(&verified_corp).copied().is_some_and(is_acl_role_allowed))
+                    || (verified_ally > 0 && g.members.get(&verified_ally).copied().is_some_and(is_acl_role_allowed))
             })
         }))
 }
 
 pub(crate) fn verify_control_acl_or_role_with_profile_at(
     snap: &WorldStateSnapshot,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
     ext: &ops::StructureExtendedState,
     st: &eve_db::UpwellStructureRecord,
     prof_opt: Option<&ops::StructureAccessProfile>,
     char_id: i64,
     now_unix: u64,
 ) -> Result<(), BridgeRpcError> {
-    if !has_defense_acl_permission(snap, ext, prof_opt, char_id)? {
+    if !has_defense_acl_permission_with_sde(snap, sde_opt, ext, prof_opt, char_id)? {
         let caller_corp = snap
             .characters
             .get(&char_id)

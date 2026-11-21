@@ -47,29 +47,18 @@ pub fn is_excluded_corp_member(corp: &CorporationRecord, char_id: i64) -> bool {
     corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id)
 }
 
-/// Resolves authoritative DB `alliance_id` for `corp_id`, treating `CorporationRecord` and `AllianceRecord`
-/// as authoritative over character-row `alliance_id` whenever the corporation record exists in `snap`.
+/// Resolves authoritative DB `alliance_id` for `corp_id` from existing corporation/alliance records.
 pub fn resolve_corp_alliance_id(
     snap: &WorldStateSnapshot,
     sde: &SdeRegistry,
     corp_id: i64,
-    ch: Option<&CharacterRecord>,
+    _ch: Option<&CharacterRecord>,
 ) -> Option<i64> {
     if is_npc_corporation(sde, corp_id) {
         return None;
     }
-    if let Some(corp) = snap.corporations.get(&corp_id) {
-        return corp
-            .alliance_id
-            .or_else(|| {
-                snap.alliances
-                    .values()
-                    .find(|a| a.member_corp_ids.contains(&corp_id))
-                    .map(|a| a.alliance_id)
-            })
-            .filter(|&id| id > 0);
-    }
-    ch.and_then(|c| (c.corporation_id == corp_id).then_some(c.alliance_id).flatten())
+    let corp = snap.corporations.get(&corp_id)?;
+    corp.alliance_id
         .or_else(|| {
             snap.alliances
                 .values()
@@ -332,7 +321,6 @@ impl CorpActor {
         let is_npc_corp = is_npc_corporation(sde, corp_id);
         let corp_opt = snap.corporations.get(&corp_id);
         let corp_exists = corp_opt.is_some();
-        let alliance_id = resolve_corp_alliance_id(snap, sde, corp_id, ch);
 
         if is_npc_corp {
             return Self {
@@ -344,7 +332,7 @@ impl CorpActor {
 
         let Some(corp) = corp_opt else {
             return Self {
-                char_id, char_in_db, corp_id, alliance_id, corp_exists: false, is_npc_corp: false,
+                char_id, char_in_db, corp_id, alliance_id: None, corp_exists: false, is_npc_corp: false,
                 is_member: false, is_excluded: false, is_ceo: false, effective_roles: 0,
             };
         };
@@ -356,6 +344,11 @@ impl CorpActor {
                 || !is_excluded
                     && (!corp.members.is_empty()
                         || ch.is_some_and(|c| c.corporation_id == corp_id)));
+        let alliance_id = if is_member && !is_excluded {
+            resolve_corp_alliance_id(snap, sde, corp_id, ch)
+        } else {
+            None
+        };
         let (is_ceo, effective_roles) = if is_member {
             evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, false, None, now_unix)
         } else {
