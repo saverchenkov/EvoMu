@@ -156,6 +156,7 @@ impl Drop for SessionCleanupGuard {
                 }
             }
         }
+        self.ctx.clear_session_scene_epoch(self.session_id);
     }
 }
 
@@ -213,6 +214,7 @@ impl ServerContext {
                     }
                 }
             }
+            self.clear_session_scene_epoch(session_id);
         }
         sent_to_live
     }
@@ -481,17 +483,17 @@ impl ServerContext {
         self.prune_notification_bound_ids_locked(&map);
     }
 
-    pub(super) fn make_bound_object_entry(
-        &self,
+    pub(super) fn make_bound_object_entry_at(
         session_id: u64,
         bound_id: u64,
         user_id: u64,
         char_id: i64,
         service: &str,
         object_id: i64,
+        now_unix: u64,
     ) -> BoundObjectEntry {
         let oid_str = format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID);
-        let ref_id = (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000);
+        let ref_id = (now_unix as i64 + 11_644_473_600).saturating_mul(10_000_000);
         BoundObjectEntry {
             bound_id,
             session_id,
@@ -502,6 +504,26 @@ impl ServerContext {
             oid_str,
             ref_id,
         }
+    }
+
+    pub(super) fn make_bound_object_entry(
+        &self,
+        session_id: u64,
+        bound_id: u64,
+        user_id: u64,
+        char_id: i64,
+        service: &str,
+        object_id: i64,
+    ) -> BoundObjectEntry {
+        Self::make_bound_object_entry_at(
+            session_id,
+            bound_id,
+            user_id,
+            char_id,
+            service,
+            object_id,
+            self.now_unix(),
+        )
     }
 
     fn notification_bound_ids_snapshot(&self) -> HashSet<u64> {

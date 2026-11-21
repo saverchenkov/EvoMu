@@ -11,7 +11,7 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 /// Retention window (`30s`, matching V24 `basesession.pyj::ObjectConnection.__del__ ->
 /// DisconnectObject(30)`) for in-flight late calls arriving during/right after a
@@ -389,6 +389,13 @@ struct TransitionDepartedLocation {
     departed_ticks: i64,
 }
 
+#[derive(Clone)]
+struct PreparedDepartedBinding {
+    entry: BoundObjectEntry,
+    retain_entry: bool,
+    departed_kind: Option<DepartedLocationKind>,
+}
+
 struct ContextGraceStore {
     owner: Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
     entries: HashMap<u64, TransitionDisconnectedBinding>,
@@ -438,11 +445,19 @@ impl Drop for ReconnectHoldGuard<'_> {
     }
 }
 
-static TRANSITION_DISCONNECT_GRACE: OnceLock<RwLock<HashMap<u64, ContextGraceStore>>> =
-    OnceLock::new();
+/// Leaf lock rank strictly above `RANK_WORLD_INNER` (40) and `RANK_LEAF` (60) — allowing
+/// callers holding `WorldRepository::inner` + `RANK_LEAF` locks (`cluster_tick` ->
+/// `combat_ephemeral`) to read `reconnect_hold_session` without same-rank inversion — and
+/// strictly below `RANK_CLOCK` (70), with zero inner locks acquired while held (`#1190`).
+const RANK_TRANSITION_GRACE: u16 = RANK_LEAF + 5;
 
-fn transition_disconnect_grace() -> &'static RwLock<HashMap<u64, ContextGraceStore>> {
-    TRANSITION_DISCONNECT_GRACE.get_or_init(|| RwLock::new(HashMap::new()))
+static TRANSITION_DISCONNECT_GRACE: OnceLock<
+    RankedRwLock<HashMap<u64, ContextGraceStore>, RANK_TRANSITION_GRACE>,
+> = OnceLock::new();
+
+fn transition_disconnect_grace(
+) -> &'static RankedRwLock<HashMap<u64, ContextGraceStore>, RANK_TRANSITION_GRACE> {
+    TRANSITION_DISCONNECT_GRACE.get_or_init(|| RankedRwLock::new(HashMap::new()))
 }
 
 fn current_scene_target_object_id(session: &SessionState, service: &str) -> Option<i64> {
@@ -722,11 +737,45 @@ impl ServerContext {
 
         let invalidated_bound_ids: Vec<u64> =
             removed_bindings.iter().map(|e| e.bound_id).collect();
-        let (loc_record, loc_purge) = if is_logout || is_login {
+        let (loc_record, loc_purge) = if is_logout || is_login || session_id == 0 {
             (Vec::new(), Vec::new())
         } else {
             Self::compute_departed_location_deltas(prev_sys, prev_dock, next_sys, next_dock)
         };
+        let prepared_bindings = if is_logout || is_login {
+            Vec::new()
+        } else {
+            self.prepare_departed_bindings(
+                &removed_bindings,
+                Some((session_id, session_id != 0 && can_record_departed)),
+            )
+        };
+
+        if session_id == 0 {
+            if is_logout || is_login {
+                self.with_existing_grace_store_mut_and_prune(|store| {
+                    store.entries.retain(|_, v| v.entry.character_id != char_id);
+                    store
+                        .departed_locations
+                        .retain(|_, v| v.character_id != char_id);
+                });
+            } else if !prepared_bindings.is_empty() {
+                self.with_grace_store_mut(now_ticks, |store| {
+                    let mut touched_sessions = Vec::new();
+                    Self::insert_departed_bindings_into_store(
+                        store,
+                        &prepared_bindings,
+                        None,
+                        now_ticks,
+                        &mut touched_sessions,
+                    );
+                    if !touched_sessions.is_empty() {
+                        Self::trim_store_session_caps(store, &touched_sessions);
+                    }
+                });
+            }
+            return 0;
+        }
 
         self.with_grace_store_mut(now_ticks, |store| {
             let departed_epoch = store.scene_epochs.get(&session_id).copied().unwrap_or(0);
@@ -768,10 +817,9 @@ impl ServerContext {
                     }
                 }
                 Self::insert_departed_bindings_into_store(
-                    self,
                     store,
-                    &removed_bindings,
-                    Some(departed_epoch),
+                    &prepared_bindings,
+                    Some((session_id, departed_epoch)),
                     now_ticks,
                     &mut touched_sessions,
                 );
@@ -953,23 +1001,62 @@ impl ServerContext {
         None
     }
 
-    fn insert_departed_bindings_into_store(
-        ctx: &ServerContext,
-        store: &mut ContextGraceStore,
+    fn prepare_departed_bindings(
+        &self,
         entries: &[BoundObjectEntry],
-        explicit_scene_epoch: Option<u64>,
+        transition_target: Option<(u64, bool)>,
+    ) -> Vec<PreparedDepartedBinding> {
+        let mut prepared = Vec::new();
+        for entry in entries {
+            if entry.session_id == 0 {
+                continue;
+            }
+            let retain_entry = policy_retains_departed_binding(&entry.service);
+            let departed_kind = self.departed_location_kind_for_entry(entry).filter(|_| {
+                match transition_target {
+                    Some((_, false)) => false,
+                    Some((target_sid, true)) if entry.session_id == target_sid => true,
+                    _ => self.has_matching_online_session_ids(
+                        entry.session_id,
+                        entry.user_id,
+                        entry.character_id,
+                    ),
+                }
+            });
+            if retain_entry || departed_kind.is_some() {
+                prepared.push(PreparedDepartedBinding {
+                    entry: entry.clone(),
+                    retain_entry,
+                    departed_kind,
+                });
+            }
+        }
+        prepared
+    }
+
+    fn insert_departed_bindings_into_store(
+        store: &mut ContextGraceStore,
+        prepared: &[PreparedDepartedBinding],
+        explicit_target: Option<(u64, u64)>,
         now_ticks: i64,
         touched_sessions: &mut Vec<u64>,
     ) {
-        for entry in entries {
-            let epoch = explicit_scene_epoch.unwrap_or_else(|| {
-                store
+        for item in prepared {
+            let entry = &item.entry;
+            if entry.session_id == 0 {
+                continue;
+            }
+            let epoch = match explicit_target {
+                Some((target_sid, departed_epoch)) if entry.session_id == target_sid => {
+                    departed_epoch
+                }
+                _ => store
                     .scene_epochs
                     .get(&entry.session_id)
                     .copied()
-                    .unwrap_or(0)
-            });
-            if policy_retains_departed_binding(&entry.service) {
+                    .unwrap_or(0),
+            };
+            if item.retain_entry {
                 if !touched_sessions.contains(&entry.session_id) {
                     touched_sessions.push(entry.session_id);
                 }
@@ -982,7 +1069,7 @@ impl ServerContext {
                     },
                 );
             }
-            if let Some(kind) = ctx.departed_location_kind_for_entry(entry) {
+            if let Some(kind) = item.departed_kind {
                 if !touched_sessions.contains(&entry.session_id) {
                     touched_sessions.push(entry.session_id);
                 }
@@ -1006,25 +1093,23 @@ impl ServerContext {
         if entries.is_empty() {
             return;
         }
-        let has_work = entries.iter().any(|e| {
-            policy_retains_departed_binding(&e.service)
-                || self.departed_location_kind_for_entry(e).is_some()
-        });
-        if !has_work {
+        let prepared = self.prepare_departed_bindings(entries, None);
+        if prepared.is_empty() {
             return;
         }
         let now_ticks = self.now_machonet_wallclock_filetime_ticks();
         self.with_grace_store_mut(now_ticks, |store| {
             let mut touched_sessions = Vec::new();
             Self::insert_departed_bindings_into_store(
-                self,
                 store,
-                entries,
+                &prepared,
                 None,
                 now_ticks,
                 &mut touched_sessions,
             );
-            Self::trim_store_session_caps(store, &touched_sessions);
+            if !touched_sessions.is_empty() {
+                Self::trim_store_session_caps(store, &touched_sessions);
+            }
         });
     }
 
@@ -1149,7 +1234,7 @@ impl ServerContext {
         record: &[(DepartedLocationKind, i64)],
         purge: &[(DepartedLocationKind, i64)],
     ) {
-        if record.is_empty() && purge.is_empty() {
+        if session.session_id == 0 || (record.is_empty() && purge.is_empty()) {
             return;
         }
         if record.is_empty() {
@@ -1183,6 +1268,49 @@ impl ServerContext {
                     .remove(&(session.session_id, kind, lid));
             }
             for &(kind, lid) in record {
+                let preserve_existing = store
+                    .departed_locations
+                    .get(&(session.session_id, kind, lid))
+                    .is_some_and(|existing| {
+                        Self::is_grace_ticks_active(existing.departed_ticks, now_ticks)
+                            && existing.user_id == uid
+                            && existing.character_id == cid
+                            && existing.scene_epoch < epoch
+                    });
+                if preserve_existing {
+                    continue;
+                }
+                if let Some(matching_rec) = store
+                    .epoch_records
+                    .get(&session.session_id)
+                    .and_then(|records| {
+                        records.iter().rev().find(|rec| {
+                            rec.entered_scene_epoch <= epoch
+                                && match kind {
+                                    DepartedLocationKind::SolarSystem => {
+                                        rec.departed_solar_system_id.map(i64::from) == Some(lid)
+                                    }
+                                    DepartedLocationKind::Dock => rec.departed_dock_id == Some(lid),
+                                }
+                        })
+                    })
+                {
+                    if Self::is_grace_ticks_active(matching_rec.recorded_ticks, now_ticks) {
+                        store.departed_locations.insert(
+                            (session.session_id, kind, lid),
+                            TransitionDepartedLocation {
+                                session_id: session.session_id,
+                                user_id: uid,
+                                character_id: cid,
+                                kind,
+                                location_id: lid,
+                                scene_epoch: matching_rec.departed_scene_epoch,
+                                departed_ticks: matching_rec.recorded_ticks,
+                            },
+                        );
+                    }
+                    continue;
+                }
                 store.departed_locations.insert(
                     (session.session_id, kind, lid),
                     TransitionDepartedLocation {
@@ -1232,39 +1360,42 @@ impl ServerContext {
         {
             return None;
         }
+        let now_unix = self.now_unix();
         let now_ticks = self.now_machonet_wallclock_filetime_ticks();
         self.with_grace_store_mut(now_ticks, |store| {
             let current_epoch = store.scene_epochs.get(&session.session_id).copied().unwrap_or(0);
-            let matching_epoch = rule.allowed_departed_kinds.iter().find_map(|&kind| {
-                store
-                    .departed_locations
-                    .get(&(session.session_id, kind, object_id))
-                    .filter(|departed| {
-                        Self::is_grace_ticks_active(departed.departed_ticks, now_ticks)
-                            && departed.session_id == session.session_id
-                            && departed.user_id == uid
-                            && departed.character_id == cid
-                            && departed.kind == kind
-                            && departed.location_id == object_id
-                            && departed.scene_epoch <= current_epoch
-                    })
-                    .map(|departed| departed.scene_epoch)
-            })?;
+            let (matching_epoch, departed_ticks) =
+                rule.allowed_departed_kinds.iter().find_map(|&kind| {
+                    store
+                        .departed_locations
+                        .get(&(session.session_id, kind, object_id))
+                        .filter(|departed| {
+                            Self::is_grace_ticks_active(departed.departed_ticks, now_ticks)
+                                && departed.session_id == session.session_id
+                                && departed.user_id == uid
+                                && departed.character_id == cid
+                                && departed.kind == kind
+                                && departed.location_id == object_id
+                                && departed.scene_epoch <= current_epoch
+                        })
+                        .map(|departed| (departed.scene_epoch, departed.departed_ticks))
+                })?;
             let bound_id = NEXT_BOUND_ID.fetch_add(1, Ordering::Relaxed);
-            let entry = self.make_bound_object_entry(
+            let entry = Self::make_bound_object_entry_at(
                 session.session_id,
                 bound_id,
                 uid,
                 cid,
                 service,
                 object_id,
+                now_unix,
             );
             store.entries.insert(
                 bound_id,
                 TransitionDisconnectedBinding {
                     entry,
                     scene_epoch: matching_epoch,
-                    disconnected_ticks: now_ticks,
+                    disconnected_ticks: departed_ticks,
                 },
             );
             Self::trim_store_session_caps(store, &[session.session_id]);

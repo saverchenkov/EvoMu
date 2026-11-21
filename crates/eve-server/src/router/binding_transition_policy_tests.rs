@@ -956,3 +956,465 @@ fn safe_logoff_teardown_grace_shares_declarative_late_call_policy_table() {
     );
     assert!(ctx.verify_bound_object(&sess, other_ship_bid).is_ok());
 }
+
+#[test]
+fn transition_grace_store_lock_order_matches_world_snapshot_under_concurrency() {
+    let ctx = Arc::new(test_ctx());
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let st_id = 60_003_760_i64;
+    let structure_id = 1_000_000_050_001_i64;
+    let jita_sys = 30_000_142_u32;
+    let perimeter_sys = 30_000_144_u32;
+    let ships = [980_210_001_i64, 980_210_002_i64, 980_210_003_i64];
+    seed_ships_for_policy_tests(&ctx, char_id, other_char, st_id, &ships, 980_210_004, 980_210_005);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = jita_sys;
+        }
+    });
+
+    let sid = 7_100_u64;
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(jita_sys);
+
+    // 1. Direct lock-rank check: holding WorldRepository::inner (40), combat_ephemeral (60),
+    //    or bound_objects (60) while reading TRANSITION_DISCONNECT_GRACE must not violate rank order.
+    {
+        let _guard = ReconnectHoldGuard::acquire(&ctx, char_id, sid);
+        ctx.db.with_mut_snapshot(|_| {
+            assert_eq!(ctx.reconnect_hold_session(char_id), Some(sid));
+        });
+        crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+            &ctx.db,
+            &*ctx.combat_ephemeral,
+            |_snap, _rt| {
+                assert_eq!(ctx.reconnect_hold_session(char_id), Some(sid));
+            },
+        );
+        let _bounds = ctx.bound_objects.read().unwrap();
+        assert_eq!(ctx.reconnect_hold_session(char_id), Some(sid));
+    }
+
+    // 2. Two-thread AB-BA stress test:
+    //    Thread A replicates `cluster_tick` / `disconnect_hold`: WorldRepository::inner (plus
+    //    `combat_ephemeral`) -> `reconnect_hold_session`.
+    //    Thread B replicates transition grace recording on non-station/Upwell/system bindings
+    //    that hit `departed_location_kind_for_entry` -> `WorldRepository::inner`.
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    std::thread::scope(|s| {
+        let ctx_a = Arc::clone(&ctx);
+        let b_a = Arc::clone(&barrier);
+        s.spawn(move || {
+            b_a.wait();
+            for iter in 0..120 {
+                let _hold_guard = ReconnectHoldGuard::acquire(&ctx_a, char_id, sid + (iter % 2) as u64);
+                ctx_a.db.with_mut_snapshot(|_| {
+                    let _ = ctx_a.reconnect_hold_session(char_id);
+                });
+                crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+                    &ctx_a.db,
+                    &*ctx_a.combat_ephemeral,
+                    |_snap, _rt| {
+                        let _ = ctx_a.reconnect_hold_session(char_id);
+                    },
+                );
+            }
+        });
+
+        let ctx_b = Arc::clone(&ctx);
+        let b_b = Arc::clone(&barrier);
+        s.spawn(move || {
+            b_b.wait();
+            for iter in 0..120_u64 {
+                let base_id = 50_000 + iter * 4;
+                let entries = vec![
+                    ctx_b.make_bound_object_entry(
+                        sid,
+                        base_id,
+                        user_id,
+                        char_id,
+                        "invbroker",
+                        ships[0],
+                    ),
+                    ctx_b.make_bound_object_entry(
+                        sid,
+                        base_id + 1,
+                        user_id,
+                        char_id,
+                        "crimewatch",
+                        i64::from(jita_sys),
+                    ),
+                    ctx_b.make_bound_object_entry(
+                        sid,
+                        base_id + 2,
+                        user_id,
+                        char_id,
+                        "beyonce",
+                        i64::from(jita_sys),
+                    ),
+                    ctx_b.make_bound_object_entry(
+                        sid,
+                        base_id + 3,
+                        user_id,
+                        char_id,
+                        "invbroker",
+                        structure_id,
+                    ),
+                ];
+                ctx_b.record_transition_grace_bindings(&entries);
+                let _ = ctx_b.record_atomic_session_transition(AtomicSceneTransitionRecord {
+                    session_id: sid,
+                    user_id: Some(user_id),
+                    char_id,
+                    kind_label: "jump_system",
+                    reason: "stargate_jump",
+                    is_logout: false,
+                    is_login: false,
+                    prev_sys: Some(jita_sys),
+                    prev_dock: None,
+                    next_sys: Some(perimeter_sys),
+                    next_dock: None,
+                    can_record_departed: true,
+                    removed_bindings: entries,
+                });
+            }
+        });
+    });
+
+    assert!(ctx.session_scene_epoch(sid) >= 120);
+    ctx.clear_session_scene_epoch(sid);
+    ctx.purge_transition_grace_for_session(sid);
+}
+
+#[test]
+fn cleanup_paths_and_offline_transitions_never_leak_epochs_or_cross_stamp_sessions() {
+    let ctx = Arc::new(test_ctx());
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let st_id = 60_003_760_i64;
+    let jita_sys = 30_000_142_u32;
+    let perimeter_sys = 30_000_144_u32;
+    let ships = [980_220_001_i64, 980_220_002_i64, 980_220_003_i64];
+    seed_ships_for_policy_tests(&ctx, char_id, other_char, st_id, &ships, 980_220_004, 980_220_005);
+
+    // 1. SessionCleanupGuard::drop clears `scene_epochs` & `epoch_records` while safe logoff
+    //    (`release_session_bindings`) keeps monotonicity beforehand.
+    let sid_guard = 7_201_u64;
+    ctx.db
+        .acquire_online_lock(user_id, sid_guard, Some(char_id), true, ctx.now_unix())
+        .expect("online lock for guard");
+    let mut sess_guard = SessionState::new(sid_guard);
+    sess_guard.user_id = Some(user_id);
+    sess_guard.character_id = Some(char_id);
+    sess_guard.solar_system_id = Some(jita_sys);
+    sess_guard.station_id = Some(st_id);
+    {
+        let _cleanup = crate::router::binding::SessionCleanupGuard::new(
+            Arc::clone(&ctx),
+            sid_guard,
+        );
+        let undock = SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::Undock {
+                solar_system_id: jita_sys,
+            },
+            "undock",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false);
+        let ep = ctx
+            .execute_session_transition_sync(Some(&mut sess_guard), undock)
+            .expect("undock transition")
+            .scene_epoch;
+        assert_eq!(ep, 1);
+        assert_eq!(ctx.session_scene_epoch(sid_guard), 1);
+        assert!(ctx.current_transition_epoch_record(sid_guard).is_some());
+    }
+    assert_eq!(ctx.session_scene_epoch(sid_guard), 0);
+    assert!(ctx.current_transition_epoch_record(sid_guard).is_none());
+
+    // 2. Headless `disconnect_session` (`!sent_to_live`) clears `scene_epochs` & `epoch_records`.
+    let sid_kick = 7_202_u64;
+    ctx.db
+        .acquire_online_lock(user_id, sid_kick, Some(char_id), true, ctx.now_unix())
+        .expect("online lock for kick");
+    let mut sess_kick = SessionState::new(sid_kick);
+    sess_kick.user_id = Some(user_id);
+    sess_kick.character_id = Some(char_id);
+    sess_kick.solar_system_id = Some(jita_sys);
+    sess_kick.station_id = Some(st_id);
+    let jump_spec = SessionTransitionSpec::for_kind(
+        char_id,
+        TransitionKind::JumpSystem {
+            solar_system_id: perimeter_sys,
+        },
+        "stargate_jump",
+    )
+    .with_emit_on_session_changed(false)
+    .with_sync_local_chat(false);
+    let ep_kick = ctx
+        .execute_session_transition_sync(Some(&mut sess_kick), jump_spec)
+        .expect("jump transition")
+        .scene_epoch;
+    assert_eq!(ep_kick, 1);
+    assert!(!ctx.disconnect_session(sid_kick, "TestKick", "forced"));
+    assert_eq!(ctx.session_scene_epoch(sid_kick), 0);
+    assert!(ctx.current_transition_epoch_record(sid_kick).is_none());
+
+    // 3. Offline transition (`session: None` and no online session -> `target_sid == 0`) must NEVER
+    //    mutate or leak `scene_epochs[0]` / `epoch_records[0]`.
+    let offline_spec = SessionTransitionSpec::for_kind(
+        char_id,
+        TransitionKind::DeathRespawn {
+            solar_system_id: jita_sys,
+            dock_id: Some((st_id, false)),
+            ship_id: ships[2],
+        },
+        "death_respawn",
+    )
+    .with_emit_on_session_changed(false)
+    .with_sync_local_chat(false);
+    let offline_res = ctx
+        .execute_session_transition_sync(None, offline_spec)
+        .expect("offline death respawn");
+    assert_eq!(offline_res.scene_epoch, 0);
+    assert_eq!(ctx.session_scene_epoch(0), 0);
+    assert!(ctx.current_transition_epoch_record(0).is_none());
+    ctx.read_context_grace_store(|s| {
+        if let Some(st) = s {
+            assert!(!st.scene_epochs.contains_key(&0));
+            assert!(!st.epoch_records.contains_key(&0));
+        }
+    });
+
+    // 4. Cross-session epoch stamping & `can_record_departed` gating in `insert_departed_bindings_into_store`:
+    //    Removing entries from `sid_other` during `sid_primary`'s transition must NOT stamp
+    //    `sid_primary`'s departed epoch onto `sid_other`'s entries, nor write `departed_locations`
+    //    when `can_record_departed == false` / offline.
+    let sid_primary = 7_203_u64;
+    let sid_other = 7_204_u64;
+    ctx.db
+        .acquire_online_lock(user_id, sid_primary, Some(char_id), true, ctx.now_unix())
+        .expect("online lock for primary");
+    let _ = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: sid_other,
+        user_id: Some(99),
+        char_id: other_char,
+        kind_label: "undock",
+        reason: "undock",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(jita_sys),
+        prev_dock: Some(st_id),
+        next_sys: Some(jita_sys),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    // Advance `sid_primary` cleanly to epoch 3 (`departed_epoch` for next transition = 3).
+    for _ in 0..3 {
+        let _ = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+            session_id: sid_primary,
+            user_id: Some(user_id),
+            char_id,
+            kind_label: "jump_system",
+            reason: "stargate_jump",
+            is_logout: false,
+            is_login: false,
+            prev_sys: Some(jita_sys),
+            prev_dock: None,
+            next_sys: Some(perimeter_sys),
+            next_dock: None,
+            can_record_departed: false,
+            removed_bindings: vec![],
+        });
+    }
+    let e_primary = ctx.make_bound_object_entry(sid_primary, 88_001, user_id, char_id, "invbroker", st_id);
+    let e_other = ctx.make_bound_object_entry(sid_other, 88_002, 99, other_char, "crimewatch", st_id);
+    let entered = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: sid_primary,
+        user_id: Some(user_id),
+        char_id,
+        kind_label: "undock",
+        reason: "undock",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(jita_sys),
+        prev_dock: Some(st_id),
+        next_sys: Some(jita_sys),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![e_primary, e_other],
+    });
+    assert_eq!(entered, 4);
+    ctx.read_context_grace_store(|s| {
+        let st = s.expect("grace store present");
+        assert_eq!(st.entries.get(&88_001).map(|b| b.scene_epoch), Some(3));
+        assert_eq!(st.entries.get(&88_002).map(|b| b.scene_epoch), Some(1));
+        assert!(!st.departed_locations.contains_key(&(sid_primary, DepartedLocationKind::Dock, st_id)));
+        assert!(!st.departed_locations.contains_key(&(sid_other, DepartedLocationKind::Dock, st_id)));
+    });
+    ctx.clear_session_scene_epoch(sid_primary);
+    ctx.clear_session_scene_epoch(sid_other);
+    ctx.purge_transition_grace_for_session(sid_primary);
+    ctx.purge_transition_grace_for_session(sid_other);
+}
+
+#[test]
+fn out_of_band_transition_followed_by_sync_session_preserves_departed_epoch_and_ttl() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let st_id = 60_003_760_i64;
+    let jita_sys = 30_000_142_u32;
+    let perimeter_sys = 30_000_144_u32;
+    let ships = [980_230_001_i64, 980_230_002_i64, 980_230_003_i64];
+    seed_ships_for_policy_tests(&ctx, char_id, other_char, st_id, &ships, 980_230_004, 980_230_005);
+
+    let sid = 7_301_u64;
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+    let mut prev_stale = SessionState::new(sid);
+    prev_stale.user_id = Some(user_id);
+    prev_stale.character_id = Some(char_id);
+    prev_stale.solar_system_id = Some(jita_sys);
+    prev_stale.station_id = Some(st_id);
+    prev_stale.ship_id = Some(ships[0]);
+
+    // First transition establishes epoch 1 (`CharacterLogin` -> 1).
+    let login_spec = SessionTransitionSpec::for_kind(
+        char_id,
+        TransitionKind::CharacterLogin {
+            solar_system_id: jita_sys,
+            dock_id: Some((st_id, false)),
+            ship_id: Some(ships[0]),
+        },
+        "login",
+    )
+    .with_emit_on_session_changed(false)
+    .with_sync_local_chat(false);
+    let ep_login = ctx
+        .execute_session_transition_sync(Some(&mut prev_stale), login_spec)
+        .expect("login transition")
+        .scene_epoch;
+    assert_eq!(ep_login, 1);
+
+    // Out-of-band `DeathRespawn` (`session: None`) moves online char `jita_sys / st_id -> perimeter_sys / space`,
+    // advancing `scene_epoch: 1 -> 2` and stamping departed location at `departed_epoch = 1` and `T0`.
+    let t0_ticks = ctx.now_machonet_wallclock_filetime_ticks();
+    let respawn_spec = SessionTransitionSpec::for_kind(
+        char_id,
+        TransitionKind::DeathRespawn {
+            solar_system_id: perimeter_sys,
+            dock_id: None,
+            ship_id: ships[2],
+        },
+        "death_respawn",
+    )
+    .with_emit_on_session_changed(false)
+    .with_sync_local_chat(false);
+    let res_oob = ctx
+        .execute_session_transition_sync(None, respawn_spec)
+        .expect("out-of-band death respawn");
+    assert_eq!(res_oob.scene_epoch, 2);
+
+    // Advance 12s, then run `sync_transition_grace_on_session_change(&prev_stale, &refreshed_next)`
+    // just like live TCP `sync_session` does after noticing DB location changed out-of-band.
+    ctx.advance_secs(12);
+    let mut refreshed_next = prev_stale.clone();
+    refreshed_next.solar_system_id = Some(perimeter_sys);
+    refreshed_next.station_id = None;
+    refreshed_next.ship_id = Some(ships[2]);
+    ctx.sync_transition_grace_on_session_change(&prev_stale, &refreshed_next);
+
+    // Departed dock & system must keep `scene_epoch == 1` (`< current_epoch == 2`) AND original `T0`.
+    ctx.read_context_grace_store(|s| {
+        let st = s.expect("grace store present");
+        let dep_dock = st
+            .departed_locations
+            .get(&(sid, DepartedLocationKind::Dock, st_id))
+            .expect("departed dock preserved");
+        assert_eq!(dep_dock.scene_epoch, 1);
+        assert_eq!(dep_dock.departed_ticks, t0_ticks);
+        let dep_sys = st
+            .departed_locations
+            .get(&(sid, DepartedLocationKind::SolarSystem, i64::from(jita_sys)))
+            .expect("departed system preserved");
+        assert_eq!(dep_sys.scene_epoch, 1);
+        assert_eq!(dep_sys.departed_ticks, t0_ticks);
+    });
+
+    // Late bind + epoch-pinned resolution must succeed with strict `departed_epoch (1) < current_epoch (2)`.
+    let kw = HashMap::new();
+    let grace_bid = ctx
+        .allocate_late_call_grace_binding(
+            &refreshed_next,
+            "crimewatch",
+            i64::from(jita_sys),
+            "GetClientStates",
+            &[],
+            &kw,
+        )
+        .expect("late grace binding allocated at departed epoch 1");
+    assert!(matches!(
+        ctx.resolve_late_call_for_epoch(
+            &refreshed_next,
+            grace_bid,
+            1,
+            "GetClientStates",
+            &[],
+            &kw
+        ),
+        LateCallResolution::DispatchWithBinding(_)
+    ));
+
+    // Advance 19s more (`T0 + 31s` total, only 19s since `sync_session` at `T0 + 12s`): grace MUST expire!
+    ctx.advance_secs(19);
+    assert!(matches!(
+        ctx.resolve_late_call_for_epoch(
+            &refreshed_next,
+            grace_bid,
+            1,
+            "GetClientStates",
+            &[],
+            &kw
+        ),
+        LateCallResolution::RejectStale
+    ));
+    assert!(ctx
+        .allocate_late_call_grace_binding(
+            &refreshed_next,
+            "crimewatch",
+            i64::from(jita_sys),
+            "GetClientStates",
+            &[],
+            &kw,
+        )
+        .is_none());
+
+    // Even a belated duplicate `sync_session` after expiry must NOT resurrect expired grace.
+    ctx.advance_secs(5);
+    ctx.sync_transition_grace_on_session_change(&prev_stale, &refreshed_next);
+    assert!(ctx
+        .allocate_late_call_grace_binding(
+            &refreshed_next,
+            "crimewatch",
+            i64::from(jita_sys),
+            "GetClientStates",
+            &[],
+            &kw,
+        )
+        .is_none());
+}
