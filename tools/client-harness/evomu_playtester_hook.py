@@ -1527,6 +1527,21 @@ def _auto_position_structure_deployment(w):
         _clear_py2_exc()
 
 
+def _is_effectively_opaque(node, root=None, max_depth=24):
+    """Return False when node or an ancestor up to root has faded opacity <= 0.01."""
+    cur = node
+    for _ in range(max_depth):
+        if cur is None:
+            return True
+        op = getattr(cur, "opacity", None)
+        if isinstance(op, (int, float)) and not isinstance(op, bool) and float(op) <= 0.01:
+            return False
+        if root is not None and cur is root:
+            return True
+        cur = getattr(cur, "parent", None)
+    return True
+
+
 def _inspect_window_content(w):
     """Inspect bounded visible tabs, rows, loading indicators, and sample text labels inside a window."""
     summary = {
@@ -1564,7 +1579,10 @@ def _inspect_window_content(w):
         visited += 1
         nname = _safe_str(getattr(node, "name", ""), 64).lower()
         cls_l = cls_n.lower()
-        if "loadingwheel" in cls_l or nname in ("loading", "loadingwheel", "loadingindicator", "busyindicator"):
+        if (
+            "loadingwheel" in cls_l
+            or nname in ("loading", "loadingwheel", "loadingindicator", "busyindicator")
+        ) and _is_effectively_opaque(node, w):
             summary["has_loading"] = True
         if hasattr(node, "GetNodes"):
             try:
@@ -1587,7 +1605,8 @@ def _inspect_window_content(w):
             low_txt = clean_txt.lower()
             if clean_txt:
                 if low_txt in ("loading", "loading...", "please wait", "loading data..."):
-                    summary["has_loading"] = True
+                    if _is_effectively_opaque(node, w):
+                        summary["has_loading"] = True
                 elif any(err_k in low_txt for err_k in ("error loading", "failed to load", "unable to load", "unexpected error")):
                     summary["has_error"] = True
                 elif low_txt != wcap and low_txt not in ("x", "?", "-", "_"):
@@ -3841,6 +3860,7 @@ def _get_state_snapshot(sm):
         space_info["in_space"] = True
         space_info["ego"] = _sample_ego_warp_state(sm)
         nearby = []
+        slims_by_id = {}
         try:
             michelle = getattr(sm, "services", {}).get("michelle")
             bp = michelle.GetBallpark() if michelle is not None else None
@@ -3859,6 +3879,7 @@ def _get_state_snapshot(sm):
                         pass
                 slims = getattr(bp, "slimItems", {}) or {}
                 for bid, slim in list(slims.items()):
+                    slims_by_id[int(bid)] = slim
                     if int(bid) == int(sid):
                         continue
                     b = bp.GetBall(bid)
@@ -3909,6 +3930,11 @@ def _get_state_snapshot(sm):
                 space_info["selected_item"] = dict(sel_ball) if sel_ball is not None else {"item_id": sel_id_i}
             except Exception:
                 pass
+        nearby_by_id = {
+            int(_nb["item_id"]): _nb
+            for _nb in nearby
+            if _nb.get("item_id") is not None
+        }
         overview_entries = []
         try:
             uc_ov = _get_uicore()
@@ -3926,25 +3952,58 @@ def _get_state_snapshot(sm):
                         slim_ov = getattr(nd, "slimItem", None) or getattr(nd, "ball", None)
                         if bid_ov is None and slim_ov is not None:
                             bid_ov = getattr(slim_ov, "itemID", None)
-                        gid_ov = int(getattr(slim_ov, "groupID", 0) or 0) if slim_ov is not None else 0
-                        cid_ov = int(getattr(slim_ov, "categoryID", 0) or 0) if slim_ov is not None else 0
-                        name_ov = _strip_tags(_safe_str(getattr(nd, "label", "") or getattr(nd, "name", "") or _resolve_ball_name(slim_ov, bid_ov), 64))
+                        bid_int = int(bid_ov) if bid_ov is not None else None
+                        if slim_ov is None and bid_int is not None:
+                            slim_ov = slims_by_id.get(bid_int)
+                        nb_ov = nearby_by_id.get(bid_int) if bid_int is not None else None
+                        gid_ov = int(
+                            (getattr(slim_ov, "groupID", 0) if slim_ov is not None else 0)
+                            or getattr(nd, "groupID", 0)
+                            or (nb_ov.get("group_id") if nb_ov else 0)
+                            or 0
+                        )
+                        cid_ov = int(
+                            (getattr(slim_ov, "categoryID", 0) if slim_ov is not None else 0)
+                            or getattr(nd, "categoryID", 0)
+                            or (nb_ov.get("category_id") if nb_ov else 0)
+                            or 0
+                        )
+                        name_ov = _strip_tags(
+                            _safe_str(
+                                getattr(nd, "label", "")
+                                or getattr(nd, "name", "")
+                                or (nb_ov.get("name") if nb_ov else "")
+                                or _resolve_ball_name(slim_ov, bid_ov),
+                                64,
+                            )
+                        )
                         dist_ov = getattr(nd, "distance", None)
+                        if not isinstance(dist_ov, (int, float)) or isinstance(dist_ov, bool):
+                            dist_ov = getattr(nd, "rawDistance", None)
+                        if not isinstance(dist_ov, (int, float)) or isinstance(dist_ov, bool):
+                            dist_ov = getattr(nd, "surfaceDist", None)
+                        if (not isinstance(dist_ov, (int, float)) or isinstance(dist_ov, bool)) and nb_ov is not None:
+                            dist_ov = nb_ov.get("distance_m")
                         if bid_ov is not None or name_ov:
                             overview_entries.append({
-                                "item_id": int(bid_ov) if bid_ov is not None else None,
+                                "item_id": bid_int,
                                 "name": name_ov,
                                 "group_id": gid_ov,
                                 "category_id": cid_ov,
-                                "distance_m": round(float(dist_ov), 1) if isinstance(dist_ov, (int, float)) else None,
+                                "distance_m": (
+                                    round(float(dist_ov), 1)
+                                    if isinstance(dist_ov, (int, float)) and not isinstance(dist_ov, bool)
+                                    else None
+                                ),
                             })
         except Exception:
             pass
         space_info["overview_entries"] = overview_entries[:30]
         space_info["overview_count"] = len(overview_entries)
+        resolved_overview = [b for b in overview_entries if int(b.get("group_id") or 0) > 0]
         space_info["celestials_in_overview"] = any(
             int(b.get("group_id") or 0) in (6, 7, 8, 9, 10, 15)
-            for b in (overview_entries or nearby)
+            for b in (resolved_overview or nearby)
         )
 
     new_flights = [e for e in _FLIGHT_RECORDER if e["seq"] > _LAST_OBSERVED_SEQ]

@@ -103,9 +103,22 @@ def _find_hangar_item(sm, station_id, type_id, exclude_id=0, min_qty=1, reverse=
         if int(_get_field(it, "typeID", 0)) != int(type_id):
             continue
         iid = int(_get_field(it, "itemID", 0))
-        qty = int(_get_field(it, "quantity", 1) or 1)
         if exclude_id and iid == int(exclude_id):
             continue
+        raw_qty = _get_field(it, "quantity", None)
+        raw_stack = _get_field(it, "stacksize", None)
+        singleton = int(_get_field(it, "singleton", 0) or 0)
+        if raw_qty is None:
+            qty = int(raw_stack) if raw_stack is not None else 1
+        else:
+            qty = int(raw_qty)
+        if qty < 0:
+            # invbroker.List() encodes singleton items with quantity == -1 (EVE convention).
+            qty = (
+                max(1, int(raw_stack or 1))
+                if (singleton != 0 or raw_stack is None or int(raw_stack or 0) > 0)
+                else 0
+            )
         if qty >= int(min_qty):
             return iid, it
     return 0, None

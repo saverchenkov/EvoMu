@@ -5871,6 +5871,136 @@ class TestStargateTargetResolution(unittest.TestCase):
                 self.assertTrue(res_ov.get("ok"), res_ov)
                 self.assertEqual(res_ov.get("selected_item_id"), 50017730)
 
+    def test_inspect_window_content_ignores_faded_out_loading_wheel(self):
+        hook = _load_hook_with_py2_stubs()
+
+        class _LoadingWheel:
+            def __init__(self, opacity=1.0, parent=None):
+                self.name = "loadingWheel"
+                self.display = True
+                self.state = 1  # UI_DISABLED (as used by CarbonUI LoadingWheel)
+                self.destroyed = False
+                self.opacity = opacity
+                self.parent = parent
+                self.children = []
+
+        class _MarketTicker:
+            def __init__(self, wheel_opacity=0.0, parent=None, self_opacity=1.0):
+                self.name = "MarketTicker"
+                self.display = True
+                self.state = 0
+                self.destroyed = False
+                self.opacity = self_opacity
+                self.parent = parent
+                self.children = [_LoadingWheel(opacity=wheel_opacity, parent=self)]
+
+        class _Label:
+            def __init__(self, text, parent=None):
+                self.name = "TickerMsg"
+                self.display = True
+                self.state = 0
+                self.destroyed = False
+                self.text = text
+                self.parent = parent
+                self.children = []
+
+        class _RegionalMarket:
+            def __init__(self, ticker):
+                self.name = "market"
+                self.caption = "The Forge Regional Market"
+                self.display = True
+                self.state = 0
+                self.destroyed = False
+                self.loading = False
+                self.parent = None
+                self.children = [ticker, _Label("Best price in Region is: 100 ISK", parent=self)]
+                ticker.parent = self
+
+        faded_wnd = _RegionalMarket(_MarketTicker(wheel_opacity=0.0))
+        faded_summary = hook._inspect_window_content(faded_wnd)
+        self.assertFalse(faded_summary["has_loading"])
+        self.assertGreaterEqual(faded_summary["populated_count"], 1)
+
+        faded_parent_wnd = _RegionalMarket(_MarketTicker(wheel_opacity=1.0, self_opacity=0.0))
+        self.assertFalse(hook._inspect_window_content(faded_parent_wnd)["has_loading"])
+
+        active_wnd = _RegionalMarket(_MarketTicker(wheel_opacity=1.0))
+        self.assertTrue(hook._inspect_window_content(active_wnd)["has_loading"])
+
+    def test_collect_ui_state_resolves_v24_overview_nodes_from_ballpark_and_nearby_fallback(self):
+        hook = _load_hook_with_py2_stubs()
+
+        class _OverviewWnd:
+            def __init__(self, nodes):
+                self.name = "overview"
+                self.windowID = "overview"
+                self.caption = "Overview"
+                self.display = True
+                self.state = 0
+                self.destroyed = False
+                self.scroll = types.SimpleNamespace(GetNodes=lambda: nodes)
+                self.children = []
+
+        def _collect_with(nodes, slim_items):
+            ov_wnd = _OverviewWnd(nodes)
+            bp = types.SimpleNamespace(
+                slimItems=slim_items,
+                GetBall=lambda bid: types.SimpleNamespace(surfaceDist=1000.0 + float(int(bid) % 500), mode=2),
+                GetSurfaceDist=lambda _sid, bid: 1000.0 + float(int(bid) % 500),
+            )
+            sess = types.SimpleNamespace(
+                userid=1, charid=90000001, corpid=1000170,
+                regionid=10000002, constellationid=20000020,
+                solarsystemid=30000142, solarsystemid2=30000142,
+                stationid=None, structureid=None, shipid=100000001, mutating=0,
+            )
+            fake_sm = types.SimpleNamespace(
+                services={"michelle": types.SimpleNamespace(GetBallpark=lambda: bp)},
+                GetService=lambda _n: None,
+            )
+            fake_uicore = types.SimpleNamespace(
+                desktop=None,
+                registry=types.SimpleNamespace(GetWindows=lambda: [ov_wnd]),
+                layer=None,
+            )
+            with (
+                mock.patch.object(hook.__builtin__, "session", sess, create=True),
+                mock.patch.object(hook, "_get_uicore", return_value=fake_uicore),
+                mock.patch.object(hook, "_ensure_windowed_mode"),
+                mock.patch.object(hook, "_install_flight_recorder_hooks"),
+                mock.patch.object(hook, "_install_warp_telemetry"),
+            ):
+                return hook._get_state_snapshot(fake_sm)
+
+        slims_celestials = {
+            40009076: types.SimpleNamespace(itemID=40009076, typeID=45041, groupID=6, categoryID=2, name="Jita - Star"),
+            60003760: types.SimpleNamespace(itemID=60003760, typeID=1529, groupID=15, categoryID=3, name="Jita IV - Moon 4"),
+        }
+        # V24 overview nodes without .slimItem / .ball / .distance resolve via bp.slimItems & nearby distances.
+        nodes_v24 = [
+            types.SimpleNamespace(itemID=40009076, label="Jita - Star"),
+            types.SimpleNamespace(itemID=60003760, label="Jita IV - Moon 4"),
+        ]
+        st_resolved = _collect_with(nodes_v24, slims_celestials)
+        ov_items = {e["item_id"]: e for e in st_resolved["space"]["overview_entries"]}
+        self.assertEqual(ov_items[40009076]["group_id"], 6)
+        self.assertEqual(ov_items[40009076]["category_id"], 2)
+        self.assertIsNotNone(ov_items[40009076]["distance_m"])
+        self.assertTrue(st_resolved["space"]["celestials_in_overview"])
+
+        # Unresolved overview nodes (group_id=0, e.g. missing from slimItems) do not mask nearby celestials.
+        nodes_unresolved = [types.SimpleNamespace(itemID=999999, label="Unknown Object")]
+        st_fallback = _collect_with(nodes_unresolved, slims_celestials)
+        self.assertEqual(st_fallback["space"]["overview_entries"][0]["group_id"], 0)
+        self.assertTrue(st_fallback["space"]["celestials_in_overview"])
+
+        # Resolved non-celestial overview nodes still enforce tab filter (celestials_in_overview=False).
+        slims_plus_frigate = dict(slims_celestials)
+        slims_plus_frigate[100009999] = types.SimpleNamespace(itemID=100009999, typeID=587, groupID=25, categoryID=6, name="Rifter")
+        nodes_pvp_only = [types.SimpleNamespace(itemID=100009999, label="Rifter")]
+        st_filtered = _collect_with(nodes_pvp_only, slims_plus_frigate)
+        self.assertFalse(st_filtered["space"]["celestials_in_overview"])
+
 
 if __name__ == "__main__":
     unittest.main()
