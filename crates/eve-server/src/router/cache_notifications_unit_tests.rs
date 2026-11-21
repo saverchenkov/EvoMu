@@ -1700,3 +1700,60 @@ fn item_compare_handles_on_multiple_item_change_without_double_counting_and_writ
     );
     let _ = std::fs::remove_file(&report_path);
 }
+
+#[tokio::test]
+async fn item_compare_tracks_dispatch_tick_and_neither_scopes() {
+    use crate::router::delta_item_compare::*;
+    let report_path = std::env::temp_dir().join(format!("evomu_scope_{}_{:?}.ndjson", std::process::id(), std::thread::current().id()));
+    let _ = std::fs::remove_file(&report_path);
+    let ctx = test_ctx();
+    set_item_compare_override_for_test(&ctx, Some(true), Some(Some(report_path.clone())));
+    let (pilot_id, station_id) = (90_000_001_i64, 60_003_760_i64);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+    ctx.db.acquire_online_lock(uid, 9_305, Some(pilot_id), true, 1_700_000_500).expect("lock");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    let mk = |item_id, type_id, bp| eve_db::InventoryItemRecord {
+        item_id, type_id, owner_id: pilot_id, location_id: station_id, quantity: 1, version: 1,
+        flag: eve_db::InventoryFlag::Hangar, singleton: bp, is_blueprint_copy: bp,
+        blueprint_runs_remaining: bp.then_some(5), ..Default::default()
+    };
+    let chg = || vec![(3, PyRep::Integer(0))];
+    ctx.db.with_mut_snapshot(|s| { s.items.insert(991_500_001, mk(991_500_001, 34, false)); });
+    ctx.emit_item_change_routed(pilot_id, &mk(991_500_002, 34, false), chg());
+    with_compare_tick_scope(async {
+        let bp = mk(991_500_003, *ctx.sde.blueprints.keys().next().expect("bp"), true);
+        ctx.db.with_mut_snapshot(|s| { s.items.insert(bp.item_id, bp.clone()); });
+        ctx.notify_item_mutation(pilot_id, None, Some(&bp));
+    }).await;
+    {
+        let _g = enter_compare_tick_sync_scope(Some(&ctx.db));
+        let fx = mk(991_500_004, 34, false);
+        let row = crate::router::delta_projection::build_inv_item_dbrow(&fx, &ctx.sde, "");
+        ctx.db.tx("tick_fx", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(991_500_008, mk(991_500_008, 34, false));
+            tx.snap.items.insert(fx.item_id, fx.clone());
+            tx.effects.notify_character(pilot_id, "OnItemChange", "charid", vec![row.clone(), PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])]);
+            Ok(())
+        }).expect("tx");
+    }
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        with_compare_tick_scope(async {
+            let d1 = mk(991_500_005, 34, false);
+            ctx.db.with_mut_snapshot(|s| { s.items.insert(d1.item_id, d1.clone()); });
+            ctx.emit_item_change_routed(pilot_id, &d1, chg());
+            ctx.db.with_mut_snapshot(|s| { s.items.insert(991_500_006, mk(991_500_006, 34, false)); });
+            ctx.emit_item_change_routed(pilot_id, &mk(991_500_007, 34, false), chg());
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        }).await;
+    }).await;
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    log_item_compare_summary(&ctx);
+    let sum = flush_item_compare_summary(&ctx);
+    let s = &sum.item_change.by_scope;
+    assert_eq!(((s.dispatch.matched, s.dispatch.projected_only, s.dispatch.hand_written_only), (s.tick.matched, s.tick.projected_only, s.tick.hand_written_only), (s.neither.matched, s.neither.projected_only, s.neither.hand_written_only)), ((1, 1, 1), (1, 1, 0), (0, 1, 1)));
+    assert_eq!((sum.blueprints_updated.by_scope.tick.matched, sum.explicit_in_tx_effects_by_scope.tick), (1, 1));
+    let p: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&report_path).expect("ndjson").lines().next().expect("line")).expect("json");
+    let _ = std::fs::remove_file(&report_path);
+    let nd = &p["item_change"]["by_scope"];
+    assert_eq!((nd["dispatch"]["matched"].as_u64(), nd["tick"]["projected_only"].as_u64(), nd["neither"]["hand_written_only"].as_u64(), p["explicit_in_tx_effects_by_scope"]["tick"].as_u64()), (Some(1), Some(1), Some(1), Some(1)));
+}

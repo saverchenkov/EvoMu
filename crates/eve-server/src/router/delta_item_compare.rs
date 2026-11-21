@@ -59,6 +59,45 @@ fn env_report_path() -> Option<PathBuf> {
     })
 }
 
+/// Execution context where a projected commit or hand-written notify occurred (`#931` Track 2.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompareOriginScope {
+    Dispatch,
+    Tick,
+    Neither,
+}
+
+/// Three-way execution-scope breakdown (`dispatch`, `tick`, `neither`) (`#931` Track 2.5).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ItemCompareByScope<T> {
+    pub dispatch: T,
+    pub tick: T,
+    pub neither: T,
+}
+
+impl<T> ItemCompareByScope<T> {
+    fn get_mut(&mut self, scope: CompareOriginScope) -> &mut T {
+        match scope {
+            CompareOriginScope::Dispatch => &mut self.dispatch,
+            CompareOriginScope::Tick => &mut self.tick,
+            CompareOriginScope::Neither => &mut self.neither,
+        }
+    }
+}
+
+/// Compare counts for one [`CompareOriginScope`] bucket (`#931` Track 2.5).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ItemCompareScopeCounts {
+    pub matched: u64,
+    pub hand_written_only: u64,
+    pub projected_only: u64,
+    pub pending: usize,
+    pub by_helper: BTreeMap<String, HelperCompareCounts>,
+    pub sample_projected_only: Vec<String>,
+    pub sample_hand_written_only: Vec<String>,
+}
+
 /// Per-helper compare counts (`matched`, `hand_written_only`, `projected_only`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HelperCompareCounts {
@@ -77,6 +116,7 @@ pub struct ItemCompareEventSummary {
     pub by_helper: BTreeMap<String, HelperCompareCounts>,
     pub sample_projected_only: Vec<String>,
     pub sample_hand_written_only: Vec<String>,
+    pub by_scope: ItemCompareByScope<ItemCompareScopeCounts>,
 }
 
 /// Combined compare-only diagnostics for `#931` Track 2 (`OnItemChange` & `OnBlueprintsUpdated`).
@@ -85,6 +125,7 @@ pub struct ItemCompareSummary {
     pub item_change: ItemCompareEventSummary,
     pub blueprints_updated: ItemCompareEventSummary,
     pub explicit_in_tx_effects: u64,
+    pub explicit_in_tx_effects_by_scope: ItemCompareByScope<u64>,
 }
 
 impl ItemCompareSummary {
@@ -106,6 +147,7 @@ struct ItemCompareNdjsonRecord {
     item_change: ItemCompareEventSummary,
     blueprints_updated: ItemCompareEventSummary,
     explicit_in_tx_effects: u64,
+    explicit_in_tx_effects_by_scope: ItemCompareByScope<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -155,8 +197,8 @@ impl CompareCounters {
         }
     }
 
-    fn to_summary(&self, pending: usize) -> ItemCompareEventSummary {
-        ItemCompareEventSummary {
+    fn to_scope_counts(&self, pending: usize) -> ItemCompareScopeCounts {
+        ItemCompareScopeCounts {
             matched: self.matched,
             hand_written_only: self.hand_written_only,
             projected_only: self.projected_only,
@@ -166,6 +208,48 @@ impl CompareCounters {
             sample_hand_written_only: self.sample_hand_written_only.clone(),
         }
     }
+}
+
+impl ItemCompareByScope<CompareCounters> {
+    fn to_summary(&self, pending: ItemCompareByScope<usize>) -> ItemCompareEventSummary {
+        let mut total = CompareCounters::default();
+        let push_samples = |dst: &mut Vec<String>, src: &[String]| {
+            dst.extend(src.iter().take(MAX_COMPARE_SAMPLES.saturating_sub(dst.len())).cloned());
+        };
+        for sc in [&self.dispatch, &self.tick, &self.neither] {
+            total.matched += sc.matched;
+            total.hand_written_only += sc.hand_written_only;
+            total.projected_only += sc.projected_only;
+            for (k, v) in &sc.by_helper {
+                let d = total.by_helper.entry(k.clone()).or_default();
+                d.matched += v.matched;
+                d.hand_written_only += v.hand_written_only;
+                d.projected_only += v.projected_only;
+            }
+            push_samples(&mut total.sample_projected_only, &sc.sample_projected_only);
+            push_samples(&mut total.sample_hand_written_only, &sc.sample_hand_written_only);
+        }
+        ItemCompareEventSummary {
+            matched: total.matched,
+            hand_written_only: total.hand_written_only,
+            projected_only: total.projected_only,
+            pending: pending.dispatch + pending.tick + pending.neither,
+            by_helper: total.by_helper,
+            sample_projected_only: total.sample_projected_only,
+            sample_hand_written_only: total.sample_hand_written_only,
+            by_scope: ItemCompareByScope {
+                dispatch: self.dispatch.to_scope_counts(pending.dispatch),
+                tick: self.tick.to_scope_counts(pending.tick),
+                neither: self.neither.to_scope_counts(pending.neither),
+            },
+        }
+    }
+}
+
+fn pending_counts_by_scope<T>(q: &VecDeque<T>, f: impl Fn(&T) -> CompareOriginScope) -> ItemCompareByScope<usize> {
+    let mut out = ItemCompareByScope::default();
+    q.iter().for_each(|entry| *out.get_mut(f(entry)) += 1);
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +280,7 @@ struct PendingItemCompare {
     char_id: i64,
     id_type: &'static str,
     fields: ItemChangeFields,
+    scope: CompareOriginScope,
     mismatched_helper: Option<String>,
 }
 
@@ -203,6 +288,7 @@ struct PendingItemCompare {
 struct PendingBlueprintCompare {
     char_id: i64,
     owner_id: i64,
+    scope: CompareOriginScope,
     mismatched_helper: Option<String>,
 }
 
@@ -318,13 +404,15 @@ impl TxItemEffectKeys {
 struct ItemCompareLedger {
     pending_items: VecDeque<PendingItemCompare>,
     pending_bps: VecDeque<PendingBlueprintCompare>,
-    item_counts: CompareCounters,
-    bp_counts: CompareCounters,
+    item_counts: ItemCompareByScope<CompareCounters>,
+    bp_counts: ItemCompareByScope<CompareCounters>,
     explicit_in_tx_effects: u64,
+    explicit_in_tx_effects_by_scope: ItemCompareByScope<u64>,
     // Synchronous call-stack helper labels keyed by ThreadId so fixed-signature `ServerContext::notify`
     // retains the single ratcheted `pending_notifications.write()` call site (`::notify::pending_notifications`)
     // and never alters notification delivery.
     active_sources_by_thread: HashMap<ThreadId, Vec<&'static str>>,
+    tick_sync_depths_by_thread: HashMap<ThreadId, u32>,
     enabled_override: Option<bool>,
     report_path_override: Option<Option<PathBuf>>,
     reported_to_file: bool,
@@ -346,7 +434,7 @@ impl ItemCompareLedger {
 
     fn retire_item(&mut self, entry: PendingItemCompare) {
         let helper = entry.mismatched_helper.clone();
-        self.item_counts.record_projected_only(helper.as_deref(), || {
+        self.item_counts.get_mut(entry.scope).record_projected_only(helper.as_deref(), || {
             format!(
                 "cid={} id_type={} {} mismatched_helper={:?}",
                 entry.char_id,
@@ -359,7 +447,7 @@ impl ItemCompareLedger {
 
     fn retire_bp(&mut self, entry: PendingBlueprintCompare) {
         let helper = entry.mismatched_helper.clone();
-        self.bp_counts.record_projected_only(helper.as_deref(), || {
+        self.bp_counts.get_mut(entry.scope).record_projected_only(helper.as_deref(), || {
             format!(
                 "cid={} owner={} mismatched_helper={:?}",
                 entry.char_id, entry.owner_id, helper
@@ -369,6 +457,7 @@ impl ItemCompareLedger {
 
     fn record_projected_batch(
         &mut self,
+        scope: CompareOriginScope,
         projected_items: Vec<(i64, &'static str, ItemChangeFields)>,
         projected_bps: Vec<(i64, i64)>,
         explicit_effects: u64,
@@ -378,6 +467,7 @@ impl ItemCompareLedger {
             self.logged_summary = false;
         }
         self.explicit_in_tx_effects += explicit_effects;
+        *self.explicit_in_tx_effects_by_scope.get_mut(scope) += explicit_effects;
         let mut retired_items = Vec::new();
         for (char_id, id_type, fields) in projected_items {
             let item_id = fields.item_id;
@@ -387,6 +477,7 @@ impl ItemCompareLedger {
                     char_id,
                     id_type,
                     fields,
+                    scope,
                     mismatched_helper: None,
                 },
                 |p| p.char_id == char_id && p.id_type == id_type && p.fields.item_id == item_id,
@@ -404,6 +495,7 @@ impl ItemCompareLedger {
                 PendingBlueprintCompare {
                     char_id,
                     owner_id,
+                    scope,
                     mismatched_helper: None,
                 },
                 |p| p.char_id == char_id && p.owner_id == owner_id,
@@ -417,6 +509,7 @@ impl ItemCompareLedger {
 
     fn match_or_record_item_row(
         &mut self,
+        scope: CompareOriginScope,
         helper: &str,
         recipients: &[(i64, Option<u64>)],
         id_type: &str,
@@ -424,7 +517,7 @@ impl ItemCompareLedger {
     ) {
         for &(cid, _) in recipients {
             let Some(actual) = actual_opt else {
-                self.item_counts.record_hand_written_only(helper, || {
+                self.item_counts.get_mut(scope).record_hand_written_only(helper, || {
                     format!("helper={helper} cid={cid} id_type={id_type} unparsed_args")
                 });
                 continue;
@@ -433,7 +526,7 @@ impl ItemCompareLedger {
                 p.char_id == cid && p.id_type == id_type && p.fields.matches(actual)
             }) {
                 let _ = self.pending_items.remove(pos);
-                self.item_counts.record_matched(helper);
+                self.item_counts.get_mut(scope).record_matched(helper);
             } else {
                 let near = self
                     .pending_items
@@ -450,7 +543,7 @@ impl ItemCompareLedger {
                 } else {
                     String::new()
                 };
-                self.item_counts.record_hand_written_only(helper, || {
+                self.item_counts.get_mut(scope).record_hand_written_only(helper, || {
                     format!(
                         "helper={helper} cid={cid} id_type={id_type} {}{near_desc}",
                         format_item_fields(actual)
@@ -462,6 +555,7 @@ impl ItemCompareLedger {
 
     fn record_hand_written(
         &mut self,
+        scope: CompareOriginScope,
         default_helper: &str,
         recipients: &[(i64, Option<u64>)],
         id_type: &str,
@@ -486,29 +580,24 @@ impl ItemCompareLedger {
         match event {
             "OnItemChange" => {
                 let actual_opt = extract_item_change_fields(payload_args);
-                self.match_or_record_item_row(helper, recipients, id_type, actual_opt.as_ref());
+                self.match_or_record_item_row(scope, helper, recipients, id_type, actual_opt.as_ref());
             }
             "OnMultipleItemChange" => match payload_args.first() {
                 Some(PyRep::List(rows) | PyRep::Tuple(rows)) if !rows.is_empty() => {
                     for row in rows {
                         let actual_opt = extract_item_change_fields_from_row(row);
-                        self.match_or_record_item_row(
-                            helper,
-                            recipients,
-                            id_type,
-                            actual_opt.as_ref(),
-                        );
+                        self.match_or_record_item_row(scope, helper, recipients, id_type, actual_opt.as_ref());
                     }
                 }
                 _ => {
-                    self.match_or_record_item_row(helper, recipients, id_type, None);
+                    self.match_or_record_item_row(scope, helper, recipients, id_type, None);
                 }
             },
             "OnBlueprintsUpdated" => {
                 let owner_opt = extract_blueprint_owner_id(payload_args);
                 for &(cid, _) in recipients {
                     let Some(owner_id) = owner_opt else {
-                        self.bp_counts.record_hand_written_only(helper, || {
+                        self.bp_counts.get_mut(scope).record_hand_written_only(helper, || {
                             format!("helper={helper} cid={cid} unparsed_owner")
                         });
                         continue;
@@ -519,9 +608,9 @@ impl ItemCompareLedger {
                         .position(|p| p.char_id == cid && p.owner_id == owner_id)
                     {
                         let _ = self.pending_bps.remove(pos);
-                        self.bp_counts.record_matched(helper);
+                        self.bp_counts.get_mut(scope).record_matched(helper);
                     } else {
-                        self.bp_counts.record_hand_written_only(helper, || {
+                        self.bp_counts.get_mut(scope).record_hand_written_only(helper, || {
                             format!("helper={helper} cid={cid} owner={owner_id}")
                         });
                     }
@@ -543,9 +632,10 @@ impl ItemCompareLedger {
 
     fn summary(&self) -> ItemCompareSummary {
         ItemCompareSummary {
-            item_change: self.item_counts.to_summary(self.pending_items.len()),
-            blueprints_updated: self.bp_counts.to_summary(self.pending_bps.len()),
+            item_change: self.item_counts.to_summary(pending_counts_by_scope(&self.pending_items, |p| p.scope)),
+            blueprints_updated: self.bp_counts.to_summary(pending_counts_by_scope(&self.pending_bps, |p| p.scope)),
             explicit_in_tx_effects: self.explicit_in_tx_effects,
+            explicit_in_tx_effects_by_scope: self.explicit_in_tx_effects_by_scope.clone(),
         }
     }
 }
@@ -609,6 +699,10 @@ fn collect_compare_item_expectations(
 fn trim_event_samples_for_ndjson(mut ev: ItemCompareEventSummary) -> ItemCompareEventSummary {
     ev.sample_projected_only.truncate(MAX_NDJSON_SAMPLES);
     ev.sample_hand_written_only.truncate(MAX_NDJSON_SAMPLES);
+    for sc in [&mut ev.by_scope.dispatch, &mut ev.by_scope.tick, &mut ev.by_scope.neither] {
+        sc.sample_projected_only.truncate(MAX_NDJSON_SAMPLES);
+        sc.sample_hand_written_only.truncate(MAX_NDJSON_SAMPLES);
+    }
     ev
 }
 
@@ -624,6 +718,7 @@ fn append_ndjson_record(path: &Path, bridge_id: u64, summary: &ItemCompareSummar
         item_change: trim_event_samples_for_ndjson(summary.item_change.clone()),
         blueprints_updated: trim_event_samples_for_ndjson(summary.blueprints_updated.clone()),
         explicit_in_tx_effects: summary.explicit_in_tx_effects,
+        explicit_in_tx_effects_by_scope: summary.explicit_in_tx_effects_by_scope.clone(),
     };
     let Ok(mut line) = serde_json::to_string(&record) else {
         return;
@@ -668,6 +763,7 @@ impl ItemCompareBridge {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_commit(
         &self,
         snap: &WorldStateSnapshot,
@@ -676,6 +772,7 @@ impl ItemCompareBridge {
         now_unix: u64,
         online: &impl OnlineCharacterLookup,
         effects: &TxItemEffectKeys,
+        in_dispatch: bool,
     ) {
         {
             let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
@@ -700,10 +797,10 @@ impl ItemCompareBridge {
             (Vec::new(), Vec::new())
         };
         if !projected_items.is_empty() || !projected_bps.is_empty() || effects.explicit_count > 0 {
-            self.ledger
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .record_projected_batch(projected_items, projected_bps, effects.explicit_count);
+            let tid = std::thread::current().id();
+            let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            let scope = resolve_compare_origin_scope(in_dispatch, ledger.tick_sync_depths_by_thread.contains_key(&tid));
+            ledger.record_projected_batch(scope, projected_items, projected_bps, effects.explicit_count);
         }
     }
 
@@ -803,6 +900,49 @@ pub(crate) fn push_paired_multi_item_skip_scope(ctx: &ServerContext) -> CompareS
     push_compare_source_scope(ctx, PAIRED_MULTI_ITEM_SKIP_SOURCE)
 }
 
+tokio::task_local! { static COMPARE_TICK_SCOPE: (); }
+
+/// Executes an async server-tick future within compare tick scope (`#931` Track 2.5).
+pub(crate) async fn with_compare_tick_scope<F: std::future::Future<Output = R>, R>(fut: F) -> R {
+    COMPARE_TICK_SCOPE.scope((), fut).await
+}
+
+/// Non-`Send` RAII guard marking a synchronous block on this thread as running inside a server tick.
+pub(crate) struct CompareTickSyncGuard {
+    bridges: Vec<Arc<ItemCompareBridge>>,
+    tid: ThreadId,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for CompareTickSyncGuard {
+    fn drop(&mut self) {
+        for bridge in &self.bridges {
+            let mut ledger = bridge.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(d) = ledger.tick_sync_depths_by_thread.get_mut(&self.tid) {
+                *d -= 1;
+                if *d == 0 {
+                    ledger.tick_sync_depths_by_thread.remove(&self.tid);
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn enter_compare_tick_sync_scope(db: Option<&eve_db::WorldRepository>) -> CompareTickSyncGuard {
+    let tid = std::thread::current().id();
+    let bridges = db.map(|r| super::delta_commit_listener::item_compare_bridges_for_db(r.instance_id())).unwrap_or_default();
+    for bridge in &bridges {
+        *bridge.ledger.lock().unwrap_or_else(|e| e.into_inner()).tick_sync_depths_by_thread.entry(tid).or_insert(0) += 1;
+    }
+    CompareTickSyncGuard { bridges, tid, _not_send: std::marker::PhantomData }
+}
+
+fn resolve_compare_origin_scope(in_dispatch: bool, in_tick_sync: bool) -> CompareOriginScope {
+    if in_dispatch { CompareOriginScope::Dispatch }
+    else if in_tick_sync || COMPARE_TICK_SCOPE.try_with(|_| ()).is_ok() { CompareOriginScope::Tick }
+    else { CompareOriginScope::Neither }
+}
+
 /// Records a hand-written `OnItemChange`, `OnMultipleItemChange`, or `OnBlueprintsUpdated`
 /// emission against compare-only commit expectations without mutating queued/live notifications.
 pub(crate) fn record_legacy_item_compare(
@@ -824,11 +964,14 @@ pub(crate) fn record_legacy_item_compare(
     let Some(bridge) = super::delta_commit_listener::item_compare_bridge(ctx) else {
         return;
     };
+    let in_dispatch = super::cache_notifications::current_dispatch_staging_scope_id(Some(&*ctx.pending_notifications), Some(&ctx.notify_tx)).is_some();
+    let tid = std::thread::current().id();
     let mut ledger = bridge.ledger.lock().unwrap_or_else(|e| e.into_inner());
     if !ledger.is_enabled() {
         return;
     }
-    ledger.record_hand_written(default_helper, recipients, id_type, event, payload_args);
+    let scope = resolve_compare_origin_scope(in_dispatch, ledger.tick_sync_depths_by_thread.contains_key(&tid));
+    ledger.record_hand_written(scope, default_helper, recipients, id_type, event, payload_args);
 }
 
 /// Returns current compare-only counters (including unmatched `pending` entries) for `ctx`.
