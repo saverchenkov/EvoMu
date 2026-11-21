@@ -117,7 +117,7 @@ pub fn handle_pi_orbitals_gm(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            if !crate::router::ServerContext::has_canonical_gm_role(session) {
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMAddCommodity requires GM role".into(),
@@ -227,7 +227,7 @@ pub fn handle_pi_orbitals_gm(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            if !crate::router::ServerContext::has_canonical_gm_role(session) {
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMConvertCommandCenter requires GM role".into(),
@@ -292,7 +292,7 @@ pub fn handle_pi_orbitals_gm(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            if !crate::router::ServerContext::has_canonical_gm_role(session) {
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMForceInstallProgram requires GM role".into(),
@@ -351,7 +351,7 @@ pub fn handle_pi_orbitals_gm(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            if !crate::router::ServerContext::has_canonical_gm_role(session) {
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMVerifySimulation requires GM role".into(),
@@ -388,7 +388,7 @@ pub fn handle_pi_orbitals_gm(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            if !crate::router::ServerContext::has_canonical_gm_role(session) {
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMGetLocalDistributionReport requires GM role".into(),
@@ -444,7 +444,7 @@ pub fn handle_pi_orbitals_gm(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            if !crate::router::ServerContext::has_canonical_gm_role(session) {
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMGetSynchedServerState requires GM role".into(),
@@ -482,7 +482,7 @@ pub fn handle_pi_orbitals_gm(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            if !crate::router::ServerContext::has_canonical_gm_role(session) {
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMRunDepletionSim requires GM role".into(),
@@ -540,7 +540,7 @@ pub fn handle_pi_orbitals_gm(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            if !crate::router::ServerContext::has_canonical_gm_role(session) {
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMCreateNuggetLayer requires GM role".into(),
@@ -602,7 +602,7 @@ pub fn handle_pi_orbitals_gm(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            if !crate::router::ServerContext::has_canonical_gm_role(session) {
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMGetCompleteResource requires GM role".into(),
