@@ -145,15 +145,14 @@ fn character_or_session_fallback(
 fn persist_unlocked_containers_in_snap(
     guard: &mut eve_db::WorldStateSnapshot,
     unlock_pairs: &[(i64, i64)],
-) {
-    if unlock_pairs.is_empty() {
-        return;
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    for &(target_id, char_id) in unlock_pairs {
+        fitting_containers_ships::set_container_unlocked_snap(
+            guard, target_id, char_id, true, now_unix,
+        )?;
     }
-    fitting_containers_ships::write_container_ship_state_snap(guard, |st| {
-        for &pair in unlock_pairs {
-            st.unlocked_containers.insert(pair);
-        }
-    });
+    Ok(())
 }
 
 fn parse_opt_positive_id(
@@ -258,7 +257,6 @@ fn validate_bound_and_hint_chain(
 fn enforce_container_chain_policies(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
-    cs_state: &fitting_containers_ships::ContainerShipRuntimeState,
     char_id: i64,
     corp_id: i64,
     check_corp_containers: bool,
@@ -301,7 +299,7 @@ fn enforce_container_chain_policies(
                 });
             }
         }
-        if policy.reject_alsc_locked && cs_state.alsc_locked_items.contains(&anc.item_id) {
+        if policy.reject_alsc_locked && snap.is_item_in_alsc_lock(anc.item_id) {
             return Err(BridgeRpcError {
                 code: "ALSCItemLocked".into(),
                 message: "Parent Audit Log Secure Container is locked".into(),
@@ -330,29 +328,24 @@ fn enforce_container_chain_policies(
 
     let mut unlock_pairs = Vec::new();
     for &anc_id in container_hops {
-        if let Some(req_pw) = cs_state.container_passwords.get(&anc_id) {
-            if !req_pw.is_empty() {
-                let password_per_action = cs_state
-                    .container_configs
-                    .get(&anc_id)
-                    .is_some_and(|c| c.password_per_action);
-                let already_unlocked = !password_per_action
-                    && (cs_state.unlocked_containers.contains(&(anc_id, char_id))
-                        || cs_state.unlocked_containers.contains(&(char_id, anc_id)));
-                if !already_unlocked {
-                    if provided_pw == Some(req_pw.as_str()) {
-                        if !password_per_action {
-                            unlock_pairs.push((anc_id, char_id));
-                        }
-                    } else {
-                        return Err(BridgeRpcError {
-                            code: "ALSCPasswordRequired".into(),
-                            message: format!(
-                                "Password required to access Secure Container {anc_id}"
-                            ),
-                            client_error: None,
-                        });
+        if let Some(req_pw) = fitting_containers_ships::container_password_snap(snap, anc_id, 1) {
+            let password_per_action =
+                fitting_containers_ships::container_config_snap(snap, anc_id).password_per_action;
+            let already_unlocked = !password_per_action
+                && fitting_containers_ships::is_container_unlocked_snap(snap, anc_id, char_id);
+            if !already_unlocked {
+                if provided_pw == Some(req_pw.as_str()) {
+                    if !password_per_action {
+                        unlock_pairs.push((anc_id, char_id));
                     }
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "ALSCPasswordRequired".into(),
+                        message: format!(
+                            "Password required to access Secure Container {anc_id}"
+                        ),
+                        client_error: None,
+                    });
                 }
             }
         }
@@ -364,7 +357,6 @@ fn enforce_container_chain_policies(
 fn validate_location_reachability_in_snap(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
-    cs_state: &fitting_containers_ships::ContainerShipRuntimeState,
     session: &SessionState,
     ch: &eve_db::CharacterRecord,
     char_id: i64,
@@ -627,17 +619,15 @@ fn validate_location_reachability_in_snap(
                 client_error: None,
             });
         }
-        if let Some(cfg) = cs_state.ship_configs.get(&host_ship.item_id) {
-            if let Some(req_pw) = cfg.password.as_deref().filter(|s| !s.is_empty()) {
-                let already_unlocked = cs_state
-                    .unlocked_containers
-                    .contains(&(char_id, host_ship.item_id))
-                    || cs_state
-                        .unlocked_containers
-                        .contains(&(host_ship.item_id, char_id));
-                if !already_unlocked && provided_pw == Some(req_pw) {
-                    ship_bay_unlock = Some((char_id, host_ship.item_id));
-                }
+        let cfg = fitting_containers_ships::ship_access_config_snap(snap, host_ship.item_id);
+        if let Some(req_pw) = cfg.password.as_deref().filter(|s| !s.is_empty()) {
+            let already_unlocked = fitting_containers_ships::is_container_unlocked_snap(
+                snap,
+                host_ship.item_id,
+                char_id,
+            );
+            if !already_unlocked && provided_pw == Some(req_pw) {
+                ship_bay_unlock = Some((host_ship.item_id, char_id));
             }
         }
     } else if is_in_space_root {
@@ -685,8 +675,8 @@ fn execute_split_stack_in_tx(
         .and_then(|v| v.as_str())
         .or_else(|| args.iter().find_map(|a| a.as_str()));
 
+    let now_unix = ctx.now_unix_secs();
     ctx.db.try_with_mut_snapshot(|guard| {
-        let cs_state = fitting_containers_ships::read_container_ship_state_snap(guard);
         let ch = guard
             .characters
             .get(&char_id)
@@ -742,7 +732,6 @@ fn execute_split_stack_in_tx(
         let ship_unlock = validate_location_reachability_in_snap(
             ctx,
             guard,
-            &cs_state,
             session,
             &ch,
             char_id,
@@ -765,7 +754,7 @@ fn execute_split_stack_in_tx(
             )?;
         }
 
-        if cs_state.alsc_locked_items.contains(&item_id) {
+        if guard.is_item_in_alsc_lock(item_id) {
             return Err(BridgeRpcError {
                 code: "ALSCItemLocked".into(),
                 message: "Cannot split an item locked in an Audit Log Secure Container".into(),
@@ -799,7 +788,6 @@ fn execute_split_stack_in_tx(
         let mut unlock_pairs = enforce_container_chain_policies(
             ctx,
             guard,
-            &cs_state,
             char_id,
             ch.corporation_id,
             true,
@@ -831,11 +819,14 @@ fn execute_split_stack_in_tx(
             new_i.owner_id = ship_owner;
         }
         // Persist container unlock and native bay custom flag only after `split_stack_in_snap` succeeds.
-        persist_unlocked_containers_in_snap(guard, &unlock_pairs);
+        persist_unlocked_containers_in_snap(guard, &unlock_pairs, now_unix)?;
         if matches!(new_i.flag as u16, 90 | 155) {
-            fitting_containers_ships::write_container_ship_state_snap(guard, |st| {
-                st.custom_item_flags.insert(new_i.item_id, new_i.flag as u16);
-            });
+            fitting_containers_ships::set_custom_item_flag_snap(
+                guard,
+                new_i.item_id,
+                Some(new_i.flag as u16),
+                now_unix,
+            )?;
         }
         Ok((orig, new_i, foreign_ship_bay_owner))
     })
@@ -1019,10 +1010,9 @@ pub(in crate::services) fn handle_stack_ops(
             let provided_pw = kwargs.get("password").and_then(|v| v.as_str());
             let loaded_tube_items = snapshot_loaded_tube_items(ctx);
             let pre_balls = snapshot_pre_balls(ctx, session, char_id);
+            let now_unix = ctx.now_unix_secs();
             let tx_res = ctx.db.try_with_mut_snapshot(|guard| {
                 let ch = character_or_session_fallback(guard, session, char_id)?;
-                let cs_state_merge =
-                    fitting_containers_ships::read_container_ship_state_snap(guard);
                 let lock_index = guard.build_inventory_lock_index();
                 let mut events = Vec::with_capacity(ops.len());
                 let mut checked_reachability = HashSet::new();
@@ -1110,7 +1100,6 @@ pub(in crate::services) fn handle_stack_ops(
                         if let Some(ship_unlock) = validate_location_reachability_in_snap(
                             ctx,
                             guard,
-                            &cs_state_merge,
                             session,
                             &ch,
                             char_id,
@@ -1126,9 +1115,7 @@ pub(in crate::services) fn handle_stack_ops(
                             unlock_pairs.push(ship_unlock);
                         }
                     }
-                    if cs_state_merge.alsc_locked_items.contains(&src_id)
-                        || cs_state_merge.alsc_locked_items.contains(&dst_id)
-                    {
+                    if guard.is_item_in_alsc_lock(src_id) || guard.is_item_in_alsc_lock(dst_id) {
                         return Err(BridgeRpcError {
                             code: "ALSCItemLocked".into(),
                             message: "Cannot merge items locked in an Audit Log Secure Container"
@@ -1204,7 +1191,6 @@ pub(in crate::services) fn handle_stack_ops(
                     let chain_unlocks = enforce_container_chain_policies(
                         ctx,
                         guard,
-                        &cs_state_merge,
                         char_id,
                         ch.corporation_id,
                         true,
@@ -1300,7 +1286,7 @@ pub(in crate::services) fn handle_stack_ops(
                         });
                     }
                 }
-                persist_unlocked_containers_in_snap(guard, &unlock_pairs);
+                persist_unlocked_containers_in_snap(guard, &unlock_pairs, now_unix)?;
                 Ok(events)
             });
             let events = match tx_res {
@@ -1480,9 +1466,9 @@ pub(in crate::services) fn handle_stack_ops(
             let provided_pw = kwargs.get("password").and_then(|v| v.as_str());
             let loaded_tube_items = snapshot_loaded_tube_items(ctx);
             let pre_balls = snapshot_pre_balls(ctx, session, char_id);
+            let now_unix = ctx.now_unix_secs();
             let (outcome, foreign_ship_owner) = match ctx.db.try_with_mut_snapshot(|guard| {
                 let ch = character_or_session_fallback(guard, session, char_id)?;
-                let cs_state = fitting_containers_ships::read_container_ship_state_snap(guard);
                 let chain = collect_container_chain(guard, target_loc, 9);
                 validate_bound_and_hint_chain(
                     guard,
@@ -1496,7 +1482,6 @@ pub(in crate::services) fn handle_stack_ops(
                 let ship_unlock = validate_location_reachability_in_snap(
                     ctx,
                     guard,
-                    &cs_state,
                     session,
                     &ch,
                     char_id,
@@ -1512,7 +1497,6 @@ pub(in crate::services) fn handle_stack_ops(
                 let mut unlock_pairs = enforce_container_chain_policies(
                     ctx,
                     guard,
-                    &cs_state,
                     char_id,
                     ch.corporation_id,
                     true,
@@ -1543,7 +1527,7 @@ pub(in crate::services) fn handle_stack_ops(
                     target_flag,
                     &loaded_tube_items,
                 );
-                persist_unlocked_containers_in_snap(guard, &unlock_pairs);
+                persist_unlocked_containers_in_snap(guard, &unlock_pairs, now_unix)?;
                 Ok((outcome, foreign_ship_owner))
             }) {
                 Ok(v) => v,

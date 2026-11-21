@@ -91,12 +91,11 @@ pub(super) async fn handle_loot_all(
             let foreign_deployable =
                 matches!(t.group_id, 1246 | 1250) && wreck_item.owner_id != char_id;
             let locked_cont = if matches!(t.group_id, 340 | 448) && wreck_item.owner_id != char_id {
-                let st = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state_snap(snap);
-                st.container_passwords
-                    .get(&wreck_id)
-                    .is_some_and(|pw| !pw.is_empty())
-                    && !st.unlocked_containers.contains(&(wreck_id, char_id))
-                    && !st.unlocked_containers.contains(&(char_id, wreck_id))
+                use crate::services::inventory_fitting::fitting_containers_ships::{
+                    container_password_snap, is_container_unlocked_snap,
+                };
+                container_password_snap(snap, wreck_id, 1).is_some()
+                    && !is_container_unlocked_snap(snap, wreck_id, char_id)
             } else {
                 false
             };
@@ -237,7 +236,6 @@ pub(super) async fn handle_loot_all(
             .and_then(|s| ctx.sde.types.get(&s.type_id))
             .map(|t| t.capacity)
             .unwrap_or(400.0);
-        let cs_state = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state_snap(snap);
         let used_vol: f64 = snap
             .items
             .values()
@@ -270,7 +268,7 @@ pub(super) async fn handle_loot_all(
             let Some(child) = snap.items.get(&cid).cloned() else {
                 continue;
             };
-            if child.flag == InventoryFlag::Locked || cs_state.alsc_locked_items.contains(&cid) {
+            if child.flag == InventoryFlag::Locked || snap.is_item_in_alsc_lock(cid) {
                 remaining.push(cid);
                 continue;
             }

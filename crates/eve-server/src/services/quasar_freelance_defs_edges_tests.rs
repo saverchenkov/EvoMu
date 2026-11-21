@@ -495,17 +495,9 @@ fn mutants_cov_locked_explicit_autoselect_distractors_and_batch_math() {
                 },
             );
         }
-        s.owner_notes.insert(
-            -8_400_000_000_000,
-            eve_db::OwnerNoteRecord {
-                note_id: -8_400_000_000_000,
-                character_id: cid,
-                item_id: 0,
-                label: "alsc".into(),
-                note: serde_json::json!({ "alsc_locked_items": [710_002] }).to_string(),
-                timestamp_unix: now,
-            },
-        );
+        s.kv_mut(eve_db::Ns::AlscLockedItem)
+            .set_with_unix(710_002, "", &true, now)
+            .unwrap();
     });
 
     let build_req = |item_id: Option<i64>, qty: u64| {

@@ -6,7 +6,6 @@ use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
 const MAX_IDEMPOTENCY_KEYS: usize = 4_096;
-const CONTAINER_SHIP_NOTE_ID: i64 = -8_400_000_000_000;
 const STRUCTURE_EXT_STATE_KEY: i64 = -7_700_001;
 const TYPE_ASSET_SAFETY_WRAP: u32 = 60;
 const TYPE_PLASTIC_WRAP: u32 = 3_468;
@@ -731,32 +730,25 @@ impl WorldStateSnapshot {
             .any(|other| other.item_id != item_id && other.location_id == item_id && other.quantity > 0)
     }
 
-    fn visit_alsc_locked_items(&self, mut on_id: impl FnMut(i64) -> bool) -> bool {
-        let Some(note) = self.owner_notes.get(&CONTAINER_SHIP_NOTE_ID) else {
-            return false;
-        };
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&note.note) else {
-            return false;
-        };
-        let Some(arr) = val.get("alsc_locked_items").and_then(|v| v.as_array()) else {
-            return false;
-        };
-        arr.iter().filter_map(|entry| entry.as_i64()).any(&mut on_id)
-    }
-
-    /// Collects all item IDs locked via ALSC container security (`owner_notes[-8_400_000_000_000]`).
+    /// Collects all item IDs locked via ALSC container security (`entity_kv` `Ns::AlscLockedItem`).
     pub fn alsc_locked_item_ids(&self) -> HashSet<i64> {
-        let mut locked = HashSet::new();
-        self.visit_alsc_locked_items(|id| {
-            locked.insert(id);
-            false
-        });
-        locked
+        self.kv(crate::service_domains::Ns::AlscLockedItem)
+            .iter_ns()
+            .filter_map(|(k, row)| {
+                if k.sub_key.is_empty() && matches!(serde_json::from_str::<bool>(&row.value_json), Ok(true)) {
+                    Some(k.entity_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
-    /// Returns `true` if `item_id` is locked via ALSC container security (`owner_notes[-8_400_000_000_000]`).
+    /// Returns `true` if `item_id` is locked via ALSC container security (`entity_kv` `Ns::AlscLockedItem`).
     pub fn is_item_in_alsc_lock(&self, item_id: i64) -> bool {
-        self.visit_alsc_locked_items(|id| id == item_id)
+        self.kv(crate::service_domains::Ns::AlscLockedItem)
+            .get::<bool>(item_id, "")
+            .unwrap_or(false)
     }
 
     fn collect_wrap_ancestor_chain(&self, item_id: i64) -> Vec<i64> {
