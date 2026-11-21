@@ -10,10 +10,13 @@ pub mod client_compat_ratchet;
 pub mod client_contract;
 pub mod client_harness;
 pub mod destiny_invariants;
+pub mod legal_fixture;
 pub mod notify_ratchet;
 pub mod pre_check;
 pub mod quasar_tap;
+pub mod scenario;
 pub mod shadow_client;
+pub mod test_fixture_ratchet;
 
 use std::fs::OpenOptions;
 use std::io::Write;

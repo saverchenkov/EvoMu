@@ -1731,6 +1731,93 @@ impl SdeRegistry {
             .filter(|line| line.activity == activity_id)
             .collect()
     }
+
+    /// Deterministically picks the lowest-key entry matching `pred` from an unordered map.
+    ///
+    /// Returns `None` if no entry satisfies `pred`. Results never depend on `HashMap` hash seed
+    /// or iteration order (`#1540`).
+    pub fn pick_lowest_entry<'a, K: Ord + Copy, V, S: std::hash::BuildHasher>(
+        map: &'a HashMap<K, V, S>,
+        mut pred: impl FnMut(&K, &V) -> bool,
+    ) -> Option<(K, &'a V)> {
+        let mut best: Option<(K, &'a V)> = None;
+        for (k, v) in map {
+            if !pred(k, v) {
+                continue;
+            }
+            if best.is_none_or(|(best_k, _)| *k < best_k) {
+                best = Some((*k, v));
+            }
+        }
+        best
+    }
+
+    /// Returns all entries matching `pred` sorted in ascending key order (`#1540`).
+    pub fn pick_lowest_entries_sorted<'a, K: Ord + Copy, V, S: std::hash::BuildHasher>(
+        map: &'a HashMap<K, V, S>,
+        mut pred: impl FnMut(&K, &V) -> bool,
+    ) -> Vec<(K, &'a V)> {
+        let mut out: Vec<(K, &'a V)> = map
+            .iter()
+            .filter(|(k, v)| pred(k, v))
+            .map(|(k, v)| (*k, v))
+            .collect();
+        out.sort_by_key(|(k, _)| *k);
+        out
+    }
+
+    /// Returns the lowest-ID [`InvType`] matching `pred`, independent of `HashMap` iteration order.
+    pub fn lowest_matching_type(&self, mut pred: impl FnMut(&InvType) -> bool) -> Option<&InvType> {
+        Self::pick_lowest_entry(&self.types, |_, t| pred(t)).map(|(_, t)| t)
+    }
+
+    /// Returns all [`InvType`] records matching `pred` sorted ascending by `type_id`.
+    pub fn matching_types_sorted(&self, mut pred: impl FnMut(&InvType) -> bool) -> Vec<&InvType> {
+        Self::pick_lowest_entries_sorted(&self.types, |_, t| pred(t))
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect()
+    }
+
+    /// Returns the lowest-ID [`StationInfo`] matching `pred`.
+    pub fn lowest_matching_station(
+        &self,
+        mut pred: impl FnMut(&StationInfo) -> bool,
+    ) -> Option<&StationInfo> {
+        Self::pick_lowest_entry(&self.stations, |_, s| pred(s)).map(|(_, s)| s)
+    }
+
+    /// Returns the lowest-ID [`SolarSystem`] matching `pred`.
+    pub fn lowest_matching_solar_system(
+        &self,
+        mut pred: impl FnMut(&SolarSystem) -> bool,
+    ) -> Option<&SolarSystem> {
+        Self::pick_lowest_entry(&self.solar_systems, |_, s| pred(s)).map(|(_, s)| s)
+    }
+
+    /// Returns the lowest-ID [`BlueprintInfo`] matching `pred`.
+    pub fn lowest_matching_blueprint(
+        &self,
+        mut pred: impl FnMut(&BlueprintInfo) -> bool,
+    ) -> Option<&BlueprintInfo> {
+        Self::pick_lowest_entry(&self.blueprints, |_, b| pred(b)).map(|(_, b)| b)
+    }
+
+    /// Returns the lowest-ID [`AncestryInfo`] matching `pred`.
+    pub fn lowest_matching_ancestry(
+        &self,
+        mut pred: impl FnMut(&AncestryInfo) -> bool,
+    ) -> Option<&AncestryInfo> {
+        Self::pick_lowest_entry(&self.ancestries, |_, a| pred(a)).map(|(_, a)| a)
+    }
+
+    /// Returns the lowest-ID [`SchoolInfo`] matching `pred`.
+    pub fn lowest_matching_school(
+        &self,
+        mut pred: impl FnMut(&SchoolInfo) -> bool,
+    ) -> Option<&SchoolInfo> {
+        Self::pick_lowest_entry(&self.schools, |_, s| pred(s)).map(|(_, s)| s)
+    }
 }
 
 pub mod cfsd_domain_loaders;
@@ -2039,6 +2126,63 @@ mod tests {
         let sde = SdeRegistry::with_canonical_seed();
         assert!(sde.load_cfsd_table("res:/missing_flat_table.fsdbinary").is_err());
         assert!(sde.load_cfsd_nested("res:/missing_nested_table.fsdbinary").is_err());
+    }
+
+    #[test]
+    fn test_deterministic_lowest_id_picks_invariant_across_hash_seeds() {
+        // Construct separate HashMaps (each with its own RandomState seed) and reversed insertion order.
+        let mut forward: HashMap<u32, u32> = HashMap::new();
+        let mut reverse: HashMap<u32, u32> = HashMap::new();
+        let entries: Vec<(u32, u32)> = (100..250).map(|id| (id, id % 7)).collect();
+        for &(id, tag) in &entries {
+            forward.insert(id, tag);
+        }
+        for &(id, tag) in entries.iter().rev() {
+            reverse.insert(id, tag);
+        }
+
+        for target_tag in 0..7_u32 {
+            let expected = entries.iter().find(|&&(_, tag)| tag == target_tag).unwrap().0;
+            for trial in 0..16_usize {
+                let mut reseeded: HashMap<u32, u32> = HashMap::new();
+                for &(id, tag) in entries.iter().skip(trial).chain(entries.iter().take(trial)) {
+                    reseeded.insert(id, tag);
+                }
+                let picked_f = SdeRegistry::pick_lowest_entry(&forward, |_, &t| t == target_tag);
+                let picked_r = SdeRegistry::pick_lowest_entry(&reverse, |_, &t| t == target_tag);
+                let picked_s = SdeRegistry::pick_lowest_entry(&reseeded, |_, &t| t == target_tag);
+                assert_eq!(picked_f.map(|(k, _)| k), Some(expected));
+                assert_eq!(picked_r.map(|(k, _)| k), Some(expected));
+                assert_eq!(picked_s.map(|(k, _)| k), Some(expected));
+            }
+            let sorted_f: Vec<u32> =
+                SdeRegistry::pick_lowest_entries_sorted(&forward, |_, &t| t == target_tag)
+                    .into_iter()
+                    .map(|(k, _)| k)
+                    .collect();
+            let sorted_r: Vec<u32> =
+                SdeRegistry::pick_lowest_entries_sorted(&reverse, |_, &t| t == target_tag)
+                    .into_iter()
+                    .map(|(k, _)| k)
+                    .collect();
+            assert_eq!(sorted_f, sorted_r);
+            assert!(sorted_f.windows(2).all(|w| w[0] < w[1]));
+        }
+
+        assert!(SdeRegistry::pick_lowest_entry(&forward, |_, &t| t == 99).is_none());
+
+        let sde = SdeRegistry::open(SdeRegistry::default_db_path())
+            .expect("data/evomu_sde.sqlite must open cleanly");
+        let lowest_ship = sde
+            .lowest_matching_type(|t| t.published && t.category_id == 6 && t.group_id == 25)
+            .expect("published frigate type");
+        let sorted_ships = sde.matching_types_sorted(|t| t.published && t.category_id == 6 && t.group_id == 25);
+        assert_eq!(lowest_ship.type_id, sorted_ships[0].type_id);
+        assert!(sorted_ships.windows(2).all(|w| w[0].type_id < w[1].type_id));
+        assert!(sde.lowest_matching_station(|st| st.solar_system_id == 30_000_142).is_some());
+        assert!(sde.lowest_matching_solar_system(|sys| !sys.stations.is_empty()).is_some());
+        assert!(sde.lowest_matching_blueprint(|bp| !bp.materials.is_empty()).is_some());
+        assert!(sde.lowest_matching_school(|sc| sc.race_id == 1).is_some());
     }
 }
 
