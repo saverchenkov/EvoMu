@@ -87,8 +87,37 @@ fn verify_control_acl_or_role_with_profile(
     verify_control_acl_or_role_with_profile_at(snap, ext, st, prof_opt, char_id, 0)
 }
 
+fn resolve_defense_acl_alliance_id(
+    snap: &WorldStateSnapshot, sde_opt: Option<&eve_sde::SdeRegistry>,
+    caller_corp: i64, ch_opt: Option<&eve_db::CharacterRecord>,
+) -> i64 {
+    if let Some(sde) = sde_opt {
+        return eve_db::corp_actor::resolve_corp_alliance_id(snap, sde, caller_corp, ch_opt).unwrap_or(0);
+    }
+    if caller_corp <= 0 || (1_000_000..2_000_000).contains(&caller_corp) { return 0; }
+    let ally_fallback = || {
+        snap.alliances.values().find(|a| a.member_corp_ids.contains(&caller_corp)).map(|a| a.alliance_id)
+    };
+    if let Some(corp) = snap.corporations.get(&caller_corp) {
+        corp.alliance_id.or_else(ally_fallback).filter(|&id| id > 0).unwrap_or(0)
+    } else {
+        ch_opt.and_then(|c| (c.corporation_id == caller_corp).then_some(c.alliance_id).flatten())
+            .or_else(ally_fallback).filter(|&id| id > 0).unwrap_or(0)
+    }
+}
+
 fn has_defense_acl_permission(
     snap: &WorldStateSnapshot,
+    ext: &ops::StructureExtendedState,
+    prof_opt: Option<&ops::StructureAccessProfile>,
+    char_id: i64,
+) -> Result<bool, BridgeRpcError> {
+    has_defense_acl_permission_with_sde(snap, None, ext, prof_opt, char_id)
+}
+
+fn has_defense_acl_permission_with_sde(
+    snap: &WorldStateSnapshot,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
     ext: &ops::StructureExtendedState,
     prof_opt: Option<&ops::StructureAccessProfile>,
     char_id: i64,
@@ -96,32 +125,9 @@ fn has_defense_acl_permission(
     let Some(p) = prof_opt else {
         return Ok(false);
     };
-    let caller_corp = snap
-        .characters
-        .get(&char_id)
-        .map(|c| c.corporation_id)
-        .unwrap_or(0);
-    let caller_ally = snap
-        .corporations
-        .get(&caller_corp)
-        .and_then(|c| c.alliance_id)
-        .or_else(|| {
-            (caller_corp > 0)
-                .then(|| {
-                    snap.alliances
-                        .values()
-                        .find(|a| a.member_corp_ids.contains(&caller_corp))
-                        .map(|a| a.alliance_id)
-                })
-                .flatten()
-        })
-        .or_else(|| {
-            snap.characters
-                .get(&char_id)
-                .and_then(|c| c.alliance_id)
-                .filter(|_| !snap.corporations.contains_key(&caller_corp))
-        })
-        .unwrap_or(0);
+    let ch_opt = snap.characters.get(&char_id);
+    let caller_corp = ch_opt.map(|c| c.corporation_id).unwrap_or(0);
+    let caller_ally = resolve_defense_acl_alliance_id(snap, sde_opt, caller_corp, ch_opt);
     if p.blocked_characters.contains(&char_id)
         || p.defense_blocked_characters.contains(&char_id)
         || (caller_corp > 0 && p.blocked_corporations.contains(&caller_corp))
@@ -768,19 +774,8 @@ pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionS
             )
         });
     let now_unix = ctx.now_unix();
-    let sess_corp_opt = session.corporation_id.filter(|&sc| sc > 0);
-    let (actor, forced_wf, ch_opt, stale_struct, split_fixture_ally) = ctx.db.with_snapshot(|snap| {
+    let (actor, forced_wf, ch_opt, stale_struct) = ctx.db.with_snapshot(|snap| {
         let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, cid, now_unix);
-        let split_fixture_ally = if forced_corp.is_none() && actor.is_npc_corp {
-            sess_corp_opt.and_then(|sc| {
-                snap.corporations
-                    .get(&sc)
-                    .filter(|c| c.ceo_id == cid || c.members.contains(&cid))
-                    .map(|_| eve_db::corp_actor::resolve_corp_alliance_id(snap, &ctx.sde, sc, None))
-            })
-        } else {
-            None
-        };
         let forced_wf = crate::services::fw_enlistment::load_store(snap)
             .forced_war_faction_sync
             .get(&cid)
@@ -789,7 +784,7 @@ pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionS
         let stale_struct = session
             .ship_id
             .is_some_and(|sid| snap.structures.contains_key(&sid));
-        (actor, forced_wf, ch_opt, stale_struct, split_fixture_ally)
+        (actor, forced_wf, ch_opt, stale_struct)
     });
     if actor.char_in_db {
         let db_corp_opt = (actor.corp_id > 0).then_some(actor.corp_id);
@@ -836,15 +831,10 @@ pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionS
                 };
                 session.corp_role = forced.2;
             }
-        } else if let Some(ally_opt) = split_fixture_ally {
-            session.alliance_id = ally_opt;
         } else {
-            let corp_changed = session.corporation_id != db_corp_opt;
             session.corporation_id = db_corp_opt;
             session.alliance_id = actor.alliance_id;
-            if corp_changed || actor.corp_exists || actor.effective_roles != 0 {
-                session.corp_role = actor.effective_roles;
-            }
+            session.corp_role = actor.effective_roles;
         }
     } else if let Some((new_corp, new_ally, new_role)) = forced_corp {
         session.corporation_id = (new_corp > 0).then_some(new_corp);
@@ -1135,8 +1125,9 @@ pub fn handle_get_structure_pilot(
                 | eve_db::corp_roles::ROLE_STARBASE_CONFIG,
             now_unix,
         );
-        let has_acl = has_defense_acl_permission(snap, &ext, effective_prof, char_id)
-            .unwrap_or(false);
+        let has_acl =
+            has_defense_acl_permission_with_sde(snap, Some(&ctx.sde), &ext, effective_prof, char_id)
+                .unwrap_or(false);
         let is_authorized = is_gm
             || is_docked
             || is_corp_controller
