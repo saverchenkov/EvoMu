@@ -179,7 +179,7 @@
         "services/cluster_macho_misc_services.rs": 5,
         "services/combat_fighters.rs": 13,
         "services/combat_npcs_drones.rs": 16,
-        "services/contracts_service.rs": 84,
+        "services/contracts_service.rs": 81,
         "services/corp_registry_burst_fallback.rs": 10,
         "services/cosmetics_ui_ops.rs": 40,
         "services/crate_loot_service.rs": 36,
