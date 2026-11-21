@@ -1218,8 +1218,10 @@ pub(crate) async fn handle_module_cycles(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if !matches!((service, method), ("dogmaIM", "Activate") | ("dogmaIM", "Overload")) {
-        return None;
+    // Explicit `match (service, method)` keeps both RPCs visible to `rpc_negative_matrix`'s dispatch scanner.
+    match (service, method) {
+        ("dogmaIM", "Activate") | ("dogmaIM", "Overload") => {}
+        _ => return None,
     }
     match handle_module_cycles_inner(ctx, session, _bound_entry, method, args, kwargs).await {
         CycleExecutionOutcome::Ready(res) => res,
