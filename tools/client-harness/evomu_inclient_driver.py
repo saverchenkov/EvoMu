@@ -1254,7 +1254,7 @@ def _journey_structures(ctx):
             _sleep_sim_ms(350)
             _advance_clock(sm, ipc, 240)
             _sleep_sim_ms(1500)
-            _wait_warp_fx_settled(sm, timeout_sec=4.0)
+            _wait_warp_fx_settled(sm, timeout_sec=4.0, ipc=ipc)
             _warp_full(sm, b_perim, int(bm_mid[0]), stuff_type="bookmark", ipc=ipc)
             _advance_clock(sm, ipc, 604860)
             anc_res = sm.RemoteSvc("structureDeployment").Anchor(cit_id, "Station Citadel")

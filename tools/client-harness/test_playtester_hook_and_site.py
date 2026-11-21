@@ -6329,13 +6329,16 @@ class TestIssue1539HostGmTimeControlRouting(unittest.TestCase):
                 GetService=lambda n: fake_sm_w.services.get(n),
                 RemoteSvc=lambda n: fake_sm_w.services[n],
             )
+            explicit_ipc_w = object()
+            adv_ipcs_w = []
             with mock.patch.dict(builtins.__dict__, {"session": sess_w, "sm": fake_sm_w}), \
-                 mock.patch.object(helpers, "_advance_clock", return_value=gm_ok), \
+                 mock.patch.object(helpers, "_advance_clock", side_effect=lambda _s, ipc_arg, *_a, **_kw: (adv_ipcs_w.append(ipc_arg), gm_ok)[1]), \
                  mock.patch.object(helpers, "_ensure_warp_signal_tracker", return_value=None), \
                  mock.patch.object(helpers, "_sleep_sim_ms"), \
                  mock.patch.object(helpers, "_sleep_ms"), \
                  mock.patch.object(helpers.time, "time", side_effect=_advance_warp_t):
-                helpers._wait_warp_fx_settled(fake_sm_w, timeout_sec=1.0, allow_time_control=True)
+                helpers._wait_warp_fx_settled(fake_sm_w, timeout_sec=1.0, allow_time_control=True, ipc=explicit_ipc_w)
+            self.assertEqual(adv_ipcs_w, [explicit_ipc_w])
             seen_loops[gm_ok] = seen_balls[-1] - 100.0
         self.assertLessEqual(seen_loops[True], 6.0)
         self.assertGreaterEqual(seen_loops[False], 12.0)
@@ -6656,6 +6659,27 @@ class TestIssue1539HostGmTimeControlRouting(unittest.TestCase):
 
         self.assertEqual(client_slash_calls, [])
         self.assertEqual([c["command"] for c in ipc_slash_calls], ["/cleartimers", "/giveskill 3363 1", "/heal"])
+
+        # Host-returned slash sim_time_injected_sec/injection_id mirrors into client-side collect_sim_time_telemetry.
+        sim_slash_ipc = types.SimpleNamespace(
+            request=lambda payload, timeout=None: {
+                "ok": True,
+                "handled": True,
+                "via": "gm_bridge",
+                "command": payload["command"],
+                "target_char_id": 90000001,
+                "injection_id": "host-sim-slash-1",
+                "sim_time_injected_sec": 600.0,
+                "result": {"advancedSeconds": 600},
+            }
+        )
+        with mock.patch.object(real_helpers, "_HOST_GM_STATE", {"port": 0, "client": sim_slash_ipc, "target_char_id": 90000001, "sim_seq": 0, "sim_events": [], "configured_with_ipc": True, "mode": "playtester"}):
+            real_helpers._reset_sim_time_telemetry()
+            real_helpers._try_slash(fake_sm, "/advancetime 600", raise_on_error=True)
+            client_sim_tel = real_helpers.collect_sim_time_telemetry()
+            self.assertAlmostEqual(client_sim_tel["sim_time_injected_sec"], 600.0)
+            self.assertEqual(client_sim_tel["sim_time_injection_count"], 1)
+            self.assertEqual(client_sim_tel["sim_time_injections"][0]["injection_id"], "host-sim-slash-1")
 
         # Host denial (even with handled=False / reason present) fails closed with zero played-client slash.SlashCmd fallback.
         denied_ipc = types.SimpleNamespace(

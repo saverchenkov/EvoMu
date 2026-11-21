@@ -834,6 +834,21 @@ def _try_slash(sm, cmd, ipc=None, target_char_id=0, raise_on_error=False, target
         or "error" in res
     ):
         if res.get("ok"):
+            try:
+                sim_sec = float(res.get("sim_time_injected_sec") or 0.0)
+            except Exception:
+                sim_sec = 0.0
+            if sim_sec > 0.0:
+                stripped = str(cmd or "").strip()
+                verb = stripped.split()[0].lower() if stripped.startswith("/") else "slash"
+                _record_sim_time_injection(
+                    sim_sec,
+                    target_char_id=tgt,
+                    via=res.get("via", "gm_bridge"),
+                    injection_id=res.get("injection_id"),
+                    source="inclient_slash",
+                    method="SlashCmd:%s" % verb,
+                )
             if cmd.startswith("/giveskill ") or cmd.startswith("/setskill "):
                 _sleep_ms(150)
             return res.get("result")
@@ -966,7 +981,7 @@ def _wait_session_timer_clear(max_wait_sec=12.0):
         _sleep_ms(200)
 
 
-def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0, allow_time_control=True):
+def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0, allow_time_control=True, ipc=None):
     _ensure_warp_signal_tracker(sm)
     try:
         sess = getattr(__builtin__, "session", None)
@@ -1029,7 +1044,7 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0, allow_time_contro
         if getattr(sess, "stationid", None) is None and getattr(sess, "structureid", None) is None:
             adv_ok = False
             if allow_time_control:
-                adv_ok = bool(_advance_clock(sm, None, 2, raise_on_error=False))
+                adv_ok = bool(_advance_clock(sm, ipc, 2, raise_on_error=False))
                 _sleep_sim_ms(1500 if adv_ok else 600)
             else:
                 _sleep_sim_ms(600)
@@ -1066,13 +1081,13 @@ def _warp_full(sm, b_obj, tid, stuff_type="item", distance=0.0, ipc=None):
             if "ShipInWarp" in msg or "ShipAlreadyInWarp" in msg:
                 adv_ok = bool(_advance_clock(sm, ipc, 120, raise_on_error=False))
                 _sleep_sim_ms(400)
-                _wait_warp_fx_settled(sm, timeout_sec=(4.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok))
+                _wait_warp_fx_settled(sm, timeout_sec=(4.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok), ipc=ipc)
                 continue
             raise
         _sleep_ms(30)
         adv_ok = bool(_advance_clock(sm, ipc, 240, raise_on_error=False))
         _sleep_sim_ms(400)
-        _wait_warp_fx_settled(sm, timeout_sec=(4.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok))
+        _wait_warp_fx_settled(sm, timeout_sec=(4.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok), ipc=ipc)
         break
     _wait_view_settled(sm)
 
@@ -1103,7 +1118,7 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
             if "ShipInWarp" in msg or "ShipAlreadyInWarp" in msg:
                 adv_ok = bool(_advance_clock(sm, ipc, 120, raise_on_error=False))
                 _sleep_sim_ms(400)
-                _wait_warp_fx_settled(sm, timeout_sec=(4.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok))
+                _wait_warp_fx_settled(sm, timeout_sec=(4.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok), ipc=ipc)
                 start_before = int(_WARP_SIGNAL_STATE["started"])
                 finish_before = int(_WARP_SIGNAL_STATE["finished"])
                 continue
@@ -1156,7 +1171,7 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
 
     adv_finish_ok = bool(_advance_clock(sm, ipc, 120, raise_on_error=False))
     _sleep_sim_ms(400)
-    _wait_warp_fx_settled(sm, timeout_sec=(8.0 if adv_finish_ok else 35.0), min_finished=finish_before + 1, allow_time_control=bool(adv_finish_ok))
+    _wait_warp_fx_settled(sm, timeout_sec=(8.0 if adv_finish_ok else 35.0), min_finished=finish_before + 1, allow_time_control=bool(adv_finish_ok), ipc=ipc)
     _wait_view_settled(sm)
 
     started_delta = int(_WARP_SIGNAL_STATE["started"]) - start_before
@@ -1259,6 +1274,7 @@ def _dock_station(sm, station_id=60003760, allow_time_control=True, ipc=None):
             sm,
             timeout_sec=(6.0 if warp_adv_ok else 35.0),
             allow_time_control=bool(warp_adv_ok),
+            ipc=ipc,
         )
     _wait_view_settled(sm)
     clear_ok = bool(
@@ -1349,7 +1365,7 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
     sess = getattr(__builtin__, "session", None)
     if getattr(sess, "solarsystemid", None) and not getattr(sess, "stationid", None):
         _sleep_sim_ms(1200)
-    _wait_warp_fx_settled(sm, timeout_sec=35.0, allow_time_control=False)
+    _wait_warp_fx_settled(sm, timeout_sec=35.0, allow_time_control=False, ipc=ipc)
     sess = getattr(__builtin__, "session", None)
     cur_stop_sys = int(getattr(sess, "solarsystemid", 0) or getattr(sess, "solarsystemid2", 0) or 0) if sess is not None else 0
     if cur_stop_sys and not getattr(sess, "stationid", None) and not getattr(sess, "structureid", None):
@@ -1358,7 +1374,7 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
     adv_ok = bool(_advance_clock(sm, ipc, 12, raise_on_error=False))
     _sleep_sim_ms(1200)
     _sleep_ms(1200 if adv_ok else 2000)
-    _wait_warp_fx_settled(sm, timeout_sec=(5.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok))
+    _wait_warp_fx_settled(sm, timeout_sec=(5.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok), ipc=ipc)
     try:
         sm.RemoteSvc("stationSvc").Dock(target_station)
     except Exception:
