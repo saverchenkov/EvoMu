@@ -5009,11 +5009,14 @@ async fn multi_add_and_auto_fit_enforce_alsc_lock_and_commit_logs_atomically() {
         assert_eq!(snap.items[&unlocked_guns].quantity, 1);
         assert_eq!(snap.items[&fitted_id].location_id, ship_id);
         assert_eq!(snap.items[&fitted_id].flag, InventoryFlag::HiSlot0);
-        let actions: Vec<String> = container_alsc_logs_snap(snap, alsc_id)
-            .into_iter()
-            .map(|e| e.action)
-            .collect();
+        let logs = container_alsc_logs_snap(snap, alsc_id);
+        let actions: Vec<String> = logs.iter().map(|e| e.action.clone()).collect();
         assert_eq!(actions, vec!["ALSCActionLock", "ALSCActionAdd", "ALSCActionTake"]);
+        assert_eq!(
+            logs.last().unwrap().item_id,
+            unlocked_guns,
+            "auto-fit split-take ALSCActionTake must record original source stack item_id"
+        );
     });
 }
 
@@ -5280,4 +5283,153 @@ async fn bf_1180_multi_add_and_move_enforce_foreign_corp_and_password_per_action
     )
     .await
     .expect("jetcan take by foreign corp remains allowed");
+}
+
+#[test]
+fn bf_1180_undocked_caller_cannot_list_docked_foreign_ship_or_nested_bay() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        verify_nested_unit_list_in_snap, ShipAccessConfig,
+    };
+
+    let ctx = test_ctx();
+    let owner_id = 92_880_011_i64;
+    let mate_id = 92_880_012_i64;
+    let corp_id = 98_880_011_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let owner_ship = 1_880_200_001_i64;
+    let mate_ship = 1_880_200_002_i64;
+    let sma_ship = 1_880_200_010_i64;
+    let fh_ore = 1_880_200_011_i64;
+    let nest_box = 1_880_200_012_i64;
+    let nest_ore = 1_880_200_013_i64;
+
+    ensure_char(&ctx, owner_id, corp_id, Some(station_id), sys_id, owner_ship);
+    ensure_char(&ctx, mate_id, corp_id, None, sys_id, mate_ship);
+    insert_item(&ctx, owner_ship, 587, owner_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, mate_ship, 587, mate_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, sma_ship, 587, owner_id, owner_ship, InventoryFlag::ShipHangar, 1, true);
+    insert_item(&ctx, fh_ore, 34, owner_id, owner_ship, InventoryFlag::FleetHangar, 50, false);
+    // Nested container owned by mate_id inside docked owner_ship FleetHangar.
+    insert_item(&ctx, nest_box, 17_366, mate_id, owner_ship, InventoryFlag::FleetHangar, 1, true);
+    insert_item(&ctx, nest_ore, 34, mate_id, nest_box, InventoryFlag::Cargo, 25, false);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            777_880,
+            FleetRecord {
+                fleet_id: 777_880,
+                boss_id: owner_id,
+                members: vec![owner_id, mate_id],
+                ..Default::default()
+            },
+        );
+        set_ship_access_config_snap(
+            snap,
+            owner_ship,
+            &ShipAccessConfig {
+                allow_fleet_smb: true,
+                allow_corp_smb: true,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: true,
+                password: None,
+            },
+            0,
+        )
+        .unwrap();
+        snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
+    });
+
+    let mate_sess = make_session(mate_id, corp_id, None, Some(sys_id), Some(mate_ship));
+    let bound_owner_ship = make_bound(owner_ship, mate_id);
+    let bound_nest = make_bound(nest_box, mate_id);
+    let kw = HashMap::new();
+    let row_count = |rep: PyRep| -> usize {
+        let PyRep::ObjectEx { list, .. } = rep else {
+            panic!("expected ObjectEx rowset, got {rep:?}");
+        };
+        list.len()
+    };
+
+    // Undocked caller holding bound moniker for docked corp/fleet ship must get 0 rows.
+    assert_eq!(
+        row_count(handle_list(&ctx, &mate_sess, Some(&bound_owner_ship), &[], &kw).unwrap()),
+        0,
+        "undocked List on docked foreign ship must return 0 rows"
+    );
+    assert_eq!(
+        row_count(
+            super::handle_list_by_flags(
+                &ctx,
+                &mate_sess,
+                Some(&bound_owner_ship),
+                &[PyRep::List(vec![PyRep::Integer(90)])],
+                &kw,
+            )
+            .unwrap()
+        ),
+        0,
+        "undocked ListByFlags([90]) on docked foreign ship must return 0 rows"
+    );
+    assert_eq!(
+        row_count(
+            super::handle_list_by_flags(
+                &ctx,
+                &mate_sess,
+                Some(&bound_owner_ship),
+                &[PyRep::List(vec![PyRep::Integer(155)])],
+                &kw,
+            )
+            .unwrap()
+        ),
+        0,
+        "undocked ListByFlags([155]) on docked foreign ship must return 0 rows"
+    );
+    assert_eq!(
+        row_count(handle_list(&ctx, &mate_sess, Some(&bound_nest), &[], &kw).unwrap()),
+        0,
+        "undocked List on nested container inside docked foreign ship must return 0 rows"
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        let (unlock_none, rows_none) = super::verify_and_collect_foreign_ship_rows(
+            &ctx, snap, &mate_sess, mate_id, owner_ship, false, false, None, None,
+        )
+        .unwrap();
+        assert!(unlock_none.is_none() && rows_none.is_empty());
+        let (unlock_docked, rows_docked) = super::verify_and_collect_foreign_ship_rows(
+            &ctx, snap, &mate_sess, mate_id, owner_ship, true, true, Some(&[90]), None,
+        )
+        .unwrap();
+        assert!(unlock_docked.is_none() && rows_docked.is_empty());
+        assert_eq!(
+            verify_nested_unit_list_in_snap(&ctx, snap, &mate_sess, mate_id, nest_box, None)
+                .unwrap_err()
+                .code,
+            "BoundObjectOwnershipViolation"
+        );
+    });
+
+    // Move foreign ship into space >2,500m -> second-snapshot helpers must reject OutOfRange.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&owner_ship).unwrap().location_id = i64::from(sys_id);
+        snap.items.get_mut(&owner_ship).unwrap().flag = InventoryFlag::None;
+        snap.item_positions.insert(owner_ship, [10_000.0, 0.0, 0.0]);
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            super::verify_and_collect_foreign_ship_rows(
+                &ctx, snap, &mate_sess, mate_id, owner_ship, true, true, Some(&[90]), None,
+            )
+            .unwrap_err()
+            .code,
+            "OutOfRange"
+        );
+        assert_eq!(
+            verify_nested_unit_list_in_snap(&ctx, snap, &mate_sess, mate_id, nest_box, None)
+                .unwrap_err()
+                .code,
+            "OutOfRange"
+        );
+    });
 }

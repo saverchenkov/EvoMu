@@ -14,8 +14,8 @@ pub(crate) use super::fitting_containers_ships_ops::{
     is_container_unlocked_snap, list_with_optional_ship_unlock, set_alsc_item_locked_snap,
     set_container_config_snap, set_container_password_snap, set_container_unlocked_snap,
     set_custom_item_flag_snap, set_ship_access_config_snap, ship_access_config_snap,
-    ship_password_snap, verify_nested_unit_list_in_snap, AlscLogEntry, ContainerConfig,
-    ShipAccessConfig,
+    ship_password_snap, verify_nested_unit_list_in_snap, verify_ship_proximity_in_snap,
+    AlscLogEntry, ContainerConfig, ShipAccessConfig,
 };
 #[cfg(test)]
 pub(crate) use super::fitting_containers_ships_ops::{

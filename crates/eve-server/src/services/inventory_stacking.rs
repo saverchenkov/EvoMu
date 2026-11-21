@@ -16,7 +16,7 @@ mod inventory_stacking_ops;
 pub(super) use inventory_stacking_ops::handle_stack_ops;
 use super::fitting_containers_ships::{
     edge_distance_in_space_snap, foreign_ship_deny_err, list_with_optional_ship_unlock,
-    verify_nested_unit_list_in_snap,
+    verify_nested_unit_list_in_snap, verify_ship_proximity_in_snap,
 };
 
 fn validate_multi_add_dest_flag(flag_u16: u16) -> Result<(), BridgeRpcError> {
@@ -1178,7 +1178,7 @@ async fn handle_multi_add_auto_fit(
             let updated = it.clone();
             snap.module_online_states.insert(fitted_id, plan.online);
             fitting_containers_ships::record_inv_move_logs_in_snap(
-                &ctx.sde, snap, char_id, updated.item_id, updated.item_id, updated.type_id, updated.quantity, old_loc, ship_id, true, now_unix,
+                &ctx.sde, snap, char_id, updated.item_id, plan.src_item.item_id, updated.type_id, updated.quantity, old_loc, ship_id, true, now_unix,
             )?;
             out.push((plan, updated, split_orig_opt, old_loc, old_flag_u16, do_split, was_singleton));
         }
@@ -1681,6 +1681,7 @@ fn handle_list_impl(
     enum ShipListAccess {
         NotShip,
         Owner,
+        Denied,
         Foreign { can_sma: bool, can_fh: bool },
     }
 
@@ -1694,6 +1695,39 @@ fn handle_list_impl(
                 && snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&it.owner_id))
                 && fleet_shipping_authorized;
             let is_auth = session.has_gm_role() || it.owner_id == char_id || it.owner_id == 0 || is_fleet_auth;
+            if is_unit && !session.has_gm_role() {
+                if let Some((host_ship, _)) =
+                    super::inventory_bound::find_ship_bay_ancestor_in_snap(
+                        ctx,
+                        snap,
+                        it.location_id,
+                        it.flag as u16,
+                    )
+                {
+                    if host_ship.owner_id != char_id {
+                        let supplied_pw = kwargs
+                            .get("password")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| args.iter().find_map(|a| a.as_str()));
+                        let _ = super::inventory_bound::check_foreign_ship_bay_ancestor_chain_in_snap(
+                            ctx,
+                            snap,
+                            session,
+                            char_id,
+                            it.location_id,
+                            it.flag as u16,
+                            supplied_pw,
+                            false,
+                        )?;
+                        if !verify_ship_proximity_in_snap(
+                            ctx, snap, session, char_id, host_ship, bound_loc_id, true,
+                        )? {
+                            return Ok((false, ShipListAccess::Denied, None));
+                        }
+                        return Ok((true, ShipListAccess::NotShip, Some(host_ship.item_id)));
+                    }
+                }
+            }
             if is_unit && is_auth {
                 if (30_000_000..=39_999_999).contains(&it.location_id) && !session.has_gm_role() {
                     let sys_id = session.solar_system_id.unwrap_or(0);
@@ -1726,122 +1760,14 @@ fn handle_list_impl(
                 }
                 return Ok((true, ShipListAccess::NotShip, None));
             }
-            if is_unit {
-                let supplied_pw = kwargs
-                    .get("password")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| args.iter().find_map(|a| a.as_str()));
-                if let Some((host_ship, _)) =
-                    super::inventory_bound::find_ship_bay_ancestor_in_snap(
-                        ctx,
-                        snap,
-                        it.location_id,
-                        it.flag as u16,
-                    )
-                {
-                    if host_ship.owner_id != char_id {
-                        let _ = super::inventory_bound::check_foreign_ship_bay_ancestor_chain_in_snap(
-                            ctx,
-                            snap,
-                            session,
-                            char_id,
-                            it.location_id,
-                            it.flag as u16,
-                            supplied_pw,
-                            false,
-                        )?;
-                        let ch_dock = session.station_id.or(session.structure_id).unwrap_or(0);
-                        if ch_dock > 0 {
-                            if host_ship.location_id != ch_dock {
-                                return Err(BridgeRpcError {
-                                    code: "BoundObjectOwnershipViolation".into(),
-                                    message: format!(
-                                        "Character {char_id} is not docked at container {bound_loc_id}'s host ship"
-                                    ),
-                                    client_error: None,
-                                });
-                            }
-                        } else if (30_000_000..=39_999_999).contains(&host_ship.location_id) {
-                            let sys_id = session.solar_system_id.unwrap_or(0);
-                            if sys_id == 0 || host_ship.location_id != sys_id as i64 {
-                                return Err(BridgeRpcError {
-                                    code: "NotInSameSolarSystem".into(),
-                                    message: format!(
-                                        "Caller must be in space in system {} to list container {bound_loc_id}",
-                                        host_ship.location_id
-                                    ),
-                                    client_error: None,
-                                });
-                            }
-                            let ship_id = session.ship_id.unwrap_or(0);
-                            if let Some(edge_dist) = edge_distance_in_space_snap(
-                                ctx, snap, sys_id, ship_id, host_ship.item_id, host_ship.type_id,
-                            ) {
-                                if edge_dist > 2_500.0 {
-                                    return Err(BridgeRpcError {
-                                        code: "OutOfRange".into(),
-                                        message: format!(
-                                            "Container {bound_loc_id} is out of range ({edge_dist:.1}m > 2500m)"
-                                        ),
-                                        client_error: None,
-                                    });
-                                }
-                            } else {
-                                return Err(BridgeRpcError {
-                                    code: "OutOfRange".into(),
-                                    message: format!("Host ship {} position is out of range", host_ship.item_id),
-                                    client_error: None,
-                                });
-                            }
-                        } else {
-                            return Ok((false, ShipListAccess::NotShip, None));
-                        }
-                        return Ok((true, ShipListAccess::NotShip, Some(host_ship.item_id)));
-                    }
-                }
-            }
             if cat == 6 {
                 if it.owner_id == char_id || session.has_gm_role() {
                     return Ok((false, ShipListAccess::Owner, None));
                 }
-                let ch_dock = session.station_id.or(session.structure_id).unwrap_or(0);
-                if ch_dock > 0 {
-                    if it.location_id != ch_dock {
-                        return Err(BridgeRpcError {
-                            code: "BoundObjectOwnershipViolation".into(),
-                            message: format!("Character {char_id} is not docked at ship {bound_loc_id}'s location"),
-                            client_error: None,
-                        });
-                    }
-                } else if (30_000_000..=39_999_999).contains(&it.location_id) {
-                    let sys_id = session.solar_system_id.unwrap_or(0);
-                    if sys_id == 0 || it.location_id != sys_id as i64 {
-                        return Err(BridgeRpcError {
-                            code: "NotInSameSolarSystem".into(),
-                            message: format!("Caller must be in space in system {} to list ship {bound_loc_id}", it.location_id),
-                            client_error: None,
-                        });
-                    }
-                    let ship_id = session.ship_id.unwrap_or(0);
-                    if let Some(edge_dist) =
-                        edge_distance_in_space_snap(ctx, snap, sys_id, ship_id, bound_loc_id, it.type_id)
-                    {
-                        if edge_dist > 2_500.0 {
-                            return Err(BridgeRpcError {
-                                code: "OutOfRange".into(),
-                                message: format!("Ship {bound_loc_id} is out of range ({edge_dist:.1}m > 2500m)"),
-                                client_error: None,
-                            });
-                        }
-                    } else {
-                        return Err(BridgeRpcError {
-                            code: "OutOfRange".into(),
-                            message: format!("Ship {bound_loc_id} position is out of range"),
-                            client_error: None,
-                        });
-                    }
-                } else {
-                    return Ok((false, ShipListAccess::Foreign { can_sma: false, can_fh: false }, None));
+                if !verify_ship_proximity_in_snap(
+                    ctx, snap, session, char_id, it, bound_loc_id, false,
+                )? {
+                    return Ok((false, ShipListAccess::Denied, None));
                 }
                 let supplied_pw = kwargs
                     .get("password")
@@ -1903,18 +1829,24 @@ fn handle_list_impl(
         } else {
             ctx.db.with_snapshot(|snap| collect_unit_list_rows(ctx, snap, bound_loc_id, flags_filter.as_deref()))
         }
+    } else if matches!(ship_list_access, ShipListAccess::Denied) {
+        Vec::new()
     } else if let ShipListAccess::Foreign { can_sma, can_fh } = ship_list_access {
-        list_with_optional_ship_unlock(
-            ctx,
-            char_id,
-            supplied_pw_opt.is_some() && foreign_unlock_ship_id.is_some(),
-            |snap| {
-                verify_and_collect_foreign_ship_rows(
-                    ctx, snap, session, char_id, bound_loc_id, can_sma, can_fh,
-                    flags_filter.as_deref(), supplied_pw_opt,
-                )
-            },
-        )?
+        if !can_sma && !can_fh {
+            Vec::new()
+        } else {
+            list_with_optional_ship_unlock(
+                ctx,
+                char_id,
+                supplied_pw_opt.is_some() && foreign_unlock_ship_id.is_some(),
+                |snap| {
+                    verify_and_collect_foreign_ship_rows(
+                        ctx, snap, session, char_id, bound_loc_id, can_sma, can_fh,
+                        flags_filter.as_deref(), supplied_pw_opt,
+                    )
+                },
+            )?
+        }
     } else if let Some(flags) = flags_filter {
         if flags.is_empty() {
             Vec::new()
@@ -2015,6 +1947,9 @@ fn verify_and_collect_foreign_ship_rows(
     flags_filter: Option<&[i64]>,
     supplied_pw_opt: Option<&str>,
 ) -> Result<(Option<i64>, Vec<Vec<PyRep>>), BridgeRpcError> {
+    if !orig_can_sma && !orig_can_fh {
+        return Ok((None, Vec::new()));
+    }
     let wants_sma = flags_filter.is_some_and(|f| f.iter().any(|&v| matches!(v, 90 | 138)));
     let wants_fh = flags_filter.is_some_and(|f| f.iter().any(|&v| v == 155));
     let deny_sma = (wants_sma && !wants_fh) || (!wants_sma && !wants_fh && orig_can_sma);
@@ -2036,6 +1971,9 @@ fn verify_and_collect_foreign_ship_rows(
             .map(|i| item_to_packed_cells(ctx, i))
             .collect();
         return Ok((None, rows));
+    }
+    if !verify_ship_proximity_in_snap(ctx, snap, session, char_id, sh, bound_loc_id, false)? {
+        return Ok((None, Vec::new()));
     }
     let live_can_sma = fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
         snap, char_id, bound_loc_id, sh.owner_id, true, supplied_pw_opt,

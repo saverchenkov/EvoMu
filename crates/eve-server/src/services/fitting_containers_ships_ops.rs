@@ -2092,6 +2092,80 @@ pub(crate) fn edge_distance_in_space_snap(
     Some((s.distance(u) - ship_r - target_r).max(0.0))
 }
 
+/// Verifies caller docking co-location or in-space <=2,500m edge distance to `ship`.
+/// Returns `Ok(false)` when the caller is in space and `ship` is not in space (e.g. docked/stored).
+pub(crate) fn verify_ship_proximity_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    ship: &eve_db::InventoryItemRecord,
+    target_id: i64,
+    is_host_ship: bool,
+) -> Result<bool, BridgeRpcError> {
+    let ch_dock = session.station_id.or(session.structure_id).unwrap_or(0);
+    if ch_dock > 0 {
+        if ship.location_id != ch_dock {
+            let what = if is_host_ship {
+                format!("container {target_id}'s host ship")
+            } else {
+                format!("ship {target_id}'s location")
+            };
+            let msg = format!("Character {char_id} is not docked at {what}");
+            return Err(BridgeRpcError::with_client_error(
+                "BoundObjectOwnershipViolation",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        }
+        return Ok(true);
+    }
+    if (30_000_000..=39_999_999).contains(&ship.location_id) {
+        let sys_id = session.solar_system_id.unwrap_or(0);
+        if sys_id == 0 || ship.location_id != sys_id as i64 {
+            let msg = if is_host_ship {
+                format!("Caller must be in space in system {} to list container {target_id}", ship.location_id)
+            } else {
+                format!("Caller must be in space in system {} to list ship {target_id}", ship.location_id)
+            };
+            return Err(BridgeRpcError::with_client_error(
+                "NotInSameSolarSystem",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        }
+        let caller_ship_id = session.ship_id.unwrap_or(0);
+        let Some(edge_dist) =
+            edge_distance_in_space_snap(ctx, snap, sys_id, caller_ship_id, ship.item_id, ship.type_id)
+        else {
+            let msg = if is_host_ship {
+                format!("Host ship {} position is out of range", ship.item_id)
+            } else {
+                format!("Ship {target_id} position is out of range")
+            };
+            return Err(BridgeRpcError::with_client_error(
+                "OutOfRange",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        };
+        if edge_dist > 2_500.0 {
+            let msg = if is_host_ship {
+                format!("Container {target_id} is out of range ({edge_dist:.1}m > 2500m)")
+            } else {
+                format!("Ship {target_id} is out of range ({edge_dist:.1}m > 2500m)")
+            };
+            return Err(BridgeRpcError::with_client_error(
+                "OutOfRange",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 pub(crate) fn list_with_optional_ship_unlock<F>(
     ctx: &ServerContext,
     char_id: i64,
@@ -2131,18 +2205,28 @@ pub(crate) fn verify_nested_unit_list_in_snap(
             eve_proto::ClientError::CustomInfo(msg),
         ));
     };
-    if it.owner_id == char_id || it.owner_id == 0 || session.has_gm_role() {
+    if session.has_gm_role() {
         return Ok(None);
     }
-    let live_host_id = crate::services::inventory_bound::check_foreign_ship_bay_ancestor_chain_in_snap(
-        ctx, snap, session, char_id, it.location_id, it.flag as u16, supplied_pw_opt, false,
-    )?;
-    if live_host_id.is_none()
-        && !crate::services::inventory_bound::find_ship_bay_ancestor_in_snap(
-            ctx, snap, it.location_id, it.flag as u16,
-        )
-        .is_some_and(|(host, _)| host.owner_id == char_id)
-    {
+    if let Some((host_ship, _)) = crate::services::inventory_bound::find_ship_bay_ancestor_in_snap(
+        ctx, snap, it.location_id, it.flag as u16,
+    ) {
+        if host_ship.owner_id != char_id {
+            let live_host_id = crate::services::inventory_bound::check_foreign_ship_bay_ancestor_chain_in_snap(
+                ctx, snap, session, char_id, it.location_id, it.flag as u16, supplied_pw_opt, false,
+            )?;
+            if !verify_ship_proximity_in_snap(ctx, snap, session, char_id, host_ship, bound_loc_id, true)? {
+                let msg = format!("Character {char_id} lacks spatial access to container {bound_loc_id}'s host ship");
+                return Err(BridgeRpcError::with_client_error(
+                    "BoundObjectOwnershipViolation",
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
+                ));
+            }
+            return Ok(live_host_id);
+        }
+    }
+    if it.owner_id != char_id && it.owner_id != 0 {
         let msg = format!("Character {char_id} lacks access to container {bound_loc_id}");
         return Err(BridgeRpcError::with_client_error(
             "BoundObjectOwnershipViolation",
@@ -2150,7 +2234,7 @@ pub(crate) fn verify_nested_unit_list_in_snap(
             eve_proto::ClientError::CustomInfo(msg),
         ));
     }
-    Ok(live_host_id)
+    Ok(None)
 }
 
 pub(crate) fn foreign_ship_deny_err(deny_sma: bool, msg: String) -> BridgeRpcError {

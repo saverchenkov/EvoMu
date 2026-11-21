@@ -3660,3 +3660,113 @@ async fn bf_1180_invbroker_add_merge_into_lock_by_default_alsc_locks_target() {
         assert!(!logs.iter().any(|l| l.item_id == src_iid), "ALSC logs must not reference deleted src_iid");
     });
 }
+
+#[tokio::test]
+async fn bf_1180_invbroker_add_partial_split_take_from_alsc_logs_orig_item_id() {
+    use crate::services::inventory_fitting::fitting_containers_ships::container_alsc_logs_snap;
+
+    let (mut ctx, mut session, char_id, _corp_id, station_id, _ship_id) = setup_inv_ctx();
+    let alsc_tid = 999_448u32;
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        let mut alsc = sde.types[&587].clone();
+        alsc.type_id = alsc_tid;
+        alsc.group_id = 448;
+        alsc.category_id = 2;
+        alsc.capacity = 500.0;
+        alsc.volume = 1_000.0;
+        sde.types.insert(alsc_tid, alsc);
+    }
+
+    let src_alsc_id = 96_693_001i64;
+    let dst_alsc_id = 96_693_002i64;
+    let src_iid = 96_693_010i64;
+    let dst_target_iid = 96_693_011i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(src_alsc_id, mk_item(src_alsc_id, alsc_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(dst_alsc_id, mk_item(dst_alsc_id, alsc_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(src_iid, mk_item(src_iid, 34, char_id, src_alsc_id, InventoryFlag::Cargo, 20, false));
+        snap.items.insert(dst_target_iid, mk_item(dst_target_iid, 34, char_id, dst_alsc_id, InventoryFlag::Cargo, 10, false));
+    });
+
+    let station_bound = BoundObjectEntry {
+        bound_id: 31,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: station_id,
+        oid_str: "N=31:1".into(),
+        ref_id: 31,
+    };
+    let dst_alsc_bound = BoundObjectEntry {
+        bound_id: 32,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: dst_alsc_id,
+        oid_str: "N=32:1".into(),
+        ref_id: 32,
+    };
+
+    // 1. Direct-move partial split-take (qty 4) from ALSC -> station hangar must log orig_item_id (`src_iid`).
+    let mut kw_take_4 = HashMap::new();
+    kw_take_4.insert("quantity".into(), PyRep::Integer(4));
+    let split_id_rep = handle(
+        &ctx,
+        &mut session,
+        Some(&station_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(src_iid), PyRep::Integer(src_alsc_id), PyRep::Integer(InventoryFlag::Hangar as i64)],
+        &kw_take_4,
+    )
+    .await
+    .unwrap()
+    .expect("partial split-take out of ALSC into hangar must succeed");
+    let split_id = split_id_rep
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("Add returns new split itemID");
+    assert_ne!(split_id, src_iid);
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&src_iid).map(|i| (i.location_id, i.quantity)), Some((src_alsc_id, 16)));
+        assert_eq!(snap.items.get(&split_id).map(|i| (i.location_id, i.quantity)), Some((station_id, 4)));
+        let logs = container_alsc_logs_snap(snap, src_alsc_id);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].action, "ALSCActionTake");
+        assert_eq!(logs[0].item_id, src_iid, "ALSCActionTake must log orig_item_id (`src_iid`), not split_id");
+        assert_eq!(logs[0].quantity, 4);
+    });
+
+    // 2. Partial split-take + merge (qty 3) from ALSC -> second ALSC with existing Tritanium stack.
+    let mut kw_take_3 = HashMap::new();
+    kw_take_3.insert("quantity".into(), PyRep::Integer(3));
+    handle(
+        &ctx,
+        &mut session,
+        Some(&dst_alsc_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(src_iid), PyRep::Integer(src_alsc_id), PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &kw_take_3,
+    )
+    .await
+    .unwrap()
+    .expect("partial split-take+merge between ALSCs must succeed");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&src_iid).map(|i| (i.location_id, i.quantity)), Some((src_alsc_id, 13)));
+        assert_eq!(snap.items.get(&dst_target_iid).map(|i| (i.location_id, i.quantity)), Some((dst_alsc_id, 13)));
+        let src_logs = container_alsc_logs_snap(snap, src_alsc_id);
+        assert_eq!(src_logs.len(), 2);
+        assert_eq!(src_logs[1].action, "ALSCActionTake");
+        assert_eq!(src_logs[1].item_id, src_iid, "split+merge ALSCActionTake must log orig_item_id (`src_iid`)");
+        assert_eq!(src_logs[1].quantity, 3);
+        let dst_logs = container_alsc_logs_snap(snap, dst_alsc_id);
+        assert!(dst_logs.iter().any(|l| l.action == "ALSCActionAdd" && l.item_id == dst_target_iid && l.quantity == 3));
+    });
+}

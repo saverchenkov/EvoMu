@@ -1980,7 +1980,7 @@ async fn handle_invbroker_add(
                                 let clear_ids = split_qty_opt.is_none().then_some(effective_item_id);
                                 fitting_containers_ships::finalize_add_move_side_effects_in_snap(
                                     ctx, snap, char_id, pending_alsc_take.as_ref(), clear_ids.as_slice(), None,
-                                    target_iid, effective_item_id, active_src_record.type_id, active_src_record.quantity,
+                                    target_iid, orig_item_id, active_src_record.type_id, active_src_record.quantity,
                                     orig_item.location_id, orig_item.flag as u16, new_loc, flag_u16, supplied_pw, ctx.now_unix_secs(),
                                 )?;
                                 return Ok(AddTxOutcome::Merged {
@@ -2134,7 +2134,7 @@ async fn handle_invbroker_add(
                 fitting_containers_ships::finalize_add_move_side_effects_in_snap(
                     ctx, snap, char_id, pending_alsc_take.as_ref(), &custom_flag_ids,
                     matches!(flag_u16, 90 | 155).then_some(flag_u16),
-                    updated.item_id, updated.item_id, updated.type_id, updated.quantity,
+                    updated.item_id, orig_item_id, updated.type_id, updated.quantity,
                     old_loc_id, old_flag_id as u16, updated.location_id, flag_u16, supplied_pw, ctx.now_unix_secs(),
                 )?;
 
