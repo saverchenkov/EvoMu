@@ -757,8 +757,9 @@ async fn self_destruct_transfer_corp_asset_turbo_dock_unanchor_shipping_and_gett
             make_item(ship_id, 587, char_mgr, sys_id as i64, InventoryFlag::None, 1),
         );
     });
-    fitting_containers_ships::write_container_ship_state(&ctx, |st| {
-        st.container_passwords.insert(shipping_id, "secret".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        fitting_containers_ships::set_container_password_snap(snap, shipping_id, 1, "secret", 0)
+            .unwrap();
     });
 
     let mut mgr_sess = make_session(char_mgr, corp_id, Some(sys_id), Some(ship_id), 0);

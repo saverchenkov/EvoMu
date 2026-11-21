@@ -425,6 +425,39 @@ pub(crate) fn config_rep(cfg: &crate::services::inventory_fitting::ShipAccessCon
     ])
 }
 
+fn require_ship_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+) -> Result<(i64, u32), BridgeRpcError> {
+    let Some(ship) = snap.items.get(&ship_id) else {
+        return Err(err("ShipNotFound", format!("Ship {ship_id} not found")));
+    };
+    let cat_id = ctx
+        .sde
+        .types
+        .get(&ship.type_id)
+        .map(|t| t.category_id)
+        .unwrap_or(0);
+    Ok((ship.owner_id, cat_id))
+}
+
+fn require_owned_ship_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    char_id: i64,
+) -> Result<(), BridgeRpcError> {
+    let (owner, cat_id) = require_ship_in_snap(ctx, snap, ship_id)?;
+    if owner != char_id || cat_id != 6 {
+        return Err(err(
+            "OwnershipViolation",
+            format!("Ship {ship_id} is not owned by character {char_id}"),
+        ));
+    }
+    Ok(())
+}
+
 pub fn ship_configuration(
     ctx: &ServerContext,
     session: &eve_machonet::SessionState,
@@ -467,33 +500,18 @@ pub fn ship_configuration(
         let sid = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
         (sid, None)
     };
-    let ship_meta = ctx.db.with_snapshot(|snap| {
-        snap.items.get(&ship_id).map(|i| {
-            let cat_id = ctx
-                .sde
-                .types
-                .get(&i.type_id)
-                .map(|t| t.category_id)
-                .unwrap_or(0);
-            (i.owner_id, cat_id)
-        })
-    });
-    let Some((owner, cat_id)) = ship_meta else {
-        return Err(err("ShipNotFound", format!("Ship {ship_id} not found")));
-    };
     if method == "GetShipConfiguration" {
-        let cfg = ctx
-            .db
-            .with_snapshot(|snap| fitting_containers_ships::ship_access_config_snap(snap, ship_id));
-        return Ok(config_rep(&cfg));
-    }
-    if owner != char_id || cat_id != 6 {
-        return Err(err("OwnershipViolation", format!("Ship {ship_id} is not owned by character {char_id}")));
+        return ctx.db.with_snapshot(|snap| {
+            require_owned_ship_in_snap(ctx, snap, ship_id, char_id)?;
+            let cfg = fitting_containers_ships::ship_access_config_snap(snap, ship_id);
+            Ok(config_rep(&cfg))
+        });
     }
     let now_unix = ctx.now_unix_secs();
     if method == "SetShipPassword" {
         let pw_opt = password_arg.and_then(|a| a.as_str()).filter(|p| !p.is_empty()).map(str::to_string);
         return ctx.db.try_with_mut_snapshot(|snap| -> Result<eve_proto::PyRep, BridgeRpcError> {
+            require_owned_ship_in_snap(ctx, snap, ship_id, char_id)?;
             let mut cfg = fitting_containers_ships::ship_access_config_snap(snap, ship_id);
             cfg.password = pw_opt;
             fitting_containers_ships::set_ship_access_config_snap(snap, ship_id, &cfg, now_unix)?;
@@ -505,11 +523,25 @@ pub fn ship_configuration(
         _ => None,
     });
     ctx.db.try_with_mut_snapshot(|snap| -> Result<eve_proto::PyRep, BridgeRpcError> {
+        require_owned_ship_in_snap(ctx, snap, ship_id, char_id)?;
         let mut cfg = fitting_containers_ships::ship_access_config_snap(snap, ship_id);
         if let Some(entries) = dict_entries {
             for (k, v) in entries {
-                let (Some(key), Some(val)) = (k.as_str(), v.as_bool().or_else(|| v.as_i64().map(|i| i != 0))) else {
-                    continue;
+                let Some(key) = k.as_str() else {
+                    let msg = "Ship configuration keys must be strings".to_string();
+                    return Err(BridgeRpcError::with_client_error(
+                        "InvalidArgument",
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
+                    ));
+                };
+                let Some(val) = v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)) else {
+                    let msg = format!("Ship configuration value for {key} must be bool or int");
+                    return Err(BridgeRpcError::with_client_error(
+                        "InvalidArgument",
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
+                    ));
                 };
                 match key {
                     CFG_FLEET_HANGAR_FLEET => cfg.allow_fleet_hangar = val,

@@ -47,17 +47,18 @@ fn container_runtime_state_volume_bay_access_logs_and_item_locks() {
     let corp_id = 98_910_i64;
     let station_id = 60_003_760_i64;
 
-    // 1. ContainerShipRuntimeState password set/get/clear & persistence
-    let mut st = ContainerShipRuntimeState::default();
-    st.set_container_password(100, 1, "sec1".into());
-    st.set_container_password(100, 2, "sec2".into());
-    assert_eq!(st.get_container_password(100, 1), Some("sec1"));
-    assert_eq!(st.get_container_password(100, 2), Some("sec2"));
-    st.set_container_password(100, 1, "".into());
-    assert_eq!(st.get_container_password(100, 1), None);
-    save_container_ship_state(&ctx, &st);
-    let loaded = read_container_ship_state(&ctx);
-    assert_eq!(loaded.get_container_password(100, 2), Some("sec2"));
+    // 1. Container password set/get/clear & persistence in entity_kv
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, 100, 1, "sec1", 0).unwrap();
+        set_container_password_snap(snap, 100, 2, "sec2", 0).unwrap();
+        assert_eq!(container_password_snap(snap, 100, 1).as_deref(), Some("sec1"));
+        assert_eq!(container_password_snap(snap, 100, 2).as_deref(), Some("sec2"));
+        set_container_password_snap(snap, 100, 1, "", 0).unwrap();
+        assert_eq!(container_password_snap(snap, 100, 1), None);
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(container_password_snap(snap, 100, 2).as_deref(), Some("sec2"));
+    });
 
     // 2. is_container_group & effective_item_unit_volume
     assert!(is_container_group(448, 34)); // Audit Log Secure Container group
@@ -227,24 +228,28 @@ fn container_runtime_state_volume_bay_access_logs_and_item_locks() {
             },
         );
 
-        let mut rt = ContainerShipRuntimeState::default();
-        rt.ship_configs.insert(
+        set_ship_access_config_snap(
+            snap,
             ship_id,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_corp_smb: true,
                 allow_corp_hangar: true,
                 password: Some("fleetpw".into()),
                 ..Default::default()
             },
-        );
-        rt.container_configs.insert(
+            1000,
+        )
+        .unwrap();
+        set_container_config_snap(
+            snap,
             alsc_id,
-            ContainerConfig {
+            &ContainerConfig {
                 lock_by_default: true,
                 ..Default::default()
             },
-        );
-        save_container_ship_state_snap(snap, 1000, &rt);
+            1000,
+        )
+        .unwrap();
 
         // Corp member with wrong password vs right password
         assert!(!can_character_access_ship_bay_with_password_snap(
@@ -333,10 +338,8 @@ fn validate_container_and_bay_move_rejects_invalid_moves_and_enforces_bays() {
             );
         }
 
-        let mut rt = ContainerShipRuntimeState::default();
-        rt.alsc_locked_items.insert(locked_item);
-        rt.set_container_password(cont_b, 1, "pw123".into());
-        save_container_ship_state_snap(snap, 1000, &rt);
+        set_alsc_item_locked_snap(snap, locked_item, true, 1000).unwrap();
+        set_container_password_snap(snap, cont_b, 1, "pw123", 1000).unwrap();
     });
 
     // Self store

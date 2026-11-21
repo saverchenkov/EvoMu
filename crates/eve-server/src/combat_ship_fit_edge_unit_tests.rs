@@ -48,7 +48,7 @@ use crate::services::fitting_cycles_overheat::{
 };
 use crate::services::fitting_saved_apply::{dna_to_fitting, fitting_to_dna, handle_fit_ships};
 use crate::services::inventory_fitting::fitting_containers_ships::{
-    validate_container_and_bay_move, write_container_ship_state,
+    set_alsc_item_locked_snap, set_container_password_snap, validate_container_and_bay_move,
 };
 use crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im;
 use crate::services::inventory_fitting::fitting_dogma_ops::handle_dogma_ops;
@@ -1106,9 +1106,9 @@ async fn repackage_assemble_insurance_and_container_bay_guards() {
         snap.items.insert(moving_ship_id, make_item(moving_ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true));
         snap.items.insert(cont_id, make_item(cont_id, 17366, char_id, station_id, InventoryFlag::Hangar, 1, true));
     });
-    write_container_ship_state(&ctx, |st| {
-        st.alsc_locked_items.insert(moving_ship_id);
-        st.container_passwords.insert(cont_id, "secret123".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, moving_ship_id, true, 0).unwrap();
+        set_container_password_snap(snap, cont_id, 1, "secret123", 0).unwrap();
     });
 
     let res_self = validate_container_and_bay_move(
@@ -1121,8 +1121,8 @@ async fn repackage_assemble_insurance_and_container_bay_guards() {
     );
     assert_eq!(res_alsc.unwrap_err().code, "ALSCItemLocked");
 
-    write_container_ship_state(&ctx, |st| {
-        st.alsc_locked_items.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, moving_ship_id, false, 0).unwrap();
     });
     let res_pw = validate_container_and_bay_move(
         &ctx, char_id, moving_ship_id, cont_id, InventoryFlag::None as u16, &HashMap::new(), None,

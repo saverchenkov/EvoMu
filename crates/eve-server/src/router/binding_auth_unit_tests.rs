@@ -1694,15 +1694,18 @@ async fn dispatch_rpc_invbroker_bound_handles_subobjects_end_to_end() {
             },
         );
     });
-    crate::services::fitting_containers_ships::write_container_ship_state(&ctx, |st| {
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::services::fitting_containers_ships::set_ship_access_config_snap(
+            snap,
             fleet_ship_id,
-            crate::services::fitting_containers_ships::ShipAccessConfig {
+            &crate::services::fitting_containers_ships::ShipAccessConfig {
                 allow_fleet_hangar: true,
                 password: None,
                 ..Default::default()
             },
-        );
+            0,
+        )
+        .unwrap();
     });
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.authorized_shipping_storage

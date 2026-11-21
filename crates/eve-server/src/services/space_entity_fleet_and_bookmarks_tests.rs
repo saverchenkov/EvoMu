@@ -156,8 +156,9 @@ async fn open_shipping_unit_storage_and_abandon_loot_flows() {
         snap.items.insert(ore_item_id, make_item(ore_item_id, 991_002, owner_id, sys_id as i64, InventoryFlag::None, 10));
     });
 
-    fitting_containers_ships::write_container_ship_state(&ctx, |st| {
-        st.container_passwords.insert(alsc_id, "secret42".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        fitting_containers_ships::set_container_password_snap(snap, alsc_id, 1, "secret42", 0)
+            .unwrap();
     });
 
     let mut other_sess = make_session(other_id, 98_000_002, Some(sys_id), Some(ship_id), service_roles::ROLE_PLAYER_DEFAULT);
@@ -175,9 +176,10 @@ async fn open_shipping_unit_storage_and_abandon_loot_flows() {
     assert_eq!(kv_field(&open_ok, "storageOpened").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(kv_field(&open_ok, "itemCount").and_then(|v| v.as_i64()), Some(1));
 
-    let st_after = fitting_containers_ships::read_container_ship_state(&ctx);
-    assert!(st_after.unlocked_containers.contains(&(alsc_id, other_id)));
-    assert_eq!(st_after.alsc_logs.get(&alsc_id).map(|v| v.len()), Some(1));
+    ctx.db.with_snapshot(|snap| {
+        assert!(fitting_containers_ships::is_container_unlocked_snap(snap, alsc_id, other_id));
+        assert_eq!(fitting_containers_ships::container_alsc_logs_snap(snap, alsc_id).len(), 1);
+    });
 
     let mut owner_sess = make_session(owner_id, corp_id, Some(sys_id), Some(ship_id), service_roles::ROLE_PLAYER_DEFAULT);
     assert_eq!(handle(&ctx, &mut owner_sess, None, "beyonce", "CmdAbandonLoot", &[PyRep::Integer(ore_item_id)], &HashMap::new()).await.unwrap().unwrap_err().code, "InvalidItemType");

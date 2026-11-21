@@ -451,10 +451,12 @@ async fn set_password_covers_in_space_guards_station_override_corp_logs_and_clea
         ])
     );
     ctx.db.with_snapshot(|snap| {
-        let st = fitting_containers_ships::read_container_ship_state_snap(snap);
-        assert!(st.get_container_password(corp_alsc_id, 2) == Some("cfg_secret"));
-        assert!(!st.unlocked_containers.contains(&(corp_alsc_id, char_id)));
-        let cfg = st.container_configs.get(&corp_alsc_id).expect("config stored");
+        assert_eq!(
+            fitting_containers_ships::container_password_snap(snap, corp_alsc_id, 2).as_deref(),
+            Some("cfg_secret")
+        );
+        assert!(!fitting_containers_ships::is_container_unlocked_snap(snap, corp_alsc_id, char_id));
+        let cfg = fitting_containers_ships::container_config_snap(snap, corp_alsc_id);
         assert!(cfg.lock_by_default);
         assert!(!cfg.password_per_action);
         let logs = snap.corp_container_logs.get(&corp_id).expect("corp log written");
@@ -761,10 +763,14 @@ async fn handle_set_password_covers_binding_inspace_corp_logs_and_clear_paths() 
     let alsc_notes = ctx.drain_notifications_for_char(char_id);
     assert!(!alsc_notes.iter().any(|n| n.event == "OnPasswordChanged"));
     assert!(alsc_notes.iter().any(|n| n.event == "OnInvalidateCacheForLocations"));
-    // Slot 2 does not populate unlocked_containers
-    let st_after_cfg =
-        crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(&ctx);
-    assert!(!st_after_cfg.unlocked_containers.contains(&(hangar_cont_id, char_id)));
+    // Slot 2 does not populate ContainerUnlockedChar
+    assert!(!ctx.db.with_snapshot(|snap| {
+        crate::services::inventory_fitting::fitting_containers_ships::is_container_unlocked_snap(
+            snap,
+            hangar_cont_id,
+            char_id,
+        )
+    }));
 
     // Item-bound string/None syntax (args = [String/None]) + clearing password emits OnPasswordChanged
     let item_bound = BoundObjectEntry {
