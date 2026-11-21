@@ -790,7 +790,7 @@ pub(crate) fn emit_station_jump_clone_invalidated(
     }
 }
 
-/// Emits `OnShipJumpCloneInstallationOffered(offeringCharID, targetCharID, shipID, b)`.
+/// Emits `OnShipJumpCloneInstallationOffered((offeringCharID, targetCharID, shipID, offered))` to target character.
 pub(crate) fn emit_ship_clone_offered(
     ctx: &ServerContext,
     offerer_id: i64,
@@ -800,10 +800,12 @@ pub(crate) fn emit_ship_clone_offered(
     ctx.emit_typed(
         NotificationTarget::Character(target_char_id),
         crate::router::notify_registry::OnShipJumpCloneInstallationOffered {
-            arg0: PyRep::Integer(offerer_id),
-            arg1: Some(PyRep::Integer(target_char_id)),
-            arg2: Some(PyRep::Integer(ship_id)),
-            arg3: Some(PyRep::Bool(true)),
+            args: crate::router::notify_registry::ShipJumpCloneInstallationArgs {
+                offering_char_id: offerer_id,
+                target_char_id,
+                ship_id,
+                offered: true,
+            },
         },
     );
 }
@@ -834,10 +836,12 @@ pub(crate) fn emit_ship_clone_accepted(
     ship_id: i64,
 ) {
     let done = crate::router::notify_registry::OnShipJumpCloneInstallationDone {
-        arg0: PyRep::Integer(offerer_id),
-        arg1: Some(PyRep::Integer(target_char_id)),
-        arg2: Some(PyRep::Integer(ship_id)),
-        arg3: Some(PyRep::Bool(true)),
+        args: crate::router::notify_registry::ShipJumpCloneInstallationArgs {
+            offering_char_id: offerer_id,
+            target_char_id,
+            ship_id,
+            offered: true,
+        },
     };
     let inv = crate::router::notify_registry::OnShipJumpCloneCacheInvalidated {
         location_id: ship_id,

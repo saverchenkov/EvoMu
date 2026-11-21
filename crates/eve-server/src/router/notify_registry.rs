@@ -15,6 +15,8 @@ use eve_proto::PyRep;
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 
+pub use super::notify_types::*;
+
 /// Conversion trait for strongly typed notification payload arguments.
 pub trait ToNotifyArg {
     fn into_notify_arg(self) -> PyRep;
@@ -2485,30 +2487,14 @@ define_notifications! {
         samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::Integer(1_000_000_000_001)]],
     },
     OnSlimItemChange => "OnSlimItemChange" ("solarsystemid") {
-        fields: { old_slim: PyRep, new_slim: PyRep },
+        fields: { old_slim: PyRep, new_slim: SlimItemKeyVal },
         samples: || vec![vec![
             PyRep::Integer(1_000_000_000_001),
-            PyRep::keyval([
-                ("itemID", PyRep::Integer(1_000_000_000_001)),
-                ("typeID", PyRep::Integer(35832)),
-                ("ownerID", PyRep::Integer(98_000_001)),
-                ("corpID", PyRep::Integer(98_000_001)),
-                ("allianceID", PyRep::None),
-                ("charID", PyRep::None),
-                ("categoryID", PyRep::Integer(65)),
-                ("groupID", PyRep::Integer(1657)),
-                ("controllerID", PyRep::None),
-                ("incapacitated", PyRep::Bool(false)),
-                ("posState", PyRep::Integer(0)),
-                ("posTimestamp", PyRep::Integer(0)),
-                ("isEmpty", PyRep::Bool(false)),
-                ("lootRights", PyRep::None),
-                ("hackingSecurityState", PyRep::None),
-                ("orbitalHackerID", PyRep::None),
-                ("orbitalHackerProgress", PyRep::Real(0.0)),
-                ("orbitalState", PyRep::None),
-                ("orbitalTimestamp", PyRep::Integer(0)),
-            ]),
+            SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
+                item_id: 1_000_000_000_001, type_id: 35832, group_id: 1657, category_id: 65,
+                owner_id: 98_000_001, char_id: None, corp_id: Some(98_000_001),
+                alliance_id: None, name: "Astrahus".into(),
+            }).into_notify_arg(),
         ]],
     },
     OnSolarSystemDevIndexChanged => "OnSolarSystemDevIndexChanged" ("solarsystemid") {
@@ -2807,42 +2793,33 @@ define_notifications! {
         samples: || vec![vec![PyRep::Bool(true), PyRep::Integer(500_001)]],
     },
     OnFittingAdded => "OnFittingAdded" ("charid") {
-        fields: { owner_id: i64, fit_id: PyRep },
-        samples: || vec![vec![
-            PyRep::Integer(90_000_001),
-            PyRep::List(vec![PyRep::Integer(1)]),
-        ]],
+        fields: { owner_id: i64, fit_ids: Vec<i64> },
+        samples: || vec![vec![PyRep::Integer(90_000_001), PyRep::List(vec![PyRep::Integer(1)])]],
     },
     OnFittingDeleted => "OnFittingDeleted" ("charid") {
         fields: { owner_id: i64, fit_id: i64 },
         samples: || vec![vec![PyRep::Integer(90_000_001), PyRep::Integer(1)]],
     },
     OnFittingsUpdated => "OnFittingsUpdated" ("charid") {
-        fields: { fitting: PyRep },
-        samples: || vec![vec![PyRep::keyval([
-            ("shipTypeID", PyRep::Integer(587)),
-            (
-                "fitData",
-                PyRep::List(vec![PyRep::Tuple(vec![
-                    PyRep::Integer(3170),
-                    PyRep::Integer(12),
-                    PyRep::Integer(1),
-                ])]),
-            ),
-        ])]],
+        fields: { fitting: UpdatedFittingPayload },
+        samples: || vec![
+            vec![UpdatedFittingPayload::Fitting(UpdatedFittingKeyVal {
+                fitting_id: 1, owner_id: 90_000_001, ship_type_id: 587,
+                name: "Rifter Fit".into(), description: String::new(), fit_data: vec![(3170, 12, 1)],
+            }).into_notify_arg()],
+            vec![UpdatedFittingPayload::Cleared.into_notify_arg()],
+        ],
     },
     OnFleetDisbanded => "OnFleetDisbanded" ("charid") {
         fields: { char_ids: Vec<i64> },
         samples: || vec![vec![PyRep::List(vec![PyRep::Integer(90_000_001)])]],
     },
     OnFleetInvite => "OnFleetInvite" ("charid") {
-        fields: { fleet_id: i64, invite_id: i64, msg_name: PyRep, msg_dict: PyRep },
-        optional: { role_num: Option<i64> },
+        fields: { fleet_id: i64, invite_id: i64, msg_name: FleetInviteMsgName, msg_dict: FleetInviteMsgDict },
         samples: || vec![vec![
-            PyRep::Integer(1),
-            PyRep::Integer(90_000_001),
-            PyRep::String("FleetInvite".into()),
-            PyRep::Dict(vec![(PyRep::String("autoAccept".into()), PyRep::Bool(false))]),
+            PyRep::Integer(1), PyRep::Integer(90_000_001),
+            FleetInviteMsgName::AskJoinFleet.into_notify_arg(),
+            FleetInviteMsgDict { auto_accept: false }.into_notify_arg(),
         ]],
     },
     OnFleetJoinReject => "OnFleetJoinReject" ("charid") {
@@ -3106,24 +3083,16 @@ define_notifications! {
         samples: || vec![vec![PyRep::Tuple(Vec::new())]],
     },
     OnShipJumpCloneInstallationDone => "OnShipJumpCloneInstallationDone" ("charid") {
-        fields: { arg0: PyRep },
-        optional: { arg1: Option<PyRep>, arg2: Option<PyRep>, arg3: Option<PyRep> },
-        samples: || vec![vec![PyRep::Tuple(vec![
-            PyRep::Integer(90_000_001),
-            PyRep::Integer(90_000_002),
-            PyRep::Integer(100_000_001),
-            PyRep::Bool(true),
-        ])]],
+        fields: { args: ShipJumpCloneInstallationArgs },
+        samples: || vec![vec![ShipJumpCloneInstallationArgs {
+            offering_char_id: 90_000_001, target_char_id: 90_000_002, ship_id: 100_000_001, offered: true,
+        }.into_notify_arg()]],
     },
     OnShipJumpCloneInstallationOffered => "OnShipJumpCloneInstallationOffered" ("charid") {
-        fields: { arg0: PyRep },
-        optional: { arg1: Option<PyRep>, arg2: Option<PyRep>, arg3: Option<PyRep> },
-        samples: || vec![vec![PyRep::Tuple(vec![
-            PyRep::Integer(90_000_001),
-            PyRep::Integer(90_000_002),
-            PyRep::Integer(100_000_001),
-            PyRep::Bool(true),
-        ])]],
+        fields: { args: ShipJumpCloneInstallationArgs },
+        samples: || vec![vec![ShipJumpCloneInstallationArgs {
+            offering_char_id: 90_000_001, target_char_id: 90_000_002, ship_id: 100_000_001, offered: true,
+        }.into_notify_arg()]],
     },
     OnShowContract => "OnShowContract" ("charid") {
         fields: { contract_id: i64 },

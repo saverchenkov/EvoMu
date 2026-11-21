@@ -406,9 +406,10 @@ pub(super) async fn handle_fleets(
                         crate::router::notify_registry::OnFleetInvite {
                             fleet_id: out.fleet_id,
                             invite_id: out.inviter_id,
-                            msg_name: PyRep::Integer(out.wing_id),
-                            msg_dict: PyRep::Integer(out.squad_id),
-                            role_num: Some(out.role_num),
+                            msg_name: crate::router::notify_registry::FleetInviteMsgName::AskJoinFleet,
+                            msg_dict: crate::router::notify_registry::FleetInviteMsgDict {
+                                auto_accept: false,
+                            },
                         },
                     );
                     Some(Ok(PyRep::keyval([
