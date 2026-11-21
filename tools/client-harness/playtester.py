@@ -6979,6 +6979,7 @@ class PlaytesterRunner:
                 if isinstance(fr_resp.get("result"), dict):
                     fr_resp = fr_resp["result"]
                 self._record_session_flight_calls(fr_resp.get("macho_calls") or [])
+                self._ensure_run_guard_state().absorb_payload(fr_resp)
             except Exception:
                 pass
 
@@ -10950,28 +10951,30 @@ class ScenarioRunner(PlaytesterRunner):
             if initial_res and tick_res.get("action_ok") is False:
                 merged_res["action_ok"] = False
                 merged_res["action_error"] = tick_res.get("action_error")
-            wait_guards_off = (
-                bool(latest_guard_summary.get("client_guards_off"))
-                if isinstance(latest_guard_summary, dict)
-                and isinstance(latest_guard_summary.get("client_guards_off"), bool)
-                else False
-            )
-            merged_guard_summary = guard_registry.summarize_guard_hits(
-                all_guard_hits,
-                client_guards_off=wait_guards_off,
-            )
             merged_res["guard_hits"] = list(all_guard_hits)
             merged_res["guard_hit_count"] = len(all_guard_hits)
-            merged_res["guard_summary"] = dict(merged_guard_summary)
-            merged_res["flight_recorder"] = {
+            merged_fr: Dict[str, Any] = {
                 "macho_calls": all_calls,
                 "scatters_observed": all_scatters,
                 "log_exceptions": all_log_excs,
                 "quasar_errors": all_quasar_errs,
                 "macho_exceptions": all_macho_excs,
                 "guard_hits": list(all_guard_hits),
-                "guard_summary": dict(merged_guard_summary),
             }
+            if isinstance(latest_guard_summary, dict):
+                has_bool_off = isinstance(latest_guard_summary.get("client_guards_off"), bool)
+                wait_guards_off = bool(latest_guard_summary["client_guards_off"]) if has_bool_off else False
+                merged_guard_summary = guard_registry.summarize_guard_hits(
+                    all_guard_hits,
+                    client_guards_off=wait_guards_off,
+                )
+                if not has_bool_off:
+                    merged_guard_summary.pop("client_guards_off", None)
+                merged_res["guard_summary"] = dict(merged_guard_summary)
+                merged_fr["guard_summary"] = dict(merged_guard_summary)
+            else:
+                merged_res.pop("guard_summary", None)
+            merged_res["flight_recorder"] = merged_fr
             latest_res = merged_res
             ok_until, until_fail_chk, until_fail_msg = evaluate_scenario_checks(
                 until_checks, step_pre_state, latest_state, merged_res, context=context
@@ -11280,7 +11283,15 @@ class ScenarioRunner(PlaytesterRunner):
                         if step_log_errs:
                             log_errors.extend(step_log_errs)
 
+                        has_inline_guards = isinstance(exec_res, dict) and (
+                            isinstance(exec_res.get("guard_hits"), list)
+                            or isinstance((exec_res.get("flight_recorder") or {}).get("guard_hits"), list)
+                        )
                         step_guard_hits = guard_tracker.absorb_payload(exec_res)
+                        if not has_inline_guards:
+                            step_guard_hits.extend(
+                                guard_tracker.poll_rpc(getattr(self, "rpc", None), timeout=1.0)
+                            )
                         step_records.append({
                             "step_index": step_num,
                             "step_id": step_id,
@@ -11364,7 +11375,7 @@ class ScenarioRunner(PlaytesterRunner):
             "steps": step_records,
             "failure": failure_info,
         }
-        guard_summary = guard_tracker.summary(default_guards_off=True)
+        guard_summary = guard_tracker.summary(default_guards_off=False)
         journey_entry["client_guards_off"] = guard_summary["client_guards_off"]
         journey_entry["guard_hits"] = list(guard_tracker.hits)
         journey_entry["guard_hits_count"] = guard_summary["guard_hits_count"]
@@ -11421,7 +11432,7 @@ class ScenarioRunner(PlaytesterRunner):
         all_guards_off = (
             all(bool(entry_item.get("client_guards_off", False)) for entry_item in journeys.values())
             if journeys
-            else True
+            else False
         )
         guard_rollup = guard_registry.summarize_guard_hits(
             all_guard_hits, client_guards_off=all_guards_off

@@ -1765,6 +1765,150 @@ class TestTelemetryPropagationEndToEnd(unittest.TestCase):
                 except Exception:
                     pass
 
+    def test_bootstrap_session_wire_unwrap_preserves_boot_guard_hits(self):
+        import socket
+        import threading
+
+        hook = _load_py2_harness_module("evomu_playtester_hook.py", stub_helpers=True)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_sock:
+            probe_sock.bind(("127.0.0.1", 0))
+            hook_port = probe_sock.getsockname()[1]
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            _isolated_evomu_site_env(
+                env_overrides={
+                    guard_registry.DISABLE_SERVER_GUARDS_ENV: "0",
+                    "EVOMU_PLAYTESTER_PORT": "",
+                }
+            ),
+        ):
+            root = Path(td)
+            mem_dir = root / "runtime"
+            run_dir = root / "run_wire"
+            step_dir = run_dir / "steps" / "step_00001"
+            step_dir.mkdir(parents=True, exist_ok=True)
+            stage_dir = root / "staged_client"
+            (stage_dir / "bin64").mkdir(parents=True, exist_ok=True)
+            (stage_dir / "bin64" / "exefile").write_text("#!/bin/sh\n", encoding="utf-8")
+
+            evomu_site._record_guard_hit("camera_dock_guard", "Boot.Init", "boot_wire_hit")
+            fake_sm = mock.Mock()
+            fake_sm.IsServiceRunning.return_value = False
+            srv = hook.PlaytesterRpcServer({"playtester_port": hook_port}, fake_sm)
+
+            listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listen_sock.bind(("127.0.0.1", 0))
+            listen_sock.listen(8)
+            listen_sock.settimeout(0.05)
+            wire_port = listen_sock.getsockname()[1]
+            stop_evt = threading.Event()
+
+            def _serve():
+                while not stop_evt.is_set():
+                    try:
+                        conn, _ = listen_sock.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    with conn:
+                        rfile = conn.makefile("r", encoding="utf-8", errors="replace")
+                        line = rfile.readline()
+                        if line:
+                            req = json.loads(line)
+                            resp = srv._dispatch(req)
+                            conn.sendall((json.dumps(hook._json_safe(resp)) + "\n").encode("utf-8"))
+
+            t = threading.Thread(target=_serve, daemon=True)
+            t.start()
+            try:
+                snap = {
+                    "open_windows": [],
+                    "modals": [],
+                    "ui": {},
+                    "space": {},
+                    "skills_state": {},
+                    "wallet_state": {},
+                    "active_view": "hangar",
+                    "client_build": "9990001",
+                    "session": {"charid": 90000001},
+                }
+
+                class DummyProc:
+                    pid = 5252
+                    returncode = None
+
+                    def poll(self):
+                        return None
+
+                runner = playtester.PlaytesterRunner.__new__(playtester.PlaytesterRunner)
+                runner.worktree_dir = root
+                runner.runtime_dir = mem_dir
+                runner.current_run_dir = run_dir
+                runner.staged_app = root / "EVE.app"
+                runner.args = types.SimpleNamespace(silent=True)
+                runner.ports = {"gateway": 26005, "http": 26004, "macho": 26000, "rpc": wire_port}
+                runner.client_proc = None
+                runner.rpc = playtester.InClientRpcBridge("127.0.0.1", wire_port, timeout=5.0)
+                runner.memory = playtester.PlaytesterMemory(mem_dir, git_head="abc123", server_bin_mtime=1.0)
+                runner.write_inclient_cfg = lambda: run_dir / "inclient.json"
+                runner._crashmon_pids = lambda: set()
+
+                def _step1_sleep(_ms):
+                    evomu_site._record_guard_hit("wreck_rotation_guard", "Wreck.Prepare", "step1_wire_hit")
+
+                with (
+                    mock.patch.object(hook, "_install_flight_recorder_hooks"),
+                    mock.patch.object(hook, "_install_warp_telemetry"),
+                    mock.patch.object(hook, "_ensure_windowed_mode"),
+                    mock.patch.object(hook, "_get_state_snapshot", return_value=snap),
+                    mock.patch.object(hook, "_compute_state_diff", return_value={"ui_changed": False, "view_changed": False}),
+                    mock.patch.object(hook, "_settle_secondary_view_transition"),
+                    mock.patch.object(hook.H, "_sleep_sim_ms", create=True),
+                    mock.patch.object(hook.H, "_sleep_ms", side_effect=_step1_sleep, create=True),
+                    mock.patch.object(
+                        hook.__builtin__,
+                        "session",
+                        _make_fake_session(stationid=60003760, shipid=2002),
+                        create=True,
+                    ),
+                    mock.patch.object(playtester, "stage_playtester_client", return_value=stage_dir),
+                    mock.patch.object(playtester, "mint_sso_jwt_via_server", return_value="tok"),
+                    mock.patch.object(playtester.subprocess, "Popen", return_value=DummyProc()),
+                ):
+                    self.assertTrue(runner.start_client())
+                    self.assertEqual(runner._guard_tracker.total_count, 1)
+                    self.assertEqual(runner._guard_tracker.last_seq, 1)
+                    self.assertFalse(runner._guard_tracker.client_guards_off)
+
+                    # Execute Step 1 over real InClientRpcBridge so post-boot hit arrives inline (seq=2 > 1).
+                    step_res = runner.rpc.call("execute_action", {"action": {"type": "wait", "wait_ms": 10, "strict_wait": True}})
+                    runner._record_step_guard_hits(1, step_res)
+                    runner._write_run_summary(step_num=1, final=True)
+
+                    # Also verify _sync_initial_session_flight_calls fallback absorbs get_flight_recorder guard hits.
+                    runner._guard_tracker = playtester._GuardHitTracker()
+                    runner.client_proc = DummyProc()
+                    runner._sync_initial_session_flight_calls({"client_build": "9990001"})
+                    self.assertEqual(runner._guard_tracker.total_count, 2)
+
+                run_sum = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(run_sum["guard_hits_count"], 2)
+                self.assertEqual(
+                    run_sum["guard_hits_by_guard"],
+                    {"camera_dock_guard": 1, "wreck_rotation_guard": 1},
+                )
+            finally:
+                stop_evt.set()
+                t.join(timeout=2.0)
+                listen_sock.close()
+                try:
+                    srv.sock.close()
+                except Exception:
+                    pass
+
     def test_playtester_runner_keeps_guards_on_and_records_telemetry(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -2299,6 +2443,146 @@ class TestTelemetryPropagationEndToEnd(unittest.TestCase):
                 {"camera_dock_guard": 1, "probe_tracker_guard": 1},
             )
 
+            # P2-1: wait_until without guard_summary must not synthesize client_guards_off=False.
+            sr_p2 = playtester.ScenarioRunner.__new__(playtester.ScenarioRunner)
+            sr_p2._default_target_char_id = lambda: 90000001
+            sr_p2.rpc = mock.MagicMock()
+            sr_p2.rpc.call.return_value = {
+                "action_ok": True,
+                "post_state": {"active_view": "space", "open_windows": ["space_hud"]},
+                "flight_recorder": {
+                    "macho_calls": [],
+                    "scatters_observed": [],
+                    "log_exceptions": [],
+                    "quasar_errors": [],
+                    "macho_exceptions": [],
+                },
+            }
+            p2_res, _ = sr_p2._execute_wait_until(
+                {"wait_until": {"checks": {"expect_window_open": "space_hud"}, "timeout_ms": 2000}},
+                {"active_view": "hangar", "open_windows": []},
+                {},
+                initial_res=None,
+                initial_state={"active_view": "hangar", "open_windows": []},
+            )
+            self.assertNotIn("guard_summary", p2_res)
+            self.assertNotIn("guard_summary", p2_res["flight_recorder"])
+            p2_tracker = playtester._GuardHitTracker()
+            p2_tracker.client_guards_off = True
+            p2_tracker.absorb_payload(p2_res)
+            self.assertTrue(p2_tracker.client_guards_off)
+
+            # P2-4: gm_bridge step without wait_until must poll get_guard_hits in-step.
+            gm_scen_path = root / "gm_scen.json"
+            gm_scen_path.write_text(
+                json.dumps({
+                    "id": "gm_step_poll",
+                    "title": "GM Step Poll Check",
+                    "steps": [
+                        {
+                            "id": "s_gm",
+                            "setup": True,
+                            "action": {"type": "slash_command", "command": "/tr 90000001 34 1"},
+                            "checks": {},
+                        }
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            gm_scen = playtester.load_scenario_file(gm_scen_path)
+            gm_scen["path"] = gm_scen_path
+            gm_cmds = []
+            sr._should_dispatch_via_gm_bridge = lambda act, act_type: act_type == "slash_command"
+            sr._execute_gm_or_time_control_via_bridge = lambda act, act_type, cid: {
+                "action_ok": True,
+                "flight_recorder": {"macho_calls": [], "scatters_observed": [], "log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            }
+
+            def _gm_rpc(cmd, params=None, timeout=20.0):
+                gm_cmds.append(cmd)
+                if cmd == "get_state":
+                    return {"post_state": {"active_view": "hangar", "client_build": "9990001"}}
+                if cmd == "get_guard_hits":
+                    return {
+                        "ok": True,
+                        "guard_hits": [{"seq": 1, "guard": "camera_dock_guard", "function": "ViewStateSvc._OpenView", "reason": "gm_side_effect", "time": 1.0}],
+                        "guard_summary": {"client_guards_off": True},
+                    }
+                return {"ok": True}
+
+            sr.rpc.call.side_effect = _gm_rpc
+            gm_res, _ = sr.run_single_scenario(gm_scen)
+            self.assertTrue(gm_res["passed"])
+            self.assertGreaterEqual(gm_cmds.count("get_guard_hits"), 1)
+            self.assertEqual(gm_res["steps"][0]["guard_hits_count"], 1)
+
+    def test_scenario_runner_fails_closed_when_startup_or_telemetry_missing(self):
+        for case_name in ("start_server_failed", "start_client_failed", "missing_guard_summary"):
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                scen_path = root / "fail_closed_scen.json"
+                scen_path.write_text(
+                    json.dumps({
+                        "id": f"fc_{case_name}",
+                        "title": "Fail Closed Check",
+                        "steps": [{"id": "s1", "action": {"type": "wait", "target": "10"}, "checks": {}}],
+                    }),
+                    encoding="utf-8",
+                )
+                out_dir = root / "out"
+                run_dir = root / "run"
+                (run_dir / "client_logs").mkdir(parents=True, exist_ok=True)
+                (run_dir / "server.log").write_text("", encoding="utf-8")
+
+                sr = playtester.ScenarioRunner.__new__(playtester.ScenarioRunner)
+                sr.worktree_dir = root
+                sr.current_run_dir = run_dir
+                sr.out_dir = out_dir
+                sr.staged_app = root / "EVE.app"
+                sr.world_db_path = root / "missing.sqlite"
+                sr.args = types.SimpleNamespace(silent=True, foreground=False)
+                sr.screenshot_max_dim = 1024
+                sr.ports = {"gateway": 26005, "http": 26004, "macho": 26000, "rpc": 26995}
+                sr.client_proc = None
+                sr.server_proc = None
+                sr._session_flight_calls = []
+                sr._session_flight_seqs = set()
+                sr._active_declared_setup_steps = []
+                sr._active_expected_characters = []
+                sr._active_starting_state = {}
+                sr._last_boot_result = {}
+                sr._scenario_auth_params = lambda: ("demo", "demo-secret", 90000001, "Demo Pilot")
+                sr.stop_client = lambda: None
+                sr.stop_server = lambda: None
+                sr._close_gm_bridge = lambda: None
+                sr._ensure_starting_state = lambda scen_cfg: []
+                sr._record_session_flight_calls = lambda calls: None
+                sr._capture_failure_screenshot = lambda p: None
+                sr._run_destiny_parity_check = lambda logs: None
+                sr.scenario_paths = [scen_path]
+                sr.rpc = mock.MagicMock()
+
+                if case_name == "start_server_failed":
+                    sr.start_server = lambda *a, **kw: False
+                    sr.start_client = lambda *a, **kw: True
+                elif case_name == "start_client_failed":
+                    sr.start_server = lambda *a, **kw: True
+                    sr.start_client = lambda *a, **kw: False
+                else:
+                    sr.start_server = lambda *a, **kw: True
+                    sr.start_client = lambda *a, **kw: True
+                    sr._last_boot_result = {"ok": True, "session": {"charid": 90000001}, "active_view": "hangar"}
+                    sr.rpc.call.side_effect = lambda cmd, params=None, timeout=20.0: (
+                        {"action_ok": True, "post_state": {"client_build": "9990001", "active_view": "hangar"}, "flight_recorder": {}}
+                        if cmd == "execute_action"
+                        else {}
+                    )
+
+                sr.run_scenarios()
+                res = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
+                self.assertFalse(res["client_guards_off"], case_name)
+                self.assertFalse(res["journeys"][f"fc_{case_name}"]["client_guards_off"], case_name)
+
     def test_inclient_driver_and_run_journeys_attestation_telemetry(self):
         drv = _load_py2_harness_module("evomu_inclient_driver.py", stub_helpers=False)
         rj = _load_run_journeys_module()
@@ -2443,9 +2727,7 @@ class TestTelemetryPropagationEndToEnd(unittest.TestCase):
 
                 # When launch_login is skipped via only_journeys, boot hits remain isolated from station_ui
                 # and are folded into top-level totals from real_client_boot_telemetry.json.
-                evomu_site._reset_guard_hits_for_test() if hasattr(evomu_site, "_reset_guard_hits_for_test") else None
-                evomu_site._GUARD_HITS[:] = []
-                evomu_site._GUARD_HIT_SEQ = 0
+                evomu_site.reset_guard_hits()
                 drv_out2 = root / "driver_out_filtered"
                 with mock.patch.object(
                     drv,

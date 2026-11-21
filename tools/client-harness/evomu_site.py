@@ -122,6 +122,7 @@ def reset_guard_hits():
         del _GUARD_HITS[:]
         _GUARD_HIT_SEQ = 0
         _GUARD_HIT_COUNTS.clear()
+        globals()["_PT_CONSUMED_GUARD_SEQ"] = 0
 
 
 def _is_exc_noise_line(ln):

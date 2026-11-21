@@ -8347,19 +8347,25 @@ class PlaytesterRpcServer(object):
             globals()["_LAST_SNAPSHOT_SM"] = self.sm
             globals()["_LAST_SNAPSHOT_TS"] = time.time()
             gt = _collect_hook_guard_telemetry(0, advance_cursor=True)
+            boot_fr = {
+                "macho_calls": list(_FLIGHT_RECORDER[-80:]),
+                "scatters_observed": [s.get("event") for s in _RECENT_SCATTERS[-60:]],
+                "guard_hits": gt["guard_hits"],
+                "guard_summary": gt["cumulative_summary"],
+            }
+            boot_result = dict(st) if isinstance(st, dict) else {}
+            boot_result["char_id"] = int(cid or 0)
+            boot_result["guard_hits"] = gt["guard_hits"]
+            boot_result["guard_summary"] = gt["cumulative_summary"]
+            boot_result["flight_recorder"] = boot_fr
             return {
                 "ok": True,
-                "result": st,
+                "result": boot_result,
                 "char_id": int(cid or 0),
                 "state": st,
                 "guard_hits": gt["guard_hits"],
                 "guard_summary": gt["cumulative_summary"],
-                "flight_recorder": {
-                    "macho_calls": list(_FLIGHT_RECORDER[-80:]),
-                    "scatters_observed": [s.get("event") for s in _RECENT_SCATTERS[-60:]],
-                    "guard_hits": gt["guard_hits"],
-                    "guard_summary": gt["cumulative_summary"],
-                },
+                "flight_recorder": dict(boot_fr),
             }
         if cmd == "get_guard_hits":
             since_seq = int(params.get("since_seq", 0) or 0)

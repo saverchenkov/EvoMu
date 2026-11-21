@@ -1807,11 +1807,18 @@ def _execute_all_journeys(cfg, ipc):
         _atomic_write_json(boot_telemetry_path, boot_entry)
     ipc.notify({"cmd": "boot_guard_telemetry", "entry": boot_entry})
 
+    first_journey = True
     for jid, handler in _JOURNEY_HANDLERS:
         if only_set is not None and jid not in only_set:
             continue
 
-        guard_seq_before = 0 if jid == "launch_login" else _read_guard_cursor()
+        if jid == "launch_login":
+            guard_seq_before = 0
+        elif first_journey:
+            guard_seq_before = boot_guard_cursor
+        else:
+            guard_seq_before = _read_guard_cursor()
+        first_journey = False
         pre_reset_tb = None
         try:
             _reset_baseline_state(sm, ipc, ctx["baseline"], char_id=ctx["char_id"])
