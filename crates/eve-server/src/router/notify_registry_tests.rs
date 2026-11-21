@@ -635,6 +635,7 @@ fn raw_notify_ratchet_holds_and_migrated_files_stay_clean() {
         "services/fitting_mining_lasers.rs",
         "services/fitting_module_cycles.rs",
         "services/fitting_module_cycles_helpers.rs",
+        "services/fitting_module_cycles_pending_actions.rs",
         "services/fitting_saved_apply.rs",
         "services/fitting_saved_multifit.rs",
         "services/fitting_scanners_superweapons.rs",
