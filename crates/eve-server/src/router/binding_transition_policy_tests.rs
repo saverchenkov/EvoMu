@@ -1070,7 +1070,7 @@ fn transition_grace_store_lock_order_matches_world_snapshot_under_concurrency() 
                         structure_id,
                     ),
                 ];
-                ctx_b.record_transition_grace_bindings(&entries);
+                ctx_b.record_transition_grace_bindings(&entries, Some(perimeter_sys), None);
                 let _ = ctx_b.record_atomic_session_transition(AtomicSceneTransitionRecord {
                     session_id: sid,
                     user_id: Some(user_id),
@@ -2074,6 +2074,193 @@ fn live_apply_db_false_dock_purges_departed_dock_grace_and_grants_fresh_window()
             jita_station,
             "GetDirtTimestamp",
             &[PyRep::Integer(ship_a)],
+            &kw,
+        )
+        .is_none());
+}
+
+#[test]
+fn same_system_apply_db_false_dock_excludes_active_system_from_departed_locations() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let sid = 880_015_u64;
+    let jita_sys = 30_000_142_u32;
+    let perimeter_sys = 30_000_144_u32;
+    let jita_station = 60_003_760_i64;
+    let ship_a = 1_897_400_801_i64;
+
+    seed_ships_for_policy_tests(
+        &ctx,
+        char_id,
+        other_char,
+        jita_station,
+        &[ship_a],
+        1_897_400_898,
+        1_897_400_899,
+    );
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_id);
+
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::CharacterLogin {
+                solar_system_id: jita_sys,
+                dock_id: Some((jita_station, false)),
+                ship_id: Some(ship_a),
+            },
+            "login",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("character login");
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::Undock {
+                solar_system_id: jita_sys,
+            },
+            "undock",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("undock");
+
+    // Bind a solar-system-scoped object while undocked (every live pilot holds `beyonce(sys_id)`).
+    let beyonce_bid = ctx
+        .bind_object(&sess, "beyonce", i64::from(jita_sys))
+        .expect("bind beyonce in space");
+
+    // Same-system live Dock (`apply_db(false)`): invalidates `beyonce(jita_sys)` while remaining in `jita_sys`.
+    ctx.advance_secs(10);
+    ctx.db
+        .dock_character_if_in_space(char_id, jita_sys, jita_station, false)
+        .expect("dock_character_if_in_space");
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::Dock {
+                dock_id: jita_station,
+                is_structure: false,
+            },
+            "dock",
+        )
+        .with_apply_db(false)
+        .with_cleanup_departing_space(false)
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("live apply_db(false) dock");
+
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&beyonce_bid));
+    let kw = HashMap::new();
+    ctx.read_context_grace_store(|s| {
+        let st = s.expect("grace store present");
+        assert!(
+            !st.departed_locations.contains_key(&(
+                sid,
+                DepartedLocationKind::SolarSystem,
+                i64::from(jita_sys),
+            )),
+            "same-system dock must never record entered solar system in departed_locations"
+        );
+    });
+    assert!(
+        ctx.allocate_late_call_grace_binding(
+            &sess,
+            "crimewatch",
+            i64::from(jita_sys),
+            "GetClientStates",
+            &[],
+            &kw,
+        )
+        .is_none(),
+        "solar-system late-call grace must stay inactive while still in system"
+    );
+
+    // Out-of-band invalidation sync while docked in `jita_sys` must also filter active destination.
+    let oob_beyonce = ctx
+        .bind_verified_sub_object(&sess, "beyonce", i64::from(jita_sys))
+        .expect("bind oob beyonce");
+    ctx.invalidate_bound_objects_for_session_transition(
+        char_id,
+        jita_sys,
+        Some(jita_station),
+        "dock",
+    );
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&oob_beyonce));
+    ctx.read_context_grace_store(|s| {
+        let st = s.expect("grace store present");
+        assert!(
+            !st.departed_locations.contains_key(&(
+                sid,
+                DepartedLocationKind::SolarSystem,
+                i64::from(jita_sys),
+            )),
+            "out-of-band dock invalidation must not record active solar system"
+        );
+    });
+
+    // Departing `jita_sys` 15s after docking must grant a fresh 30s window (+35s valid, +46s expired).
+    ctx.advance_secs(15);
+    let prev = sess.clone();
+    sess.solar_system_id = Some(perimeter_sys);
+    sess.station_id = None;
+    ctx.sync_transition_grace_on_session_change(&prev, &sess);
+
+    let sys_bid = ctx
+        .allocate_late_call_grace_binding(
+            &sess,
+            "crimewatch",
+            i64::from(jita_sys),
+            "GetClientStates",
+            &[],
+            &kw,
+        )
+        .expect("fresh solar-system grace after docking and out-of-band departure");
+
+    ctx.advance_secs(20);
+    assert!(matches!(
+        ctx.resolve_late_call_with_policy(
+            &sess,
+            sys_bid,
+            "GetClientStates",
+            &[],
+            &kw,
+        ),
+        LateCallResolution::DispatchWithBinding(entry) if entry.object_id == i64::from(jita_sys)
+    ));
+
+    ctx.advance_secs(11);
+    assert!(matches!(
+        ctx.resolve_late_call_with_policy(
+            &sess,
+            sys_bid,
+            "GetClientStates",
+            &[],
+            &kw,
+        ),
+        LateCallResolution::RejectStale
+    ));
+    assert!(ctx
+        .allocate_late_call_grace_binding(
+            &sess,
+            "crimewatch",
+            i64::from(jita_sys),
+            "GetClientStates",
+            &[],
             &kw,
         )
         .is_none());

@@ -1065,7 +1065,7 @@ impl ServerContext {
             reason,
         );
         if reason != "logout" {
-            self.record_transition_grace_bindings(&removed);
+            self.record_transition_grace_bindings(&removed, Some(system_id), active_dock_id);
         }
         for entry in &removed {
             self.emit_macho_object_disconnect(entry);

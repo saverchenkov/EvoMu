@@ -750,6 +750,8 @@ impl ServerContext {
             self.prepare_departed_bindings(
                 &removed_bindings,
                 Some((session_id, session_id != 0 && can_record_departed)),
+                next_sys,
+                next_dock,
             )
         };
 
@@ -794,9 +796,6 @@ impl ServerContext {
                 store.epoch_records.remove(&session_id);
             } else {
                 let mut touched_sessions = Vec::new();
-                for &(kind, lid) in &loc_purge {
-                    store.departed_locations.remove(&(session_id, kind, lid));
-                }
                 if can_record_departed {
                     if let Some(uid) = user_id {
                         for &(kind, lid) in &loc_record {
@@ -825,6 +824,9 @@ impl ServerContext {
                     now_ticks,
                     &mut touched_sessions,
                 );
+                for &(kind, lid) in &loc_purge {
+                    store.departed_locations.remove(&(session_id, kind, lid));
+                }
                 if !touched_sessions.is_empty() {
                     Self::trim_store_session_caps(store, &touched_sessions);
                 }
@@ -1013,10 +1015,24 @@ impl ServerContext {
         None
     }
 
+    fn matches_destination_location(
+        kind: DepartedLocationKind,
+        object_id: i64,
+        dest_sys: Option<u32>,
+        dest_dock: Option<i64>,
+    ) -> bool {
+        match kind {
+            DepartedLocationKind::SolarSystem => dest_sys.map(i64::from) == Some(object_id),
+            DepartedLocationKind::Dock => dest_dock == Some(object_id),
+        }
+    }
+
     fn prepare_departed_bindings(
         &self,
         entries: &[BoundObjectEntry],
         transition_target: Option<(u64, bool)>,
+        dest_sys: Option<u32>,
+        dest_dock: Option<i64>,
     ) -> Vec<PreparedDepartedBinding> {
         let mut prepared = Vec::new();
         for entry in entries {
@@ -1024,7 +1040,19 @@ impl ServerContext {
                 continue;
             }
             let retain_entry = policy_retains_departed_binding(&entry.service);
-            let departed_kind = self.departed_location_kind_for_entry(entry).filter(|_| {
+            let departed_kind = self.departed_location_kind_for_entry(entry).filter(|&kind| {
+                let is_entered_destination = match transition_target {
+                    Some((target_sid, _)) if entry.session_id != target_sid => false,
+                    _ => Self::matches_destination_location(
+                        kind,
+                        entry.object_id,
+                        dest_sys,
+                        dest_dock,
+                    ),
+                };
+                if is_entered_destination {
+                    return false;
+                }
                 match transition_target {
                     Some((_, false)) => false,
                     Some((target_sid, true)) if entry.session_id == target_sid => true,
@@ -1101,11 +1129,16 @@ impl ServerContext {
         }
     }
 
-    pub(crate) fn record_transition_grace_bindings(&self, entries: &[BoundObjectEntry]) {
+    pub(crate) fn record_transition_grace_bindings(
+        &self,
+        entries: &[BoundObjectEntry],
+        dest_sys: Option<u32>,
+        dest_dock: Option<i64>,
+    ) {
         if entries.is_empty() {
             return;
         }
-        let prepared = self.prepare_departed_bindings(entries, None);
+        let prepared = self.prepare_departed_bindings(entries, None, dest_sys, dest_dock);
         if prepared.is_empty() {
             return;
         }
