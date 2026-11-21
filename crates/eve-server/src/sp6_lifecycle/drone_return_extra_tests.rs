@@ -1347,3 +1347,338 @@ async fn launched_active_drone_cannot_be_stolen_during_return_or_scoop_race() {
         Some(thief_char)
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_docking() {
+    use crate::services::combat_crimewatch::combat_npcs_drones::{
+        handle_npcs_drones, move_drone_item_to_bay_in_snap,
+    };
+
+    let ctx = Arc::new(test_ctx());
+    let sys_id = 30_000_142u32;
+    let char_id = 90_000_001i64;
+    let ship_id = 920_009_001i64;
+    let d_race = 920_009_101i64;
+    let d_dock = 920_009_102i64;
+    let d_cargo = 920_009_103i64;
+
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).expect("demo character");
+        ch.active_ship_id = ship_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        let uid = ch.user_id;
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 645, // Dominix (large drone bay + bandwidth)
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for id in [d_race, d_dock, d_cargo] {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: 2454,
+                    owner_id: char_id,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        uid
+    });
+    ctx.db
+        .acquire_online_lock_with_computer_hash(
+            uid,
+            1,
+            Some(char_id),
+            None,
+            true,
+            ctx.now_unix(),
+        )
+        .expect("register online");
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    spawn_ball(&ctx, sys_id, ship_id, 645, DVec3::ZERO);
+    for id in [d_race, d_dock, d_cargo] {
+        spawn_ball(&ctx, sys_id, id, 2454, DVec3::new(500.0, 0.0, 0.0));
+    }
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        for id in [d_race, d_dock, d_cargo] {
+            rt.active_drones_in_space.insert(
+                id,
+                make_drone_state(id, id, 2454, char_id, ship_id, sys_id, false, 1),
+            );
+        }
+    });
+
+    let mut owner_sess = SessionState::default();
+    owner_sess.user_id = Some(uid);
+    owner_sess.character_id = Some(char_id);
+    owner_sess.ship_id = Some(ship_id);
+    owner_sess.solar_system_id = Some(sys_id);
+    let kw = HashMap::new();
+
+    // 1. Overlapping concurrent `ScoopToDroneBay` calls gated behind `db.with_mut_snapshot` lock:
+    //    exactly one succeeds, one returns `DroneNotInSpace`, and NO zombie remains in `active_drones_in_space`.
+    {
+        let db_hold = Arc::clone(&ctx.db);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::task::spawn_blocking(move || {
+            db_hold.with_mut_snapshot(|_snap| {
+                let _ = locked_tx.send(());
+                let _ = release_rx.blocking_recv();
+            });
+        });
+        locked_rx.await.unwrap();
+
+        let (e1_tx, e1_rx) = tokio::sync::oneshot::channel::<()>();
+        let (e2_tx, e2_rx) = tokio::sync::oneshot::channel::<()>();
+        let c1 = Arc::clone(&ctx);
+        let c2 = Arc::clone(&ctx);
+        let mut s1 = owner_sess.clone();
+        let mut s2 = owner_sess.clone();
+        let k1 = kw.clone();
+        let k2 = kw.clone();
+
+        let t1 = tokio::spawn(async move {
+            let _ = e1_tx.send(());
+            handle_npcs_drones(&c1, &mut s1, "ship", "ScoopToDroneBay", &[PyRep::Integer(d_race)], &k1)
+                .await
+        });
+        let t2 = tokio::spawn(async move {
+            let _ = e2_tx.send(());
+            handle_npcs_drones(&c2, &mut s2, "ship", "ScoopToDroneBay", &[PyRep::Integer(d_race)], &k2)
+                .await
+        });
+        e1_rx.await.unwrap();
+        e2_rx.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let _ = sys_handle.get_ball_snapshot(ship_id).await;
+        let _ = release_tx.send(());
+        holder.await.unwrap();
+
+        let r1 = t1.await.unwrap().expect("t1 handled");
+        let r2 = t2.await.unwrap().expect("t2 handled");
+        match (r1, r2) {
+            (Ok(_), Err(e)) | (Err(e), Ok(_)) => assert_eq!(e.code, "DroneNotInSpace"),
+            other => panic!("expected exactly one Ok and one DroneNotInSpace, got {other:?}"),
+        }
+        ctx.db.with_snapshot(|snap| {
+            let it = &snap.items[&d_race];
+            assert_eq!(it.location_id, ship_id);
+            assert_eq!(it.flag, InventoryFlag::DroneBay);
+            assert_eq!(it.owner_id, char_id);
+        });
+        with_combat_runtime(&ctx, |rt| {
+            assert!(
+                !rt.active_drones_in_space.contains_key(&d_race),
+                "losing ScoopToDroneBay must NOT re-insert zombie active drone"
+            );
+            assert!(!rt.drone_next_ready_unix.contains_key(&d_race));
+        });
+    }
+
+    // 2. Direct `F-1489-R3-02` unit check on `move_drone_item_to_bay_in_snap` + `try_atomic_scoop_drone`
+    //    race where the drone item is moved to ship Cargo (ball still present in space) while returning.
+    {
+        ctx.db.with_mut_snapshot(|snap| {
+            assert!(
+                !move_drone_item_to_bay_in_snap(
+                    snap,
+                    d_race,
+                    d_race,
+                    sys_id,
+                    Some(char_id),
+                    ship_id,
+                    false,
+                ),
+                "item already in DroneBay must be rejected"
+            );
+            assert!(
+                !move_drone_item_to_bay_in_snap(
+                    snap,
+                    d_cargo,
+                    d_cargo,
+                    sys_id + 1,
+                    Some(char_id),
+                    ship_id,
+                    false,
+                ),
+                "item in different solar system must be rejected"
+            );
+            assert_eq!(snap.items[&d_cargo].flag, InventoryFlag::None);
+            assert_eq!(snap.items[&d_cargo].location_id, sys_id as i64);
+        });
+
+        let state_cargo = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&d_cargo].clone());
+        let db_hold = Arc::clone(&ctx.db);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::task::spawn_blocking(move || {
+            db_hold.with_mut_snapshot(|snap| {
+                let _ = locked_tx.send(());
+                let _ = release_rx.blocking_recv();
+                if let Some(it) = snap.items.get_mut(&d_cargo) {
+                    it.location_id = ship_id;
+                    it.flag = InventoryFlag::Cargo;
+                }
+            });
+        });
+        locked_rx.await.unwrap();
+        let _ = ctx.drain_notifications_for_char(char_id);
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let c_ret = Arc::clone(&ctx);
+        let sys_ret = sys_handle.clone();
+        let ret_task = tokio::spawn(async move {
+            let _ = entered_tx.send(());
+            super::try_atomic_scoop_drone(&c_ret, &sys_ret, &state_cargo, ship_id).await
+        });
+        entered_rx.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let _ = release_tx.send(());
+        holder.await.unwrap();
+
+        let scooped = ret_task.await.unwrap();
+        assert!(!scooped, "try_atomic_scoop_drone must return false when item moved to Cargo");
+        ctx.db.with_snapshot(|snap| {
+            let it = &snap.items[&d_cargo];
+            assert_eq!(it.location_id, ship_id);
+            assert_eq!(it.flag, InventoryFlag::Cargo);
+        });
+        with_combat_runtime(&ctx, |rt| {
+            assert!(
+                !rt.active_drones_in_space.contains_key(&d_cargo),
+                "stale Cargo drone must be removed without zombie entry"
+            );
+        });
+        assert!(
+            sys_handle.get_ball_snapshot(d_cargo).await.unwrap().is_some(),
+            "NotInSpace outcome must not remove live ballpark ball"
+        );
+        let notifs_cargo = ctx.drain_notifications_for_char(char_id);
+        assert!(
+            notifs_cargo
+                .iter()
+                .all(|n| n.event != "OnDroneStateChange" && n.event != "OnDroneControlLost"),
+            "NotInSpace return rejection must emit zero drone state notifications, got {notifs_cargo:?}"
+        );
+        assert!(
+            !notifs_cargo.iter().any(|n| {
+                n.event == "OnItemChange"
+                    && format!("{n:?}").contains("DroneBay")
+            }),
+            "NotInSpace return rejection must emit zero OnItemChange into DroneBay, got {notifs_cargo:?}"
+        );
+    }
+
+    // 3. Dock-during-scoop race gated behind `db.with_mut_snapshot`:
+    //    ScoopToDroneBay passes initial snapshot/ball checks, pilot docks in DB while DB lock is held,
+    //    and ScoopToDroneBay returns `DroneNotInSpace`, leaves item in space, abandons drone in runtime,
+    //    and emits `OnDroneStateChange(0, 0) < OnDroneActivityChange(0) < OnDroneControlLost`.
+    {
+        let _ = ctx.drain_notifications_for_char(char_id);
+        let db_hold = Arc::clone(&ctx.db);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::task::spawn_blocking(move || {
+            db_hold.with_mut_snapshot(|snap| {
+                let _ = locked_tx.send(());
+                let _ = release_rx.blocking_recv();
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.station_id = Some(60_003_760);
+                }
+                if let Some(sh) = snap.items.get_mut(&ship_id) {
+                    sh.location_id = 60_003_760;
+                    sh.flag = InventoryFlag::Hangar;
+                }
+            });
+        });
+        locked_rx.await.unwrap();
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let c_dock = Arc::clone(&ctx);
+        let mut s_dock = owner_sess.clone();
+        let k_dock = kw.clone();
+        let scoop_task = tokio::spawn(async move {
+            let _ = entered_tx.send(());
+            handle_npcs_drones(&c_dock, &mut s_dock, "ship", "ScoopToDroneBay", &[PyRep::Integer(d_dock)], &k_dock)
+                .await
+        });
+        entered_rx.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let _ = sys_handle.get_ball_snapshot(ship_id).await;
+        let _ = release_tx.send(());
+        holder.await.unwrap();
+
+        let dock_err = scoop_task
+            .await
+            .unwrap()
+            .expect("handled")
+            .expect_err("dock during scoop must fail");
+        assert_eq!(dock_err.code, "DroneNotInSpace");
+
+        ctx.db.with_snapshot(|snap| {
+            let it = &snap.items[&d_dock];
+            assert_eq!(it.location_id, sys_id as i64);
+            assert_eq!(it.flag, InventoryFlag::None);
+        });
+        with_combat_runtime(&ctx, |rt| {
+            let d = rt
+                .active_drones_in_space
+                .get(&d_dock)
+                .expect("abandoned drone stays tracked in space");
+            assert!(d.is_abandoned);
+            assert_eq!(d.owner_char_id, 0);
+            assert_eq!(d.parent_ship_id, 0);
+            assert_eq!(d.activity_state, 0);
+        });
+
+        let dock_notifs = ctx.drain_notifications_for_char(char_id);
+        let idx_state = dock_notifs
+            .iter()
+            .position(|n| {
+                n.event == "OnDroneStateChange"
+                    && n.args.first().and_then(|v| v.as_i64()) == Some(d_dock)
+                    && n.args.get(1).and_then(|v| v.as_i64()) == Some(0)
+                    && n.args.get(2).and_then(|v| v.as_i64()) == Some(0)
+            })
+            .expect("dock-during-scoop abandonment emits OnDroneStateChange(0, 0)");
+        let idx_act = dock_notifs
+            .iter()
+            .position(|n| {
+                n.event == "OnDroneActivityChange"
+                    && n.args.first().and_then(|v| v.as_i64()) == Some(d_dock)
+                    && n.args.get(1).and_then(|v| v.as_i64()) == Some(0)
+            })
+            .expect("dock-during-scoop abandonment emits OnDroneActivityChange(0)");
+        let idx_lost = dock_notifs
+            .iter()
+            .position(|n| {
+                n.event == "OnDroneControlLost"
+                    && n.args.first().and_then(|v| v.as_i64()) == Some(d_dock)
+            })
+            .expect("dock-during-scoop abandonment emits OnDroneControlLost");
+        assert!(
+            idx_state < idx_act && idx_act < idx_lost,
+            "OnDroneStateChange(0,0) must precede OnDroneControlLost on dock-during-scoop"
+        );
+    }
+}

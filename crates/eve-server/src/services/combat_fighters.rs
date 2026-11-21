@@ -1316,11 +1316,16 @@ async fn handle_recall_fighters_to_tubes(
     session: &mut SessionState,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (char_id, ship_id, _sys_id, sys_handle) =
+    let (char_id, ship_id, sys_id, sys_handle) =
         match require_undocked_uncloaked_fighter_ship(ctx, session, "recall fighters").await {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
+    let entry_db_state = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| (c.station_id, c.structure_id, c.solar_system_id, c.active_ship_id))
+    });
     let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
         let message = "Active ship is not spawned in space".to_string();
         return Some(Err(BridgeRpcError::with_client_error(
@@ -1466,15 +1471,27 @@ async fn handle_recall_fighters_to_tubes(
                             .sum()
                     })
                     .unwrap_or(0.0);
+                let saved_charges: Vec<_> = fg
+                    .charge_state
+                    .iter()
+                    .filter(|(&(id, _), _)| id == bid)
+                    .map(|(&k, &v)| (k, v))
+                    .collect();
+                let saved_cooldowns: Vec<_> = fg
+                    .cooldown_state
+                    .iter()
+                    .filter(|(&(id, _), _)| id == bid)
+                    .map(|(&k, &v)| (k, v))
+                    .collect();
                 fg.charge_state.retain(|&(id, _), _| id != bid);
                 fg.cooldown_state.retain(|&(id, _), _| id != bid);
                 let loaded_tube_ids: std::collections::HashSet<i64> = fg.tube_loads.values().copied().collect();
-                Some((f, charge_reload_s, loaded_tube_ids))
+                Some((f, charge_reload_s, loaded_tube_ids, saved_charges, saved_cooldowns))
             } else {
                 None
             }
         };
-        let Some((f, charge_reload_s, loaded_tube_ids)) = claimed else {
+        let Some((mut f, charge_reload_s, loaded_tube_ids, saved_charges, saved_cooldowns)) = claimed else {
             continue;
         };
 
@@ -1505,8 +1522,27 @@ async fn handle_recall_fighters_to_tubes(
                 })
             })
             .unwrap_or(9);
-        let mut refilled_units = 0i32;
-        ctx.db.with_mut_snapshot(|snap| {
+        let db_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<i32, BridgeRpcError> {
+            let char_invalid = snap.characters.get(&char_id).is_some_and(|ch| {
+                let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
+                entry_db_state.is_some_and(|e| cur_db_state != e)
+                    || ch.station_id.is_some()
+                    || ch.structure_id.is_some()
+                    || ch.solar_system_id != sys_id
+                    || ch.active_ship_id != ship_id
+            });
+            let ship_moved = snap.items.get(&ship_id).is_some_and(|sh| {
+                sh.location_id != sys_id as i64 || sh.flag != InventoryFlag::None
+            });
+            if char_invalid || ship_moved {
+                let msg = format!("Ship {ship_id} is no longer undocked in solar system {sys_id}");
+                return Err(BridgeRpcError::with_client_error(
+                    "ShipNotInSpace",
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
+                ));
+            }
+            let mut refilled_units = 0i32;
             if let Some(main_it) = snap.items.get_mut(&f.item_id) {
                 main_it.location_id = ship_id;
                 main_it.flag = InventoryFlag::FighterBay;
@@ -1543,7 +1579,38 @@ async fn handle_recall_fighters_to_tubes(
                     }
                 }
             }
+            Ok(refilled_units)
         });
+        let refilled_units = match db_res {
+            Ok(units) => units,
+            Err(e) => {
+                let destroyed = with_mut_combat_runtime(ctx, |rt| {
+                    let dead = rt.is_recently_destroyed_item_id(f.ball_id)
+                        || rt.is_recently_destroyed_item_id(f.item_id);
+                    if !dead && accum_dmg > 0.0 {
+                        rt.fighter_unit_damage_accum.insert(bid, accum_dmg);
+                    }
+                    dead
+                });
+                if let Ok(mut fg) = ctx.fighters.write() {
+                    fg.tube_loads.remove(&(ship_id, f.tube_index));
+                    if !destroyed {
+                        f.is_abandoned = true;
+                        f.parent_ship_id = 0;
+                        f.target_id = None;
+                        fg.active_fighters.entry(f.ball_id).or_insert(f);
+                        for (k, v) in saved_charges {
+                            fg.charge_state.insert(k, v);
+                        }
+                        for (k, v) in saved_cooldowns {
+                            fg.cooldown_state.insert(k, v);
+                        }
+                    }
+                }
+                sys_handle.try_stop_ball(bid);
+                return Some(Err(e));
+            }
+        };
 
         let total_rearm_secs = (base_refuel_s + charge_reload_s + repair_s + (refilled_units as f64) * 2.5)
             .ceil()

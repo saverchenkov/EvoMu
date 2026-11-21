@@ -790,5 +790,89 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
         })
         .expect("CmdAbandonDrone emits OnDroneControlLost");
     assert!(c_state < c_lost, "CmdAbandonDrone must order OnDroneStateChange(0,0) before OnDroneControlLost");
+
+    // `disconnect_drones_for_ship_on_warp_sync` must likewise emit `OnDroneStateChange(0, 0)`
+    // before `OnDroneControlLost` (and enqueue `DestinyEvent::OnDroneStateChange`) while
+    // preserving `!is_abandoned` for reconnect eligibility.
+    let d_disc = d_warp_ball.max(d_cmd) + 100;
+    let d_disc_item = d_warp_item.max(d_cmd) + 101;
+    spawn_ball(&ctx, sys_id, d_disc, 2454, DVec3::new(700.0, 0.0, 0.0));
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space
+            .insert(d_disc, make_drone(d_disc, d_disc_item));
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    if let Some(sys_handle) = ctx.systems.get_or_spawn_if_runtime(sys_id) {
+        sys_handle.ballpark.write().unwrap().pending_events.clear();
+    }
+
+    disconnect_drones_for_ship_on_warp_sync(&ctx, char_id, ship_id, sys_id);
+
+    with_combat_runtime(&ctx, |rt| {
+        let d = &rt.active_drones_in_space[&d_disc];
+        assert!(!d.is_abandoned, "disconnect on warp preserves !is_abandoned for reconnect");
+        assert_eq!(d.owner_char_id, char_id);
+        assert_eq!(d.parent_ship_id, 0);
+        assert_eq!(d.activity_state, 0);
+        assert_eq!(d.target_id, None);
+    });
+
+    let disc_notifs = ctx.drain_notifications_for_char(char_id);
+    let d_state = disc_notifs
+        .iter()
+        .position(|n| {
+            n.event == "OnDroneStateChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(d_disc_item)
+                && n.args.get(1).and_then(|v| v.as_i64()) == Some(0)
+                && n.args.get(2).and_then(|v| v.as_i64()) == Some(0)
+                && n.args.get(3).and_then(|v| v.as_i64()) == Some(0)
+                && n.args.get(4).and_then(|v| v.as_i64()) == Some(2454)
+                && n.args.get(5).and_then(|v| v.as_i64()) == Some(0)
+        })
+        .expect("warp disconnect emits OnDroneStateChange(0, 0)");
+    let d_act = disc_notifs
+        .iter()
+        .position(|n| {
+            n.event == "OnDroneActivityChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(d_disc_item)
+                && n.args.get(1).and_then(|v| v.as_i64()) == Some(0)
+        })
+        .expect("warp disconnect emits OnDroneActivityChange(0)");
+    let d_lost = disc_notifs
+        .iter()
+        .position(|n| {
+            n.event == "OnDroneControlLost"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(d_disc_item)
+        })
+        .expect("warp disconnect emits OnDroneControlLost");
+    assert!(
+        d_state < d_act && d_act < d_lost,
+        "warp disconnect must emit OnDroneStateChange(0, 0) < OnDroneActivityChange(0) < OnDroneControlLost"
+    );
+
+    let disc_destiny_events = std::mem::take(
+        &mut ctx
+            .systems
+            .get_or_spawn(sys_id)
+            .ballpark
+            .write()
+            .unwrap()
+            .pending_events,
+    );
+    assert!(
+        disc_destiny_events.into_iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnDroneStateChange {
+                drone_id,
+                owner_id: 0,
+                controller_id: 0,
+                activity_state: 0,
+                type_id: 2454,
+                controller_owner_id: 0,
+                target_id: None,
+            } if drone_id == d_disc_item
+        )),
+        "warp disconnect must enqueue DestinyEvent::OnDroneStateChange(0, 0)"
+    );
 }
 

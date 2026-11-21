@@ -400,11 +400,13 @@ pub(crate) fn purge_destroyed_drone_from_snap(
     snap.sp6_lifecycle.space_object_meta.remove(&drone_ball_id);
 }
 
-/// Moves a live space drone item into `ship_id`'s `DroneBay` and clears its space position/meta.
+/// Moves a live space drone item still located in `expected_sys_id` (`InventoryFlag::None`)
+/// into `ship_id`'s `DroneBay` and clears its space position/meta.
 pub(crate) fn move_drone_item_to_bay_in_snap(
     snap: &mut eve_db::WorldStateSnapshot,
     drone_item_id: i64,
     drone_ball_id: i64,
+    expected_sys_id: u32,
     owner_char_id: Option<i64>,
     ship_id: i64,
     clear_meta_entirely: bool,
@@ -412,6 +414,9 @@ pub(crate) fn move_drone_item_to_bay_in_snap(
     let Some(it) = snap.items.get_mut(&drone_item_id) else {
         return false;
     };
+    if it.location_id != expected_sys_id as i64 || it.flag != InventoryFlag::None {
+        return false;
+    }
     if let Some(cid) = owner_char_id {
         it.owner_id = cid;
     }
