@@ -159,7 +159,7 @@ fn demo_snapshot_starter_items_system_states_corp_roles_and_partial_populate() {
     // Verify every seeded starter item 100_000_003..=100_000_012
     let expected_items = [
         (100_000_003i64, 438u32, 1i32, true),
-        (100_000_004, 1236, 2, true),
+        (100_000_004, 1236, 2, false),
         (100_000_007, 691, 1, true),
         (100_000_008, 34, 100_000, false),
         (100_000_009, 35, 50_000, false),

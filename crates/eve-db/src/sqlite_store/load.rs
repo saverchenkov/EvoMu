@@ -491,7 +491,18 @@ pub fn load_snapshot_from_sqlite_with_options(
                 .and_then(|js| {
                     serde_json::from_str::<InventoryItemRecord>(&js).map_err(|e| e.to_string())
                 }) {
-                Ok(item) => {
+                Ok(mut item) => {
+                    // Multi-unit stacks of plain items must never be marked singleton;
+                    // repair legacy persisted starter stacks (e.g., #1551 item 100_000_004) on load.
+                    if !item.is_blueprint_copy
+                        && item.quantity > 1
+                        && item.singleton
+                        && item.blueprint_runs_remaining.is_none()
+                        && item.dynamic_attributes.is_empty()
+                        && item.source_mutaplasmid_id.is_none()
+                    {
+                        item.singleton = false;
+                    }
                     snap.items.insert(item.item_id, item);
                 }
                 Err(err) => {
