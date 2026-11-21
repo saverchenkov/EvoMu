@@ -14,32 +14,40 @@ mod discovery_checkout_ext {
 // - `rpc:ProjectDiscovery.get_new_task`
 
 
-use crate::common;
+use crate::common::{self, ServerWireTransport};
+use crate::scenario_common::ServerScenarioBackend;
 use eve_db::InventoryFlag;
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_testkit::legal_fixture::assert_legal_fixture;
+use eve_testkit::scenario::{ActorSpec, BuiltScenario, ScenarioBuilder, ScenarioWorldBackend};
 use std::collections::HashMap;
 
-const PILOT: i64 = 90_000_001;
 const SKIN_TYPE_ID: u32 = 40519;
 
-async fn login_pilot(ctx: &ServerContext, sid: u64, char_id: i64) -> SessionState {
-    let mut s = SessionState::new(sid);
-    common::login_pilot(ctx, &mut s, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut s,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+async fn build_discovery_pilot<'c>(
+    ctx: &'c ServerContext,
+    username: &str,
+    password: &str,
+    char_name: &str,
+) -> BuiltScenario<ServerWireTransport<'c>> {
+    let mut backend = ServerScenarioBackend::new(ctx);
+    let mut b = ScenarioBuilder::new();
+    b = b.add_actor(ActorSpec {
+        label: username.into(),
+        username: username.into(),
+        password: password.into(),
+        character_name: char_name.into(),
+        require_omega: true,
+        ..ActorSpec::default()
+    });
+    let scenario = b.build(&mut backend).await;
+    let actor = scenario.actor(0);
+    let view = backend.actor_session_view(actor.harness.transport());
+    ctx.db.with_snapshot(|snap| assert_legal_fixture(username, snap, &ctx.sde, &view, &actor.expectation));
     ctx.advance_secs(5);
-    s
+    scenario
 }
 
 async fn rpc(
@@ -65,19 +73,22 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
         .unwrap_err();
     assert_eq!(unauth_err.code, "Unauthorized");
 
-    // 2. Authenticate pilot
-    let mut sess = login_pilot(&ctx, 88_002, PILOT).await;
-    let user_id = sess.user_id.expect("user_id on pilot session");
+    // 2. Authenticate pilot via ScenarioBuilder
+    let mut scenario = build_discovery_pilot(&ctx, "fc_pilot_u1", "demo-secret", "Fast Checkout Pilot").await;
+    let actor = scenario.actor_mut(0);
+    let pilot_id = actor.character_id;
+    let user_id = actor.user_id;
+    let sess = &mut actor.harness.transport_mut().inner.session;
 
     // 3. Fast checkout initially disabled: GetOffersForUser returns empty list, BuyOffer fails
-    let disabled_offers = rpc(&ctx, &mut sess, "FastCheckoutService", "GetOffersForUser", &[])
+    let disabled_offers = rpc(&ctx, sess, "FastCheckoutService", "GetOffersForUser", &[])
         .await
         .expect("GetOffersForUser disabled");
     assert_eq!(disabled_offers, PyRep::List(Vec::new()));
 
     let disabled_buy = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "FastCheckoutService",
         "BuyOffer",
         &[PyRep::Integer(5001), PyRep::Integer(1), PyRep::String("demo-secret".into())],
@@ -90,7 +101,7 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
     sess.role |= service_roles::ROLE_GM_DEFAULT;
     let enable_cmd = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "slash",
         "SlashCmd",
         &[PyRep::String("/fastcheckout 1".into())],
@@ -183,7 +194,7 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
     });
 
     // 6. GetOffersForUser returns authentic structure matching client expectation dictionary
-    let offers_rep = rpc(&ctx, &mut sess, "FastCheckoutService", "GetOffersForUser", &[])
+    let offers_rep = rpc(&ctx, sess, "FastCheckoutService", "GetOffersForUser", &[])
         .await
         .expect("GetOffersForUser enabled");
     let PyRep::Dict(offers_dict) = offers_rep else {
@@ -212,7 +223,7 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
     // 7a. Non-existent offer ID -> OfferNotFound
     let not_found_err = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "FastCheckoutService",
         "BuyOffer",
         &[PyRep::Integer(9999), PyRep::Integer(1), PyRep::String("demo-secret".into())],
@@ -224,7 +235,7 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
     // 7b. Invalid non-positive quantity -> InvalidQuantity
     let invalid_qty_err = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "FastCheckoutService",
         "BuyOffer",
         &[PyRep::Integer(5001), PyRep::Integer(0), PyRep::String("demo-secret".into())],
@@ -236,7 +247,7 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
     // 7c. Incorrect password -> InvalidPassword
     let bad_pass_err = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "FastCheckoutService",
         "BuyOffer",
         &[PyRep::Integer(5001), PyRep::Integer(1), PyRep::String("wrong-pwd".into())],
@@ -248,7 +259,7 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
     // 7d. Cash offer without payment token -> PaymentTokenRequired
     let no_token_err = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "FastCheckoutService",
         "BuyOffer",
         &[PyRep::Integer(5001), PyRep::Integer(1), PyRep::String("demo-secret".into())],
@@ -260,7 +271,7 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
     // 7e. Insufficient PLEX balance -> UserError
     let no_balance_err = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "FastCheckoutService",
         "BuyOffer",
         &[PyRep::Integer(5003), PyRep::Integer(1), PyRep::String("demo-secret".into())],
@@ -290,7 +301,7 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
         .with_snapshot(|snap| snap.account_plex_vault.get(&user_id).copied().unwrap_or(0));
     let buy_plex_rep = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "FastCheckoutService",
         "BuyOffer",
         &[PyRep::Integer(5001), PyRep::Integer(1), PyRep::String("demo-secret".into())],
@@ -318,14 +329,14 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
     let hangar_skins_before = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
-            .filter(|i| i.owner_id == PILOT && i.type_id == SKIN_TYPE_ID && i.flag == InventoryFlag::Hangar)
+            .filter(|i| i.owner_id == pilot_id && i.type_id == SKIN_TYPE_ID && i.flag == InventoryFlag::Hangar)
             .map(|i| i.quantity)
             .sum::<i32>()
     });
 
     let buy_item_rep = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "FastCheckoutService",
         "BuyOffer",
         &[PyRep::Integer(5002), PyRep::Integer(1), PyRep::String("demo-secret".into())],
@@ -350,7 +361,7 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
     let hangar_skins_after = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
-            .filter(|i| i.owner_id == PILOT && i.type_id == SKIN_TYPE_ID && i.flag == InventoryFlag::Hangar)
+            .filter(|i| i.owner_id == pilot_id && i.type_id == SKIN_TYPE_ID && i.flag == InventoryFlag::Hangar)
             .map(|i| i.quantity)
             .sum::<i32>()
     });
@@ -362,15 +373,16 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
-    let mut sess = login_pilot(&ctx, 89_001, PILOT).await;
+    let mut scenario = build_discovery_pilot(&ctx, "pd_bonus_u1", "demo-secret", "PD Bonus Pilot").await;
+    let sess = &mut scenario.actor_mut(0).harness.transport_mut().inner.session;
 
     // 1. Initial bonus samples: Omega pilot max is 20, remaining starts at 20
-    let max_bonus_init = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_maximum_bonus_samples", &[])
+    let max_bonus_init = rpc(&ctx, sess, "ProjectDiscovery", "get_maximum_bonus_samples", &[])
         .await
         .expect("get_maximum_bonus_samples initial");
     assert_eq!(max_bonus_init, PyRep::Integer(20));
 
-    let rem_bonus_init = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
+    let rem_bonus_init = rpc(&ctx, sess, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
         .await
         .expect("get_remaining_bonus_samples initial");
     assert_eq!(rem_bonus_init, PyRep::Integer(20));
@@ -384,13 +396,13 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
         eve_server::services::project_discovery::set_project_discovery_task_consensus(snap, 1, true);
     });
 
-    let max_bonus_updated = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_maximum_bonus_samples", &[])
+    let max_bonus_updated = rpc(&ctx, sess, "ProjectDiscovery", "get_maximum_bonus_samples", &[])
         .await
         .expect("get_maximum_bonus_samples updated");
     assert_eq!(max_bonus_updated, PyRep::Integer(25));
 
     // 3. Issue authentic task via get_new_task
-    let task_rep = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_new_task", &[])
+    let task_rep = rpc(&ctx, sess, "ProjectDiscovery", "get_new_task", &[])
         .await
         .expect("get_new_task");
     let PyRep::KeyVal(task_kv) = task_rep else {
@@ -407,7 +419,7 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
 
     // 4. get_data_from_url error conditions:
     // 4a. Empty URL -> InvalidTaskUrl
-    let err_empty = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("".into())])
+    let err_empty = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("".into())])
         .await
         .unwrap_err();
     assert_eq!(err_empty.code.to_ascii_lowercase(), "invalidtaskurl");
@@ -415,7 +427,7 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
     // 4b. Foreign host -> InvalidTaskUrl
     let err_foreign = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "ProjectDiscovery",
         "get_data_from_url",
         &[PyRep::String("https://malicious.example.com/tasks/1".into())],
@@ -427,7 +439,7 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
     // 4c. Non-numeric task index -> InvalidTaskUrl
     let err_bad_num = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "ProjectDiscovery",
         "get_data_from_url",
         &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/abc".into())],
@@ -439,7 +451,7 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
     // 4d. Unissued task number -> TaskNotFound
     let err_unissued = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "ProjectDiscovery",
         "get_data_from_url",
         &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/9999".into())],
@@ -451,7 +463,7 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
     // 5. Authentic task data fetch via get_data_from_url:
     let data_rep1 = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "ProjectDiscovery",
         "get_data_from_url",
         &[PyRep::String(task_url.into())],
@@ -481,7 +493,7 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
     // Second fetch increments fetch_count
     let data_rep2 = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "ProjectDiscovery",
         "get_data_from_url",
         &[PyRep::String(task_url.into())],
@@ -505,7 +517,7 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
     ]);
     let submit_rep = rpc(
         &ctx,
-        &mut sess,
+        sess,
         "ProjectDiscovery",
         "post_classification",
         &[PyRep::Integer(1), submit_payload],
@@ -521,14 +533,14 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
         Some(&PyRep::Integer(24))
     );
 
-    let rem_after_submit = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
+    let rem_after_submit = rpc(&ctx, sess, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
         .await
         .expect("get_remaining_bonus_samples after submit");
     assert_eq!(rem_after_submit, PyRep::Integer(24));
 
     // 7. Daily bonus sample refill: advance virtual clock by 25 hours (>86,400s)
     ctx.advance_secs(90_000);
-    let rem_refilled = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
+    let rem_refilled = rpc(&ctx, sess, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
         .await
         .expect("get_remaining_bonus_samples after daily reset");
     assert_eq!(rem_refilled, PyRep::Integer(25));
@@ -547,7 +559,8 @@ mod discovery_planet_ext {
 // - `quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj`
 
 
-use crate::common;
+use crate::common::{self, ServerWireTransport};
+use crate::scenario_common::ServerScenarioBackend;
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
     encode_bytes_field, encode_varint_field, EvePublicRequest, EvePublicResponse,
@@ -556,33 +569,41 @@ use eve_proto::quasar::{
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{STATUS_NOT_FOUND, STATUS_OK, STATUS_UNAUTHORIZED};
 use eve_server::router::ServerContext;
+use eve_testkit::legal_fixture::{assert_legal_fixture, LegalFixtureExpectation};
+use eve_testkit::scenario::{ActorSpec, BuiltScenario, ScenarioBuilder, ScenarioWorldBackend};
 use std::collections::HashMap;
 
-const PILOT: i64 = 90_000_001;
 const NULLSEC_SYSTEM: u32 = 30_004_759;
 
-async fn select_pilot(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i64) -> SessionState {
-    let mut s = SessionState::new(sid);
-    common::login_pilot(ctx, &mut s, user, pass).await;
-    ctx.dispatch_rpc(&mut s, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &HashMap::new(), None)
-        .await
-        .expect("SelectCharacterID");
+async fn build_planet_pilot<'c>(
+    ctx: &'c ServerContext,
+    label: &str,
+    username: &str,
+    password: &str,
+    in_space: bool,
+) -> BuiltScenario<ServerWireTransport<'c>> {
+    let mut backend = ServerScenarioBackend::new(ctx);
+    let scenario = ScenarioBuilder::new()
+        .add_actor(ActorSpec {
+            label: label.into(),
+            username: username.into(),
+            password: password.into(),
+            character_name: format!("Planet {}", label.replace('_', "")),
+            require_omega: true,
+            in_space,
+            ..ActorSpec::default()
+        })
+        .build(&mut backend)
+        .await;
+    let actor = scenario.actor(0);
+    let view = backend.actor_session_view(actor.harness.transport());
+    ctx.db.with_snapshot(|snap| assert_legal_fixture(label, snap, &ctx.sde, &view, &actor.expectation));
     ctx.advance_secs(12);
-    s
+    scenario
 }
 
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, eve_proto::BridgeRpcError> {
     ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
-}
-
-fn quasar_sess(sid: u64, cid: Option<i64>, corp: Option<i64>, sys: Option<u32>) -> SessionState {
-    let mut s = SessionState::new(sid);
-    s.user_id = Some(1);
-    s.character_id = cid;
-    s.corporation_id = corp;
-    s.solar_system_id = sys;
-    s.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
-    s
 }
 
 async fn quasar_rpc(ctx: &ServerContext, s: &mut SessionState, ty: &str, value: Vec<u8>) -> EvePublicResponse {
@@ -628,17 +649,18 @@ fn varint(m: &WireMessage, field: u32) -> Option<u64> {
 #[tokio::test]
 async fn test_project_discovery_end_to_end_flows() {
     let ctx = ServerContext::new();
-    let mut sess = select_pilot(&ctx, 62_001, "demo", "demo-secret", PILOT).await;
+    let mut scenario = build_planet_pilot(&ctx, "pd_e2e", "pd_e2e_u1", "demo-secret", false).await;
+    let sess = &mut scenario.actor_mut(0).harness.transport_mut().inner.session;
 
     // =========================================================================
     // 1. rpc:ProjectDiscovery.get_tutorial_xp_reward
     // =========================================================================
     // In unseeded default state, tutorial XP reward returns DEFAULT_TUTORIAL_XP_REWARD (500.0)
-    let unseeded_reward = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_tutorial_xp_reward", &[]).await.expect("get_tutorial_xp_reward unseeded");
+    let unseeded_reward = rpc(&ctx, sess, "ProjectDiscovery", "get_tutorial_xp_reward", &[]).await.expect("get_tutorial_xp_reward unseeded");
     assert_eq!(unseeded_reward, PyRep::Real(500.0));
 
     // Also accepts optional integer argument
-    let unseeded_with_arg = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_tutorial_xp_reward", &[PyRep::Integer(1)]).await.expect("get_tutorial_xp_reward unseeded with arg");
+    let unseeded_with_arg = rpc(&ctx, sess, "ProjectDiscovery", "get_tutorial_xp_reward", &[PyRep::Integer(1)]).await.expect("get_tutorial_xp_reward unseeded with arg");
     assert_eq!(unseeded_with_arg, PyRep::Real(500.0));
 
     // Seed MMOS configuration: 2500.0 xp per rank, 350.0 tutorial xp reward
@@ -648,64 +670,64 @@ async fn test_project_discovery_end_to_end_flows() {
         );
     });
 
-    let configured_reward = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_tutorial_xp_reward", &[]).await.expect("get_tutorial_xp_reward configured");
+    let configured_reward = rpc(&ctx, sess, "ProjectDiscovery", "get_tutorial_xp_reward", &[]).await.expect("get_tutorial_xp_reward configured");
     assert_eq!(configured_reward, PyRep::Real(350.0));
 
     // Verify tutorial reward state transitions with tutorial levels:
     // Initial tutorial_level is 1; not entitled to tutorial reward yet.
-    let init_lvl = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_tutorial_level", &[]).await.expect("get_tutorial_level init");
+    let init_lvl = rpc(&ctx, sess, "ProjectDiscovery", "get_tutorial_level", &[]).await.expect("get_tutorial_level init");
     assert_eq!(init_lvl, PyRep::Integer(1));
 
-    let entitled_init = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("get_is_player_entitled_to_tutorial_reward init");
+    let entitled_init = rpc(&ctx, sess, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("get_is_player_entitled_to_tutorial_reward init");
     assert_eq!(entitled_init, PyRep::Bool(false));
 
     // Claim attempt before completion fails and does not change player XP
-    let claim_early = rpc(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards early");
+    let claim_early = rpc(&ctx, sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards early");
     assert_eq!(claim_early, PyRep::Bool(false));
 
-    let state_early = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_player_state", &[]).await.expect("get_player_state early");
+    let state_early = rpc(&ctx, sess, "ProjectDiscovery", "get_player_state", &[]).await.expect("get_player_state early");
     assert_eq!(state_early.dict_get("experience").and_then(|v| v.as_f64()), Some(0.0));
 
     // Advance tutorial through levels 2, 3, 4, 5
     for lvl in 2..=5 {
-        let advanced = rpc(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("increase_tutorial_level");
+        let advanced = rpc(&ctx, sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("increase_tutorial_level");
         assert_eq!(advanced.dict_get("tutorialLevel").and_then(|v| v.as_i64()), Some(lvl));
         assert_eq!(advanced.dict_get("finishedTutorial").and_then(|v| v.as_bool()), Some(lvl >= 5));
     }
 
-    let comp_status = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_tutorial_completion_status", &[]).await.expect("get_tutorial_completion_status at lvl 5");
+    let comp_status = rpc(&ctx, sess, "ProjectDiscovery", "get_tutorial_completion_status", &[]).await.expect("get_tutorial_completion_status at lvl 5");
     assert_eq!(comp_status, PyRep::Bool(true));
 
-    let entitled_comp = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("get_is_player_entitled_to_tutorial_reward at lvl 5");
+    let entitled_comp = rpc(&ctx, sess, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("get_is_player_entitled_to_tutorial_reward at lvl 5");
     assert_eq!(entitled_comp, PyRep::Bool(true));
 
     // Claim tutorial rewards: grants exactly configured tutorial_xp_reward (350.0 XP)
-    let claim_done = rpc(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards at lvl 5");
+    let claim_done = rpc(&ctx, sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards at lvl 5");
     assert_eq!(claim_done, PyRep::Bool(true));
 
-    let state_claimed = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_player_state", &[]).await.expect("get_player_state after claim");
+    let state_claimed = rpc(&ctx, sess, "ProjectDiscovery", "get_player_state", &[]).await.expect("get_player_state after claim");
     assert_eq!(state_claimed.dict_get("experience").and_then(|v| v.as_f64()), Some(350.0));
 
     // Repeat claim attempt fails (idempotent, no double reward)
-    let claim_repeat = rpc(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards repeat");
+    let claim_repeat = rpc(&ctx, sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards repeat");
     assert_eq!(claim_repeat, PyRep::Bool(false));
 
-    let state_claimed_again = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_player_state", &[]).await.expect("get_player_state after repeat");
+    let state_claimed_again = rpc(&ctx, sess, "ProjectDiscovery", "get_player_state", &[]).await.expect("get_player_state after repeat");
     assert_eq!(state_claimed_again.dict_get("experience").and_then(|v| v.as_f64()), Some(350.0));
 
     // =========================================================================
     // 2. rpc:ProjectDiscovery.new_training_task
     // =========================================================================
     // Reset tutorial level to 1 to test clean level-based task generation
-    let reset_res = rpc(&ctx, &mut sess, "ProjectDiscovery", "reset_tutorial", &[]).await.expect("reset_tutorial");
+    let reset_res = rpc(&ctx, sess, "ProjectDiscovery", "reset_tutorial", &[]).await.expect("reset_tutorial");
     assert_eq!(reset_res.dict_get("tutorialLevel").and_then(|v| v.as_i64()), Some(1));
     assert_eq!(reset_res.dict_get("finishedTutorial").and_then(|v| v.as_bool()), Some(false));
 
-    let lvl_after_reset = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_tutorial_level", &[]).await.expect("get_tutorial_level reset");
+    let lvl_after_reset = rpc(&ctx, sess, "ProjectDiscovery", "get_tutorial_level", &[]).await.expect("get_tutorial_level reset");
     assert_eq!(lvl_after_reset, PyRep::Integer(1));
 
     // 2a. Call with no arguments -> defaults to current tutorial level 1
-    let train_default = rpc(&ctx, &mut sess, "ProjectDiscovery", "new_training_task", &[]).await.expect("new_training_task no args");
+    let train_default = rpc(&ctx, sess, "ProjectDiscovery", "new_training_task", &[]).await.expect("new_training_task no args");
     let PyRep::KeyVal(t1_kv) = train_default else { panic!("expected KeyVal from new_training_task") };
     assert_eq!(t1_kv.get("task_id").and_then(|v| v.as_str()), Some("ed134308-e080-49bc-be56-169a5f839c96"));
     assert_eq!(t1_kv.get("taskId").and_then(|v| v.as_str()), Some("ed134308-e080-49bc-be56-169a5f839c96"));
@@ -715,22 +737,24 @@ async fn test_project_discovery_end_to_end_flows() {
     assert!(matches!(t1_kv.get("solution"), Some(PyRep::List(polys)) if !polys.is_empty()));
 
     // 2b. Call with non-positive arguments (0 or -5) -> falls back to current tutorial level
-    let train_zero = rpc(&ctx, &mut sess, "ProjectDiscovery", "new_training_task", &[PyRep::Integer(0)]).await.expect("new_training_task arg 0");
+    let train_zero = rpc(&ctx, sess, "ProjectDiscovery", "new_training_task", &[PyRep::Integer(0)]).await.expect("new_training_task arg 0");
     assert_eq!(train_zero.dict_get("task_number").and_then(|v| v.as_i64()), Some(1));
 
-    let train_neg = rpc(&ctx, &mut sess, "ProjectDiscovery", "new_training_task", &[PyRep::Integer(-5)]).await.expect("new_training_task arg -5");
+    let train_neg = rpc(&ctx, sess, "ProjectDiscovery", "new_training_task", &[PyRep::Integer(-5)]).await.expect("new_training_task arg -5");
     assert_eq!(train_neg.dict_get("task_number").and_then(|v| v.as_i64()), Some(1));
 
     // 2c. Call with explicit task number (e.g. 4) while level is 1
-    let train_task4 = rpc(&ctx, &mut sess, "ProjectDiscovery", "new_training_task", &[PyRep::Integer(4)]).await.expect("new_training_task arg 4");
+    let train_task4 = rpc(&ctx, sess, "ProjectDiscovery", "new_training_task", &[PyRep::Integer(4)]).await.expect("new_training_task arg 4");
     assert_eq!(train_task4.dict_get("task_id").and_then(|v| v.as_str()), Some("21cbef0c-684e-4a4c-b1fe-be6e24d894c2"));
     assert_eq!(train_task4.dict_get("task_number").and_then(|v| v.as_i64()), Some(4));
     assert_eq!(train_task4.dict_get("level").and_then(|v| v.as_i64()), Some(1));
 
     // 2d. Advance tutorial level to 3 and verify no-arg call tracks the new level
-    let _ = rpc(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc to 2");
-    let _ = rpc(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc to 3");
-    let train_lvl3 = rpc(&ctx, &mut sess, "ProjectDiscovery", "new_training_task", &[]).await.expect("new_training_task at lvl 3");
+    let inc2 = rpc(&ctx, sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc to 2");
+    assert_eq!(inc2.dict_get("tutorialLevel").and_then(|v| v.as_i64()), Some(2));
+    let inc3 = rpc(&ctx, sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc to 3");
+    assert_eq!(inc3.dict_get("tutorialLevel").and_then(|v| v.as_i64()), Some(3));
+    let train_lvl3 = rpc(&ctx, sess, "ProjectDiscovery", "new_training_task", &[]).await.expect("new_training_task at lvl 3");
     assert_eq!(train_lvl3.dict_get("task_id").and_then(|v| v.as_str()), Some("eb4c6403-e878-43cf-a009-9c8c566ae90f"));
     assert_eq!(train_lvl3.dict_get("task_number").and_then(|v| v.as_i64()), Some(3));
     assert_eq!(train_lvl3.dict_get("level").and_then(|v| v.as_i64()), Some(3));
@@ -739,30 +763,30 @@ async fn test_project_discovery_end_to_end_flows() {
     // 3. rpc:ProjectDiscovery.get_data_from_url
     // =========================================================================
     // 3a. Error conditions:
-    let err_empty = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("".into())]).await.unwrap_err();
+    let err_empty = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("".into())]).await.unwrap_err();
     assert_eq!(err_empty.code.to_ascii_lowercase(), "invalidtaskurl");
 
-    let err_ws = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("   ".into())]).await.unwrap_err();
+    let err_ws = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("   ".into())]).await.unwrap_err();
     assert_eq!(err_ws.code.to_ascii_lowercase(), "invalidtaskurl");
 
-    let err_foreign = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://untrusted.example.com/tasks/1".into())]).await.unwrap_err();
+    let err_foreign = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://untrusted.example.com/tasks/1".into())]).await.unwrap_err();
     assert_eq!(err_foreign.code.to_ascii_lowercase(), "invalidtaskurl");
 
-    let err_non_num = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/invalid".into())]).await.unwrap_err();
+    let err_non_num = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/invalid".into())]).await.unwrap_err();
     assert_eq!(err_non_num.code.to_ascii_lowercase(), "invalidtaskurl");
 
-    let err_zero = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/0".into())]).await.unwrap_err();
+    let err_zero = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/0".into())]).await.unwrap_err();
     assert_eq!(err_zero.code.to_ascii_lowercase(), "invalidtaskurl");
 
-    let err_neg = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/-10".into())]).await.unwrap_err();
+    let err_neg = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/-10".into())]).await.unwrap_err();
     assert_eq!(err_neg.code.to_ascii_lowercase(), "invalidtaskurl");
 
     // Task number not yet issued to player (e.g. 9999) -> TaskNotFound
-    let err_not_found = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/9999".into())]).await.unwrap_err();
+    let err_not_found = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/9999".into())]).await.unwrap_err();
     assert_eq!(err_not_found.code.to_ascii_lowercase(), "tasknotfound");
 
     // 3b. Issue a new task via get_new_task and fetch its data
-    let task_issued = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task");
+    let task_issued = rpc(&ctx, sess, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task");
     let issued_url = task_issued.dict_get("url").and_then(|v| v.as_str()).expect("task url").to_string();
     let issued_tid = task_issued.dict_get("task_id").and_then(|v| v.as_str()).expect("task id").to_string();
     let issued_num = task_issued.dict_get("task_number").and_then(|v| v.as_i64()).expect("task num");
@@ -770,7 +794,7 @@ async fn test_project_discovery_end_to_end_flows() {
     assert_eq!(issued_tid, "task_1");
 
     // First fetch: fetch_count starts at 1
-    let data_resp1 = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String(issued_url.clone())]).await.expect("get_data_from_url first fetch");
+    let data_resp1 = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String(issued_url.clone())]).await.expect("get_data_from_url first fetch");
     let PyRep::String(json_str1) = data_resp1 else { panic!("expected PyRep::String from get_data_from_url") };
     let parsed1: serde_json::Value = serde_json::from_str(&json_str1).expect("valid json response");
     assert_eq!(parsed1["task_id"], "task_1");
@@ -780,30 +804,30 @@ async fn test_project_discovery_end_to_end_flows() {
     assert_eq!(parsed1["fetch_count"], 1);
 
     // Second fetch: state transition increments fetch_count to 2
-    let data_resp2 = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String(issued_url.clone())]).await.expect("get_data_from_url second fetch");
+    let data_resp2 = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String(issued_url.clone())]).await.expect("get_data_from_url second fetch");
     let parsed2: serde_json::Value = serde_json::from_str(data_resp2.as_str().unwrap()).expect("valid json 2");
     assert_eq!(parsed2["fetch_count"], 2);
 
     // Alternate URL format with task_1 identifier and trailing slash also resolves and increments fetch_count
     let alt_url = "https://projectdiscovery.eveonline.com/mcgill-polyseg/tasks/task_1/";
-    let data_resp3 = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String(alt_url.into())]).await.expect("get_data_from_url alternate url");
+    let data_resp3 = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String(alt_url.into())]).await.expect("get_data_from_url alternate url");
     let parsed3: serde_json::Value = serde_json::from_str(data_resp3.as_str().unwrap()).expect("valid json 3");
     assert_eq!(parsed3["fetch_count"], 3);
 
     // 3c. Issue next task (task 2) and verify previous task is still queryable in player task history
-    let task2 = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task 2");
+    let task2 = rpc(&ctx, sess, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task 2");
     let task2_num = task2.dict_get("task_number").and_then(|v| v.as_i64()).unwrap();
     assert_eq!(task2_num, 2);
 
     let task2_url = task2.dict_get("url").and_then(|v| v.as_str()).unwrap().to_string();
-    let data_task2 = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String(task2_url)]).await.expect("get_data_from_url task 2");
+    let data_task2 = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String(task2_url)]).await.expect("get_data_from_url task 2");
     let parsed_t2: serde_json::Value = serde_json::from_str(data_task2.as_str().unwrap()).unwrap();
     assert_eq!(parsed_t2["task_id"], "task_2");
     assert_eq!(parsed_t2["task_number"], 2);
     assert_eq!(parsed_t2["fetch_count"], 1);
 
     // Fetch previous task 1 again from cache
-    let data_task1_again = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String(issued_url)]).await.expect("get_data_from_url task 1 again");
+    let data_task1_again = rpc(&ctx, sess, "ProjectDiscovery", "get_data_from_url", &[PyRep::String(issued_url)]).await.expect("get_data_from_url task 1 again");
     let parsed_t1_again: serde_json::Value = serde_json::from_str(data_task1_again.as_str().unwrap()).unwrap();
     assert_eq!(parsed_t1_again["task_number"], 1);
     assert_eq!(parsed_t1_again["fetch_count"], 4);
@@ -811,25 +835,69 @@ async fn test_project_discovery_end_to_end_flows() {
 
 #[tokio::test]
 async fn test_quasar_sovereignty_resource_planet_requests() {
-
     let ctx = ServerContext::new();
-
-    // Prepare pilot in NULLSEC_SYSTEM
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT) {
+    let mut scenario = build_planet_pilot(&ctx, "planet_pilot", "planet_pilot_u1", "demo-secret", true).await;
+    let actor = scenario.actor_mut(0);
+    let char_id = actor.character_id;
+    let ship_id = actor.ship_id.expect("active ship in space");
+    let hull_type = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = NULLSEC_SYSTEM;
             ch.station_id = None;
             ch.structure_id = None;
         }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = i64::from(NULLSEC_SYSTEM);
+            ship.type_id
+        } else {
+            587
+        }
     });
-
-    let mut sess = quasar_sess(62_010, Some(PILOT), Some(98_000_001), Some(NULLSEC_SYSTEM));
+    let cs = ctx.build_type_combat_state(hull_type);
+    ctx.systems
+        .get_or_spawn(NULLSEC_SYSTEM)
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: hull_type,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            cs,
+        )
+        .await
+        .expect("spawn ship in nullsec ballpark");
+    actor.harness.transport_mut().inner.session.solar_system_id = Some(NULLSEC_SYSTEM);
+    let mut backend = ServerScenarioBackend::new(&ctx);
+    let view = backend.actor_session_view(actor.harness.transport());
+    let in_nullsec = backend.ship_in_space_ballpark(NULLSEC_SYSTEM, ship_id).await;
+    drop(backend);
+    ctx.db.with_snapshot(|snap| {
+        assert_legal_fixture(
+            "planet_pilot_nullsec",
+            snap,
+            &ctx.sde,
+            &view,
+            &LegalFixtureExpectation {
+                expect_in_space: Some(true),
+                ship_in_space_ballpark: in_nullsec,
+                ..actor.expectation.clone()
+            },
+        );
+    });
+    let sess = &mut actor.harness.transport_mut().inner.session;
 
     // =========================================================================
     // 1. GetAllDefinitionsRequest
     // =========================================================================
     // 1a. Unconditioned request (empty payload) -> returns STATUS_OK, GetAllDefinitionsResponse, 8 planet definitions
-    let defs_resp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", Vec::new()).await;
+    let defs_resp = quasar_rpc(&ctx, sess, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", Vec::new()).await;
     assert_eq!(defs_resp.status_code, STATUS_OK);
     let payload = defs_resp.payload.expect("payload present");
     assert_eq!(payload.type_url, format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.planet.api.GetAllDefinitionsResponse"));
@@ -889,13 +957,13 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
     encode_varint_field(3, 0, &mut ver_buf); // patch
     encode_bytes_field(1, &ver_buf, &mut known_req); // field 1: known_version
 
-    let cache_hit_resp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", known_req).await;
+    let cache_hit_resp = quasar_rpc(&ctx, sess, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", known_req).await;
     assert_eq!(cache_hit_resp.status_code, eve_server::quasar_gateway::STATUS_NOT_MODIFIED);
 
     // 1c. Explicit no_known_version = true in oneof -> returns all definitions
     let mut no_known_req = Vec::new();
     encode_varint_field(2, 1, &mut no_known_req); // field 2: no_known_version = true
-    let no_known_resp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", no_known_req).await;
+    let no_known_resp = quasar_rpc(&ctx, sess, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", no_known_req).await;
     assert_eq!(no_known_resp.status_code, STATUS_OK);
     let no_known_payload = no_known_resp.payload.expect("payload present");
     let no_known_wm = wm(&no_known_payload.value);
@@ -905,7 +973,7 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
     // 2. GetDefinitionsVersionRequest
     // =========================================================================
     // 2a. Default request (empty payload) -> returns STATUS_OK, GetDefinitionsVersionResponse, matching definitions count
-    let ver_req_resp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", Vec::new()).await;
+    let ver_req_resp = quasar_rpc(&ctx, sess, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", Vec::new()).await;
     assert_eq!(ver_req_resp.status_code, STATUS_OK);
     let ver_payload = ver_req_resp.payload.expect("payload present");
     assert_eq!(ver_payload.type_url, format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionResponse"));
@@ -916,7 +984,7 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
     // 2b. Explicit valid specification version { major: 1, minor: 0, patch: 0 } -> STATUS_OK
     let mut valid_spec_req = Vec::new();
     encode_bytes_field(1, &ver_buf, &mut valid_spec_req);
-    let valid_spec_resp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", valid_spec_req).await;
+    let valid_spec_resp = quasar_rpc(&ctx, sess, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", valid_spec_req).await;
     assert_eq!(valid_spec_resp.status_code, STATUS_OK);
 
     // 2c. Unknown major version (major: 99) -> returns STATUS_NOT_FOUND (404)
@@ -924,7 +992,7 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
     encode_varint_field(1, 99, &mut bad_ver_buf);
     let mut bad_spec_req = Vec::new();
     encode_bytes_field(1, &bad_ver_buf, &mut bad_spec_req);
-    let bad_ver_resp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", bad_spec_req).await;
+    let bad_ver_resp = quasar_rpc(&ctx, sess, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", bad_spec_req).await;
     assert_eq!(bad_ver_resp.status_code, STATUS_NOT_FOUND);
     assert!(bad_ver_resp.status_message.contains("Unknown planet resource definitions major version 99"));
 
@@ -938,13 +1006,14 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
     assert!(no_user_resp.status_message.contains("user login required"));
 
     // 3b. Authenticated user without active character selection -> STATUS_FORBIDDEN (403)
-    let mut no_char_sess = quasar_sess(62_012, None, None, None);
+    let mut no_char_sess = SessionState::new(62_012);
+    common::login_pilot(&ctx, &mut no_char_sess, "demo", "demo-secret").await;
     let no_char_resp = quasar_rpc(&ctx, &mut no_char_sess, "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest", Vec::new()).await;
     assert_eq!(no_char_resp.status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
     assert!(no_char_resp.status_message.contains("Active character selection required"));
 
     // 3c. Authenticated character in NULLSEC_SYSTEM -> STATUS_OK, GetAllConfigurationsResponse, non-empty
-    let cfg_resp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest", Vec::new()).await;
+    let cfg_resp = quasar_rpc(&ctx, sess, "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest", Vec::new()).await;
     assert_eq!(cfg_resp.status_code, STATUS_OK);
     let cfg_payload = cfg_resp.payload.expect("payload present");
     assert_eq!(cfg_payload.type_url, format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.planet.api.GetAllConfigurationsResponse"));

@@ -1,6 +1,7 @@
 //! Agents, Missions, Standings, and Loyalty Point Store (`E-5`) complete parity integration tests.
 
 use crate::common;
+use crate::scenario_common::ServerScenarioBackend;
 use eve_db::{
     ActiveMissionRecord, InventoryFlag, InventoryItemRecord, TypeId,
 };
@@ -9,6 +10,8 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
 use eve_testkit::client_harness::ClientErrorResponse;
+use eve_testkit::legal_fixture::assert_legal_fixture;
+use eve_testkit::scenario::{ActorSpec, ScenarioBuilder, ScenarioWorldBackend, ShipLoadoutSpec};
 use std::collections::HashMap;
 
 const JITA_STATION_ID: i64 = 60_003_760;
@@ -21,20 +24,28 @@ fn do_action_info(rep: &PyRep) -> &PyRep {
     }
 }
 
-async fn setup_pilot(ctx: &ServerContext, session_id: u64, username: &str, password: &str, char_id: i64) -> SessionState {
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(session_id);
-    common::login_pilot(ctx, &mut sess, username, password).await;
-    common::borrow_wire_harness(ctx, &mut sess)
-        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
+async fn setup_scenario_pilot(ctx: &ServerContext, seed: u64) -> (SessionState, i64) {
+    let mut backend = ServerScenarioBackend::new(ctx);
+    let mut scenario = ScenarioBuilder::with_seed(seed)
+        .add_actor(ActorSpec {
+            label: format!("pilot_{seed}"),
+            username: format!("mission_{seed}"),
+            character_name: format!("Mission Pilot {seed}"),
+            require_omega: true,
+            ship: Some(ShipLoadoutSpec { hull_type_id: 587, ..Default::default() }),
+            in_space: false,
+            ..ActorSpec::default()
+        })
+        .build(&mut backend)
         .await;
-    let (ship_id, corp_id) = ctx.db.with_snapshot(|snap| {
-        let ch = snap.characters.get(&char_id);
-        (ch.map(|c| c.active_ship_id), ch.map(|c| c.corporation_id))
+    let actor = scenario.actors.remove(0);
+    let view = backend.actor_session_view(actor.harness.transport());
+    ctx.db.with_snapshot(|snap| {
+        assert_legal_fixture("mission_pilot", snap, &ctx.sde, &view, &actor.expectation);
     });
-    sess.ship_id = ship_id;
-    sess.corporation_id = corp_id;
-    sess
+    let char_id = actor.character_id;
+    let sess = actor.harness.into_transport().inner.session;
+    (sess, char_id)
 }
 
 async fn rpc_call(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, ClientErrorResponse> {
@@ -43,11 +54,9 @@ async fn rpc_call(ctx: &ServerContext, sess: &mut SessionState, service: &str, m
         .await
 }
 
-fn colocate_with_agent(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, agent_id: i64) -> (u32, i64) {
-    let agent = ctx.sde.agents.get(&agent_id).expect("agent in SDE");
-    let sta_id = agent.station_id.unwrap_or(JITA_STATION_ID);
+fn dock_at_station(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, sta_id: i64, fallback_sys: Option<u32>) -> (u32, i64) {
     let st_info = ctx.sde.stations.get(&sta_id);
-    let sys_id = st_info.map(|s| s.solar_system_id).or(agent.solar_system_id).unwrap_or(JITA_SOLAR_SYSTEM_ID);
+    let sys_id = st_info.map(|s| s.solar_system_id).or(fallback_sys).unwrap_or(JITA_SOLAR_SYSTEM_ID);
     let reg_id = st_info.map(|s| s.region_id).or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id)).unwrap_or(10_000_002);
     let const_id = st_info.map(|s| s.constellation_id).or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.constellation_id)).unwrap_or(20_000_001);
     ctx.db.with_mut_snapshot(|snap| {
@@ -63,6 +72,12 @@ fn colocate_with_agent(ctx: &ServerContext, sess: &mut SessionState, char_id: i6
     sess.solar_system_id = Some(sys_id); sess.constellation_id = Some(const_id);
     sess.region_id = Some(reg_id); sess.station_id = Some(sta_id); sess.structure_id = None;
     (sys_id, sta_id)
+}
+
+fn colocate_with_agent(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, agent_id: i64) -> (u32, i64) {
+    let agent = ctx.sde.agents.get(&agent_id).expect("agent in SDE");
+    let sta_id = agent.station_id.unwrap_or(JITA_STATION_ID);
+    dock_at_station(ctx, sess, char_id, sta_id, agent.solar_system_id)
 }
 
 fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str) -> ActiveMissionRecord {
@@ -85,8 +100,7 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     eve_testkit::attest(&["feat:pve.anomic-burner-missions"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 503, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 503).await;
 
     let (dist_agent_id, dist_corp_id) = ctx.sde.agents.values()
         .filter(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 22 && a.solar_system_id.is_some())
@@ -290,8 +304,7 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
     eve_testkit::attest(&["feat:pve.mission-courier"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 504, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 504).await;
 
     let (dist_agent_id, dist_corp_id) = ctx
         .sde
@@ -453,9 +466,9 @@ async fn test_non_courier_offers_decline_and_expiry_preserve_player_inventory_re
     // parity: feat:pve.mission-decline, feat:pve.mission-expire
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 505, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 505).await;
     let ship_id = sess.ship_id.expect("active ship");
+    let start_station_id = sess.station_id.expect("docked start station");
 
     let (tri_h, tri_c, ore_h, trade_c) = (888_001, 888_002, 888_003, 888_004);
     ctx.db.with_mut_snapshot(|snap| {
@@ -464,9 +477,9 @@ async fn test_non_courier_offers_decline_and_expiry_preserve_player_inventory_re
             it.flag = InventoryFlag::Cargo;
             it
         };
-        snap.items.insert(tri_h, make_item(tri_h, 34, char_id, JITA_STATION_ID, 25_000, false));
+        snap.items.insert(tri_h, make_item(tri_h, 34, char_id, start_station_id, 25_000, false));
         snap.items.insert(tri_c, cargo_it(tri_c, 34, 500));
-        snap.items.insert(ore_h, make_item(ore_h, 1230, char_id, JITA_STATION_ID, 5_000, false));
+        snap.items.insert(ore_h, make_item(ore_h, 1230, char_id, start_station_id, 5_000, false));
         snap.items.insert(trade_c, cargo_it(trade_c, 3683, 100));
     });
 
@@ -516,7 +529,10 @@ async fn test_non_courier_offers_decline_and_expiry_preserve_player_inventory_re
             save_mission_meta(snap, char_id, &meta);
         }
     });
-    let _ = rpc_call(&ctx, &mut sess, "agentMgr", "GetMyJournalDetails", &[]).await;
+    let PyRep::Tuple(journal) = rpc_call(&ctx, &mut sess, "agentMgr", "GetMyJournalDetails", &[]).await.expect("GetMyJournalDetails") else {
+        panic!("expected GetMyJournalDetails tuple");
+    };
+    assert_eq!(journal.len(), 2);
 
     ctx.db.with_snapshot(|snap| {
         assert_eq!((snap.items.get(&tri_h).map(|i| i.quantity), snap.items.get(&tri_c).map(|i| i.quantity)), (Some(25_000), Some(500)));
@@ -530,8 +546,7 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     eve_testkit::attest(&["feat:pve.mission-courier"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 506, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 506).await;
 
     let (dist_agent_id, dist_corp_id) = ctx.sde.agents.values()
         .filter(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 22 && a.solar_system_id.is_some())
@@ -611,8 +626,10 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     ]).await.expect_err("corp div multiadd must fail");
     assert_eq!(multi_div_err.code, "CannotDeliverCourierCargo");
 
+    let (mut sess2, partner_id) = setup_scenario_pilot(&ctx, 507).await;
+    colocate_with_agent(&ctx, &mut sess2, partner_id, dist_agent_id);
     // RV-CLAIMS-ERRCODES-TESTS-01: invbroker.DeliverToCorpMember
-    let dlv_err = rpc_call(&ctx, &mut sess, "invbroker", "DeliverToCorpMember", &[PyRep::Integer(granted_cid), PyRep::Integer(90_000_002)]).await.expect_err("deliver to corp member must fail");
+    let dlv_err = rpc_call(&ctx, &mut sess, "invbroker", "DeliverToCorpMember", &[PyRep::Integer(granted_cid), PyRep::Integer(partner_id)]).await.expect_err("deliver to corp member must fail");
     assert_eq!(dlv_err.code, "ItemCannotBeTransferred");
 
     // RV-CLAIMS-ERRCODES-TESTS-01: contractProxy.CreateContract
@@ -630,9 +647,6 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     assert_eq!(contract_err.code, "ItemCannotBeContracted");
 
     // RV-CLAIMS-ERRCODES-TESTS-01: trademgr.AddItem (via bound tradeSession from InitiateTrade)
-    let partner_id = 90_000_002;
-    let mut sess2 = setup_pilot(&ctx, 507, "other", "other-secret", partner_id).await;
-    colocate_with_agent(&ctx, &mut sess2, partner_id, dist_agent_id);
     let tr_rep = common::borrow_wire_harness(&ctx, &mut sess)
         .call_ok("trademgr", None, "InitiateTrade", &[PyRep::Integer(partner_id)], &HashMap::new())
         .await;
@@ -701,16 +715,16 @@ async fn test_invbroker_partial_split_container_and_multiadd_validation_regressi
     eve_testkit::attest(&["feat:inventory.containers", "feat:ships.cargo-capacity"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 508, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 508).await;
     let ship_id = sess.ship_id.expect("active ship");
+    let start_station_id = sess.station_id.expect("docked start station");
 
     let (container_id, large_stack_id, item_a_id, item_b_id) = (880_001, 880_002, 880_003, 880_004);
     // Small Standard Container (type 3293, capacity 100 m3). Tritanium (type 34, 0.01 m3/unit): 20k units = 200 m3 > 100 m3 cap.
     // Metal Scraps (type 15331, 5 m3/unit): 200 units = 1000 m3 > Corvette cargo cap (~135 m3).
     ctx.db.with_mut_snapshot(|snap| {
         for (id, tid, qty, sing) in [(container_id, 3293, 1, true), (large_stack_id, 34, 20_000, false), (item_a_id, 34, 50_000, false), (item_b_id, 34, 50_000, false)] {
-            snap.items.insert(id, make_item(id, tid, char_id, JITA_STATION_ID, qty, sing));
+            snap.items.insert(id, make_item(id, tid, char_id, start_station_id, qty, sing));
         }
     });
 
@@ -760,7 +774,7 @@ async fn test_invbroker_partial_split_container_and_multiadd_validation_regressi
             "invbroker",
             None,
             "MultiAdd",
-            &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Integer(JITA_STATION_ID), PyRep::Integer(InventoryFlag::Hangar as i64)],
+            &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Integer(start_station_id), PyRep::Integer(InventoryFlag::Hangar as i64)],
             &HashMap::new(),
         )
         .await
@@ -815,7 +829,7 @@ async fn test_invbroker_partial_split_container_and_multiadd_validation_regressi
     let (vol, avail) = (wire_kv[0].1, wire_kv[1].1);
     assert!(vol > 0.0 && avail >= 0.0 && vol > avail, "vol={vol}, avail={avail}");
     ctx.db.with_snapshot(|snap| {
-        assert_eq!((snap.items.get(&item_a_id).map(|i| i.location_id), snap.items.get(&item_b_id).map(|i| i.location_id)), (Some(JITA_STATION_ID), Some(JITA_STATION_ID)));
+        assert_eq!((snap.items.get(&item_a_id).map(|i| i.location_id), snap.items.get(&item_b_id).map(|i| i.location_id)), (Some(start_station_id), Some(start_station_id)));
     });
 }
 
@@ -845,22 +859,6 @@ const DIPLOMACY_SKILL: TypeId = 3357;
 const CRIMINAL_CONNECTIONS_SKILL: TypeId = 3361;
 const NEGOTIATION_SKILL: TypeId = 3356;
 const SECURITY_CONNECTIONS_SKILL: TypeId = 3893;
-
-async fn setup_pilot(
-    ctx: &ServerContext,
-    session_id: u64,
-    username: &str,
-    password: &str,
-    char_id: i64,
-) -> SessionState {
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(session_id);
-    common::login_pilot(ctx, &mut sess, username, password).await;
-    common::borrow_wire_harness(ctx, &mut sess)
-        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
-        .await;
-    sess
-}
 
 async fn rpc_call(
     ctx: &ServerContext,
@@ -938,8 +936,7 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     eve_testkit::attest(&["feat:pve.mission-accept", "feat:pve.mission-decline", "feat:pve.mission-quit", "feat:pve.mission-expire", "feat:pve.mission-journal", "feat:pve.mission-tracker"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 502, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 502).await;
 
     let (agent_id, corp_id, _) = find_agent_by_level_and_type(&ctx, 1, 2);
     colocate_with_agent(&ctx, &mut sess, char_id, agent_id);
@@ -1187,8 +1184,7 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
     eve_testkit::attest(&["feat:pve.mission-faction-standing-loss", "feat:standings.npc-standings", "feat:standings.standing-gain-missions", "feat:standings.standing-loss", "feat:standings.standing-compositions", "feat:standings.effective-standing", "feat:standings.corp-standings", "feat:standings.standing-notifications", "feat:standings.trig-edencom-standings"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 505, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 505).await;
 
     let pirate_corp_id = ctx
         .sde
@@ -1394,8 +1390,7 @@ async fn test_agent_dialogue_and_access_standings() {
     eve_testkit::attest(&["feat:pve.agent-finder", "feat:pve.agent-conversation", "feat:pve.mission-levels", "feat:pve.mission-standing-gate"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 501, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 501).await;
 
     let (l1_agent_id, l1_corp_id, _) = find_agent_by_level_and_type(&ctx, 1, 2);
     let (l2_agent_id, l2_corp_id, _) = find_agent_by_level_and_type(&ctx, 2, 2);
@@ -1508,23 +1503,6 @@ const JITA_STATION_ID: i64 = 60_003_760;
 const JITA_SOLAR_SYSTEM_ID: u32 = 30_000_142;
 const CALDARI_NAVY_CORP_ID: i64 = 1_000_035;
 
-async fn setup_pilot(
-    ctx: &ServerContext,
-    session_id: u64,
-    username: &str,
-    password: &str,
-    char_id: i64,
-) -> SessionState {
-    let mut sess = SessionState::new(session_id);
-    common::login_pilot(ctx, &mut sess, username, password).await;
-    let mut harness = common::borrow_wire_harness(ctx, &mut sess);
-    harness
-        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &HashMap::new())
-        .await;
-    drop(harness);
-    sess
-}
-
 async fn rpc_call(
     ctx: &ServerContext,
     sess: &mut SessionState,
@@ -1617,8 +1595,7 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     eve_testkit::attest(&["feat:pve.mission-storyline", "feat:pve.epic-arcs", "feat:pve.storyline-arcs-soe", "feat:pve.data-centers", "feat:pve.career-agents", "feat:pve.research-agents", "feat:pve.locator-agents"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 504, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 504).await;
 
     // 1. Storyline tally: 15 completed regular missions + 16th completion triggers Storyline offer
     let (reg_agent_id, reg_corp_id, _) = find_agent_by_level_and_type(&ctx, 1, 2);
@@ -1999,11 +1976,12 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         .solar_system_id
         .expect("locator solar_system_id");
     colocate_with_agent(&ctx, &mut sess, char_id, locator_agent_id);
+    let (_target_sess, target_id) = setup_scenario_pilot(&ctx, 509).await;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.standings.insert(locator_agent_id, 8.0);
         }
-        if let Some(target) = snap.characters.get_mut(&90_000_002) {
+        if let Some(target) = snap.characters.get_mut(&target_id) {
             target.solar_system_id = agent_sys;
         }
     });
@@ -2015,7 +1993,7 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         &[
             PyRep::Integer(15),
             PyRep::Integer(locator_agent_id),
-            PyRep::Integer(90_000_002),
+            PyRep::Integer(target_id),
         ],
     )
     .await
@@ -2024,7 +2002,7 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         do_action_info(&locate_res)
             .dict_get("targetCharacterID")
             .and_then(|v| v.as_i64()),
-        Some(90_000_002)
+        Some(target_id)
     );
 
     let locate_cd_err = rpc_call(
@@ -2035,7 +2013,7 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         &[
             PyRep::Integer(15),
             PyRep::Integer(locator_agent_id),
-            PyRep::Integer(90_000_002),
+            PyRep::Integer(target_id),
         ],
     )
     .await
@@ -2049,9 +2027,8 @@ async fn test_lp_store_offers_exchange_rates_and_purchase_validation() {
     eve_testkit::attest(&["feat:lp.lp-balance", "feat:lp.lp-corp-wallet", "feat:lp.concord-lp", "feat:lp.lp-reward-logs"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 506, "demo", "demo-secret", char_id).await;
-    sess.station_id = Some(JITA_STATION_ID);
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 506).await;
+    dock_at_station(&ctx, &mut sess, char_id, JITA_STATION_ID, Some(JITA_SOLAR_SYSTEM_ID));
 
     let offers = rpc_call(
         &ctx,
@@ -2215,29 +2192,6 @@ use eve_testkit::client_harness::ClientErrorResponse;
 const JITA_STATION_ID: i64 = 60_003_760;
 const JITA_SOLAR_SYSTEM_ID: u32 = 30_000_142;
 
-async fn setup_pilot(
-    ctx: &ServerContext,
-    session_id: u64,
-    username: &str,
-    password: &str,
-    char_id: i64,
-) -> SessionState {
-    let mut sess = SessionState::new(session_id);
-    common::login_pilot(ctx, &mut sess, username, password).await;
-    let mut harness = common::borrow_wire_harness(ctx, &mut sess);
-    harness
-        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &HashMap::new())
-        .await;
-    drop(harness);
-    let (ship_id, corp_id) = ctx.db.with_snapshot(|snap| {
-        let ch = snap.characters.get(&char_id);
-        (ch.map(|c| c.active_ship_id), ch.map(|c| c.corporation_id))
-    });
-    sess.ship_id = ship_id;
-    sess.corporation_id = corp_id;
-    sess
-}
-
 async fn rpc_call(
     ctx: &ServerContext,
     sess: &mut SessionState,
@@ -2321,8 +2275,7 @@ async fn test_pve_courier_mission_distribution_lifecycle_and_destination_transpo
     eve_testkit::attest(&["feat:pve.mission-courier"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 601, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 601).await;
 
     // Select Level 1 Distribution agent (division 22)
     let (dist_agent_id, dist_corp_id) = ctx
@@ -2476,8 +2429,7 @@ async fn test_pve_trade_mission_commodity_delivery_and_consumption() {
     eve_testkit::attest(&["feat:pve.mission-trade"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 602, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 602).await;
 
     // Use a distribution/trade agent
     let (agent_id, corp_id) = ctx
@@ -2587,8 +2539,7 @@ async fn test_pve_security_mission_multi_npc_wave_and_elimination() {
     eve_testkit::attest(&["feat:pve.mission-security"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 603, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 603).await;
 
     // Select Level 2 Security agent (division 24)
     let (sec_agent_id, sec_corp_id) = ctx
@@ -2693,8 +2644,7 @@ async fn test_pve_mining_mission_asteroid_spawn_and_ore_delivery() {
     eve_testkit::attest(&["feat:mining.mining-missions", "feat:pve.mission-mining"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 604, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 604).await;
 
     // Select Level 1 Mining agent (division 23)
     let (mining_agent_id, mining_corp_id) = ctx
@@ -2807,8 +2757,7 @@ async fn test_per_mission_complete_courier_burner_storyline_epic_arc_rewards() {
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    let char_id = 90_000_001_i64;
-    let mut sess = setup_pilot(&ctx, 790, "demo", "demo-secret", char_id).await;
+    let (mut sess, char_id) = setup_scenario_pilot(&ctx, 790).await;
 
     // Train Negotiation 3 (+15% ISK/bonus) & Security Connections 4 (+40% LP) & Distribution Connections 2 (+20% LP)
     ctx.db.with_mut_snapshot(|snap| {

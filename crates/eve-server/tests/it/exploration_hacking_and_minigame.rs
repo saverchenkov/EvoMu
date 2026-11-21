@@ -33,9 +33,6 @@ use eve_server::services::pve_hacking_sites::{
 use glam::DVec3;
 use std::collections::HashMap;
 
-const CHAR_EXPLORER: i64 = 90_000_001;
-const CHAR_BYSTANDER: i64 = 90_000_002;
-
 const HIGHSEC_SYS: u32 = 30_000_142; // Jita (0.95)
 const LOWSEC_SYS: u32 = 30_002_904;  // VFK-IV (Null-sec -0.85) / lowsec testing with 30_002_813 (Tama 0.28)
 const NULLSEC_SYS: u32 = 30_000_208; // LZ-6SU (Null-sec -0.17)
@@ -69,69 +66,73 @@ fn make_inventory_item(
     }
 }
 
-async fn setup_in_space_pilot(
+pub(super) async fn build_space_pilot(
     ctx: &ServerContext,
-    sess_id: u64,
-    char_id: i64,
-    ship_id: i64,
-    ship_type_id: u32,
+    seed: u64,
     sys_id: u32,
+    ship_type_id: u32,
     pos: DVec3,
-) -> SessionState {
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(sess_id);
-    let (user, pass) = if char_id == CHAR_BYSTANDER {
-        ("other", "other-secret")
-    } else {
-        ("demo", "demo-secret")
-    };
-    ctx.dispatch_rpc(
-        &mut sess,
-        "authentication",
-        None,
-        "Login",
-        &[PyRep::String(user.into()), PyRep::String(pass.into())],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Login");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    shield_hp: f64,
+    equip_analyzers: bool,
+) -> (SessionState, i64, i64) {
+    use crate::scenario_common::ServerScenarioBackend;
+    use eve_testkit::legal_fixture::assert_legal_fixture;
+    use eve_testkit::scenario::{ActorSpec, ScenarioBuilder, ScenarioWorldBackend, ShipLoadoutSpec};
 
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.ship_id = Some(ship_id);
+    let mut backend = ServerScenarioBackend::new(ctx);
+    let scenario = ScenarioBuilder::with_seed(seed)
+        .add_actor(ActorSpec {
+            label: format!("exp_{seed}"),
+            username: format!("exp_{seed:x}"),
+            character_name: format!("Explorer {seed:X}"),
+            starting_isk: 100_000_000.0,
+            require_omega: true,
+            ship: Some(ShipLoadoutSpec {
+                hull_type_id: ship_type_id,
+                ..Default::default()
+            }),
+            in_space: true,
+            ..ActorSpec::default()
+        })
+        .build(&mut backend)
+        .await;
+    let mut actor = scenario.actors.into_iter().next().expect("scenario explorer actor");
+    let char_id = actor.character_id;
+    let ship_id = actor.ship_id.expect("scenario ship_id");
+    let orig_sys_id = actor.solar_system_id;
 
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.active_ship_id = ship_id;
+    let _ = ctx.systems.get_or_spawn(orig_sys_id).remove_ball(ship_id).await;
+    if orig_sys_id != sys_id {
+        let sys_meta = ctx.sde.solar_systems.get(&sys_id).map(|s| (s.constellation_id, s.region_id));
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.solar_system_id = sys_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+            }
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = i64::from(sys_id);
+                ship.flag = InventoryFlag::None;
+            }
+            snap.item_positions.insert(ship_id, pos.to_array());
+        });
+        let sess = &mut actor.harness.transport_mut().inner.session;
+        sess.solar_system_id = Some(sys_id);
+        if let Some((const_id, reg_id)) = sys_meta {
+            sess.constellation_id = Some(const_id);
+            sess.region_id = Some(reg_id);
         }
-        snap.items.insert(
-            ship_id,
-            make_inventory_item(ship_id, ship_type_id, char_id, i64::from(sys_id), InventoryFlag::None, 1),
-        );
-        snap.item_positions.insert(ship_id, pos.to_array());
-    });
+    } else {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.item_positions.insert(ship_id, pos.to_array());
+        });
+    }
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
     let mut cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
-    cs.shield_hp = 10_000.0;
-    cs.max_shield_hp = 10_000.0;
-    let _ = sys
+    cs.shield_hp = shield_hp;
+    cs.max_shield_hp = shield_hp;
+    ctx.systems
+        .get_or_spawn(sys_id)
         .spawn_ball_with_meta(
             Ball {
                 id: ship_id,
@@ -148,8 +149,34 @@ async fn setup_in_space_pilot(
             cs,
             ctx.build_ship_slim_meta(char_id, ship_type_id),
         )
-        .await;
-    sess
+        .await
+        .expect("spawn scenario ship ball");
+
+    actor.expectation.ship_in_space_ballpark = backend.ship_in_space_ballpark(sys_id, ship_id).await;
+    let view = backend.actor_session_view(actor.harness.transport());
+    let exp = &actor.expectation;
+    let label = &actor.label;
+    ctx.db.with_snapshot(|snap| {
+        assert_legal_fixture(label, snap, &ctx.sde, &view, exp);
+    });
+
+    if equip_analyzers {
+        ctx.db.with_mut_snapshot(|snap| {
+            for (slot_off, tid, flag) in [
+                (1_i64, TYPE_DATA_ANALYZER_I, InventoryFlag::MedSlot0),
+                (2_i64, TYPE_RELIC_ANALYZER_I, InventoryFlag::MedSlot1),
+            ] {
+                snap.items.insert(
+                    ship_id * 10 + slot_off,
+                    make_inventory_item(ship_id * 10 + slot_off, tid, char_id, ship_id, flag, 1),
+                );
+            }
+        });
+    }
+
+    let mut sess = actor.harness.into_transport().inner.session;
+    let _ = sess.drain_notifications();
+    (sess, char_id, ship_id)
 }
 
 // ============================================================================
@@ -167,10 +194,9 @@ async fn test_exploration_hacking_coherence_strength_and_node_network() {
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
-    let ship_id = 700_100_001i64;
     let analyzer_id = 700_100_002i64;
     let pos = DVec3::ZERO;
-    let mut sess = setup_in_space_pilot(&ctx, 9401, CHAR_EXPLORER, ship_id, TYPE_RIFTER, LOWSEC_SYS, pos).await;
+    let (mut sess, char_id, ship_id) = build_space_pilot(&ctx, 9401, LOWSEC_SYS, TYPE_RIFTER, pos, 10_000.0, false).await;
 
     // ------------------------------------------------------------------------
     // Part 1: Analyzer stats scaling (T1 vs T2, Skills +10 coherence per level)
@@ -179,39 +205,39 @@ async fn test_exploration_hacking_coherence_strength_and_node_network() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             analyzer_id,
-            make_inventory_item(analyzer_id, TYPE_DATA_ANALYZER_I, CHAR_EXPLORER, ship_id, InventoryFlag::MedSlot0, 1),
+            make_inventory_item(analyzer_id, TYPE_DATA_ANALYZER_I, char_id, ship_id, InventoryFlag::MedSlot0, 1),
         );
         snap.module_online_states.insert(analyzer_id, true);
-        snap.skills.entry(CHAR_EXPLORER).or_default().remove(&SKILL_HACKING);
+        snap.skills.entry(char_id).or_default().remove(&SKILL_HACKING);
     });
 
     let (t1_coh_0, t1_str_0, t1_slots_0, _) =
-        resolve_fitted_analyzer_virus_stats(&ctx, &sess, CHAR_EXPLORER, false).expect("T1 stats with skill 0");
+        resolve_fitted_analyzer_virus_stats(&ctx, &sess, char_id, false).expect("T1 stats with skill 0");
     assert_eq!(t1_coh_0, 40, "T1 Data Analyzer base coherence is 40");
     assert_eq!(t1_str_0, 20, "T1 Data Analyzer base virus strength is 20");
     assert_eq!(t1_slots_0, 3, "T1 Data Analyzer has 3 utility element slots");
 
     // Add Hacking skill level 3 (+30 coherence)
     ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(CHAR_EXPLORER).or_default().insert(
+        snap.skills.entry(char_id).or_default().insert(
             SKILL_HACKING,
             TrainedSkillRecord { type_id: SKILL_HACKING, level: 3, skill_points: 40_000.0 },
         );
     });
     let (t1_coh_3, t1_str_3, _, _) =
-        resolve_fitted_analyzer_virus_stats(&ctx, &sess, CHAR_EXPLORER, false).expect("T1 stats with skill 3");
+        resolve_fitted_analyzer_virus_stats(&ctx, &sess, char_id, false).expect("T1 stats with skill 3");
     assert_eq!(t1_coh_3, 70, "T1 Data Analyzer + Hacking III = 40 + 3*10 = 70 coherence");
     assert_eq!(t1_str_3, 20, "Virus strength remains 20");
 
     // Add Hacking skill level 5 (+50 coherence)
     ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(CHAR_EXPLORER).or_default().insert(
+        snap.skills.entry(char_id).or_default().insert(
             SKILL_HACKING,
             TrainedSkillRecord { type_id: SKILL_HACKING, level: 5, skill_points: 256_000.0 },
         );
     });
     let (t1_coh_5, t1_str_5, _, _) =
-        resolve_fitted_analyzer_virus_stats(&ctx, &sess, CHAR_EXPLORER, false).expect("T1 stats with skill 5");
+        resolve_fitted_analyzer_virus_stats(&ctx, &sess, char_id, false).expect("T1 stats with skill 5");
     assert_eq!(t1_coh_5, 90, "T1 Data Analyzer + Hacking V = 40 + 5*10 = 90 coherence");
     assert_eq!(t1_str_5, 20, "Virus strength remains 20");
 
@@ -220,13 +246,13 @@ async fn test_exploration_hacking_coherence_strength_and_node_network() {
         if let Some(item) = snap.items.get_mut(&analyzer_id) {
             item.type_id = TYPE_RELIC_ANALYZER_II;
         }
-        snap.skills.entry(CHAR_EXPLORER).or_default().insert(
+        snap.skills.entry(char_id).or_default().insert(
             SKILL_ARCHAEOLOGY,
             TrainedSkillRecord { type_id: SKILL_ARCHAEOLOGY, level: 4, skill_points: 135_765.0 },
         );
     });
     let (t2_coh, t2_str, t2_slots, _) =
-        resolve_fitted_analyzer_virus_stats(&ctx, &sess, CHAR_EXPLORER, true).expect("T2 stats with Archaeology IV");
+        resolve_fitted_analyzer_virus_stats(&ctx, &sess, char_id, true).expect("T2 stats with Archaeology IV");
     assert_eq!(t2_coh, 100, "T2 Relic Analyzer + Archaeology IV = 60 + 4*10 = 100 coherence");
     assert_eq!(t2_str, 30, "T2 Relic Analyzer virus strength is 30");
     assert_eq!(t2_slots, 3, "T2 Relic Analyzer has 3 utility element slots");
@@ -306,7 +332,7 @@ async fn test_exploration_hacking_coherence_strength_and_node_network() {
 
     // Install controlled board to test defensive subroutine combat rules deterministically
     with_pve_exploration_reg(&ctx, |reg| {
-        let g = reg.hacking_games.get_mut(&(CHAR_EXPLORER, relic_can_id)).unwrap();
+        let g = reg.hacking_games.get_mut(&(char_id, relic_can_id)).unwrap();
         // Tile 0 is revealed (Empty).
         // Tile 1 is adjacent to tile 0: Antivirus (coherence 50, strength 20).
         g.virus_coherence = 50;
@@ -356,7 +382,7 @@ async fn test_exploration_hacking_coherence_strength_and_node_network() {
 
     // Failure rule: if player virus coherence reaches 0, hack status becomes Failed
     with_pve_exploration_reg(&ctx, |reg| {
-        let g = reg.hacking_games.get_mut(&(CHAR_EXPLORER, relic_can_id)).unwrap();
+        let g = reg.hacking_games.get_mut(&(char_id, relic_can_id)).unwrap();
         g.virus_coherence = 10;
         g.tiles[6].kind = HackingNodeKind::Firewall;
         g.tiles[6].coherence = 60;
@@ -398,9 +424,7 @@ async fn test_exploration_hack_failure_container_explosion() {
     let loot_item_2 = 700_200_102i64;
     let loot_item_3 = 700_200_103i64;
 
-    let ship_near_id = 700_200_001i64;
     let analyzer_id = 700_200_002i64;
-    let ship_far_id = 700_200_003i64;
 
     let can_pos = DVec3::from_array(site_pos);
     // Ship near: 2,000 meters from container (within 5,000m blast range)
@@ -408,14 +432,14 @@ async fn test_exploration_hack_failure_container_explosion() {
     // Ship far: 8,000 meters from container (outside 5,000m blast range)
     let pos_far = can_pos + DVec3::new(8_000.0, 0.0, 0.0);
 
-    let mut sess_near = setup_in_space_pilot(&ctx, 9501, CHAR_EXPLORER, ship_near_id, TYPE_HERON, LOWSEC_SYS, pos_near).await;
-    let _sess_far = setup_in_space_pilot(&ctx, 9502, CHAR_BYSTANDER, ship_far_id, TYPE_RIFTER, LOWSEC_SYS, pos_far).await;
+    let (mut sess_near, char_id, ship_near_id) = build_space_pilot(&ctx, 9501, LOWSEC_SYS, TYPE_HERON, pos_near, 10_000.0, false).await;
+    let (_sess_far, _, ship_far_id) = build_space_pilot(&ctx, 9502, LOWSEC_SYS, TYPE_RIFTER, pos_far, 10_000.0, false).await;
 
     // Equip analyzer on near ship
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             analyzer_id,
-            make_inventory_item(analyzer_id, TYPE_RELIC_ANALYZER_I, CHAR_EXPLORER, ship_near_id, InventoryFlag::MedSlot0, 1),
+            make_inventory_item(analyzer_id, TYPE_RELIC_ANALYZER_I, char_id, ship_near_id, InventoryFlag::MedSlot0, 1),
         );
         snap.module_online_states.insert(analyzer_id, true);
 
@@ -471,7 +495,7 @@ async fn test_exploration_hack_failure_container_explosion() {
 
     // Force failure
     with_pve_exploration_reg(&ctx, |reg| {
-        let g = reg.hacking_games.get_mut(&(CHAR_EXPLORER, can_id)).unwrap();
+        let g = reg.hacking_games.get_mut(&(char_id, can_id)).unwrap();
         g.virus_coherence = 5;
         g.tiles[1].kind = HackingNodeKind::Antivirus;
         g.tiles[1].coherence = 50;
@@ -506,7 +530,7 @@ async fn test_exploration_hack_failure_container_explosion() {
         .expect("Start game attempt 2");
 
     with_pve_exploration_reg(&ctx, |reg| {
-        let g = reg.hacking_games.get_mut(&(CHAR_EXPLORER, can_id)).unwrap();
+        let g = reg.hacking_games.get_mut(&(char_id, can_id)).unwrap();
         g.virus_coherence = 5;
         g.tiles[1].kind = HackingNodeKind::Firewall;
         g.tiles[1].coherence = 60;
@@ -646,28 +670,6 @@ async fn spawn_test_ball(ctx: &ServerContext, sys_id: u32, id: i64, type_id: u32
         .await;
 }
 
-async fn setup_pilot_in_space(ctx: &ServerContext, session_id: u64, char_id: i64, solar_system_id: u32, ship_id: i64, ship_type_id: u32) -> SessionState {
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(session_id);
-    ctx.dispatch_rpc(&mut sess, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await.expect("Login");
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("SelectCharacterID");
-    sess.solar_system_id = Some(solar_system_id);
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.ship_id = Some(ship_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = solar_system_id;
-            ch.active_ship_id = ship_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-        }
-        snap.items.insert(ship_id, make_item(ship_id, ship_type_id, char_id, solar_system_id as i64, InventoryFlag::Hangar, 1, true));
-    });
-    spawn_test_ball(ctx, solar_system_id, ship_id, ship_type_id, DVec3::ZERO, 1_200_000.0, false).await;
-    sess
-}
-
 fn last_hacking_turn_event_data(sess: &mut SessionState) -> PyRep {
     let (_, payload) = sess.drain_notifications().into_iter().rev().find(|(ev, _)| ev == "OnHackingTurnComplete").expect("OnHackingTurnComplete");
     let Some(PyRep::List(events)) = payload.first() else { panic!("events list") };
@@ -687,8 +689,8 @@ async fn test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_leve
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let (char_id, sys_id, ship_id, launcher_id) = (90_000_001, 30_000_142u32, 610_000_001i64, 610_000_010i64);
-    let mut sess = setup_pilot_in_space(&ctx, 701, char_id, sys_id, ship_id, 606).await;
+    let (sys_id, launcher_id) = (30_000_142u32, 610_000_010i64);
+    let (mut sess, char_id, ship_id) = build_space_pilot(&ctx, 701, sys_id, 606, DVec3::ZERO, 10_000.0, false).await;
 
     // 1. Core vs Combat probe range steps (0.25..=32 AU vs 0.5..=64 AU) & flight time from SDE
     assert_eq!(probe_allowed_ranges_au(&ctx.sde, 30013), [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]);
@@ -725,7 +727,8 @@ async fn test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_leve
         snap.items.get_mut(&ship_id).unwrap().dynamic_attributes.insert(38, 0.1);
         snap.items.insert(610_000_012, make_item(610_000_012, 30013, char_id, ship_id, InventoryFlag::HiSlot0, 8, false));
     });
-    let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    let launch_1 = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    assert_eq!(launch_1.dict_get("launchedCount").and_then(|v| v.as_i64()), Some(8));
     ctx.advance_secs(4_001);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let std_in_cargo: i32 = ctx.db.with_snapshot(|snap| {
@@ -735,13 +738,15 @@ async fn test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_leve
 
     // 2. Live RPC range steps & deviation scaling (untrained Astrometrics 0 vs Astrometrics 4 + Pinpointing 3)
     // and signature reveal thresholds (<25%, 25%..75%, 75%..100%, 100%) + SDE dungeon difficulty levels (I-III: 42, IV: 72, V: 104)
-    let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[], &kw, None).await.unwrap();
+    let scan_mgr_rep = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[], &kw, None).await.unwrap();
+    assert_eq!(scan_mgr_rep.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(i64::from(sys_id)));
     let sig_pos = [300_000.0, 0.0, 0.0];
     let now_u = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&ship_id).unwrap().dynamic_attributes.insert(38, 1_000.0);
         if let Some(sk) = snap.skills.get_mut(&char_id) {
             sk.remove(&3412);
+            sk.remove(&25739);
             sk.remove(&25810);
             sk.remove(&25811);
         }
@@ -765,7 +770,8 @@ async fn test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_leve
     assert_eq!(signature_difficulty_level_and_min_strength(&ctx.sde, sys_id, &sigs_snap[1]), (4, 72.0));
     assert_eq!(signature_difficulty_level_and_min_strength(&ctx.sde, sys_id, &sigs_snap[2]), (5, 104.0));
 
-    let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    let launch_1 = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    assert_eq!(launch_1.dict_get("launchedCount").and_then(|v| v.as_i64()), Some(8));
     let nan_coords = PyRep::List(vec![PyRep::List(vec![PyRep::Real(f64::NAN), PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Integer(1)])]);
     assert_eq!(ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[nan_coords], &kw, None).await.unwrap_err().code, "InvalidProbeCoordinates");
 
@@ -851,13 +857,15 @@ async fn test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_leve
     assert_eq!(find_row(&scan_astro5, "TST-LV5").dict_get("warpable"), Some(&PyRep::Bool(false)));
 
     // Load Sisters Core Scanner Probe (30488, base 44) + Astrometric Rangefinding V -> formation strength = 110.0 >= 104.0 (resolves Lv V)
-    let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
+    let recov_2 = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
+    assert_eq!(recov_2.dict_get("recoveredCount").and_then(|v| v.as_i64()), Some(8));
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(25810, TrainedSkillRecord { type_id: 25810, level: 5, skill_points: 512_000.0 });
         snap.items.retain(|_, i| !(i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != launcher_id));
         snap.items.insert(610_000_015, make_item(610_000_015, 30488, char_id, ship_id, InventoryFlag::HiSlot0, 8, false));
     });
-    let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    let launch_1 = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    assert_eq!(launch_1.dict_get("launchedCount").and_then(|v| v.as_i64()), Some(8));
     let scan_105 = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[make_coords_step(8, 1)], &kw, None).await.unwrap();
     assert_eq!(find_row(&scan_105, "TST-LV5").dict_get("warpable"), Some(&PyRep::Bool(true)));
 
@@ -870,7 +878,8 @@ async fn test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_leve
     let PyRep::List(rows_105) = &scan_105 else { panic!() };
     assert!(rows_105.iter().all(|r| r.dict_get("targetClass").and_then(|v| v.as_str()) == Some("CosmicSignature")));
 
-    let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
+    let recov_2 = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
+    assert_eq!(recov_2.dict_get("recoveredCount").and_then(|v| v.as_i64()), Some(8));
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.retain(|_, i| !(i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != launcher_id));
         snap.items.insert(610_000_014, make_item(610_000_014, 30486, char_id, ship_id, InventoryFlag::HiSlot0, 8, false));
@@ -920,7 +929,8 @@ async fn reveal_tile_via_clicks(ctx: &ServerContext, sess: &mut SessionState, ch
             if !need_click {
                 break;
             }
-            let _ = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(step_idx as i64)], &kw, None).await.unwrap();
+            let step_rep = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(step_idx as i64)], &kw, None).await.unwrap();
+            assert_eq!(step_rep.dict_get("tileIndex").and_then(|v| v.as_i64()), Some(i64::from(step_idx)));
         }
     }
 }
@@ -937,8 +947,8 @@ async fn test_exploration_hacking_grid_coherence_strength_and_second_fail_explos
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let (char_id, wh_sys_id, ship_id) = (90_000_001, 31_000_005u32, 620_000_001i64);
-    let mut sess = setup_pilot_in_space(&ctx, 702, char_id, wh_sys_id, ship_id, 606).await;
+    let wh_sys_id = 31_000_005u32;
+    let (mut sess, char_id, ship_id) = build_space_pilot(&ctx, 702, wh_sys_id, 606, DVec3::ZERO, 10_000.0, false).await;
 
     let (can_1, can_2, loot_in_can_2, bystander_near, bystander_far) = (620_000_101, 620_000_102, 620_000_103, 620_000_201, 620_000_202);
     ensure_system_pve_sites_seeded(&ctx, wh_sys_id).await;
@@ -966,7 +976,8 @@ async fn test_exploration_hacking_grid_coherence_strength_and_second_fail_explos
     // 1. T1 analyzer stats (20 strength, 40 + 10*2 = 60 coherence via Archaeology 13278), asserted via OnHackingTurnComplete notification payload
     let _ = sess.drain_notifications();
     let v24_start_args = [PyRep::Integer(can_1), PyRep::Integer(24675), PyRep::Integer(620_000_010), PyRep::Integer(22177), PyRep::Integer(5), PyRep::Integer(0), PyRep::Integer(0)];
-    let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &v24_start_args, &kw, None).await.unwrap();
+    let start_1 = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &v24_start_args, &kw, None).await.unwrap();
+    assert_eq!(start_1.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
     let start_ev = last_hacking_turn_event_data(&mut sess);
     assert_eq!(start_ev.dict_get("virusStrength").and_then(|v| v.as_i64()), Some(20));
     assert_eq!(start_ev.dict_get("virusCoherence").and_then(|v| v.as_i64()), Some(60));
@@ -1023,7 +1034,8 @@ async fn test_exploration_hacking_grid_coherence_strength_and_second_fail_explos
             if with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, can_1)].tiles[d_idx as usize].coherence <= 0) {
                 break;
             }
-            let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(d_idx as i64)], &kw, None).await.unwrap();
+            let d_rep1 = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(d_idx as i64)], &kw, None).await.unwrap();
+            assert_eq!(d_rep1.dict_get("tileIndex").and_then(|v| v.as_i64()), Some(i64::from(d_idx)));
         }
     }
     let fail1_ev = failed_ev.expect("Reached hack failure via real defensive node clicks");
@@ -1037,7 +1049,8 @@ async fn test_exploration_hacking_grid_coherence_strength_and_second_fail_explos
     });
     let v24_start_can2 = [PyRep::Integer(can_2), PyRep::Integer(24675), PyRep::Integer(620_000_010), PyRep::Integer(30832), PyRep::Integer(5), PyRep::Integer(0), PyRep::Integer(0)];
     let _ = sess.drain_notifications();
-    let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &v24_start_can2, &kw, None).await.unwrap();
+    let start_2 = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &v24_start_can2, &kw, None).await.unwrap();
+    assert_eq!(start_2.dict_get("containerID").and_then(|v| v.as_i64()), Some(can_2));
     let start_t2_ev = last_hacking_turn_event_data(&mut sess);
     assert_eq!((start_t2_ev.dict_get("virusStrength").and_then(|v| v.as_i64()), start_t2_ev.dict_get("virusCoherence").and_then(|v| v.as_i64())), (Some(30), Some(100)));
     let layout_2: Vec<String> = with_pve_exploration_reg(&ctx, |reg| {
@@ -1047,7 +1060,8 @@ async fn test_exploration_hacking_grid_coherence_strength_and_second_fail_explos
 
     let sys_handle = ctx.systems.get_or_spawn(wh_sys_id);
     // 1st failure on can_2 via QuitHackingAttempt
-    let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "QuitHackingAttempt", &[], &kw, None).await.unwrap();
+    let quit_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "QuitHackingAttempt", &[], &kw, None).await.unwrap();
+    assert_eq!(quit_rep, PyRep::Bool(true));
     assert!(sys_handle.get_ball_snapshot(can_2).await.unwrap().is_some());
 
     // 2nd attempt on can_2 with T1 Relic Analyzer I (22177) + Archaeology 0 (40 coherence, 20 strength) -> fail via real clicks on defensive nodes -> explodes!
@@ -1056,7 +1070,8 @@ async fn test_exploration_hacking_grid_coherence_strength_and_second_fail_explos
         snap.skills.entry(char_id).or_default().insert(13278, TrainedSkillRecord { type_id: 13278, level: 0, skill_points: 0.0 });
     });
     let _ = sess.drain_notifications();
-    let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &v24_start_can2, &kw, None).await.unwrap();
+    let start_3 = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &v24_start_can2, &kw, None).await.unwrap();
+    assert_eq!(start_3.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
     let def_indices_2: Vec<u32> = with_pve_exploration_reg(&ctx, |reg| {
         reg.hacking_games[&(char_id, can_2)].tiles.iter().filter(|t| t.strength > 0).map(|t| t.tile_index).collect()
     });
@@ -1071,7 +1086,8 @@ async fn test_exploration_hacking_grid_coherence_strength_and_second_fail_explos
             if with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, can_2)].tiles[d_idx as usize].coherence <= 0) {
                 break;
             }
-            let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(d_idx as i64)], &kw, None).await.unwrap();
+            let d_rep2 = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(d_idx as i64)], &kw, None).await.unwrap();
+            assert_eq!(d_rep2.dict_get("tileIndex").and_then(|v| v.as_i64()), Some(i64::from(d_idx)));
         }
     }
     let fail2_ev = fail2_ev_opt.expect("2nd failure reached via real defensive node clicks");
@@ -1097,11 +1113,12 @@ async fn test_wormhole_decay_stages_propulsion_mass_collapse_and_static_respawn(
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let (char_id, wh_sys_id, dest_sys_id, ship_id) = (90_000_001, 31_000_240u32, 31_000_028u32, 630_000_001i64);
-    let mut sess = setup_pilot_in_space(&ctx, 703, char_id, wh_sys_id, ship_id, 621).await;
+    let (wh_sys_id, dest_sys_id) = (31_000_240u32, 31_000_028u32);
+    let (mut sess, char_id, ship_id) = build_space_pilot(&ctx, 703, wh_sys_id, 621, DVec3::ZERO, 10_000.0, false).await;
     ctx.advance_secs(15);
 
-    let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(wh_sys_id as i64)], &kw, None).await.unwrap();
+    let wh_scan_mgr = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(wh_sys_id as i64)], &kw, None).await.unwrap();
+    assert_eq!(wh_scan_mgr.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(i64::from(wh_sys_id)));
     let (static_sig_id, wh_pos) = ctx.db.with_mut_snapshot(|snap| {
         let sig = snap.cosmic_signatures.get_mut(&wh_sys_id).unwrap().iter_mut().find(|s| s.signature_id.starts_with("WST-")).unwrap();
         sig.destination_system_id = Some(dest_sys_id);
@@ -1237,8 +1254,7 @@ async fn test_wormhole_system_phenomena_dogma_modifiers_and_hud() {
     assert_eq!(resolve_system_wormhole_phenomenon(&ctx.sde, 31_000_006, None).expect("Drifter WR"), (18, 2, "Wolf-Rayet", 30875));
 
     // Live ship attribute verification via `dogmaIM.GetAllInfo` in Jita vs W-space phenomenon system `31_000_006` (Class 2 Wolf-Rayet)
-    let (char_id, ship_id) = (90_000_001, 640_000_001i64);
-    let mut sess = setup_pilot_in_space(&ctx, 704, char_id, 30_000_142, ship_id, 587).await;
+    let (mut sess, char_id, ship_id) = build_space_pilot(&ctx, 704, 30_000_142, 587, DVec3::ZERO, 10_000.0, false).await;
     let get_ship_attr = |info: &PyRep, aid: i64| -> f64 {
         let Some(PyRep::Dict(entries)) = info.dict_get("shipAttributes") else { panic!("shipAttributes") };
         entries.iter().find(|(k, _)| k.as_i64() == Some(aid)).and_then(|(_, v)| v.as_f64()).unwrap()
@@ -1286,7 +1302,6 @@ pub(crate) mod pve_hacking_mechanics_suite {
 
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_destiny::{Ball, MovementMode};
-use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::pve_exploration::{
@@ -1300,7 +1315,6 @@ use eve_server::services::pve_hacking_board::{
 use glam::DVec3;
 use std::collections::HashMap;
 
-const PILOT_1: i64 = 90_000_001;
 const JITA_SYS: u32 = 30_000_142; // High-sec (0.95)
 const LOWSEC_SYS: u32 = 30_002_904; // Tama (Low-sec 0.28)
 const TYPE_HERON: u32 = 605; // +5 virusCoherenceBonus hull bonus
@@ -1328,61 +1342,6 @@ fn make_item(
         singleton,
         ..Default::default()
     }
-}
-
-async fn setup_space_pilot(
-    ctx: &ServerContext,
-    sess_id: u64,
-    char_id: i64,
-    ship_id: i64,
-    ship_type_id: u32,
-    sys_id: u32,
-    pos: DVec3,
-) -> SessionState {
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(sess_id);
-    ctx.dispatch_rpc(&mut sess, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await.expect("Login");
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("SelectCharacterID");
-
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.ship_id = Some(ship_id);
-
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.active_ship_id = ship_id;
-        }
-        snap.items.insert(ship_id, make_item(ship_id, ship_type_id, char_id, i64::from(sys_id), InventoryFlag::None, 1, true));
-        snap.item_positions.insert(ship_id, pos.to_array());
-    });
-
-    let sys = ctx.systems.get_or_spawn(sys_id);
-    let mut cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
-    cs.shield_hp = 50_000.0;
-    cs.max_shield_hp = 50_000.0;
-    let _ = sys
-        .spawn_ball_with_meta(
-            Ball {
-                id: ship_id,
-                type_id: ship_type_id,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 365.0,
-                inertia: 1.0,
-                mass: 1_200_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            cs,
-            ctx.build_ship_slim_meta(char_id, ship_type_id),
-        )
-        .await;
-    sess
 }
 
 fn build_controlled_v24_board() -> Vec<HackingTileState> {
@@ -1426,9 +1385,8 @@ async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let ship_id = 750_001_001i64;
     let analyzer_id = 750_001_010i64;
-    let mut sess = setup_space_pilot(&ctx, 9201, PILOT_1, ship_id, TYPE_HERON, JITA_SYS, DVec3::ZERO).await;
+    let (mut sess, char_id, ship_id) = build_space_pilot(&ctx, 9201, JITA_SYS, TYPE_HERON, DVec3::ZERO, 50_000.0, false).await;
 
     ensure_system_pve_sites_seeded(&ctx, JITA_SYS).await;
     let (data_can_id, site_pos) = with_pve_exploration_reg(&ctx, |reg| {
@@ -1450,14 +1408,14 @@ async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
 
     // 2. Fit Data Analyzer I (22175: 40 coh / 20 str) + Hacking V (+50 coh) on Heron (605: +5 hull coh) = 95 coh, 20 str
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(analyzer_id, make_item(analyzer_id, TYPE_DATA_ANALYZER_I, PILOT_1, ship_id, InventoryFlag::MedSlot0, 1, true));
+        snap.items.insert(analyzer_id, make_item(analyzer_id, TYPE_DATA_ANALYZER_I, char_id, ship_id, InventoryFlag::MedSlot0, 1, true));
         snap.module_online_states.insert(analyzer_id, true);
-        snap.skills.entry(PILOT_1).or_default().insert(
+        snap.skills.entry(char_id).or_default().insert(
             SKILL_HACKING,
             TrainedSkillRecord { type_id: SKILL_HACKING, level: 5, skill_points: 256_000.0 },
         );
     });
-    let (coh, strg, slots, _range) = resolve_fitted_analyzer_virus_stats(&ctx, &sess, PILOT_1, false).expect("Analyzer stats");
+    let (coh, strg, slots, _range) = resolve_fitted_analyzer_virus_stats(&ctx, &sess, char_id, false).expect("Analyzer stats");
     assert_eq!((coh, strg, slots), (90, 25, 3));
 
     // 3. Procedural board scales coherence/strength with difficulty (1..=5) and includes all V24 node kinds
@@ -1490,7 +1448,7 @@ async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
     assert!((1..=5).contains(&start_dist));
 
     with_pve_exploration_reg(&ctx, |reg| {
-        let g = reg.hacking_games.get_mut(&(PILOT_1, data_can_id)).unwrap();
+        let g = reg.hacking_games.get_mut(&(char_id, data_can_id)).unwrap();
         g.tiles = build_controlled_v24_board();
         g.virus_coherence = 120;
         g.max_virus_coherence = 120;
@@ -1504,7 +1462,7 @@ async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
         .await
         .expect("Click Empty tile 6");
     let expected_d6 = with_pve_exploration_reg(&ctx, |reg| {
-        hacking_tile_distance_indicator(6, &reg.hacking_games[&(PILOT_1, data_can_id)].tiles)
+        hacking_tile_distance_indicator(6, &reg.hacking_games[&(char_id, data_can_id)].tiles)
     });
     assert_eq!(click_6.dict_get("distanceIndicator").and_then(|v| v.as_i64()), Some(i64::from(expected_d6)));
 
@@ -1529,11 +1487,13 @@ async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
     assert_eq!(click_7.dict_get("nodeCoherence").and_then(|v| v.as_i64()), Some(20));
 
     // Reveal RestorationNode at tile 2 (coh 35 - 25 = 10) -> heals Firewall (tile 7: 20 -> 40)
-    let _ = ctx
+    let click_2 = ctx
         .dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(2)], &kw, None)
         .await
         .expect("Click RestorationNode tile 2");
-    let fw_healed_coh = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].tiles[7].coherence);
+    assert_eq!(click_2.dict_get("tileIndex").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(click_2.dict_get("nodeCoherence").and_then(|v| v.as_i64()), Some(10));
+    let fw_healed_coh = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, data_can_id)].tiles[7].coherence);
     assert_eq!(fw_healed_coh, 40, "RestorationNode must heal revealed Firewall (+20 -> 40)");
 
     // One-shot Antivirus (tile 12, coh 15 <= 25 str); active RestorationNode heals itself (tile 2: 10 -> 30)
@@ -1542,15 +1502,18 @@ async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
         .await
         .expect("One-shot Antivirus tile 12");
     assert_eq!(click_12.dict_get("nodeCoherence").and_then(|v| v.as_i64()), Some(0));
-    let rn_coh = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].tiles[2].coherence);
+    let rn_coh = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, data_can_id)].tiles[2].coherence);
     assert_eq!(rn_coh, 30, "RestorationNode heals revealed Defensive Subsystem (+20 -> 30)");
 
     // Kill RestorationNode (tile 2: 30 -> 5 -> 0)
-    let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(2)], &kw, None).await.unwrap();
-    let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(2)], &kw, None).await.unwrap();
+    let click_2a = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(2)], &kw, None).await.unwrap();
+    assert_eq!(click_2a.dict_get("tileIndex").and_then(|v| v.as_i64()), Some(2));
+    let click_2b = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(2)], &kw, None).await.unwrap();
+    assert_eq!(click_2b.dict_get("nodeCoherence").and_then(|v| v.as_i64()), Some(0));
 
     // DataCache at tile 13 yields PolymorphicShield into slot 0; DataCache at tile 14 conceals a Firewall
-    let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(13)], &kw, None).await.unwrap();
+    let click_13 = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(13)], &kw, None).await.unwrap();
+    assert_eq!(click_13.dict_get("tileIndex").and_then(|v| v.as_i64()), Some(13));
     let click_14 = ctx
         .dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(14)], &kw, None)
         .await
@@ -1559,7 +1522,8 @@ async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
 
     // Collect UtilitySubsystems at tiles 18 (KernelRot), 19 (SelfRepair), 20 (SecondaryVector) and activate all 4
     for tid in [18_i64, 19, 20] {
-        ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(tid)], &kw, None).await.unwrap();
+        let tid_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(tid)], &kw, None).await.unwrap();
+        assert_eq!(tid_rep.dict_get("tileIndex").and_then(|v| v.as_i64()), Some(tid));
     }
     let use_ps = ctx
         .dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(data_can_id), PyRep::Integer(0), PyRep::Integer(0)], &kw, None)
@@ -1567,39 +1531,42 @@ async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
         .expect("Use PolymorphicShield");
     assert_eq!(use_ps.dict_get("polymorphicShieldCharges").and_then(|v| v.as_i64()), Some(2));
 
-    let coh_before_kr = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].tiles[7].coherence);
-    let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(data_can_id), PyRep::Integer(1), PyRep::Integer(7)], &kw, None).await.unwrap();
-    let coh_after_kr = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].tiles[7].coherence);
+    let coh_before_kr = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, data_can_id)].tiles[7].coherence);
+    let use_kr = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(data_can_id), PyRep::Integer(1), PyRep::Integer(7)], &kw, None).await.unwrap();
+    assert_eq!(use_kr.dict_get("usedSlot").and_then(|v| v.as_i64()), Some(1));
+    let coh_after_kr = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, data_can_id)].tiles[7].coherence);
     assert_eq!(coh_after_kr, (coh_before_kr / 2).max(1));
 
-    let coh_before_sr = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].virus_coherence);
-    let _use_sr = ctx
+    let use_sr = ctx
         .dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(data_can_id), PyRep::Integer(2), PyRep::Integer(0)], &kw, None)
         .await
         .expect("Use SelfRepair");
-    let sr_turns = with_pve_exploration_reg(&ctx, |reg| reg.self_repair_turns.get(&(PILOT_1, data_can_id)).copied());
+    assert_eq!(use_sr.dict_get("usedSlot").and_then(|v| v.as_i64()), Some(2));
+    assert!(use_sr.dict_get("virusCoherence").and_then(|v| v.as_i64()).is_some());
+    let sr_turns = with_pve_exploration_reg(&ctx, |reg| reg.self_repair_turns.get(&(char_id, data_can_id)).copied());
     assert_eq!(sr_turns, Some(3));
-    let _ = coh_before_sr;
 
-    let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(data_can_id), PyRep::Integer(3), PyRep::Integer(7)], &kw, None).await.unwrap();
-    let sv_active = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].secondary_vector_target);
+    let use_sv = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(data_can_id), PyRep::Integer(3), PyRep::Integer(7)], &kw, None).await.unwrap();
+    assert_eq!(use_sv.dict_get("usedSlot").and_then(|v| v.as_i64()), Some(3));
+    let sv_active = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, data_can_id)].secondary_vector_target);
     assert_eq!(sv_active, Some((7, 3)));
 
     // Verify SelfRepair heals 5..=10 per turn for 3 turns and exceeds max_virus_coherence
     let max_coh = with_pve_exploration_reg(&ctx, |reg| {
-        let g = reg.hacking_games.get_mut(&(PILOT_1, data_can_id)).unwrap();
+        let g = reg.hacking_games.get_mut(&(char_id, data_can_id)).unwrap();
         g.virus_coherence = g.max_virus_coherence;
         g.max_virus_coherence
     });
     let mut prev_coh = max_coh;
     for tid in [3_i64, 4, 5] {
-        ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(tid)], &kw, None).await.unwrap();
-        let cur_coh = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].virus_coherence);
+        let sr_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(tid)], &kw, None).await.unwrap();
+        assert_eq!(sr_rep.dict_get("tileIndex").and_then(|v| v.as_i64()), Some(tid));
+        let cur_coh = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, data_can_id)].virus_coherence);
         assert!((5..=10).contains(&(cur_coh - prev_coh)), "SelfRepair must heal 5..=10 per turn");
         prev_coh = cur_coh;
     }
     assert!(prev_coh > max_coh, "SelfRepair must allow virus_coherence to exceed max_virus_coherence");
-    assert_eq!(with_pve_exploration_reg(&ctx, |reg| reg.self_repair_turns.get(&(PILOT_1, data_can_id)).copied()), None);
+    assert_eq!(with_pve_exploration_reg(&ctx, |reg| reg.self_repair_turns.get(&(char_id, data_can_id)).copied()), None);
 }
 
 // ============================================================================
@@ -1610,14 +1577,13 @@ async fn test_hacking_failure_outcomes_and_core_kill_loot_spew() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let ship_id = 750_002_001i64;
     let relic_analyzer_id = 750_002_010i64;
     let data_analyzer_id = 750_002_011i64;
-    let mut sess = setup_space_pilot(&ctx, 9202, PILOT_1, ship_id, TYPE_RIFTER, LOWSEC_SYS, DVec3::ZERO).await;
+    let (mut sess, char_id, ship_id) = build_space_pilot(&ctx, 9202, LOWSEC_SYS, TYPE_RIFTER, DVec3::ZERO, 50_000.0, false).await;
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(relic_analyzer_id, make_item(relic_analyzer_id, TYPE_RELIC_ANALYZER_I, PILOT_1, ship_id, InventoryFlag::MedSlot0, 1, true));
-        snap.items.insert(data_analyzer_id, make_item(data_analyzer_id, TYPE_DATA_ANALYZER_I, PILOT_1, ship_id, InventoryFlag::MedSlot1, 1, true));
+        snap.items.insert(relic_analyzer_id, make_item(relic_analyzer_id, TYPE_RELIC_ANALYZER_I, char_id, ship_id, InventoryFlag::MedSlot0, 1, true));
+        snap.items.insert(data_analyzer_id, make_item(data_analyzer_id, TYPE_DATA_ANALYZER_I, char_id, ship_id, InventoryFlag::MedSlot1, 1, true));
         snap.module_online_states.insert(relic_analyzer_id, true);
         snap.module_online_states.insert(data_analyzer_id, true);
     });
@@ -1653,7 +1619,7 @@ async fn test_hacking_failure_outcomes_and_core_kill_loot_spew() {
     for attempt in 1..=2 {
         ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can_explode)], &kw, None).await.unwrap();
         with_pve_exploration_reg(&ctx, |reg| {
-            let g = reg.hacking_games.get_mut(&(PILOT_1, can_explode)).unwrap();
+            let g = reg.hacking_games.get_mut(&(char_id, can_explode)).unwrap();
             g.virus_coherence = 10;
             g.tiles[1].kind = HackingNodeKind::Antivirus;
             g.tiles[1].coherence = 50;
@@ -1707,7 +1673,7 @@ async fn test_hacking_failure_outcomes_and_core_kill_loot_spew() {
 
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(ghost_can_id)], &kw, None).await.unwrap();
     with_pve_exploration_reg(&ctx, |reg| {
-        let g = reg.hacking_games.get_mut(&(PILOT_1, ghost_can_id)).unwrap();
+        let g = reg.hacking_games.get_mut(&(char_id, ghost_can_id)).unwrap();
         g.virus_coherence = 10;
         g.tiles[1].kind = HackingNodeKind::Antivirus;
         g.tiles[1].coherence = 50;
@@ -1729,7 +1695,7 @@ async fn test_hacking_failure_outcomes_and_core_kill_loot_spew() {
     let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(site_pos)).await;
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can_win)], &kw, None).await.unwrap();
     with_pve_exploration_reg(&ctx, |reg| {
-        let g = reg.hacking_games.get_mut(&(PILOT_1, can_win)).unwrap();
+        let g = reg.hacking_games.get_mut(&(char_id, can_win)).unwrap();
         g.tiles[1].kind = HackingNodeKind::SystemCore;
         g.tiles[1].coherence = 15;
         g.tiles[1].strength = 10;
@@ -1762,15 +1728,14 @@ async fn test_ghost_blast_radius_cutoff_and_utility_range_cloak_tile_guards() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let ship_id = 750_009_001i64;
     let bystander_ship_id = 750_009_002i64;
     let data_analyzer_id = 750_009_010i64;
-    let mut sess = setup_space_pilot(&ctx, 9209, PILOT_1, ship_id, TYPE_HERON, LOWSEC_SYS, DVec3::ZERO).await;
+    let (mut sess, char_id, ship_id) = build_space_pilot(&ctx, 9209, LOWSEC_SYS, TYPE_HERON, DVec3::ZERO, 50_000.0, false).await;
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             data_analyzer_id,
-            make_item(data_analyzer_id, TYPE_DATA_ANALYZER_I, PILOT_1, ship_id, InventoryFlag::MedSlot0, 1, true),
+            make_item(data_analyzer_id, TYPE_DATA_ANALYZER_I, char_id, ship_id, InventoryFlag::MedSlot0, 1, true),
         );
         snap.module_online_states.insert(data_analyzer_id, true);
     });
@@ -1813,7 +1778,7 @@ async fn test_ghost_blast_radius_cutoff_and_utility_range_cloak_tile_guards() {
         .await
         .expect("StartNewGameInstance");
     with_pve_exploration_reg(&ctx, |reg| {
-        let g = reg.hacking_games.get_mut(&(PILOT_1, data_can_id)).unwrap();
+        let g = reg.hacking_games.get_mut(&(char_id, data_can_id)).unwrap();
         g.tiles = build_controlled_v24_board();
         g.utilities = vec![
             Some(HackingUtilityKind::KernelRot),
@@ -1850,7 +1815,7 @@ async fn test_ghost_blast_radius_cutoff_and_utility_range_cloak_tile_guards() {
         .expect_err("Unrevealed tile must fail UsedUtilityElementOnVirus");
     assert_eq!(unrev2.code, "TargetTileNotRevealed");
     assert_eq!(
-        with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].utilities[0]),
+        with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, data_can_id)].utilities[0]),
         Some(HackingUtilityKind::KernelRot),
         "Failed target tile validation must NOT consume utility slot"
     );
@@ -1890,7 +1855,7 @@ async fn test_ghost_blast_radius_cutoff_and_utility_range_cloak_tile_guards() {
         .expect_err("Out-of-range ship must not activate hacking utility");
     assert_eq!(range_err.code, "OutOfRange");
     assert_eq!(
-        with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].utilities[1]),
+        with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, data_can_id)].utilities[1]),
         Some(HackingUtilityKind::SelfRepair),
         "Out-of-range utility activation must NOT consume utility slot"
     );
@@ -1898,7 +1863,7 @@ async fn test_ghost_blast_radius_cutoff_and_utility_range_cloak_tile_guards() {
     // 2. Ghost Site Blast Radius Cutoff:
     //    - Bystander ship at 25 km (> 10 km blast radius) takes ZERO damage
     //    - Hacking ship moved to 25 km before QuitHackingAttempt ALSO takes ZERO damage (no teleport fallback!)
-    let mut bystander_cs = ctx.build_ship_combat_state(PILOT_1, bystander_ship_id, TYPE_RIFTER);
+    let mut bystander_cs = ctx.build_ship_combat_state(char_id, bystander_ship_id, TYPE_RIFTER);
     bystander_cs.shield_hp = 20_000.0;
     bystander_cs.max_shield_hp = 20_000.0;
     let _ = sys_handle
@@ -1992,114 +1957,11 @@ async fn clear_site_wave_npcs(ctx: &ServerContext, solar_system_id: u32, site_id
     }
 }
 
-async fn create_in_space_session(
-    ctx: &ServerContext,
-    session_id: u64,
-    solar_system_id: u32,
-    ship_id: i64,
-    ship_type_id: u32,
-) -> SessionState {
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(session_id);
-
-    ctx.dispatch_rpc(
-        &mut sess,
-        "authentication",
-        None,
-        "Login",
-        &[
-            PyRep::String("demo".into()),
-            PyRep::String("demo-secret".into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Login");
-
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
-
-    sess.solar_system_id = Some(solar_system_id);
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.ship_id = Some(ship_id);
-
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.solar_system_id = solar_system_id;
-            ch.active_ship_id = ship_id;
-        }
-        snap.items.insert(
-            ship_id,
-            InventoryItemRecord {
-                item_id: ship_id,
-                type_id: ship_type_id,
-                owner_id: 90_000_001,
-                location_id: solar_system_id as i64,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-        for (slot_off, tid, flag) in [(1_i64, 22175_u32, InventoryFlag::MedSlot0), (2, 22177, InventoryFlag::MedSlot1)] {
-            snap.items.insert(
-                ship_id * 10 + slot_off,
-                InventoryItemRecord {
-                    item_id: ship_id * 10 + slot_off,
-                    type_id: tid,
-                    owner_id: 90_000_001,
-                    location_id: ship_id,
-                    flag,
-                    quantity: 1,
-                    singleton: true,
-                    ..Default::default()
-                },
-            );
-        }
-    });
-
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    let mut cs = ctx.build_type_combat_state(ship_type_id);
-    cs.shield_hp = 50_000.0;
-    cs.max_shield_hp = 50_000.0;
-    let _ = sys_handle
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship_id,
-                type_id: ship_type_id,
-                position: DVec3::ZERO,
-                velocity: DVec3::ZERO,
-                max_velocity: 365.0,
-                inertia: 1.0,
-                mass: 1_067_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            cs,
-        )
-        .await;
-
-    sess
-}
-
 async fn traverse_and_win_hack(ctx: &ServerContext, sess: &mut SessionState, can_id: i64) -> PyRep {
     let kw = HashMap::new();
+    let char_id = sess.character_id.expect("char_id");
     let core_idx = with_pve_exploration_reg(ctx, |reg| {
-        reg.hacking_games[&(90_000_001, can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
+        reg.hacking_games[&(char_id, can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
     });
     let mut path: Vec<u32> = (1..=(core_idx / 6)).map(|r| r * 6).collect();
     path.extend(((core_idx / 6) * 6 + 1)..=core_idx);
@@ -2133,7 +1995,13 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
 
     let ctx = ServerContext::new();
     let kw = HashMap::new();
-    let mut sess = create_in_space_session(&ctx, 8103, 30_000_142, 710_001_003, 587).await;
+    let (mut sess, char_id, _ship_id) = build_space_pilot(&ctx, 8103, 30_000_142, 587, DVec3::ZERO, 50_000.0, true).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sk) = snap.skills.get_mut(&char_id) {
+            sk.remove(&13278);
+            sk.remove(&21718);
+        }
+    });
 
     // 1. Data Site (DAT-30000142) and Relic Site (REL-30000142) hackable containers from the seeded sites
     ensure_system_pve_sites_seeded(&ctx, 30_000_142).await;
@@ -2167,7 +2035,7 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     let empty_util_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(relic_can_id), PyRep::Integer(0), PyRep::Integer(0)], &kw, None).await.expect_err("empty utility slot");
     assert_eq!(empty_util_err.code, "UtilitySlotEmpty");
     let poly_idx = with_pve_exploration_reg(&ctx, |reg| {
-        reg.hacking_games[&(90_000_001, relic_can_id)].tiles.iter()
+        reg.hacking_games[&(char_id, relic_can_id)].tiles.iter()
             .find(|t| t.utility_drop.as_ref().is_some_and(|u| format!("{u:?}") == "PolymorphicShield"))
             .unwrap().tile_index
     });
@@ -2180,7 +2048,7 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
         }
     }
     let poly_slot = with_pve_exploration_reg(&ctx, |reg| {
-        reg.hacking_games[&(90_000_001, relic_can_id)].utilities.iter()
+        reg.hacking_games[&(char_id, relic_can_id)].utilities.iter()
             .position(|u| u.as_ref().is_some_and(|k| format!("{k:?}") == "PolymorphicShield")).unwrap()
     });
     let util_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(relic_can_id), PyRep::Integer(poly_slot as i64), PyRep::Integer(0)], &kw, None).await.expect("UsedUtilityElement PolymorphicShield");
@@ -2188,7 +2056,7 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
 
     // Traverse adjacent tiles to the SystemCore tile and destroy it to win the hack and trigger Loot Spew
     let core_tile_idx = with_pve_exploration_reg(&ctx, |reg| {
-        reg.hacking_games[&(90_000_001, relic_can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
+        reg.hacking_games[&(char_id, relic_can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
     });
     let won_rep = traverse_and_win_hack(&ctx, &mut sess, relic_can_id).await;
     let won_spew = match won_rep.dict_get("spewedContainers") {
@@ -2202,11 +2070,11 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     assert_eq!(prog_rep.dict_get("status").and_then(|v| v.as_str()), Some("Won"));
 
     // BF-SEASON-HACKWIN-01: Verify replay of ClickedOnTile on won game fails and does not increment hacking_wins
-    let wins_before: u64 = ctx.db.with_snapshot(|s| s.seasons_and_campaigns.hacking_wins.get(&90000001).copied().unwrap_or(0));
+    let wins_before: u64 = ctx.db.with_snapshot(|s| s.seasons_and_campaigns.hacking_wins.get(&char_id).copied().unwrap_or(0));
     assert!(wins_before >= 1);
     let replay_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(relic_can_id), PyRep::Integer(core_tile_idx as i64)], &kw, None).await.expect_err("replay ClickedOnTile on won game must fail");
     assert_eq!(replay_err.code, "HackingGameAlreadyFinished");
-    let wins_after: u64 = ctx.db.with_snapshot(|s| s.seasons_and_campaigns.hacking_wins.get(&90000001).copied().unwrap_or(0));
+    let wins_after: u64 = ctx.db.with_snapshot(|s| s.seasons_and_campaigns.hacking_wins.get(&char_id).copied().unwrap_or(0));
     assert_eq!(wins_after, wins_before);
 
     // BF-SEASON-HACKWIN-02: Replay StartNewGameInstance on won container must fail and not spawn loot cans or increment wins
@@ -2215,7 +2083,7 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     assert_eq!(restart_err.code, "HackingGameAlreadyFinished");
     let cans_count_after = with_pve_exploration_reg(&ctx, |r| r.spewed_cans.len());
     assert_eq!(cans_count_after, cans_count_before);
-    let wins_after_restart: u64 = ctx.db.with_snapshot(|s| s.seasons_and_campaigns.hacking_wins.get(&90000001).copied().unwrap_or(0));
+    let wins_after_restart: u64 = ctx.db.with_snapshot(|s| s.seasons_and_campaigns.hacking_wins.get(&char_id).copied().unwrap_or(0));
     assert_eq!(wins_after_restart, wins_before);
 
     // BF-SEASON-HACKWIN-02: Target container validation rejects non-existent container IDs
@@ -2251,7 +2119,7 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
 
     // BF-HACK-XSYS-01: Cross-system container validation check
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = 30_000_143;
         }
     });
@@ -2259,7 +2127,7 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     let xsys_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(data_can_id)], &kw, None).await.expect_err("Cross-system container hack must fail");
     assert_eq!(xsys_err.code, "TargetNotFound");
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = 30_000_142;
         }
     });
@@ -2277,73 +2145,14 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     // BF-HACK-MULTICHAR-01 & BF-HACK-FAILSEM-02: Exclusive active hack & quit-after-fail semantics
     let can3_id = data_cans[2];
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can3_id)], &kw, None).await.expect("p1 start can3");
-    let ship2_id = 710_002_003_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.solar_system_id = 30_000_142;
-            ch.active_ship_id = ship2_id;
-        }
-        snap.items.insert(
-            ship2_id,
-            InventoryItemRecord {
-                item_id: ship2_id,
-                type_id: 587,
-                owner_id: 90_000_002,
-                location_id: 30_000_142,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-        snap.items.insert(
-            ship2_id * 10 + 1,
-            InventoryItemRecord {
-                item_id: ship2_id * 10 + 1,
-                type_id: 22175,
-                owner_id: 90_000_002,
-                location_id: ship2_id,
-                flag: InventoryFlag::MedSlot0,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-    });
-    let cs2 = ctx.build_type_combat_state(587);
-    let _ = jita_sys
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship2_id,
-                type_id: 587,
-                position: DVec3::from_array(data_pos) + DVec3::new(500.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 365.0,
-                inertia: 1.0,
-                mass: 1_067_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            cs2,
-        )
-        .await;
-    let mut sess2 = SessionState::new(8888);
-    sess2.user_id = Some(2);
-    sess2.character_id = Some(90_000_002);
-    sess2.solar_system_id = Some(30_000_142);
-    sess2.station_id = None;
-    sess2.structure_id = None;
-    sess2.ship_id = Some(ship2_id);
+    let (mut sess2, _, _) = build_space_pilot(&ctx, 8888, 30_000_142, 587, DVec3::from_array(data_pos) + DVec3::new(500.0, 0.0, 0.0), 50_000.0, true).await;
     let multichar_err = ctx.dispatch_rpc(&mut sess2, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can3_id)], &kw, None).await.expect_err("p2 hacking same can must fail");
     assert_eq!(multichar_err.code, "HackingGameAlreadyInProgress");
     assert_eq!(multichar_err.message, "Another pilot is already hacking this container");
 
     // Pilot 1 fails minigame via virus coherence reaching 0 on a defensive node (strength > 0)
     let def_path = with_pve_exploration_reg(&ctx, |reg| {
-        let tiles = &reg.hacking_games[&(90_000_001, can3_id)].tiles;
+        let tiles = &reg.hacking_games[&(char_id, can3_id)].tiles;
         let core_idx = tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index;
         tiles.iter().filter(|t| t.strength > 0 && t.tile_index > 0 && t.tile_index != core_idx).find_map(|t| {
             let p1: Vec<u32> = (1..=(t.tile_index / 6)).map(|r| r * 6).chain(((t.tile_index / 6) * 6 + 1)..=t.tile_index).collect();
@@ -2355,13 +2164,13 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     let (&def_idx, prefix_path) = def_path.split_last().unwrap();
     for &idx in prefix_path {
         for _ in 0..5 {
-            with_pve_exploration_reg(&ctx, |reg| { if let Some(g) = reg.hacking_games.get_mut(&(90_000_001, can3_id)) { g.virus_coherence = 100; } });
+            with_pve_exploration_reg(&ctx, |reg| { if let Some(g) = reg.hacking_games.get_mut(&(char_id, can3_id)) { g.virus_coherence = 100; } });
             let r = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can3_id), PyRep::Integer(idx as i64)], &kw, None).await.expect("reveal path to defensive node");
             if r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0 { break; }
         }
     }
     with_pve_exploration_reg(&ctx, |reg| {
-        if let Some(g) = reg.hacking_games.get_mut(&(90_000_001, can3_id)) { g.virus_coherence = 1; g.polymorphic_shield_charges = 0; }
+        if let Some(g) = reg.hacking_games.get_mut(&(char_id, can3_id)) { g.virus_coherence = 1; g.polymorphic_shield_charges = 0; }
     });
     let fail_step = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can3_id), PyRep::Integer(def_idx as i64)], &kw, None).await.expect("click tile fail");
     assert_eq!(fail_step.dict_get("status").and_then(|v| v.as_str()), Some("Failed"));
@@ -2387,7 +2196,7 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let mut sess = create_in_space_session(&ctx, 8104, 30_000_142, 710_001_004, 587).await;
+    let (mut sess, char_id, ship_id) = build_space_pilot(&ctx, 8104, 30_000_142, 587, DVec3::ZERO, 50_000.0, true).await;
 
     // 1. Ghost Site (GHO-30000142) seeded from SDE by regional faction & security band, scanned via scanMgr.RequestScans
     ensure_system_pve_sites_seeded(&ctx, 30_000_142).await;
@@ -2407,10 +2216,10 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
     });
     let ghost_cans = site_cans("GHO-30000142");
     let sys_142 = ctx.systems.get_or_spawn(30_000_142);
-    let _ = sys_142.set_ball_position(710_001_004, DVec3::from_array(gho_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
+    let _ = sys_142.set_ball_position(ship_id, DVec3::from_array(gho_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(ghost_cans[1])], &kw, None).await.expect("Ghost hack starts timer");
     with_pve_exploration_reg(&ctx, |reg| {
-        if let Some(g) = reg.hacking_games.get_mut(&(90_000_001, ghost_cans[1])) {
+        if let Some(g) = reg.hacking_games.get_mut(&(char_id, ghost_cans[1])) {
             g.virus_coherence = 5;
         }
         if let Some(s) = reg.sites_by_system.get_mut(&30_000_142).and_then(|l| l.iter_mut().find(|x| x.site_id == "GHO-30000142")) {
@@ -2457,7 +2266,7 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
 
     // 2. Sleeper Cache (SLC-30000142): attempting passage before hacking Rift Generator fails, solving puzzle unlocks passage
     let rift_can_id = site_cans("SLC-30000142")[0];
-    let _ = sys_142.set_ball_position(710_001_004, DVec3::from_array(slc_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
+    let _ = sys_142.set_ball_position(ship_id, DVec3::from_array(slc_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
 
     let rift_err = ctx
         .dispatch_rpc(
@@ -2504,7 +2313,7 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
 
     // 3. Wormhole Sleeper Combat Sites (`31_001_883` J172943 C5 Core Citadel): wave triggers & Blue Loot (30746 Ancient Coordinates Database)
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = 31_001_883;
         }
     });
@@ -2556,8 +2365,7 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let ship_id = 710_001_006_i64;
-    let mut sess = create_in_space_session(&ctx, 8106, 30_002_813, ship_id, 587).await;
+    let (mut sess, char_id, ship_id) = build_space_pilot(&ctx, 8106, 30_002_813, 587, DVec3::ZERO, 50_000.0, true).await;
 
     // 1. Verify T0..T6 filament classification and 5 weather types
     assert_eq!(
@@ -2587,8 +2395,8 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
             99_720,
             eve_db::FleetRecord {
                 fleet_id: 99_720,
-                boss_id: 90_000_001,
-                members: vec![90_000_001],
+                boss_id: char_id,
+                members: vec![char_id],
                 ..Default::default()
             },
         );
@@ -2597,7 +2405,7 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
             InventoryItemRecord {
                 item_id: 720_001_001,
                 type_id: 47899,
-                owner_id: 90_000_001,
+                owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
                 quantity: 4,
@@ -2609,7 +2417,7 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
 
     // 2. Verify abyssalMgr deployment consumes 3 filaments for a Frigate and gate RPCs outside abyss return NotInAbyssalSpace
     const ERR_UNIMPLEMENTED: &str = concat!("Unimplemented", "RPC");
-    let _deploy_res = ctx
+    let deploy_res = ctx
         .dispatch_rpc(
             &mut sess,
             "abyssalMgr",
@@ -2621,6 +2429,9 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
         )
         .await
         .expect("AbyssalEntranceDeployment succeeds");
+    assert_eq!(deploy_res.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(30_002_813));
+    assert_eq!(deploy_res.dict_get("tier").and_then(|v| v.as_i64()), Some(5));
+    assert!(deploy_res.dict_get("traceBallID").and_then(|v| v.as_i64()).is_some());
     assert_eq!(sess.solar_system_id, Some(30_002_813));
 
     let gate_err = ctx
@@ -2689,7 +2500,6 @@ use std::collections::HashMap;
 use glam::DVec3;
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
-use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::destroy_specialized_npc_and_queue_bounty;
@@ -2701,47 +2511,6 @@ use eve_server::services::pve_expeditions::{
 };
 use eve_server::services::pve_exploration_seeding::ensure_system_pve_sites_seeded;
 use eve_server::services::pve_sleeper_caches::is_ghost_site_timer_expired;
-
-async fn create_in_space_session(
-    ctx: &ServerContext,
-    session_id: u64,
-    solar_system_id: u32,
-    char_id: i64,
-    ship_id: i64,
-    ship_type_id: u32,
-) -> SessionState {
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(session_id);
-    let _ = ctx.dispatch_rpc(&mut sess, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await;
-    let _ = ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await;
-    sess.solar_system_id = Some(solar_system_id);
-    sess.ship_id = Some(ship_id);
-    sess.character_id = Some(char_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = solar_system_id;
-            ch.active_ship_id = ship_id;
-        }
-        snap.items.insert(ship_id, InventoryItemRecord {
-            item_id: ship_id, type_id: ship_type_id, owner_id: char_id, location_id: solar_system_id as i64,
-            flag: InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default()
-        });
-        for (slot_off, tid, flag) in [(1_i64, 22175_u32, InventoryFlag::MedSlot0), (2, 22177, InventoryFlag::MedSlot1)] {
-            snap.items.insert(ship_id * 10 + slot_off, InventoryItemRecord {
-                item_id: ship_id * 10 + slot_off, type_id: tid, owner_id: char_id, location_id: ship_id,
-                flag, quantity: 1, singleton: true, ..Default::default()
-            });
-        }
-    });
-    let mut cs = ctx.build_type_combat_state(ship_type_id);
-    cs.shield_hp = 50_000.0;
-    cs.max_shield_hp = 50_000.0;
-    let _ = ctx.systems.get_or_spawn(solar_system_id).spawn_ball_with_combat(Ball {
-        id: ship_id, type_id: ship_type_id, position: DVec3::ZERO, velocity: DVec3::ZERO,
-        max_velocity: 365.0, inertia: 1.0, mass: 1_067_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
-    }, cs).await;
-    sess
-}
 
 async fn traverse_and_win_hack(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, can_id: i64) {
     let kw = HashMap::new();
@@ -2778,10 +2547,7 @@ async fn traverse_and_win_hack(ctx: &ServerContext, sess: &mut SessionState, cha
 async fn test_pve_escalation_npc_destruction_triggers_expedition() {
     let ctx = ServerContext::new();
     let sys_id = 30_000_142; // Jita
-    let char_id = 90_000_001;
-    let ship_id = 1_000_101;
-
-    let _sess = create_in_space_session(&ctx, 77_001, sys_id, char_id, ship_id, 587).await;
+    let (_sess, char_id, _ship_id) = build_space_pilot(&ctx, 77_001, sys_id, 587, DVec3::ZERO, 50_000.0, true).await;
 
     // Seed PvE combat anomaly / signature sites
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
@@ -2860,10 +2626,7 @@ async fn test_pve_escalation_npc_destruction_triggers_expedition() {
 async fn test_pve_expedition_multi_step_progression_and_rpcs() {
     let ctx = ServerContext::new();
     let sys_id = 30_000_142;
-    let char_id = 90_000_002;
-    let ship_id = 1_000_102;
-
-    let mut sess = create_in_space_session(&ctx, 77_002, sys_id, char_id, ship_id, 587).await;
+    let (mut sess, char_id, _ship_id) = build_space_pilot(&ctx, 77_002, sys_id, 587, DVec3::ZERO, 50_000.0, true).await;
 
     // Create an expedition directly
     let entry = create_escalation_expedition(
@@ -2940,10 +2703,7 @@ async fn test_pve_ghost_site_timer_and_detonation_mechanics() {
     // parity: feat:pve.ghost-sites
     let ctx = ServerContext::new();
     let sys_id = 30_000_142;
-    let char_id = 90_000_003;
-    let ship_id = 1_000_103;
-
-    let mut sess = create_in_space_session(&ctx, 77_003, sys_id, char_id, ship_id, 587).await;
+    let (mut sess, char_id, ship_id) = build_space_pilot(&ctx, 77_003, sys_id, 587, DVec3::ZERO, 50_000.0, true).await;
     let kw = HashMap::new();
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
 
@@ -2983,7 +2743,7 @@ async fn test_pve_ghost_site_timer_and_detonation_mechanics() {
     assert_eq!(win_status, "Won", "Hack before timer expiry must succeed");
 
     // 3. Detonates immediately on failed hack (status == 'Failed')
-    let _ = ctx
+    let start_can1 = ctx
         .dispatch_rpc(
             &mut sess,
             "hackingMgr",
@@ -2995,6 +2755,8 @@ async fn test_pve_ghost_site_timer_and_detonation_mechanics() {
         )
         .await
         .expect("StartNewGameInstance can1");
+    assert_eq!(start_can1.dict_get("containerID").and_then(|v| v.as_i64()), Some(can1_id));
+    assert_eq!(start_can1.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
     with_pve_exploration_reg(&ctx, |reg| {
         if let Some(g) = reg.hacking_games.get_mut(&(char_id, can1_id)) {
             g.virus_coherence = 1;
@@ -3054,10 +2816,7 @@ async fn test_pve_sleeper_cache_tiers_hazards_and_rift_passage() {
     // parity: feat:pve.sleeper-caches
     let ctx = ServerContext::new();
     let sys_id = 30_000_142;
-    let char_id = 90_000_004;
-    let frigate_ship_id = 1_000_104;
-
-    let mut sess = create_in_space_session(&ctx, 77_004, sys_id, char_id, frigate_ship_id, 587).await;
+    let (mut sess, char_id, frigate_ship_id) = build_space_pilot(&ctx, 77_004, sys_id, 587, DVec3::ZERO, 50_000.0, true).await;
     let kw = HashMap::new();
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
 
@@ -3136,7 +2895,9 @@ async fn test_pve_sleeper_cache_tiers_hazards_and_rift_passage() {
 
     // 5. Enter room now succeeds, but applies hazard damage because gas cloud is still active
     let pre_shield = sys_handle.get_combat_state(frigate_ship_id).await.unwrap().unwrap().shield_hp;
-    let _ = ctx.dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::String("SLC-30000142".into())], &kw, None).await.expect("Enter room with active gas");
+    let gate_rep = ctx.dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::String("SLC-30000142".into())], &kw, None).await.expect("Enter room with active gas");
+    assert_eq!(gate_rep.dict_get("siteID").and_then(|v| v.as_str()), Some("SLC-30000142"));
+    assert_eq!(gate_rep.dict_get("completed"), Some(&PyRep::Bool(false)));
     let post_shield = sys_handle.get_combat_state(frigate_ship_id).await.unwrap().unwrap().shield_hp;
     assert!(post_shield < pre_shield, "Hazard damage must be applied when gas cloud is untoggled");
 
@@ -3156,7 +2917,7 @@ async fn test_pve_sleeper_cache_tiers_hazards_and_rift_passage() {
 async fn test_petitioner_may_petition_codes() {
     // parity: rpc:petitioner.MayPetition
     let ctx = ServerContext::new();
-    let mut sess = create_in_space_session(&ctx, 77_005, 30_000_142, 90_000_001, 1_000_105, 587).await;
+    let (mut sess, _char_id, _ship_id) = build_space_pilot(&ctx, 77_005, 30_000_142, 587, DVec3::ZERO, 50_000.0, true).await;
     let kw = HashMap::new();
 
     // 1. Normal petition for valid category 401, subcategory 0 -> Permitted (code 1)
@@ -3184,40 +2945,47 @@ async fn test_petitioner_may_petition_codes() {
     });
 
     // 4. Rate-limited / cooldown (petition created within last 60 seconds) -> code -7
-    let _ = ctx.dispatch_rpc(&mut sess, "petitioner", None, "CreatePetition", &[PyRep::String("First ticket".into()), PyRep::String("Help needed".into()), PyRep::Integer(401)], &kw, None).await.unwrap();
+    let pet_1 = ctx.dispatch_rpc(&mut sess, "petitioner", None, "CreatePetition", &[PyRep::String("First ticket".into()), PyRep::String("Help needed".into()), PyRep::Integer(401)], &kw, None).await.unwrap();
+    assert_eq!(pet_1.dict_get("status").and_then(|v| v.as_str()), Some("open"));
+    assert_eq!(pet_1.dict_get("categoryID").and_then(|v| v.as_i64()), Some(401));
     let res_cd = ctx.dispatch_rpc(&mut sess, "petitioner", None, "MayPetition", &[PyRep::Integer(401), PyRep::Integer(0)], &kw, None).await.unwrap();
     assert_eq!(res_cd, PyRep::Integer(-7), "Recent petition within 60s cooldown must return -7");
 
     // 5. Unauthenticated call is blocked at router gate; authenticated without character -> code -6
-    let mut unauth_sess = SessionState::new(88_998);
+    let mut unauth_sess = SessionState::default();
+    unauth_sess.session_id = 88_998;
     let err_unauth = ctx
         .dispatch_rpc(&mut unauth_sess, "petitioner", None, "MayPetition", &[PyRep::Integer(401), PyRep::Integer(0)], &kw, None)
         .await
         .expect_err("unauthenticated petitioner.MayPetition must be rejected");
     assert_eq!(err_unauth.code, "Unauthorized");
 
-    let mut no_char_sess = SessionState::new(88_999);
+    let mut no_char_sess = SessionState::default();
+    no_char_sess.session_id = 88_999;
     no_char_sess.user_id = Some(88_999);
     let res_no_char = ctx.dispatch_rpc(&mut no_char_sess, "petitioner", None, "MayPetition", &[PyRep::Integer(401), PyRep::Integer(0)], &kw, None).await.unwrap();
     assert_eq!(res_no_char, PyRep::Integer(-6), "Missing character session must return -6");
 
     // 6. Banned account -> code -1
+    let uid = sess.user_id.expect("user_id");
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(acc) = snap.accounts.get_mut("demo") {
+        if let Some(acc) = snap.accounts.values_mut().find(|a| a.user_id == uid) {
             acc.banned_until_unix = Some(ctx.now_unix() + 3600);
         }
     });
     let res_ban = ctx.dispatch_rpc(&mut sess, "petitioner", None, "MayPetition", &[PyRep::Integer(401), PyRep::Integer(0)], &kw, None).await.unwrap();
     assert_eq!(res_ban, PyRep::Integer(-1), "Banned account must return -1");
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(acc) = snap.accounts.get_mut("demo") {
+        if let Some(acc) = snap.accounts.values_mut().find(|a| a.user_id == uid) {
             acc.banned_until_unix = None;
         }
     });
 
     // 7. Too many open tickets (>= 10 open petitions) -> code -2
     for i in 2..=10 {
-        let _ = ctx.dispatch_rpc(&mut sess, "petitioner", None, "CreatePetition", &[PyRep::String(format!("Subject {i}")), PyRep::String("Help needed".into()), PyRep::Integer(401)], &kw, None).await.unwrap();
+        let pet_i = ctx.dispatch_rpc(&mut sess, "petitioner", None, "CreatePetition", &[PyRep::String(format!("Subject {i}")), PyRep::String("Help needed".into()), PyRep::Integer(401)], &kw, None).await.unwrap();
+        assert_eq!(pet_i.dict_get("status").and_then(|v| v.as_str()), Some("open"));
+        assert!(pet_i.dict_get("petitionID").and_then(|v| v.as_i64()).is_some());
     }
     let res_limit = ctx.dispatch_rpc(&mut sess, "petitioner", None, "MayPetition", &[PyRep::Integer(401), PyRep::Integer(0)], &kw, None).await.unwrap();
     assert_eq!(res_limit, PyRep::Integer(-2), "Character with >= 10 open tickets must return -2");
@@ -3229,10 +2997,7 @@ async fn test_pve_combat_anomalies_regional_spawns_and_loot() {
     // parity: feat:pve.combat-anomalies
     let ctx = ServerContext::new();
     let sys_id = 30_000_142; // Jita (Guristas)
-    let char_id = 90_000_001;
-    let ship_id = 1_000_110;
-
-    let _sess = create_in_space_session(&ctx, 77_009, sys_id, char_id, ship_id, 587).await;
+    let (_sess, char_id, _ship_id) = build_space_pilot(&ctx, 77_009, sys_id, 587, DVec3::ZERO, 50_000.0, true).await;
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
 
     // Verify regional Guristas NPC type (16981, Pithi Arrogator) and CombatState
@@ -3290,10 +3055,7 @@ async fn test_petitioner_get_category_properties_keyvals() {
     // parity: rpc:petitioner.GetCategoryProperties
     let ctx = ServerContext::new();
     let sys_id = 30_000_142;
-    let char_id = 90_000_001;
-    let ship_id = 1_000_106;
-
-    let mut sess = create_in_space_session(&ctx, 77_006, sys_id, char_id, ship_id, 587).await;
+    let (mut sess, _char_id, _ship_id) = build_space_pilot(&ctx, 77_006, sys_id, 587, DVec3::ZERO, 50_000.0, true).await;
     let kw = HashMap::new();
 
     // Query Category 401: Stuck in Space
