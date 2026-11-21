@@ -1169,6 +1169,252 @@ class TestHookDockAndFlightRecorderAndEncoding(unittest.TestCase):
             )
             self.assertEqual(len(gpcs.calls), 4)
 
+    def test_bound_object_calls_resolve_canonical_service_names_safely(self):
+        import types
+
+        hook = _load_hook_with_py2_stubs()
+        carbon_mod = types.ModuleType("carbon")
+        carbon_common = types.ModuleType("carbon.common")
+        carbon_script = types.ModuleType("carbon.common.script")
+        carbon_net = types.ModuleType("carbon.common.script.net")
+        sc_gpcs_mod = types.ModuleType("carbon.common.script.net.ServiceCallGPCS")
+        mon_mod = types.ModuleType("carbon.common.script.net.moniker")
+        oc_mod = types.ModuleType("carbon.common.script.net.ObjectCallGPCS")
+
+        class FakeBoundProxyWithSideEffectingGetattr(object):
+            def __init__(self, oid, pid=None):
+                object.__setattr__(self, "objectID", oid)
+                if pid is not None:
+                    object.__setattr__(self, "__persistantObjectID__", pid)
+                object.__setattr__(self, "_getattr_calls", [])
+
+            def __getattr__(self, name):
+                getattr_calls = object.__getattribute__(self, "_getattr_calls")
+                getattr_calls.append(name)
+                if name != "MultiAdd":
+                    raise AssertionError("hook must not trigger __getattr__ for %r" % (name,))
+                return lambda *args, **kwargs: FakeBoundObjectCallWrapper(
+                    object.__getattribute__(self, "objectID"),
+                    object.__getattribute__(self, "__dict__").get("__persistantObjectID__"),
+                    name,
+                )(*args, **kwargs)
+
+        class FakeSlottedBoundProxy(object):
+            __slots__ = ("objectID",)
+
+            def __init__(self, oid):
+                self.objectID = oid
+
+        class FakeBoundObjectCallWrapper(object):
+            def __init__(self, oid, pid, method, fail=False):
+                self.objectID = oid
+                self.persistantObjectID = pid
+                self.method = method
+                self._fail = fail
+
+            def __call__(self, *args, **kwargs):
+                if self._fail:
+                    raise RuntimeError("bound err")
+                if self.method == "GetInventoryFromId":
+                    return FakeBoundProxyWithSideEffectingGetattr("N=888444:10025")
+                return "ok:" + str(self.method)
+
+        class FakeMoniker(object):
+            def __init__(self, svc_name, bound_obj=None):
+                self._Moniker__serviceName = svc_name
+                if bound_obj is not None:
+                    self._Moniker__boundObject = bound_obj
+
+            def Bind(self):
+                return FakeBoundProxyWithSideEffectingGetattr("N=888444:10022")
+
+            def MonikeredCall(self, call, *args, **kwargs):
+                meth = call[0]
+                if meth == "GetInventory":
+                    return FakeSlottedBoundProxy(b"N=888444:10024")
+                return "mon:" + str(meth)
+
+        class FakeCoreServiceCall(object):
+            def RemoteServiceCallWithoutTheStars(self, sess, nodeID, service, method, args=(), keywords=None):
+                if method == "MachoBindObject":
+                    return (FakeBoundProxyWithSideEffectingGetattr("N=888444:10084"), "sub")
+                return "ok:" + str(method)
+
+        class FakeRemoteSvcInner(object):
+            def __init__(self, svc):
+                self._svc = svc
+
+            def GetInventoryFromId(self, item_id, passive):
+                return FakeBoundProxyWithSideEffectingGetattr("N=888444:10023")
+
+        def raw_remote(name):
+            return FakeRemoteSvcInner(name)
+
+        sc_gpcs_mod.CoreServiceCall = FakeCoreServiceCall
+        mon_mod.Moniker = FakeMoniker
+        oc_mod.MachoObjectCallWrapper = FakeBoundObjectCallWrapper
+        carbon_net.ServiceCallGPCS = sc_gpcs_mod
+        carbon_net.moniker = mon_mod
+        carbon_net.ObjectCallGPCS = oc_mod
+
+        fake_mods = {
+            "carbon": carbon_mod,
+            "carbon.common": carbon_common,
+            "carbon.common.script": carbon_script,
+            "carbon.common.script.net": carbon_net,
+            "carbon.common.script.net.ServiceCallGPCS": sc_gpcs_mod,
+            "carbon.common.script.net.moniker": mon_mod,
+            "carbon.common.script.net.ObjectCallGPCS": oc_mod,
+        }
+        fake_sm = types.SimpleNamespace(RemoteSvc=raw_remote, ProxySvc=raw_remote)
+
+        with mock.patch.dict(sys.modules, fake_mods), \
+             mock.patch.object(hook, "_HOOKED_REMOTESVC", False), \
+             mock.patch.object(hook, "_HOOK_RELOAD_GEN", 1), \
+             mock.patch.object(hook, "_FLIGHT_RECORDER", []), \
+             mock.patch.object(hook, "_BOUND_OID_SERVICE_MAP", {}), \
+             mock.patch.object(hook, "_MACHO_CALL_TASKLET_DEPTH", {}):
+            hook._install_flight_recorder_hooks(fake_sm)
+
+            # 1) sm.RemoteSvc("invbroker").GetInventoryFromId returns remote proxy cleanly without triggering __getattr__
+            inv = fake_sm.RemoteSvc("invbroker").GetInventoryFromId(12345, 0)
+            self.assertEqual(object.__getattribute__(inv, "_getattr_calls"), [])
+            self.assertEqual(inv.MultiAdd([1, 2], 12345), "ok:MultiAdd")
+            self.assertEqual(object.__getattribute__(inv, "_getattr_calls"), ["MultiAdd"])
+
+            # 2) Moniker.Bind, chained BoundObj propagation (distinct unmapped 10025),
+            #    _Moniker__boundObject mapping (10026), slotted bytes OID, and MachoBindObject tuple
+            mon = FakeMoniker("invbroker")
+            mon.Bind()
+            bound_lvl1 = FakeBoundObjectCallWrapper("N=888444:10022", None, "GetInventoryFromId")
+            chained_proxy = bound_lvl1(12345, 0)
+            self.assertIsNotNone(chained_proxy)
+            self.assertEqual(object.__getattribute__(chained_proxy, "_getattr_calls"), [])
+            chained_call = FakeBoundObjectCallWrapper("N=888444:10025", None, "Add")
+            self.assertEqual(chained_call(777, 1), "ok:Add")
+
+            mon_with_bound = FakeMoniker(
+                "corpRegistry",
+                bound_obj=FakeBoundProxyWithSideEffectingGetattr("N=888444:10026"),
+            )
+            self.assertEqual(mon_with_bound.MonikeredCall(("GetCorporation", ())), "mon:GetCorporation")
+            corp_call = FakeBoundObjectCallWrapper("N=888444:10026", None, "GetRoles")
+            self.assertEqual(corp_call(), "ok:GetRoles")
+
+            mon.MonikeredCall(("GetInventory", (1,)))
+            slotted_call = FakeBoundObjectCallWrapper("N=888444:10024", None, "StackAll")
+            self.assertEqual(slotted_call(), "ok:StackAll")
+
+            CoreSC = FakeCoreServiceCall()
+            CoreSC.RemoteServiceCallWithoutTheStars(None, 888444, "skillMgr2", "MachoBindObject")
+            skill_err_call = FakeBoundObjectCallWrapper("N=888444:10084", None, "SaveNewQueue", fail=True)
+            with self.assertRaises(RuntimeError):
+                skill_err_call()
+
+            # 3) Unmapped bound OID falls back to OID cleanly
+            unknown_call = FakeBoundObjectCallWrapper("N=888444:99999", None, "List")
+            self.assertEqual(unknown_call(), "ok:List")
+
+            recorded = [(r["service"], r["method"], r["status"]) for r in hook._FLIGHT_RECORDER]
+            self.assertEqual(
+                recorded,
+                [
+                    ("invbroker", "GetInventoryFromId", "OK"),
+                    ("invbroker", "MultiAdd", "OK"),
+                    ("invbroker", "GetInventoryFromId", "OK"),
+                    ("invbroker", "Add", "OK"),
+                    ("corpRegistry", "GetCorporation", "OK"),
+                    ("corpRegistry", "GetRoles", "OK"),
+                    ("invbroker", "GetInventory", "OK"),
+                    ("invbroker", "StackAll", "OK"),
+                    ("skillMgr2", "MachoBindObject", "OK"),
+                    ("skillMgr2", "SaveNewQueue", "ERR"),
+                    ("N=888444:99999", "List", "OK"),
+                ],
+            )
+
+    def test_bound_object_cache_filtering_eviction_classic_and_reload(self):
+        from collections import OrderedDict
+        import types
+
+        hook = _load_hook_with_py2_stubs()
+
+        class StrictProxyNoGetattr(object):
+            def __init__(self, attrs):
+                for k, v in attrs.items():
+                    object.__setattr__(self, k, v)
+
+            def __getattr__(self, name):
+                raise AssertionError("forbidden __getattr__(%r)" % (name,))
+
+        class NonStringOidAttr(object):
+            def __getattr__(self, name):
+                raise AssertionError("non-text attr __getattr__(%r)" % (name,))
+
+        # 1) Py3 bytes canonical service name check rejects bytes OID forms
+        self.assertFalse(hook._is_canonical_service_name(b"N=888444:10023"))
+        self.assertFalse(hook._is_canonical_service_name(b"moniker"))
+        self.assertTrue(hook._is_canonical_service_name(b"invbroker"))
+
+        # 2) Simulated Py2 classic-instance path reads __dict__ safely without callable()/__getattr__
+        classic_proxy = StrictProxyNoGetattr({"objectID": "N=888444:10027"})
+        non_oid_obj = StrictProxyNoGetattr(
+            {"objectID": 42, "persistantObjectID": 60003760, "__objectID__": NonStringOidAttr()}
+        )
+
+        class BrokenMap(dict):
+            def pop(self, *args, **kwargs):
+                raise RuntimeError("boom")
+
+            def __contains__(self, key):
+                raise RuntimeError("boom")
+
+        with mock.patch.object(hook, "_BOUND_OID_SERVICE_MAP", OrderedDict()), \
+             mock.patch.object(hook, "_PY2_INSTANCE_TYPE", StrictProxyNoGetattr):
+            hook._record_bound_service_bindings(classic_proxy, "agentMgr")
+            self.assertEqual(hook._BOUND_OID_SERVICE_MAP.get("N=888444:10027"), "agentMgr")
+
+            # Non-OID id_keys and side-effecting non-text attr must not pollute cache or trigger __getattr__
+            hook._record_bound_service_bindings(non_oid_obj, "config")
+            self.assertNotIn("42", hook._BOUND_OID_SERVICE_MAP)
+            self.assertNotIn("60003760", hook._BOUND_OID_SERVICE_MAP)
+
+            # Deterministic FIFO eviction at 4096 entries
+            for idx in range(4096):
+                hook._BOUND_OID_SERVICE_MAP["N=888444:%d" % idx] = "svcA"
+            hook._record_bound_service_bindings(
+                StrictProxyNoGetattr({"objectID": "N=888444:5000"}),
+                "invbroker",
+            )
+            self.assertEqual(len(hook._BOUND_OID_SERVICE_MAP), 4096)
+            self.assertNotIn("N=888444:0", hook._BOUND_OID_SERVICE_MAP)
+            self.assertIn("N=888444:1", hook._BOUND_OID_SERVICE_MAP)
+            self.assertEqual(hook._BOUND_OID_SERVICE_MAP.get("N=888444:5000"), "invbroker")
+
+        # 3) Telemetry helper exceptions never escape live callers
+        with mock.patch.object(hook, "_BOUND_OID_SERVICE_MAP", BrokenMap()):
+            hook._record_bound_service_bindings(StrictProxyNoGetattr({"objectID": "N=888444:10028"}), "invbroker")
+            self.assertEqual(hook._resolve_bound_service_name(object(), "N=888444:10028", None), "")
+
+        # 4) reload_hook preserves _BOUND_OID_SERVICE_MAP across module reload
+        preserved_map = OrderedDict([("N=888444:10025", "invbroker")])
+        srv = hook.PlaytesterRpcServer.__new__(hook.PlaytesterRpcServer)
+        srv.cfg = {}
+        srv.sm = types.SimpleNamespace(RemoteSvc=lambda n: None, ProxySvc=lambda n: None)
+
+        def fake_reload(mod):
+            mod._BOUND_OID_SERVICE_MAP = OrderedDict()
+            hook.__dict__["_BOUND_OID_SERVICE_MAP"] = mod._BOUND_OID_SERVICE_MAP
+
+        with mock.patch.dict(sys.modules, {hook.__name__: hook}), \
+             mock.patch.object(hook, "_BOUND_OID_SERVICE_MAP", preserved_map), \
+             mock.patch.object(hook, "reload", side_effect=fake_reload, create=True), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"):
+            res = srv._dispatch({"method": "reload_hook"})
+            self.assertTrue(res.get("ok"))
+            self.assertIs(hook._BOUND_OID_SERVICE_MAP, preserved_map)
+            self.assertEqual(hook._BOUND_OID_SERVICE_MAP.get("N=888444:10025"), "invbroker")
+
     def test_settle_secondary_view_transition_waits_for_skinr_page_container_then_stabilizes(self):
         import types
 
