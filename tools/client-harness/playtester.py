@@ -96,10 +96,14 @@ HOOK_SCRIPT_PATH = HARNESS_DIR / "evomu_playtester_hook.py"
 SITE_SCRIPT_PATH = HARNESS_DIR / "evomu_site.py"
 HELPERS_SCRIPT_PATH = HARNESS_DIR / "evomu_inclient_helpers.py"
 SCENARIOS_DIR = HARNESS_DIR / "scenarios"
+TOOLS_DIR = HARNESS_DIR.parent
 if str(HARNESS_DIR) not in sys.path:
     sys.path.insert(0, str(HARNESS_DIR))
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
 import guard_registry  # noqa: E402
 import gm_slash_utils  # noqa: E402
+import sync_bugs_to_github  # noqa: E402
 
 
 class _GuardHitTracker:
@@ -5769,10 +5773,20 @@ class PlaytesterBugOracle:
         blocks: List[List[str]] = []
         cur: List[str] = []
         ended_prev = False
+        prev_nonempty = ""
+        in_callstack = False
+        cur_post_frame_exc = False
         for ln in raw_tb.splitlines():
             s = ln.strip()
             s_hdr = ln[len("[evomu_site] "):] if ln.startswith("[evomu_site] ") else ln
             cur_has_frames = any('File "' in x or cls._STDLOG_FRAME_RE.search(x) for x in cur)
+            is_chained_tb = prev_nonempty.startswith(
+                (
+                    "INNER TRACEBACK:",
+                    "During handling of the above exception",
+                    "The above exception was the direct cause",
+                )
+            )
             is_header = (
                 s_hdr.startswith("log.Log")
                 or s_hdr.startswith("logmodule.")
@@ -5784,18 +5798,48 @@ class PlaytesterBugOracle:
                 or s_hdr.startswith("schedule_startup failed:")
                 or s_hdr.startswith("EXCEPTION #")
                 or (s_hdr.startswith("STACKTRACE") and cur_has_frames)
+                or (
+                    s_hdr.startswith("Traceback (most recent call last):")
+                    and cur_has_frames
+                    and cur_post_frame_exc
+                    and not is_chained_tb
+                )
                 or (ended_prev and bool(s))
             )
             if is_header and cur:
                 blocks.append(cur)
                 cur = [ln]
+                cur_has_frames = 'File "' in ln or bool(cls._STDLOG_FRAME_RE.search(ln))
                 ended_prev = False
+                in_callstack = False
+                cur_post_frame_exc = False
             else:
                 cur.append(ln)
+            if s == "CALLSTACK:":
+                in_callstack = True
+                if cur_has_frames:
+                    cur_post_frame_exc = True
+            elif 'File "' in ln or cls._STDLOG_FRAME_RE.search(ln):
+                if not in_callstack:
+                    cur_post_frame_exc = False
+                elif cur_has_frames:
+                    cur_post_frame_exc = True
+            elif cur_has_frames and not is_chained_tb and s and (
+                in_callstack
+                or s in ("None", "NoneType: None")
+                or s.startswith(("Thread Locals:", "Local variables:"))
+                or (
+                    not s_hdr[:1].isspace()
+                    and re.match(r"^(?:[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Exit|Interrupt)|UserError)\b", s_hdr)
+                )
+            ):
+                cur_post_frame_exc = True
             if s == "EXCEPTION END":
                 ended_prev = True
             elif s:
                 ended_prev = False
+            if s:
+                prev_nonempty = s
         if cur:
             blocks.append(cur)
         parsed: List[Dict[str, str]] = []
@@ -5847,6 +5891,103 @@ class PlaytesterBugOracle:
             chunk = f.read(size - offset)
         setattr(self, attr_name, size)
         return chunk.decode("utf-8", errors="replace")
+
+    @classmethod
+    def extract_user_error_key(cls, err_obj: Any) -> Optional[str]:
+        return sync_bugs_to_github.extract_user_error_key(err_obj)
+
+    @classmethod
+    def extract_client_user_error_key(cls, err_obj: Any) -> Optional[str]:
+        return sync_bugs_to_github.extract_client_user_error_key(err_obj)
+
+    @classmethod
+    def _incident_user_error_key(cls, inc: Dict[str, Any], side: str) -> Optional[str]:
+        return sync_bugs_to_github._extract_bundle_side_user_error_key(inc, side)
+
+    @classmethod
+    def _merge_same_step_macho_client_user_errors(
+        cls,
+        incidents: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], set]:
+        """Absorb client_traceback incidents into same-step macho protocol_error incidents with matching UserError key."""
+        macho_by_key: Dict[str, Dict[str, Any]] = {}
+        for inc in incidents:
+            if inc.get("kind") == "protocol_error" and inc.get("subsystem") == "macho":
+                m_key = cls._incident_user_error_key(inc, "macho")
+                if m_key:
+                    macho_by_key.setdefault(m_key.lower(), inc)
+
+        if not macho_by_key:
+            return incidents, set()
+
+        kept: List[Dict[str, Any]] = []
+        absorbed_keys: set = set()
+        for inc in incidents:
+            if inc.get("kind") == "client_traceback" and inc.get("subsystem") == "client-python":
+                c_key = cls._incident_user_error_key(inc, "client")
+                if c_key and c_key.lower() in macho_by_key:
+                    target = macho_by_key[c_key.lower()]
+                    merged_summary, merged_trace = sync_bugs_to_github.merge_macho_client_user_error_fields(
+                        str(target.get("summary") or ""),
+                        str(target.get("traceback") or ""),
+                        str(inc.get("summary") or ""),
+                        str(inc.get("traceback") or ""),
+                        c_key,
+                        normalize_tb=cls._strip_build_path_prefix,
+                    )
+                    target["summary"] = merged_summary
+                    target["traceback"] = (
+                        cls._strip_build_path_prefix(merged_trace) if merged_trace else ""
+                    )
+                    absorbed_keys.add(c_key.lower())
+                    continue
+            kept.append(inc)
+        return kept, absorbed_keys
+
+    @classmethod
+    def _prev_tb_covered_by_macho_user_errors(
+        cls,
+        raw_prev_tb: str,
+        prev_log_excs: List[Any],
+        prev_non_benign_macho_excs: List[Any],
+        expected_text: str = "",
+    ) -> bool:
+        """Return True iff all non-ignorable prev_tb items match a UserError key in prev_non_benign_macho_excs."""
+        macho_keys = {
+            k.lower()
+            for e in prev_non_benign_macho_excs
+            if (k := cls.extract_user_error_key(e))
+        }
+        if not macho_keys:
+            return False
+
+        saw_any = False
+        for ple in prev_log_excs:
+            saw_any = True
+            k = cls.extract_client_user_error_key(ple)
+            if not k or k.lower() not in macho_keys:
+                return False
+
+        tb_text = str(raw_prev_tb or "").strip()
+        if tb_text and not cls.is_ignorable_client_traceback("", tb_text, expected_text):
+            blocks = cls.parse_tb_blocks(tb_text)
+            if blocks:
+                for blk in blocks:
+                    hl = str(blk.get("headline") or "")
+                    tr = str(blk.get("trace") or "")
+                    if cls.is_ignorable_client_traceback(hl, tr, expected_text):
+                        continue
+                    saw_any = True
+                    k = cls.extract_client_user_error_key(f"{hl}\n{tr}")
+                    if not k or k.lower() not in macho_keys:
+                        return False
+            else:
+                saw_any = True
+                k = cls.extract_client_user_error_key(tb_text)
+                if not k or k.lower() not in macho_keys:
+                    return False
+
+        return saw_any
 
     EXPECTED_USER_ERROR_KEYWORDS = (
         "usererror",
@@ -6223,6 +6364,12 @@ class PlaytesterBugOracle:
             elif ple:
                 prev_tb_parts.append(str(ple))
         prev_tb = "\n".join(prev_tb_parts).strip()
+        prev_tb_unexplained = bool(prev_tb) and not self._prev_tb_covered_by_macho_user_errors(
+            raw_prev_tb,
+            prev_log_excs,
+            prev_non_benign_macho_excs,
+            prev_expected_text,
+        )
         prev_action_err = str(prev_fr.get("action_error") or "").strip()
 
         incidents: List[Dict[str, Any]] = []
@@ -6318,6 +6465,8 @@ class PlaytesterBugOracle:
                         "action_error": act_err_s,
                     }
                 )
+
+        incidents, absorbed_user_error_keys = self._merge_same_step_macho_client_user_errors(incidents)
 
         # 3. Warp animation missing oracle (#531 regression detector)
         act_type = (decision.get("action") or {}).get("type")
@@ -6425,8 +6574,10 @@ class PlaytesterBugOracle:
                     f"Step {step_num}: Suppressing false-positive agent bug_report ({cat}) because {prc_skip_reason}"
                 )
             elif (
-                prev_log_excs
-                and not self._prev_step_dropped_all_log_excs
+                (
+                    (prev_log_excs and not self._prev_step_dropped_all_log_excs)
+                    or (prev_non_benign_macho_excs and prev_tb and not prev_tb_unexplained and not fr_macho_excs)
+                )
                 and not fr_non_benign_log_excs
                 and cat in ("client_exception", "client_traceback", "client_crash")
             ):
@@ -6462,7 +6613,7 @@ class PlaytesterBugOracle:
             elif (
                 (prev_quasar_errs or prev_non_benign_macho_excs)
                 and not (fr_quasar_errs or fr_macho_excs)
-                and not prev_tb
+                and not prev_tb_unexplained
                 and cat
                 in (
                     "protocol_error",
@@ -6554,7 +6705,7 @@ class PlaytesterBugOracle:
                 log_info(
                     f"Step {step_num}: Suppressing false-positive UI State Desync because {prc_skip_reason}"
                 )
-            elif (prev_quasar_errs or prev_non_benign_macho_excs) and not (fr_quasar_errs or fr_macho_excs) and not prev_tb:
+            elif (prev_quasar_errs or prev_non_benign_macho_excs) and not (fr_quasar_errs or fr_macho_excs) and not prev_tb_unexplained:
                 log_info(
                     f"Step {step_num}: Suppressing duplicate UI State Desync because Channel 2 already captured previous step macho/quasar error"
                 )
@@ -6698,9 +6849,10 @@ class PlaytesterBugOracle:
         if created_files and self.sync_github and not self.async_write:
             self._run_sync_script()
 
-        self._prev_step_dropped_all_log_excs = bool(fr_log_excs) and not any(
+        captured_client_tb = bool(absorbed_user_error_keys) or any(
             inc.get("kind") == "client_traceback" for inc in incidents
         )
+        self._prev_step_dropped_all_log_excs = bool(fr_log_excs) and not captured_client_tb
 
         return created_files
 

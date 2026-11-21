@@ -1157,7 +1157,6 @@
         "quasar_gateway.rs": 4,
         "quasar_grpc/mod.rs": 1,
         "router/binding.rs": 2,
-        "router/binding_transition_policy.rs": 1,
         "router/cache_notifications.rs": 2,
         "router/context.rs": 4,
         "router/delta_commit_listener.rs": 1,

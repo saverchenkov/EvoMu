@@ -6,12 +6,11 @@
 //! `RebindToCurrentScene`, `StaleObjectGone`) into one table-driven module.
 
 use crate::router::context::{BoundObjectEntry, ServerContext, NEXT_BOUND_ID};
-use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
+use eve_db::lock_rank::RANK_LEAF;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, OnceLock, Weak};
 
 /// Retention window (`30s`, matching V24 `basesession.pyj::ObjectConnection.__del__ ->
 /// DisconnectObject(30)`) for in-flight late calls arriving during/right after a
@@ -398,8 +397,8 @@ struct PreparedDepartedBinding {
     departed_kind: Option<DepartedLocationKind>,
 }
 
-struct ContextGraceStore {
-    owner: Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
+#[derive(Default)]
+pub(crate) struct ContextGraceStore {
     entries: HashMap<u64, TransitionDisconnectedBinding>,
     departed_locations: HashMap<(u64, DepartedLocationKind, i64), TransitionDepartedLocation>,
     scene_epochs: HashMap<u64, u64>,
@@ -451,16 +450,7 @@ impl Drop for ReconnectHoldGuard<'_> {
 /// callers holding `WorldRepository::inner` + `RANK_LEAF` locks (`cluster_tick` ->
 /// `combat_ephemeral`) to read `reconnect_hold_session` without same-rank inversion — and
 /// strictly below `RANK_CLOCK` (70), with zero inner locks acquired while held (`#1190`).
-const RANK_TRANSITION_GRACE: u16 = RANK_LEAF + 5;
-
-static TRANSITION_DISCONNECT_GRACE: OnceLock<
-    RankedRwLock<HashMap<u64, ContextGraceStore>, RANK_TRANSITION_GRACE>,
-> = OnceLock::new();
-
-fn transition_disconnect_grace(
-) -> &'static RankedRwLock<HashMap<u64, ContextGraceStore>, RANK_TRANSITION_GRACE> {
-    TRANSITION_DISCONNECT_GRACE.get_or_init(|| RankedRwLock::new(HashMap::new()))
-}
+pub(crate) const RANK_TRANSITION_GRACE: u16 = RANK_LEAF + 5;
 
 fn current_scene_target_object_id(session: &SessionState, service: &str) -> Option<i64> {
     match service {
@@ -615,56 +605,30 @@ impl ServerContext {
     }
 
     fn read_context_grace_store<R>(&self, f: impl FnOnce(Option<&ContextGraceStore>) -> R) -> R {
-        let outer = transition_disconnect_grace()
+        let store = self
+            .transition_grace_store
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        f(outer.get(&self.instance_id))
-    }
-
-    fn is_grace_store_empty(store: &ContextGraceStore) -> bool {
-        store.entries.is_empty()
-            && store.departed_locations.is_empty()
-            && store.scene_epochs.is_empty()
-            && store.epoch_records.is_empty()
-            && store.pending_displaced_logoffs.is_empty()
-            && store.prelogoff_hold_sessions.is_empty()
-            && store.reconnect_hold_sessions.is_empty()
+        f(Some(&*store))
     }
 
     fn with_existing_grace_store_mut_and_prune<R>(
         &self,
         f: impl FnOnce(&mut ContextGraceStore) -> R,
     ) -> Option<R> {
-        let lock = TRANSITION_DISCONNECT_GRACE.get()?;
-        let mut outer = lock.write().unwrap_or_else(|e| e.into_inner());
-        outer.retain(|_, store| store.owner.strong_count() > 0);
-        let res = outer.get_mut(&self.instance_id).map(f);
-        if outer
-            .get(&self.instance_id)
-            .is_some_and(Self::is_grace_store_empty)
-        {
-            outer.remove(&self.instance_id);
-        }
-        res
+        let mut store = self
+            .transition_grace_store
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        Some(f(&mut store))
     }
 
     fn with_context_grace_store_mut<R>(&self, f: impl FnOnce(&mut ContextGraceStore) -> R) -> R {
-        let owner = Arc::downgrade(&self.bound_objects);
-        let mut outer = transition_disconnect_grace()
+        let mut store = self
+            .transition_grace_store
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        outer.retain(|_, store| store.owner.strong_count() > 0);
-        let store = outer.entry(self.instance_id).or_insert_with(|| ContextGraceStore {
-            owner,
-            entries: HashMap::new(),
-            departed_locations: HashMap::new(),
-            scene_epochs: HashMap::new(),
-            epoch_records: HashMap::new(),
-            pending_displaced_logoffs: HashMap::new(),
-            prelogoff_hold_sessions: HashMap::new(),
-            reconnect_hold_sessions: HashMap::new(),
-        });
-        f(store)
+        f(&mut store)
     }
 
     /// Returns the monotonic `scene_epoch` currently associated with `session_id` (`0` before
@@ -1471,11 +1435,10 @@ impl ServerContext {
         let cid = session.character_id?;
         let now_ticks = self.now_machonet_wallclock_filetime_ticks();
         let (entry, entry_epoch, current_epoch) = {
-            let outer = TRANSITION_DISCONNECT_GRACE
-                .get()?
+            let store = self
+                .transition_grace_store
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
-            let store = outer.get(&self.instance_id)?;
             let binding = store.entries.get(&bound_id)?;
             let current_epoch = store.scene_epochs.get(&session.session_id).copied().unwrap_or(0);
             if !Self::is_grace_entry_active(binding, now_ticks)
