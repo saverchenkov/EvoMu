@@ -2154,31 +2154,18 @@ async fn handle_slash_teleport(
         let same_sys_in_space = was_in_space && old_sys_id > 0 && old_sys_id == dest_sys_id;
         let mut stopped_mid_warp = false;
         if was_in_space && old_sys_id > 0 {
-            let removed_active = ctx
-                .active_warps
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&ship_id)
-                .is_some();
-            let removed_return = ctx
-                .return_warps
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&ship_id);
             let pre_handle = ctx.systems.get_or_spawn(old_sys_id);
+            let tracked_warp =
+                pre_handle.is_active_warp(ship_id) || pre_handle.is_return_warp(ship_id);
             let ball_warping = pre_handle
                 .get_ball_snapshot(ship_id)
                 .await
                 .ok()
                 .flatten()
                 .is_some_and(|(_, b)| matches!(b.mode, MovementMode::Warp { .. }));
-            if removed_active || removed_return || ball_warping {
+            if tracked_warp || ball_warping {
                 let _ = pre_handle.force_stop_warp(ship_id);
-                crate::services::space_destiny::clear_warp_tracking(
-                    ctx,
-                    Some(&pre_handle),
-                    ship_id,
-                );
+                crate::services::space_destiny::clear_warp_tracking(&pre_handle, ship_id);
                 stopped_mid_warp = true;
                 if !same_sys_in_space {
                     // #994: For cross-system teleports, flush Stop + effects.Warping(0) in a

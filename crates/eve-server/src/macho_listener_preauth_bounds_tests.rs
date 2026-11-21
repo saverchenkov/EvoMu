@@ -1318,7 +1318,7 @@ async fn wave5b_b4_session_wire_bound_objects_notifications_logoff_and_warp_regr
     }
 
     // 5. #843: `beyonce.MachoBindObject` while in active warp (`Accelerating` / `Cruising`) must NOT
-    // remove `ship_id` from `ctx.active_warps` or force-stop the ship mid-tunnel.
+    // remove `ship_id` from system `active_warps` or force-stop the ship mid-tunnel.
     {
         let char_id = 90_000_001i64;
         let ship_id = ctx.db.with_mut_snapshot(|snap| {
@@ -1328,10 +1328,8 @@ async fn wave5b_b4_session_wire_bound_objects_notifications_logoff_and_warp_regr
             ch.solar_system_id = 30_000_142;
             ch.active_ship_id
         });
-        ctx.active_warps
-            .lock()
-            .unwrap()
-            .insert(ship_id, 40_000_001);
+        let sys_handle = ctx.systems.get_or_spawn(30_000_142);
+        sys_handle.insert_active_warp_for_test(ship_id, 40_000_001);
         let mut sess = eve_machonet::SessionState::new(888_002);
         sess.user_id = Some(1);
         sess.character_id = Some(char_id);
@@ -1351,7 +1349,7 @@ async fn wave5b_b4_session_wire_bound_objects_notifications_logoff_and_warp_regr
             .await;
         assert!(bind_res.is_ok());
         assert!(
-            ctx.active_warps.lock().unwrap().contains_key(&ship_id),
+            sys_handle.is_active_warp(ship_id),
             "beyonce.MachoBindObject must not clear active_warps (#843)"
         );
     }

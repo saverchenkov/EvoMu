@@ -511,7 +511,7 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
         )
         .await
         .unwrap();
-    ctx.active_warps.lock().unwrap().insert(ship_id, char_id);
+    sys_h.insert_active_warp_for_test(ship_id, char_id);
 
     let mut sess = make_sess(char_id, corp_id, Some(jita_sys), None, None, Some(ship_id));
     sess.address = "tcp:127.0.0.1:44446".to_string();
@@ -524,7 +524,7 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
         "ShipInWarp"
     );
     assert_eq!(sess.station_id, None);
-    assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(sys_h.is_active_warp(ship_id));
 
     // 2. Decelerating with ~2.8s remaining at 5.0 AU/s (#1001 client/server decel lead, outside 2,500m perimeter) -> succeeds and terminates warp
     let mut lead_warp = MovementMode::new_warp(origin, landing, 5.0);
@@ -543,7 +543,7 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
         .expect("stationSvc.Dock should succeed within <= 4.0s warp deceleration to station (#1001)");
     assert_eq!(dock_res.dict_get("locationID"), Some(&PyRep::Integer(jita_station)));
     assert_eq!(sess.station_id, Some(jita_station));
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!sys_h.is_active_warp(ship_id));
 }
 
 #[tokio::test]

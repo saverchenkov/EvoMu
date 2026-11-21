@@ -360,7 +360,7 @@ pub struct SystemHandle {
 
 impl SystemHandle {
     /// Returns the latest lock-free published [`super::SystemView`] snapshot.
-    pub(crate) fn view(&self) -> Arc<super::SystemView> {
+    pub fn view(&self) -> Arc<super::SystemView> {
         self.view_rx.borrow().clone()
     }
 
@@ -613,12 +613,11 @@ impl SystemHandle {
             let _ = bp.force_stop_warp(ball_id);
             super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         }
-        let tracking = {
+        {
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            st.warp_provenance.remove(&ball_id);
-            st.warp_tracking.clone()
-        };
-        clear_shared_warp_tracking(&tracking, ball_id, true);
+            st.warp_state.clear_ball(ball_id, true);
+        }
+        self.publish_view();
     }
 
     /// Reads the tracked activation state for stargate `gate_id`, if present (`#1080`).
@@ -1831,13 +1830,7 @@ impl SystemHandle {
         }
         let events = bp.step(dt_sim);
         persist_landed_warps_in_db(&bp, &events, &st.db_opt, &st.ball_space_entry_epochs);
-        let st_mut = &mut *st;
-        clear_landed_warp_tracking_from_events(
-            &bp,
-            &events,
-            &mut st_mut.warp_provenance,
-            &st_mut.warp_tracking,
-        );
+        clear_landed_warp_tracking_from_events(&bp, &events, &mut st.warp_state);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         self.publish_view_from(&bp, Some(&st));
@@ -1901,29 +1894,138 @@ impl SystemHandle {
             .map_err(|_| "Solar system reply dropped".to_string())?
     }
 
+    fn mutate_warp_state<R>(&self, f: impl FnOnce(&mut super::types::ActorWarpState) -> R) -> R {
+        let out = {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            f(&mut st.warp_state)
+        };
+        self.publish_view();
+        out
+    }
+
+    fn read_warp_state_field<T>(
+        &self,
+        from_actor: impl FnOnce(&super::types::ActorWarpState) -> T,
+        from_view: impl FnOnce(&super::SystemView) -> T,
+    ) -> T {
+        if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= RANK_ACTOR_STATE)
+        {
+            let view = self.view();
+            from_view(&view)
+        } else {
+            let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+            from_actor(&st.warp_state)
+        }
+    }
+
     pub fn set_warp_provenance(&self, ball_id: BallId, provenance: super::WarpProvenance) {
-        self.actor_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .warp_provenance
-            .insert(ball_id, provenance);
+        self.mutate_warp_state(|w| {
+            w.provenance.insert(ball_id, provenance);
+        });
     }
 
     pub fn clear_warp_provenance(&self, ball_id: BallId) {
-        self.actor_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .warp_provenance
-            .remove(&ball_id);
+        self.mutate_warp_state(|w| {
+            w.provenance.remove(&ball_id);
+        });
+    }
+
+    pub fn track_player_or_fleet_warp(&self, ball_id: BallId, char_id: CharacterId) {
+        self.mutate_warp_state(|w| w.track_player_or_fleet_warp(ball_id, char_id));
+    }
+
+    pub fn track_return_warp(&self, ball_id: BallId) {
+        self.mutate_warp_state(|w| w.track_return_warp(ball_id));
+    }
+
+    pub fn clear_warp_tracking(&self, ball_id: BallId) {
+        self.mutate_warp_state(|w| w.clear_ball(ball_id, true));
+    }
+
+    pub fn clear_return_and_pending_warp(&self, ball_id: BallId) {
+        self.mutate_warp_state(|w| {
+            w.return_warps.remove(&ball_id);
+            w.pending_warp_finished.remove(&ball_id);
+        });
+    }
+
+    pub fn consume_warp_finished(&self, ball_id: BallId) -> bool {
+        self.mutate_warp_state(|w| w.consume_warp_finished(ball_id))
     }
 
     pub fn warp_provenance(&self, ball_id: BallId) -> Option<super::WarpProvenance> {
-        self.actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .warp_provenance
-            .get(&ball_id)
-            .copied()
+        self.read_warp_state_field(
+            |w| w.provenance.get(&ball_id).copied(),
+            |v| v.warp_provenance(ball_id),
+        )
+    }
+
+    pub fn active_warp_char(&self, ball_id: BallId) -> Option<CharacterId> {
+        self.read_warp_state_field(
+            |w| w.active_warps.get(&ball_id).copied(),
+            |v| v.active_warp_char(ball_id),
+        )
+    }
+
+    pub fn is_active_warp(&self, ball_id: BallId) -> bool {
+        self.read_warp_state_field(
+            |w| w.active_warps.contains_key(&ball_id),
+            |v| v.is_active_warp(ball_id),
+        )
+    }
+
+    pub fn is_return_warp(&self, ball_id: BallId) -> bool {
+        self.read_warp_state_field(
+            |w| w.return_warps.contains(&ball_id),
+            |v| v.is_return_warp(ball_id),
+        )
+    }
+
+    pub fn is_pending_warp_finished(&self, ball_id: BallId) -> bool {
+        self.read_warp_state_field(
+            |w| w.pending_warp_finished.contains(&ball_id),
+            |v| v.is_pending_warp_finished(ball_id),
+        )
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn insert_active_warp_for_test(&self, ball_id: BallId, char_id: CharacterId) {
+        self.mutate_warp_state(|w| {
+            w.active_warps.insert(ball_id, char_id);
+        });
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn insert_return_warp_for_test(&self, ball_id: BallId) {
+        self.mutate_warp_state(|w| {
+            w.return_warps.insert(ball_id);
+        });
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn clear_all_warp_tracking_for_test(&self) {
+        self.mutate_warp_state(|w| {
+            *w = super::types::ActorWarpState::default();
+        });
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn snapshot_warp_state_for_test(&self) -> super::types::ActorWarpState {
+        self.read_warp_state_field(|w| w.clone(), |v| super::types::ActorWarpState {
+            provenance: v.warp_provenance.clone(),
+            active_warps: v.active_warps.clone(),
+            return_warps: v.return_warps.clone(),
+            pending_warp_finished: v.pending_warp_finished.clone(),
+        })
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn restore_warp_state_for_test(&self, state: super::types::ActorWarpState) {
+        self.mutate_warp_state(|w| {
+            *w = state;
+        });
     }
 
     pub async fn set_warp_scramble_strength(
@@ -2998,7 +3100,7 @@ impl SystemHandle {
 mod celestials_helpers;
 pub use celestials_helpers::try_remove_ball_for_db;
 pub(crate) use celestials_helpers::{
-    clear_landed_warp_tracking_from_events, clear_shared_warp_tracking,
+    clear_landed_warp_tracking_from_events,
     collect_all_condition_checkpoint_entries, collect_dirty_condition_checkpoint_entries,
     collect_immediate_armor_hull_checkpoint_entries,
     collect_landed_warp_positions, fast_forward_clock_in_actor_with_epochs_and_seq,

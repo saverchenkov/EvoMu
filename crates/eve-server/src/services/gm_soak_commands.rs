@@ -712,8 +712,7 @@ async fn handle_deadwarp_cmd(
                     .set_movement_mode(target_ship, MovementMode::Stop)
                     .await;
                 crate::services::space_destiny::clear_warp_tracking(
-                    ctx,
-                    Some(&sys_handle),
+                    &sys_handle,
                     target_ship,
                 );
             }
@@ -767,7 +766,7 @@ async fn handle_deadwarp_cmd(
         ));
     }
 
-    crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, cid);
+    crate::services::space_destiny::track_player_or_fleet_warp(&sys_handle, ship_id, cid);
 
     let state = GmDeadwarpState {
         char_id: cid,
@@ -1895,8 +1894,7 @@ fn step_deadwarps_for_system(ctx: &ServerContext, solar_system_id: u32) {
         }
         for (ship_id, char_id) in returned_pairs {
             crate::services::space_destiny::track_player_or_fleet_warp(
-                ctx,
-                Some(&sys_handle),
+                &sys_handle,
                 ship_id,
                 char_id,
             );
@@ -1912,7 +1910,7 @@ fn step_deadwarps_for_system(ctx: &ServerContext, solar_system_id: u32) {
     }
 
     for &ship_id in &to_remove {
-        crate::services::space_destiny::clear_warp_tracking(ctx, Some(&sys_handle), ship_id);
+        crate::services::space_destiny::clear_warp_tracking(&sys_handle, ship_id);
     }
 
     if !to_remove.is_empty() || !to_delay.is_empty() || !returned_ok.is_empty() {

@@ -478,6 +478,25 @@ pub fn populate_persisted_space_objects(
     sde: &SdeRegistry,
     db: &Arc<WorldRepository>,
 ) -> Vec<PendingAnchoringDisruptor> {
+    let mut ignored_warp_state = crate::system_actor::ActorWarpState::default();
+    populate_persisted_space_objects_with_warps(
+        ballpark,
+        solar_system_id,
+        sde,
+        db,
+        &mut ignored_warp_state,
+    )
+}
+
+/// Re-materializes persisted in-space objects into `ballpark` and restores authoritative
+/// per-system mid-warp tracking into `warp_state` when initializing a solar system actor (`#1541`).
+pub(crate) fn populate_persisted_space_objects_with_warps(
+    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId,
+    sde: &SdeRegistry,
+    db: &Arc<WorldRepository>,
+    warp_state: &mut crate::system_actor::ActorWarpState,
+) -> Vec<PendingAnchoringDisruptor> {
     let now_unix = db.clock().now_unix_secs();
     let mut pending_disruptors = Vec::new();
     let mut expired_item_ids: Vec<i64> = Vec::new();
@@ -818,6 +837,7 @@ pub fn populate_persisted_space_objects(
             } else {
                 (MovementMode::Stop, DVec3::ZERO, 0.0)
             };
+            let restored_in_warp = matches!(mode, MovementMode::Warp { .. });
             ballpark.set_ball_slim_meta(
                 disc.ship_id,
                 SlimItemMeta {
@@ -844,6 +864,17 @@ pub fn populate_persisted_space_objects(
                 mode,
             });
             ballpark.combat_states.insert(disc.ship_id, cs);
+            if restored_in_warp {
+                if disc.pre_warp_position.is_some() {
+                    warp_state.clear_ball(disc.ship_id, true);
+                    warp_state.provenance.insert(
+                        disc.ship_id,
+                        crate::system_actor::WarpProvenance::DisconnectedEmergencyWarp,
+                    );
+                } else {
+                    warp_state.track_player_or_fleet_warp(disc.ship_id, disc.char_id);
+                }
+            }
         }
 
         // 3b. Abandoned / unpiloted ships in space (`#918`, `#835`)
