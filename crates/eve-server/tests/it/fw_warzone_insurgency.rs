@@ -2301,6 +2301,10 @@ async fn test_corruption_and_suppression_per_stage_effects() {
             bp.set_ball_position(rid, DVec3::new(900_000.0, 0.0, 0.0));
         }
     }
+    // Pin RNG deterministically before 79507's single turret volley (`resolve_turret_shot` rolls
+    // `Q = 0.49 + u`, whereas `dmg_s0` uses un-rolled flat `88*4` damage; `TEST_MODE_DEFAULT_SEED`
+    // yields `u ≈ 0.654`, `Q ≈ 1.144` so authentic 500-base SDE damage is compared cleanly).
+    ctx.set_mechanic_rng_seed(Some(eve_server::rng::TEST_MODE_DEFAULT_SEED));
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&pir_cid).unwrap().active_ship_id = ci_probe_ship);
     eve_server::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(&ctx, front_sys);
     let painted_cs = sys_h.get_combat_state(ci_probe_ship).await.unwrap().unwrap();
@@ -3928,9 +3932,12 @@ async fn test_ci_sentry_grid_targeting_destruction_and_lowsec_sentry_separation(
     assert!(crim_cs.shield_hp < 50_000.0 && (crim_cs.signature_radius - base_sig * 1.50).abs() < 1e-3 && (crim_cs.ecm_jammed_remaining_s - 5.0).abs() < 1e-6);
 
     // Step 2: Remove `crim_ship` so `79_507` retargets `pir_ship` at 120 km (within 250 km TP, outside 75 km ECM)
+    //         and completes its remaining 5.0s SDE turret cycle (`attr 51 = 5000 ms`, 4.0s remaining after Step 1)
     //         while `offgrid_pir_ship` at 900 km takes zero fire!
     let _ = sys_h.remove_ball(crim_ship).await;
-    eve_server::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(&ctx, enemy_sys);
+    for _ in 0..5 {
+        eve_server::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(&ctx, enemy_sys);
+    }
     let pir_cs = sys_h.get_combat_state(pir_ship).await.unwrap().unwrap();
     let off_cs = sys_h.get_combat_state(offgrid_pir_ship).await.unwrap().unwrap();
     assert!(pir_cs.shield_hp < 50_000.0 && (pir_cs.signature_radius - base_sig * 1.50).abs() < 1e-3 && pir_cs.ecm_jammed_remaining_s == 0.0);
