@@ -975,24 +975,27 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
         1
     );
 
-    // 5. Failed subwarp move while mid-warp restores location_change_invuln and leaves protection untouched
-    // with zero OnInvulnCancelled / OnJumpCloakCancelled notifications.
+    // 5. Actor-level movement rejection inside SystemActor (`StructureCannotNavigate` via immobile
+    // slim category on `GotoPointBreakingProtection` and `SetWarpMovementModeBreakingProtection`)
+    // preserves `location_change_invuln`, gate cloak, and undock invuln with zero notifications.
     sys_handle
-        .set_movement_mode(
-            ship_id,
-            MovementMode::Warp {
-                origin: star_pos,
-                destination: star_pos + DVec3::new(1_000_000.0, 0.0, 0.0),
-                warp_speed_au_s: 3.0,
-                total_distance: 1_000_000.0,
-                phase: eve_destiny::WarpPhase::Cruising,
-                elapsed_warp_time: 5.0,
+        .spawn_ball_with_meta(
+            start_ball.clone(),
+            CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 25,
+                undock_invulnerable_remaining_ticks: 25,
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                ..Default::default()
+            },
+            eve_destiny::SlimItemMeta {
+                char_id: Some(char_id),
+                category_id: 23,
+                is_cloaked: true,
+                ..Default::default()
             },
         )
-        .await
-        .unwrap();
-    sys_handle
-        .modify_combat_state(ship_id, |cs| cs.apply_jump_cloak_and_invuln_timers(25))
         .await
         .unwrap();
     arm_safe_logoff_and_location_invuln(&ctx, char_id, ship_id, sys_id);
@@ -1009,7 +1012,11 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
     )
     .await
     .unwrap_err();
-    assert_eq!(err_move.code, ERR_SHIP_ALREADY_IN_WARP);
+    assert_eq!(err_move.code, ERR_DESTINY_COMMAND_FAILED);
+    assert!(
+        err_move.message.contains("StructureCannotNavigate"),
+        "expected actor-level rejection, got {err_move:?}"
+    );
     assert!(crate::services::space_destiny::is_location_change_invulnerable(
         &ctx,
         char_id,
@@ -1018,5 +1025,31 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
     let cs_err = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(cs_err.gate_cloak_remaining_ticks, 25);
     assert_eq!(cs_err.undock_invulnerable_remaining_ticks, 25);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    let err_warp = execute_agency_content_warp(
+        &ctx,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        &start_ball,
+        star_pos + DVec3::new(500_000.0, 0.0, 0.0),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_warp.code, ERR_DESTINY_COMMAND_FAILED);
+    assert!(
+        err_warp.message.contains("StructureCannotNavigate"),
+        "expected actor-level warp rejection, got {err_warp:?}"
+    );
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(
+        &ctx,
+        char_id,
+        ctx.now_unix(),
+    ));
+    let cs_warp_err = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_warp_err.gate_cloak_remaining_ticks, 25);
+    assert_eq!(cs_warp_err.undock_invulnerable_remaining_ticks, 25);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 }

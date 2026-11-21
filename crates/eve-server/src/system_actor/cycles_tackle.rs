@@ -778,6 +778,32 @@ pub(crate) fn on_target_unlocked_in_actor(
     }
 }
 
+fn projected_capacitor_values(
+    cs: &eve_destiny::CombatState,
+    effective_max_capacitor: Option<f64>,
+) -> (f64, f64) {
+    let mut max_cap = cs.max_capacitor;
+    let mut cap = cs.capacitor;
+    if let Some(eff_cap_max) = effective_max_capacitor {
+        if !max_cap.is_finite() || max_cap <= 0.0 {
+            max_cap = eff_cap_max;
+        }
+        if !cap.is_finite() {
+            cap = eff_cap_max;
+        } else if (max_cap - 250.0).abs() <= 1e-6
+            && (cap - 250.0).abs() <= 1e-6
+            && eff_cap_max > 250.0
+        {
+            max_cap = eff_cap_max;
+            cap = eff_cap_max;
+        } else {
+            max_cap = eff_cap_max;
+            cap = cap.min(max_cap);
+        }
+    }
+    (cap, max_cap)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_add_module_cycle(
     ballpark: &mut Ballpark,
@@ -787,7 +813,32 @@ pub(crate) fn handle_add_module_cycle(
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
+    cycle: ActiveModuleCycle,
+) -> Result<(), String> {
+    handle_add_module_cycle_with_options(
+        ballpark,
+        active_module_cycles,
+        base_scramble_strengths,
+        base_core_strengths,
+        sde_opt,
+        db_opt,
+        deactivation_hook,
+        cycle,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
     mut cycle: ActiveModuleCycle,
+    clear_undock_invuln: bool,
 ) -> Result<(), String> {
     if let Some(existing) = active_module_cycles
         .iter()
@@ -818,7 +869,17 @@ pub(crate) fn handle_add_module_cycle(
             return Err("WarpScrambled: Propulsion module disabled by warp scrambler".to_string());
         }
     }
-    // Remove any existing mutadaptive-spool cycle for this (ship_id, module_id) before re-adding
+    // Validate capacitor sufficiency against projected max capacitor BEFORE mutating `CombatState`
+    // or tearing down any prior mutadaptive cycle (`#1486`).
+    if cycle.cap_need_per_cycle > 0.0 {
+        if let Some(cs) = ballpark.combat_states.get(&cycle.ship_id) {
+            let (proj_cap, _) = projected_capacitor_values(cs, cycle.effective_max_capacitor);
+            if proj_cap < cycle.cap_need_per_cycle {
+                return Err("Insufficient capacitor to activate module".to_string());
+            }
+        }
+    }
+    // Remove any existing mutadaptive-spool cycle for this (ship_id, module_id) before re-adding.
     if let Some(pos) = active_module_cycles
         .iter()
         .position(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
@@ -829,35 +890,23 @@ pub(crate) fn handle_add_module_cycle(
         }
         cleanup_removed_module_cycle(ballpark, &prev, db_opt);
     }
-    if let Some(eff_cap_max) = cycle.effective_max_capacitor {
+    if cycle.effective_max_capacitor.is_some() {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-            if !cs.max_capacitor.is_finite() || cs.max_capacitor <= 0.0 {
-                cs.max_capacitor = eff_cap_max;
-            }
-            if !cs.capacitor.is_finite() {
-                cs.capacitor = eff_cap_max;
-            } else if (cs.max_capacitor - 250.0).abs() <= 1e-6
-                && (cs.capacitor - 250.0).abs() <= 1e-6
-                && eff_cap_max > 250.0
-            {
-                cs.max_capacitor = eff_cap_max;
-                cs.capacitor = eff_cap_max;
-            } else {
-                cs.max_capacitor = eff_cap_max;
-                cs.capacitor = cs.capacitor.min(cs.max_capacitor);
-            }
+            let (proj_cap, proj_max_cap) =
+                projected_capacitor_values(cs, cycle.effective_max_capacitor);
+            cs.max_capacitor = proj_max_cap;
+            cs.capacitor = proj_cap;
         }
     }
     if cycle.cap_need_per_cycle > 0.0 {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-            if cs.capacitor < cycle.cap_need_per_cycle {
-                return Err("Insufficient capacitor to activate module".to_string());
-            }
             cs.capacitor = (cs.capacitor - cycle.cap_need_per_cycle).max(0.0);
         }
     }
-    if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-        cs.undock_invulnerable_remaining_ticks = 0;
+    if clear_undock_invuln {
+        if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+            cs.undock_invulnerable_remaining_ticks = 0;
+        }
     }
     if cycle.cap_booster_inject_amount > 0.0 {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
@@ -1643,6 +1692,13 @@ fn finish_ball_damage_command(
             exec_ctx.ballpark,
             &exec_ctx.actor_st.db_opt,
             exec_ctx.actor_st.tactical_state.as_ref(),
+            ball_id,
+        );
+        exec_ctx.actor_st.protection_registry.remove(&ball_id);
+    } else {
+        super::protection::sync_ball_protection_in_actor(
+            exec_ctx.ballpark,
+            exec_ctx.actor_st,
             ball_id,
         );
     }

@@ -665,7 +665,7 @@ pub enum ProtectionBreakReason {
     TargetLock,
     /// Initiating warp breaks gate cloak, non-covert active cloak, and invuln while preserving covert cloak.
     WarpInitiation,
-    /// Issuing subwarp movement breaks gate cloak, non-covert active cloak, and invuln while preserving covert cloak.
+    /// Issuing subwarp movement breaks gate cloak and invuln while preserving active module cloaks.
     SubwarpMovement,
     /// Generic non-cloak space action breaks gate cloak and invuln while preserving active non-gate cloak.
     SessionAction,
@@ -683,10 +683,7 @@ impl ProtectionBreakReason {
 
     /// Returns `true` when this reason breaks an active non-covert cloak module (`!gate && !covert`).
     pub const fn breaks_non_covert_module_cloak(self) -> bool {
-        matches!(
-            self,
-            Self::WarpInitiation | Self::SubwarpMovement | Self::EssGateEntry | Self::Manual
-        )
+        matches!(self, Self::WarpInitiation | Self::EssGateEntry | Self::Manual)
     }
 
     /// Returns `true` when this reason clears post-jump/undock/warp-exit/location invulnerability timers.
@@ -722,7 +719,7 @@ pub struct ProtectionBreakEvents {
     pub tether_broken: bool,
     /// `true` if `slim_meta.is_cloaked` cleared or `deactivate_cloak` ran.
     pub slim_cloak_cleared: bool,
-    /// Cloak `ActiveModuleCycle`s removed atomically during `EssGateEntry` / `Manual`.
+    /// Cloak `ActiveModuleCycle`s removed atomically when decloaking (`#1486`).
     pub removed_cloak_cycles: Vec<RemovedCloakCycleInfo>,
     /// Post-decloak sensor recalibration targeting delay active after break (seconds).
     pub decloak_targeting_delay_s: f64,
@@ -739,10 +736,9 @@ impl ProtectionBreakEvents {
             || !self.removed_cloak_cycles.is_empty()
     }
 
-    /// Returns `true` when client `OnJumpCloakCancelled` should fire for a broken gate cloak or
-    /// non-covert module cloak.
+    /// Returns `true` when client `OnJumpCloakCancelled` should fire for a broken gate cloak.
     pub fn should_emit_jump_cloak_cancelled(&self) -> bool {
-        self.gate_cloak_broken || (self.non_gate_cloak_broken && !self.covert_cloak_broken)
+        self.gate_cloak_broken
     }
 }
 

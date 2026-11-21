@@ -1625,11 +1625,17 @@ impl SystemRegistry {
                                 fraction,
                                 reply,
                             } => {
-                                if ballpark.set_speed_fraction(ball_id, fraction) {
-                                    defer_reply(deferred_replies, reply, Ok(ballpark.current_tick));
+                                let tick_res = if exec_ctx.ballpark.set_speed_fraction(ball_id, fraction) {
+                                    protection::sync_ball_protection_in_actor(
+                                        exec_ctx.ballpark,
+                                        exec_ctx.actor_st,
+                                        ball_id,
+                                    );
+                                    Ok(exec_ctx.ballpark.current_tick)
                                 } else {
-                                    defer_reply(deferred_replies, reply, Err(format!("Ball {ball_id} not in system {solar_system_id}")));
-                                }
+                                    Err(format!("Ball {ball_id} not in system {solar_system_id}"))
+                                };
+                                defer_reply(exec_ctx.deferred_replies, reply, tick_res);
                             }
                             SystemCommand::SetBallPosition {
                                 ball_id,

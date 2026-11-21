@@ -112,6 +112,44 @@ pub fn grant_location_change_invulnerability(ctx: &ServerContext, char_id: i64, 
         .try_sync_location_change_invuln_for_char(char_id, Some(until_unix));
 }
 
+pub(crate) fn peek_active_location_change_invuln(ctx: &ServerContext, char_id: i64) -> Option<u64> {
+    let now = ctx.now_unix();
+    let map = ctx
+        .location_change_invuln
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.get(&char_id).copied().filter(|&until| now < until)
+}
+
+/// Clears `ctx.location_change_invuln[char_id]` only after an actor-level protection break
+/// commits, preserving any newer grant inserted concurrently during `.await` (`#1486`).
+pub(crate) fn commit_cleared_location_change_invuln(
+    ctx: &ServerContext,
+    char_id: i64,
+    expected_until: Option<u64>,
+    now_unix: u64,
+) -> bool {
+    let mut map = ctx
+        .location_change_invuln
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(&cur) = map.get(&char_id) else {
+        return false;
+    };
+    let allow_clear = match expected_until {
+        Some(exp) => cur <= now_unix || cur <= exp,
+        None => cur <= now_unix,
+    };
+    if !allow_clear {
+        return false;
+    }
+    map.remove(&char_id);
+    drop(map);
+    ctx.systems
+        .try_sync_location_change_invuln_for_char(char_id, None);
+    now_unix < cur
+}
+
 pub(crate) fn pop_active_location_change_invuln(ctx: &ServerContext, char_id: i64) -> Option<u64> {
     let removed = ctx
         .location_change_invuln
@@ -122,23 +160,6 @@ pub(crate) fn pop_active_location_change_invuln(ctx: &ServerContext, char_id: i6
         .try_sync_location_change_invuln_for_char(char_id, None);
     let now = ctx.now_unix();
     removed.filter(|&until| now < until)
-}
-
-pub(crate) fn restore_location_change_invuln(
-    ctx: &ServerContext,
-    char_id: i64,
-    until_unix: Option<u64>,
-) {
-    if let Some(until) = until_unix {
-        if ctx.now_unix() < until {
-            ctx.location_change_invuln
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(char_id, until);
-            ctx.systems
-                .try_sync_location_change_invuln_for_char(char_id, Some(until));
-        }
-    }
 }
 
 pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) {
@@ -181,11 +202,16 @@ pub(crate) async fn break_ship_protection_with_location_invuln(
     ship_id: i64,
     reason: crate::system_actor::ProtectionBreakReason,
 ) -> crate::system_actor::ProtectionBreakEvents {
-    let loc_until = pop_active_location_change_invuln(ctx, char_id);
+    let clears_invuln = reason.clears_invuln();
+    let loc_until = clears_invuln
+        .then(|| peek_active_location_change_invuln(ctx, char_id))
+        .flatten();
     let now = ctx.now_unix();
     if ship_id <= 0 {
+        let had_loc = clears_invuln
+            && commit_cleared_location_change_invuln(ctx, char_id, loc_until, now);
         return crate::system_actor::ProtectionBreakEvents {
-            invuln_cancelled: loc_until.is_some(),
+            invuln_cancelled: had_loc,
             ..Default::default()
         };
     }
@@ -193,12 +219,18 @@ pub(crate) async fn break_ship_protection_with_location_invuln(
         .break_protection(ship_id, Some(char_id), reason, loc_until, now)
         .await
     {
-        Ok(events) => {
+        Ok(mut events) => {
+            if clears_invuln
+                && commit_cleared_location_change_invuln(ctx, char_id, loc_until, now)
+            {
+                events.invuln_cancelled = true;
+            }
             emit_protection_break_notifications(ctx, char_id, ship_id, &events);
             events
         }
         Err(_) => {
-            let had_loc = loc_until.is_some();
+            let had_loc = clears_invuln
+                && commit_cleared_location_change_invuln(ctx, char_id, loc_until, now);
             if had_loc {
                 crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
                     ctx, char_id, ship_id, false, true,

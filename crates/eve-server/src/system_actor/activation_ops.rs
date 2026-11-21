@@ -59,16 +59,18 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
         return Err("CannotActivateCloaked: Cannot activate module while cloaked".to_string());
     }
 
-    let pre_snap = exec_ctx
-        .ballpark
-        .combat_states
-        .get_mut(&ship_id)
-        .map(|cs| {
-            cs.sync_action_breaks();
-            cs.protection_snapshot()
-        });
+    let pre_snap = request
+        .break_protection
+        .then(|| {
+            exec_ctx
+                .ballpark
+                .combat_states
+                .get(&ship_id)
+                .map(|cs| cs.protection_snapshot())
+        })
+        .flatten();
 
-    handle_add_module_cycle(
+    handle_add_module_cycle_with_options(
         exec_ctx.ballpark,
         &mut exec_ctx.actor_st.active_module_cycles,
         &exec_ctx.actor_st.base_scramble_strengths,
@@ -77,6 +79,7 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
         &exec_ctx.actor_st.db_opt,
         deact_guard.as_ref(),
         request.cycle,
+        false,
     )?;
     exec_ctx
         .actor_st
@@ -498,10 +501,11 @@ fn run_movement_breaking_protection(
     real_now_unix: u64,
     op: impl FnOnce(&mut ActorExecCtx<'_>) -> Result<u64, String>,
 ) -> Result<(u64, ProtectionBreakEvents), String> {
-    let pre_snap = exec_ctx.ballpark.combat_states.get_mut(&ball_id).map(|cs| {
-        cs.sync_action_breaks();
-        cs.protection_snapshot()
-    });
+    let pre_snap = exec_ctx
+        .ballpark
+        .combat_states
+        .get(&ball_id)
+        .map(|cs| cs.protection_snapshot());
     let tick = op(exec_ctx)?;
     Ok((
         tick,

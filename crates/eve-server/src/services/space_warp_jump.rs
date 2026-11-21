@@ -1100,9 +1100,9 @@ async fn handle_cmd_warp_to_stuff(
     if target_belt_id.is_some() {
         let _ = handle.populate_asteroid_belt_entities().await;
     }
-    // Commit warp movement and break non-covert protection atomically in `SystemActor` (`#1486`),
-    // emitting `OnJumpCloakCancelled` / `OnInvulnCancelled` only when warp initiation succeeds.
-    let loc_until = crate::services::space_destiny::pop_active_location_change_invuln(ctx, char_id);
+    // Commit warp movement and break non-covert protection atomically in `SystemActor` (`#1486`).
+    let loc_until = crate::services::space_destiny::peek_active_location_change_invuln(ctx, char_id);
+    let now = ctx.now_unix();
     match handle
         .set_warp_movement_mode_breaking_protection(
             ship_id,
@@ -1111,11 +1111,14 @@ async fn handle_cmd_warp_to_stuff(
             crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
             crate::system_actor::ProtectionBreakReason::WarpInitiation,
             loc_until,
-            ctx.now_unix(),
+            now,
         )
         .await
     {
         Ok((tick, mut protection_events)) => {
+            if crate::services::space_destiny::commit_cleared_location_change_invuln(ctx, char_id, loc_until, now) {
+                protection_events.invuln_cancelled = true;
+            }
             if let Some((new_cap, max_cap, old_cap, _)) = cap_debit_update {
                 let _ = ctx.notify_ship_capacitor_change(
                     char_id,
@@ -1161,9 +1164,6 @@ async fn handle_cmd_warp_to_stuff(
             Ok(PyRep::Integer(tick as i64))
         }
         Err(e) => {
-            crate::services::space_destiny::restore_location_change_invuln(
-                ctx, char_id, loc_until,
-            );
             if let Some((_, _, _, pre_debit_cap)) = cap_debit_update {
                 let _ = handle
                     .modify_combat_state(ship_id, move |live_cs| {

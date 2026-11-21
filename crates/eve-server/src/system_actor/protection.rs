@@ -141,16 +141,46 @@ fn consume_location_change_invuln(
     }
 }
 
+fn is_sde_covert_cloak_type(
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    type_id: u32,
+) -> Option<(bool, bool)> {
+    if let Some(sde) = sde_opt.as_ref() {
+        let t = sde.types.get(&type_id)?;
+        if t.group_id != 330 {
+            return Some((false, false));
+        }
+        let is_covert = type_id == 11578
+            || t.effect_ids.contains(&980)
+            || t.effect_ids.iter().any(|eid| {
+                sde.effects
+                    .get(eid)
+                    .is_some_and(|e| e.is_warp_safe || e.name.eq_ignore_ascii_case("cloakingWarpSafe"))
+            })
+            || t.name.contains("Covert Ops");
+        Some((true, is_covert))
+    } else {
+        match type_id {
+            11578 => Some((true, true)),
+            11370 | 11577 => Some((true, false)),
+            _ => None,
+        }
+    }
+}
+
 fn strip_cloak_cycles_for_ship(
     exec_ctx: &mut ActorExecCtx<'_>,
     ship_id: BallId,
+    include_covert: bool,
 ) -> Vec<RemovedCloakCycleInfo> {
     let mut removed_cycles = Vec::new();
+    let mut removed_ids = std::collections::HashSet::new();
     let mut idx = 0;
     while idx < exec_ctx.actor_st.active_module_cycles.len() {
-        if exec_ctx.actor_st.active_module_cycles[idx].ship_id == ship_id
+        let is_target = exec_ctx.actor_st.active_module_cycles[idx].ship_id == ship_id
             && is_cloak_cycle(&exec_ctx.actor_st.active_module_cycles[idx])
-        {
+            && (include_covert || !is_covert_cloak_cycle(&exec_ctx.actor_st.active_module_cycles[idx]));
+        if is_target {
             let removed = exec_ctx.actor_st.active_module_cycles.remove(idx);
             exec_ctx
                 .actor_st
@@ -161,6 +191,7 @@ fn strip_cloak_cycles_for_ship(
                 &removed,
                 &exec_ctx.actor_st.db_opt,
             );
+            removed_ids.insert(removed.module_id);
             removed_cycles.push(RemovedCloakCycleInfo {
                 module_id: removed.module_id,
                 module_type_id: removed.module_type_id,
@@ -169,6 +200,50 @@ fn strip_cloak_cycles_for_ship(
             });
         } else {
             idx += 1;
+        }
+    }
+    if let Some(db_ref) = exec_ctx.actor_st.db_opt.as_ref() {
+        let orphaned_db_cloaks: Vec<(ItemId, u32, bool)> = db_ref.with_snapshot(|snap| {
+            if snap.module_active_states.is_empty() {
+                return Vec::new();
+            }
+            snap.items
+                .values()
+                .filter(|it| {
+                    it.location_id == ship_id
+                        && snap.module_active_states.contains(&it.item_id)
+                        && !removed_ids.contains(&it.item_id)
+                })
+                .filter_map(|it| {
+                    let (is_cloak, is_covert) =
+                        is_sde_covert_cloak_type(&exec_ctx.actor_st.sde_opt, it.type_id)?;
+                    (is_cloak && (include_covert || !is_covert)).then_some((
+                        it.item_id,
+                        it.type_id,
+                        is_covert,
+                    ))
+                })
+                .collect()
+        });
+        if !orphaned_db_cloaks.is_empty() {
+            db_ref.with_mut_snapshot(|snap| {
+                for &(mod_id, _, _) in &orphaned_db_cloaks {
+                    snap.module_active_states.remove(&mod_id);
+                    snap.module_active_charges.remove(&mod_id);
+                }
+            });
+            for (mod_id, mod_type_id, is_covert) in orphaned_db_cloaks {
+                removed_cycles.push(RemovedCloakCycleInfo {
+                    module_id: mod_id,
+                    module_type_id: mod_type_id,
+                    is_covert,
+                    effect_name: if is_covert {
+                        "cloakingWarpSafe".to_string()
+                    } else {
+                        "cloaking".to_string()
+                    },
+                });
+            }
         }
     }
     if !removed_cycles.is_empty() {
@@ -198,6 +273,29 @@ pub(in crate::system_actor) fn break_protection_in_actor(
     real_now_unix: u64,
     pre_existing_snapshot: Option<CombatProtectionSnapshot>,
 ) -> ProtectionBreakEvents {
+    break_protection_in_actor_impl(
+        exec_ctx,
+        ball_id,
+        char_id,
+        reason,
+        location_invuln_until_unix,
+        real_now_unix,
+        pre_existing_snapshot,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn break_protection_in_actor_impl(
+    exec_ctx: &mut ActorExecCtx<'_>,
+    ball_id: BallId,
+    char_id: Option<CharacterId>,
+    reason: ProtectionBreakReason,
+    location_invuln_until_unix: Option<u64>,
+    real_now_unix: u64,
+    pre_existing_snapshot: Option<CombatProtectionSnapshot>,
+    force_all_cloaks: bool,
+) -> ProtectionBreakEvents {
     let owner_char_id = resolve_owner_char_id(exec_ctx.ballpark, ball_id, char_id);
     let location_invuln_cancelled = consume_location_change_invuln(
         exec_ctx.actor_st,
@@ -212,41 +310,43 @@ pub(in crate::system_actor) fn break_protection_in_actor(
         ..Default::default()
     };
 
-    // Defer `sync_action_breaks()` when a caller captured `pre_existing_snapshot` before an
-    // intermediate step cleared `undock_invulnerable_remaining_ticks`, so `deactivate_cloak` still
-    // sees active gate cloak ticks and emits `CloakBall(0)` + `effects.Cloak` (`#1486`).
-    let live_snap = if pre_existing_snapshot.is_none() {
-        if let Some(cs) = exec_ctx.ballpark.combat_states.get_mut(&ball_id) {
-            cs.sync_action_breaks();
-            cs.protection_snapshot()
-        } else {
-            CombatProtectionSnapshot::default()
-        }
+    // Inspect raw `CombatState` fields BEFORE calling `sync_action_breaks()` so that an
+    // intermediate step (e.g. `add_module_cycle` zeroing `undock_invulnerable_remaining_ticks`)
+    // never hides active `gate_cloak_remaining_ticks` from `ballpark.deactivate_cloak` (`#1486`).
+    let (
+        raw_gate_cloak,
+        raw_non_gate_cloak,
+        raw_covert_cloak,
+        raw_non_covert_cloak,
+        raw_undock_invuln,
+        raw_warp_exit_invuln,
+    ) = if let Some(cs) = exec_ctx.ballpark.combat_states.get(&ball_id) {
+        let raw_gate = cs.gate_cloak_remaining_ticks > 0;
+        let raw_non_gate = !raw_gate && (cs.is_cloaked || cs.cloak_velocity_multiplier.is_some());
+        (
+            raw_gate,
+            raw_non_gate,
+            raw_non_gate && cs.is_covert_cloak,
+            raw_non_gate && !cs.is_covert_cloak,
+            cs.undock_invulnerable_remaining_ticks > 0,
+            cs.warp_exit_invulnerable_remaining_ticks > 0,
+        )
     } else {
-        exec_ctx
-            .ballpark
-            .combat_states
-            .get(&ball_id)
-            .map(|cs| cs.protection_snapshot())
-            .unwrap_or_default()
+        (false, false, false, false, false, false)
     };
-    let pre_snap = pre_existing_snapshot.unwrap_or(live_snap);
-    let had_gate_cloak = live_snap.has_gate_cloak() || pre_snap.has_gate_cloak();
-    let had_non_gate_cloak =
-        live_snap.has_active_non_gate_cloak() || pre_snap.has_active_non_gate_cloak();
-    let had_covert_cloak =
-        live_snap.has_active_covert_cloak() || pre_snap.has_active_covert_cloak();
-    let had_non_covert_cloak =
-        live_snap.has_active_non_covert_cloak() || pre_snap.has_active_non_covert_cloak();
-    let had_undock_invuln = live_snap.undock_invulnerable_remaining_ticks > 0
-        || pre_snap.undock_invulnerable_remaining_ticks > 0;
-    let had_warp_exit_invuln =
-        live_snap.has_warp_exit_invuln() || pre_snap.has_warp_exit_invuln();
+    let pre_snap = pre_existing_snapshot.unwrap_or_default();
+    let had_gate_cloak = raw_gate_cloak || pre_snap.has_gate_cloak();
+    let had_non_gate_cloak = raw_non_gate_cloak || pre_snap.has_active_non_gate_cloak();
+    let had_covert_cloak = raw_covert_cloak || pre_snap.has_active_covert_cloak();
+    let had_non_covert_cloak = raw_non_covert_cloak || pre_snap.has_active_non_covert_cloak();
+    let had_undock_invuln = raw_undock_invuln || pre_snap.undock_invulnerable_remaining_ticks > 0;
+    let had_warp_exit_invuln = raw_warp_exit_invuln || pre_snap.has_warp_exit_invuln();
 
+    let strip_all_cloaks = force_all_cloaks || reason.breaks_covert_cloak();
     let should_deactivate_gate_cloak = had_gate_cloak;
     let should_deactivate_non_covert_cloak =
-        had_non_covert_cloak && reason.breaks_non_covert_module_cloak();
-    let should_deactivate_covert_cloak = had_covert_cloak && reason.breaks_covert_cloak();
+        had_non_covert_cloak && (strip_all_cloaks || reason.breaks_non_covert_module_cloak());
+    let should_deactivate_covert_cloak = had_covert_cloak && strip_all_cloaks;
 
     if should_deactivate_gate_cloak
         || should_deactivate_non_covert_cloak
@@ -269,8 +369,7 @@ pub(in crate::system_actor) fn break_protection_in_actor(
         } else if deactivated_by_ballpark {
             events.slim_cloak_cleared = true;
         }
-    } else if reason.breaks_covert_cloak() {
-        // Handle residual `slim_meta.is_cloaked` or residual CS cloak fields when forced decloak runs.
+    } else if strip_all_cloaks {
         if let Some(mut meta) = exec_ctx.ballpark.ball_slim_meta.get(&ball_id).cloned() {
             if meta.is_cloaked {
                 meta.is_cloaked = false;
@@ -280,23 +379,68 @@ pub(in crate::system_actor) fn break_protection_in_actor(
         }
     }
 
-    if reason.breaks_covert_cloak() {
-        events.removed_cloak_cycles = strip_cloak_cycles_for_ship(exec_ctx, ball_id);
-        if let Some(cs) = exec_ctx.ballpark.combat_states.get_mut(&ball_id) {
-            let had_residual = cs.is_cloaked
-                || cs.is_covert_cloak
-                || cs.gate_cloak_remaining_ticks > 0
-                || cs.cloak_stabilization_remaining_s > 0.0
-                || cs.cloak_velocity_multiplier.is_some();
-            if had_residual {
-                let (was_gate, was_non_gate) = cs.clear_all_cloak_state();
-                if was_gate {
-                    events.gate_cloak_broken = true;
+    if strip_all_cloaks || reason.breaks_non_covert_module_cloak() || should_deactivate_non_covert_cloak
+    {
+        let removed_cycles = strip_cloak_cycles_for_ship(exec_ctx, ball_id, strip_all_cloaks);
+        if !removed_cycles.is_empty() {
+            if removed_cycles.iter().any(|c| c.is_covert) {
+                events.covert_cloak_broken = true;
+            }
+            if !had_gate_cloak {
+                events.non_gate_cloak_broken = true;
+            }
+        }
+        events.removed_cloak_cycles = removed_cycles;
+        if strip_all_cloaks {
+            if let Some(cs) = exec_ctx.ballpark.combat_states.get_mut(&ball_id) {
+                let was_gate = cs.gate_cloak_remaining_ticks > 0;
+                let was_non_gate = !was_gate && (cs.is_cloaked || cs.cloak_velocity_multiplier.is_some());
+                let had_residual = cs.is_cloaked
+                    || cs.is_covert_cloak
+                    || was_gate
+                    || cs.cloak_stabilization_remaining_s > 0.0
+                    || cs.cloak_velocity_multiplier.is_some();
+                if had_residual {
+                    cs.is_cloaked = false;
+                    cs.was_cloaked_last_tick = false;
+                    cs.is_covert_cloak = false;
+                    cs.gate_cloak_remaining_ticks = 0;
+                    cs.cloak_velocity_multiplier = None;
+                    cs.cloak_stabilization_remaining_s = 0.0;
+                    if was_gate {
+                        events.gate_cloak_broken = true;
+                    }
+                    if was_non_gate {
+                        events.non_gate_cloak_broken = true;
+                        if had_covert_cloak {
+                            events.covert_cloak_broken = true;
+                        }
+                    }
                 }
-                if was_non_gate {
+            }
+        } else if !had_covert_cloak {
+            let mut cleared_non_covert_residual = false;
+            if let Some(cs) = exec_ctx.ballpark.combat_states.get_mut(&ball_id) {
+                if !cs.is_covert_cloak
+                    && cs.gate_cloak_remaining_ticks == 0
+                    && (cs.is_cloaked
+                        || cs.cloak_velocity_multiplier.is_some()
+                        || cs.cloak_stabilization_remaining_s > 0.0)
+                {
+                    cs.is_cloaked = false;
+                    cs.was_cloaked_last_tick = false;
+                    cs.cloak_velocity_multiplier = None;
+                    cs.cloak_stabilization_remaining_s = 0.0;
+                    cleared_non_covert_residual = true;
                     events.non_gate_cloak_broken = true;
-                    if had_covert_cloak {
-                        events.covert_cloak_broken = true;
+                }
+            }
+            if cleared_non_covert_residual || !events.removed_cloak_cycles.is_empty() {
+                if let Some(mut meta) = exec_ctx.ballpark.ball_slim_meta.get(&ball_id).cloned() {
+                    if meta.is_cloaked {
+                        meta.is_cloaked = false;
+                        exec_ctx.ballpark.change_slim_item(ball_id, meta);
+                        events.slim_cloak_cleared = true;
                     }
                 }
             }
@@ -354,19 +498,42 @@ pub(in crate::system_actor) fn force_decloak_in_actor(
     location_invuln_until_unix: Option<u64>,
     real_now_unix: u64,
 ) -> ProtectionBreakEvents {
-    let effective_reason = match reason {
-        ProtectionBreakReason::Manual => ProtectionBreakReason::Manual,
-        _ => ProtectionBreakReason::EssGateEntry,
-    };
-    break_protection_in_actor(
+    break_protection_in_actor_impl(
         exec_ctx,
         ball_id,
         char_id,
-        effective_reason,
+        reason,
         location_invuln_until_unix,
         real_now_unix,
         None,
+        true,
     )
+}
+
+/// Clears gate cloak and action invulnerability on `ship_id` during disconnected warp sync,
+/// syncing `protection_registry` under the actor state write lock (`#1486`).
+pub(crate) fn finish_disconnected_warp_protection_sync(
+    ballpark: &mut Ballpark,
+    actor_st: &mut SystemActorState,
+    ship_id: BallId,
+) {
+    let had_gate_cloak = ballpark
+        .combat_states
+        .get(&ship_id)
+        .is_some_and(|cs| cs.gate_cloak_remaining_ticks > 0);
+    if had_gate_cloak {
+        ballpark.deactivate_cloak(ship_id);
+        if let Some(mut meta) = ballpark.ball_slim_meta.get(&ship_id).cloned() {
+            if meta.is_cloaked {
+                meta.is_cloaked = false;
+                ballpark.change_slim_item(ship_id, meta);
+            }
+        }
+    }
+    if let Some(cs) = ballpark.combat_states.get_mut(&ship_id) {
+        let _ = cs.clear_action_invuln();
+    }
+    sync_ball_protection_in_actor(ballpark, actor_st, ship_id);
 }
 
 pub(crate) fn sync_active_module_ships_cache(

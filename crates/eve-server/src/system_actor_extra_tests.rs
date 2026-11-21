@@ -909,3 +909,119 @@ async fn activate_module_cycle_atomic_validates_preconditions_without_rollback_o
     assert!((align_ok.capacitor_after - 180.0).abs() < 1e-6);
     assert!(reg.is_module_active_sync(sys_id, ship_align, 5002));
 }
+
+#[tokio::test]
+async fn activate_module_cycle_atomic_preserves_protection_when_break_false_and_avoids_prevalidation_mutation() {
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    let reg = SystemRegistry::with_sde_and_db(sde, db.clone());
+    let sys_id: SolarSystemId = 30_000_142;
+    let h = reg.get_or_spawn(sys_id);
+    let char_id: CharacterId = 90_000_773;
+    let ship_id: BallId = 7703;
+    let mod_id: ItemId = 50_773;
+
+    // 1. `break_protection: false` keeps undock, gate-cloak, and warp-exit timers completely intact.
+    let mut cs = CombatState {
+        capacitor: 50.0,
+        max_capacitor: 100.0,
+        undock_invulnerable_remaining_ticks: 60,
+        gate_cloak_remaining_ticks: 60,
+        warp_exit_invulnerable_remaining_ticks: 10,
+        sync_invuln_with_undock_timer: true,
+        is_cloaked: true,
+        ..Default::default()
+    };
+    cs.is_covert_cloak = false;
+    h.spawn_ball_with_meta(
+        make_ball(ship_id, 587, DVec3::ZERO),
+        cs,
+        SlimItemMeta {
+            char_id: Some(char_id),
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let mutadaptive_cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: mod_id,
+        module_type_id: 47259,
+        owner_char_id: Some(char_id),
+        effect_name: "moduleBonusArmorMutadaptive".into(),
+        duration_s: 5.0,
+        repeat: 1,
+        cap_need_per_cycle: 10.0,
+        mutadaptive_spool_step: 0.1,
+        mutadaptive_spool_max: 1.0,
+        current_spool_cycles: 3,
+        ..ActiveModuleCycle::default()
+    };
+    db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(mod_id);
+    });
+    let no_break_ok = h
+        .activate_module_cycle_atomic(AtomicActivateCycleRequest {
+            char_id,
+            cycle: mutadaptive_cycle.clone(),
+            allow_while_warping: true,
+            allow_while_cloaked: true,
+            break_protection: false,
+            break_reason: ProtectionBreakReason::ModuleActivation,
+            location_change_invuln_until_unix: Some(2_000_000_000),
+            real_now_unix: 1_999_999_990,
+        })
+        .await
+        .unwrap();
+    assert!(!no_break_ok.protection_events.gate_cloak_broken);
+    assert!(!no_break_ok.protection_events.invuln_cancelled);
+    assert!(!no_break_ok.protection_events.warp_exit_invuln_cancelled);
+    let cs_intact = h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_intact.undock_invulnerable_remaining_ticks, 60);
+    assert_eq!(cs_intact.gate_cloak_remaining_ticks, 60);
+    assert_eq!(cs_intact.warp_exit_invulnerable_remaining_ticks, 10);
+    assert!(cs_intact.is_cloaked);
+    let snap_intact = h.get_protection_snapshot(ship_id).await.unwrap().unwrap();
+    assert_eq!(snap_intact.snapshot.undock_invulnerable_remaining_ticks, 60);
+    assert!(snap_intact.snapshot.has_gate_cloak());
+
+    // 2. Capacitor rejection with `effective_max_capacitor` + existing mutadaptive cycle leaves
+    //    `cs.max_capacitor`, `cs.capacitor`, existing cycle (`current_spool_cycles == 3`),
+    //    and DB `module_active_states` completely unmutated.
+    let mut cap_fail_cycle = mutadaptive_cycle;
+    cap_fail_cycle.effective_max_capacitor = Some(500.0);
+    cap_fail_cycle.cap_need_per_cycle = 80.0;
+    cap_fail_cycle.current_spool_cycles = 0;
+    let cap_err = h
+        .activate_module_cycle_atomic(AtomicActivateCycleRequest {
+            char_id,
+            cycle: cap_fail_cycle,
+            allow_while_warping: true,
+            allow_while_cloaked: true,
+            break_protection: true,
+            break_reason: ProtectionBreakReason::ModuleActivation,
+            location_change_invuln_until_unix: None,
+            real_now_unix: 1_999_999_990,
+        })
+        .await
+        .unwrap_err();
+    assert!(cap_err.contains("Insufficient capacitor"));
+
+    let cs_after = h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((cs_after.max_capacitor - 100.0).abs() < 1e-6);
+    assert!((cs_after.capacitor - 40.0).abs() < 1e-6);
+    assert_eq!(cs_after.undock_invulnerable_remaining_ticks, 60);
+    assert_eq!(cs_after.gate_cloak_remaining_ticks, 60);
+    assert!(db.with_snapshot(|s| s.module_active_states.contains(&mod_id)));
+    let spool_still = h
+        .actor_state
+        .read()
+        .unwrap()
+        .active_module_cycles
+        .iter()
+        .find(|c| c.ship_id == ship_id && c.module_id == mod_id)
+        .map(|c| c.current_spool_cycles);
+    assert_eq!(spool_still, Some(3));
+}

@@ -1887,3 +1887,81 @@ async fn break_ship_protection_with_location_invuln_emits_single_invuln_cancelle
     assert!(!events_again.any_cloak_broken());
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 }
+
+#[tokio::test]
+async fn break_ship_protection_with_location_invuln_ess_gate_entry_preserves_location_invuln() {
+    let ctx = test_ctx();
+    let char_id = 91_384_889_i64;
+    let ship_id = 1_091_384_889_i64;
+    let sys_id = 30_000_142_u32;
+    let now_unix = ctx.now_unix();
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    let mut combat = eve_destiny::CombatState {
+        is_cloaked: true,
+        is_covert_cloak: true,
+        undock_invulnerable_remaining_ticks: 40,
+        warp_exit_invulnerable_remaining_ticks: 15,
+        ..Default::default()
+    };
+    combat.gate_cloak_remaining_ticks = 0;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        combat,
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_id),
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // EssGateEntry with ship_id <= 0, unloaded/unknown ball, and live ball MUST all preserve location_change_invuln.
+    grant_location_change_invulnerability(&ctx, char_id, now_unix + 60);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let ev_zero = break_ship_protection_with_location_invuln(
+        &ctx,
+        &sys,
+        char_id,
+        0,
+        crate::system_actor::ProtectionBreakReason::EssGateEntry,
+    )
+    .await;
+    assert!(!ev_zero.invuln_cancelled);
+    assert!(is_location_change_invulnerable(&ctx, char_id, now_unix));
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    let ev_ess = break_ship_protection_with_location_invuln(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        crate::system_actor::ProtectionBreakReason::EssGateEntry,
+    )
+    .await;
+    assert!(ev_ess.covert_cloak_broken);
+    assert!(!ev_ess.invuln_cancelled);
+    assert!(!ev_ess.warp_exit_invuln_cancelled);
+    assert!(is_location_change_invulnerable(&ctx, char_id, now_unix));
+    let mirrored = sys.get_protection_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(!mirrored.has_any_cloak());
+    assert_eq!(mirrored.snapshot.undock_invulnerable_remaining_ticks, 40);
+    assert_eq!(
+        mirrored.location_change_invuln_until_unix,
+        Some(now_unix + 60)
+    );
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+}
