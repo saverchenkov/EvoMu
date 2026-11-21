@@ -108,8 +108,10 @@ pub fn grant_location_change_invulnerability(ctx: &ServerContext, char_id: i64, 
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(char_id, until_unix);
-    ctx.systems
-        .try_sync_location_change_invuln_for_char(char_id, Some(until_unix));
+    ctx.systems.try_sync_location_change_invuln_for_char(
+        char_id,
+        crate::system_actor::LocationChangeInvulnSyncOp::Grant(until_unix),
+    );
 }
 
 pub(crate) fn peek_active_location_change_invuln(ctx: &ServerContext, char_id: i64) -> Option<u64> {
@@ -145,8 +147,10 @@ pub(crate) fn commit_cleared_location_change_invuln(
     }
     map.remove(&char_id);
     drop(map);
-    ctx.systems
-        .try_sync_location_change_invuln_for_char(char_id, None);
+    ctx.systems.try_sync_location_change_invuln_for_char(
+        char_id,
+        crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo(cur),
+    );
     now_unix < cur
 }
 
@@ -173,8 +177,12 @@ pub(crate) fn pop_active_location_change_invuln(ctx: &ServerContext, char_id: i6
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&char_id);
-    ctx.systems
-        .try_sync_location_change_invuln_for_char(char_id, None);
+    if let Some(cur) = removed {
+        ctx.systems.try_sync_location_change_invuln_for_char(
+            char_id,
+            crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo(cur),
+        );
+    }
     let now = ctx.now_unix();
     removed.filter(|&until| now < until)
 }

@@ -793,6 +793,13 @@ pub struct AtomicActivateCycleRequest {
     pub real_now_unix: u64,
 }
 
+/// Actor mirror sync operation for `location_change_invuln` (`#1486`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocationChangeInvulnSyncOp {
+    Grant(u64),
+    ClearUpTo(u64),
+}
+
 /// Structured outcome returned by [`SystemCommand::ActivateModuleCycleAtomic`] (`#1486`).
 #[derive(Debug, Clone, Default)]
 pub struct AtomicActivateCycleOutcome {
@@ -1330,7 +1337,7 @@ pub enum SystemCommand {
     },
     SyncLocationChangeInvuln {
         char_id: CharacterId,
-        until_unix: Option<u64>,
+        op: LocationChangeInvulnSyncOp,
     },
     ActivateModuleCycleAtomic {
         request: AtomicActivateCycleRequest,

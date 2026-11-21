@@ -1886,6 +1886,20 @@ async fn break_ship_protection_with_location_invuln_emits_single_invuln_cancelle
     assert!(!events_again.invuln_cancelled);
     assert!(!events_again.any_cloak_broken());
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // Racing `break_location_change_invulnerability` against an in-flight `BreakProtection(Some(t1))` emits `OnInvulnCancelled` once.
+    let t_race = now_unix + 75;
+    grant_location_change_invulnerability(&ctx, char_id, t_race);
+    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+    let peeked = peek_active_location_change_invuln(&ctx, char_id);
+    assert_eq!(peeked, Some(t_race));
+    break_location_change_invulnerability(&ctx, char_id);
+    let mut ev_race = sys.break_protection(ship_id, Some(char_id), crate::system_actor::ProtectionBreakReason::ModuleActivation, peeked, now_unix).await.unwrap();
+    finalize_committed_location_change_invuln(&ctx, char_id, peeked, now_unix, &mut ev_race);
+    emit_protection_break_notifications(&ctx, char_id, ship_id, &ev_race);
+    assert!(!ev_race.invuln_cancelled && ev_race.location_invuln_already_consumed);
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
 }
 
 #[tokio::test]
@@ -2041,4 +2055,10 @@ async fn break_ship_protection_with_location_invuln_concurrent_and_newer_grant_p
     let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
     let ev_t3 = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, Move).await;
     assert!(ev_t3.invuln_cancelled && !is_location_change_invulnerable(&ctx, char_id, now));
+
+    // 4. Stale `ClearUpTo(t1)` arriving after `Grant(t2)` (`t2 > t1`) preserves newer actor grant and registry entry.
+    grant_location_change_invulnerability(&ctx, char_id, t2);
+    sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo(t1));
+    assert_eq!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(t2));
+    assert_eq!(peek_active_location_change_invuln(&ctx, char_id), Some(t2));
 }

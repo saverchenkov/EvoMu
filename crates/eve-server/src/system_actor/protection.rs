@@ -523,9 +523,6 @@ fn break_protection_in_actor_impl(
             if cs_undock_broken || had_undock_invuln {
                 events.invuln_cancelled = true;
             }
-            if had_warp_exit_invuln {
-                events.warp_exit_invuln_cancelled = true;
-            }
             if matches!(reason, ProtectionBreakReason::Manual | ProtectionBreakReason::TargetLock)
                 && cs.is_tethered
             {
@@ -783,22 +780,33 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             defer_reply(exec_ctx.deferred_replies, reply, snap);
             None
         }
-        SystemCommand::SyncLocationChangeInvuln {
-            char_id,
-            until_unix,
-        } => {
-            if let Some(until) = until_unix {
-                exec_ctx.actor_st.location_invuln_by_char.insert(char_id, until);
-                exec_ctx
-                    .actor_st
-                    .location_invuln_consumed_until_by_char
-                    .remove(&char_id);
-            } else {
-                exec_ctx.actor_st.location_invuln_by_char.remove(&char_id);
-            }
-            for entry in exec_ctx.actor_st.protection_registry.values_mut() {
-                if entry.owner_char_id == Some(char_id) {
-                    entry.location_change_invuln_until_unix = until_unix;
+        SystemCommand::SyncLocationChangeInvuln { char_id, op } => {
+            match op {
+                LocationChangeInvulnSyncOp::Grant(until) => {
+                    exec_ctx.actor_st.location_invuln_by_char.insert(char_id, until);
+                    exec_ctx.actor_st.location_invuln_consumed_until_by_char.remove(&char_id);
+                    for entry in exec_ctx.actor_st.protection_registry.values_mut() {
+                        if entry.owner_char_id == Some(char_id) {
+                            entry.location_change_invuln_until_unix = Some(until);
+                        }
+                    }
+                }
+                LocationChangeInvulnSyncOp::ClearUpTo(cleared_until) => {
+                    if !exec_ctx
+                        .actor_st
+                        .location_invuln_by_char
+                        .get(&char_id)
+                        .is_some_and(|&cur| cur > cleared_until)
+                    {
+                        exec_ctx.actor_st.location_invuln_by_char.remove(&char_id);
+                        exec_ctx
+                            .actor_st
+                            .location_invuln_consumed_until_by_char
+                            .entry(char_id)
+                            .and_modify(|prev| *prev = (*prev).max(cleared_until))
+                            .or_insert(cleared_until);
+                        clear_protection_registry_location_invuln(exec_ctx.actor_st, char_id);
+                    }
                 }
             }
             None
@@ -1186,11 +1194,12 @@ impl SystemHandle {
     }
 
     /// Non-blocking sync mirror of `location_change_invuln` state into actor memory (`#1486`).
-    pub fn try_sync_location_change_invuln(&self, char_id: CharacterId, until_unix: Option<u64>) {
-        let _ = self.cmd_tx.try_send(SystemCommand::SyncLocationChangeInvuln {
-            char_id,
-            until_unix,
-        });
+    pub fn try_sync_location_change_invuln(
+        &self,
+        char_id: CharacterId,
+        op: LocationChangeInvulnSyncOp,
+    ) {
+        let _ = self.cmd_tx.try_send(SystemCommand::SyncLocationChangeInvuln { char_id, op });
     }
 
     /// Queries the canonical actor state for whether `ship_id` has an active non-gate module cloak (`#1486`).
@@ -1224,10 +1233,10 @@ impl SystemRegistry {
     pub fn try_sync_location_change_invuln_for_char(
         &self,
         char_id: CharacterId,
-        until_unix: Option<u64>,
+        op: LocationChangeInvulnSyncOp,
     ) {
         for (_, handle) in self.active_system_handles() {
-            handle.try_sync_location_change_invuln(char_id, until_unix);
+            handle.try_sync_location_change_invuln(char_id, op);
         }
     }
 }
