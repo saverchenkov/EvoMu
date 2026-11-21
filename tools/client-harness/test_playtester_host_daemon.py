@@ -5536,5 +5536,649 @@ class TestClusterDowntimeHandling1190(unittest.TestCase):
                 runner.oracle.flush()
 
 
+class TestMachoClientUserErrorDedup(unittest.TestCase):
+    def test_extract_user_error_key_variants(self):
+        ext = playtester.PlaytesterBugOracle.extract_user_error_key
+        self.assertEqual(
+            ext("User error, msg=ModuleFitFailed, dict={'reason': 'no slot'}"),
+            "ModuleFitFailed",
+        )
+        self.assertEqual(
+            ext("UserError: User error, msg=CannotFitStackedModule, dict={}"),
+            "CannotFitStackedModule",
+        )
+        self.assertEqual(
+            ext("UserError('ModuleFitFailed', {'reason': 'no slot'})"),
+            "ModuleFitFailed",
+        )
+        self.assertEqual(
+            ext("UserError(u'CannotFitStackedModule', {})"),
+            "CannotFitStackedModule",
+        )
+        self.assertEqual(ext("UserError(CannotLoadNotEnoughCharges)"), "CannotLoadNotEnoughCharges")
+        self.assertEqual(ext("UserError: CannotFitStackedModule"), "CannotFitStackedModule")
+        self.assertEqual(
+            ext("UserError('CustomInfo', {'info': 'TargetingFailed: Target distance exceeds max'})"),
+            "CustomInfo:TargetingFailed",
+        )
+        self.assertEqual(
+            ext("UserError: ('CustomInfo', {'info': 'TargetingFailed: Target distance exceeds max'})"),
+            "CustomInfo:TargetingFailed",
+        )
+        self.assertEqual(
+            ext("UserError: User error, msg=CustomInfo, dict={'info': u'TargetingFailed: Target distance exceeds max'}"),
+            "CustomInfo:TargetingFailed",
+        )
+        self.assertEqual(
+            ext("UserError('CustomInfo', {'info': 'Fitting failed:  slot  full'})"),
+            ext("UserError: User error, msg=CustomInfo, dict={'info': u'Fitting failed: slot full'}"),
+        )
+        self.assertEqual(
+            ext("UserError(CustomInfo: Fitting failed: slot full)"),
+            ext("UserError('CustomInfo', {'info': 'Fitting failed: slot full'})"),
+        )
+        self.assertEqual(
+            ext("UserError: CustomInfo: Fitting failed: slot full"),
+            "CustomInfo:fitting failed: slot full",
+        )
+        self.assertEqual(
+            ext("UserError('CustomInfo', {'info': ('SlotFull', {'slot': 1})})"),
+            ext("UserError: ('CustomInfo', {'info': (u'SlotFull', {'slot': 1})})"),
+        )
+        self.assertIsNone(ext("KeyError: 'shipID'"))
+
+    def test_extract_client_user_error_key_rejects_non_user_error_traces(self):
+        cext = playtester.PlaytesterBugOracle.extract_client_user_error_key
+        keyerr_with_locals = (
+            'Traceback (most recent call last):\n'
+            '  File "packages/fitting/ui/slotController.py", line 142, in TryFit\n'
+            "    raise UserError('ModuleFitFailed')\n"
+            "KeyError: 'shipID'\n"
+            "Local variables:\n"
+            "  last_err = \"User error, msg=ModuleFitFailed\"\n"
+            "EXCEPTION END\n"
+        )
+        self.assertIsNone(cext(keyerr_with_locals))
+
+        attrerr_with_thread_locals = (
+            'Traceback (most recent call last):\n'
+            '  File "packages/fitting/ui/slotController.py", line 150, in Refresh\n'
+            "AttributeError: 'NoneType' object has no attribute 'GetItem'\n"
+            "Thread Locals:\n"
+            "  pending = UserError('ModuleFitFailed')\n"
+        )
+        self.assertIsNone(cext(attrerr_with_thread_locals))
+
+        truncated_frame_only = (
+            'Traceback (most recent call last):\n'
+            '  File "packages/fitting/ui/slotController.py", line 142, in TryFit\n'
+            "    raise UserError('ModuleFitFailed')\n"
+        )
+        self.assertIsNone(cext(truncated_frame_only))
+
+        formatted_keyerr = (
+            "Formatted exception info: KeyError: 'shipID'\n"
+            "Local variables:\n"
+            "  err = UserError('ModuleFitFailed')\n"
+        )
+        self.assertIsNone(cext(formatted_keyerr))
+        self.assertIsNone(cext("RuntimeError: Unexpected UserError: ('ModuleFitFailed',)"))
+        self.assertIsNone(cext('[Playtester] Client exception: KeyError: "UserError(\'ModuleFitFailed\')"'))
+        self.assertEqual(
+            cext(
+                "[evomu_site] logmodule.LogException\n"
+                'Traceback (most recent call last):\n'
+                '  File "packages/fitting/ui/slotController.py", line 142, in TryFit\n'
+                "UserError: ('ModuleFitFailed', {'moduleName': ''})\n"
+                "Thread Locals:\n"
+                "  self = <SlotController>\n"
+            ),
+            "ModuleFitFailed",
+        )
+        self.assertEqual(
+            cext("Formatted exception info: UserError: ('CustomInfo', {'info': 'CanNotFit: reason'})\nThread Locals:\n  x = 1\n"),
+            "CustomInfo:CanNotFit",
+        )
+
+    def test_evaluate_step_dedups_same_step_macho_and_client_user_error_and_suppresses_step_n_plus_1(self):
+        sync_mod = playtester.sync_bugs_to_github
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            tb = root / "client_tracebacks.log"
+            srv = root / "server.log"
+            shot = root / "screen.png"
+            sdir = root / "step_96364"
+            qdir.mkdir()
+            sdir.mkdir()
+            tb.write_text("", encoding="utf-8")
+            srv.write_text("", encoding="utf-8")
+            shot.write_bytes(b"png")
+
+            mem = playtester.PlaytesterMemory(root, git_head="3c6b4a75c")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+            client_trace = (
+                'Traceback (most recent call last):\n'
+                '  File "packages/fitting/ui/slotController.py", line 142, in TryFit\n'
+                "UserError: User error, msg=ModuleFitFailed, dict={'reason': 'No high slots'}\n"
+            )
+            step_fr = {
+                "log_exceptions": [
+                    {
+                        "headline": "User error, msg=ModuleFitFailed, dict={'reason': 'No high slots'}",
+                        "trace": client_trace,
+                    }
+                ],
+                "quasar_errors": [],
+                "macho_exceptions": [
+                    {
+                        "service": "dogmaIM",
+                        "method": "Fit",
+                        "error": "UserError('ModuleFitFailed', {'reason': 'No high slots'})",
+                    }
+                ],
+                "macho_calls": [
+                    {
+                        "offset_ms": -12,
+                        "service": "dogmaIM",
+                        "method": "Fit",
+                        "args_summary": "(1001, 2002)",
+                        "status": "UserError('ModuleFitFailed')",
+                        "duration_micros": 4200,
+                    }
+                ],
+                "traceback": client_trace,
+            }
+            queued = oracle.evaluate_step(
+                step_num=96364,
+                git_head="3c6b4a75c",
+                decision={"action": {"type": "click_widget", "target": "fitBtn"}, "bug_report": {"should_file": False}},
+                exec_res={"action_ok": False, "action_error": "", "flight_recorder": step_fr},
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(len(queued), 1)
+            bundle = json.loads(queued[0].read_text(encoding="utf-8"))
+            self.assertEqual(bundle["kind"], "protocol_error")
+            self.assertEqual(bundle["subsystem"], "macho")
+            self.assertIn("dogmaIM", bundle["summary"])
+            self.assertIn("ModuleFitFailed", bundle["summary"])
+            self.assertIn("slotController.py", bundle["trace"])
+            self.assertEqual(bundle["trace"].count("Traceback (most recent call last):"), 1)
+            self.assertFalse(oracle._prev_step_dropped_all_log_excs)
+
+            rendered = sync_mod.format_markdown_issue(bundle)
+            self.assertIn("### 🐍 Client Python Traceback", rendered)
+            self.assertIn("slotController.py", rendered)
+            self.assertIn("MachoNet RPC Flight Recorder", rendered)
+            self.assertIn("dogmaIM", rendered)
+
+            clean_fr = {"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []}
+            for cat in ("protocol_error", "client_exception", "broken_game_mechanic", "ui_state_desync"):
+                suppressed = oracle.evaluate_step(
+                    step_num=96365,
+                    git_head="3c6b4a75c",
+                    decision={
+                        "action": {"type": "wait", "duration_ms": 200},
+                        "previous_action_verification": {
+                            "expectation_met": False,
+                            "discrepancy_summary": "ModuleFitFailed rejected fit",
+                        },
+                        "bug_report": {
+                            "should_file": True,
+                            "category": cat,
+                            "title": f"Follow-up {cat} for ModuleFitFailed",
+                            "severity": "high",
+                            "subsystem": "macho" if cat != "client_exception" else "client-python",
+                            "expected_behavior": "Fits module",
+                            "actual_behavior": "ModuleFitFailed",
+                            "reproduction_steps": ["Fit module"],
+                        },
+                    },
+                    exec_res={"action_ok": True, "flight_recorder": clean_fr},
+                    ui_snapshot={},
+                    screenshot_path=shot,
+                    burst_paths=[],
+                    traceback_log=tb,
+                    server_log=srv,
+                    step_dir=sdir,
+                    last_flight_recorder=step_fr,
+                )
+                self.assertEqual(suppressed, [], f"Expected Step N+1 {cat} report to be suppressed")
+
+            auto_desync_suppressed = oracle.evaluate_step(
+                step_num=96366,
+                git_head="3c6b4a75c",
+                decision={
+                    "action": {"type": "wait", "duration_ms": 200},
+                    "previous_action_verification": {
+                        "expectation_met": False,
+                        "discrepancy_summary": "Fit did not change module slot",
+                    },
+                    "bug_report": {"should_file": False},
+                },
+                exec_res={"action_ok": True, "flight_recorder": clean_fr},
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder=step_fr,
+            )
+            self.assertEqual(auto_desync_suppressed, [])
+
+    def test_evaluate_step_dedups_custominfo_via_client_tracebacks_log_without_duplicating_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            tb = root / "client_tracebacks.log"
+            srv = root / "server.log"
+            shot = root / "screen.png"
+            sdir = root / "step_96500"
+            qdir.mkdir()
+            sdir.mkdir()
+            tb.write_text("", encoding="utf-8")
+            srv.write_text("", encoding="utf-8")
+            shot.write_bytes(b"png")
+
+            mem = playtester.PlaytesterMemory(root, git_head="3c6b4a75c")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+            tb_block = (
+                "Traceback (most recent call last):\n"
+                '  File "/workspace/eve/client/script/ui/shared/fitting/fittingMgmt.py", line 88, in Fit\n'
+                "UserError: User error, msg=CustomInfo, dict={'info': u'CannotFitStackedModule: max 1'}\n"
+            )
+            tb.write_text(tb_block, encoding="utf-8")
+
+            queued = oracle.evaluate_step(
+                step_num=96500,
+                git_head="3c6b4a75c",
+                decision={"action": {"type": "click_widget", "target": "fitModule"}, "bug_report": {"should_file": False}},
+                exec_res={
+                    "action_ok": False,
+                    "flight_recorder": {
+                        "log_exceptions": [],
+                        "quasar_errors": [],
+                        "macho_exceptions": [
+                            {
+                                "service": "dogmaIM",
+                                "method": "Fit",
+                                "error": "UserError('CustomInfo', {'info': 'CannotFitStackedModule: max 1'})",
+                            }
+                        ],
+                    },
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(len(queued), 1)
+            bundle = json.loads(queued[0].read_text(encoding="utf-8"))
+            self.assertEqual(bundle["kind"], "protocol_error")
+            self.assertEqual(bundle["subsystem"], "macho")
+            self.assertEqual(bundle["trace"].count("Traceback (most recent call last):"), 1)
+            self.assertIn("fittingMgmt.py", bundle["trace"])
+
+    def test_evaluate_step_keeps_unrelated_keyerror_mismatched_user_error_and_quasar_separate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            tb = root / "client_tracebacks.log"
+            srv = root / "server.log"
+            shot = root / "screen.png"
+            sdir = root / "step_96600"
+            qdir.mkdir()
+            sdir.mkdir()
+            tb.write_text("", encoding="utf-8")
+            srv.write_text("", encoding="utf-8")
+            shot.write_bytes(b"png")
+
+            mem = playtester.PlaytesterMemory(root, git_head="3c6b4a75c")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+
+            # 1. Unrelated KeyError traceback even when exec_res.action_error mentions ModuleFitFailed.
+            q1 = oracle.evaluate_step(
+                step_num=96601,
+                git_head="3c6b4a75c",
+                decision={"action": {"type": "click_widget", "target": "fitBtn"}, "bug_report": {"should_file": False}},
+                exec_res={
+                    "action_ok": False,
+                    "action_error": "Client action rejected with UserError('ModuleFitFailed', {})",
+                    "flight_recorder": {
+                        "log_exceptions": [
+                            {
+                                "headline": "KeyError: 'shipID'",
+                                "trace": 'Traceback (most recent call last):\n  File "hud.py", line 10, in Draw\nKeyError: \'shipID\'\n',
+                            }
+                        ],
+                        "quasar_errors": [],
+                        "macho_exceptions": [
+                            {
+                                "service": "dogmaIM",
+                                "method": "Fit",
+                                "error": "UserError('ModuleFitFailed', {'reason': 'No slot'})",
+                            }
+                        ],
+                    },
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(len(q1), 2)
+
+            # 2. Mismatched UserError keys stay separate.
+            q2 = oracle.evaluate_step(
+                step_num=96602,
+                git_head="3c6b4a75c",
+                decision={"action": {"type": "click_widget", "target": "fitBtn2"}, "bug_report": {"should_file": False}},
+                exec_res={
+                    "action_ok": False,
+                    "flight_recorder": {
+                        "log_exceptions": [
+                            {
+                                "headline": "User error, msg=CannotFitStackedModule, dict={}",
+                                "trace": 'Traceback (most recent call last):\n  File "slot2.py", line 12, in Fit\nUserError: User error, msg=CannotFitStackedModule\n',
+                            }
+                        ],
+                        "quasar_errors": [],
+                        "macho_exceptions": [
+                            {
+                                "service": "dogmaIM",
+                                "method": "Fit2",
+                                "error": "UserError('ModuleFitFailed', {'reason': 'Different reason'})",
+                            }
+                        ],
+                    },
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(len(q2), 2)
+
+            # 3. Quasar error must never absorb client_traceback even if text contains a UserError key.
+            q3 = oracle.evaluate_step(
+                step_num=96603,
+                git_head="3c6b4a75c",
+                decision={"action": {"type": "click_widget", "target": "qBtn"}, "bug_report": {"should_file": False}},
+                exec_res={
+                    "action_ok": False,
+                    "flight_recorder": {
+                        "log_exceptions": [
+                            {
+                                "headline": "User error, msg=QuasarRejectedReq, dict={}",
+                                "trace": 'Traceback (most recent call last):\n  File "q.py", line 5, in Call\nUserError: User error, msg=QuasarRejectedReq\n',
+                            }
+                        ],
+                        "quasar_errors": [
+                            {
+                                "kind": "quasar",
+                                "service": "gateway",
+                                "method": "Send",
+                                "error": "UserError('QuasarRejectedReq', {})",
+                            }
+                        ],
+                        "macho_exceptions": [],
+                    },
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(len(q3), 2)
+
+    def test_evaluate_step_never_absorbs_non_user_error_client_traceback_with_locals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            tb = root / "client_tracebacks.log"
+            srv = root / "server.log"
+            shot = root / "screen.png"
+            sdir = root / "step_96701"
+            qdir.mkdir()
+            sdir.mkdir()
+            tb.write_text("", encoding="utf-8")
+            srv.write_text("", encoding="utf-8")
+            shot.write_bytes(b"png")
+
+            mem = playtester.PlaytesterMemory(root, git_head="3c6b4a75c")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+            keyerr_trace = (
+                'Traceback (most recent call last):\n'
+                '  File "packages/fitting/ui/slotController.py", line 142, in TryFit\n'
+                "    raise UserError('ModuleFitFailed')\n"
+                "KeyError: 'shipID'\n"
+                "Local variables:\n"
+                "  last_err = \"User error, msg=ModuleFitFailed\"\n"
+                "EXCEPTION END\n"
+            )
+            queued = oracle.evaluate_step(
+                step_num=96701,
+                git_head="3c6b4a75c",
+                decision={"action": {"type": "click_widget", "target": "fitBtn"}, "bug_report": {"should_file": False}},
+                exec_res={
+                    "action_ok": False,
+                    "flight_recorder": {
+                        "log_exceptions": [
+                            {
+                                "headline": "[Playtester] Client exception: KeyError: 'shipID'",
+                                "trace": keyerr_trace,
+                            }
+                        ],
+                        "quasar_errors": [],
+                        "macho_exceptions": [
+                            {
+                                "service": "dogmaIM",
+                                "method": "Fit",
+                                "error": "UserError('ModuleFitFailed', {'reason': 'Low CPU'})",
+                            }
+                        ],
+                    },
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(len(queued), 2)
+            bundles = [json.loads(p.read_text(encoding="utf-8")) for p in queued]
+            kinds = {b["kind"] for b in bundles}
+            self.assertEqual(kinds, {"protocol_error", "client_traceback"})
+
+    def test_evaluate_step_prev_tb_concatenated_blocks_and_dropped_benign_log_excs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            tb = root / "client_tracebacks.log"
+            srv = root / "server.log"
+            shot = root / "screen.png"
+            sdir = root / "step_96702"
+            qdir.mkdir()
+            sdir.mkdir()
+            tb.write_text("", encoding="utf-8")
+            srv.write_text("", encoding="utf-8")
+            shot.write_bytes(b"png")
+
+            mem = playtester.PlaytesterMemory(root, git_head="3c6b4a75c")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+
+            # Case A: Two concatenated plain `Traceback (most recent call last):` blocks in raw_prev_tb
+            # (UserError + KeyError) must split properly so prev_tb_unexplained=True and Step N+1 is NOT suppressed.
+            concat_tb = (
+                'Traceback (most recent call last):\n'
+                '  File "packages/fitting/ui/slotController.py", line 10, in TryFit\n'
+                "UserError: ('ModuleFitFailed', {})\n"
+                'Traceback (most recent call last):\n'
+                '  File "packages/fitting/ui/slotController.py", line 22, in Refresh\n'
+                "KeyError: 'boom'\n"
+            )
+            prev_fr_concat = {
+                "log_exceptions": [],
+                "quasar_errors": [],
+                "macho_exceptions": [
+                    {
+                        "service": "dogmaIM",
+                        "method": "Fit",
+                        "error": "UserError('ModuleFitFailed', {})",
+                    }
+                ],
+                "traceback": concat_tb,
+            }
+            not_suppressed = oracle.evaluate_step(
+                step_num=96702,
+                git_head="3c6b4a75c",
+                decision={
+                    "action": {"type": "wait", "duration_ms": 200},
+                    "previous_action_verification": {
+                        "expectation_met": False,
+                        "discrepancy_summary": "KeyError boom after fit",
+                    },
+                    "bug_report": {
+                        "should_file": True,
+                        "category": "client_exception",
+                        "title": "Client KeyError boom after fit",
+                        "severity": "high",
+                        "subsystem": "client-python",
+                        "expected_behavior": "Window refreshes",
+                        "actual_behavior": "KeyError: 'boom'",
+                        "reproduction_steps": ["Fit module"],
+                    },
+                },
+                exec_res={"action_ok": True, "flight_recorder": {"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []}},
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder=prev_fr_concat,
+            )
+            self.assertEqual(len(not_suppressed), 1)
+            self.assertEqual(json.loads(not_suppressed[0].read_text(encoding="utf-8"))["kind"], "client_exception")
+
+            # Case B: Step N drops ONLY a benign log_exc (_prev_step_dropped_all_log_excs=True)
+            # alongside a macho UserError whose raw_prev_tb matches; Step N+1 client_exception must still be suppressed.
+            oracle2 = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+            benign_trace = (
+                'Traceback (most recent call last):\n'
+                '  File "eve/client/script/ui/shared/market/marketbase.py", line 100, in _OnResize\n'
+                "AttributeError: 'NoneType' object has no attribute 'max'\n"
+            )
+            step_n_fr = {
+                "log_exceptions": [
+                    {
+                        "headline": "AttributeError: 'NoneType' object has no attribute 'max'",
+                        "trace": benign_trace,
+                    }
+                ],
+                "quasar_errors": [],
+                "macho_exceptions": [
+                    {
+                        "service": "dogmaIM",
+                        "method": "Fit",
+                        "error": "UserError('ModuleFitFailed', {})",
+                    }
+                ],
+                "traceback": (
+                    'Traceback (most recent call last):\n'
+                    '  File "packages/fitting/ui/slotController.py", line 10, in TryFit\n'
+                    "UserError: ('ModuleFitFailed', {})\n"
+                ),
+            }
+            q_step_n = oracle2.evaluate_step(
+                step_num=96703,
+                git_head="3c6b4a75c",
+                decision={"action": {"type": "click_widget", "target": "fitBtn"}, "bug_report": {"should_file": False}},
+                exec_res={"action_ok": False, "flight_recorder": step_n_fr},
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(len(q_step_n), 1)
+            self.assertTrue(oracle2._prev_step_dropped_all_log_excs)
+
+            suppressed = oracle2.evaluate_step(
+                step_num=96704,
+                git_head="3c6b4a75c",
+                decision={
+                    "action": {"type": "wait", "duration_ms": 200},
+                    "previous_action_verification": {
+                        "expectation_met": False,
+                        "discrepancy_summary": "Modal showed ModuleFitFailed",
+                    },
+                    "bug_report": {
+                        "should_file": True,
+                        "category": "client_exception",
+                        "title": "Follow-up client_exception for ModuleFitFailed",
+                        "severity": "high",
+                        "subsystem": "client-python",
+                        "expected_behavior": "Fits module",
+                        "actual_behavior": "ModuleFitFailed",
+                        "reproduction_steps": ["Fit module"],
+                    },
+                },
+                exec_res={"action_ok": True, "flight_recorder": {"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []}},
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder=step_n_fr,
+            )
+            self.assertEqual(suppressed, [])
+
+    def test_extract_client_user_error_key_custom_info_with_secondary_error_names(self):
+        ext = playtester.PlaytesterBugOracle.extract_client_user_error_key
+        self.assertEqual(
+            ext(
+                "User error, msg=CustomInfo, dict={'info': 'FittingError: no slots'}"
+            ),
+            "CustomInfo:FittingError",
+        )
+        self.assertEqual(
+            ext(
+                "UserError('CustomInfo', {'info': 'ValidationError: slot full'})"
+            ),
+            "CustomInfo:ValidationError",
+        )
+        # Non-UserError primary exception mentioning CustomInfo in locals must still reject.
+        self.assertIsNone(
+            ext(
+                "KeyError: \"User error, msg=CustomInfo, dict={'info': 'FittingError: no slots'}\""
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
