@@ -750,6 +750,11 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
         _ => Vec::new(),
     };
     let warden_ball_id = balls2[0];
+    // Position mobile offensive/web drones (Berserker SW-900 optimal = 10 km) into engagement orbit around `target_ball_id` (at 35 km),
+    // keeping `warden_ball_id` and `salvage_drone` near `(0, 0, 0)` for the upcoming salvage & immobile sentry range checks.
+    for &bid in &[balls2[1], balls2[2], balls2[4]] {
+        sys_handle.try_set_ball_position(bid, DVec3::new(33_500.0, 0.0, 0.0));
+    }
 
     // Engage with EWAR drone + Augmented Ogre + Warden Sentry
     let engage2 = dispatch_combat_rpc(
@@ -940,8 +945,11 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
         Some(warden_id)
     );
 
-    // Scoop another drone via `ship.ScoopDrone`
+    // Scoop another drone via `ship.ScoopDrone` (after returning it within 2,500 m of ship)
     // parity: rpc:ship.ScoopDrone
+    let _ = sys_handle
+        .set_ball_position(balls2[2], DVec3::new(500.0, 0.0, 0.0))
+        .await;
     let scoop_drone_res = dispatch_combat_rpc(
         &ctx,
         &mut sess,

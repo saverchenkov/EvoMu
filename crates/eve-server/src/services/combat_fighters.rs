@@ -100,51 +100,98 @@ pub async fn apply_damage_to_fighter_squadron(
     fighter_ball_id: i64,
     damage: DamageVector,
 ) -> (u32, u32, bool) {
-    let squad_opt = ctx
+    let Some(type_id) = ctx
         .active_fighters
         .read()
         .unwrap()
         .get(&fighter_ball_id)
-        .cloned();
-    let Some(mut squad) = squad_opt else {
+        .map(|s| s.type_id)
+    else {
         return (0, 0, false);
     };
-    let unit_hp = ctx.sde.types.get(&squad.type_id)
+    let unit_hp = ctx
+        .sde
+        .types
+        .get(&type_id)
         .and_then(|t| t.default_attributes.get(&263).copied().or_else(|| t.default_attributes.get(&9).copied()))
-        .unwrap_or(1_000.0).max(250.0);
+        .unwrap_or(1_000.0)
+        .max(250.0);
     let raw_dmg = damage.total().max(0.0);
-    let total_accum = with_mut_combat_runtime(ctx, |rt| {
+    let units_killed = with_mut_combat_runtime(ctx, |rt| {
         let entry = rt.fighter_unit_damage_accum.entry(fighter_ball_id).or_insert(0.0);
         *entry += raw_dmg;
-        *entry
+        let killed = (*entry / unit_hp).floor() as u32;
+        if killed > 0 {
+            *entry = (*entry - (killed as f64) * unit_hp).max(0.0);
+        }
+        killed
     });
-    let units_killed = (total_accum / unit_hp).floor() as u32;
-    if units_killed > 0 {
+
+    let atomic_res = {
+        let mut fg = ctx.fighters.write().unwrap();
+        if let Some(live) = fg.active_fighters.get_mut(&fighter_ball_id) {
+            let before_size = live.squadron_size;
+            let lost = units_killed.min(before_size);
+            let after_size = before_size.saturating_sub(lost);
+            let wiped_out = after_size == 0;
+            let item_id = live.item_id;
+            let owner_char_id = live.owner_char_id;
+            let parent_ship_id = live.parent_ship_id;
+            let tube_flag = (159 + live.tube_index) as i64;
+            if wiped_out {
+                fg.active_fighters.remove(&fighter_ball_id);
+                fg.charge_state.retain(|&(bid, _), _| bid != fighter_ball_id);
+                fg.cooldown_state.retain(|&(bid, _), _| bid != fighter_ball_id);
+            } else if lost > 0 {
+                live.squadron_size = after_size;
+            }
+            Some((lost, after_size, wiped_out, item_id, owner_char_id, parent_ship_id, tube_flag))
+        } else {
+            None
+        }
+    };
+    let Some((lost, after_size, wiped_out, item_id, owner_char_id, parent_ship_id, tube_flag)) = atomic_res else {
         with_mut_combat_runtime(ctx, |rt| {
-            if let Some(entry) = rt.fighter_unit_damage_accum.get_mut(&fighter_ball_id) {
-                *entry = (*entry - (units_killed as f64) * unit_hp).max(0.0);
+            rt.fighter_unit_damage_accum.remove(&fighter_ball_id);
+        });
+        return (0, 0, false);
+    };
+
+    if wiped_out {
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.fighter_unit_damage_accum.remove(&fighter_ball_id);
+            rt.record_destroyed_item_id(fighter_ball_id);
+            rt.record_destroyed_item_id(item_id);
+        });
+    }
+
+    if wiped_out || lost > 0 {
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut remove_item = false;
+            if let Some(it) = snap.items.get_mut(&item_id) {
+                if !(it.location_id == parent_ship_id && it.flag == InventoryFlag::FighterBay) {
+                    let remaining = it.quantity - (lost as i32);
+                    if remaining > 0 {
+                        it.quantity = remaining;
+                        it.singleton = false;
+                        it.version += 1;
+                    } else {
+                        remove_item = true;
+                    }
+                }
+            }
+            if remove_item {
+                snap.items.remove(&item_id);
             }
         });
     }
-    let before_size = squad.squadron_size;
-    let lost = units_killed.min(before_size);
-    squad.squadron_size = before_size.saturating_sub(lost);
-    let wiped_out = squad.squadron_size == 0;
-    let owner_char_id = squad.owner_char_id;
-    let tube_flag = (159 + squad.tube_index) as i64;
+
     if wiped_out {
-        ctx.active_fighters.write().unwrap().remove(&fighter_ball_id);
-        with_mut_combat_runtime(ctx, |rt| { rt.fighter_unit_damage_accum.remove(&fighter_ball_id); });
+        for slot in 0..3 {
+            ctx.remove_projected_ewar_by_module(parent_ship_id, -(fighter_ball_id * 10 + slot));
+        }
         let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
         let _ = sys_handle.remove_ball(fighter_ball_id).await;
-        ctx.db.with_mut_snapshot(|snap| {
-            let reserve = snap.items.get(&squad.item_id).map(|it| it.quantity - (before_size as i32)).unwrap_or(0);
-            if reserve > 0 {
-                if let Some(it) = snap.items.get_mut(&squad.item_id) { it.quantity = reserve; it.singleton = false; it.version += 1; }
-            } else {
-                snap.items.remove(&squad.item_id);
-            }
-        });
         crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, fighter_ball_id);
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(owner_char_id),
@@ -154,25 +201,16 @@ pub async fn apply_damage_to_fighter_squadron(
             },
         );
     } else if lost > 0 {
-        ctx.active_fighters.write().unwrap().insert(fighter_ball_id, squad.clone());
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(it) = snap.items.get_mut(&squad.item_id) {
-                let reserve = (it.quantity - (before_size as i32)).max(0);
-                it.quantity = (squad.squadron_size as i32) + reserve;
-                it.singleton = false;
-                it.version += 1;
-            }
-        });
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(owner_char_id),
             crate::router::notify_registry::OnInSpaceSquadronSizeChanged {
                 fighter_id: fighter_ball_id,
-                squadron_size: squad.squadron_size as i64,
+                squadron_size: after_size as i64,
             },
         );
     }
 
-    (lost, squad.squadron_size, wiped_out)
+    (lost, after_size, wiped_out)
 }
 
 fn fighter_rpc_err(code: &'static str, message: impl Into<String>) -> BridgeRpcError {
@@ -327,9 +365,9 @@ pub async fn handle_fighters(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let res = if service == "fighterMgr" && method == "CmdScoopAbandonedFighterFromSpace" {
-        handle_scoop_abandoned_fighter(ctx, session, args).await
+        Box::pin(handle_scoop_abandoned_fighter(ctx, session, args)).await
     } else {
-        handle_fighters_inner(ctx, session, service, method, args, _kwargs).await
+        Box::pin(handle_fighters_inner(ctx, session, service, method, args, _kwargs)).await
     };
     let is_read_only = matches!((service, method), ("fighterMgr", "GetFightersForShip"));
     if !is_read_only && matches!(res, Some(Ok(_))) {
@@ -357,25 +395,25 @@ async fn handle_fighters_inner(
             handle_unload_tube_to_fighter_bay(ctx, session, args)
         }
         ("fighterMgr", "LaunchFightersFromTubes") => {
-            handle_launch_fighters_from_tubes(ctx, session, args).await
+            Box::pin(handle_launch_fighters_from_tubes(ctx, session, args)).await
         }
         ("fighterMgr", "RecallFightersToTubes") => {
-            handle_recall_fighters_to_tubes(ctx, session, args).await
+            Box::pin(handle_recall_fighters_to_tubes(ctx, session, args)).await
         }
         ("fighterMgr", "ExecuteMovementCommandOnFighters") => {
-            handle_execute_movement_command_on_fighters(ctx, session, args).await
+            Box::pin(handle_execute_movement_command_on_fighters(ctx, session, args)).await
         }
         ("fighterMgr", "CmdActivateAbilitySlots") => {
-            handle_activate_fighter_ability_slots(ctx, session, args).await
+            Box::pin(handle_activate_fighter_ability_slots(ctx, session, args)).await
         }
         ("fighterMgr", "ActivateAbilitySlotsAtPoint") => {
-            handle_activate_fighter_ability_slots_on_point(ctx, session, args).await
+            Box::pin(handle_activate_fighter_ability_slots_on_point(ctx, session, args)).await
         }
         ("fighterMgr", "CmdDeactivateAbilitySlots") => {
-            handle_deactivate_fighter_ability_slots(ctx, session, args).await
+            Box::pin(handle_deactivate_fighter_ability_slots(ctx, session, args)).await
         }
         ("fighterMgr", "CmdAbandonFighter") => {
-            handle_cmd_abandon_fighter(ctx, session, args).await
+            Box::pin(handle_cmd_abandon_fighter(ctx, session, args)).await
         }
         _ => None,
     }
@@ -1278,17 +1316,30 @@ async fn handle_recall_fighters_to_tubes(
     session: &mut SessionState,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (char_id, ship_id, _sys_id, sys_handle) =
+    let (char_id, ship_id, sys_id, sys_handle) =
         match require_undocked_uncloaked_fighter_ship(ctx, session, "recall fighters").await {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
+    let entry_db_state = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| (c.station_id, c.structure_id, c.solar_system_id, c.active_ship_id))
+    });
+    let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+        let message = "Active ship is not spawned in space".to_string();
+        return Some(Err(BridgeRpcError::with_client_error(
+            "ShipNotInSpace",
+            message.clone(),
+            eve_proto::ClientError::CustomInfo(message),
+        )));
+    };
     let filter_ids = match parse_fighter_id_filter(args, true) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
 
-    let fighters_to_recall: Vec<crate::router::context::ActiveFighterSquadron> = ctx
+    let candidate_ids: Vec<(i64, u32)> = ctx
         .active_fighters
         .read()
         .unwrap()
@@ -1307,9 +1358,9 @@ async fn handle_recall_fighters_to_tubes(
                     })
                     .unwrap_or(true)
         })
-        .cloned()
+        .map(|f| (f.ball_id, f.type_id))
         .collect();
-    if fighters_to_recall.is_empty() {
+    if candidate_ids.is_empty() {
         let all_already_recalled_own = filter_ids.as_ref().is_some_and(|ids| {
             ctx.db.with_snapshot(|snap| {
                 ids.iter().all(|&id| {
@@ -1338,37 +1389,52 @@ async fn handle_recall_fighters_to_tubes(
         )));
     }
 
-    let mut recalled = Vec::new();
-    for f in fighters_to_recall {
-        if sys_handle.get_ball_snapshot(f.ball_id).await.ok().flatten().is_none() {
+    const FIGHTER_RECALL_SURFACE_RANGE_M: f64 = 2_500.0;
+    let mut prechecked = Vec::with_capacity(candidate_ids.len());
+    for (bid, type_id) in candidate_ids {
+        let Some((_, f_ball)) = sys_handle.get_ball_snapshot(bid).await.ok().flatten() else {
             continue;
-        }
-        let f_sde = ctx.sde.types.get(&f.type_id);
-        let base_refuel_s = f_sde
-            .and_then(|t| t.default_attributes.get(&2426).copied())
-            .map(|ms| (ms / 1_000.0).clamp(2.0, 10.0))
-            .unwrap_or(3.0);
-        let charge_reload_s: f64 = {
-            let used_map = ctx.fighter_charge_state.read().unwrap();
-            ctx.sde
-                .fighter_abilities_by_type
-                .get(&f.type_id)
-                .map(|slots| {
-                    slots
-                        .iter()
-                        .filter_map(|s| {
-                            let ch = s.charges.as_ref()?;
-                            let used = used_map.get(&(f.ball_id, s.slot_index as u32)).copied().unwrap_or(0);
-                            let max_c = ch.charge_count.max(1) as f64;
-                            (used > 0).then_some(((used as f64) / max_c) * (ch.rearm_time_seconds.max(1.0) * 0.45))
-                        })
-                        .sum()
-                })
-                .unwrap_or(0.0)
         };
-        let accum_dmg = with_combat_runtime(ctx, |rt| rt.fighter_unit_damage_accum.get(&f.ball_id).copied().unwrap_or(0.0));
+        let dist = ship_ball.surface_distance(&f_ball);
+        if dist > FIGHTER_RECALL_SURFACE_RANGE_M {
+            let message = format!(
+                "Fighter squadron {bid} is {dist:.1}m from ship hull, must be within 2,500m to recall"
+            );
+            return Some(Err(BridgeRpcError::with_client_error(
+                "FighterOutOfRange",
+                message.clone(),
+                eve_proto::ClientError::CustomInfo(message),
+            )));
+        }
+        prechecked.push((bid, type_id));
+    }
+
+    let mut recalled = Vec::new();
+    for (bid, _) in prechecked {
+        let Some((_, cur_ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+            let message = "Active ship is not spawned in space".to_string();
+            return Some(Err(BridgeRpcError::with_client_error(
+                "ShipNotInSpace",
+                message.clone(),
+                eve_proto::ClientError::CustomInfo(message),
+            )));
+        };
+        let Some((_, cur_f_ball)) = sys_handle.get_ball_snapshot(bid).await.ok().flatten() else {
+            continue;
+        };
+        let cur_dist = cur_ship_ball.surface_distance(&cur_f_ball);
+        if cur_dist > FIGHTER_RECALL_SURFACE_RANGE_M {
+            let message = format!(
+                "Fighter squadron {bid} is {cur_dist:.1}m from ship hull, must be within 2,500m to recall"
+            );
+            return Some(Err(BridgeRpcError::with_client_error(
+                "FighterOutOfRange",
+                message.clone(),
+                eve_proto::ClientError::CustomInfo(message),
+            )));
+        }
         let missing_cs_hp = sys_handle
-            .get_combat_state(f.ball_id)
+            .get_combat_state(bid)
             .await
             .ok()
             .flatten()
@@ -1378,15 +1444,74 @@ async fn handle_recall_fighters_to_tubes(
                     + (cs.max_structure_hp - cs.structure_hp).max(0.0)
             })
             .unwrap_or(0.0);
+
+        let claimed = {
+            let mut fg = ctx.fighters.write().unwrap();
+            let valid = fg.active_fighters.get(&bid).is_some_and(|cur| {
+                cur.parent_ship_id == ship_id
+                    && cur.owner_char_id == char_id
+                    && !cur.is_abandoned
+                    && cur.squadron_size > 0
+            });
+            if valid {
+                let f = fg.active_fighters.remove(&bid).unwrap();
+                let charge_reload_s: f64 = ctx
+                    .sde
+                    .fighter_abilities_by_type
+                    .get(&f.type_id)
+                    .map(|slots| {
+                        slots
+                            .iter()
+                            .filter_map(|s| {
+                                let ch = s.charges.as_ref()?;
+                                let used = fg.charge_state.get(&(bid, s.slot_index as u32)).copied().unwrap_or(0);
+                                let max_c = ch.charge_count.max(1) as f64;
+                                (used > 0).then_some(((used as f64) / max_c) * (ch.rearm_time_seconds.max(1.0) * 0.45))
+                            })
+                            .sum()
+                    })
+                    .unwrap_or(0.0);
+                let saved_charges: Vec<_> = fg
+                    .charge_state
+                    .iter()
+                    .filter(|(&(id, _), _)| id == bid)
+                    .map(|(&k, &v)| (k, v))
+                    .collect();
+                let saved_cooldowns: Vec<_> = fg
+                    .cooldown_state
+                    .iter()
+                    .filter(|(&(id, _), _)| id == bid)
+                    .map(|(&k, &v)| (k, v))
+                    .collect();
+                fg.charge_state.retain(|&(id, _), _| id != bid);
+                fg.cooldown_state.retain(|&(id, _), _| id != bid);
+                let loaded_tube_ids: std::collections::HashSet<i64> = fg.tube_loads.values().copied().collect();
+                Some((f, charge_reload_s, loaded_tube_ids, saved_charges, saved_cooldowns))
+            } else {
+                None
+            }
+        };
+        let Some((mut f, charge_reload_s, loaded_tube_ids, saved_charges, saved_cooldowns)) = claimed else {
+            continue;
+        };
+
+        for slot in 0..3 {
+            ctx.remove_projected_ewar_by_module(ship_id, -(bid * 10 + slot));
+        }
+        let accum_dmg = with_mut_combat_runtime(ctx, |rt| {
+            rt.fighter_unit_damage_accum.remove(&bid).unwrap_or(0.0)
+        });
+
+        let f_sde = ctx.sde.types.get(&f.type_id);
+        let base_refuel_s = f_sde
+            .and_then(|t| t.default_attributes.get(&2426).copied())
+            .map(|ms| (ms / 1_000.0).clamp(2.0, 10.0))
+            .unwrap_or(3.0);
         let unit_hp = f_sde
             .and_then(|t| t.default_attributes.get(&263).copied().or_else(|| t.default_attributes.get(&9).copied()))
             .unwrap_or(1_000.0)
             .max(250.0);
         let repair_s = (((accum_dmg + missing_cs_hp) / unit_hp).clamp(0.0, 4.0)) * 1.5;
-
-        ctx.active_fighters.write().unwrap().remove(&f.ball_id);
-        ctx.fighter_charge_state.write().unwrap().retain(|&(bid, _), _| bid != f.ball_id);
-        with_mut_combat_runtime(ctx, |rt| { rt.fighter_unit_damage_accum.remove(&f.ball_id); });
 
         let max_squadron_size = f_sde
             .map(|t| {
@@ -1397,9 +1522,27 @@ async fn handle_recall_fighters_to_tubes(
                 })
             })
             .unwrap_or(9);
-        let loaded_tube_ids: std::collections::HashSet<i64> = ctx.fighter_tube_loads.read().unwrap().values().copied().collect();
-        let mut refilled_units = 0i32;
-        ctx.db.with_mut_snapshot(|snap| {
+        let db_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<i32, BridgeRpcError> {
+            let char_invalid = snap.characters.get(&char_id).is_some_and(|ch| {
+                let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
+                entry_db_state.is_some_and(|e| cur_db_state != e)
+                    || ch.station_id.is_some()
+                    || ch.structure_id.is_some()
+                    || ch.solar_system_id != sys_id
+                    || ch.active_ship_id != ship_id
+            });
+            let ship_moved = snap.items.get(&ship_id).is_some_and(|sh| {
+                sh.location_id != sys_id as i64 || sh.flag != InventoryFlag::None
+            });
+            if char_invalid || ship_moved {
+                let msg = format!("Ship {ship_id} is no longer undocked in solar system {sys_id}");
+                return Err(BridgeRpcError::with_client_error(
+                    "ShipNotInSpace",
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
+                ));
+            }
+            let mut refilled_units = 0i32;
             if let Some(main_it) = snap.items.get_mut(&f.item_id) {
                 main_it.location_id = ship_id;
                 main_it.flag = InventoryFlag::FighterBay;
@@ -1436,7 +1579,38 @@ async fn handle_recall_fighters_to_tubes(
                     }
                 }
             }
+            Ok(refilled_units)
         });
+        let refilled_units = match db_res {
+            Ok(units) => units,
+            Err(e) => {
+                let destroyed = with_mut_combat_runtime(ctx, |rt| {
+                    let dead = rt.is_recently_destroyed_item_id(f.ball_id)
+                        || rt.is_recently_destroyed_item_id(f.item_id);
+                    if !dead && accum_dmg > 0.0 {
+                        rt.fighter_unit_damage_accum.insert(bid, accum_dmg);
+                    }
+                    dead
+                });
+                if let Ok(mut fg) = ctx.fighters.write() {
+                    fg.tube_loads.remove(&(ship_id, f.tube_index));
+                    if !destroyed {
+                        f.is_abandoned = true;
+                        f.parent_ship_id = 0;
+                        f.target_id = None;
+                        fg.active_fighters.entry(f.ball_id).or_insert(f);
+                        for (k, v) in saved_charges {
+                            fg.charge_state.insert(k, v);
+                        }
+                        for (k, v) in saved_cooldowns {
+                            fg.cooldown_state.insert(k, v);
+                        }
+                    }
+                }
+                sys_handle.try_stop_ball(bid);
+                return Some(Err(e));
+            }
+        };
 
         let total_rearm_secs = (base_refuel_s + charge_reload_s + repair_s + (refilled_units as f64) * 2.5)
             .ceil()
@@ -1510,18 +1684,20 @@ async fn handle_execute_movement_command_on_fighters(
         let fighters = ctx.active_fighters.read().unwrap();
         for &fid in &fighter_ids {
             let Some(f) = fighters.get(&fid) else {
-                return Some(Err(BridgeRpcError {
-                    code: "FighterNotFound".into(),
-                    message: format!("Fighter squadron {fid} not found"),
-                    client_error: None,
-                }));
+                let message = format!("Fighter squadron {fid} not found");
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "FighterNotFound",
+                    message.clone(),
+                    eve_proto::ClientError::CustomInfo(message),
+                )));
             };
             if f.owner_char_id != char_id || f.is_abandoned {
-                return Some(Err(BridgeRpcError {
-                    code: "FighterNotOwned".into(),
-                    message: format!("Fighter squadron {fid} is not controlled by pilot"),
-                    client_error: None,
-                }));
+                let message = format!("Fighter squadron {fid} is not controlled by pilot");
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "FighterNotOwned",
+                    message.clone(),
+                    eve_proto::ClientError::CustomInfo(message),
+                )));
             }
         }
     }
@@ -1545,61 +1721,115 @@ async fn handle_execute_movement_command_on_fighters(
     }
     if cmd == "MJD" {
         let now_unix = ctx.now_unix();
-        for fid in fighter_ids {
-            let ftype_id = ctx
-                .active_fighters
-                .read()
-                .unwrap()
-                .get(&fid)
-                .map(|f| f.type_id)
-                .unwrap_or(0);
-            let mjd_slot_opt = ctx
-                .sde
-                .fighter_abilities_by_type
-                .get(&ftype_id)
-                .and_then(|slots| slots.iter().find(|s| s.ability_id == 5));
-            let mjd_dist_attr = ctx
-                .sde
-                .types
-                .get(&ftype_id)
-                .and_then(|t| t.default_attributes.get(&2154).copied());
-            if mjd_slot_opt.is_none() && mjd_dist_attr.is_none() {
-                return Some(Err(BridgeRpcError {
-                    code: "FighterLacksMjdAbility".into(),
-                    message: format!(
+        let reserved_batch: Result<Vec<(i64, u32, f64, Option<u64>)>, BridgeRpcError> = (|| {
+            let mut fg = ctx.fighters.write().unwrap();
+            let mut seen = std::collections::HashSet::with_capacity(fighter_ids.len());
+            let mut targets = Vec::with_capacity(fighter_ids.len());
+            for &fid in &fighter_ids {
+                if !seen.insert(fid) {
+                    continue;
+                }
+                let Some(f) = fg.active_fighters.get(&fid) else {
+                    continue;
+                };
+                if f.owner_char_id != char_id || f.is_abandoned {
+                    continue;
+                }
+                let ftype_id = f.type_id;
+                let mjd_slot_opt = ctx
+                    .sde
+                    .fighter_abilities_by_type
+                    .get(&ftype_id)
+                    .and_then(|slots| slots.iter().find(|s| s.ability_id == 5));
+                let mjd_dist_attr = ctx
+                    .sde
+                    .types
+                    .get(&ftype_id)
+                    .and_then(|t| t.default_attributes.get(&2154).copied());
+                if mjd_slot_opt.is_none() && mjd_dist_attr.is_none() {
+                    let message = format!(
                         "Fighter squadron {fid} (type {ftype_id}) does not possess a Micro Jump Drive ability"
-                    ),
-                    client_error: None,
-                }));
-            }
-            let slot_idx = mjd_slot_opt.map(|s| s.slot_index as u32).unwrap_or(1);
-            if let Some(&ready_at) = ctx
-                .fighter_cooldown_state
-                .read()
-                .unwrap()
-                .get(&(fid, slot_idx))
-            {
-                if now_unix < ready_at {
-                    return Some(Err(BridgeRpcError {
-                        code: "AbilityOnCooldown".into(),
-                        message: format!(
+                    );
+                    return Err(BridgeRpcError::with_client_error(
+                        "FighterLacksMjdAbility",
+                        message.clone(),
+                        eve_proto::ClientError::CustomInfo(message),
+                    ));
+                }
+                let slot_idx = mjd_slot_opt.map(|s| s.slot_index as u32).unwrap_or(1);
+                if let Some(&ready_at) = fg.cooldown_state.get(&(fid, slot_idx)) {
+                    if now_unix < ready_at {
+                        let message = format!(
                             "Fighter MJD ability on squadron {fid} is on cooldown until {ready_at}"
-                        ),
-                        client_error: None,
-                    }));
+                        );
+                        return Err(BridgeRpcError::with_client_error(
+                            "AbilityOnCooldown",
+                            message.clone(),
+                            eve_proto::ClientError::CustomInfo(message),
+                        ));
+                    }
+                }
+                let mjd_dist = mjd_dist_attr.unwrap_or(100_000.0);
+                let cd_secs = mjd_slot_opt
+                    .and_then(|s| s.cooldown_seconds)
+                    .map(|c| c.ceil() as u64)
+                    .unwrap_or(60)
+                    .max(1);
+                targets.push((fid, slot_idx, mjd_dist, cd_secs));
+            }
+            let mut committed = Vec::with_capacity(targets.len());
+            for (fid, slot_idx, mjd_dist, cd_secs) in targets {
+                let prev_cd = fg.cooldown_state.insert((fid, slot_idx), now_unix + cd_secs);
+                committed.push((fid, slot_idx, mjd_dist, prev_cd));
+            }
+            Ok(committed)
+        })();
+        let committed = match reserved_batch {
+            Ok(v) if !v.is_empty() => v,
+            Ok(_) => {
+                let first_id = fighter_ids[0];
+                let message = format!("Fighter squadron {first_id} not found");
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "FighterNotFound",
+                    message.clone(),
+                    eve_proto::ClientError::CustomInfo(message),
+                )));
+            }
+            Err(e) => return Some(Err(e)),
+        };
+        let mut first_err: Option<BridgeRpcError> = None;
+        let mut jumped_any = false;
+        for (fid, slot_idx, mjd_dist, prev_cd) in committed {
+            match sys_handle.micro_jump(fid, mjd_dist).await {
+                Ok(_) => {
+                    jumped_any = true;
+                }
+                Err(err_msg) => {
+                    let mut fg = ctx.fighters.write().unwrap();
+                    if fg.active_fighters.contains_key(&fid) {
+                        if let Some(old) = prev_cd {
+                            fg.cooldown_state.insert((fid, slot_idx), old);
+                        } else {
+                            fg.cooldown_state.remove(&(fid, slot_idx));
+                        }
+                    } else {
+                        fg.cooldown_state.remove(&(fid, slot_idx));
+                    }
+                    if first_err.is_none() {
+                        let message = format!("Fighter micro jump failed for {fid}: {err_msg}");
+                        first_err = Some(BridgeRpcError::with_client_error(
+                            "MicroJumpFailed",
+                            message.clone(),
+                            eve_proto::ClientError::CustomInfo(message),
+                        ));
+                    }
                 }
             }
-            let mjd_dist = mjd_dist_attr.unwrap_or(100_000.0);
-            let cd_secs = mjd_slot_opt
-                .and_then(|s| s.cooldown_seconds)
-                .map(|c| c.ceil() as u64)
-                .unwrap_or(60)
-                .max(1);
-            let _ = sys_handle.micro_jump(fid, mjd_dist).await;
-            ctx.fighter_cooldown_state
-                .write()
-                .unwrap()
-                .insert((fid, slot_idx), now_unix + cd_secs);
+        }
+        if !jumped_any {
+            if let Some(err) = first_err {
+                return Some(Err(err));
+            }
         }
         return Some(Ok(PyRep::Bool(true)));
     }
@@ -1644,7 +1874,15 @@ async fn handle_execute_movement_command_on_fighters(
         }
     };
     for fid in fighter_ids {
-        let _ = sys_handle.set_movement_mode(fid, mode.clone()).await;
+        let still_owned = ctx
+            .active_fighters
+            .read()
+            .unwrap()
+            .get(&fid)
+            .is_some_and(|f| f.owner_char_id == char_id && !f.is_abandoned);
+        if still_owned {
+            let _ = sys_handle.set_movement_mode(fid, mode.clone()).await;
+        }
     }
     Some(Ok(PyRep::Bool(true)))
 }
@@ -1815,7 +2053,13 @@ async fn handle_scoop_abandoned_fighter(
         fighters.remove(&resolved_key).unwrap()
     };
     let restore_squad = |sq: crate::router::context::ActiveFighterSquadron| {
-        ctx.active_fighters.write().unwrap().insert(sq.ball_id, sq);
+        let destroyed = with_combat_runtime(ctx, |rt| {
+            rt.is_recently_destroyed_item_id(sq.ball_id)
+                || rt.is_recently_destroyed_item_id(sq.item_id)
+        });
+        if !destroyed {
+            ctx.active_fighters.write().unwrap().entry(sq.ball_id).or_insert(sq);
+        }
     };
 
     let in_caller_sys = ctx.db.with_snapshot(|snap| {
@@ -1832,19 +2076,19 @@ async fn handle_scoop_abandoned_fighter(
             client_error: None,
         }));
     }
-    let f_pos = sys_handle
+    let f_ball = sys_handle
         .get_ball_snapshot(squad.ball_id)
         .await
         .ok()
         .flatten()
-        .map(|(_, b)| b.position);
-    let s_pos = sys_handle
+        .map(|(_, b)| b);
+    let s_ball = sys_handle
         .get_ball_snapshot(ship_id)
         .await
         .ok()
         .flatten()
-        .map(|(_, b)| b.position);
-    let Some(f_pos) = f_pos else {
+        .map(|(_, b)| b);
+    let Some(f_ball) = f_ball else {
         let ball_id = squad.ball_id;
         restore_squad(squad);
         return Some(Err(BridgeRpcError {
@@ -1853,7 +2097,7 @@ async fn handle_scoop_abandoned_fighter(
             client_error: None,
         }));
     };
-    let Some(s_pos) = s_pos else {
+    let Some(s_ball) = s_ball else {
         restore_squad(squad);
         return Some(Err(BridgeRpcError {
             code: "ShipNotInSystem".into(),
@@ -1861,12 +2105,12 @@ async fn handle_scoop_abandoned_fighter(
             client_error: None,
         }));
     };
-    let dist = (f_pos - s_pos).length();
+    let dist = s_ball.surface_distance(&f_ball);
     if dist > 2500.0 {
         restore_squad(squad);
         return Some(Err(BridgeRpcError {
             code: "FighterOutOfRange".into(),
-            message: format!("Fighter squadron is {dist:.1}m away, must be within 2500m to scoop"),
+            message: format!("Fighter squadron is {dist:.1}m from ship hull, must be within 2500m to scoop"),
             client_error: None,
         }));
     }

@@ -162,7 +162,10 @@ async fn drone_engage_combat_logi_ewar_and_step_engaged_drones() {
     assert!(sys_handle.get_target_locks(enemy_id).await.unwrap().is_empty());
     let enemy_cs = sys_handle.get_combat_state(enemy_id).await.unwrap().unwrap();
     assert!(enemy_cs.capacitor < 500.0 && enemy_cs.signature_radius > 40.0);
-    assert!(sys_handle.get_ball_snapshot(enemy_id).await.unwrap().unwrap().1.speed_fraction < 1.0);
+    let enemy_ball = sys_handle.get_ball_snapshot(enemy_id).await.unwrap().unwrap().1;
+    assert!((enemy_ball.speed_fraction - 1.0).abs() < 1e-6);
+    assert!(enemy_ball.max_velocity < 300.0);
+    assert!(enemy_cs.web_velocity_multiplier < 1.0);
 
     // 4. Advance time & step_engaged_drones -> fires next cycle & updates drone_next_ready_unix
     let future_ts = ctx.now_unix() + 100;
@@ -1010,14 +1013,17 @@ async fn drone_math_tractor_modifiers_launch_meta_engage_and_scoop_boundary_muta
     let ret_edge = handle_npcs_drones(&ctx, &mut session, "entity", "CmdReturnHome", &[], &kwargs).await.unwrap().unwrap();
     assert_eq!(ret_edge.as_i64(), Some(1));
 
-    // ScoopToDroneBay errors + ownership + range (2_500 vs 2_501) + rollback when bay full + abandoned other owner
-    let _ = sys_handle.set_ball_position(launched_bid, DVec3::new(2_500.1, 0.0, 0.0)).await;
+    // ScoopToDroneBay errors + ownership + surface range (2_500 vs 2_500.1) + rollback when bay full + abandoned other owner
+    let (_, s_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let (_, d_ball) = sys_handle.get_ball_snapshot(launched_bid).await.unwrap().unwrap();
+    let scoop_edge_x = 2_500.0 + s_ball.radius + d_ball.radius;
+    let _ = sys_handle.set_ball_position(launched_bid, DVec3::new(scoop_edge_x + 0.1, 0.0, 0.0)).await;
     let scoop_far = handle_npcs_drones(&ctx, &mut session, "ship", "ScoopToDroneBay", &[PyRep::Integer(launched_bid)], &kwargs)
         .await.unwrap().unwrap_err();
     assert_eq!(scoop_far.code, "OutOfScoopRange");
 
     // Owned by other (not abandoned) -> DroneOwnedByOther and NOT removed from active_drones_in_space
-    let _ = sys_handle.set_ball_position(launched_bid, DVec3::new(2_500.0, 0.0, 0.0)).await;
+    let _ = sys_handle.set_ball_position(launched_bid, DVec3::new(scoop_edge_x, 0.0, 0.0)).await;
     with_mut_combat_runtime(&ctx, |rt| {
         let d = rt.active_drones_in_space.get_mut(&launched_bid).unwrap();
         d.owner_char_id = char_id + 99;
@@ -1099,4 +1105,480 @@ async fn drone_math_tractor_modifiers_launch_meta_engage_and_scoop_boundary_muta
     assert_eq!(py_dict_get(&engage_tp, "ewarApplied"), Some(&PyRep::Bool(true)));
     let target_cs = sys_handle.get_combat_state(tp_target_id).await.unwrap().unwrap();
     assert_eq!(target_cs.tp_sig_multiplier, Some(2.0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drone_web_preserves_pilot_throttle_clears_on_return_and_death_prevents_resurrection() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let kwargs = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let target_id = 300_000_901i64;
+
+    spawn_test_ball(&ctx, sys_id, ship_id, 587, DVec3::ZERO, 2_000.0).await;
+    spawn_test_ball(&ctx, sys_id, target_id, 587, DVec3::new(3_000.0, 0.0, 0.0), 5_000.0).await;
+    sys_handle.set_speed_fraction(target_id, 0.45).await.unwrap();
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(820_001, make_fighter_item(820_001, 23_711, char_id, ship_id, InventoryFlag::DroneBay, 1));
+        snap.items.insert(820_002, make_fighter_item(820_002, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 1));
+    });
+    let PyRep::List(bids) = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Integer(820_001), PyRep::Integer(820_002)])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap() else {
+        panic!("expected launch list");
+    };
+    let web_bid = bids[0].as_i64().unwrap();
+    let combat_bid = bids[1].as_i64().unwrap();
+
+    // 1. Web drone reduces target max_velocity via module cycle without changing target speed_fraction throttle
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(web_bid)]), PyRep::Integer(target_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("web engage succeeds");
+    let (_, webbed_ball) = sys_handle.get_ball_snapshot(target_id).await.unwrap().unwrap();
+    let webbed_cs = sys_handle.get_combat_state(target_id).await.unwrap().unwrap();
+    assert!((webbed_ball.speed_fraction - 0.45).abs() < 1e-6);
+    assert!(webbed_ball.max_velocity < 300.0);
+    assert!(webbed_cs.web_velocity_multiplier < 1.0);
+
+    // 2. CmdReturnHome clears the drone web cycle cleanly while leaving pilot throttle untouched
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdReturnHome",
+        &[PyRep::List(vec![PyRep::Integer(web_bid)])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("CmdReturnHome succeeds");
+    let (_, unwebbed_ball) = sys_handle.get_ball_snapshot(target_id).await.unwrap().unwrap();
+    let unwebbed_cs = sys_handle.get_combat_state(target_id).await.unwrap().unwrap();
+    assert!((unwebbed_ball.speed_fraction - 0.45).abs() < 1e-6);
+    assert!((unwebbed_ball.max_velocity - 300.0).abs() < 1e-3);
+    assert!((unwebbed_cs.web_velocity_multiplier - 1.0).abs() < 1e-6);
+
+    // 3. Re-web past cycle cooldown, then destroy web drone -> web cycle cleared & drone cannot be resurrected by ticks
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.drone_next_ready_unix.insert(web_bid, 0);
+    });
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(web_bid), PyRep::Integer(combat_bid)]), PyRep::Integer(target_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("re-engage succeeds");
+    assert!(sys_handle.get_combat_state(target_id).await.unwrap().unwrap().web_velocity_multiplier < 1.0);
+
+    let (_, web_destroyed) = apply_damage_to_drone_in_space(
+        &ctx,
+        sys_id,
+        web_bid,
+        DamageVector::new(10_000.0, 10_000.0, 10_000.0, 10_000.0),
+    )
+    .await;
+    assert!(web_destroyed);
+    let (_, after_kill_ball) = sys_handle.get_ball_snapshot(target_id).await.unwrap().unwrap();
+    let after_kill_cs = sys_handle.get_combat_state(target_id).await.unwrap().unwrap();
+    assert!((after_kill_cs.web_velocity_multiplier - 1.0).abs() < 1e-6);
+    assert!((after_kill_ball.max_velocity - 300.0).abs() < 1e-3);
+
+    // Abandon combat_bid and verify auto-aggression / engaged steps neither resurrect web_bid nor re-control combat_bid
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdAbandonDrone",
+        &[PyRep::List(vec![PyRep::Integer(combat_bid)])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("abandon succeeds");
+    let tick_ts = ctx.now_unix() + 120;
+    step_engaged_drones(&ctx, tick_ts).await;
+    let engaged = step_drone_auto_aggression_and_assist(&ctx, sys_id, char_id, Some(target_id), None, None).await;
+    assert!(engaged.is_empty());
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drones_in_space.contains_key(&web_bid));
+        assert!(!rt.drone_next_ready_unix.contains_key(&web_bid));
+        let cb = rt.active_drones_in_space.get(&combat_bid).expect("abandoned drone remains in space");
+        assert!(cb.is_abandoned);
+        assert_eq!(cb.target_id, None);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_switch() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let kwargs = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let target_a = 300_000_951i64;
+    let target_b = 300_000_952i64;
+
+    spawn_test_ball(&ctx, sys_id, ship_id, 587, DVec3::ZERO, 2_000.0).await;
+    spawn_test_ball(&ctx, sys_id, target_a, 587, DVec3::new(3_000.0, 0.0, 0.0), 5_000.0).await;
+    spawn_test_ball(&ctx, sys_id, target_b, 587, DVec3::new(3_500.0, 0.0, 0.0), 5_000.0).await;
+    sys_handle.set_speed_fraction(target_a, 0.55).await.unwrap();
+    for tid in [target_a, target_b] {
+        sys_handle
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: tid,
+                    lock_time_ms: 1_000.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(825_001, make_fighter_item(825_001, 23_711, char_id, ship_id, InventoryFlag::DroneBay, 1));
+    });
+    let PyRep::List(bids) = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Integer(825_001)])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap() else {
+        panic!("expected launch list");
+    };
+    let web_bid = bids[0].as_i64().unwrap();
+
+    // 1. Engaging sets finite SDE max_effective_range_m on the drone_web cycle
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(web_bid)]), PyRep::Integer(target_a)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("web engage succeeds");
+    let expected_range = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&web_bid].clone())
+        .effective_optimal_range(&ctx);
+    assert!(expected_range > 0.0);
+    {
+        let st = sys_handle.actor_state.read().unwrap();
+        let web_cyc = st
+            .active_module_cycles
+            .iter()
+            .find(|c| c.ship_id == web_bid && c.module_id == -web_bid)
+            .expect("drone_web cycle active");
+        assert!(web_cyc.effect_name.starts_with("drone_web:"));
+        assert_eq!(web_cyc.max_effective_range_m, Some(expected_range));
+    }
+
+    // 2. CmdAssist clears active drone_web cycle and resets target_id
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdAssist",
+        &[PyRep::Integer(char_id + 10), PyRep::List(vec![PyRep::Integer(web_bid)])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("CmdAssist succeeds");
+    assert!(
+        !sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid),
+        "CmdAssist must clear drone_web cycle"
+    );
+    let (_, ball_after_assist) = sys_handle.get_ball_snapshot(target_a).await.unwrap().unwrap();
+    let cs_after_assist = sys_handle.get_combat_state(target_a).await.unwrap().unwrap();
+    assert!((ball_after_assist.speed_fraction - 0.55).abs() < 1e-6);
+    assert!((ball_after_assist.max_velocity - 300.0).abs() < 1e-3);
+    assert!((cs_after_assist.web_velocity_multiplier - 1.0).abs() < 1e-6);
+    with_combat_runtime(&ctx, |rt| {
+        assert_eq!(rt.active_drones_in_space[&web_bid].target_id, None);
+        assert_eq!(rt.active_drones_in_space[&web_bid].activity_state, 6);
+    });
+
+    // 3. Re-engage, then CmdGuard clears active drone_web cycle and resets target_id
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.drone_next_ready_unix.insert(web_bid, 0);
+    });
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(web_bid)]), PyRep::Integer(target_a)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("re-engage before CmdGuard");
+    assert!(sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid));
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdGuard",
+        &[PyRep::Integer(char_id + 11), PyRep::List(vec![PyRep::Integer(web_bid)])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("CmdGuard succeeds");
+    assert!(
+        !sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid),
+        "CmdGuard must clear drone_web cycle"
+    );
+    with_combat_runtime(&ctx, |rt| {
+        assert_eq!(rt.active_drones_in_space[&web_bid].target_id, None);
+        assert_eq!(rt.active_drones_in_space[&web_bid].activity_state, 7);
+    });
+
+    // 4. Re-engage on target_a, move drone outside web range, step_engaged_drones clears web cycle
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.drone_next_ready_unix.insert(web_bid, 0);
+    });
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(web_bid)]), PyRep::Integer(target_a)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("re-engage before OOR step");
+    assert!(sys_handle.set_ball_position(web_bid, DVec3::new(30_000.0, 0.0, 0.0)).await);
+    let future_ts = ctx.now_unix() + 120;
+    step_engaged_drones(&ctx, future_ts).await;
+    assert!(
+        !sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid),
+        "step_engaged_drones must clear web cycle when drone moves out of SDE web range"
+    );
+
+    // 5. Re-engage, then CmdAbandonDrone clears active drone_web cycle and restores target velocity
+    assert!(sys_handle.set_ball_position(web_bid, DVec3::new(100.0, 0.0, 0.0)).await);
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.drone_next_ready_unix.insert(web_bid, 0);
+    });
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(web_bid)]), PyRep::Integer(target_a)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("re-engage before CmdAbandonDrone");
+    assert!(
+        sys_handle
+            .get_combat_state(target_a)
+            .await
+            .unwrap()
+            .unwrap()
+            .web_velocity_multiplier
+            < 1.0
+    );
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdAbandonDrone",
+        &[PyRep::List(vec![PyRep::Integer(web_bid)])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("CmdAbandonDrone succeeds");
+    assert!(
+        !sys_handle
+            .actor_state
+            .read()
+            .unwrap()
+            .active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == web_bid),
+        "CmdAbandonDrone must clear drone_web cycle"
+    );
+    let (_, ball_after_abandon) = sys_handle.get_ball_snapshot(target_a).await.unwrap().unwrap();
+    let cs_after_abandon = sys_handle.get_combat_state(target_a).await.unwrap().unwrap();
+    assert!((cs_after_abandon.web_velocity_multiplier - 1.0).abs() < 1e-6);
+    assert!((ball_after_abandon.max_velocity - 300.0).abs() < 1e-3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drone_web_out_of_range_engage_skips_ewar_and_applies_on_closing_step() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let kwargs = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let target_a = 300_000_961i64;
+    let target_b = 300_000_962i64;
+
+    spawn_test_ball(&ctx, sys_id, ship_id, 587, DVec3::ZERO, 2_000.0).await;
+    spawn_test_ball(&ctx, sys_id, target_a, 587, DVec3::new(25_000.0, 0.0, 0.0), 5_000.0).await;
+    spawn_test_ball(&ctx, sys_id, target_b, 587, DVec3::new(2_000.0, 0.0, 0.0), 5_000.0).await;
+    for tid in [target_a, target_b] {
+        sys_handle
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: tid,
+                    lock_time_ms: 1_000.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(825_011, make_fighter_item(825_011, 23_711, char_id, ship_id, InventoryFlag::DroneBay, 1));
+    });
+    let PyRep::List(bids) = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Integer(825_011)])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap() else {
+        panic!("expected launch list");
+    };
+    let web_bid = bids[0].as_i64().unwrap();
+
+    // 1. Out-of-range CmdEngage (25km > SDE web optimal) must NOT report ewarApplied or record assist/aggression
+    let eng_oor = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(web_bid)]), PyRep::Integer(target_a)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("OOR CmdEngage succeeds with ewarApplied=false");
+    assert_eq!(eng_oor.dict_get("ewarApplied"), Some(&PyRep::Bool(false)));
+    assert!(
+        !sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid),
+        "OOR CmdEngage must not register active drone_web cycle"
+    );
+    let target_a_cs = sys_handle.get_combat_state(target_a).await.unwrap().unwrap();
+    assert!((target_a_cs.web_velocity_multiplier - 1.0).abs() < 1e-6);
+    assert!((target_a_cs.capacitor - 500.0).abs() < 1e-6, "OOR engage must not neut out-of-range target");
+    assert_eq!(target_a_cs.tp_sig_multiplier, None, "OOR engage must not TP out-of-range target");
+    let npc_until_after_oor = with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.aggression_assist_log.contains_key(&target_a), "OOR engage must not log killmail assist");
+        rt.npc_timers.get(&char_id).copied().unwrap_or(0)
+    });
+
+    // 2. Drone moves within web range; step_engaged_drones applies web, logs assist, and renews aggression
+    assert!(sys_handle.set_ball_position(web_bid, DVec3::new(23_000.0, 0.0, 0.0)).await);
+    let t1 = ctx.now_unix() + 120;
+    step_engaged_drones(&ctx, t1).await;
+    assert!(
+        sys_handle
+            .actor_state
+            .read()
+            .unwrap()
+            .active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == web_bid && c.target_id == Some(target_a)),
+        "step_engaged_drones must apply drone_web once drone enters range"
+    );
+    assert!(sys_handle.get_combat_state(target_a).await.unwrap().unwrap().web_velocity_multiplier < 1.0);
+    assert!(sys_handle.get_ball_snapshot(target_a).await.unwrap().unwrap().1.max_velocity < 300.0);
+    with_combat_runtime(&ctx, |rt| {
+        let assists = rt.aggression_assist_log.get(&target_a).expect("assist recorded once in range");
+        assert!(assists.iter().any(|a| a.attacker_char_id == char_id && a.is_ewar));
+        assert!(
+            rt.npc_timers
+                .get(&char_id)
+                .is_some_and(|&u| u >= t1 + 300 && u > npc_until_after_oor),
+            "step_engaged_drones must renew NPC aggression timer past initial OOR command"
+        );
+    });
+
+    // 3. Target switch while on cooldown clears target_a web immediately, and next step_engaged_drones applies web to target_b
+    assert!(sys_handle.set_ball_position(web_bid, DVec3::new(500.0, 0.0, 0.0)).await);
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.drone_next_ready_unix.insert(web_bid, ctx.now_unix() + 30);
+    });
+    let switch_res = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(web_bid)]), PyRep::Integer(target_b)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("target switch succeeds on cooldown");
+    assert_eq!(switch_res.dict_get("ewarApplied"), Some(&PyRep::Bool(false)));
+    assert!((sys_handle.get_combat_state(target_a).await.unwrap().unwrap().web_velocity_multiplier - 1.0).abs() < 1e-6);
+
+    let t2 = t1 + 120;
+    step_engaged_drones(&ctx, t2).await;
+    assert!(
+        sys_handle
+            .actor_state
+            .read()
+            .unwrap()
+            .active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == web_bid && c.target_id == Some(target_b)),
+        "step_engaged_drones must apply drone_web on target_b after cooldown"
+    );
+    assert!(sys_handle.get_combat_state(target_b).await.unwrap().unwrap().web_velocity_multiplier < 1.0);
 }
