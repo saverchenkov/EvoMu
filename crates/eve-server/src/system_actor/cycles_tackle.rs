@@ -1786,7 +1786,7 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
                 .db_opt
                 .as_ref()
                 .map(|db| db.clock().now_unix_secs())
-                .unwrap_or_else(current_wall_unix_secs);
+                .unwrap_or(0);
             let out = if is_invuln_stronghold {
                 exec_ctx.ballpark.balls.get(&ball_id).cloned().map(|b| (0.0, false, b))
             } else if let Some((applied, destroyed, ball_opt)) =
@@ -1947,14 +1947,6 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
         }
         other => Some(other),
     }
-}
-
-#[inline]
-fn current_wall_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 pub(in crate::system_actor) fn execute_pending_step_in_actor(
@@ -2271,7 +2263,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             .db_opt
             .as_ref()
             .map(|db| db.clock().now_unix_secs())
-            .unwrap_or_else(current_wall_unix_secs);
+            .unwrap_or(0);
         crate::services::mobile_deployables::step_mobile_deployables_in_actor(
             exec_ctx.ballpark,
             &mut exec_ctx.actor_st.active_module_cycles,
