@@ -520,6 +520,7 @@ fn courier_corp_acceptor_structure_destination_location_metadata_and_expiry() {
         snap.items.get_mut(&hauler_ship).unwrap().location_id = DEST_STRUCT_ID;
     });
     let div1_before = ctx.db.with_snapshot(|s| s.corporations[&hauler_corp].division_balance(1));
+    let div3_before_done = ctx.db.with_snapshot(|s| s.corporations[&hauler_corp].division_balance(3));
     let _ = ctx.drain_notifications_for_char(issuer_id);
     let done = handle(&ctx, &mut hauler_sess, "contractProxy", "CompleteContract", &[PyRep::Integer(cid)], &kw)
         .unwrap()
@@ -531,11 +532,12 @@ fn courier_corp_acceptor_structure_destination_location_metadata_and_expiry() {
         let it = snap.items.get(&pkg_item).unwrap();
         assert_eq!(it.owner_id, issuer_corp);
         assert_eq!(it.location_id, DEST_STRUCT_ID);
-        assert_eq!(it.flag, InventoryFlag::Hangar);
+        assert_eq!(it.flag, InventoryFlag::CorpDeliveries);
         assert_eq!(
-            snap.corporations[&hauler_corp].division_balance(1).0 - div1_before.0,
+            snap.corporations[&hauler_corp].division_balance(3).0 - div3_before_done.0,
             IskCents::from_isk(1_750_000).0
         );
+        assert_eq!(snap.corporations[&hauler_corp].division_balance(1), div1_before);
     });
     assert!(ctx.drain_notifications_for_char(issuer_id).iter().any(|n| n.event == "OnContractCompleted"));
 

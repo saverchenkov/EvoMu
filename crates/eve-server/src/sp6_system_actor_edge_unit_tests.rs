@@ -2402,7 +2402,7 @@ fn contracts_and_market_order_search_plex_margin_and_expiry_edges() {
                 user_id: 201,
                 username: "gm_acct".into(),
                 password_token: String::new(),
-                role: 1,
+                role: eve_db::service_roles::ROLE_GM_MASK,
                 banned_until_unix: None,
                 ban_reason: None,
             },

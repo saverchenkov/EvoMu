@@ -2235,3 +2235,258 @@ fn contract_item_reply_v24_blueprint_and_damage_fields_1345() {
     }
 }
 
+fn seed_eco_corp(snap: &mut eve_db::WorldStateSnapshot, cid: i64, ceo: i64, ally: Option<i64>, member: i64, roles: u64, d1: i64, d2: i64) {
+    let mut c = eve_db::CorporationRecord::default();
+    (c.corporation_id, c.name, c.ceo_id, c.alliance_id) = (cid, format!("C{cid}"), ceo, ally);
+    c.ensure_wallet_divisions();
+    for d in 3..=7u8 { c.set_division_balance(d, IskCents::from_isk(1_000_000)); }
+    c.set_division_balance(1, IskCents::from_isk(d1));
+    c.set_division_balance(2, IskCents::from_isk(d2));
+    c.members.insert(member);
+    c.member_roles.insert(member, roles);
+    snap.corporations.insert(cid, c);
+}
+fn seed_eco_accounts(snap: &mut eve_db::WorldStateSnapshot, uids: &[u64]) {
+    for &uid in uids {
+        if !snap.accounts.values().any(|a| a.user_id == uid) {
+            snap.accounts.insert(format!("eco_{uid}"), eve_db::AccountRecord { user_id: uid, username: format!("eco_{uid}"), password_token: String::new(), role: 0, banned_until_unix: None, ban_reason: None });
+        }
+    }
+}
+
+#[test]
+fn eco_109_and_110_corp_division_escrow_conservation_and_reject_contract_guards() {
+    use eve_db::corp_roles;
+
+    let (ctx, mut issuer_sess, issuer_id, mut p_bid_sess, p_bid_id, station_id, _) =
+        setup_contracts_ctx();
+    let kw = HashMap::new();
+    let (issuer_corp, bidder_corp, corp_bid_id, corp_bid_ship) =
+        (98_147_801_i64, 98_147_802_i64, 90_000_003_i64, 100_000_003_i64);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        seed_eco_corp(snap, issuer_corp, issuer_id, None, issuer_id, corp_roles::ROLE_CONTRACT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[2], 1_000_000, 1_000_000);
+        seed_eco_corp(snap, bidder_corp, 99_147_802, None, corp_bid_id, corp_roles::ROLE_CONTRACT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0] | corp_roles::ROLE_ACCOUNT_CAN_TAKE[1], 500_000, 200_000);
+        let mut cb_char = snap.characters[&p_bid_id].clone();
+        (cb_char.character_id, cb_char.user_id, cb_char.corporation_id, cb_char.active_ship_id) =
+            (corp_bid_id, 3, bidder_corp, corp_bid_ship);
+        snap.characters.insert(corp_bid_id, cb_char);
+        snap.characters.get_mut(&issuer_id).unwrap().corporation_id = issuer_corp;
+        for (iid, owner, flag) in [(878_001, issuer_id, InventoryFlag::Hangar), (878_002, issuer_corp, InventoryFlag::CorpDeliveries), (878_003, issuer_corp, InventoryFlag::CorpDeliveries)] {
+            snap.items.insert(iid, make_fighter_item(iid, 34, owner, station_id, flag, 10));
+        }
+        seed_eco_accounts(snap, &[1, 42, 3]);
+    });
+    for (uid, cid) in [(1_u64, issuer_id), (42, p_bid_id), (3, corp_bid_id)] {
+        ctx.db.acquire_online_lock(uid, uid, Some(cid), false, ctx.now_unix()).unwrap();
+    }
+    issuer_sess.corporation_id = Some(issuer_corp);
+    p_bid_sess.user_id = Some(42);
+    let mut corp_bid_sess = issuer_sess.clone();
+    (corp_bid_sess.user_id, corp_bid_sess.character_id, corp_bid_sess.corporation_id, corp_bid_sess.ship_id, corp_bid_sess.corp_account_key) =
+        (Some(3), Some(corp_bid_id), Some(bidder_corp), Some(corp_bid_ship), 1000);
+    let call = |s: &mut SessionState, m: &str, a: &[PyRep]| handle(&ctx, s, "contractProxy", m, a, &kw).unwrap();
+
+    // (a) ECO-109: Cross-division D1 -> D2 self-outbid/buyout MUST NOT pool D1 escrow into D2
+    let auc1 = created_cid(&call(&mut issuer_sess, "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("Auction".into())), ("availability", PyRep::String("Public".into())),
+        ("startStationID", PyRep::Integer(station_id)), ("price", PyRep::Real(400_000.0)),
+        ("collateral", PyRep::Real(600_000.0)), ("numDays", PyRep::Integer(1)), ("itemList", PyRep::Integer(878_001)),
+    ])]).unwrap()).unwrap();
+    call(&mut corp_bid_sess, "PlaceBid", &[PyRep::Integer(auc1), PyRep::Real(400_000.0), PyRep::Bool(true)]).unwrap();
+    corp_bid_sess.corp_account_key = 1001; // D2 holds 200k < 500k
+    assert_eq!(call(&mut corp_bid_sess, "PlaceBid", &[PyRep::Integer(auc1), PyRep::Real(500_000.0), PyRep::Bool(true)]).unwrap_err().code, "InsufficientFunds");
+    assert_eq!(call(&mut corp_bid_sess, "PlaceBid", &[PyRep::Integer(auc1), PyRep::Real(600_000.0), PyRep::Bool(true)]).unwrap_err().code, "InsufficientFunds");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.corporations[&bidder_corp].division_balance(1), IskCents::from_isk(100_000));
+        assert_eq!(s.corporations[&bidder_corp].division_balance(2), IskCents::from_isk(200_000));
+        assert_eq!(s.contracts[&auc1].current_bid, IskCents::from_isk(400_000));
+    });
+    // Same-division D1 == D1 incremental self-outbid succeeds, then funded D2 outbids & refunds D1
+    corp_bid_sess.corp_account_key = 1000;
+    call(&mut corp_bid_sess, "PlaceBid", &[PyRep::Integer(auc1), PyRep::Real(450_000.0), PyRep::Bool(true)]).unwrap();
+    ctx.db.with_mut_snapshot(|s| s.corporations.get_mut(&bidder_corp).unwrap().set_division_balance(2, IskCents::from_isk(600_000)));
+    corp_bid_sess.corp_account_key = 1001;
+    call(&mut corp_bid_sess, "PlaceBid", &[PyRep::Integer(auc1), PyRep::Real(500_000.0), PyRep::Bool(true)]).unwrap();
+    // Personal bidder insufficient funds fails without clamping balance to 0; outbid + lazy expiry notifies both
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&p_bid_id).unwrap().balance = IskCents::from_isk(100_000));
+    assert_eq!(call(&mut p_bid_sess, "PlaceBid", &[PyRep::Integer(auc1), PyRep::Real(600_000.0)]).unwrap_err().code, "InsufficientFunds");
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&p_bid_id].balance), IskCents::from_isk(100_000));
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&p_bid_id).unwrap().balance = IskCents::from_isk(800_000));
+    call(&mut p_bid_sess, "PlaceBid", &[PyRep::Integer(auc1), PyRep::Real(530_000.0)]).unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.corporations[&bidder_corp].division_balance(1), IskCents::from_isk(500_000));
+        assert_eq!(s.corporations[&bidder_corp].division_balance(2), IskCents::from_isk(600_000));
+        assert_eq!(s.characters[&p_bid_id].balance, IskCents::from_isk(270_000));
+    });
+    ctx.db.with_mut_snapshot(|s| s.contracts.get_mut(&auc1).unwrap().expiration_unix = ctx.now_unix().saturating_sub(1));
+    let _ = (ctx.drain_notifications_for_char(issuer_id), ctx.drain_notifications_for_char(p_bid_id));
+    assert_eq!(call(&mut corp_bid_sess, "PlaceBid", &[PyRep::Integer(auc1), PyRep::Real(560_000.0), PyRep::Bool(true)]).unwrap_err().code, "ContractExpired");
+    assert!(ctx.drain_notifications_for_char(issuer_id).iter().any(|n| n.event == "OnContractCompleted"));
+    assert!(ctx.drain_notifications_for_char(p_bid_id).iter().any(|n| n.event == "OnContractCompleted"));
+
+    // (b) ECO-110 + corp div 3 settlement: RejectContract rejects active open auction and settles expired auction first
+    issuer_sess.corp_account_key = 1002; // div 3
+    let auc2 = created_cid(&call(&mut issuer_sess, "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("Auction".into())), ("availability", PyRep::String("Private".into())),
+        ("assigneeID", PyRep::Integer(p_bid_id)), ("startStationID", PyRep::Integer(station_id)),
+        ("price", PyRep::Real(50_000.0)), ("collateral", PyRep::Real(300_000.0)), ("numDays", PyRep::Integer(1)),
+        ("forCorp", PyRep::Bool(true)), ("itemList", PyRep::Integer(878_002)),
+    ])]).unwrap()).unwrap();
+    call(&mut p_bid_sess, "PlaceBid", &[PyRep::Integer(auc2), PyRep::Real(100_000.0)]).unwrap();
+    assert_eq!(call(&mut p_bid_sess, "RejectContract", &[PyRep::Integer(auc2)]).unwrap_err().code, "InvalidContractState");
+    assert_eq!(ctx.db.with_snapshot(|s| s.contracts[&auc2].current_bidder_id), Some(p_bid_id));
+    let (d1_b, d3_b) = ctx.db.with_snapshot(|s| (s.corporations[&issuer_corp].division_balance(1), s.corporations[&issuer_corp].division_balance(3)));
+    ctx.db.with_mut_snapshot(|s| s.contracts.get_mut(&auc2).unwrap().expiration_unix = ctx.now_unix().saturating_sub(1));
+    let _ = (ctx.drain_notifications_for_char(issuer_id), ctx.drain_notifications_for_char(p_bid_id));
+    assert_eq!(call(&mut p_bid_sess, "RejectContract", &[PyRep::Integer(auc2)]).unwrap_err().code, "ContractExpired");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.contracts[&auc2].status, "Completed");
+        assert_eq!(s.items[&878_002].owner_id, p_bid_id);
+        assert_eq!(s.corporations[&issuer_corp].division_balance(3).0 - d3_b.0, IskCents::from_isk(100_000).0);
+        assert_eq!(s.corporations[&issuer_corp].division_balance(1), d1_b);
+    });
+    assert!(ctx.drain_notifications_for_char(issuer_id).iter().any(|n| n.event == "OnContractCompleted"));
+    assert!(ctx.drain_notifications_for_char(p_bid_id).iter().any(|n| n.event == "OnContractCompleted"));
+
+    let rej_c = created_cid(&call(&mut issuer_sess, "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("Courier".into())), ("availability", PyRep::String("Private".into())),
+        ("assigneeID", PyRep::Integer(p_bid_id)), ("startStationID", PyRep::Integer(station_id)),
+        ("endStationID", PyRep::Integer(station_id)), ("reward", PyRep::Real(40_000.0)),
+        ("forCorp", PyRep::Bool(true)), ("itemList", PyRep::Integer(878_003)),
+    ])]).unwrap()).unwrap();
+    let d3_pre_rej = ctx.db.with_snapshot(|s| s.corporations[&issuer_corp].division_balance(3));
+    assert_eq!(dict_str(&call(&mut p_bid_sess, "RejectContract", &[PyRep::Integer(rej_c)]).unwrap(), "status"), Some("Rejected"));
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&issuer_corp].division_balance(3).0 - d3_pre_rej.0), IskCents::from_isk(40_000).0);
+}
+
+#[test]
+fn eco_111_to_120_acl_alliance_corp_deliveries_journals_notifications_and_gm_role() {
+    use crate::domain::market_acl::{is_contract_visible_to_character, is_contract_visible_to_character_in_snap};
+    use eve_db::{corp_roles, AccountRecord};
+
+    let (mut ctx, mut issuer_sess, issuer_id, mut outsider_sess, outsider_id, station_id, dest_station_id) =
+        setup_contracts_ctx();
+    let kw = HashMap::new();
+    let (issuer_corp, ally_corp, hauler_corp, alliance_id, ally_id, hauler_id) =
+        (98_147_811_i64, 98_147_812_i64, 98_147_813_i64, 99_147_800_i64, 90_000_011_i64, 90_000_012_i64);
+    Arc::make_mut(&mut ctx.sde).types.insert(3468, make_fighter_type(3468, 22, 4, 1.0, vec![]));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        seed_eco_corp(snap, issuer_corp, issuer_id, None, issuer_id, corp_roles::ROLE_CONTRACT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[2], 1_000_000, 1_000_000);
+        seed_eco_corp(snap, ally_corp, ally_id, Some(alliance_id), ally_id, 0, 1_000_000, 1_000_000);
+        seed_eco_corp(snap, hauler_corp, 99_147_813, None, hauler_id, corp_roles::ROLE_CONTRACT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[3], 1_000_000, 1_000_000);
+        let base = snap.characters[&outsider_id].clone();
+        for (cid, uid, corp, ally) in [(ally_id, 11, ally_corp, Some(alliance_id)), (hauler_id, 12, hauler_corp, None)] {
+            let mut ch = base.clone();
+            (ch.character_id, ch.user_id, ch.corporation_id, ch.alliance_id) = (cid, uid, corp, ally);
+            snap.characters.insert(cid, ch);
+        }
+        snap.characters.get_mut(&issuer_id).unwrap().corporation_id = issuer_corp;
+        snap.characters.get_mut(&outsider_id).unwrap().alliance_id = None;
+        snap.accounts.insert("player_777".into(), AccountRecord {
+            user_id: 777, username: "player_777".into(), password_token: String::new(), role: 1, banned_until_unix: None, ban_reason: None,
+        });
+        for (iid, owner, flag) in [(878_101, issuer_id, InventoryFlag::Hangar), (878_102, issuer_corp, InventoryFlag::CorpDeliveries), (878_103, issuer_corp, InventoryFlag::CorpDeliveries), (878_104, issuer_corp, InventoryFlag::CorpDeliveries)] {
+            snap.items.insert(iid, make_fighter_item(iid, 34, owner, station_id, flag, 10));
+        }
+        seed_eco_accounts(snap, &[1, 11, 12, 42]);
+    });
+    for (uid, cid) in [(1_u64, issuer_id), (11, ally_id), (12, hauler_id), (42, outsider_id)] {
+        ctx.db.acquire_online_lock(uid, uid, Some(cid), false, ctx.now_unix()).unwrap();
+    }
+    issuer_sess.corporation_id = Some(issuer_corp);
+    outsider_sess.user_id = Some(42);
+    let mut ally_sess = outsider_sess.clone();
+    (ally_sess.user_id, ally_sess.character_id, ally_sess.corporation_id, ally_sess.alliance_id) = (Some(11), Some(ally_id), Some(ally_corp), Some(alliance_id));
+    let mut hauler_sess = outsider_sess.clone();
+    (hauler_sess.user_id, hauler_sess.character_id, hauler_sess.corporation_id, hauler_sess.corp_account_key) = (Some(12), Some(hauler_id), Some(hauler_corp), 1003);
+    let call = |s: &mut SessionState, m: &str, a: &[PyRep]| handle(&ctx, s, "contractProxy", m, a, &kw).unwrap();
+
+    // (c) ECO-111: Closed ContractAvailability + Alliance visibility
+    for bad in [PyRep::String("Region".into()), PyRep::String("bogus".into()), PyRep::Integer(99)] {
+        assert_eq!(call(&mut issuer_sess, "CreateContract", &[PyRep::keyval([
+            ("type", PyRep::String("ItemExchange".into())), ("availability", bad), ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)), ("itemList", PyRep::Integer(878_101)),
+        ])]).unwrap_err().code, "InvalidContractParameters");
+    }
+    assert_eq!(call(&mut issuer_sess, "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("ItemExchange".into())), ("availability", PyRep::String("Alliance".into())),
+        ("startStationID", PyRep::Integer(station_id)), ("price", PyRep::Real(100_000.0)), ("itemList", PyRep::Integer(878_101)),
+    ])]).unwrap_err().code, "CrpAccessDenied");
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.get_mut(&issuer_corp).unwrap().alliance_id = Some(alliance_id);
+        s.characters.get_mut(&issuer_id).unwrap().alliance_id = Some(alliance_id);
+    });
+    issuer_sess.alliance_id = Some(alliance_id);
+    let ally_cid = created_cid(&call(&mut issuer_sess, "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("ItemExchange".into())), ("availability", PyRep::String("Alliance".into())), ("numDays", PyRep::Integer(7)),
+        ("startStationID", PyRep::Integer(station_id)), ("price", PyRep::Real(100_000.0)), ("itemList", PyRep::Integer(878_101)),
+    ])]).unwrap()).unwrap();
+    assert_eq!(ctx.db.with_snapshot(|s| s.contracts[&ally_cid].assignee_id), alliance_id);
+    assert!(contract_list_rows(&call(&mut ally_sess, "SearchContracts", &[]).unwrap()).iter().any(|r| r.dict_get("contract").and_then(|c| dict_i64(c, "contractID")) == Some(ally_cid)));
+    assert!(!contract_list_rows(&call(&mut outsider_sess, "SearchContracts", &[]).unwrap()).iter().any(|r| r.dict_get("contract").and_then(|c| dict_i64(c, "contractID")) == Some(ally_cid)));
+    assert!(call(&mut ally_sess, "GetContractInfo", &[PyRep::Integer(ally_cid)]).is_ok()); // rpc-lint: allow test fixture
+    assert_eq!(call(&mut outsider_sess, "GetContractInfo", &[PyRep::Integer(ally_cid)]).unwrap_err().code, "ContractAccessDenied"); // rpc-lint: allow test fixture
+    ctx.db.with_snapshot(|s| {
+        let mut legacy = s.contracts[&ally_cid].clone();
+        legacy.assignee_id = 0;
+        assert!(is_contract_visible_to_character_in_snap(s, &legacy, ally_id, ally_corp, Some(alliance_id)));
+        assert!(!is_contract_visible_to_character_in_snap(s, &legacy, outsider_id, 1_000_009, None));
+        legacy.availability = "Regional".into();
+        assert!(!is_contract_visible_to_character(&legacy, outsider_id, 1_000_009, None));
+    });
+
+    // (d) ECO-112 + (e) CorpDeliveries, BreakPlasticWrap issuer OnAccountChange, div 3 journals & refund
+    issuer_sess.corp_account_key = 1002; // div 3
+    let cour_cid = created_cid(&call(&mut issuer_sess, "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("Courier".into())), ("availability", PyRep::String("Public".into())),
+        ("startStationID", PyRep::Integer(station_id)), ("endStationID", PyRep::Integer(dest_station_id)),
+        ("reward", PyRep::Real(100_000.0)), ("collateral", PyRep::Real(400_000.0)), ("numDays", PyRep::Integer(2)),
+        ("forCorp", PyRep::Bool(true)), ("itemList", PyRep::Integer(878_102)),
+    ])]).unwrap()).unwrap();
+    let wrap_id = dict_i64(&call(&mut hauler_sess, "AcceptContract", &[PyRep::Integer(cour_cid), PyRep::Bool(true)]).unwrap(), "courierPackageID").unwrap();
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&wrap_id].flag), InventoryFlag::CorpDeliveries);
+    let (d1_b, d3_b) = ctx.db.with_snapshot(|s| (s.corporations[&issuer_corp].division_balance(1), s.corporations[&issuer_corp].division_balance(3)));
+    let _ = (ctx.drain_notifications_for_char(issuer_id), ctx.drain_notifications_for_char(hauler_id));
+    call(&mut hauler_sess, "BreakPlasticWrap", &[PyRep::Integer(wrap_id)]).unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&878_102].flag, InventoryFlag::CorpDeliveries);
+        assert_eq!(s.corporations[&issuer_corp].division_balance(3).0 - d3_b.0, IskCents::from_isk(500_000).0); // collateral + reward (deposit refunded at AcceptContract)
+        assert_eq!(s.corporations[&issuer_corp].division_balance(1), d1_b);
+        assert!(s.wallet_journal.iter().any(|j| j.character_id == issuer_corp && j.entry_type == "ContractCollateral"));
+        assert!(s.corp_wallet_journals.get(&(issuer_corp, 3)).is_some_and(|v| v.len() >= 6));
+    });
+    let iss_brk = ctx.drain_notifications_for_char(issuer_id);
+    assert!(iss_brk.iter().any(|n| n.event == "OnContractFailed"));
+    assert!(iss_brk.iter().any(|n| n.event == "OnAccountChange" && n.args.first() == Some(&PyRep::String("cash3".into())) && n.args.get(1) == Some(&PyRep::Integer(issuer_corp))));
+    assert!(ctx.drain_notifications_for_char(hauler_id).iter().any(|n| n.event == "OnContractFailed"));
+
+    // (e) GM_ExpireContract role gating & sweep_expired_contracts_and_notify corp div 3 deposit refund + cash3 OnAccountChange
+    let exp_gm = created_cid(&call(&mut issuer_sess, "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("ItemExchange".into())), ("availability", PyRep::String("Public".into())), ("numDays", PyRep::Integer(7)),
+        ("startStationID", PyRep::Integer(station_id)), ("price", PyRep::Real(2_000_000.0)), ("forCorp", PyRep::Bool(true)), ("itemList", PyRep::Integer(878_103)),
+    ])]).unwrap()).unwrap();
+    let exp_sw = created_cid(&call(&mut issuer_sess, "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("ItemExchange".into())), ("availability", PyRep::String("Public".into())), ("expireTime", PyRep::Integer(60)),
+        ("startStationID", PyRep::Integer(station_id)), ("price", PyRep::Real(2_000_000.0)), ("forCorp", PyRep::Bool(true)), ("itemList", PyRep::Integer(878_104)),
+    ])]).unwrap()).unwrap();
+    let mut gm_sess = outsider_sess.clone();
+    (gm_sess.user_id, gm_sess.role) = (Some(777), 1);
+    assert_eq!(call(&mut gm_sess, "GM_ExpireContract", &[PyRep::Integer(exp_gm)]).unwrap_err().code, "GMRoleRequired");
+    ctx.db.with_mut_snapshot(|s| s.accounts.get_mut("player_777").unwrap().role = eve_db::service_roles::ROLE_GM_MASK);
+    let d3_pre_gm = ctx.db.with_snapshot(|s| s.corporations[&issuer_corp].division_balance(3));
+    assert_eq!(dict_str(&call(&mut gm_sess, "GM_ExpireContract", &[PyRep::Integer(exp_gm)]).unwrap(), "status"), Some("Expired"));
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&issuer_corp].division_balance(3).0 - d3_pre_gm.0), IskCents::from_isk(100_000).0);
+
+    let (d1_sw, d3_sw, exp_sw_unix) = ctx.db.with_snapshot(|s| (s.corporations[&issuer_corp].division_balance(1), s.corporations[&issuer_corp].division_balance(3), s.contracts[&exp_sw].expiration_unix));
+    let _ = ctx.drain_notifications_for_char(issuer_id);
+    assert_eq!(sweep_expired_contracts_and_notify(&ctx, exp_sw_unix), 1);
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.contracts[&exp_sw].status, "Expired");
+        assert_eq!(s.corporations[&issuer_corp].division_balance(3).0 - d3_sw.0, IskCents::from_isk(100_000).0);
+        assert_eq!(s.corporations[&issuer_corp].division_balance(1), d1_sw);
+    });
+    assert!(ctx.drain_notifications_for_char(issuer_id).iter().any(|n| n.event == "OnAccountChange" && n.args.first() == Some(&PyRep::String("cash3".into())) && n.args.get(1) == Some(&PyRep::Integer(issuer_corp))));
+}
+
