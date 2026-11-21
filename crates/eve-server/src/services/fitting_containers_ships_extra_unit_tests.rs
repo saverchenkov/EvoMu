@@ -142,17 +142,20 @@ fn ship_bay_access_fleet_corp_and_password_unlock_branches() {
         );
     });
 
-    write_container_ship_state(&ctx, |st| {
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             host_ship,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: Some("secret123".into()),
             },
-        );
+            0,
+        )
+        .unwrap();
     });
 
     ctx.db.with_snapshot(|snap| {
@@ -167,8 +170,8 @@ fn ship_bay_access_fleet_corp_and_password_unlock_branches() {
         ));
     });
 
-    write_container_ship_state(&ctx, |st| {
-        st.unlocked_containers.insert((fleet_mate, host_ship));
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_unlocked_snap(snap, host_ship, fleet_mate, true, 0).unwrap();
     });
     ctx.db.with_snapshot(|snap| {
         assert!(can_character_access_ship_bay_snap(
@@ -245,8 +248,8 @@ async fn validate_container_and_bay_move_sma_fleet_hangar_and_container_errors()
     }
 
     // Password-protected destination container failure then success
-    write_container_ship_state(&ctx, |st| {
-        st.set_container_password(asm_cont_id, 1, "contpw".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, asm_cont_id, 1, "contpw", 0).unwrap();
     });
     assert_eq!(
         validate_container_and_bay_move(&ctx, char_id, ore_id, asm_cont_id, 4, &kw, None)
@@ -454,8 +457,8 @@ async fn alsc_lock_unlock_log_assemble_and_decode_item_branches() {
         .code,
         "ItemNotInContainer"
     );
-    write_container_ship_state(&ctx, |st| {
-        st.set_container_password(cont_id, 1, "alscpw".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, cont_id, 1, "alscpw", 0).unwrap();
     });
     assert_eq!(
         handle_containers_ships_and_fitting(
@@ -767,9 +770,9 @@ async fn containers_ops_clear_charges_fit_fitting_alsc_retrieve_password_and_ite
     );
 
     // RetrievePassword + HasExistingPasswordSet
-    write_container_ship_state(&ctx, |st| {
-        st.set_container_password(corp_cont_id, 1, "genpw".into());
-        st.set_container_password(corp_cont_id, 2, "cfgpw".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, corp_cont_id, 1, "genpw", 0).unwrap();
+        set_container_password_snap(snap, corp_cont_id, 2, "cfgpw", 0).unwrap();
     });
     assert_eq!(
         handle_containers_ships_and_fitting(&ctx, &mut sess, None, "invbroker", "HasExistingPasswordSet", &[PyRep::Integer(corp_cont_id), PyRep::Integer(2)], &kw)
@@ -1216,8 +1219,8 @@ async fn invbroker_misc_crystal_damage_fit_fitting_edge_cases_and_pi_errors() {
         snap.corp_role_assignments.remove(&(corp_id, char_id));
         snap.corp_governance.remove(&corp_id);
     });
-    write_container_ship_state(&ctx, |st| {
-        st.set_container_password(pw_cont_id, 1, "secret".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, pw_cont_id, 1, "secret", 0).unwrap();
     });
 
     // 1. GetDamageForCrystals reads DAMAGE and HP_STRUCT fallback
@@ -1268,7 +1271,9 @@ async fn invbroker_misc_crystal_damage_fit_fitting_edge_cases_and_pi_errors() {
             .await.unwrap().unwrap_err().code,
         "ItemNotInContainer"
     );
-    write_container_ship_state(&ctx, |st| { st.unlocked_containers.clear(); });
+    ctx.db.with_mut_snapshot(|snap| {
+        clear_container_unlocks_snap(snap, pw_cont_id);
+    });
     assert_eq!(
         handle_containers_ships_and_fitting(&ctx, &mut sess, None, "invbroker", "ALSCLockItems", &[PyRep::Integer(pw_cont_id), PyRep::List(vec![PyRep::Integer(cont_child_id)])], &kw)
             .await.unwrap().unwrap_err().code,
@@ -2722,4 +2727,89 @@ async fn bl02_invbroker_add_commits_alsc_take_custom_flag_and_ship_unlock_atomic
     });
     drop(repo2);
     cleanup_sqlite_files(&db_path);
+}
+
+#[tokio::test]
+async fn clear_charges_rejects_alsc_locked_charge_without_tx_commit() {
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+    let base_tpl = sde.types.get(&587).unwrap().clone();
+    let ensure_type = |sde: &mut eve_sde::SdeRegistry, tid: u32, grp: u32, cat: u32, vol: f64, effects: Vec<u16>| {
+        if !sde.types.contains_key(&tid) {
+            let mut t = base_tpl.clone();
+            t.type_id = tid;
+            t.group_id = grp;
+            t.category_id = cat;
+            t.volume = vol;
+            t.capacity = 0.0;
+            t.effect_ids = effects;
+            sde.types.insert(tid, t);
+        }
+    };
+    ensure_type(&mut sde, 995_001, 55, 7, 5.0, vec![12]);
+    ensure_type(&mut sde, 995_002, 83, 8, 1.0, vec![]);
+
+    let ctx = Arc::new(
+        ServerContext::with_sde_and_repository(Arc::new(sde), db)
+            .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED),
+    );
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let turret_id = 881_001_i64;
+    let charge_id = 881_002_i64;
+
+    let mut sess = SessionState::new(91_602);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(98_000_001);
+    sess.station_id = Some(60_003_760);
+    sess.solar_system_id = Some(30_000_142);
+    sess.ship_id = Some(ship_id);
+    ctx.sync_session(&mut sess);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            turret_id,
+            mk_item(turret_id, 995_001, char_id, ship_id, InventoryFlag::HiSlot0, 1, true),
+        );
+        snap.items.insert(
+            charge_id,
+            mk_item(charge_id, 995_002, char_id, ship_id, InventoryFlag::HiSlot0, 4, false),
+        );
+        snap.module_active_charges.insert(turret_id, 995_002);
+        set_alsc_item_locked_snap(snap, charge_id, true, 0).unwrap();
+    });
+
+    let kw = HashMap::new();
+    let commits_before = ctx.db.tx_commit_count();
+    let err = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "ClearCharges",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "ItemLocked");
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&charge_id).map(|i| i.flag), Some(InventoryFlag::HiSlot0));
+        assert!(snap.module_active_charges.contains_key(&turret_id));
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, charge_id, false, 0).unwrap();
+    });
+    handle_containers_ships_and_fitting(&ctx, &mut sess, None, "invbroker", "ClearCharges", &[], &kw)
+        .await
+        .unwrap()
+        .expect("ClearCharges succeeds after ALSC lock cleared");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.module_active_charges.contains_key(&turret_id));
+        assert_eq!(snap.items.get(&charge_id).map(|i| i.flag), Some(InventoryFlag::Cargo));
+    });
 }

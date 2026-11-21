@@ -295,10 +295,9 @@ fn set_ship_password_rejects_missing_or_integer_password_without_mutating() {
     );
     assert_eq!(ctx.db.tx_commit_count(), commits_before);
     assert_eq!(
-        fitting_containers_ships::read_container_ship_state(&ctx)
-            .ship_passwords
-            .get(&ship_id)
-            .map(String::as_str),
+        ctx.db
+            .with_snapshot(|snap| fitting_containers_ships::ship_password_snap(snap, ship_id))
+            .as_deref(),
         Some("initial-pw")
     );
 
@@ -310,14 +309,254 @@ fn set_ship_password_rejects_missing_or_integer_password_without_mutating() {
     )
     .expect("explicit (ship_id, password) succeeds");
     assert_eq!(
-        fitting_containers_ships::read_container_ship_state(&ctx)
-            .ship_passwords
-            .get(&ship_id)
-            .map(String::as_str),
+        ctx.db
+            .with_snapshot(|snap| fitting_containers_ships::ship_password_snap(snap, ship_id))
+            .as_deref(),
         Some("updated-pw")
     );
+}
+
+#[test]
+fn ship_configuration_enforces_ship_validation_and_tx_atomicity() {
+    let ctx = test_ctx_with_custom(|_| {});
+    let char_id = 90_000_001_i64;
+    let other_id = 90_000_002_i64;
+    let ship_id = 77_700_101_i64;
+    let foreign_ship_id = 77_700_102_i64;
+    let non_ship_id = 77_700_103_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for (item_id, type_id, owner_id) in [
+            (ship_id, 587, char_id),
+            (foreign_ship_id, 587, other_id),
+            (non_ship_id, 34, char_id),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id,
+                    location_id: 60_003_760,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut owner_sess = SessionState::default();
+    owner_sess.user_id = Some(char_id as u64);
+    owner_sess.character_id = Some(char_id);
+    owner_sess.ship_id = Some(ship_id);
+
+    let commits_before = ctx.db.tx_commit_count();
+    assert_eq!(
+        ship_configuration(
+            &ctx,
+            &owner_sess,
+            "GetShipConfiguration",
+            &[PyRep::Integer(99_999_999)],
+        )
+        .unwrap_err()
+        .code,
+        "ShipNotFound"
+    );
+    for bad_target in [99_999_999_i64, foreign_ship_id, non_ship_id] {
+        let expected_err = if bad_target == 99_999_999 {
+            "ShipNotFound"
+        } else {
+            "OwnershipViolation"
+        };
+        assert_eq!(
+            ship_configuration(
+                &ctx,
+                &owner_sess,
+                "SetShipPassword",
+                &[PyRep::Integer(bad_target), PyRep::String("pw".into())],
+            )
+            .unwrap_err()
+            .code,
+            expected_err
+        );
+        assert_eq!(
+            ship_configuration(
+                &ctx,
+                &owner_sess,
+                "ConfigureShip",
+                &[
+                    PyRep::Integer(bad_target),
+                    PyRep::Dict(vec![(
+                        PyRep::String(CFG_FLEET_HANGAR_FLEET.into()),
+                        PyRep::Bool(true),
+                    )]),
+                ],
+            )
+            .unwrap_err()
+            .code,
+            expected_err
+        );
+    }
+    assert_eq!(
+        ship_configuration(
+            &ctx,
+            &owner_sess,
+            "ConfigureShip",
+            &[
+                PyRep::Integer(ship_id),
+                PyRep::Dict(vec![(PyRep::String("unknownFlag".into()), PyRep::Bool(true))]),
+            ],
+        )
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+
+    let cfg_reply = ship_configuration(
+        &ctx,
+        &owner_sess,
+        "ConfigureShip",
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::Dict(vec![(
+                PyRep::String(CFG_FLEET_HANGAR_FLEET.into()),
+                PyRep::Bool(true),
+            )]),
+        ],
+    )
+    .expect("owner ConfigureShip succeeds");
+    assert_eq!(
+        cfg_reply.dict_get(CFG_FLEET_HANGAR_FLEET).and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(ctx.db.tx_commit_count(), commits_before + 1);
+
+    ship_configuration(
+        &ctx,
+        &owner_sess,
+        "SetShipPassword",
+        &[PyRep::Integer(ship_id), PyRep::String("vault-ship".into())],
+    )
+    .expect("owner SetShipPassword succeeds");
+    assert_eq!(ctx.db.tx_commit_count(), commits_before + 2);
+    ctx.db.with_snapshot(|snap| {
+        let cfg = fitting_containers_ships::ship_access_config_snap(snap, ship_id);
+        assert!(cfg.allow_fleet_hangar);
+        assert_eq!(cfg.password.as_deref(), Some("vault-ship"));
+    });
 }
 
 #[cfg(test)]
 #[path = "fitting_ship_forcefield_cov_edges_tests.rs"]
 mod fitting_ship_forcefield_cov_edges_tests;
+
+#[test]
+fn bf_1180_get_ship_configuration_and_configure_ship_validation() {
+    let ctx = test_ctx_with_custom(|_| {});
+    let owner_id = 91_880_001_i64;
+    let outsider_id = 91_880_002_i64;
+    let station_id = 60_003_760_i64;
+    let owner_ship = 1_880_001_001_i64;
+    let non_ship_box = 1_880_001_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            owner_ship,
+            InventoryItemRecord {
+                item_id: owner_ship,
+                type_id: 587,
+                owner_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            non_ship_box,
+            InventoryItemRecord {
+                item_id: non_ship_box,
+                type_id: 17_366,
+                owner_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut owner_sess = eve_machonet::SessionState::default();
+    owner_sess.user_id = Some(1);
+    owner_sess.character_id = Some(owner_id);
+    owner_sess.station_id = Some(station_id);
+    owner_sess.ship_id = Some(owner_ship);
+
+    let mut outsider_sess = eve_machonet::SessionState::default();
+    outsider_sess.user_id = Some(2);
+    outsider_sess.character_id = Some(outsider_id);
+    outsider_sess.station_id = Some(station_id);
+
+    // Owner reads own ship configuration -> Ok
+    assert!(
+        ship_configuration(&ctx, &owner_sess, "GetShipConfiguration", &[PyRep::Integer(owner_ship)]).is_ok()
+    );
+    // Missing ship -> ShipNotFound; non-ship owned by caller -> OwnershipViolation; foreign ship -> OwnershipViolation
+    assert_eq!(
+        ship_configuration(&ctx, &owner_sess, "GetShipConfiguration", &[PyRep::Integer(1_880_999_999)])
+            .unwrap_err()
+            .code,
+        "ShipNotFound"
+    );
+    assert_eq!(
+        ship_configuration(&ctx, &owner_sess, "GetShipConfiguration", &[PyRep::Integer(non_ship_box)])
+            .unwrap_err()
+            .code,
+        "OwnershipViolation"
+    );
+    assert_eq!(
+        ship_configuration(&ctx, &outsider_sess, "GetShipConfiguration", &[PyRep::Integer(owner_ship)])
+            .unwrap_err()
+            .code,
+        "OwnershipViolation"
+    );
+
+    // P2: ConfigureShip rejects non-string key and non-bool/int value instead of silently ignoring
+    assert_eq!(
+        ship_configuration(
+            &ctx,
+            &owner_sess,
+            "ConfigureShip",
+            &[
+                PyRep::Integer(owner_ship),
+                PyRep::Dict(vec![(PyRep::Integer(42), PyRep::Bool(true))]),
+            ],
+        )
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        ship_configuration(
+            &ctx,
+            &owner_sess,
+            "ConfigureShip",
+            &[
+                PyRep::Integer(owner_ship),
+                PyRep::Dict(vec![(
+                    PyRep::String(CFG_FLEET_HANGAR_FLEET.into()),
+                    PyRep::String("yes".into()),
+                )]),
+            ],
+        )
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+}

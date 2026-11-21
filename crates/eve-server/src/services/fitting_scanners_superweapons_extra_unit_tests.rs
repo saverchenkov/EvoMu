@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::inventory_fitting::fitting_containers_ships::read_container_ship_state;
+use super::inventory_fitting::fitting_containers_ships::is_container_unlocked_snap;
 use super::inventory_fitting::fitting_scanners_superweapons::*;
 use crate::router::ServerContext;
 use eve_db::{
@@ -232,7 +232,7 @@ fn hacking_unlock_dbuff_aggregation_and_attribute_modifier_operations() {
         assert_eq!(hs.core_hp_remaining, 0.0);
         assert!(hs.unlocked);
     }
-    assert!(read_container_ship_state(&ctx).unlocked_containers.contains(&(cont_space_id, char_id)));
+    assert!(ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, cont_space_id, char_id)));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&cont_space_id].flag, InventoryFlag::None);
         assert_eq!(snap.items[&cont_station_id].flag, InventoryFlag::Locked);

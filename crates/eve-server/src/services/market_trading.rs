@@ -1222,30 +1222,7 @@ pub fn handle(
                 let mut matched_sellers: Vec<(i64, i64)> = Vec::new();
                 let mut delivered_items: Vec<(i64, TypeId, i64, i64)> = Vec::new();
                 let mut delivered_item_records: Vec<InventoryItemRecord> = Vec::new();
-                let mut buyer_acct_after: Option<(bool, i64, u8, IskCents)> = None;
-                let mut touched_seller_accts: Vec<(bool, i64, u8)> = Vec::new();
                 let mut career_fills: Vec<(i64, i64, u32, IskCents)> = Vec::new();
-                let resolve_seller_acct_updates =
-                    |snap: &eve_db::snapshot_ext::WorldStateSnapshot,
-                     accts: Vec<(bool, i64, u8)>,
-                     buyer_after: Option<(bool, i64, u8, IskCents)>|
-                     -> Vec<(bool, i64, u8, IskCents)> {
-                        accts
-                            .into_iter()
-                            .filter_map(|(is_corp, oid, div)| {
-                                let bal = if is_corp {
-                                    snap.corporations.get(&oid)?.division_balance(div)
-                                } else {
-                                    snap.characters.get(&oid)?.balance
-                                };
-                                if buyer_after == Some((is_corp, oid, div, bal)) {
-                                    None
-                                } else {
-                                    Some((is_corp, oid, div, bal))
-                                }
-                            })
-                            .collect()
-                    };
 
                 for (oid, _) in candidate_ids {
                     if remaining_qty <= 0 {
@@ -1292,9 +1269,6 @@ pub fn handle(
                                 buyer.balance
                             })
                         };
-                        if let Some(bal) = buyer_bal {
-                            buyer_acct_after = Some((use_corp, order_owner_id, div_id, bal));
-                        }
                         let (mut seller_net, mut seller_bal, mut fill_tax) = (IskCents(0), None, IskCents(0));
                         if !resting.is_npc {
                             matched_sellers.push((oid, resting.owner_id));
@@ -1313,18 +1287,10 @@ pub fn handle(
                             if let Some(seller) = snap.characters.get_mut(&resting.owner_id) {
                                 seller.balance = seller.balance.checked_add(seller_net).unwrap_or(seller.balance);
                                 seller_bal = Some(seller.balance);
-                                let key = (false, resting.owner_id, 1);
-                                if !touched_seller_accts.contains(&key) {
-                                    touched_seller_accts.push(key);
-                                }
                             } else if let Some(seller_corp) = snap.corporations.get_mut(&resting.owner_id) {
                                 let s_div = (seller_meta.account_key.unwrap_or(1000).saturating_sub(999)).clamp(1, 7) as u8;
                                 let s_bal = seller_corp.credit_division(s_div, seller_net);
                                 seller_bal = Some(s_bal);
-                                let key = (true, resting.owner_id, s_div);
-                                if !touched_seller_accts.contains(&key) {
-                                    touched_seller_accts.push(key);
-                                }
                             }
                         }
                         snap.journal_market_fill(eve_db::ledger::MarketFill {
@@ -1419,11 +1385,6 @@ pub fn handle(
                 }
 
                 if remaining_qty == 0 {
-                    let seller_acct_updates = resolve_seller_acct_updates(
-                        snap,
-                        touched_seller_accts,
-                        buyer_acct_after,
-                    );
                     return Ok((
                         first_matched_oid.unwrap_or(0),
                         order_owner_id,
@@ -1434,8 +1395,6 @@ pub fn handle(
                         matched_sellers,
                         delivered_items,
                         delivered_item_records,
-                        buyer_acct_after,
-                        seller_acct_updates,
                         career_fills,
                     ));
                 }
@@ -1494,7 +1453,7 @@ pub fn handle(
                         client_error: None,
                     });
                 }
-                let broker_bal = if use_corp {
+                let _ = if use_corp {
                     if let Some(corp) = snap.corporations.get_mut(&caller_corp_id) {
                         let bal_after = corp.division_balance(div_id).checked_sub(broker_fee).unwrap_or(IskCents(0));
                         corp.set_division_balance(div_id, bal_after);
@@ -1518,9 +1477,6 @@ pub fn handle(
                 } else {
                     None
                 };
-                if let Some(bal) = broker_bal {
-                    buyer_acct_after = Some((use_corp, order_owner_id, div_id, bal));
-                }
                 if let Some((st_corp_id, _, pilot_bps)) = structure_broker_opt {
                     let owner_share = structure_owner_broker_share_with_pilot(snap, station_id, broker_fee, pilot_bps);
                     if owner_share.0 > 0 {
@@ -1542,9 +1498,6 @@ pub fn handle(
                         buyer.balance
                     })
                 };
-                if let Some(bal) = escrow_bal {
-                    buyer_acct_after = Some((use_corp, order_owner_id, div_id, bal));
-                }
 
                 snap.next_entity_id += 1;
                 let new_oid = snap.next_entity_id;
@@ -1568,7 +1521,6 @@ pub fn handle(
                     m.issued_by = Some(char_id);
                 }
                 if let Some(bal) = escrow_bal {
-                    buyer_acct_after = Some((use_corp, order_owner_id, div_id, bal));
                     if escrow.0 > 0 {
                         snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
                             owner_id: order_owner_id,
@@ -1581,16 +1533,11 @@ pub fn handle(
                         });
                     }
                 }
-                let seller_acct_updates = resolve_seller_acct_updates(
-                    snap,
-                    touched_seller_accts,
-                    buyer_acct_after,
-                );
-                Ok((new_oid, order_owner_id, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates, career_fills))
+                Ok((new_oid, order_owner_id, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items, delivered_item_records, career_fills))
             });
 
             match res {
-                Ok((order_id, order_owner_id, filled_immediately, broker_fee, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates, career_fills)) => {
+                Ok((order_id, order_owner_id, filled_immediately, broker_fee, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items, delivered_item_records, career_fills)) => {
                     for (b_id, s_id, tid, gross) in career_fills {
                         crate::services::quasar_career_goals::record_market_fill_career_goals(
                             ctx, b_id, s_id, tid, gross,
@@ -1598,12 +1545,6 @@ pub fn handle(
                     }
                     for (matched_oid, seller_id) in matched_sellers {
                         notify_own_order_changed(ctx, seller_id, 0, matched_oid, "Change");
-                    }
-                    if let Some((b_is_corp, b_owner, b_div, b_bal)) = buyer_acct_after {
-                        emit_market_account_change(ctx, b_is_corp, b_owner, b_div, b_bal);
-                    }
-                    for (s_is_corp, s_owner, s_div, s_bal) in seller_acct_updates {
-                        emit_market_account_change(ctx, s_is_corp, s_owner, s_div, s_bal);
                     }
                     for rec in &delivered_item_records {
                         emit_market_item_change(ctx, char_id, rec, vec![(3, PyRep::Integer(0))]);

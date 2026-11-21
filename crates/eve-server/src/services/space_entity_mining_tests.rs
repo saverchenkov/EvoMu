@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::services::combat_crimewatch::{with_combat_runtime, DroneMiningState};
-use crate::services::inventory_fitting::fitting_containers_ships::{write_container_ship_state, AlscLogEntry};
+use crate::services::inventory_fitting::fitting_containers_ships::{append_alsc_log_snap, AlscLogEntry};
 use crate::services::station_structure::structure_upwell_ops::{
     configure_structure_access_profile, load_ext_state, save_ext_state, StructureLifecycleState,
 };
@@ -394,21 +394,26 @@ async fn reprocessing_reprocess_and_get_quotes_error_and_success_paths() {
     assert_eq!(handle(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(unref_id)], None).await.unwrap().unwrap_err().code, "ItemNotReprocessable");
     assert_eq!(handle(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(small_ore_id)], None).await.unwrap().unwrap_err().code, "InsufficientBatchPortion");
 
-    write_container_ship_state(&ctx, |st| {
-        st.alsc_logs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        append_alsc_log_snap(
+            snap,
             ore_item_id,
-            vec![AlscLogEntry {
+            AlscLogEntry {
                 timestamp_unix: ctx.now_unix_secs(),
                 actor_id: char_id,
                 action: "ALSCActionLock".into(),
                 item_id: ore_item_id,
                 item_type_id: 995_001,
                 quantity: 250,
-            }],
-        );
+            },
+            0,
+        )
+        .unwrap();
     });
     assert_eq!(handle(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(ore_item_id)], None).await.unwrap().unwrap_err().code, "ContainerHasActiveAuditLog");
-    write_container_ship_state(&ctx, |st| { st.alsc_logs.remove(&ore_item_id); });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.kv_mut(eve_db::Ns::ContainerAlscLogs).remove(ore_item_id, "");
+    });
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().balance = IskCents(10_000_000);

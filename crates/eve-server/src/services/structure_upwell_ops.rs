@@ -845,7 +845,7 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
     let wrap_id = arg_i64(args, 0).ok_or_else(|| err("MissingWrapId", "MoveSafetyWrapToStructure requires wrapID"))?;
     let explicit_dest_id = arg_i64(args, 1);
     let now_unix = ctx.now_unix();
-    let (owner_id, is_corp, bal_f64, resp) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (owner_id, is_corp, resp) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
         let Some(wrap) = ext.asset_safety_wraps.get(&wrap_id).cloned() else { return Err(err("AssetSafetyWrapNotFound", format!("Asset safety wrap {wrap_id} not found"))); };
         let dest_id = explicit_dest_id
@@ -907,7 +907,7 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
             ASSET_SAFETY_FEE_FRACTION
         };
         let fee = eve_db::IskCents::from_f64_isk(wrap.estimated_value_isk * fee_rate);
-        let (payer, bal_f64) = if wrap.is_corp {
+        let payer = if wrap.is_corp {
             let corp = snap.corporations.get_mut(&wrap.owner_id).ok_or_else(|| err("CorpNotFound", format!("Corp {} not found", wrap.owner_id)))?;
             let cur = corp.division_balance(1);
             if cur < fee { return Err(err("InsufficientFunds", format!("Delivering corp wrap {wrap_id} requires fee {fee:?}"))); }
@@ -924,7 +924,7 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
                 });
                 snap.append_journal(wrap.owner_id, "AssetSafetyRecovery", eve_db::IskCents(-fee.0), new_bal, desc);
             }
-            (wrap.owner_id, new_bal.to_wire_f64())
+            wrap.owner_id
         } else {
             let ch = snap.characters.get_mut(&char_id).ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
             if ch.balance < fee { return Err(err("InsufficientFunds", format!("Delivering wrap {wrap_id} requires fee {fee:?}"))); }
@@ -933,7 +933,7 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
             if fee.0 > 0 {
                 snap.append_journal(char_id, "AssetSafetyRecoveryTax", eve_db::IskCents(-fee.0), new_bal, format!("Asset Safety recovery fee for wrap {wrap_id} to destination {dest_id}"));
             }
-            (char_id, new_bal.to_wire_f64())
+            char_id
         };
         snap.items.remove(&wrap_id);
         for &iid in &wrap.item_ids {
@@ -944,7 +944,7 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
             w.retrieval_fee_paid = true;
         }
         save_ext_state(snap, &ext);
-        Ok((payer, wrap.is_corp, bal_f64, PyRep::keyval([
+        Ok((payer, wrap.is_corp, PyRep::keyval([
             ("wrapID", PyRep::Integer(wrap_id)), ("destinationID", PyRep::Integer(dest_id)),
             ("deliveredItemCount", PyRep::Integer(wrap.item_ids.len() as i64)), ("feePaidISK", PyRep::Real(fee.to_wire_f64())),
             ("autoDelivered", PyRep::Bool(wrap.auto_delivered)),
@@ -960,17 +960,6 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
             "corpid",
             crate::router::notify_registry::OnAssetSafetyDelivered { owner_id },
         );
-        ctx.emit_typed_with_id_type(
-            crate::router::NotificationTarget::Corporation(owner_id),
-            "corpid",
-            crate::router::notify_registry::OnAccountChange {
-                account_key: "cash".into(),
-                owner_id,
-                balance: bal_f64,
-            },
-        );
-    } else {
-        ctx.notify_account_change(char_id, "cash", owner_id, bal_f64);
     }
     Ok(resp)
 }

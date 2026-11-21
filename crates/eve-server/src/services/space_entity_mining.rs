@@ -1939,7 +1939,6 @@ pub async fn handle(
                 Deleted(InventoryItemRecord),
             }
             let mut item_deltas: Vec<ReprocessItemDelta> = Vec::new();
-            let mut wallet_notify: Option<f64> = None;
 
             let now_unix = ctx.now_unix();
             if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
@@ -2290,7 +2289,6 @@ pub async fn handle(
                         } else {
                             IskCents(0)
                         };
-                        wallet_notify = Some(bal_after.to_wire_f64());
                         if station_id >= 1_000_000_000_000 {
                             if let Some(owner_corp_id) =
                                 snap.structures.get(&station_id).map(|s| s.owner_corp_id)
@@ -2356,9 +2354,6 @@ pub async fn handle(
 
             match res {
                 Ok((mut batch_results, reprocessed_inputs)) => {
-                    if let Some(bal) = wallet_notify {
-                        ctx.notify_account_change(char_id, "cash", char_id, bal);
-                    }
                     for delta in item_deltas {
                         match delta {
                             ReprocessItemDelta::Updated(rec, changes) => {

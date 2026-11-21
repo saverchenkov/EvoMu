@@ -27,27 +27,27 @@ fn make_ctx_and_session() -> (Arc<ServerContext>, SessionState) {
 #[test]
 fn container_ship_runtime_state_passwords_and_persistence() {
     let (ctx, _) = make_ctx_and_session();
-    let mut st = ContainerShipRuntimeState::default();
-    assert_eq!(st.get_container_password(5001, 1), None);
-    assert_eq!(st.get_container_password(5001, 2), None);
+    ctx.db.with_mut_snapshot(|snap| {
+        assert_eq!(container_password_snap(snap, 5001, 1), None);
+        assert_eq!(container_password_snap(snap, 5001, 2), None);
 
-    st.set_container_password(5001, 1, "open_pw".into());
-    st.set_container_password(5001, 2, "cfg_pw".into());
-    assert_eq!(st.get_container_password(5001, 1), Some("open_pw"));
-    assert_eq!(st.get_container_password(5001, 2), Some("cfg_pw"));
+        set_container_password_snap(snap, 5001, 1, "open_pw", 0).unwrap();
+        set_container_password_snap(snap, 5001, 2, "cfg_pw", 0).unwrap();
+        assert_eq!(container_password_snap(snap, 5001, 1).as_deref(), Some("open_pw"));
+        assert_eq!(container_password_snap(snap, 5001, 2).as_deref(), Some("cfg_pw"));
 
-    st.set_container_password(5001, 1, String::new());
-    assert_eq!(st.get_container_password(5001, 1), None);
-    assert_eq!(st.get_container_password(5001, 2), Some("cfg_pw"));
-
-    save_container_ship_state(&ctx, &st);
-    let loaded = read_container_ship_state(&ctx);
-    assert_eq!(loaded.get_container_password(5001, 2), Some("cfg_pw"));
-
-    write_container_ship_state(&ctx, |mut_st| {
-        mut_st.alsc_locked_items.insert(777);
+        set_container_password_snap(snap, 5001, 1, "", 0).unwrap();
+        assert_eq!(container_password_snap(snap, 5001, 1), None);
+        assert_eq!(container_password_snap(snap, 5001, 2).as_deref(), Some("cfg_pw"));
     });
-    assert!(read_container_ship_state(&ctx).alsc_locked_items.contains(&777));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(container_password_snap(snap, 5001, 2).as_deref(), Some("cfg_pw"));
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, 777, true, 0).unwrap();
+    });
+    assert!(ctx.db.with_snapshot(|snap| snap.is_item_in_alsc_lock(777)));
 }
 
 #[test]
@@ -107,17 +107,20 @@ fn ship_bay_access_and_alsc_audit_logging() {
     });
 
     // Disallow corp & fleet on ship config -> denied for non-owner
-    write_container_ship_state(&ctx, |st| {
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             host_ship_id,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: false,
                 allow_corp_smb: false,
                 allow_fleet_hangar: false,
                 allow_corp_hangar: false,
                 password: Some("baypw".into()),
             },
-        );
+            0,
+        )
+        .unwrap();
     });
     ctx.db.with_snapshot(|snap| {
         assert!(!can_character_access_ship_bay_with_password_snap(
@@ -155,15 +158,18 @@ fn ship_bay_access_and_alsc_audit_logging() {
             },
         );
     });
-    write_container_ship_state(&ctx, |st| {
-        st.container_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_config_snap(
+            snap,
             cont_id,
-            ContainerConfig {
+            &ContainerConfig {
                 lock_by_default: true,
                 password_per_action: false,
                 config_bitmask: 3,
             },
-        );
+            0,
+        )
+        .unwrap();
     });
 
     record_container_add_log(&ctx, owner_id, 880_002, 34, 100, cont_id);
@@ -173,9 +179,8 @@ fn ship_bay_access_and_alsc_audit_logging() {
     let now_secs = ctx.now_unix_secs();
     ctx.db.with_snapshot(|snap| {
         assert!(container_has_active_audit_log_snap(snap, cont_id, now_secs));
-        let st = read_container_ship_state_snap(snap);
-        assert!(st.alsc_locked_items.contains(&880_002));
-        assert!(st.alsc_logs.get(&cont_id).unwrap().len() >= 3);
+        assert!(snap.is_item_in_alsc_lock(880_002));
+        assert!(container_alsc_logs_snap(snap, cont_id).len() >= 3);
     });
 }
 
@@ -190,8 +195,8 @@ async fn container_and_bay_move_validation_and_rpc_handlers() {
     assert_eq!(self_err.message, "CannotStoreShipInItself");
 
     // 2. ALSC locked item rejected
-    write_container_ship_state(&ctx, |st| {
-        st.alsc_locked_items.insert(880_010);
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, 880_010, true, 0).unwrap();
     });
     let lock_err = validate_container_and_bay_move(&ctx, 90_000_001, 880_010, 60_003_760, 4, &kw, None)
         .expect_err("locked item move must fail");
@@ -1046,8 +1051,8 @@ async fn has_existing_password_set_bound_moniker_and_slot_validation() {
     }
 
     // 2. Only config password (which=2) set: slot 1 stays false, slot 2 returns true across bound/unbound/kwargs.
-    write_container_ship_state(&ctx, |st| {
-        st.set_container_password(alsc_id, 2, "cfg-secret".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, alsc_id, 2, "cfg-secret", 0).unwrap();
     });
     assert_eq!(
         ctx.dispatch_rpc(
@@ -1110,8 +1115,8 @@ async fn has_existing_password_set_bound_moniker_and_slot_validation() {
     );
 
     // 3. Both slots set then slot 1 cleared: slot 1 returns false again while slot 2 remains true.
-    write_container_ship_state(&ctx, |st| {
-        st.set_container_password(alsc_id, 1, "gen-secret".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, alsc_id, 1, "gen-secret", 0).unwrap();
     });
     assert_eq!(
         ctx.dispatch_rpc(
@@ -1127,8 +1132,8 @@ async fn has_existing_password_set_bound_moniker_and_slot_validation() {
         .unwrap(),
         PyRep::Bool(true)
     );
-    write_container_ship_state(&ctx, |st| {
-        st.set_container_password(alsc_id, 1, String::new());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, alsc_id, 1, "", 0).unwrap();
     });
     assert_eq!(
         ctx.dispatch_rpc(
@@ -1283,10 +1288,10 @@ async fn alsc_log_get_rejects_same_corp_and_npc_corp_non_owner_without_mutating_
         }
     });
 
-    write_container_ship_state(&ctx, |st| {
-        st.set_container_password(personal_alsc, 1, "p-pw".into());
-        st.set_container_password(npc_personal_alsc, 1, "npc-pw".into());
-        st.set_container_password(corp_alsc, 1, "c-pw".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, personal_alsc, 1, "p-pw", 0).unwrap();
+        set_container_password_snap(snap, npc_personal_alsc, 1, "npc-pw", 0).unwrap();
+        set_container_password_snap(snap, corp_alsc, 1, "c-pw", 0).unwrap();
     });
 
     let kw = std::collections::HashMap::new();
@@ -1380,22 +1385,21 @@ async fn alsc_log_get_rejects_same_corp_and_npc_corp_non_owner_without_mutating_
     assert_eq!(npc_bound_err.code, "ALSCAccessDenied");
 
     // Verify neither personal ALSC accumulated any ALSCActionPasswordFailure entry.
-    let state_after_denied = read_container_ship_state(&ctx);
-    assert!(
-        state_after_denied.alsc_logs.get(&personal_alsc).is_none_or(Vec::is_empty),
-        "denied same-corp ALSCLogGet must not mutate personal ALSC audit log"
-    );
-    assert!(
-        state_after_denied.alsc_logs.get(&npc_personal_alsc).is_none_or(Vec::is_empty),
-        "denied NPC-corp ALSCLogGet must not mutate personal ALSC audit log"
-    );
     let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
+        assert!(
+            container_alsc_logs_snap(snap, personal_alsc).is_empty(),
+            "denied same-corp ALSCLogGet must not mutate personal ALSC audit log"
+        );
+        assert!(
+            container_alsc_logs_snap(snap, npc_personal_alsc).is_empty(),
+            "denied NPC-corp ALSCLogGet must not mutate personal ALSC audit log"
+        );
         assert!(!container_has_active_audit_log_snap(snap, personal_alsc, now));
         assert!(!container_has_active_audit_log_snap(snap, npc_personal_alsc, now));
     });
 
-    // 3. Personal owner and GM succeed via atomic write_container_ship_state (recording failure then success).
+    // 3. Personal owner and GM succeed via atomic entity_kv tx (recording failure then success).
     let wrong_pw_err = handle_containers_ships_and_fitting(
         &ctx,
         &mut owner_sess,
@@ -1409,8 +1413,9 @@ async fn alsc_log_get_rejects_same_corp_and_npc_corp_non_owner_without_mutating_
     .unwrap()
     .unwrap_err();
     assert_eq!(wrong_pw_err.code, "ALSCPasswordNeededToViewAuditLog");
-    let logs_after_owner_fail = read_container_ship_state(&ctx);
-    let p_logs = logs_after_owner_fail.alsc_logs.get(&personal_alsc).expect("owner failure logged");
+    let p_logs = ctx
+        .db
+        .with_snapshot(|snap| container_alsc_logs_snap(snap, personal_alsc));
     assert_eq!(p_logs.len(), 1);
     assert_eq!(p_logs[0].action, "ALSCActionPasswordFailure");
     assert_eq!(p_logs[0].actor_id, owner_id);
@@ -1445,7 +1450,10 @@ async fn alsc_log_get_rejects_same_corp_and_npc_corp_non_owner_without_mutating_
     .unwrap()
     .unwrap_err();
     assert_eq!(corp_plain_err.code, "ALSCAccessDenied");
-    assert!(read_container_ship_state(&ctx).alsc_logs.get(&corp_alsc).is_none_or(Vec::is_empty));
+    assert!(ctx
+        .db
+        .with_snapshot(|snap| container_alsc_logs_snap(snap, corp_alsc))
+        .is_empty());
 
     let corp_dir_wrong = handle_containers_ships_and_fitting(
         &ctx,
@@ -1461,7 +1469,9 @@ async fn alsc_log_get_rejects_same_corp_and_npc_corp_non_owner_without_mutating_
     .unwrap_err();
     assert_eq!(corp_dir_wrong.code, "ALSCPasswordNeededToViewAuditLog");
     assert_eq!(
-        read_container_ship_state(&ctx).alsc_logs[&corp_alsc][0].action,
+        ctx.db
+            .with_snapshot(|snap| container_alsc_logs_snap(snap, corp_alsc))[0]
+            .action,
         "ALSCActionPasswordFailure"
     );
 

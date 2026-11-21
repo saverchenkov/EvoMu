@@ -58,11 +58,7 @@ pub(crate) fn active_tackle_and_core_deltas(
         .filter(|c| c.ship_id == ball_id)
         .map(|c| c.warp_core_stab_bonus)
         .sum();
-    let is_protected = cs.is_invulnerable()
-        || cs.undock_invulnerable_remaining_ticks > 0
-        || cs.gate_cloak_remaining_ticks > 0
-        || cs.is_cloaked
-        || cs.is_tethered;
+    let is_protected = cs.is_protected() || cs.has_any_cloak();
     let lance_scram = if cs.lance_disrupted_remaining_s > 0.0 && !is_protected {
         100
     } else {
@@ -519,11 +515,7 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             .is_some_and(|m| m.group_id == 31);
 
         if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
-            let is_protected = cs.is_invulnerable()
-                || cs.undock_invulnerable_remaining_ticks > 0
-                || cs.gate_cloak_remaining_ticks > 0
-                || cs.is_cloaked
-                || cs.is_tethered;
+            let is_protected = cs.is_protected() || cs.has_any_cloak();
             let lance_scram = if cs.lance_disrupted_remaining_s > 0.0 && !is_protected { 100 } else { 0 };
             cs.warp_scramble_strength = base_scram + mod_scram + lance_scram;
             cs.warp_core_strength = base_core + mod_core;
@@ -786,6 +778,32 @@ pub(crate) fn on_target_unlocked_in_actor(
     }
 }
 
+fn projected_capacitor_values(
+    cs: &eve_destiny::CombatState,
+    effective_max_capacitor: Option<f64>,
+) -> (f64, f64) {
+    let mut max_cap = cs.max_capacitor;
+    let mut cap = cs.capacitor;
+    if let Some(eff_cap_max) = effective_max_capacitor {
+        if !max_cap.is_finite() || max_cap <= 0.0 {
+            max_cap = eff_cap_max;
+        }
+        if !cap.is_finite() {
+            cap = eff_cap_max;
+        } else if (max_cap - 250.0).abs() <= 1e-6
+            && (cap - 250.0).abs() <= 1e-6
+            && eff_cap_max > 250.0
+        {
+            max_cap = eff_cap_max;
+            cap = eff_cap_max;
+        } else {
+            max_cap = eff_cap_max;
+            cap = cap.min(max_cap);
+        }
+    }
+    (cap, max_cap)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_add_module_cycle(
     ballpark: &mut Ballpark,
@@ -795,7 +813,28 @@ pub(crate) fn handle_add_module_cycle(
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
-    mut cycle: ActiveModuleCycle,
+    cycle: ActiveModuleCycle,
+) -> Result<(), String> {
+    handle_add_module_cycle_with_options(
+        ballpark,
+        active_module_cycles,
+        base_scramble_strengths,
+        base_core_strengths,
+        sde_opt,
+        db_opt,
+        deactivation_hook,
+        cycle,
+        true,
+    )
+}
+
+/// Validates non-mutating preconditions for adding `cycle` (`ModuleAlreadyActive`,
+/// `WarpScrambled`, and projected capacitor sufficiency) before mutating `CombatState`
+/// or tearing down prior mutadaptive/protection state (`#1486`).
+pub(in crate::system_actor) fn validate_add_module_cycle_preconditions(
+    ballpark: &Ballpark,
+    active_module_cycles: &[ActiveModuleCycle],
+    cycle: &mut ActiveModuleCycle,
 ) -> Result<(), String> {
     if let Some(existing) = active_module_cycles
         .iter()
@@ -826,7 +865,31 @@ pub(crate) fn handle_add_module_cycle(
             return Err("WarpScrambled: Propulsion module disabled by warp scrambler".to_string());
         }
     }
-    // Remove any existing mutadaptive-spool cycle for this (ship_id, module_id) before re-adding
+    if cycle.cap_need_per_cycle > 0.0 {
+        if let Some(cs) = ballpark.combat_states.get(&cycle.ship_id) {
+            let (proj_cap, _) = projected_capacitor_values(cs, cycle.effective_max_capacitor);
+            if proj_cap < cycle.cap_need_per_cycle {
+                return Err("Insufficient capacitor to activate module".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+    mut cycle: ActiveModuleCycle,
+    clear_undock_invuln: bool,
+) -> Result<(), String> {
+    validate_add_module_cycle_preconditions(ballpark, active_module_cycles, &mut cycle)?;
+    // Remove any existing mutadaptive-spool cycle for this (ship_id, module_id) before re-adding.
     if let Some(pos) = active_module_cycles
         .iter()
         .position(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
@@ -837,35 +900,23 @@ pub(crate) fn handle_add_module_cycle(
         }
         cleanup_removed_module_cycle(ballpark, &prev, db_opt);
     }
-    if let Some(eff_cap_max) = cycle.effective_max_capacitor {
+    if cycle.effective_max_capacitor.is_some() {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-            if !cs.max_capacitor.is_finite() || cs.max_capacitor <= 0.0 {
-                cs.max_capacitor = eff_cap_max;
-            }
-            if !cs.capacitor.is_finite() {
-                cs.capacitor = eff_cap_max;
-            } else if (cs.max_capacitor - 250.0).abs() <= 1e-6
-                && (cs.capacitor - 250.0).abs() <= 1e-6
-                && eff_cap_max > 250.0
-            {
-                cs.max_capacitor = eff_cap_max;
-                cs.capacitor = eff_cap_max;
-            } else {
-                cs.max_capacitor = eff_cap_max;
-                cs.capacitor = cs.capacitor.min(cs.max_capacitor);
-            }
+            let (proj_cap, proj_max_cap) =
+                projected_capacitor_values(cs, cycle.effective_max_capacitor);
+            cs.max_capacitor = proj_max_cap;
+            cs.capacitor = proj_cap;
         }
     }
     if cycle.cap_need_per_cycle > 0.0 {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-            if cs.capacitor < cycle.cap_need_per_cycle {
-                return Err("Insufficient capacitor to activate module".to_string());
-            }
             cs.capacitor = (cs.capacitor - cycle.cap_need_per_cycle).max(0.0);
         }
     }
-    if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-        cs.undock_invulnerable_remaining_ticks = 0;
+    if clear_undock_invuln {
+        if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+            cs.undock_invulnerable_remaining_ticks = 0;
+        }
     }
     if cycle.cap_booster_inject_amount > 0.0 {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
@@ -1598,6 +1649,773 @@ impl SystemRegistry {
             .map(|h| h.max_active_module_cycle_expiry_unix_sync(ship_id, cyno_expiry_unix, now_unix))
             .unwrap_or(cyno_expiry_unix)
     }
+}
+
+fn reconcile_and_sync_positions(exec_ctx: &mut ActorExecCtx<'_>) {
+    let deact_guard = exec_ctx
+        .module_deactivation_hook_actor
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    reconcile_tackle_and_bubbles(
+        exec_ctx.ballpark,
+        &mut exec_ctx.actor_st.active_module_cycles,
+        &exec_ctx.actor_st.base_scramble_strengths,
+        &exec_ctx.actor_st.base_core_strengths,
+        &exec_ctx.actor_st.db_opt,
+        deact_guard.as_ref(),
+    );
+    sync_ball_positions(
+        exec_ctx.ballpark,
+        exec_ctx.ball_positions_actor,
+        exec_ctx.scrambled_balls_actor,
+    );
+}
+
+fn sync_positions_only(exec_ctx: &ActorExecCtx<'_>) {
+    sync_ball_positions(
+        exec_ctx.ballpark,
+        exec_ctx.ball_positions_actor,
+        exec_ctx.scrambled_balls_actor,
+    );
+}
+
+fn finish_ball_damage_command(
+    exec_ctx: &mut ActorExecCtx<'_>,
+    ball_id: BallId,
+    applied: f64,
+    destroyed: bool,
+    ball_opt: Option<eve_destiny::Ball>,
+) -> Option<(f64, bool, eve_destiny::Ball)> {
+    if destroyed {
+        let deact_guard = super::protection::read_deact_hook(exec_ctx);
+        remove_all_ship_module_cycles(
+            exec_ctx.ballpark,
+            &mut exec_ctx.actor_st.active_module_cycles,
+            &exec_ctx.actor_st.base_scramble_strengths,
+            &exec_ctx.actor_st.base_core_strengths,
+            &exec_ctx.actor_st.db_opt,
+            ball_id,
+            deact_guard.as_ref(),
+        );
+        crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+            exec_ctx.ballpark,
+            &exec_ctx.actor_st.db_opt,
+            exec_ctx.actor_st.tactical_state.as_ref(),
+            ball_id,
+        );
+        exec_ctx.actor_st.protection_registry.remove(&ball_id);
+    } else {
+        super::protection::sync_ball_protection_in_actor(
+            exec_ctx.ballpark,
+            exec_ctx.actor_st,
+            ball_id,
+        );
+    }
+    if let (Some(db), Some(cs)) = (
+        &exec_ctx.actor_st.db_opt,
+        exec_ctx.ballpark.combat_states.get(&ball_id),
+    ) {
+        let not_stale = db.with_snapshot(|snap| {
+            !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
+                snap,
+                ball_id,
+                Some(exec_ctx.solar_system_id),
+                None,
+            )
+        });
+        if not_stale {
+            crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, cs);
+        }
+    }
+    sync_positions_only(exec_ctx);
+    ball_opt.map(|ball_snap| (applied, destroyed, ball_snap))
+}
+
+pub(in crate::system_actor) fn handle_tackle_or_damage_command(
+    exec_ctx: &mut ActorExecCtx<'_>,
+    cmd: SystemCommand,
+) -> Option<SystemCommand> {
+    match cmd {
+        SystemCommand::SetWarpScrambleStrength { ball_id, strength, reply } => {
+            let res = if exec_ctx.ballpark.set_warp_scramble_strength(ball_id, strength) {
+                exec_ctx.actor_st.base_scramble_strengths.insert(ball_id, strength);
+                reconcile_and_sync_positions(exec_ctx);
+                Ok(exec_ctx.ballpark.current_tick)
+            } else {
+                Err(format!("Ball {ball_id} not in system or has no combat state"))
+            };
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::SetWarpCoreStrength { ball_id, strength, reply } => {
+            let res = if exec_ctx.ballpark.set_warp_core_strength(ball_id, strength) {
+                exec_ctx.actor_st.base_core_strengths.insert(ball_id, strength);
+                reconcile_and_sync_positions(exec_ctx);
+                Ok(exec_ctx.ballpark.current_tick)
+            } else {
+                Err(format!("Ball {ball_id} not in system or has no combat state"))
+            };
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::AddWarpBubble { id, position, radius, reply } => {
+            exec_ctx.ballpark.add_warp_bubble(id, position, radius);
+            defer_reply(exec_ctx.deferred_replies, reply, Ok(exec_ctx.ballpark.current_tick));
+            None
+        }
+        SystemCommand::RemoveWarpBubble { id, reply } => {
+            defer_reply(exec_ctx.deferred_replies, reply, exec_ctx.ballpark.remove_warp_bubble(id).is_some());
+            None
+        }
+        SystemCommand::ApplyDamage { ball_id, damage, reply } => {
+            let is_invuln_stronghold = exec_ctx
+                .actor_st
+                .db_opt
+                .as_ref()
+                .map(|db| {
+                    crate::services::insurgency_services::is_stronghold_invulnerable_in_db(
+                        db,
+                        exec_ctx.solar_system_id,
+                        ball_id,
+                    )
+                })
+                .unwrap_or(false);
+            let now_unix = exec_ctx
+                .actor_st
+                .db_opt
+                .as_ref()
+                .map(|db| db.clock().now_unix_secs())
+                .unwrap_or(0);
+            let out = if is_invuln_stronghold {
+                exec_ctx.ballpark.balls.get(&ball_id).cloned().map(|b| (0.0, false, b))
+            } else if let Some((applied, destroyed, ball_opt)) =
+                crate::services::mobile_deployables::handle_ball_damage_in_actor(
+                    &exec_ctx.actor_st.db_opt,
+                    &exec_ctx.actor_st.sde_opt,
+                    exec_ctx.solar_system_id,
+                    ball_id,
+                    damage,
+                    exec_ctx.ballpark,
+                    now_unix,
+                )
+                .or_else(|| {
+                    crate::services::fw_gameplay::fw_gameplay_insurgency::handle_fob_ball_damage_in_actor(
+                        exec_ctx.actor_st.db_opt.as_deref(),
+                        exec_ctx.solar_system_id,
+                        ball_id,
+                        damage,
+                        exec_ctx.ballpark,
+                        now_unix,
+                    )
+                })
+                .or_else(|| exec_ctx.ballpark.apply_damage_to_ball(ball_id, damage))
+            {
+                if applied > 0.0 || damage.total() > 0.0 {
+                    let entry = exec_ctx.actor_st.rah_incoming_damage.entry(ball_id).or_insert([0.0; 4]);
+                    entry[0] += damage.em;
+                    entry[1] += damage.thermal;
+                    entry[2] += damage.kinetic;
+                    entry[3] += damage.explosive;
+                }
+                finish_ball_damage_command(exec_ctx, ball_id, applied, destroyed, ball_opt)
+            } else {
+                None
+            };
+            defer_reply(exec_ctx.deferred_replies, reply, out);
+            None
+        }
+        SystemCommand::ApplyTrueDamage { ball_id, amount, reply } => {
+            let out = if let Some((applied, destroyed, ball_opt)) =
+                exec_ctx.ballpark.apply_true_damage_to_ball(ball_id, amount)
+            {
+                finish_ball_damage_command(exec_ctx, ball_id, applied, destroyed, ball_opt)
+            } else {
+                None
+            };
+            defer_reply(exec_ctx.deferred_replies, reply, out);
+            None
+        }
+        SystemCommand::SetInterdictionNullified { ball_id, nullified, reply } => {
+            defer_reply(exec_ctx.deferred_replies, reply, exec_ctx.ballpark.set_interdiction_nullified(ball_id, nullified));
+            None
+        }
+        SystemCommand::MicroJump { ball_id, distance_meters, reply } => {
+            let res = exec_ctx.ballpark.micro_jump(ball_id, distance_meters);
+            if res.is_ok() {
+                persist_ball_positions_in_db(exec_ctx.ballpark, &[ball_id], &exec_ctx.actor_st.db_opt, &exec_ctx.actor_st.ball_space_entry_epochs);
+            }
+            sync_positions_only(exec_ctx);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::MicroJumpField { ball_id, distance_meters, field_radius_meters, max_jumped_ships, reply } => {
+            let res = exec_ctx.ballpark.micro_jump_field(ball_id, distance_meters, field_radius_meters, max_jumped_ships);
+            if let Ok(ref jumped_ids) = res {
+                persist_ball_positions_in_db(exec_ctx.ballpark, jumped_ids, &exec_ctx.actor_st.db_opt, &exec_ctx.actor_st.ball_space_entry_epochs);
+            }
+            sync_positions_only(exec_ctx);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::IsBallScrambled { ball_id, reply } => {
+            defer_reply(exec_ctx.deferred_replies, reply, exec_ctx.ballpark.is_ball_scrambled(ball_id));
+            None
+        }
+        SystemCommand::AddInterdictionSphere { id, position, radius, reply } => {
+            let ok = exec_ctx.ballpark.add_interdiction_sphere(id, position, radius);
+            reconcile_and_sync_positions(exec_ctx);
+            defer_reply(exec_ctx.deferred_replies, reply, ok);
+            None
+        }
+        SystemCommand::AddMobileWarpDisruptor { id, position, radius, reply } => {
+            let ok = exec_ctx.ballpark.add_mobile_warp_disruptor(id, position, radius);
+            reconcile_and_sync_positions(exec_ctx);
+            defer_reply(exec_ctx.deferred_replies, reply, ok);
+            None
+        }
+        SystemCommand::ScheduleMobileWarpDisruptor { id, type_id, position, radius, anchoring_delay_s, reply } => {
+            let ok = handle_schedule_mobile_warp_disruptor(exec_ctx.ballpark, &mut exec_ctx.actor_st.pending_anchoring_disruptors, id, type_id, position, radius, anchoring_delay_s);
+            sync_positions_only(exec_ctx);
+            defer_reply(exec_ctx.deferred_replies, reply, ok);
+            None
+        }
+        cmd @ (SystemCommand::ApplyEcmJam { .. }
+        | SystemCommand::ApplyEcmJamFrom { .. }
+        | SystemCommand::ApplyEcmJamFromModule { .. }) => {
+            let (source_id_opt, module_id_opt, target_id, duration_s, reply) = match cmd {
+                SystemCommand::ApplyEcmJam { target_id, duration_s, reply } => (None, None, target_id, duration_s, reply),
+                SystemCommand::ApplyEcmJamFrom { source_id, target_id, duration_s, reply } => (Some(source_id), None, target_id, duration_s, reply),
+                SystemCommand::ApplyEcmJamFromModule { source_id, module_id, target_id, duration_s, reply } => (Some(source_id), Some(module_id), target_id, duration_s, reply),
+                _ => unreachable!(),
+            };
+            let target_ewar_immune = exec_ctx
+                .actor_st
+                .active_module_cycles
+                .iter()
+                .any(|c| c.ship_id == target_id && c.self_ewar_immune);
+            let exists = exec_ctx.ballpark.combat_states.contains_key(&target_id) && !target_ewar_immune;
+            if exists {
+                exec_ctx.ballpark.apply_ecm_jam_with_module(source_id_opt, module_id_opt, target_id, duration_s);
+                let deact_guard = super::protection::read_deact_hook(exec_ctx);
+                on_target_unlocked_in_actor(
+                    exec_ctx.ballpark,
+                    &mut exec_ctx.actor_st.active_module_cycles,
+                    &exec_ctx.actor_st.base_scramble_strengths,
+                    &exec_ctx.actor_st.base_core_strengths,
+                    &exec_ctx.actor_st.db_opt,
+                    target_id,
+                    None,
+                    deact_guard.as_ref(),
+                );
+                sync_positions_only(exec_ctx);
+            }
+            defer_reply(exec_ctx.deferred_replies, reply, exists);
+            None
+        }
+        SystemCommand::ApplyEcmBurst { source_id, burst_radius_m, jam_strengths, duration_s, roll, ship_eval_overrides, reply } => {
+            let jammed = handle_apply_ecm_burst(
+                exec_ctx.ballpark,
+                &exec_ctx.actor_st.active_module_cycles,
+                &exec_ctx.actor_st.sde_opt,
+                &exec_ctx.actor_st.mechanic_rng_opt,
+                source_id,
+                burst_radius_m,
+                jam_strengths,
+                duration_s,
+                roll,
+                ship_eval_overrides,
+            );
+            if !jammed.is_empty() {
+                let deact_guard = super::protection::read_deact_hook(exec_ctx);
+                for &tid in &jammed {
+                    on_target_unlocked_in_actor(
+                        exec_ctx.ballpark,
+                        &mut exec_ctx.actor_st.active_module_cycles,
+                        &exec_ctx.actor_st.base_scramble_strengths,
+                        &exec_ctx.actor_st.base_core_strengths,
+                        &exec_ctx.actor_st.db_opt,
+                        tid,
+                        None,
+                        deact_guard.as_ref(),
+                    );
+                }
+                sync_positions_only(exec_ctx);
+            }
+            defer_reply(exec_ctx.deferred_replies, reply, jammed);
+            None
+        }
+        other => Some(other),
+    }
+}
+
+pub(in crate::system_actor) fn execute_pending_step_in_actor(
+    exec_ctx: &mut ActorExecCtx<'_>,
+    dt: f64,
+    step_reply: StepReply,
+) -> PendingActorDelivery {
+    let raw_tidi = f64::from_bits(
+        exec_ctx
+            .tidi_factor_bits_actor
+            .load(std::sync::atomic::Ordering::Relaxed),
+    );
+    let tidi = if raw_tidi.is_finite() {
+        raw_tidi.clamp(0.10, 1.0)
+    } else {
+        1.0
+    };
+    let dt_sim = if dt > 0.0 && dt.is_finite() {
+        dt * tidi
+    } else {
+        dt
+    };
+    if dt_sim > 0.0 && dt_sim.is_finite() {
+        exec_ctx.actor_st.sim_elapsed_secs += dt_sim;
+        exec_ctx.sim_elapsed_secs_bits_actor.store(
+            exec_ctx.actor_st.sim_elapsed_secs.to_bits(),
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+    respawn_due_asteroids(
+        exec_ctx.ballpark,
+        &mut exec_ctx.actor_st.asteroids,
+        &exec_ctx.actor_st.asteroid_templates,
+        &exec_ctx.actor_st.sde_opt,
+        &exec_ctx.actor_st.db_opt,
+    );
+    super::belts::sync_player_slim_items(exec_ctx.ballpark, &exec_ctx.actor_st.db_opt);
+    if let Some(db) = exec_ctx.actor_st.db_opt.as_ref() {
+        let now_unix = db.clock().now_unix_secs();
+        if now_unix > exec_ctx.ballpark.sim_unix_secs {
+            exec_ctx.ballpark.sim_unix_secs = now_unix;
+        }
+        let now_ms = machonet_wallclock_ms(
+            db.clock().as_ref(),
+            exec_ctx.unrebased_clock_offset_secs_actor,
+        );
+        if now_ms > 0 {
+            let _ = exec_ctx
+                .ballpark
+                .settle_stargate_activation_transitions(0.0, Some(now_ms));
+        }
+    }
+    let pre_tick_caps =
+        cycles::snapshot_player_ship_capacitors(exec_ctx.ballpark, exec_ctx.actor_st.db_opt.as_ref());
+    let pre_missile_positions = missiles::snapshot_missile_positions(
+        exec_ctx.ballpark,
+        &exec_ctx.actor_st.active_guided_missiles,
+    );
+    let prev_tick = exec_ctx.ballpark.current_tick;
+    let events = exec_ctx.ballpark.step(dt_sim);
+    let completed_sim_steps = exec_ctx.ballpark.current_tick.saturating_sub(prev_tick);
+    missiles::flush_pending_missile_deploy_fx(
+        exec_ctx.ballpark,
+        &mut exec_ctx.actor_st.pending_missile_deploy_fx,
+    );
+    let landed_warps = celestials::collect_landed_warp_positions(exec_ctx.ballpark, &events);
+    persist_landed_warps_in_db(
+        exec_ctx.ballpark,
+        &events,
+        &exec_ctx.actor_st.db_opt,
+        &exec_ctx.actor_st.ball_space_entry_epochs,
+    );
+    celestials::clear_landed_warp_tracking_from_events(
+        exec_ctx.ballpark,
+        &events,
+        &mut exec_ctx.actor_st.warp_provenance,
+        &exec_ctx.actor_st.warp_tracking,
+    );
+    cycles::flush_target_lost_notifications(
+        exec_ctx.ballpark,
+        &events,
+        exec_ctx.actor_st.db_opt.as_ref(),
+        exec_ctx
+            .actor_st
+            .pending_notifications_opt
+            .as_deref()
+            .map(|r| r as &dyn AnyRwLock<_>),
+        exec_ctx.actor_st.notify_tx_opt.as_ref(),
+    );
+    let mut lock_completed_events = Vec::new();
+    let mut target_lost_events = Vec::new();
+    let lock_hook_opt = exec_ctx
+        .target_lock_completed_hook_actor
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let deact_guard = exec_ctx
+        .module_deactivation_hook_actor
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    for ev in &events {
+        if let DestinyEvent::OnTarget {
+            mode,
+            source_id,
+            target_id,
+        } = ev
+        {
+            if mode == "lost" {
+                on_target_unlocked_in_actor(
+                    exec_ctx.ballpark,
+                    &mut exec_ctx.actor_st.active_module_cycles,
+                    &exec_ctx.actor_st.base_scramble_strengths,
+                    &exec_ctx.actor_st.base_core_strengths,
+                    &exec_ctx.actor_st.db_opt,
+                    *source_id,
+                    Some(*target_id),
+                    deact_guard.as_ref(),
+                );
+            }
+            if mode == "locked" || mode == "lost" {
+                let char_id_opt = exec_ctx
+                    .ballpark
+                    .ball_slim_meta
+                    .get(source_id)
+                    .and_then(|m| m.char_id)
+                    .or_else(|| {
+                        exec_ctx.actor_st.db_opt.as_ref().and_then(|db| {
+                            db.with_snapshot(|s| {
+                                s.characters
+                                    .values()
+                                    .find(|c| c.active_ship_id == *source_id)
+                                    .map(|c| c.character_id)
+                                    .or_else(|| {
+                                        crate::services::station_structure::structure_upwell_ops::load_ext_state(s)
+                                            .active_pilot_by_structure
+                                            .get(source_id)
+                                            .copied()
+                                    })
+                            })
+                        })
+                    });
+                if let Some(cid) = char_id_opt.filter(|&c| c > 0) {
+                    if mode == "locked" {
+                        lock_completed_events.push((cid, *target_id));
+                        if let Some(ref lock_hook) = lock_hook_opt {
+                            lock_hook(cid, *target_id);
+                        }
+                    } else {
+                        target_lost_events.push((cid, *target_id));
+                    }
+                }
+            }
+        }
+    }
+    cycles::step_module_reloads_sim_clock(
+        &mut exec_ctx.actor_st.module_reload_sim_remaining,
+        Some(exec_ctx.actor_st.module_reload_sim_deadlines.as_ref()),
+        &exec_ctx.actor_st.db_opt,
+        dt_sim,
+        tidi,
+    );
+    let mut missile_destroyed = Vec::new();
+    missiles::step_guided_missiles_in_actor(
+        exec_ctx.ballpark,
+        &mut exec_ctx.actor_st.active_guided_missiles,
+        &pre_missile_positions,
+        &mut exec_ctx.actor_st.rah_incoming_damage,
+        &exec_ctx.actor_st.sde_opt,
+        &exec_ctx.actor_st.db_opt,
+        &mut exec_ctx.actor_st.pending_cycle_actions,
+        &mut missile_destroyed,
+        Some(exec_ctx.pending_destroyed_actor),
+        dt_sim,
+    );
+    let mut destroyed_balls = cycles::step_cycles_and_capacitor_with_missiles_and_tidi(
+        exec_ctx.ballpark,
+        &mut exec_ctx.actor_st.active_module_cycles,
+        &mut exec_ctx.actor_st.pending_anchoring_disruptors,
+        &mut exec_ctx.actor_st.active_nanite_repairs,
+        &mut exec_ctx.actor_st.ship_rack_heat,
+        &mut exec_ctx.actor_st.rah_incoming_damage,
+        &exec_ctx.actor_st.base_scramble_strengths,
+        &exec_ctx.actor_st.base_core_strengths,
+        &exec_ctx.actor_st.sde_opt,
+        &exec_ctx.actor_st.db_opt,
+        &exec_ctx.actor_st.ball_space_entry_epochs,
+        &exec_ctx.actor_st.fit_projections,
+        &mut exec_ctx.actor_st.weapon_cycle_start_modules,
+        &mut exec_ctx.actor_st.pending_missile_launches,
+        &exec_ctx.actor_st.mechanic_rng_opt,
+        exec_ctx.actor_st.tactical_state.as_ref(),
+        &mut exec_ctx.actor_st.pending_cycle_actions,
+        exec_ctx.actor_st.sim_elapsed_secs,
+        dt_sim,
+        tidi,
+        Some(&mut exec_ctx.actor_st.module_reload_sim_remaining),
+        deact_guard.as_ref(),
+        Some(exec_ctx.pending_destroyed_actor),
+    );
+    destroyed_balls.extend(missile_destroyed);
+    missiles::flush_pending_missile_launches(
+        exec_ctx.ballpark,
+        &mut exec_ctx.actor_st.pending_missile_launches,
+        &mut exec_ctx.actor_st.active_guided_missiles,
+        &mut exec_ctx.actor_st.pending_missile_deploy_fx,
+        &mut exec_ctx.actor_st.next_missile_ball_id,
+        &exec_ctx.actor_st.sde_opt,
+    );
+    {
+        let mut dead_guard = exec_ctx
+            .actor_st
+            .module_reload_sim_deadlines
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        for action in exec_ctx.actor_st.pending_cycle_actions.iter() {
+            if let PendingCycleAction::AutoReloadStarted {
+                module_ids,
+                sim_deadline_s,
+                ..
+            } = action
+            {
+                for &mid in module_ids {
+                    dead_guard.insert(
+                        mid,
+                        (
+                            exec_ctx.solar_system_id,
+                            exec_ctx.actor_st.sim_elapsed_secs,
+                            *sim_deadline_s,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    cycles::record_player_ship_capacitor_deltas(
+        exec_ctx.ballpark,
+        &pre_tick_caps,
+        &mut exec_ctx.actor_st.pending_cycle_actions,
+    );
+    cycles::flush_pending_cycle_damage_notifications_with_ballpark(
+        exec_ctx.ballpark,
+        exec_ctx.actor_st.sde_opt.as_deref(),
+        exec_ctx.actor_st.db_opt.as_ref(),
+        exec_ctx
+            .actor_st
+            .pending_notifications_opt
+            .as_deref()
+            .map(|r| r as &dyn AnyRwLock<_>),
+        exec_ctx.actor_st.notify_tx_opt.as_ref(),
+        &mut exec_ctx.actor_st.pending_cycle_actions,
+    );
+    let cycle_actions = exec_ctx.actor_st.pending_cycle_actions.clone();
+    if let Some(db) = exec_ctx.actor_st.db_opt.as_ref() {
+        for &(target_ball_id, _) in &destroyed_balls {
+            crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+                exec_ctx.ballpark,
+                &exec_ctx.actor_st.db_opt,
+                exec_ctx.actor_st.tactical_state.as_ref(),
+                target_ball_id,
+            );
+            crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
+                exec_ctx.ballpark,
+                db,
+                exec_ctx.solar_system_id,
+                target_ball_id,
+            );
+        }
+    }
+    for _ in 0..completed_sim_steps {
+        for bid in crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
+            exec_ctx.ballpark,
+            exec_ctx.actor_st.sde_opt.as_deref(),
+            exec_ctx.actor_st.db_opt.as_ref(),
+            exec_ctx.solar_system_id,
+        ) {
+            destroyed_balls.push((bid, None));
+            exec_ctx.pending_destroyed_actor.record_one(bid, None);
+        }
+        for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
+            exec_ctx.ballpark,
+            exec_ctx.actor_st.sde_opt.as_deref(),
+            exec_ctx.actor_st.db_opt.as_ref(),
+            exec_ctx.solar_system_id,
+            exec_ctx
+                .actor_st
+                .pending_notifications_opt
+                .as_deref()
+                .map(|r| r as &dyn AnyRwLock<_>),
+            exec_ctx.actor_st.notify_tx_opt.as_ref(),
+        ) {
+            destroyed_balls.push((bid, None));
+            exec_ctx.pending_destroyed_actor.record_one(bid, None);
+        }
+        for bid in crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_with_notifications(
+            exec_ctx.ballpark,
+            exec_ctx.actor_st.sde_opt.as_deref(),
+            exec_ctx.actor_st.db_opt.as_ref(),
+            exec_ctx.solar_system_id,
+            exec_ctx
+                .actor_st
+                .pending_notifications_opt
+                .as_deref()
+                .map(|r| r as &dyn AnyRwLock<_>),
+            exec_ctx.actor_st.notify_tx_opt.as_ref(),
+        ) {
+            destroyed_balls.push((bid, None));
+            exec_ctx.pending_destroyed_actor.record_one(bid, None);
+        }
+    }
+    {
+        let step_now_unix = exec_ctx
+            .actor_st
+            .db_opt
+            .as_ref()
+            .map(|db| db.clock().now_unix_secs())
+            .unwrap_or(0);
+        crate::services::mobile_deployables::step_mobile_deployables_in_actor(
+            exec_ctx.ballpark,
+            &mut exec_ctx.actor_st.active_module_cycles,
+            exec_ctx.mechanic_rng,
+            deact_guard.as_ref(),
+            exec_ctx.actor_st.sde_opt.as_deref(),
+            exec_ctx.actor_st.db_opt.as_ref(),
+            exec_ctx.actor_st.mechanic_rng_opt.as_deref(),
+            exec_ctx.solar_system_id,
+            dt_sim,
+            step_now_unix,
+        );
+        let pre_bosonic_len = destroyed_balls.len();
+        crate::services::doomsday_aoe_ops::step_bosonic_doomsday_in_ballpark(
+            exec_ctx.ballpark,
+            &mut exec_ctx.actor_st.base_scramble_strengths,
+            exec_ctx.actor_st.sde_opt.as_ref(),
+            exec_ctx.actor_st.db_opt.as_ref(),
+            exec_ctx.solar_system_id,
+            step_now_unix,
+            &mut destroyed_balls,
+        );
+        exec_ctx
+            .pending_destroyed_actor
+            .record_batch(&destroyed_balls[pre_bosonic_len..]);
+        if !destroyed_balls.is_empty() {
+            let dead_ids: Vec<BallId> = destroyed_balls.iter().map(|&(bid, _)| bid).collect();
+            cycles::teardown_attacker_locks_and_cycles_for_destroyed_balls(
+                exec_ctx.ballpark,
+                &mut exec_ctx.actor_st.active_module_cycles,
+                &exec_ctx.actor_st.base_scramble_strengths,
+                &exec_ctx.actor_st.base_core_strengths,
+                &exec_ctx.actor_st.db_opt,
+                exec_ctx
+                    .actor_st
+                    .pending_notifications_opt
+                    .as_deref()
+                    .map(|r| r as &dyn AnyRwLock<_>),
+                exec_ctx.actor_st.notify_tx_opt.as_ref(),
+                deact_guard.as_ref(),
+                &dead_ids,
+            );
+        }
+        snapshot_active_tackle_totals(
+            exec_ctx.ballpark,
+            &exec_ctx.actor_st.active_module_cycles,
+            exec_ctx.last_active_totals,
+        );
+        reconcile_tackle_and_bubbles(
+            exec_ctx.ballpark,
+            &mut exec_ctx.actor_st.active_module_cycles,
+            &exec_ctx.actor_st.base_scramble_strengths,
+            &exec_ctx.actor_st.base_core_strengths,
+            &exec_ctx.actor_st.db_opt,
+            deact_guard.as_ref(),
+        );
+    }
+    super::protection::sync_all_protection_registry_in_actor(exec_ctx.ballpark, exec_ctx.actor_st);
+    sync_ball_positions(
+        exec_ctx.ballpark,
+        exec_ctx.ball_positions_actor,
+        exec_ctx.scrambled_balls_actor,
+    );
+    super::protection::sync_active_module_ships_cache(
+        &exec_ctx.actor_st.active_module_cycles,
+        exec_ctx.active_module_ships_actor,
+    );
+    let current_tick = exec_ctx.ballpark.current_tick;
+    let has_subscribers = exec_ctx.event_tx_actor.receiver_count() > 0;
+    let has_pending_destiny_updates = !events.is_empty()
+        || !exec_ctx.ballpark.pending_events.is_empty()
+        || exec_ctx
+            .ballpark
+            .observer_events
+            .values()
+            .any(|evs| !evs.is_empty());
+    let should_emit_broadcast = matches!(step_reply, StepReply::Full(_))
+        || (has_subscribers && (completed_sim_steps > 0 || has_pending_destiny_updates));
+    let broadcast_opt = if should_emit_broadcast {
+        let fx_floor = exec_ctx
+            .last_visible_stamp_actor
+            .load(std::sync::atomic::Ordering::Acquire)
+            .max(
+                exec_ctx
+                    .last_fx_stamp_actor
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ) as u32;
+        let mut broadcast = belts::build_tick_broadcast_with_fx_floor(
+            exec_ctx.solar_system_id,
+            exec_ctx.ballpark,
+            events,
+            fx_floor,
+            Some(exec_ctx.last_visible_stamp_actor),
+            Some(exec_ctx.last_fx_stamp_actor),
+        );
+        celestials::record_warp_stops_from_events_in_map(
+            &broadcast.events,
+            exec_ctx.warp_stopped_at_actor,
+        );
+        if has_subscribers {
+            send_tick_broadcast_sequenced(
+                exec_ctx.event_tx_actor,
+                exec_ctx.broadcast_seq_gate_actor,
+                &mut broadcast,
+            );
+        }
+        Some(broadcast)
+    } else {
+        celestials::record_warp_stops_from_events_in_map(
+            &events,
+            exec_ctx.warp_stopped_at_actor,
+        );
+        celestials::record_warp_stops_from_events_in_map(
+            &exec_ctx.ballpark.pending_events,
+            exec_ctx.warp_stopped_at_actor,
+        );
+        belts::drain_tick_events_without_encode(exec_ctx.ballpark);
+        None
+    };
+    let condition_checkpoint = if is_condition_checkpoint_tick(exec_ctx.solar_system_id, current_tick)
+    {
+        Some(celestials::collect_dirty_condition_checkpoint_entries(
+            exec_ctx.actor_st,
+            exec_ctx.ballpark,
+        ))
+    } else {
+        celestials::collect_immediate_armor_hull_checkpoint_entries(
+            exec_ctx.actor_st,
+            exec_ctx.ballpark,
+        )
+    };
+    celestials::update_system_hibernation_flag(
+        exec_ctx.actor_st,
+        exec_ctx.ballpark,
+        has_subscribers as usize,
+    );
+    let (step_destroyed_balls, destroyed_lease) =
+        exec_ctx.pending_destroyed_actor.checkout_for_step();
+    let step_out = StepOutput {
+        solar_system_id: exec_ctx.solar_system_id,
+        tick: current_tick,
+        dt_sim,
+        landed_warps,
+        destroyed_balls: step_destroyed_balls,
+        destroyed_lease,
+        lock_completed_events,
+        target_lost_events,
+        cycle_actions,
+        condition_checkpoint,
+        broadcast: broadcast_opt,
+    };
+    PendingActorDelivery::Step(step_reply, step_out)
 }
 
 #[cfg(test)]

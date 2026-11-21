@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "Shrinking baseline ratchet of negative-matrix violations observed on main (first landing is report-only; this list may only shrink).",
-  "total_violations": 355,
+  "total_violations": 354,
   "violation_groups": [
     {"situation":"b","service":"LSC","kind":"unexpected_allow","methods":["Invite"]},
     {"situation":"b","service":"LSC","kind":"world_mutated","methods":["Invite"]},
@@ -43,7 +43,7 @@
     {"situation":"b","service":"scanMgr","kind":"unexpected_allow","methods":["GetAnomalies","GetFullState","GetScanResults","GetSignatures","SignalTrackerRegister"]},
     {"situation":"b","service":"scanMgr","kind":"world_mutated","methods":["GetSignatures","SignalTrackerRegister"]},
     {"situation":"b","service":"scanSvc","kind":"unexpected_allow","methods":["ConeScan","GetEscalatingPathDungeonsEntered","GetScanResults","GetSystemScanMgr"]},
-    {"situation":"b","service":"ship","kind":"unexpected_allow","methods":["GetDirtTimestamp","GetShipConfiguration"]},
+    {"situation":"b","service":"ship","kind":"unexpected_allow","methods":["GetDirtTimestamp"]},
     {"situation":"b","service":"shipKillCounter","kind":"unexpected_allow","methods":["GetItemKillCountPlayer"]},
     {"situation":"b","service":"structure","kind":"unexpected_allow","methods":["MachoBindObject"]},
     {"situation":"b","service":"structure","kind":"world_mutated","methods":["MachoBindObject"]},

@@ -347,6 +347,22 @@ impl DeltaProjectionDomains {
         skills: false,
         market_orders: false,
     };
+
+    /// Enables only inventory item and blueprint projections.
+    pub const ITEMS_ONLY: Self = Self {
+        items: true,
+        wallets: false,
+        skills: false,
+        market_orders: false,
+    };
+
+    /// Enables both wallet/PLEX and inventory item/blueprint projections.
+    pub const WALLETS_AND_ITEMS: Self = Self {
+        items: true,
+        wallets: true,
+        skills: false,
+        market_orders: false,
+    };
 }
 
 /// Standard V24.01 delta projector covering inventory items, blueprints, wallets (personal ISK
@@ -383,6 +399,22 @@ impl DefaultDeltaProjection {
     pub fn wallets_only() -> Self {
         Self {
             domains: DeltaProjectionDomains::WALLETS_ONLY,
+            hooks: Vec::new(),
+        }
+    }
+
+    /// Creates a projector restricted to inventory item & blueprint changes without extra hooks.
+    pub fn items_only() -> Self {
+        Self {
+            domains: DeltaProjectionDomains::ITEMS_ONLY,
+            hooks: Vec::new(),
+        }
+    }
+
+    /// Creates a projector covering wallet/PLEX and item/blueprint changes without extra hooks.
+    pub fn wallets_and_items() -> Self {
+        Self {
+            domains: DeltaProjectionDomains::WALLETS_AND_ITEMS,
             hooks: Vec::new(),
         }
     }

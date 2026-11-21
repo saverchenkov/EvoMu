@@ -1151,6 +1151,7 @@ impl SystemHandle {
                         active_module_cycles,
                         base_scramble_strengths,
                         base_core_strengths,
+                        protection_registry,
                         db_opt,
                         ..
                     } = &mut *st;
@@ -1169,6 +1170,7 @@ impl SystemHandle {
                         .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
                     base_scramble_strengths.remove(&ball_id);
                     base_core_strengths.remove(&ball_id);
+                    protection_registry.remove(&ball_id);
                     if emit_destruction_fx {
                         let _ = bp.destroy_ball_with_terminal_explosion(ball_id, None);
                     } else {
@@ -1461,6 +1463,7 @@ impl SystemHandle {
         combat_state: CombatState,
         slim_meta: SlimItemMeta,
     ) {
+        let ball_id = ball.id;
         let apply_spawn = |bp: &mut Ballpark| {
             let ball_id = ball.id;
             if bp.balls.contains_key(&ball_id) {
@@ -1500,14 +1503,22 @@ impl SystemHandle {
             .iter()
             .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
         {
-            match self.ballpark.try_write_unranked() {
-                Ok(mut bp) => apply_spawn(&mut bp),
-                Err(std::sync::TryLockError::Poisoned(e)) => apply_spawn(&mut e.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) => {}
-            }
+            let mut bp = match self.ballpark.try_write_unranked() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return,
+            };
+            let mut st = match self.actor_state.try_write_unranked() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return,
+            };
+            apply_spawn(&mut bp);
+            super::protection::sync_ball_protection_in_actor(&bp, &mut st, ball_id);
         } else {
             let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
             apply_spawn(&mut bp);
+            super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
         }
     }
 
@@ -1579,6 +1590,7 @@ impl SystemHandle {
         bp.add_ball(ball);
         bp.combat_states.insert(ball_id, combat_state);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
         let dyn_count = bp.balls.keys().filter(|&&bid| !bp.is_static_ball(bid)).count();
         self.dynamic_ball_count
             .store(dyn_count, std::sync::atomic::Ordering::Relaxed);
@@ -1597,6 +1609,7 @@ impl SystemHandle {
         if let Some(cs) = bp.combat_states.get_mut(&ball_id) {
             f(cs);
             super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+            super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
             true
         } else {
             false
@@ -1623,6 +1636,7 @@ impl SystemHandle {
         f(cs);
         bp.recompute_ball_attributes(ball_id);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
         true
     }
 
@@ -1824,6 +1838,7 @@ impl SystemHandle {
             &st_mut.warp_tracking,
         );
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         self.publish_view_from(&bp, Some(&st));
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
         drop(st);
@@ -2019,26 +2034,6 @@ impl SystemHandle {
             return false;
         }
         rx.await.unwrap_or(false)
-    }
-
-    /// Synchronously applies `event` for `ball_id` or falls back to non-blocking actor dispatch
-    /// if `ballpark` is currently write-locked (for synchronous hooks inside `step_system_tick`).
-    pub fn try_emit_destiny_event(&self, ball_id: BallId, event: DestinyEvent) -> bool {
-        if let Ok(mut bp) = self.ballpark.try_write() {
-            return crate::system_actor::cycles_tackle::apply_destiny_event_in_actor(
-                &mut bp,
-                ball_id,
-                event,
-            );
-        }
-        let (tx, _rx) = oneshot::channel();
-        self.cmd_sender()
-            .try_send(SystemCommand::EmitDestinyEvent {
-                ball_id,
-                event,
-                reply: tx,
-            })
-            .is_ok()
     }
 
     /// Queues `event` directly into `observer_ball_id`'s observer queue (returns `false` if absent).

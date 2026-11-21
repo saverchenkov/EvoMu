@@ -5,9 +5,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::inventory_fitting::fitting_containers_ships::{
-    read_container_ship_state, save_container_ship_state,
-};
+use crate::services::inventory_fitting::fitting_containers_ships::set_alsc_item_locked_snap;
 use crate::services::sov_gameplay::sov_gameplay_skyhook::{
     apply_skyhook_weapon_damage, apply_skyhook_weapon_damage_typed, handle_skyhook_component_call,
     tick_skyhooks, SKYHOOK_BASE_SHIELD_HP, SKYHOOK_SILO_LINK_DURATION_SECS,
@@ -149,11 +147,9 @@ async fn deposit_plex_and_assemble_ship_enforce_locks_escrow_safety_location_and
         );
         save_ext_state(snap, &ext);
     });
-    {
-        let mut cs = read_container_ship_state(&ctx);
-        cs.alsc_locked_items.insert(930_003);
-        save_container_ship_state(&ctx, &cs);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, 930_003, true, 0).unwrap();
+    });
 
     let mut sess = SessionState::new(88_491);
     sess.user_id = Some(uid);

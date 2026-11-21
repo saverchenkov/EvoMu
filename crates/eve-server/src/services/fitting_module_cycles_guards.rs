@@ -51,14 +51,7 @@ pub(crate) async fn is_ship_actively_cloaked(
     sys: &crate::system_actor::SystemHandle,
     ship_id: i64,
 ) -> bool {
-    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-        if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
-            || cs.cloak_velocity_multiplier.is_some()
-        {
-            return true;
-        }
-    }
-    has_active_db_cloak_module(ctx, ship_id)
+    sys.is_ship_actively_cloaked(ship_id).await || has_active_db_cloak_module(ctx, ship_id)
 }
 
 /// Rejects undocked module online/offline/deactivate calls while actively module-cloaked
@@ -154,26 +147,15 @@ pub(crate) async fn commit_space_action_cloak_and_invuln_break(
     ship_id: i64,
     pre_undock_invuln_ticks: u32,
 ) {
-    let had_location_invuln = ctx
-        .location_change_invuln
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&char_id)
-        .is_some_and(|until| ctx.now_unix() < until);
-    let cs_before = sys.get_combat_state(ship_id).await.ok().flatten();
-    let had_gate_cloak = cs_before
-        .as_ref()
-        .is_some_and(|cs| cs.gate_cloak_remaining_ticks > 0);
-    let still_had_tick_invuln = cs_before
-        .as_ref()
-        .is_some_and(|cs| cs.undock_invulnerable_remaining_ticks > 0);
-    if had_gate_cloak || still_had_tick_invuln {
-        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
-            ctx, sys, char_id, ship_id,
-        )
-        .await;
-    }
-    if !still_had_tick_invuln && (pre_undock_invuln_ticks > 0 || had_location_invuln) && ship_id > 0 {
+    let events = crate::services::space_destiny::break_ship_protection_with_location_invuln(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        crate::system_actor::ProtectionBreakReason::ModuleActivation,
+    )
+    .await;
+    if !events.invuln_cancelled && pre_undock_invuln_ticks > 0 && ship_id > 0 {
         crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
             ctx, char_id, ship_id, false, true,
         );

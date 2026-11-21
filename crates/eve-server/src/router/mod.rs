@@ -13,6 +13,7 @@ pub mod context;
 mod context_charges;
 mod context_runtime_persistence;
 pub mod delta_commit_listener;
+pub mod delta_item_compare;
 pub mod delta_projection;
 pub mod destiny_delivery_policy;
 pub mod dispatch;
@@ -25,6 +26,10 @@ pub mod session_transition;
 pub use binding::{alloc_transport_session_id, SessionCleanupGuard, NEXT_TRANSPORT_SESSION_ID};
 pub use cache_notifications::*;
 pub use context::*;
+pub use delta_item_compare::{
+    flush_item_compare_summary, is_item_compare_enabled, item_compare_summary,
+    log_item_compare_summary, HelperCompareCounts, ItemCompareEventSummary, ItemCompareSummary,
+};
 pub use delta_projection::{
     materialize_pending_notifications, project_fit_attribute_diff, resolve_all_notifications,
     resolve_projected_recipients, DefaultDeltaProjection, DefaultGodmaFitHook, DeltaProjection,

@@ -1135,10 +1135,7 @@ pub async fn relocate_ship(
     };
     let mut combat = ctx.build_ship_combat_state(char_id, ship_id, type_id);
     crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat, prev_cs);
-    combat.is_cloaked = true;
-    combat.gate_cloak_remaining_ticks = 60;
-    combat.undock_invulnerable_remaining_ticks = 60;
-    combat.sync_invuln_with_undock_timer = true;
+    combat.apply_jump_cloak_and_invuln_timers(60);
     let meta = ctx.build_ship_slim_meta(char_id, type_id);
     let dest_tick = dest_handle.spawn_ball_with_meta(ball, combat, meta).await.unwrap_or(0);
     crate::services::space_destiny::record_session_change_timer(
@@ -1258,7 +1255,7 @@ pub(crate) async fn caller_in_space(
     if validated
         .combat_state
         .as_ref()
-        .is_some_and(|cs| cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
+        .is_some_and(eve_destiny::CombatState::has_active_non_gate_cloak)
     {
         return Err(err(
             "CannotJumpWhileCloaked",

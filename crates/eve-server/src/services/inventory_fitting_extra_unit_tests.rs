@@ -1327,7 +1327,7 @@ fn decode_user_error(err: &BridgeRpcError) -> (String, HashMap<String, f64>) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invbroker_add_enforces_foreign_ship_bay_acl_transfers_owner_and_notifies() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -1425,20 +1425,21 @@ async fn invbroker_add_enforces_foreign_ship_bay_acl_transfers_owner_and_notifie
     ctx.db
         .acquire_online_lock(mate_uid, 1_002, Some(mate_id), true, now_ts)
         .unwrap();
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_carrier,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: Some("bay-pw".into()),
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let mut mate_sess = SessionState::new(2);
     mate_sess.user_id = Some(mate_uid);
@@ -2051,7 +2052,7 @@ fn install_r2_synthetic_types(ctx: &mut ServerContext) -> (u32, u32, u32, u32, u
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bf_1290_r2_01_blocks_bare_space_and_piloted_ship_teleport_and_fails_closed() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::{DisconnectedShipEntry, FleetRecord};
 
@@ -2126,20 +2127,21 @@ async fn bf_1290_r2_01_blocks_bare_space_and_piloted_ship_teleport_and_fails_clo
         snap.items.insert(jetcan_trit, mk_item(jetcan_trit, 34, mate_id, space_jetcan, InventoryFlag::Cargo, 10, false));
         snap.items.insert(jetcan_pyerite, mk_item(jetcan_pyerite, 35, mate_id, space_jetcan, InventoryFlag::Cargo, 12, false));
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             foreign_space_carrier,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: true,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: true,
                 password: None,
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     ceo_sess.ship_id = Some(ceo_carrier);
     ceo_sess.corp_role = corp_roles::ROLE_DIRECTOR;
@@ -2292,7 +2294,7 @@ async fn bf_1290_r2_01_blocks_bare_space_and_piloted_ship_teleport_and_fails_clo
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bf_1290_r2_02_recursive_sma_owner_transfer_and_nested_bay_containers() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -2355,20 +2357,21 @@ async fn bf_1290_r2_02_recursive_sma_owner_transfer_and_nested_bay_containers() 
     let _ = ctx.db.acquire_online_lock(owner_uid, 2001, Some(owner_id), true, now_ts);
     let _ = ctx.db.acquire_online_lock(711, 2002, Some(mate_id), true, now_ts);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_carrier,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: Some("bay-pw".into()),
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let mut owner_live_sess = owner_sess;
     owner_live_sess.ship_id = Some(owner_carrier);
@@ -2605,7 +2608,7 @@ async fn bf_1290_r2_02_recursive_sma_owner_transfer_and_nested_bay_containers() 
 #[test]
 fn bf_1290_r2_03_space_titan_surface_range_self_inv_item_and_no_tokio_panic() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -2654,20 +2657,21 @@ fn bf_1290_r2_03_space_titan_surface_range_self_inv_item_and_no_tokio_panic() {
         snap.item_positions.insert(owner_titan, [11_500.0, 0.0, 0.0]);
         snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_titan,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: None,
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let mut mate_sess = SessionState::new(5);
     mate_sess.user_id = Some(722);
@@ -2781,7 +2785,7 @@ fn bf_1290_r2_03_space_titan_surface_range_self_inv_item_and_no_tokio_panic() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bf_1290_r2_03_space_titan_surface_range_add_and_multiadd() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -2825,20 +2829,21 @@ async fn bf_1290_r2_03_space_titan_surface_range_add_and_multiadd() {
         snap.item_positions.insert(owner_titan, [11_500.0, 0.0, 0.0]);
         snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_titan,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: false,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: None,
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
     let mut mate_sess = SessionState::new(6);
     mate_sess.user_id = Some(723);
     mate_sess.character_id = Some(mate_id);
@@ -2888,7 +2893,7 @@ async fn bf_1290_r2_03_space_titan_surface_range_add_and_multiadd() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bf_1290_r2_04_multiadd_sma_rules_positional_pw_and_split_notify() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -2942,20 +2947,21 @@ async fn bf_1290_r2_04_multiadd_sma_rules_positional_pw_and_split_notify() {
     let owner_uid = ctx.db.with_snapshot(|s| s.characters[&owner_id].user_id);
     let _ = ctx.db.acquire_online_lock(owner_uid, 2005, Some(owner_id), true, now_ts);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_carrier,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: Some("bay-pw".into()),
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let mut mate_sess = SessionState::new(7);
     mate_sess.user_id = Some(732);
@@ -3100,7 +3106,7 @@ async fn bf_1290_r2_04_multiadd_sma_rules_positional_pw_and_split_notify() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bf_1290_r3_split_stack_and_multiadd_recursive_owner_invariants() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -3162,20 +3168,21 @@ async fn bf_1290_r3_split_stack_and_multiadd_recursive_owner_invariants() {
     let owner_uid = ctx.db.with_snapshot(|s| s.characters[&owner_id].user_id);
     let _ = ctx.db.acquire_online_lock(owner_uid, 2010, Some(owner_id), true, now_ts);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_titan,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: Some("bay-pw".into()),
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let mut mate_sess = SessionState::new(8);
     mate_sess.user_id = Some(742);
@@ -3296,10 +3303,10 @@ async fn bf_1290_r3_split_stack_and_multiadd_recursive_owner_invariants() {
         assert_eq!(snap.items[&fh_split_id].owner_id, owner_id);
         assert_eq!(snap.items[&fh_split_id].flag, InventoryFlag::FleetHangar);
         assert_eq!(
-            crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state_snap(snap)
-                .custom_item_flags
-                .get(&fh_split_id)
-                .copied(),
+            crate::services::inventory_fitting::fitting_containers_ships::custom_item_flag_snap(
+                snap,
+                fh_split_id
+            ),
             Some(155)
         );
     });
@@ -3382,3 +3389,384 @@ async fn bf_1290_r3_split_stack_and_multiadd_recursive_owner_invariants() {
 }
 
 
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1180_invbroker_add_to_alsc_cargo_and_omitted_flag_enforces_rules_pw_cap() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        set_container_config_snap, set_container_password_snap, ContainerConfig,
+    };
+
+    let (mut ctx, mut session, char_id, _corp_id, station_id, _ship_id) = setup_inv_ctx();
+    let alsc_tid = 999_448u32;
+    let freight_box_tid = 999_340u32;
+    let freighter_tid = 999_513u32;
+    let ore_tid = 999_449u32;
+
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        let mut alsc = sde.types[&587].clone();
+        alsc.type_id = alsc_tid;
+        alsc.group_id = 448;
+        alsc.category_id = 2;
+        alsc.capacity = 50.0;
+        alsc.volume = 1_000.0;
+        sde.types.insert(alsc_tid, alsc);
+
+        let mut sec_box = sde.types[&587].clone();
+        sec_box.type_id = freight_box_tid;
+        sec_box.group_id = 340;
+        sec_box.category_id = 2;
+        sec_box.capacity = 100.0;
+        sec_box.volume = 100.0;
+        sde.types.insert(freight_box_tid, sec_box);
+
+        let mut freighter = sde.types[&587].clone();
+        freighter.type_id = freighter_tid;
+        freighter.group_id = 513;
+        freighter.category_id = 6;
+        freighter.capacity = 5_000.0;
+        freighter.volume = 100_000.0;
+        sde.types.insert(freighter_tid, freighter);
+
+        let mut ore = sde.types[&34].clone();
+        ore.type_id = ore_tid;
+        ore.volume = 0.01;
+        sde.types.insert(ore_tid, ore);
+    }
+
+    let alsc_id = 96_691_001i64;
+    let freighter_id = 96_691_002i64;
+    let nested_alsc_id = 96_691_003i64;
+    let nested_sec_id = 96_691_004i64;
+    let trit_over = 96_691_005i64;
+    let trit_ok_flag = 96_691_006i64;
+    let ore_ok_omit = 96_691_007i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(alsc_id, mk_item(alsc_id, alsc_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(freighter_id, mk_item(freighter_id, freighter_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(nested_alsc_id, mk_item(nested_alsc_id, alsc_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(nested_sec_id, mk_item(nested_sec_id, freight_box_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(trit_over, mk_item(trit_over, 34, char_id, station_id, InventoryFlag::Hangar, 6_000, false));
+        snap.items.insert(trit_ok_flag, mk_item(trit_ok_flag, 34, char_id, station_id, InventoryFlag::Hangar, 100, false));
+        snap.items.insert(ore_ok_omit, mk_item(ore_ok_omit, ore_tid, char_id, station_id, InventoryFlag::Hangar, 100, false));
+        set_container_password_snap(snap, alsc_id, 1, "alsc-pw", 0).unwrap();
+        set_container_config_snap(
+            snap,
+            alsc_id,
+            &ContainerConfig {
+                lock_by_default: false,
+                password_per_action: true,
+                config_bitmask: 0,
+            },
+            0,
+        )
+        .unwrap();
+    });
+
+    let alsc_bound = BoundObjectEntry {
+        bound_id: 11,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: alsc_id,
+        oid_str: "N=11:1".into(),
+        ref_id: 11,
+    };
+    let freighter_bound = BoundObjectEntry {
+        bound_id: 12,
+        object_id: freighter_id,
+        oid_str: "N=12:1".into(),
+        ref_id: 12,
+        ..alsc_bound.clone()
+    };
+    let kw_empty = HashMap::new();
+    let mut kw_pw = HashMap::new();
+    kw_pw.insert("password".into(), PyRep::String("alsc-pw".into()));
+
+    // Missing password on ALSC must reject both explicit flag=5 and omitted flag
+    for args in [
+        vec![PyRep::Integer(trit_ok_flag), PyRep::Integer(station_id), PyRep::Integer(5)],
+        vec![PyRep::Integer(ore_ok_omit), PyRep::Integer(station_id)],
+    ] {
+        assert_eq!(
+            handle(&ctx, &mut session, Some(&alsc_bound), "invbroker", "Add", &args, &kw_empty)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "ALSCPasswordNeededToOpen"
+        );
+    }
+
+    // Over-capacity stack into ALSC with flag=5 must reject
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut session,
+            Some(&alsc_bound),
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(trit_over), PyRep::Integer(station_id), PyRep::Integer(5)],
+            &kw_pw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CapacityExceeded"
+    );
+
+    // Assembled 448 & non-649 secure containers into freighter with flag=5 & omitted flag must reject
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut session,
+            Some(&freighter_bound),
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(nested_alsc_id), PyRep::Integer(station_id), PyRep::Integer(5)],
+            &kw_empty,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CapacityExceeded"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut session,
+            Some(&freighter_bound),
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(nested_sec_id), PyRep::Integer(station_id)],
+            &kw_empty,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OnlyFreightContainersAllowedInFreighters"
+    );
+
+    // Valid password + capacity succeeds for both explicit flag=5 and omitted flag
+    handle(
+        &ctx,
+        &mut session,
+        Some(&alsc_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(trit_ok_flag), PyRep::Integer(station_id), PyRep::Integer(5)],
+        &kw_pw,
+    )
+    .await
+    .unwrap()
+    .expect("Add with flag=5 and valid password must succeed");
+    handle(
+        &ctx,
+        &mut session,
+        Some(&alsc_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(ore_ok_omit), PyRep::Integer(station_id)],
+        &kw_pw,
+    )
+    .await
+    .unwrap()
+    .expect("Add with omitted flag and valid password must succeed");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&trit_ok_flag].location_id, alsc_id);
+        assert_eq!(snap.items[&trit_ok_flag].flag, InventoryFlag::Cargo);
+        assert_eq!(snap.items[&ore_ok_omit].location_id, alsc_id);
+        assert_eq!(snap.items[&ore_ok_omit].flag, InventoryFlag::Cargo);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1180_invbroker_add_merge_into_lock_by_default_alsc_locks_target() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        container_alsc_logs_snap, set_container_config_snap, ContainerConfig,
+    };
+
+    let (mut ctx, mut session, char_id, _corp_id, station_id, _ship_id) = setup_inv_ctx();
+    let alsc_tid = 999_447u32;
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        let mut alsc = sde.types[&587].clone();
+        alsc.type_id = alsc_tid;
+        alsc.group_id = 448;
+        alsc.category_id = 2;
+        alsc.capacity = 500.0;
+        alsc.volume = 1_000.0;
+        sde.types.insert(alsc_tid, alsc);
+    }
+
+    let alsc_id = 96_692_001i64;
+    let target_iid = 96_692_002i64;
+    let src_iid = 96_692_003i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(alsc_id, mk_item(alsc_id, alsc_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(target_iid, mk_item(target_iid, 34, char_id, alsc_id, InventoryFlag::Cargo, 10, false));
+        snap.items.insert(src_iid, mk_item(src_iid, 34, char_id, station_id, InventoryFlag::Hangar, 5, false));
+        set_container_config_snap(
+            snap,
+            alsc_id,
+            &ContainerConfig {
+                lock_by_default: true,
+                password_per_action: false,
+                config_bitmask: 0,
+            },
+            0,
+        )
+        .unwrap();
+    });
+
+    let alsc_bound = BoundObjectEntry {
+        bound_id: 21,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: alsc_id,
+        oid_str: "N=21:1".into(),
+        ref_id: 21,
+    };
+    handle(
+        &ctx,
+        &mut session,
+        Some(&alsc_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(src_iid), PyRep::Integer(station_id), PyRep::Integer(5)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect("merge Add into lock_by_default ALSC must succeed");
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.items.get(&src_iid).is_none(), "source stack must be deleted on merge");
+        assert_eq!(snap.items.get(&target_iid).map(|i| i.quantity), Some(15));
+        assert!(snap.is_item_in_alsc_lock(target_iid), "surviving merged stack must be locked");
+        assert!(!snap.is_item_in_alsc_lock(src_iid), "deleted source stack must NOT retain orphaned lock");
+        let logs = container_alsc_logs_snap(snap, alsc_id);
+        assert!(logs.iter().any(|l| l.action == "ALSCActionAdd" && l.item_id == target_iid), "ALSCActionAdd must reference surviving target_iid");
+        assert!(logs.iter().any(|l| l.action == "ALSCActionLock" && l.item_id == target_iid), "ALSCActionLock must reference surviving target_iid");
+        assert!(!logs.iter().any(|l| l.item_id == src_iid), "ALSC logs must not reference deleted src_iid");
+    });
+}
+
+#[tokio::test]
+async fn bf_1180_invbroker_add_partial_split_take_from_alsc_logs_orig_item_id() {
+    use crate::services::inventory_fitting::fitting_containers_ships::container_alsc_logs_snap;
+
+    let (mut ctx, mut session, char_id, _corp_id, station_id, _ship_id) = setup_inv_ctx();
+    let alsc_tid = 999_448u32;
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        let mut alsc = sde.types[&587].clone();
+        alsc.type_id = alsc_tid;
+        alsc.group_id = 448;
+        alsc.category_id = 2;
+        alsc.capacity = 500.0;
+        alsc.volume = 1_000.0;
+        sde.types.insert(alsc_tid, alsc);
+    }
+
+    let src_alsc_id = 96_693_001i64;
+    let dst_alsc_id = 96_693_002i64;
+    let src_iid = 96_693_010i64;
+    let dst_target_iid = 96_693_011i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(src_alsc_id, mk_item(src_alsc_id, alsc_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(dst_alsc_id, mk_item(dst_alsc_id, alsc_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(src_iid, mk_item(src_iid, 34, char_id, src_alsc_id, InventoryFlag::Cargo, 20, false));
+        snap.items.insert(dst_target_iid, mk_item(dst_target_iid, 34, char_id, dst_alsc_id, InventoryFlag::Cargo, 10, false));
+    });
+
+    let station_bound = BoundObjectEntry {
+        bound_id: 31,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: station_id,
+        oid_str: "N=31:1".into(),
+        ref_id: 31,
+    };
+    let dst_alsc_bound = BoundObjectEntry {
+        bound_id: 32,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: dst_alsc_id,
+        oid_str: "N=32:1".into(),
+        ref_id: 32,
+    };
+
+    // 1. Direct-move partial split-take (qty 4) from ALSC -> station hangar must log orig_item_id (`src_iid`).
+    let mut kw_take_4 = HashMap::new();
+    kw_take_4.insert("quantity".into(), PyRep::Integer(4));
+    let split_id_rep = handle(
+        &ctx,
+        &mut session,
+        Some(&station_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(src_iid), PyRep::Integer(src_alsc_id), PyRep::Integer(InventoryFlag::Hangar as i64)],
+        &kw_take_4,
+    )
+    .await
+    .unwrap()
+    .expect("partial split-take out of ALSC into hangar must succeed");
+    let split_id = split_id_rep
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("Add returns new split itemID");
+    assert_ne!(split_id, src_iid);
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&src_iid).map(|i| (i.location_id, i.quantity)), Some((src_alsc_id, 16)));
+        assert_eq!(snap.items.get(&split_id).map(|i| (i.location_id, i.quantity)), Some((station_id, 4)));
+        let logs = container_alsc_logs_snap(snap, src_alsc_id);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].action, "ALSCActionTake");
+        assert_eq!(logs[0].item_id, src_iid, "ALSCActionTake must log orig_item_id (`src_iid`), not split_id");
+        assert_eq!(logs[0].quantity, 4);
+    });
+
+    // 2. Partial split-take + merge (qty 3) from ALSC -> second ALSC with existing Tritanium stack.
+    let mut kw_take_3 = HashMap::new();
+    kw_take_3.insert("quantity".into(), PyRep::Integer(3));
+    handle(
+        &ctx,
+        &mut session,
+        Some(&dst_alsc_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(src_iid), PyRep::Integer(src_alsc_id), PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &kw_take_3,
+    )
+    .await
+    .unwrap()
+    .expect("partial split-take+merge between ALSCs must succeed");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&src_iid).map(|i| (i.location_id, i.quantity)), Some((src_alsc_id, 13)));
+        assert_eq!(snap.items.get(&dst_target_iid).map(|i| (i.location_id, i.quantity)), Some((dst_alsc_id, 13)));
+        let src_logs = container_alsc_logs_snap(snap, src_alsc_id);
+        assert_eq!(src_logs.len(), 2);
+        assert_eq!(src_logs[1].action, "ALSCActionTake");
+        assert_eq!(src_logs[1].item_id, src_iid, "split+merge ALSCActionTake must log orig_item_id (`src_iid`)");
+        assert_eq!(src_logs[1].quantity, 3);
+        let dst_logs = container_alsc_logs_snap(snap, dst_alsc_id);
+        assert!(dst_logs.iter().any(|l| l.action == "ALSCActionAdd" && l.item_id == dst_target_iid && l.quantity == 3));
+    });
+}

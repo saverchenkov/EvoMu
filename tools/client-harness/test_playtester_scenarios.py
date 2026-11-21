@@ -19,15 +19,29 @@ import argparse
 import json
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
+
+try:
+    import tomllib  # type: ignore[import-not-found]
+except ImportError:
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError:
+        tomllib = None  # type: ignore[assignment]
 
 HARNESS_DIR = Path(__file__).resolve().parent
 if str(HARNESS_DIR) not in sys.path:
     sys.path.insert(0, str(HARNESS_DIR))
 
 import playtester  # noqa: E402
+from test_playtester_host_daemon import _parse_simple_toml  # noqa: E402
+
+
+def _loads_toml_text(text: str) -> dict:
+    return tomllib.loads(text) if tomllib is not None else _parse_simple_toml(text)
 
 
 EXPECTED_16_STATION_WINDOWS = (
@@ -1292,9 +1306,6 @@ class TestRound4RpcAndAccountFixes(unittest.TestCase):
         self.assertEqual(len(validated_setup["declared_setup_steps"]), 1)
 
     def test_write_server_config_non_demo_defaults_and_zero_preservation(self):
-        import tomllib
-        import types
-
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             scen = root / "s.json"
@@ -1318,7 +1329,7 @@ class TestRound4RpcAndAccountFixes(unittest.TestCase):
                     "initial_balance_isk": 0,
                     "initial_balance_plex": 0,
                 }
-                cfg = tomllib.loads(runner.write_server_config().read_text(encoding="utf-8"))
+                cfg = _loads_toml_text(runner.write_server_config().read_text(encoding="utf-8"))
                 self.assertFalse(cfg["feature_flags"]["seed_demo"])
                 self.assertFalse(cfg["feature_flags"]["gm_mode"])
                 self.assertNotIn("admin_accounts", cfg)
@@ -1332,12 +1343,12 @@ class TestRound4RpcAndAccountFixes(unittest.TestCase):
                 self.assertEqual(starter["initial_balance_plex"], 0)
 
                 runner._active_starting_state = {"account": "pilot_amarr", "bloodline_id": 5}
-                cfg_amarr = tomllib.loads(runner.write_server_config().read_text(encoding="utf-8"))
+                cfg_amarr = _loads_toml_text(runner.write_server_config().read_text(encoding="utf-8"))
                 self.assertEqual(cfg_amarr["player_accounts"][0]["starter_character"]["ancestry_id"], 1)
                 self.assertEqual(cfg_amarr["player_accounts"][0]["starter_character"]["school_id"], 11)
 
                 runner._active_starting_state = {"account": "demo"}
-                cfg_demo = tomllib.loads(runner.write_server_config().read_text(encoding="utf-8"))
+                cfg_demo = _loads_toml_text(runner.write_server_config().read_text(encoding="utf-8"))
                 self.assertTrue(cfg_demo["feature_flags"]["seed_demo"])
 
             created_calls = []
@@ -1568,8 +1579,6 @@ class Test1202R4And1242Acceptance(unittest.TestCase):
         return playtester.ScenarioRunner(args, scenario_paths=scen_paths, out_dir=root / "out")
 
     def test_p1_scenario_gm_never_clobbers_demo_or_starter_state(self):
-        import tomllib
-
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             # Case A: custom account (`user != "demo"`) with setup=True
@@ -1596,7 +1605,7 @@ class Test1202R4And1242Acceptance(unittest.TestCase):
             runner_c = self._runner_in_dir(root / "c1", [scen_custom])
             runner_c._active_starting_state = loaded_custom["starting_state"]
             runner_c._active_declared_setup_steps = loaded_custom["declared_setup_steps"]
-            cfg_c = tomllib.loads(runner_c.write_server_config().read_text(encoding="utf-8"))
+            cfg_c = _loads_toml_text(runner_c.write_server_config().read_text(encoding="utf-8"))
             player_names = [a["username"] for a in cfg_c["player_accounts"]]
             admin_names = [a["username"] for a in cfg_c.get("admin_accounts", [])]
             self.assertEqual(player_names, ["caldari_pilot"])
@@ -1621,7 +1630,7 @@ class Test1202R4And1242Acceptance(unittest.TestCase):
             runner_d = self._runner_in_dir(root / "c2", [scen_demo])
             runner_d._active_starting_state = loaded_demo["starting_state"]
             runner_d._active_declared_setup_steps = loaded_demo["declared_setup_steps"]
-            cfg_d = tomllib.loads(runner_d.write_server_config().read_text(encoding="utf-8"))
+            cfg_d = _loads_toml_text(runner_d.write_server_config().read_text(encoding="utf-8"))
             self.assertNotIn("admin_accounts", cfg_d)
             self.assertTrue(cfg_d["feature_flags"]["seed_demo"])
             self.assertIn("EVOMU_ADMIN_TOKEN", runner_d._scenario_server_extra_env())

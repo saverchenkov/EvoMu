@@ -1314,3 +1314,60 @@ fn legacy_plex_fold_with_unchanged_vault_projects_net_unified_delta_bf04() {
         .project_with_cache(&projector, None, &a_zero, &c_zero, &sde, 1_700_000_001, &[])
         .is_empty());
 }
+
+#[test]
+fn items_only_and_wallets_and_items_projectors_respect_domain_masks() {
+    let sde = shared_sde();
+    let db = WorldRepository::with_demo_seed();
+    let pilot_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let bp_type_id = *sde
+        .blueprints
+        .keys()
+        .next()
+        .expect("SDE must include at least one blueprint type");
+
+    let (before, after, changes) = capture_diff(&db, 1, |snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance = IskCents::from_isk(987_654);
+        snap.items.insert(
+            990_777_001,
+            InventoryItemRecord {
+                item_id: 990_777_001,
+                type_id: 34,
+                owner_id: pilot_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 250,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            990_777_002,
+            InventoryItemRecord {
+                item_id: 990_777_002,
+                type_id: bp_type_id,
+                owner_id: pilot_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let input = DeltaProjectionInput::new(Some(&before), &after, &changes, &sde, 1_700_000_000);
+    let items_only = DefaultDeltaProjection::items_only().project_to_vec(&input);
+    assert!(items_only.iter().any(|n| n.event == "OnItemChange"));
+    assert!(items_only.iter().any(|n| n.event == "OnBlueprintsUpdated"));
+    assert!(
+        !items_only.iter().any(|n| n.event == "OnAccountChange"),
+        "items_only must not emit OnAccountChange"
+    );
+
+    let both = DefaultDeltaProjection::wallets_and_items().project_to_vec(&input);
+    assert!(both.iter().any(|n| n.event == "OnAccountChange"));
+    assert!(both.iter().any(|n| n.event == "OnItemChange"));
+    assert!(both.iter().any(|n| n.event == "OnBlueprintsUpdated"));
+}

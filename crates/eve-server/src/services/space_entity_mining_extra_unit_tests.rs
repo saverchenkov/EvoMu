@@ -531,7 +531,9 @@ async fn test_gh1183_ship_cargo_and_mineral_hold_capacity_and_flag_checks() {
 
 #[tokio::test]
 async fn test_gh1183_station_container_capacity_lock_password_and_type_checks() {
-    use crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state;
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        set_alsc_item_locked_snap, set_container_password_snap, set_container_unlocked_snap,
+    };
 
     let ctx = test_ctx();
     let station_id = 60_003_760i64;
@@ -732,9 +734,9 @@ async fn test_gh1183_station_container_capacity_lock_password_and_type_checks() 
         assert_eq!(e.code, exp_code, "loc={loc} flag={flag:?}");
     }
 
-    // 4. ALSC lock (`alsc_locked_items`) -> ItemLocked.
-    write_container_ship_state(&ctx, |st| {
-        st.alsc_locked_items.insert(alsc_cont_id);
+    // 4. ALSC lock (`AlscLockedItem`) -> ItemLocked.
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, alsc_cont_id, true, 0).unwrap();
     });
     let err_lock = handle(
         &ctx,
@@ -756,9 +758,9 @@ async fn test_gh1183_station_container_capacity_lock_password_and_type_checks() 
     assert_eq!(err_lock.code, "ItemLocked");
 
     // 5. ALSC password -> ALSCPasswordRequired until unlocked for character.
-    write_container_ship_state(&ctx, |st| {
-        st.alsc_locked_items.remove(&alsc_cont_id);
-        st.container_passwords.insert(alsc_cont_id, "pw123".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, alsc_cont_id, false, 0).unwrap();
+        set_container_password_snap(snap, alsc_cont_id, 1, "pw123", 0).unwrap();
     });
     let err_pw = handle(
         &ctx,
@@ -780,8 +782,8 @@ async fn test_gh1183_station_container_capacity_lock_password_and_type_checks() 
     assert_eq!(err_pw.code, "ALSCPasswordRequired");
 
     // 6. Unlocked ALSC container accepts 40 m3 Tritanium (<= 120 m3 capacity).
-    write_container_ship_state(&ctx, |st| {
-        st.unlocked_containers.insert((alsc_cont_id, char_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_unlocked_snap(snap, alsc_cont_id, char_id, true, 0).unwrap();
     });
     handle(
         &ctx,

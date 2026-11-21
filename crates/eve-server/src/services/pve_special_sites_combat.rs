@@ -11,7 +11,6 @@ use crate::services::pve_special_sites::{
     build_special_site_npc_combat_state, deposit_loot_into_ship_or_container_in_snapshot,
     with_pve_special_reg, with_pve_special_reg_db, DrifterHiveRecord,
 };
-use eve_db::lock_rank::AnyRwLock;
 use eve_db::{IskCents, WorldRepository};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
@@ -653,38 +652,6 @@ pub fn get_drifter_hive_for_system(
 
 pub fn get_all_drifter_hives(ctx: &ServerContext) -> Vec<DrifterHiveRecord> {
     with_pve_special_reg(ctx, |reg| reg.drifter_hives.values().cloned().collect())
-}
-
-pub fn notify_special_site_account_changes(
-    db: &WorldRepository,
-    pending_notifications: &dyn AnyRwLock<
-        std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
-    >,
-    notify_tx: &tokio::sync::broadcast::Sender<(
-        i64,
-        crate::router::cache_notifications::PendingMachoNotification,
-    )>,
-    changes: &[(i64, f64)],
-) {
-    if changes.is_empty() {
-        return;
-    }
-    let now_ft = db.clock().now_blueos_filetime_ticks();
-    for &(char_id, new_balance_isk) in changes {
-        crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
-            Some(pending_notifications),
-            Some(notify_tx),
-            char_id,
-            None,
-            <crate::router::notify_registry::OnAccountChange as crate::router::notify_registry::TypedNotification>::DEFAULT_ID_TYPE,
-            now_ft,
-            crate::router::notify_registry::OnAccountChange {
-                account_key: "cash".into(),
-                owner_id: char_id,
-                balance: new_balance_isk,
-            },
-        );
-    }
 }
 
 pub async fn on_special_site_npc_destroyed_core(

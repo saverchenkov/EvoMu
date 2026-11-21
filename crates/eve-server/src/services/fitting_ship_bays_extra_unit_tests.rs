@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use super::inventory_fitting::fitting_containers_ships::{
-    write_container_ship_state, ShipAccessConfig,
+    set_custom_item_flag_snap, set_ship_access_config_snap, ShipAccessConfig,
 };
 use super::inventory_fitting::fitting_ship_bays::*;
 use crate::router::ServerContext;
@@ -247,17 +247,20 @@ async fn board_stored_ship_corp_role_sma_password_and_in_space_combat_guards() {
     // Move host to CorpSAG1 owned by corp_id; host SMA password denies access without password, then allows with password + ROLE_EQUIPMENT_CONFIG + ROLE_HANGAR_CAN_TAKE_1
     put_item(&ctx, host_id, 998_001, corp_id, station_id, InventoryFlag::CorpSAG1, 1, true);
     sess.corp_role = corp_roles::ROLE_EQUIPMENT_CONFIG | corp_roles::ROLE_HANGAR_CAN_TAKE[0];
-    write_container_ship_state(&ctx, |st| {
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             host_id,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: true,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: true,
                 password: Some("baypw".into()),
             },
-        );
+            0,
+        )
+        .unwrap();
     });
     assert_eq!(
         board_stored_ship(&ctx, &mut sess, &[PyRep::Integer(stored_ship_id)], &kw)
@@ -274,8 +277,8 @@ async fn board_stored_ship_corp_role_sma_password_and_in_space_combat_guards() {
     assert_eq!(boarded.dict_get("shipID"), Some(&PyRep::Integer(stored_ship_id)));
 
     // Move to space and test Criminal, WeaponsTimer, ShipInWarp, WarpScrambled, and non-capsule swap
-    write_container_ship_state(&ctx, |st| {
-        st.ship_configs.remove(&host_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.kv_mut(eve_db::Ns::ShipAccessConfig).remove(host_id, "");
     });
     sess.station_id = None;
     sess.ship_id = Some(active_ship_id);
@@ -1141,17 +1144,20 @@ async fn workstream_2a2_in_space_store_guards_cleanup_active_capsule_reuse_and_k
 
     // Password-locked corp host rejects wrong password in space, succeeds once password supplied
     put_item(&ctx, host_id, 998_001, corp_id, null_sys as i64, InventoryFlag::None, 1, true);
-    write_container_ship_state(&ctx, |st| {
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             host_id,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: true,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: true,
                 password: Some("secpw".into()),
             },
-        );
+            0,
+        )
+        .unwrap();
     });
     assert_eq!(
         ship_scoop_and_store(&ctx, &mut sess, "StoreVessel", &[PyRep::Integer(target_cruiser), PyRep::Integer(host_id)], &kw)
@@ -1201,9 +1207,7 @@ async fn workstream_2a2_in_space_store_guards_cleanup_active_capsule_reuse_and_k
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.remove(&space_pod_id);
         snap.items.get_mut(&host_id).unwrap().owner_id = char_id;
-    });
-    write_container_ship_state(&ctx, |st| {
-        st.ship_configs.remove(&host_id);
+        snap.kv_mut(eve_db::Ns::ShipAccessConfig).remove(host_id, "");
     });
     let active_res_1 = ship_scoop_and_store(
         &ctx,
@@ -1299,9 +1303,9 @@ async fn ship_bays_board_jettison_drop_scoop_guards_and_versions_kill_mutants() 
         corp.members.insert(char_id);
         snap.corporations.insert(corp_id, corp);
     });
-    crate::services::fitting_containers_ships::write_container_ship_state(&ctx, |st| {
-        st.custom_item_flags.insert(stored_feb, 177);
-        st.custom_item_flags.insert(stored_sde_ship, 138);
+    ctx.db.with_mut_snapshot(|snap| {
+        set_custom_item_flag_snap(snap, stored_feb, Some(177), 0).unwrap();
+        set_custom_item_flag_snap(snap, stored_sde_ship, Some(138), 0).unwrap();
     });
 
     put_item(&ctx, active_ship, 587, char_id, sys_null as i64, InventoryFlag::None, 1, true);

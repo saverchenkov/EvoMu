@@ -924,7 +924,7 @@ async fn test_validate_and_apply_specialized_holds_cargo_fighter_capacity_and_du
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_and_apply_t3c_subsystems_cpu_pg_target_guards_and_notifications() {
-    use crate::services::fitting_containers_ships::write_container_ship_state;
+    use crate::services::fitting_containers_ships::set_alsc_item_locked_snap;
 
     let mut sde = (*shared_sde()).clone();
     let t3c_hull_tid = 900_401_u32;
@@ -1079,8 +1079,8 @@ async fn test_validate_and_apply_t3c_subsystems_cpu_pg_target_guards_and_notific
             );
         }
     });
-    write_container_ship_state(&ctx, |st| {
-        st.alsc_locked_items.insert(hangar_alsc_locked);
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, hangar_alsc_locked, true, 0).unwrap();
     });
     ctx.db
         .acquire_online_lock(char_id as u64, char_id as u64, Some(char_id), true, ctx.now_unix())
