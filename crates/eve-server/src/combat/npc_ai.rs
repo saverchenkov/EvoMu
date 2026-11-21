@@ -1894,37 +1894,63 @@ fn apply_ai_step_world_effects(
     }
 
     if !applied_hits.is_empty() {
+        // Temporary stop-gap for #1565: only notify undocked pilots in `sys_id` who actively
+        // control/pilot the hit target (never resolve abandoned drones or stale `snap.items`
+        // owners). Remove when #1190 Track 3 (`outbound_sequencer.rs` epoch/scene frames) lands.
+        let active_craft_owners: HashMap<i64, Option<i64>> = {
+            let mut map = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                applied_hits
+                    .iter()
+                    .filter_map(|&(_, _, tid, ..)| {
+                        rt.active_drones_in_space.get(&tid).map(|d| {
+                            let owner = (!d.is_abandoned
+                                && d.owner_char_id > 0
+                                && d.solar_system_id == sys_id)
+                                .then_some(d.owner_char_id);
+                            (tid, owner)
+                        })
+                    })
+                    .collect::<HashMap<i64, Option<i64>>>()
+            });
+            if let Ok(fighters) = ctx.active_fighters.read() {
+                for &(_, _, tid, ..) in &applied_hits {
+                    if let Some(sq) = fighters.get(&tid) {
+                        let owner = (!sq.is_abandoned && sq.owner_char_id > 0)
+                            .then_some(sq.owner_char_id);
+                        map.entry(tid).or_insert(owner);
+                    }
+                }
+            }
+            map
+        };
         for (attacker_id, npc_type_id, tid, applied, is_wrecking, s_r, a_r, h_r) in applied_hits {
             let victim_char_opt = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&tid)
-                    .map(|c| c.character_id)
-                    .or_else(|| {
-                        snap.characters
-                            .values()
-                            .find(|c| c.active_ship_id == tid)
-                            .map(|c| c.character_id)
-                    })
-                    .or_else(|| {
-                        snap.items
-                            .get(&tid)
-                            .map(|i| i.owner_id)
-                            .filter(|id| snap.characters.contains_key(id))
-                    })
+                let ch = match active_craft_owners.get(&tid) {
+                    Some(Some(cid)) => snap.characters.get(cid),
+                    Some(None) => None,
+                    None => snap
+                        .characters
+                        .get(&tid)
+                        .or_else(|| snap.characters.values().find(|c| c.active_ship_id == tid)),
+                }?;
+                (ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.structure_id.is_none())
+                    .then_some(ch.character_id)
             });
-            crate::services::combat_crimewatch::emit_combat_log_and_damage_state(
-                ctx,
-                attacker_id,
-                victim_char_opt,
-                attacker_id,
-                tid,
-                npc_type_id,
-                applied,
-                is_wrecking,
-                s_r,
-                a_r,
-                h_r,
-            );
+            if victim_char_opt.is_some() {
+                crate::services::combat_crimewatch::emit_combat_log_and_damage_state(
+                    ctx,
+                    attacker_id,
+                    victim_char_opt,
+                    attacker_id,
+                    tid,
+                    npc_type_id,
+                    applied,
+                    is_wrecking,
+                    s_r,
+                    a_r,
+                    h_r,
+                );
+            }
         }
     }
 
@@ -1936,13 +1962,13 @@ fn apply_ai_step_world_effects(
                 .filter_map(|&tid| {
                     snap.characters
                         .get(&tid)
-                        .map(|c| c.character_id)
-                        .or_else(|| {
-                            snap.characters
-                                .values()
-                                .find(|c| c.active_ship_id == tid)
-                                .map(|c| c.character_id)
+                        .or_else(|| snap.characters.values().find(|c| c.active_ship_id == tid))
+                        .filter(|c| {
+                            c.solar_system_id == sys_id
+                                && c.station_id.is_none()
+                                && c.structure_id.is_none()
                         })
+                        .map(|c| c.character_id)
                 })
                 .collect()
         });

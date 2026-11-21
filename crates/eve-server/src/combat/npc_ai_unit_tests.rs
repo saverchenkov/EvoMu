@@ -233,6 +233,8 @@ async fn npc_ai_orbit_attack_cooldown_and_destruction_factions_and_abyssal() {
         if let Some(ch) = snap.characters.get_mut(&player_char) {
             ch.active_ship_id = player_ship;
             ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
         }
     });
     sys_handle.try_spawn_ball_with_combat(
