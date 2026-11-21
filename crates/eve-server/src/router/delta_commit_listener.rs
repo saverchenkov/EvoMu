@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 type BridgeKey = (u64, usize);
 const MAX_RECENT_COMMIT_EPOCH_LAG: u64 = 32;
-const MAX_RECENT_PROJECTED_RECORDS: usize = 256;
+const MAX_RECENT_PROJECTED_RECORDS: usize = 4096;
 
 #[derive(Debug, Clone)]
 struct ProjectedAccountRecord {
@@ -49,6 +49,66 @@ struct ProjectedAccountRecord {
 #[derive(Debug, Default)]
 struct EpochLedger {
     records: VecDeque<ProjectedAccountRecord>,
+    /// Monotonic commit counter per `(owner_id, account_key)` so unrelated DB
+    /// commits (career goals, telemetry, other wallets) never evict recent records.
+    wallet_epochs: HashMap<i64, HashMap<String, u64>>,
+}
+
+impl EpochLedger {
+    /// Record a batch of committed wallet account notifications under per-wallet
+    /// epochs and prune records older than `MAX_RECENT_COMMIT_EPOCH_LAG` for those keys.
+    fn record_batch(&mut self, mut committed_records: Vec<ProjectedAccountRecord>) {
+        if committed_records.is_empty() {
+            return;
+        }
+        let mut batch_epochs: HashMap<i64, HashMap<String, u64>> = HashMap::new();
+        for rec in &mut committed_records {
+            let next_epoch = if let Some(&epoch) = batch_epochs
+                .get(&rec.owner_id)
+                .and_then(|m| m.get(&rec.account_key))
+            {
+                epoch
+            } else {
+                let by_key = self.wallet_epochs.entry(rec.owner_id).or_default();
+                let next = if let Some(entry) = by_key.get_mut(&rec.account_key) {
+                    *entry = entry.saturating_add(1);
+                    *entry
+                } else {
+                    by_key.insert(rec.account_key.clone(), 1);
+                    1
+                };
+                batch_epochs
+                    .entry(rec.owner_id)
+                    .or_default()
+                    .insert(rec.account_key.clone(), next);
+                next
+            };
+            rec.commit_epoch = next_epoch;
+        }
+        self.records.retain(|r| {
+            let Some(&latest) = batch_epochs
+                .get(&r.owner_id)
+                .and_then(|m| m.get(&r.account_key))
+            else {
+                return true;
+            };
+            latest.saturating_sub(r.commit_epoch) <= MAX_RECENT_COMMIT_EPOCH_LAG
+        });
+        for rec in committed_records {
+            if self.records.len() >= MAX_RECENT_PROJECTED_RECORDS {
+                self.records.pop_front();
+            }
+            self.records.push_back(rec);
+        }
+    }
+
+    fn wallet_epoch(&self, owner_id: i64, account_key: &str) -> u64 {
+        self.wallet_epochs
+            .get(&owner_id)
+            .and_then(|m| m.get(account_key))
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 struct DeltaCommitBridgeState {
@@ -287,7 +347,8 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
             };
             let now_ft = db.clock().now_blueos_filetime_ticks();
             let now_unix = db.now_unix_secs();
-            let commit_epoch = db.state_epoch();
+            // Assigned per `(owner_id, account_key)` inside `EpochLedger::record_batch`.
+            let commit_epoch = 0u64;
             let staging_scope_id =
                 current_dispatch_staging_scope_id(Some(&*pend), Some(&notify_tx));
 
@@ -354,15 +415,12 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 }
             }
 
-            let mut ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
-            ledger.records.retain(|r| {
-                commit_epoch.saturating_sub(r.commit_epoch) <= MAX_RECENT_COMMIT_EPOCH_LAG
-            });
-            for rec in committed_records {
-                if ledger.records.len() >= MAX_RECENT_PROJECTED_RECORDS {
-                    ledger.records.pop_front();
-                }
-                ledger.records.push_back(rec);
+            if !committed_records.is_empty() {
+                bridge
+                    .recent_epoch
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record_batch(committed_records);
             }
         },
     ));
@@ -500,17 +558,18 @@ pub(crate) fn try_handle_legacy_account_change_emit(
         .unwrap_or_else(|e| e.into_inner())
         .get(&bridge_key)
         .and_then(Weak::upgrade)?;
-    let current_epoch = ctx.db.state_epoch();
     let staging_scope_id =
         current_dispatch_staging_scope_id(Some(&*ctx.pending_notifications), Some(&ctx.notify_tx));
     let matching: Vec<ProjectedAccountRecord> = {
         let ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+        let current_wallet_epoch = ledger.wallet_epoch(owner_id, &account_key);
         ledger
             .records
             .iter()
             .filter(|r| {
                 r.staging_scope_id == staging_scope_id
-                    && current_epoch.saturating_sub(r.commit_epoch) <= MAX_RECENT_COMMIT_EPOCH_LAG
+                    && current_wallet_epoch.saturating_sub(r.commit_epoch)
+                        <= MAX_RECENT_COMMIT_EPOCH_LAG
                     && r.account_key == account_key
                     && r.owner_id == owner_id
             })
