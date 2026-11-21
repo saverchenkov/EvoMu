@@ -923,6 +923,9 @@ class RunJourneysIsolationTests(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(stage_dir, "tools", "startup", "evomu.py")))
 
         out_dir = os.path.join(self.tmp, "cli_out")
+        # Use an unbound ephemeral port (> 1) rather than hardcoding 65432,
+        # which can be bound locally by host IDE/daemon processes and stall the probe.
+        closed_port = str(rj.find_free_port())
         res = subprocess.run(
             [
                 sys.executable,
@@ -932,7 +935,7 @@ class RunJourneysIsolationTests(unittest.TestCase):
                 "--journeys",
                 JOURNEYS_JSON_PATH,
                 "--bridge-port",
-                "65432",
+                closed_port,
                 "--client-app",
                 fake_build,
                 "--skip-real-client",
