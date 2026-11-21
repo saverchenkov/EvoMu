@@ -44,6 +44,7 @@ fn clone_jump_reset_and_contract_helpers_kill_mutations() {
 
     sess.corporation_id = Some(player_corp);
     ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().corporation_id = player_corp;
         snap.corporations.insert(
             player_corp,
             { let mut __corp = CorporationRecord::default();
@@ -61,6 +62,12 @@ fn clone_jump_reset_and_contract_helpers_kill_mutations() {
         "CrpAccessDenied"
     );
 
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&player_corp).unwrap();
+        corp.members.insert(char_id);
+        corp.member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_CONTRACT_MANAGER);
+    });
     sess.corp_role = eve_db::corp_roles::ROLE_CONTRACT_MANAGER;
     assert_eq!(
         handle_contract_delete_notif(&ctx, &sess, "DeleteNotification", &[PyRep::Integer(999_999), PyRep::Bool(true)])

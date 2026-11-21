@@ -553,7 +553,7 @@ fn resolve_expired_contract_covers_auction_corp_winner_no_bids_and_guards() {
         IskCents(IskCents::from_isk(1_000).0 + 5_000 + 777)
     );
 
-    // Auction with zero bids expires, restores original flag (unless Locked -> Hangar), ignores non-numeric deposit, credits corp if for_corp
+    // Auction with zero bids expires, restores original flag (unless Locked -> CorpDeliveries for corp), ignores non-numeric deposit, credits corp if for_corp
     snap.corporations
         .insert(98_000_030, sample_corp(98_000_030, issuer, IskCents(100)));
     snap.items.insert(
@@ -595,7 +595,7 @@ fn resolve_expired_contract_covers_auction_corp_winner_no_bids_and_guards() {
     assert_eq!(snap.resolve_expired_contract(13, 1_500), Some("Expired"));
     assert_eq!(snap.items[&9003].owner_id, 98_000_030);
     assert_eq!(snap.items[&9003].flag, InventoryFlag::ShipHangar);
-    assert_eq!(snap.items[&9004].flag, InventoryFlag::Hangar);
+    assert_eq!(snap.items[&9004].flag, InventoryFlag::CorpDeliveries);
     assert_eq!(snap.corporations[&98_000_030].master_wallet, IskCents(300));
 
     // InProgress non-Courier contract returns Some("Failed") without mutating status

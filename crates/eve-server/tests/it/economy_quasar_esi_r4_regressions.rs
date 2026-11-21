@@ -772,7 +772,7 @@ async fn test_r4_193_contract_deposit_refunds_and_unbid_corp_auction_item_return
         "Issuer must be refunded contract_deposit on RejectContract"
     );
 
-    // c1 finishes expired unbid corporate auction -> item returns to corp_id in CorpSAG1 (not c1)
+    // c1 finishes expired unbid corporate auction (no ContractOrigFlag) -> item returns to corp_id in CorpDeliveries (not c1)
     ctx.dispatch_rpc(
         &mut sess1,
         "contractProxy",
@@ -789,7 +789,7 @@ async fn test_r4_193_contract_deposit_refunds_and_unbid_corp_auction_item_return
         item.owner_id, corp_id,
         "Unbid corporate auction item must return to issuer_corp_id"
     );
-    assert_eq!(item.flag, InventoryFlag::CorpSAG1);
+    assert_eq!(item.flag, InventoryFlag::CorpDeliveries);
 }
 
 #[tokio::test]
