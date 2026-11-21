@@ -494,7 +494,7 @@ async fn test_abyssal_trace_scanning_and_fleet_entry() {
             warp_end_ft: None,
         });
     }
-    let scan_rep = ctx.dispatch_rpc(&mut sess2, "scanMgr", None, "RequestScans", &[PyRep::Real(4.0 * 149_597_870_700.0), PyRep::Real(40.0)], &kw, None).await.expect("RequestScans finds trace");
+    let scan_rep = ctx.dispatch_rpc(&mut sess2, "scanMgr", None, "RequestScans", &[PyRep::None, PyRep::Integer(4)], &kw, None).await.expect("RequestScans finds trace");
     let PyRep::List(scan_rows) = scan_rep else { panic!("Expected PyRep::List of scan results from combat probes"); };
     assert!(scan_rows.iter().any(|r| r.dict_get("targetID").and_then(|v| v.as_i64()) == Some(trace_id) && r.dict_get("targetClass").and_then(|v| v.as_str()) == Some("AbyssalTrace")));
 

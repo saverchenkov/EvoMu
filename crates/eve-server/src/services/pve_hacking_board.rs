@@ -619,12 +619,15 @@ pub async fn detonate_ghost_site_with_can(
     let mut dungeon_id = 5534_u32;
     let mut already_detonated = false;
     let mut cans_to_destroy: Vec<ItemId> = Vec::new();
-    with_pve_exploration_reg(ctx, |reg| {
+    let should_skip = with_pve_exploration_reg(ctx, |reg| {
         if let Some(sites) = reg.sites_by_system.get_mut(&solar_system_id) {
             if let Some(site) = sites.iter_mut().find(|s| s.site_id == site_id) {
                 pos = site.position;
                 dungeon_id = site.dungeon_id;
                 already_detonated = site.ghost_detonated;
+                if failed_container_id.is_none() && already_detonated {
+                    return true;
+                }
                 site.ghost_detonated = true;
                 site.npc_guards_spawned = true;
                 if let Some(cid) = failed_container_id {
@@ -644,7 +647,11 @@ pub async fn detonate_ghost_site_with_can(
             reg.spewed_cans
                 .retain(|_, c| c.parent_container_id != cid);
         }
+        false
     });
+    if should_skip {
+        return (0.0, Vec::new());
+    }
 
     let sys_sec = ctx
         .sde

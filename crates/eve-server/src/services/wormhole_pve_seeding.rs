@@ -760,7 +760,12 @@ pub async fn seed_special_wormhole_pve_sites(
 
     with_pve_exploration_reg(ctx, |reg| {
         reg.seeded_systems.insert(solar_system_id, true);
-        reg.sites_by_system.insert(solar_system_id, sites);
+        let existing = reg.sites_by_system.entry(solar_system_id).or_default();
+        for site in sites {
+            if !existing.iter().any(|s| s.site_id == site.site_id) {
+                existing.push(site);
+            }
+        }
     });
     true
 }

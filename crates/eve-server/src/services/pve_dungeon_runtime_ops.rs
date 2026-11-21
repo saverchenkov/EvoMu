@@ -108,7 +108,7 @@ pub(super) fn find_active_dungeon_id_at_position(
         return runtime_did;
     }
 
-    with_pve_exploration_reg(ctx, |reg| {
+    read_pve_exploration_reg(ctx, |reg| {
         reg.sites_by_system.get(&sys_id).and_then(|sites| {
             sites
                 .iter()

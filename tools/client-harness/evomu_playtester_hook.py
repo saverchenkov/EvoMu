@@ -2788,6 +2788,73 @@ def _stale_module_button_reason(node, sm=None):
     return ""
 
 
+_BR_TAG_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
+_STR_VALUE_TYPES = (str, type(u""))
+_EXPLICIT_MODULE_SLOT_PREFIXES_LOWER = (
+    "modulebutton_",
+    "inflighthighslot",
+    "inflightmediumslot",
+    "inflightlowslot",
+    "hislot",
+    "medslot",
+    "lowslot",
+)
+
+
+def _is_explicit_module_slot_or_id(token):
+    """Return True if token names a HUD slot path/key, ModuleButton_* widget, or numeric ID."""
+    if not token or len(token.split()) > 1:
+        return False
+    leaf = token.rsplit("/", 1)[-1].strip()
+    if not leaf:
+        return False
+    if leaf.isdigit():
+        return True
+    return leaf.lower().startswith(_EXPLICIT_MODULE_SLOT_PREFIXES_LOWER)
+
+
+def _module_button_display_name(node):
+    """Resolve a HUD ModuleButton's display name via evetypes or line-preserving metadata."""
+    if node is None:
+        return ""
+    minfo = getattr(node, "moduleinfo", None)
+    if minfo is not None:
+        t_name = _safe_str(getattr(minfo, "typeName", None), 128).strip()
+        if t_name:
+            return t_name
+        type_id = _coerce_optional_int(getattr(minfo, "typeID", None))
+        if type_id is not None and type_id > 0:
+            try:
+                import evetypes as _evetypes
+                if hasattr(_evetypes, "GetName"):
+                    resolved = _safe_str(_evetypes.GetName(type_id), 128).strip()
+                    if resolved:
+                        return resolved
+            except Exception:
+                pass
+    for attr in ("hint", "label", "caption", "text"):
+        val = getattr(node, attr, None)
+        if val is None or callable(val):
+            continue
+        if hasattr(val, "text") and not isinstance(val, _STR_VALUE_TYPES):
+            val = getattr(val, "text", None)
+            if val is None or callable(val):
+                continue
+        u_raw = _to_unicode(val)
+        if not u_raw:
+            continue
+        u_lines_src = _BR_TAG_RE.sub(u"\n", u_raw[:2048])
+        for raw_line in u_lines_src.splitlines():
+            clean_line = _safe_str(_strip_tags(raw_line), 128).strip()
+            if (
+                clean_line
+                and not clean_line.startswith("ModuleButton_")
+                and not clean_line.startswith("<")
+            ):
+                return clean_line
+    return ""
+
+
 def _coerce_optional_int(val):
     if val is None or isinstance(val, bool):
         return None
@@ -5803,13 +5870,25 @@ def _execute_action(sm, action):
                     pass
                 explicit_tid = None
                 if raw_target and ":" in raw_target:
-                    _rhs = raw_target.split(":", 1)[1].strip().split()[0]
-                    if _rhs.isdigit():
-                        explicit_tid = int(_rhs)
-                mod_target = raw_target.split(":")[0].split()[0].strip() if raw_target else ""
+                    _rhs_parts = raw_target.split(":", 1)[1].strip().split()
+                    if _rhs_parts and _rhs_parts[0].isdigit():
+                        explicit_tid = int(_rhs_parts[0])
+                mod_name_raw = raw_target.split(":", 1)[0].strip() if raw_target else ""
+                _mod_parts = mod_name_raw.split() if mod_name_raw else []
+                if (
+                    len(_mod_parts) > 1
+                    and _mod_parts[-1].isdigit()
+                    and int(_mod_parts[-1]) >= 50000000
+                    and explicit_tid is None
+                ):
+                    explicit_tid = int(_mod_parts[-1])
+                    mod_name_raw = " ".join(_mod_parts[:-1]).strip()
+                    _mod_parts = mod_name_raw.split() if mod_name_raw else []
+                mod_target = mod_name_raw if _is_explicit_module_slot_or_id(mod_name_raw) else ""
                 if mod_target.isdigit() and int(mod_target) >= 50000000:
                     explicit_tid = int(mod_target)
                     mod_target = ""
+                    mod_name_raw = ""
                 try:
                     from eve.client.script.parklife import states as _park_states
                     st_svc = sm.GetService("stateSvc") if hasattr(sm, "GetService") else None
@@ -5838,30 +5917,43 @@ def _execute_action(sm, action):
                                 st_svc.SetState(best_tid, _park_states.activeTarget, 1)
                 except Exception:
                     pass
-                slot_name = mod_target or "inFlightHighSlot1"
-                candidates = [slot_name]
+                slot_name = mod_target or mod_name_raw or "inFlightHighSlot1"
                 if mod_target:
+                    candidates = [mod_target]
                     if mod_target.isdigit():
                         mb_cand = "ModuleButton_%s" % mod_target
                         if mb_cand not in candidates:
                             candidates.append(mb_cand)
+                    _leaf_target = mod_target.rsplit("/", 1)[-1].strip()
+                    _leaf_low = _leaf_target.lower()
                     _slot_prefixes = (
                         ("hiSlot", "inFlightHighSlot"),
                         ("medSlot", "inFlightMediumSlot"),
                         ("lowSlot", "inFlightLowSlot"),
                     )
                     for _short_p, _hud_p in _slot_prefixes:
-                        if mod_target.startswith(_short_p) and mod_target[len(_short_p):].isdigit():
-                            _hud_cand = "%s%d" % (_hud_p, int(mod_target[len(_short_p):]) + 1)
-                            if _hud_cand not in candidates:
-                                candidates.append(_hud_cand)
-                        elif mod_target.startswith(_hud_p) and mod_target[len(_hud_p):].isdigit():
-                            _idx = int(mod_target[len(_hud_p):])
+                        _short_low = _short_p.lower()
+                        _hud_low = _hud_p.lower()
+                        if _leaf_low.startswith(_short_low) and _leaf_low[len(_short_low):].isdigit():
+                            _idx = int(_leaf_low[len(_short_low):])
+                            for _cand in ("%s%d" % (_short_p, _idx), "%s%d" % (_hud_p, _idx + 1)):
+                                if _cand not in candidates:
+                                    candidates.append(_cand)
+                        elif _leaf_low.startswith(_hud_low) and _leaf_low[len(_hud_low):].isdigit():
+                            _idx = int(_leaf_low[len(_hud_low):])
+                            _cands = ["%s%d" % (_hud_p, _idx)]
                             if _idx >= 1:
-                                _short_cand = "%s%d" % (_short_p, _idx - 1)
-                                if _short_cand not in candidates:
-                                    candidates.append(_short_cand)
+                                _cands.append("%s%d" % (_short_p, _idx - 1))
+                            for _cand in _cands:
+                                if _cand not in candidates:
+                                    candidates.append(_cand)
+                elif mod_name_raw:
+                    # Module display names (single- or multi-word, e.g. "Afterburner",
+                    # "5MN Microwarpdrive I") are resolved via tiered hud_slot_buttons
+                    # display-name matching rather than _find_widget or default slot fallbacks.
+                    candidates = []
                 else:
+                    candidates = ["inFlightHighSlot1"]
                     for extra_cand in (
                         "ModuleButton_483",
                         "ModuleButton_3651",
@@ -5879,6 +5971,7 @@ def _execute_action(sm, action):
                             candidates.append(extra_cand)
                 node = None
                 fallback_offline_node = None
+                fallback_slot_name = slot_name
                 hud_slot_buttons = []
                 for slot_idx in range(1, 9):
                     for prefix in ("inFlightHighSlot", "inFlightMediumSlot", "inFlightLowSlot"):
@@ -5899,14 +5992,19 @@ def _execute_action(sm, action):
                             for ch in list(getattr(first_node, "children", []) or []):
                                 if hasattr(ch, "moduleinfo") or _safe_str(getattr(ch, "name", ""), 64).startswith("ModuleButton_"):
                                     matched_buttons.append(ch)
+                    cand_low = cand_name.lower()
                     for s_key, ch in hud_slot_buttons:
                         ch_name = _safe_str(getattr(ch, "name", ""), 64)
+                        ch_low = ch_name.lower()
+                        s_low = s_key.lower()
+                        rel_slot_btn = ("%s/%s" % (s_low, ch_low)) if ch_low else ""
                         minfo = getattr(ch, "moduleinfo", None)
                         m_type = str(getattr(minfo, "typeID", "") or "") if minfo is not None else ""
                         m_item = str(getattr(minfo, "itemID", "") or "") if minfo is not None else ""
                         if (
-                            ch_name == cand_name
-                            or s_key == cand_name
+                            ch_low == cand_low
+                            or s_low == cand_low
+                            or (rel_slot_btn and (cand_low == rel_slot_btn or cand_low.endswith("/" + rel_slot_btn)))
                             or (mod_target and (m_type == mod_target or m_item == mod_target))
                         ) and ch not in matched_buttons:
                             matched_buttons.append(ch)
@@ -5919,11 +6017,37 @@ def _execute_action(sm, action):
                             break
                         elif fallback_offline_node is None:
                             fallback_offline_node = mb
+                            fallback_slot_name = _safe_str(getattr(mb, "name", "") or cand_name, 64)
                     if node is not None:
                         break
+                if node is None and fallback_offline_node is None and mod_name_raw:
+                    query_norm = " ".join(mod_name_raw.lower().split())
+                    tiered = {0: [], 1: [], 2: []}
+                    for s_key, ch in hud_slot_buttons:
+                        ch_name = _safe_str(getattr(ch, "name", ""), 64)
+                        disp_norm = " ".join(_module_button_display_name(ch).lower().split())
+                        if disp_norm == query_norm or ch_name.lower() == query_norm or s_key.lower() == query_norm:
+                            tiered[0].append((s_key, ch))
+                        elif len(query_norm) >= 3 and disp_norm.startswith(query_norm):
+                            tiered[1].append((s_key, ch))
+                        elif len(query_norm) >= 4 and query_norm in disp_norm:
+                            tiered[2].append((s_key, ch))
+                    for tier_idx in (0, 1, 2):
+                        for s_key, ch in tiered[tier_idx]:
+                            if _stale_module_button_reason(ch, sm):
+                                continue
+                            if bool(getattr(ch, "online", False)):
+                                node = ch
+                                slot_name = _safe_str(getattr(ch, "name", "") or s_key, 64)
+                                break
+                            elif fallback_offline_node is None:
+                                fallback_offline_node = ch
+                                fallback_slot_name = _safe_str(getattr(ch, "name", "") or s_key, 64)
+                        if node is not None or fallback_offline_node is not None:
+                            break
                 if node is None and fallback_offline_node is not None:
                     node = fallback_offline_node
-                    slot_name = _safe_str(getattr(node, "name", "") or slot_name, 64)
+                    slot_name = _safe_str(getattr(node, "name", "") or fallback_slot_name, 64)
                     try:
                         minfo = getattr(node, "moduleinfo", None)
                         mod_item_id = getattr(minfo, "itemID", None) if minfo is not None else None
