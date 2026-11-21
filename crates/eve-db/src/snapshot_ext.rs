@@ -1608,15 +1608,90 @@ impl WorldStateSnapshot {
         at_dock_hangar || in_ship_cargo
     }
 
-    /// Credits a contract issuer (corporation master wallet division 1000 when `c.for_corp`,
+    /// Returns originating corporate wallet division (`1..=7`) recorded at contract creation.
+    pub fn contract_issuer_division(&self, contract_id: i64) -> u8 {
+        self.kv(crate::service_domains::Ns::ContractOrigFlag)
+            .get::<u16>(contract_id, "issuer_div")
+            .map(|d| d as u8)
+            .filter(|&d| (1..=7).contains(&d))
+            .unwrap_or(1)
+    }
+
+    /// Removes per-contract originating and bid wallet division metadata on terminal resolution.
+    pub fn clear_contract_divisions(&mut self, contract_id: i64) {
+        self.kv_mut(crate::service_domains::Ns::ContractOrigFlag).clear_entity(contract_id);
+        self.kv_mut(crate::service_domains::Ns::ContractBidDiv).clear_entity(contract_id);
+    }
+
+    /// Removes and returns an escrowed public contract deposit (checking typed storage and legacy blobs).
+    pub fn take_contract_deposit(&mut self, contract_id: i64) -> Option<IskCents> {
+        self.fleet_and_social_ops.contract_deposits.remove(&contract_id).or_else(|| {
+            self.service_state_blobs
+                .remove(&format!("contract_deposit:{contract_id}"))
+                .and_then(|s| s.parse::<i64>().ok())
+        }).filter(|&raw| raw > 0).map(IskCents)
+    }
+
+    /// Records a contract wallet journal entry on the owner's personal or corporate division wallet.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_contract_journal(
+        &mut self, owner_id: i64, div: u8, entry_type: &str, ref_type_id: i32,
+        first_party_id: i64, second_party_id: i64, contract_id: i64,
+        signed_amount: IskCents, now_unix: u64, reason: impl Into<String>,
+    ) {
+        if signed_amount.0 == 0 || owner_id <= 0 { return; }
+        let (balance_after, account_key) = if let Some(corp) = self.corporations.get(&owner_id) {
+            let d = div.clamp(1, 7);
+            (corp.division_balance(d), 999 + i32::from(d))
+        } else if let Some(ch) = self.characters.get(&owner_id) {
+            (ch.balance, crate::ledger::ACCOUNTING_KEY_CASH)
+        } else {
+            return;
+        };
+        let meta = crate::ledger::JournalMeta::new(ref_type_id, first_party_id, second_party_id, now_unix)
+            .with_context(crate::ledger::JournalContext::Contract, contract_id)
+            .with_account_key(account_key);
+        self.append_journal_entry(crate::ledger::JournalEntryInput {
+            owner_id, entry_type, amount: signed_amount, balance_after, reason: reason.into(), meta,
+        });
+    }
+
+    /// Credits the contract issuer (personal wallet or originating corporate division) and logs a journal entry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn credit_contract_issuer_with_journal(
+        &mut self, c: &ContractRecord, amount: IskCents, entry_type: &str,
+        ref_type_id: i32, first_party_id: i64, now_unix: u64, reason: impl Into<String>,
+    ) {
+        if amount.0 <= 0 { return; }
+        self.credit_contract_issuer(c, amount);
+        let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 { c.issuer_corp_id } else { c.issuer_id };
+        let issuer_div = if c.for_corp { self.contract_issuer_division(c.contract_id) } else { 1 };
+        self.record_contract_journal(
+            issuer_entity_id, issuer_div, entry_type, ref_type_id,
+            first_party_id, issuer_entity_id, c.contract_id, amount, now_unix, reason,
+        );
+    }
+
+    /// Refunds and journals any escrowed deposit back to the contract issuer's originating wallet.
+    pub fn refund_contract_deposit(&mut self, c: &ContractRecord, now_unix: u64, label: &str) {
+        if let Some(dep) = self.take_contract_deposit(c.contract_id) {
+            self.credit_contract_issuer_with_journal(
+                c, dep, "ContractDepositRefund", crate::ledger::ref_types::CONTRACT_BROKERS_FEE,
+                c.contract_id, now_unix, format!("Deposit refund on {label} contract {}", c.contract_id),
+            );
+        }
+    }
+
+    /// Credits a contract issuer (originating corporate division when `c.for_corp`,
     /// or character wallet when `!c.for_corp`) (`feat:lifecycle.corp-contract-wallet`, `plan:E-3`).
     pub fn credit_contract_issuer(&mut self, c: &ContractRecord, amount: IskCents) {
         if amount.0 <= 0 {
             return;
         }
         if c.for_corp {
+            let div = self.contract_issuer_division(c.contract_id);
             if let Some(corp) = self.corporations.get_mut(&c.issuer_corp_id) {
-                corp.credit_division(1, amount);
+                corp.credit_division(div, amount);
                 return;
             }
         }
@@ -1688,9 +1763,10 @@ impl WorldStateSnapshot {
     /// Completes escrow settlement of `item_ids` (plus any orphaned items directly at
     /// `contract_id` when `include_contract_location_orphans` is true): moves top-level roots to
     /// `target_location_id` with `target_flag` (or restores each root's saved `ContractOrigFlag`
-    /// defaulting to `Hangar` when `target_flag` is `None`), transfers ownership of both top-level
-    /// roots and all nested descendants to `target_owner_id`, clears `ContractOrigFlag` entries
-    /// and `self_destructs`, and returns every item ID whose `owner_id` changed.
+    /// defaulting to `CorpDeliveries` for corporations or `Hangar` otherwise when `target_flag`
+    /// is `None`), transfers ownership of both top-level roots and all nested descendants to
+    /// `target_owner_id`, clears `ContractOrigFlag` entries and `self_destructs`, and returns every
+    /// item ID whose `owner_id` changed.
     pub fn settle_contract_escrow_items(
         &mut self,
         contract_id: i64,
@@ -1712,6 +1788,11 @@ impl WorldStateSnapshot {
             roots.extend(extra_ids);
         }
         let descendants = self.collect_item_descendants_many(&roots);
+        let default_flag = if self.corporations.contains_key(&target_owner_id) {
+            InventoryFlag::CorpDeliveries
+        } else {
+            InventoryFlag::Hangar
+        };
         let mut transferred_ids = Vec::new();
         for &iid in &roots {
             let iid_sub = iid.to_string();
@@ -1729,7 +1810,7 @@ impl WorldStateSnapshot {
                     .or(blob_flag)
                     .map(InventoryFlag::from_u16)
                     .filter(|f| *f != InventoryFlag::Locked)
-                    .unwrap_or(InventoryFlag::Hangar)
+                    .unwrap_or(default_flag)
             });
             self.sp6_lifecycle.self_destructs.remove(&iid);
             if let Some(item) = self.items.get_mut(&iid) {
@@ -1778,34 +1859,20 @@ impl WorldStateSnapshot {
                         .or(c.acceptor_id)
                         .filter(|&id| id > 0 && c.current_bid.0 > 0)
                     {
-                        self.credit_contract_issuer(&c, c.current_bid);
-                        if let Some(dep_raw) = self
-                            .fleet_and_social_ops
-                            .contract_deposits
-                            .remove(&contract_id)
-                            .or_else(|| {
-                                self.service_state_blobs
-                                    .remove(&format!("contract_deposit:{contract_id}"))
-                                    .and_then(|s| s.parse::<i64>().ok())
-                            })
-                        {
-                            self.credit_contract_issuer(&c, IskCents(dep_raw));
-                        }
+                        self.credit_contract_issuer_with_journal(
+                            &c, c.current_bid, "ContractAuctionSold", crate::ledger::ref_types::CONTRACT_PRICE,
+                            winner_id, now_unix, format!("Auction contract {contract_id} expired/sold to {winner_id}"),
+                        );
+                        self.refund_contract_deposit(&c, now_unix, "sold auction");
                         let winner_flag = if self.corporations.contains_key(&winner_id) {
                             InventoryFlag::CorpDeliveries
                         } else {
                             InventoryFlag::Hangar
                         };
                         let transferred_ids = self.settle_contract_escrow_items(
-                            contract_id,
-                            &c.item_ids,
-                            winner_id,
-                            c.start_station_id,
-                            Some(winner_flag),
-                            true,
+                            contract_id, &c.item_ids, winner_id, c.start_station_id, Some(winner_flag), true,
                         );
-                        self.kv_mut(crate::service_domains::Ns::ContractBidDiv)
-                            .clear_entity(contract_id);
+                        self.clear_contract_divisions(contract_id);
                         self.strip_ship_cosmetics(&transferred_ids);
                         if let Some(c_mut) = self.contracts.get_mut(&contract_id) {
                             c_mut.acceptor_id = Some(winner_id);
@@ -1814,32 +1881,18 @@ impl WorldStateSnapshot {
                         return Some("Completed");
                     }
                 }
-                self.credit_contract_issuer(&c, c.reward);
-                if let Some(dep_raw) = self
-                    .fleet_and_social_ops
-                    .contract_deposits
-                    .remove(&contract_id)
-                    .or_else(|| {
-                        self.service_state_blobs
-                            .remove(&format!("contract_deposit:{contract_id}"))
-                            .and_then(|s| s.parse::<i64>().ok())
-                    })
-                {
-                    self.credit_contract_issuer(&c, IskCents(dep_raw));
-                }
+                self.credit_contract_issuer_with_journal(
+                    &c, c.reward, "ContractRewardRefund", crate::ledger::ref_types::CONTRACT_REWARD,
+                    contract_id, now_unix, format!("Reward refunded on expired contract {contract_id}"),
+                );
+                self.refund_contract_deposit(&c, now_unix, "expired");
                 let transferred_ids = self.settle_contract_escrow_items(
-                    contract_id,
-                    &c.item_ids,
-                    issuer_entity_id,
-                    c.start_station_id,
-                    None,
-                    true,
+                    contract_id, &c.item_ids, issuer_entity_id, c.start_station_id, None, true,
                 );
                 if !transferred_ids.is_empty() {
                     self.strip_ship_cosmetics(&transferred_ids);
                 }
-                self.kv_mut(crate::service_domains::Ns::ContractBidDiv)
-                    .clear_entity(contract_id);
+                self.clear_contract_divisions(contract_id);
                 if let Some(c_mut) = self.contracts.get_mut(&contract_id) {
                     c_mut.status = "Expired".into();
                 }
@@ -1876,26 +1929,22 @@ impl WorldStateSnapshot {
 
     /// Fails an active in-progress courier contract, paying collateral + reward to issuer
     /// and unwrapping the goods in-place for the acceptor without teleporting them (`feat:lifecycle.courier-package-destroyed`).
-    pub fn fail_courier_contract(&mut self, contract_id: i64, _now_unix: u64) -> bool {
+    pub fn fail_courier_contract(&mut self, contract_id: i64, now_unix: u64) -> bool {
         let Some(c) = self.contracts.get(&contract_id).cloned() else { return false };
         if c.contract_type != "Courier" || c.status != "InProgress" {
             return false;
         }
         let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 { c.issuer_corp_id } else { c.issuer_id };
-        let refund_and_collateral = c.collateral.checked_add(c.reward).unwrap_or(c.collateral);
-        self.credit_contract_issuer(&c, refund_and_collateral);
-        if let Some(dep_raw) = self
-            .fleet_and_social_ops
-            .contract_deposits
-            .remove(&contract_id)
-            .or_else(|| {
-                self.service_state_blobs
-                    .remove(&format!("contract_deposit:{contract_id}"))
-                    .and_then(|s| s.parse::<i64>().ok())
-            })
-        {
-            self.credit_contract_issuer(&c, IskCents(dep_raw));
-        }
+        self.credit_contract_issuer_with_journal(
+            &c, c.collateral, "ContractCollateral", crate::ledger::ref_types::CONTRACT_COLLATERAL,
+            c.acceptor_id.unwrap_or(contract_id), now_unix,
+            format!("Collateral forfeited on failed courier contract {contract_id}"),
+        );
+        self.credit_contract_issuer_with_journal(
+            &c, c.reward, "ContractRewardRefund", crate::ledger::ref_types::CONTRACT_REWARD,
+            contract_id, now_unix, format!("Reward refunded on failed courier contract {contract_id}"),
+        );
+        self.refund_contract_deposit(&c, now_unix, "failed courier");
         let target_owner = c.acceptor_id.unwrap_or(issuer_entity_id);
         let mut transferred_ids = self.transfer_descendant_item_ownership(&c.item_ids, target_owner);
         let mut wraps_to_remove = Vec::new();
@@ -1913,7 +1962,13 @@ impl WorldStateSnapshot {
                     transferred_ids.push(*iid);
                 }
                 item.owner_id = target_owner;
-                item.flag = if in_ship_container { InventoryFlag::Cargo } else { InventoryFlag::Hangar };
+                item.flag = if in_ship_container {
+                    InventoryFlag::Cargo
+                } else if self.corporations.contains_key(&target_owner) {
+                    InventoryFlag::CorpDeliveries
+                } else {
+                    InventoryFlag::Hangar
+                };
                 item.version += 1;
             }
         }
@@ -1923,6 +1978,7 @@ impl WorldStateSnapshot {
         for wid in wraps_to_remove {
             self.items.remove(&wid);
         }
+        self.clear_contract_divisions(contract_id);
         if let Some(c_mut) = self.contracts.get_mut(&contract_id) {
             c_mut.status = "Failed".into();
         }
