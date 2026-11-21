@@ -1679,3 +1679,79 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
     assert!(h.get_protection_snapshot(ship_nc).await.unwrap().is_none());
     assert!(!h.has_active_non_gate_cloak_sync(ship_nc));
 }
+
+#[tokio::test]
+async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_and_destiny_event() {
+    let reg = SystemRegistry::new();
+    let h = reg.get_or_spawn(30_000_142);
+
+    // 1. `try_remove_ball` and `try_remove_destroyed_ball` evict `protection_registry`.
+    let (ship_a, ship_b, ship_c, ship_d, ship_e, ship_f) = (95_001, 95_002, 95_003, 95_004, 95_005, 95_006);
+    h.spawn_ball_with_combat(make_actor_ball(ship_a, 587, DVec3::ZERO), CombatState { undock_invulnerable_remaining_ticks: 15, ..Default::default() }).await.unwrap();
+    h.spawn_ball_with_combat(make_actor_ball(ship_b, 587, DVec3::new(500.0, 0.0, 0.0)), CombatState { is_cloaked: true, cloak_velocity_multiplier: Some(0.1), ..Default::default() }).await.unwrap();
+    assert!(h.get_protection_snapshot(ship_a).await.unwrap().is_some() && h.has_active_non_gate_cloak_sync(ship_b));
+
+    h.try_remove_ball(ship_a);
+    assert!(h.actor_state.read().unwrap().protection_registry.get(&ship_a).is_none());
+    assert!(h.get_protection_snapshot(ship_a).await.unwrap().is_none());
+
+    h.try_remove_destroyed_ball(ship_b);
+    assert!(h.actor_state.read().unwrap().protection_registry.get(&ship_b).is_none());
+    assert!(!h.has_active_non_gate_cloak_sync(ship_b) && h.get_protection_snapshot(ship_b).await.unwrap().is_none());
+
+    // 2. `try_step_manual` steps and syncs `protection_registry`.
+    h.spawn_ball_with_combat(
+        Ball { speed_fraction: 0.0, ..make_actor_ball(ship_c, 587, DVec3::new(1_000.0, 0.0, 0.0)) },
+        CombatState { is_cloaked: true, gate_cloak_remaining_ticks: 2, undock_invulnerable_remaining_ticks: 2, ..Default::default() },
+    ).await.unwrap();
+    h.try_step_manual(1.0);
+    let snap_c1 = h.actor_state.read().unwrap().protection_registry[&ship_c];
+    assert_eq!((snap_c1.snapshot.gate_cloak_remaining_ticks, snap_c1.snapshot.undock_invulnerable_remaining_ticks), (1, 1));
+    h.try_step_manual(1.0);
+    let snap_c2 = h.actor_state.read().unwrap().protection_registry[&ship_c];
+    assert_eq!((snap_c2.snapshot.gate_cloak_remaining_ticks, snap_c2.snapshot.undock_invulnerable_remaining_ticks, snap_c2.snapshot.is_cloaked), (0, 0, false));
+
+    // 3. `prepare_disconnected_warp_sync` clears gate cloak/invuln via `set_mode` and syncs registry.
+    h.spawn_ball_with_combat(make_actor_ball(ship_d, 587, DVec3::ZERO), CombatState { is_cloaked: true, gate_cloak_remaining_ticks: 20, undock_invulnerable_remaining_ticks: 20, ..Default::default() }).await.unwrap();
+    assert!(h.actor_state.read().unwrap().protection_registry[&ship_d].snapshot.has_gate_cloak());
+    h.prepare_disconnected_warp_sync(ship_d, 587, 40.0, 1_200_000.0, 2.5, 350.0, 3.0, DVec3::ZERO, DVec3::new(1_000_000.0, 0.0, 0.0));
+    let snap_d = h.actor_state.read().unwrap().protection_registry[&ship_d];
+    assert!(!snap_d.snapshot.has_gate_cloak() && !snap_d.snapshot.is_cloaked && snap_d.snapshot.undock_invulnerable_remaining_ticks == 0);
+
+    // 4. `SystemCommand::EmitDestinyEvent` (`SetSpeedFraction`) breaks protection and syncs `protection_registry`.
+    h.spawn_ball_with_combat(
+        Ball { speed_fraction: 0.0, ..make_actor_ball(ship_e, 587, DVec3::new(2_000.0, 0.0, 0.0)) },
+        CombatState { is_cloaked: true, gate_cloak_remaining_ticks: 30, undock_invulnerable_remaining_ticks: 30, ..Default::default() },
+    ).await.unwrap();
+    assert!(h.get_protection_snapshot(ship_e).await.unwrap().unwrap().snapshot.has_gate_cloak());
+    assert!(h.emit_destiny_event(ship_e, DestinyEvent::SetSpeedFraction { ball_id: ship_e, fraction: 0.5 }).await);
+    let snap_e = h.get_protection_snapshot(ship_e).await.unwrap().unwrap().snapshot;
+    assert!(!snap_e.has_gate_cloak() && !snap_e.is_cloaked && snap_e.undock_invulnerable_remaining_ticks == 0);
+
+    // 5. `cleaned_stale` in `activate_module_cycle_atomic` (even on err) and `reconcile_module_cycle_before_activate` clear `has_active_cloak_cycle`.
+    h.spawn_ball_with_meta(
+        make_actor_ball(ship_f, 587, DVec3::new(3_000.0, 0.0, 0.0)),
+        CombatState { capacitor: 1.0, max_capacitor: 100.0, ..Default::default() },
+        SlimItemMeta { char_id: Some(95_906), owner_id: 95_906, category_id: 6, group_id: 25, ..Default::default() },
+    ).await.unwrap();
+    let stale_cycle = |module_id, repeat, elapsed_s, cap_need_per_cycle| ActiveModuleCycle {
+        ship_id: ship_f, module_id, module_type_id: 11_370, owner_char_id: Some(95_906),
+        effect_name: "cloaking".to_string(), repeat, duration_s: 1.0, elapsed_s, cap_need_per_cycle,
+        started_at_unix: 1_000, ..ActiveModuleCycle::default()
+    };
+    h.add_module_cycle(stale_cycle(995_001, 0, 1.5, 0.0)).await.unwrap();
+    assert!(h.get_protection_snapshot(ship_f).await.unwrap().unwrap().has_active_cloak_cycle);
+    let err = h.activate_module_cycle_atomic(AtomicActivateCycleRequest {
+        char_id: 95_906, cycle: stale_cycle(995_001, 1, 0.0, 500.0),
+        allow_while_warping: false, allow_while_cloaked: true, break_protection: true,
+        break_reason: ProtectionBreakReason::ModuleActivation, location_change_invuln_until_unix: None, real_now_unix: 1_700_000_000,
+    }).await.unwrap_err();
+    assert!(err.contains("Insufficient capacitor"), "got unexpected err: {err}");
+    assert!(!h.get_protection_snapshot(ship_f).await.unwrap().unwrap().has_active_cloak_cycle);
+
+    h.add_module_cycle(stale_cycle(995_002, 0, 1.5, 0.0)).await.unwrap();
+    assert!(h.get_protection_snapshot(ship_f).await.unwrap().unwrap().has_active_cloak_cycle);
+    let (existing, cleaned) = h.reconcile_module_cycle_before_activate(ship_f, 995_002, 1_700_000_000).await;
+    assert!(existing.is_none() && cleaned);
+    assert!(!h.get_protection_snapshot(ship_f).await.unwrap().unwrap().has_active_cloak_cycle);
+}

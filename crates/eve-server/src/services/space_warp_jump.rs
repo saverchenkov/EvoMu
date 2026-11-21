@@ -1116,9 +1116,13 @@ async fn handle_cmd_warp_to_stuff(
         .await
     {
         Ok((tick, mut protection_events)) => {
-            if crate::services::space_destiny::commit_cleared_location_change_invuln(ctx, char_id, loc_until, now) {
-                protection_events.invuln_cancelled = true;
-            }
+            crate::services::space_destiny::finalize_committed_location_change_invuln(
+                ctx,
+                char_id,
+                loc_until,
+                now,
+                &mut protection_events,
+            );
             if let Some((new_cap, max_cap, old_cap, _)) = cap_debit_update {
                 let _ = ctx.notify_ship_capacitor_change(
                     char_id,
@@ -1149,8 +1153,8 @@ async fn handle_cmd_warp_to_stuff(
                 );
             }
             // [plan:DG-4] Entering warp halts active non-warp module cycles (weapons, scrams, webs, mining lasers, etc.)
-            crate::services::nav_warp_interdiction::on_warp_initiated_hooks(
-                ctx, &handle, char_id, ship_id, sys_id,
+            crate::services::nav_warp_interdiction::on_warp_initiated_hooks_with_options(
+                ctx, &handle, char_id, ship_id, sys_id, false,
             )
             .await;
             let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(

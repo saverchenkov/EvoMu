@@ -828,17 +828,13 @@ pub(crate) fn handle_add_module_cycle(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
-    ballpark: &mut Ballpark,
-    active_module_cycles: &mut Vec<ActiveModuleCycle>,
-    base_scramble_strengths: &HashMap<BallId, i32>,
-    base_core_strengths: &HashMap<BallId, i32>,
-    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
-    db_opt: &Option<Arc<eve_db::WorldRepository>>,
-    deactivation_hook: Option<&ModuleDeactivationHook>,
-    mut cycle: ActiveModuleCycle,
-    clear_undock_invuln: bool,
+/// Validates non-mutating preconditions for adding `cycle` (`ModuleAlreadyActive`,
+/// `WarpScrambled`, and projected capacitor sufficiency) before mutating `CombatState`
+/// or tearing down prior mutadaptive/protection state (`#1486`).
+pub(in crate::system_actor) fn validate_add_module_cycle_preconditions(
+    ballpark: &Ballpark,
+    active_module_cycles: &[ActiveModuleCycle],
+    cycle: &mut ActiveModuleCycle,
 ) -> Result<(), String> {
     if let Some(existing) = active_module_cycles
         .iter()
@@ -869,8 +865,6 @@ pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
             return Err("WarpScrambled: Propulsion module disabled by warp scrambler".to_string());
         }
     }
-    // Validate capacitor sufficiency against projected max capacitor BEFORE mutating `CombatState`
-    // or tearing down any prior mutadaptive cycle (`#1486`).
     if cycle.cap_need_per_cycle > 0.0 {
         if let Some(cs) = ballpark.combat_states.get(&cycle.ship_id) {
             let (proj_cap, _) = projected_capacitor_values(cs, cycle.effective_max_capacitor);
@@ -879,6 +873,22 @@ pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
             }
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+    mut cycle: ActiveModuleCycle,
+    clear_undock_invuln: bool,
+) -> Result<(), String> {
+    validate_add_module_cycle_preconditions(ballpark, active_module_cycles, &mut cycle)?;
     // Remove any existing mutadaptive-spool cycle for this (ship_id, module_id) before re-adding.
     if let Some(pos) = active_module_cycles
         .iter()

@@ -13,9 +13,13 @@ pub(crate) fn is_cloak_cycle(cycle: &ActiveModuleCycle) -> bool {
 }
 
 #[inline]
-fn is_covert_cloak_cycle(cycle: &ActiveModuleCycle) -> bool {
-    cycle.module_type_id == 11578
-        || cycle.effect_name.eq_ignore_ascii_case("cloakingWarpSafe")
+fn is_covert_cloak_cycle(
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    cycle: &ActiveModuleCycle,
+) -> bool {
+    cycle.effect_name.eq_ignore_ascii_case("cloakingWarpSafe")
+        || is_sde_covert_cloak_type(sde_opt, cycle.module_type_id)
+            .is_some_and(|(is_cloak, is_covert)| is_cloak && is_covert)
 }
 
 /// Synchronizes `actor_st.protection_registry[ball_id]` from `ballpark.combat_states`,
@@ -102,43 +106,73 @@ fn resolve_owner_char_id(
     })
 }
 
+fn clear_protection_registry_location_invuln(
+    actor_st: &mut SystemActorState,
+    cid: CharacterId,
+) {
+    for entry in actor_st.protection_registry.values_mut() {
+        if entry.owner_char_id == Some(cid) {
+            entry.location_change_invuln_until_unix = None;
+        }
+    }
+}
+
+/// Consumes an active `location_change_invuln` grant matching `expected_until` inside the actor.
+///
+/// Returns `(cancelled_now, already_consumed_by_concurrent_command)` while never re-inserting
+/// stale peeked expirations or overwriting newer grants (`cur > exp`) (`#1486`).
 fn consume_location_change_invuln(
     actor_st: &mut SystemActorState,
     owner_char_id: Option<CharacterId>,
-    location_invuln_until_unix: Option<u64>,
+    expected_until: Option<u64>,
     real_now_unix: u64,
     clear_if_active: bool,
-) -> bool {
-    if let Some(cid) = owner_char_id {
-        if let Some(until) = location_invuln_until_unix {
-            if until > real_now_unix {
-                let entry = actor_st.location_invuln_by_char.entry(cid).or_insert(until);
-                *entry = (*entry).max(until);
-            }
-        }
-        let cached_active = if clear_if_active {
-            actor_st
-                .location_invuln_by_char
-                .remove(&cid)
-                .is_some_and(|until| until > real_now_unix)
-        } else {
-            actor_st
-                .location_invuln_by_char
-                .get(&cid)
-                .copied()
-                .is_some_and(|until| until > real_now_unix)
-        };
-        if clear_if_active {
-            for entry in actor_st.protection_registry.values_mut() {
-                if entry.owner_char_id == Some(cid) {
-                    entry.location_change_invuln_until_unix = None;
-                }
-            }
-        }
-        cached_active
-    } else {
-        location_invuln_until_unix.is_some_and(|until| until > real_now_unix)
+) -> (bool, bool) {
+    if !clear_if_active {
+        return (false, false);
     }
+    actor_st
+        .location_invuln_consumed_until_by_char
+        .retain(|_, until| *until > real_now_unix);
+    let Some(cid) = owner_char_id else {
+        return (expected_until.is_some_and(|until| until > real_now_unix), false);
+    };
+    if let Some(cur) = actor_st.location_invuln_by_char.get(&cid).copied() {
+        if cur <= real_now_unix {
+            actor_st.location_invuln_by_char.remove(&cid);
+            clear_protection_registry_location_invuln(actor_st, cid);
+            return (false, false);
+        }
+        if expected_until.is_some_and(|exp| cur <= exp) {
+            let consumed_floor = expected_until.unwrap_or(cur).max(cur);
+            actor_st.location_invuln_by_char.remove(&cid);
+            actor_st
+                .location_invuln_consumed_until_by_char
+                .entry(cid)
+                .and_modify(|prev| *prev = (*prev).max(consumed_floor))
+                .or_insert(consumed_floor);
+            clear_protection_registry_location_invuln(actor_st, cid);
+            return (true, false);
+        }
+        return (false, false);
+    }
+    let Some(exp) = expected_until.filter(|&until| until > real_now_unix) else {
+        return (false, false);
+    };
+    let prev_consumed = actor_st
+        .location_invuln_consumed_until_by_char
+        .get(&cid)
+        .copied()
+        .unwrap_or(0);
+    if prev_consumed >= exp {
+        clear_protection_registry_location_invuln(actor_st, cid);
+        return (false, true);
+    }
+    actor_st
+        .location_invuln_consumed_until_by_char
+        .insert(cid, exp);
+    clear_protection_registry_location_invuln(actor_st, cid);
+    (true, false)
 }
 
 fn is_sde_covert_cloak_type(
@@ -173,15 +207,20 @@ fn strip_cloak_cycles_for_ship(
     ship_id: BallId,
     include_covert: bool,
 ) -> Vec<RemovedCloakCycleInfo> {
+    let deact_guard = read_deact_hook(exec_ctx);
     let mut removed_cycles = Vec::new();
     let mut removed_ids = std::collections::HashSet::new();
     let mut idx = 0;
     while idx < exec_ctx.actor_st.active_module_cycles.len() {
-        let is_target = exec_ctx.actor_st.active_module_cycles[idx].ship_id == ship_id
-            && is_cloak_cycle(&exec_ctx.actor_st.active_module_cycles[idx])
-            && (include_covert || !is_covert_cloak_cycle(&exec_ctx.actor_st.active_module_cycles[idx]));
+        let is_target = {
+            let cyc = &exec_ctx.actor_st.active_module_cycles[idx];
+            cyc.ship_id == ship_id
+                && is_cloak_cycle(cyc)
+                && (include_covert || !is_covert_cloak_cycle(&exec_ctx.actor_st.sde_opt, cyc))
+        };
         if is_target {
             let removed = exec_ctx.actor_st.active_module_cycles.remove(idx);
+            let is_covert = is_covert_cloak_cycle(&exec_ctx.actor_st.sde_opt, &removed);
             exec_ctx
                 .actor_st
                 .weapon_cycle_start_modules
@@ -191,11 +230,17 @@ fn strip_cloak_cycles_for_ship(
                 &removed,
                 &exec_ctx.actor_st.db_opt,
             );
+            super::cycles::emit_cycle_deactivation(
+                &removed,
+                exec_ctx.ballpark,
+                &exec_ctx.actor_st.db_opt,
+                deact_guard.as_ref(),
+            );
             removed_ids.insert(removed.module_id);
             removed_cycles.push(RemovedCloakCycleInfo {
                 module_id: removed.module_id,
                 module_type_id: removed.module_type_id,
-                is_covert: is_covert_cloak_cycle(&removed),
+                is_covert,
                 effect_name: removed.effect_name,
             });
         } else {
@@ -232,22 +277,41 @@ fn strip_cloak_cycles_for_ship(
                     snap.module_active_charges.remove(&mod_id);
                 }
             });
+            let owner_char_id = exec_ctx
+                .ballpark
+                .ball_slim_meta
+                .get(&ship_id)
+                .and_then(|meta| meta.char_id);
             for (mod_id, mod_type_id, is_covert) in orphaned_db_cloaks {
+                let effect_name = if is_covert {
+                    "cloakingWarpSafe".to_string()
+                } else {
+                    "cloaking".to_string()
+                };
+                let synth_cycle = ActiveModuleCycle {
+                    ship_id,
+                    module_id: mod_id,
+                    module_type_id: mod_type_id,
+                    owner_char_id,
+                    effect_name: effect_name.clone(),
+                    ..ActiveModuleCycle::default()
+                };
+                super::cycles::emit_cycle_deactivation(
+                    &synth_cycle,
+                    exec_ctx.ballpark,
+                    &exec_ctx.actor_st.db_opt,
+                    deact_guard.as_ref(),
+                );
                 removed_cycles.push(RemovedCloakCycleInfo {
                     module_id: mod_id,
                     module_type_id: mod_type_id,
                     is_covert,
-                    effect_name: if is_covert {
-                        "cloakingWarpSafe".to_string()
-                    } else {
-                        "cloaking".to_string()
-                    },
+                    effect_name,
                 });
             }
         }
     }
     if !removed_cycles.is_empty() {
-        let deact_guard = read_deact_hook(exec_ctx);
         reconcile_tackle_and_bubbles(
             exec_ctx.ballpark,
             &mut exec_ctx.actor_st.active_module_cycles,
@@ -259,6 +323,23 @@ fn strip_cloak_cycles_for_ship(
         sync_active_ships_cache(exec_ctx);
     }
     removed_cycles
+}
+
+fn clear_slim_cloak_meta(
+    ballpark: &mut Ballpark,
+    ball_id: BallId,
+    deactivated_by_ballpark: bool,
+) -> bool {
+    if deactivated_by_ballpark {
+        return true;
+    }
+    if let Some(mut meta) = ballpark.ball_slim_meta.get(&ball_id).cloned() {
+        if meta.is_cloaked {
+            meta.is_cloaked = false;
+            return ballpark.change_slim_item(ball_id, meta);
+        }
+    }
+    false
 }
 
 /// Atomically breaks cloak and/or invulnerability protection on `ball_id` according to `reason`,
@@ -297,15 +378,17 @@ fn break_protection_in_actor_impl(
     force_all_cloaks: bool,
 ) -> ProtectionBreakEvents {
     let owner_char_id = resolve_owner_char_id(exec_ctx.ballpark, ball_id, char_id);
-    let location_invuln_cancelled = consume_location_change_invuln(
-        exec_ctx.actor_st,
-        owner_char_id,
-        location_invuln_until_unix,
-        real_now_unix,
-        reason.clears_invuln(),
-    );
+    let (location_invuln_cancelled, location_invuln_already_consumed) =
+        consume_location_change_invuln(
+            exec_ctx.actor_st,
+            owner_char_id,
+            location_invuln_until_unix,
+            real_now_unix,
+            reason.clears_invuln(),
+        );
 
     let mut events = ProtectionBreakEvents {
+        location_invuln_already_consumed,
         sim_elapsed_secs: exec_ctx.actor_st.sim_elapsed_secs,
         ..Default::default()
     };
@@ -360,23 +443,11 @@ fn break_protection_in_actor_impl(
             events.non_gate_cloak_broken = had_non_gate_cloak;
             events.covert_cloak_broken = should_deactivate_covert_cloak;
         }
-        if let Some(mut meta) = exec_ctx.ballpark.ball_slim_meta.get(&ball_id).cloned() {
-            if meta.is_cloaked || deactivated_by_ballpark {
-                meta.is_cloaked = false;
-                exec_ctx.ballpark.change_slim_item(ball_id, meta);
-                events.slim_cloak_cleared = true;
-            }
-        } else if deactivated_by_ballpark {
+        if clear_slim_cloak_meta(exec_ctx.ballpark, ball_id, deactivated_by_ballpark) {
             events.slim_cloak_cleared = true;
         }
-    } else if strip_all_cloaks {
-        if let Some(mut meta) = exec_ctx.ballpark.ball_slim_meta.get(&ball_id).cloned() {
-            if meta.is_cloaked {
-                meta.is_cloaked = false;
-                exec_ctx.ballpark.change_slim_item(ball_id, meta);
-                events.slim_cloak_cleared = true;
-            }
-        }
+    } else if strip_all_cloaks && clear_slim_cloak_meta(exec_ctx.ballpark, ball_id, false) {
+        events.slim_cloak_cleared = true;
     }
 
     if strip_all_cloaks || reason.breaks_non_covert_module_cloak() || should_deactivate_non_covert_cloak
@@ -435,14 +506,10 @@ fn break_protection_in_actor_impl(
                     events.non_gate_cloak_broken = true;
                 }
             }
-            if cleared_non_covert_residual || !events.removed_cloak_cycles.is_empty() {
-                if let Some(mut meta) = exec_ctx.ballpark.ball_slim_meta.get(&ball_id).cloned() {
-                    if meta.is_cloaked {
-                        meta.is_cloaked = false;
-                        exec_ctx.ballpark.change_slim_item(ball_id, meta);
-                        events.slim_cloak_cleared = true;
-                    }
-                }
+            if (cleared_non_covert_residual || !events.removed_cloak_cycles.is_empty())
+                && clear_slim_cloak_meta(exec_ctx.ballpark, ball_id, false)
+            {
+                events.slim_cloak_cleared = true;
             }
         }
     }
@@ -521,15 +588,8 @@ pub(crate) fn finish_disconnected_warp_protection_sync(
         .combat_states
         .get(&ship_id)
         .is_some_and(|cs| cs.gate_cloak_remaining_ticks > 0);
-    if had_gate_cloak {
-        ballpark.deactivate_cloak(ship_id);
-        if let Some(mut meta) = ballpark.ball_slim_meta.get(&ship_id).cloned() {
-            if meta.is_cloaked {
-                meta.is_cloaked = false;
-                ballpark.change_slim_item(ship_id, meta);
-            }
-        }
-    }
+    let deactivated = had_gate_cloak && ballpark.deactivate_cloak(ship_id);
+    let _ = clear_slim_cloak_meta(ballpark, ship_id, deactivated);
     if let Some(cs) = ballpark.combat_states.get_mut(&ship_id) {
         let _ = cs.clear_action_invuln();
     }
@@ -729,6 +789,10 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
         } => {
             if let Some(until) = until_unix {
                 exec_ctx.actor_st.location_invuln_by_char.insert(char_id, until);
+                exec_ctx
+                    .actor_st
+                    .location_invuln_consumed_until_by_char
+                    .remove(&char_id);
             } else {
                 exec_ctx.actor_st.location_invuln_by_char.remove(&char_id);
             }

@@ -2901,15 +2901,14 @@ impl SystemHandle {
             false
         };
         sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        let tracking = warp_started.then(|| {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
+            st.warp_provenance.insert(ship_id, super::WarpProvenance::DisconnectedEmergencyWarp);
+            st.warp_tracking.clone()
+        });
         drop(bp);
-        if warp_started {
-            let tracking = {
-                let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-                st.warp_provenance.insert(ship_id, super::WarpProvenance::DisconnectedEmergencyWarp);
-                st.warp_tracking.clone()
-            };
-            super::clear_shared_warp_tracking(&tracking, ship_id, true);
-        }
+        if let Some(tracking) = tracking { super::clear_shared_warp_tracking(&tracking, ship_id, true); }
     }
 
     pub fn reconcile_disconnected_warp_sync(&self, ship_id: BallId, dest: DVec3) -> (DVec3, bool) {

@@ -1025,3 +1025,98 @@ async fn activate_module_cycle_atomic_preserves_protection_when_break_false_and_
         .map(|c| c.current_spool_cycles);
     assert_eq!(spool_still, Some(3));
 }
+
+#[tokio::test]
+async fn atomic_cloak_activation_from_gate_cloak_non_11578_covert_sde_and_deact_hook() {
+    let mut sde_val = SdeRegistry::with_canonical_seed();
+    let base_type = sde_val.types.values().next().unwrap().clone();
+    let (custom_cov_tid, custom_cov_eid, proto_tid) = (99_578_u32, 55_980_u16, 11_370_u32);
+    sde_val.effects.insert(
+        custom_cov_eid,
+        eve_sde::DogmaEffectType {
+            effect_id: custom_cov_eid,
+            name: "cloakingWarpSafe".to_string(),
+            is_warp_safe: true,
+            ..Default::default()
+        },
+    );
+    let mut custom_cov_type = base_type.clone();
+    custom_cov_type.type_id = custom_cov_tid;
+    custom_cov_type.group_id = 330;
+    // Deliberately omit "Covert Ops" and 11578 so SDE effect lookup (`F1486-R2-03`) is exercised.
+    custom_cov_type.name = "Syndicate Stealth Unit".to_string();
+    custom_cov_type.effect_ids = vec![custom_cov_eid];
+    sde_val.types.insert(custom_cov_tid, custom_cov_type);
+    let mut proto_type = base_type;
+    proto_type.type_id = proto_tid;
+    proto_type.group_id = 330;
+    proto_type.name = "Prototype Cloaking Device I".to_string();
+    proto_type.effect_ids = Vec::new();
+    sde_val.types.insert(proto_tid, proto_type);
+
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let reg = SystemRegistry::with_sde_and_db(Arc::new(sde_val), db.clone());
+    let deact_records = Arc::new(std::sync::Mutex::new(Vec::<(i64, i64)>::new()));
+    let deact_clone = Arc::clone(&deact_records);
+    reg.set_module_deactivation_hook(Arc::new(move |cid, cyc| deact_clone.lock().unwrap().push((cid, cyc.module_id))));
+
+    let (h, char_id, ship_proto, ship_cov, proto_mod_id, cov_mod_id, now) = (
+        reg.get_or_spawn(30_000_142), 91_486_701_i64, 96_001_i64, 96_002_i64, 996_001_i64, 996_002_i64, 1_700_000_000_u64,
+    );
+
+    // 1. Cloak activation from gate cloak breaks prior protection BEFORE installing cloak cycle.
+    h.spawn_ball_with_meta(
+        make_ball(ship_proto, 587, DVec3::ZERO),
+        CombatState {
+            is_cloaked: true, gate_cloak_remaining_ticks: 60, undock_invulnerable_remaining_ticks: 60,
+            capacitor: 500.0, max_capacitor: 500.0, ..Default::default()
+        },
+        SlimItemMeta { char_id: Some(char_id), owner_id: char_id, category_id: 6, group_id: 25, is_cloaked: true, ..Default::default() },
+    ).await.unwrap();
+    db.with_mut_snapshot(|s| { s.module_active_states.insert(proto_mod_id); });
+
+    let outcome = h.activate_module_cycle_atomic(AtomicActivateCycleRequest {
+        char_id,
+        cycle: ActiveModuleCycle {
+            ship_id: ship_proto, module_id: proto_mod_id, module_type_id: proto_tid, owner_char_id: Some(char_id),
+            effect_name: "cloaking".to_string(), repeat: 1, duration_s: 5.0, speed_boost_factor: -0.90,
+            ..ActiveModuleCycle::default()
+        },
+        allow_while_warping: false, allow_while_cloaked: true, break_protection: true,
+        break_reason: ProtectionBreakReason::ModuleActivation, location_change_invuln_until_unix: None, real_now_unix: now,
+    }).await.unwrap();
+    assert!(outcome.protection_events.gate_cloak_broken && outcome.protection_events.invuln_cancelled);
+    let cs_proto = h.get_combat_state(ship_proto).await.unwrap().unwrap();
+    assert_eq!((cs_proto.gate_cloak_remaining_ticks, cs_proto.undock_invulnerable_remaining_ticks), (0, 0));
+    assert!((cs_proto.cloak_velocity_multiplier.unwrap_or(0.0) - 0.1).abs() < 1e-6);
+    let prot_proto = h.get_protection_snapshot(ship_proto).await.unwrap().unwrap();
+    assert!(prot_proto.has_active_cloak_cycle && prot_proto.has_active_non_gate_cloak());
+    assert!(reg.has_active_modules_or_cloak_sync(30_000_142, ship_proto));
+
+    // 2. Non-11578 SDE Covert Ops cloak survives `WarpInitiation`; `force_decloak` strips & fires hook.
+    h.spawn_ball_with_meta(
+        make_ball(ship_cov, 12032, DVec3::new(2_000.0, 0.0, 0.0)),
+        CombatState {
+            is_cloaked: true, is_covert_cloak: true, cloak_velocity_multiplier: Some(1.0),
+            capacitor: 500.0, max_capacitor: 500.0, ..Default::default()
+        },
+        SlimItemMeta { char_id: Some(char_id), owner_id: char_id, category_id: 6, group_id: 830, is_cloaked: true, ..Default::default() },
+    ).await.unwrap();
+    db.with_mut_snapshot(|s| { s.module_active_states.insert(cov_mod_id); });
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: ship_cov, module_id: cov_mod_id, module_type_id: custom_cov_tid, owner_char_id: Some(char_id),
+        effect_name: "cloaking".to_string(), repeat: 1, duration_s: 5.0, ..ActiveModuleCycle::default()
+    }).await.unwrap();
+
+    deact_records.lock().unwrap().clear();
+    let warp_ev = h.break_protection(ship_cov, Some(char_id), ProtectionBreakReason::WarpInitiation, None, now).await.unwrap();
+    assert!(!warp_ev.covert_cloak_broken && warp_ev.removed_cloak_cycles.is_empty());
+    assert!(h.get_protection_snapshot(ship_cov).await.unwrap().unwrap().has_active_cloak_cycle);
+    assert!(deact_records.lock().unwrap().is_empty());
+
+    let decloak_ev = h.force_decloak(ship_cov, Some(char_id), ProtectionBreakReason::Manual, None, now).await.unwrap();
+    assert!(decloak_ev.covert_cloak_broken && decloak_ev.removed_cloak_cycles.len() == 1);
+    assert_eq!(decloak_ev.removed_cloak_cycles[0].module_id, cov_mod_id);
+    assert!(!h.get_protection_snapshot(ship_cov).await.unwrap().unwrap().has_active_cloak_cycle);
+    assert!(deact_records.lock().unwrap().contains(&(char_id, cov_mod_id)));
+}

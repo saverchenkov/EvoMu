@@ -721,6 +721,9 @@ pub struct ProtectionBreakEvents {
     pub slim_cloak_cleared: bool,
     /// Cloak `ActiveModuleCycle`s removed atomically when decloaking (`#1486`).
     pub removed_cloak_cycles: Vec<RemovedCloakCycleInfo>,
+    /// `true` if the matching `location_change_invuln` grant was already consumed by a concurrent
+    /// actor command so service-level post-await cleanup must not re-emit `OnInvulnCancelled` (`#1486`).
+    pub location_invuln_already_consumed: bool,
     /// Post-decloak sensor recalibration targeting delay active after break (seconds).
     pub decloak_targeting_delay_s: f64,
     /// Monotonic simulation clock elapsed seconds when this break ran (`sim_elapsed_secs`).
@@ -802,6 +805,7 @@ pub(crate) struct SystemActorState {
     pub active_module_cycles: Vec<ActiveModuleCycle>,
     pub protection_registry: HashMap<BallId, ActorShipProtection>,
     pub location_invuln_by_char: HashMap<CharacterId, u64>,
+    pub location_invuln_consumed_until_by_char: HashMap<CharacterId, u64>,
     pub pending_anchoring_disruptors: Vec<PendingAnchoringDisruptor>,
     pub active_nanite_repairs: Vec<ActiveNaniteRepair>,
     pub ship_rack_heat: HashMap<BallId, [f64; 3]>,

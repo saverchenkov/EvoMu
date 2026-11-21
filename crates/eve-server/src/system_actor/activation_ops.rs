@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// commits `request.cycle`, and breaks protection in a single actor turn (`#1486`).
 pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
     exec_ctx: &mut ActorExecCtx<'_>,
-    request: AtomicActivateCycleRequest,
+    mut request: AtomicActivateCycleRequest,
 ) -> Result<AtomicActivateCycleOutcome, String> {
     let ship_id = request.cycle.ship_id;
     let module_id = request.cycle.module_id;
@@ -40,6 +40,7 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
     );
     if cleaned_stale {
         super::protection::sync_active_ships_cache(exec_ctx);
+        sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
     }
 
     if !request.allow_while_warping {
@@ -59,8 +60,33 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
         return Err("CannotActivateCloaked: Cannot activate module while cloaked".to_string());
     }
 
-    let pre_snap = request
-        .break_protection
+    cycles_tackle::validate_add_module_cycle_preconditions(
+        exec_ctx.ballpark,
+        &exec_ctx.actor_st.active_module_cycles,
+        &mut request.cycle,
+    )?;
+
+    let is_activating_cloak = super::protection::is_cloak_cycle(&request.cycle);
+    let mut protection_events = if request.break_protection && is_activating_cloak {
+        // Break any pre-existing gate cloak / invulnerability BEFORE adding a cloak cycle so
+        // `deactivate_cloak` clears only prior gate cloak and preserves the new cloak multiplier (`#1486`).
+        break_protection_in_actor(
+            exec_ctx,
+            ship_id,
+            Some(request.char_id),
+            request.break_reason,
+            request.location_change_invuln_until_unix,
+            request.real_now_unix,
+            None,
+        )
+    } else {
+        ProtectionBreakEvents {
+            sim_elapsed_secs: exec_ctx.actor_st.sim_elapsed_secs,
+            ..Default::default()
+        }
+    };
+
+    let pre_snap = (request.break_protection && !is_activating_cloak)
         .then(|| {
             exec_ctx
                 .ballpark
@@ -86,8 +112,8 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
         .weapon_cycle_start_modules
         .remove(&(ship_id, module_id));
 
-    let protection_events = if request.break_protection {
-        break_protection_in_actor(
+    if request.break_protection && !is_activating_cloak {
+        protection_events = break_protection_in_actor(
             exec_ctx,
             ship_id,
             Some(request.char_id),
@@ -95,14 +121,10 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
             request.location_change_invuln_until_unix,
             request.real_now_unix,
             pre_snap,
-        )
+        );
     } else {
         sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
-        ProtectionBreakEvents {
-            sim_elapsed_secs: exec_ctx.actor_st.sim_elapsed_secs,
-            ..Default::default()
-        }
-    };
+    }
 
     super::protection::snapshot_tackle_totals_in_actor(exec_ctx);
     super::protection::sync_positions_and_active_ships(exec_ctx);
@@ -846,6 +868,10 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 module_id,
                 now_unix,
             );
+            if res.1 {
+                super::protection::sync_active_ships_cache(exec_ctx);
+                sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
+            }
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }

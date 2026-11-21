@@ -150,6 +150,23 @@ pub(crate) fn commit_cleared_location_change_invuln(
     now_unix < cur
 }
 
+/// Applies the `commit_cleared_location_change_invuln` CAS to `events` while honoring
+/// `events.location_invuln_already_consumed` so concurrent completions cannot double-emit
+/// `OnInvulnCancelled` (`#1486`).
+pub(crate) fn finalize_committed_location_change_invuln(
+    ctx: &ServerContext,
+    char_id: i64,
+    expected_until: Option<u64>,
+    now_unix: u64,
+    events: &mut crate::system_actor::ProtectionBreakEvents,
+) {
+    if commit_cleared_location_change_invuln(ctx, char_id, expected_until, now_unix)
+        && !events.location_invuln_already_consumed
+    {
+        events.invuln_cancelled = true;
+    }
+}
+
 pub(crate) fn pop_active_location_change_invuln(ctx: &ServerContext, char_id: i64) -> Option<u64> {
     let removed = ctx
         .location_change_invuln
@@ -220,10 +237,14 @@ pub(crate) async fn break_ship_protection_with_location_invuln(
         .await
     {
         Ok(mut events) => {
-            if clears_invuln
-                && commit_cleared_location_change_invuln(ctx, char_id, loc_until, now)
-            {
-                events.invuln_cancelled = true;
+            if clears_invuln {
+                finalize_committed_location_change_invuln(
+                    ctx,
+                    char_id,
+                    loc_until,
+                    now,
+                    &mut events,
+                );
             }
             emit_protection_break_notifications(ctx, char_id, ship_id, &events);
             events

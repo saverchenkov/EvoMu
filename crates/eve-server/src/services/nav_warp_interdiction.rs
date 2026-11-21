@@ -514,6 +514,28 @@ pub(crate) fn check_warp_exit_approach_or_reject(
     Ok(false)
 }
 
+/// Shared warp-initiation side effects: clears jump/undock invulnerability timers when requested,
+/// aborts pending safe logoff, halts active non-warp module cycles, and abandons drones.
+pub(crate) async fn on_warp_initiated_hooks_with_options(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    break_location_invuln: bool,
+) {
+    if break_location_invuln {
+        crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
+    }
+    let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
+        ctx,
+        char_id,
+        "SAFE_LOGOFF_ABORT_MOVING",
+    );
+    let _ = sys_handle.stop_non_warp_module_cycles(ship_id).await;
+    crate::sp6_lifecycle::abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
+}
+
 /// Shared warp-initiation side effects: clears jump/undock invulnerability timers,
 /// aborts pending safe logoff, halts active non-warp module cycles, and abandons drones.
 pub(crate) async fn on_warp_initiated_hooks(
@@ -523,14 +545,7 @@ pub(crate) async fn on_warp_initiated_hooks(
     ship_id: i64,
     sys_id: u32,
 ) {
-    crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
-    let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
-        ctx,
-        char_id,
-        "SAFE_LOGOFF_ABORT_MOVING",
-    );
-    let _ = sys_handle.stop_non_warp_module_cycles(ship_id).await;
-    crate::sp6_lifecycle::abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
+    on_warp_initiated_hooks_with_options(ctx, sys_handle, char_id, ship_id, sys_id, true).await;
 }
 
 /// Evaluates origin/destination warp-disruption bubbles in `sys_handle` (`#520`):
@@ -713,11 +728,13 @@ pub(crate) async fn execute_agency_content_warp(
             });
         }
     };
-    if crate::services::space_destiny::commit_cleared_location_change_invuln(
-        ctx, char_id, loc_until, now,
-    ) {
-        protection_events.invuln_cancelled = true;
-    }
+    crate::services::space_destiny::finalize_committed_location_change_invuln(
+        ctx,
+        char_id,
+        loc_until,
+        now,
+        &mut protection_events,
+    );
     if let Some((new_cap, max_cap, old_cap)) = cap_debit_update {
         let _ = sys_handle.set_capacitor(ship_id, new_cap).await;
         let _ = ctx.notify_ship_capacitor_change(
@@ -729,7 +746,7 @@ pub(crate) async fn execute_agency_content_warp(
         );
     }
     emit_movement_protection_events(ctx, char_id, ship_id, is_covert_cloaked, protection_events);
-    on_warp_initiated_hooks(ctx, sys_handle, char_id, ship_id, sys_id).await;
+    on_warp_initiated_hooks_with_options(ctx, sys_handle, char_id, ship_id, sys_id, false).await;
     crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);
     Ok(())
 }
@@ -815,11 +832,13 @@ pub(crate) async fn execute_subwarp_goto_point(
             };
             nav_err(code, e)
         })?;
-    if crate::services::space_destiny::commit_cleared_location_change_invuln(
-        ctx, char_id, loc_until, now,
-    ) {
-        protection_events.invuln_cancelled = true;
-    }
+    crate::services::space_destiny::finalize_committed_location_change_invuln(
+        ctx,
+        char_id,
+        loc_until,
+        now,
+        &mut protection_events,
+    );
 
     crate::services::space_destiny::emit_protection_break_notifications(
         ctx,
@@ -1136,11 +1155,13 @@ pub async fn handle_use_warp_vector(
             });
         }
     };
-    if crate::services::space_destiny::commit_cleared_location_change_invuln(
-        ctx, char_id, loc_until, now,
-    ) {
-        protection_events.invuln_cancelled = true;
-    }
+    crate::services::space_destiny::finalize_committed_location_change_invuln(
+        ctx,
+        char_id,
+        loc_until,
+        now,
+        &mut protection_events,
+    );
     emit_movement_protection_events(
         ctx,
         char_id,
@@ -1148,7 +1169,7 @@ pub async fn handle_use_warp_vector(
         validated.is_covert_cloaked,
         protection_events,
     );
-    on_warp_initiated_hooks(ctx, &sys_handle, char_id, ship_id, sys_id).await;
+    on_warp_initiated_hooks_with_options(ctx, &sys_handle, char_id, ship_id, sys_id, false).await;
 
     crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);
 

@@ -1965,3 +1965,80 @@ async fn break_ship_protection_with_location_invuln_ess_gate_entry_preserves_loc
     );
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn break_ship_protection_with_location_invuln_concurrent_and_newer_grant_preservation() {
+    use crate::system_actor::ProtectionBreakReason::SubwarpMovement as Move;
+    let ctx = Arc::new(test_ctx());
+    let (char_id, ship_id, sys_id, now) = (91_486_001_i64, 1_091_486_001_i64, 30_000_142_u32, 0);
+    let _ = now;
+    let now = ctx.now_unix();
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        test_ship_ball(ship_id, 587, DVec3::ZERO),
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_id),
+            owner_id: char_id,
+            category_id: 6,
+            group_id: 25,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // 1. Concurrent callers observing one grant flip `invuln_cancelled` once across tasks.
+    grant_location_change_invulnerability(&ctx, char_id, now + 60);
+    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+    let (c1, s1, c2, s2) = (Arc::clone(&ctx), sys.clone(), Arc::clone(&ctx), sys.clone());
+    let (ra, rb) = tokio::join!(
+        tokio::spawn(async move {
+            break_ship_protection_with_location_invuln(
+                &c1, &s1, char_id, ship_id, crate::system_actor::ProtectionBreakReason::ModuleActivation,
+            )
+            .await
+        }),
+        tokio::spawn(async move {
+            break_ship_protection_with_location_invuln(
+                &c2, &s2, char_id, ship_id, crate::system_actor::ProtectionBreakReason::ModuleActivation,
+            )
+            .await
+        })
+    );
+    let (ev_a, ev_b) = (ra.unwrap(), rb.unwrap());
+    assert!(ev_a.invuln_cancelled ^ ev_b.invuln_cancelled, "{ev_a:?} / {ev_b:?}");
+    assert!(!is_location_change_invulnerable(&ctx, char_id, now));
+    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+
+    // 2. Stale `T1` / `None` preserves newer `T2 > T1`, and post-consumption `T1` never re-inserts.
+    let (t1, t2, t3) = (now + 20, now + 90, now + 10);
+    grant_location_change_invulnerability(&ctx, char_id, t1);
+    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+    grant_location_change_invulnerability(&ctx, char_id, t2);
+    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+
+    for expected in [Some(t1), None] {
+        let ev = sys.break_protection(ship_id, Some(char_id), Move, expected, now).await.unwrap();
+        assert!(!ev.invuln_cancelled && !ev.location_invuln_already_consumed);
+        assert_eq!(peek_active_location_change_invuln(&ctx, char_id), Some(t2));
+        assert_eq!(
+            sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix,
+            Some(t2)
+        );
+    }
+
+    let ev_clear = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, Move).await;
+    assert!(ev_clear.invuln_cancelled && peek_active_location_change_invuln(&ctx, char_id).is_none());
+    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+
+    let ev_stale_post = sys.break_protection(ship_id, Some(char_id), Move, Some(t1), now).await.unwrap();
+    assert!(!ev_stale_post.invuln_cancelled && ev_stale_post.location_invuln_already_consumed);
+    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+
+    // 3. Same-second shorter re-grant `t3 < t2` resets consumption watermark and consumes cleanly.
+    grant_location_change_invulnerability(&ctx, char_id, t3);
+    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+    let ev_t3 = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, Move).await;
+    assert!(ev_t3.invuln_cancelled && !is_location_change_invulnerable(&ctx, char_id, now));
+}

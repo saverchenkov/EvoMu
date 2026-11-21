@@ -1660,6 +1660,9 @@ impl SystemRegistry {
                                     ball_id,
                                     event,
                                 );
+                                if known {
+                                    sync_protection_ball = Some(ball_id);
+                                }
                                 defer_reply(deferred_replies, reply, known);
                             }
                             SystemCommand::EmitObserverDestinyEvent {

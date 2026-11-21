@@ -1151,6 +1151,7 @@ impl SystemHandle {
                         active_module_cycles,
                         base_scramble_strengths,
                         base_core_strengths,
+                        protection_registry,
                         db_opt,
                         ..
                     } = &mut *st;
@@ -1169,6 +1170,7 @@ impl SystemHandle {
                         .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
                     base_scramble_strengths.remove(&ball_id);
                     base_core_strengths.remove(&ball_id);
+                    protection_registry.remove(&ball_id);
                     if emit_destruction_fx {
                         let _ = bp.destroy_ball_with_terminal_explosion(ball_id, None);
                     } else {
@@ -1824,6 +1826,7 @@ impl SystemHandle {
             &st_mut.warp_tracking,
         );
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         self.publish_view_from(&bp, Some(&st));
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
         drop(st);
