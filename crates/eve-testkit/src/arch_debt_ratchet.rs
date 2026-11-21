@@ -385,6 +385,7 @@ enum PatternKind {
     HandwrittenAccountChangeEmitters,
     SystemTimeNowInGameplay,
     IsWriteLockedByCurrentThread,
+    ProcessGlobalMutableState,
 }
 
 impl PatternKind {
@@ -408,6 +409,7 @@ impl PatternKind {
         Self::HandwrittenAccountChangeEmitters,
         Self::SystemTimeNowInGameplay,
         Self::IsWriteLockedByCurrentThread,
+        Self::ProcessGlobalMutableState,
     ];
 
     fn as_str(self) -> &'static str {
@@ -431,6 +433,7 @@ impl PatternKind {
             Self::HandwrittenAccountChangeEmitters => "handwritten_account_change_emitters",
             Self::SystemTimeNowInGameplay => "system_time_now_in_gameplay",
             Self::IsWriteLockedByCurrentThread => "is_write_locked_by_current_thread",
+            Self::ProcessGlobalMutableState => "process_global_mutable_state",
         }
     }
 
@@ -475,6 +478,9 @@ impl PatternKind {
             ),
             Self::SystemTimeNowInGameplay => Some(r"\bSystemTime\s*::\s*now\s*\("),
             Self::IsWriteLockedByCurrentThread => Some(r"\bis_write_locked_by_current_thread\b"),
+            Self::ProcessGlobalMutableState => Some(
+                r"\bthread_local\s*!|(?<!')\bstatic\s+(?:mut\b|[^;=]*\b(?:OnceLock|LazyLock|Mutex|RwLock|Atomic[A-Za-z0-9_]*)\b)",
+            ),
         }
     }
 }
@@ -534,6 +540,7 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
         PatternKind::IsWriteLockedByCurrentThread => {
             count_whole_word(text, "is_write_locked_by_current_thread")
         }
+        PatternKind::ProcessGlobalMutableState => count_process_global_mutable_state(text),
     }
 }
 
@@ -1002,6 +1009,93 @@ fn count_system_time_now(text: &str) -> usize {
     count
 }
 
+fn match_mutable_global_type_keyword_end(b: &[u8], idx: usize) -> Option<usize> {
+    if !has_word_boundary_before(b, idx) {
+        return None;
+    }
+    const EXACT_KEYWORDS: &[&[u8]] = &[b"OnceLock", b"LazyLock", b"Mutex", b"RwLock"];
+    for &kw in EXACT_KEYWORDS {
+        let end = idx + kw.len();
+        if b[idx..].starts_with(kw) && has_word_boundary_after(b, end) {
+            return Some(end);
+        }
+    }
+    const ATOMIC_PREFIX: &[u8] = b"Atomic";
+    if b[idx..].starts_with(ATOMIC_PREFIX) {
+        let mut end = idx + ATOMIC_PREFIX.len();
+        while end < b.len() && is_ident_byte(b[end]) {
+            end += 1;
+        }
+        return Some(end);
+    }
+    None
+}
+
+fn count_process_global_mutable_state(text: &str) -> usize {
+    if !text.contains("thread_local") && !text.contains("static") {
+        return 0;
+    }
+    const THREAD_LOCAL: &[u8] = b"thread_local";
+    const STATIC: &[u8] = b"static";
+    const MUT: &[u8] = b"mut";
+
+    let b = text.as_bytes();
+    let mut count = 0usize;
+    let mut pos = 0usize;
+
+    while pos < b.len() {
+        if b[pos..].starts_with(THREAD_LOCAL) && has_word_boundary_before(b, pos) {
+            let bang = skip_ws(b, pos + THREAD_LOCAL.len());
+            if bang < b.len() && b[bang] == b'!' {
+                count += 1;
+                pos = bang + 1;
+                continue;
+            }
+        }
+
+        if b[pos..].starts_with(STATIC)
+            && (pos == 0 || b[pos - 1] != b'\'')
+            && has_word_boundary_before(b, pos)
+        {
+            let after_static = pos + STATIC.len();
+            let body_start = skip_ws(b, after_static);
+            if body_start > after_static {
+                if b[body_start..].starts_with(MUT)
+                    && has_word_boundary_after(b, body_start + MUT.len())
+                {
+                    count += 1;
+                    pos = body_start + MUT.len();
+                    continue;
+                }
+
+                let mut limit = body_start;
+                while limit < b.len() && b[limit] != b';' && b[limit] != b'=' {
+                    limit += 1;
+                }
+                let mut last_match_end: Option<usize> = None;
+                let mut i = body_start;
+                while i < limit {
+                    if let Some(end) = match_mutable_global_type_keyword_end(b, i) {
+                        last_match_end = Some(end);
+                        i = end;
+                    } else {
+                        i += 1;
+                    }
+                }
+                if let Some(match_end) = last_match_end {
+                    count += 1;
+                    pos = match_end;
+                    continue;
+                }
+            }
+        }
+
+        pos += 1;
+    }
+
+    count
+}
+
 /// Strips Rust line/block comments and `#[cfg(test)]` items while keeping string/char literals intact.
 fn strip_comments_and_cfg_tests_keep_literals(
     raw: &str,
@@ -1229,6 +1323,7 @@ mod tests {
             "handwritten_account_change_emitters",
             "system_time_now_in_gameplay",
             "is_write_locked_by_current_thread",
+            "process_global_mutable_state",
         ] {
             assert!(
                 ratchet.patterns.contains_key(required_key),
@@ -1667,6 +1762,102 @@ pub fn notify_special_site_account_changes(ctx: &Ctx) {
         );
         assert!(
             !report.patterns["handwritten_account_change_emitters"].per_file.contains_key("router/delta_projection.rs")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_process_global_mutable_state_and_exemptions() {
+        let tmp = make_temp_dir("1541_global_state");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+
+        std::fs::write(
+            src.join("globals.rs"),
+            r#"
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64};
+use std::sync::{LazyLock, Mutex, Once, OnceLock, RwLock};
+
+thread_local! {
+    static TL_CELL: Cell<u32> = const { Cell::new(0) };
+}
+std::thread_local ! (
+    static TL_REF: RefCell<u32> = RefCell::new(0);
+);
+
+static mut RAW_GLOBAL: u64 = 0;
+pub static MY_ONCE: OnceLock<u64> = OnceLock::new();
+pub(crate) static MULTI_LINE_ONCE:
+    std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+static MY_LAZY: LazyLock<String> = LazyLock::new(String::new);
+static MY_MUTEX: Mutex<u32> = Mutex::new(0);
+static MY_RW: RwLock<u32> = RwLock::new(0);
+static MY_ATOMIC: AtomicU64 = AtomicU64::new(0);
+static MY_ATOMIC_PTR: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static NESTED_GLOBAL: LazyLock<Mutex<AtomicBool>> =
+    LazyLock::new(|| Mutex::new(AtomicBool::new(false)));
+
+// Near-misses and exempted patterns (must all stay 0):
+pub fn lifetime_ref(&self) -> &'static Mutex<u32> {
+    todo!()
+}
+tokio::task_local! {
+    static TASK_VAL: u32;
+}
+static IMMUT_TABLE: &[&str] = &["a", "b"];
+static INIT_ONLY: Once = Once::new();
+static ONCE_LIKE: CustomOnceLockWrapper = CustomOnceLockWrapper;
+static MUT_LIKE: MutWrapper = MutWrapper;
+static mut_prefix: MyType = MyType;
+pub fn param_name(static_like: Mutex<u32>) {}
+const CONST_MUTEX: Mutex<u32> = Mutex::new(0);
+static RHS_ONLY: MyWrapper = Mutex::new(0);
+
+pub fn strings_and_comments() {
+    // static FAKE_COMMENT: OnceLock<u8> = OnceLock::new(); thread_local! {}
+    let _ = "static FAKE_STR: Mutex<u8> = Mutex::new(0); thread_local! {}";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    static TEST_ONLY_ONCE: OnceLock<u8> = OnceLock::new();
+    thread_local! {
+        static TEST_TL: Cell<u8> = const { Cell::new(0) };
+    }
+}
+"#,
+        )
+        .expect("write globals.rs");
+
+        // Test-only files (`*_tests.rs`) must be excluded.
+        std::fs::write(
+            src.join("services/global_helper_tests.rs"),
+            "static TEST_FILE_MUTEX: Mutex<u8> = Mutex::new(0);\n",
+        )
+        .expect("write test file");
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan 1541 globals");
+        let entry = &report.patterns["process_global_mutable_state"];
+        assert_eq!(entry.occurrences, 11);
+        assert_eq!(entry.files, 1);
+        assert_eq!(entry.per_file.get("globals.rs"), Some(&11));
+        assert!(!entry.per_file.contains_key("services/global_helper_tests.rs"));
+
+        // Direct boundary / non-overlapping edge-case parity with regex engine.
+        assert_eq!(
+            count_process_global_mutable_state("static mut A: Mutex<u8> = Mutex::new(0);"),
+            1
+        );
+        assert_eq!(
+            count_process_global_mutable_state("static X: MutWrapper = ...; thread_local!{}"),
+            1
+        );
+        assert_eq!(
+            count_process_global_mutable_state("let _ = &'static Mutex<u8>;"),
+            0
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
