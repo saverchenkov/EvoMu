@@ -1933,7 +1933,7 @@ fn apply_ai_step_world_effects(
                         .get(&tid)
                         .or_else(|| snap.characters.values().find(|c| c.active_ship_id == tid)),
                 }?;
-                (ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.structure_id.is_none())
+                (ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.structure_id.is_none_or(|st_id| ch.active_ship_id == st_id))
                     .then_some(ch.character_id)
             });
             if victim_char_opt.is_some() {
@@ -1966,7 +1966,7 @@ fn apply_ai_step_world_effects(
                         .filter(|c| {
                             c.solar_system_id == sys_id
                                 && c.station_id.is_none()
-                                && c.structure_id.is_none()
+                                && c.structure_id.is_none_or(|st_id| c.active_ship_id == st_id)
                         })
                         .map(|c| c.character_id)
                 })

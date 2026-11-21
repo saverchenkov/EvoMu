@@ -834,6 +834,7 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
     spawn_drone(active_drone);
     mgr.entities.get_mut(&npc_ball).unwrap().target_id = Some(active_drone);
 
+    let shield_before_oos = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&owner_char) {
             ch.solar_system_id = other_sys;
@@ -841,6 +842,8 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         }
     });
     mgr.step_ai_sync(&ctx, combat_sys, 17, 1.0);
+    let shield_after_oos = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    assert!(shield_after_oos < shield_before_oos, "NPC should damage active drone (oos)");
     assert_no_combat_notifs("active drone owned by out-of-system pilot");
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -850,6 +853,8 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         }
     });
     mgr.step_ai_sync(&ctx, combat_sys, 20, 1.0);
+    let shield_after_docked = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    assert!(shield_after_docked < shield_after_oos, "NPC should damage active drone (docked)");
     assert_no_combat_notifs("active drone owned by docked pilot");
 
     ctx.db.with_mut_snapshot(|snap| {

@@ -1831,7 +1831,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
                     snap.characters.get(&target_ball_id).or_else(|| snap.characters.values().find(|c| c.active_ship_id == target_ball_id)).map(|c| c.character_id)
                 }),
             }?;
-            let vic = snap.characters.get(&cid).filter(|c| c.station_id.is_none() && c.structure_id.is_none())?;
+            let vic = snap.characters.get(&cid).filter(|c| c.station_id.is_none() && c.structure_id.is_none_or(|st_id| c.active_ship_id == st_id))?;
             let active_craft = active_drone.is_some() || active_fighter.is_some() || target_ball_id == vic.character_id || target_ball_id == vic.active_ship_id;
             if !active_craft && snap.items.contains_key(&target_ball_id) {
                 return None;
@@ -1842,7 +1842,8 @@ pub(crate) fn emit_combat_log_and_damage_state(
                 .or_else(|| snap.structures.get(&attacker_ship_id).map(|s| s.solar_system_id))
                 .or_else(|| snap.characters.get(&attacker_char_id).map(|a| a.solar_system_id))
                 .or_else(|| active_fighter.and_then(|(_, _, iid)| item_sys(iid)))
-                .or_else(|| item_sys(target_ball_id));
+                .or_else(|| item_sys(target_ball_id))
+                .or_else(|| snap.structures.get(&target_ball_id).map(|s| s.solar_system_id));
             combat_sys.map_or(Some(cid), |sys| (vic.solar_system_id == sys).then_some(cid))
         })
     };

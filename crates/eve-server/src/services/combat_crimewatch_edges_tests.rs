@@ -806,3 +806,112 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
         );
     }
 }
+
+#[test]
+fn emit_combat_log_and_damage_state_allows_active_structure_gunner_and_blocks_structure_docked() {
+    let (ctx, _session, att_id, att_ship, sys_a) = make_fighter_ctx_and_session();
+    let sys_b = 30_000_144_u32;
+    let vic_id = 90_000_002_i64;
+    let vic_ship = 720_090_i64;
+    let sid = 1_000_000_000_123_i64;
+    let standup_fighter_item = 750_847_101_i64;
+    let standup_fighter_ball = 750_847_102_i64;
+    let npc_att_id = 880_000_001_i64;
+    let npc_ship_id = 880_000_002_i64;
+
+    let vic_uid = ctx.db.with_mut_snapshot(|snap| {
+        let mut vic = snap.characters[&vic_id].clone();
+        vic.active_ship_id = vic_ship;
+        vic.solar_system_id = sys_a;
+        vic.station_id = None;
+        vic.structure_id = Some(sid);
+        let uid = vic.user_id;
+        snap.characters.insert(vic_id, vic);
+        snap.structures.insert(
+            sid,
+            eve_db::UpwellStructureRecord {
+                structure_id: sid,
+                type_id: 35_832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: sys_a,
+                name: "Gunner Citadel".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            vic_ship,
+            make_fighter_item(vic_ship, 587, vic_id, sid, InventoryFlag::Hangar, 1),
+        );
+        snap.items.insert(
+            standup_fighter_item,
+            make_fighter_item(standup_fighter_item, 40_556, vic_id, sys_a as i64, InventoryFlag::None, 1),
+        );
+        uid
+    });
+    ctx.db
+        .acquire_online_lock(vic_uid, 9_089, Some(vic_id), true, 1_750_000_000)
+        .unwrap();
+    ctx.active_fighters.write().unwrap().insert(
+        standup_fighter_ball,
+        crate::router::context::ActiveFighterSquadron {
+            ball_id: standup_fighter_ball,
+            item_id: standup_fighter_item,
+            type_id: 40_556,
+            owner_char_id: vic_id,
+            parent_ship_id: sid,
+            tube_index: 0,
+            squadron_size: 3,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+
+    let victim_combat_events = || {
+        ctx.drain_notifications_for_char(vic_id)
+            .into_iter()
+            .filter(|n| {
+                matches!(
+                    n.event.as_str(),
+                    "OnDamageMessage" | "OnDamageMessages" | "OnCombatMessage" | "OnDamageStateChange"
+                )
+            })
+            .map(|n| n.event)
+            .collect::<Vec<_>>()
+    };
+
+    // 1. Normally docked in structure (`structure_id == Some(sid)`, `active_ship_id != sid`) -> zero notifications
+    let _ = ctx.drain_notifications_for_char(vic_id);
+    for (target, explicit) in [
+        (sid, Some(vic_id)),
+        (vic_ship, None),
+        (vic_ship, Some(vic_id)),
+        (standup_fighter_ball, Some(vic_id)),
+    ] {
+        emit_combat_log_and_damage_state(&ctx, att_id, explicit, att_ship, target, 2_905, 25.0, false, 0.9, 1.0, 1.0);
+        assert!(victim_combat_events().is_empty(), "docked pilot must get zero events for target={target}");
+    }
+
+    // 2. Active Upwell structure gunner (`structure_id == Some(sid)`, `active_ship_id == sid`) -> receives events
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&vic_id).unwrap().active_ship_id = sid;
+    });
+    for (aid, aship, target, label) in [
+        (att_id, att_ship, sid, "player attacking manned structure"),
+        (npc_att_id, npc_ship_id, sid, "NPC attacking manned structure"),
+        (npc_att_id, npc_ship_id, standup_fighter_ball, "NPC attacking Standup fighters"),
+    ] {
+        emit_combat_log_and_damage_state(&ctx, aid, None, aship, target, 2_905, 25.0, false, 0.8, 1.0, 1.0);
+        let ev = victim_combat_events();
+        assert!(ev.contains(&"OnDamageMessage".to_string()), "{label}: missing OnDamageMessage");
+        assert!(ev.contains(&"OnDamageStateChange".to_string()), "{label}: missing OnDamageStateChange");
+    }
+
+    // 3. Out-of-system guard still applies when gunner's solar_system_id mismatches structure's solar_system_id
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&vic_id).unwrap().solar_system_id = sys_b;
+    });
+    emit_combat_log_and_damage_state(&ctx, npc_att_id, Some(vic_id), npc_ship_id, sid, 2_905, 25.0, false, 0.8, 1.0, 1.0);
+    assert!(victim_combat_events().is_empty(), "out-of-system gunner must receive zero notifications");
+}
