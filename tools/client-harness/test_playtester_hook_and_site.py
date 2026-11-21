@@ -5807,9 +5807,9 @@ class TestStargateTargetResolution(unittest.TestCase):
             self.assertIsNone(err, sub)
             self.assertEqual(bid, 750000058, sub)
 
-        bid_warp, err_warp = hook._resolve_space_command_item_id(bp, 1001, "warp_to", "Veldspar")
+        bid_warp, err_warp = hook._resolve_space_command_item_id(bp, 1001, "warp_to", "Station")
         self.assertIsNone(err_warp)
-        self.assertEqual(bid_warp, 750000210)
+        self.assertEqual(bid_warp, 60003754)
 
         bid_dock, err_dock = hook._resolve_space_command_item_id(bp, 1001, "dock", "Station")
         self.assertIsNone(err_dock)
