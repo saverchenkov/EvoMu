@@ -31,7 +31,8 @@ pub use cache_notifications::*;
 pub use context::*;
 pub use delta_item_compare::{
     flush_item_compare_summary, is_item_compare_enabled, item_compare_summary,
-    log_item_compare_summary, HelperCompareCounts, ItemCompareEventSummary, ItemCompareSummary,
+    log_item_compare_summary, CompareOriginScope, HelperCompareCounts, ItemCompareByScope,
+    ItemCompareEventSummary, ItemCompareScopeCounts, ItemCompareSummary,
 };
 #[cfg(any(test, feature = "testkit"))]
 pub use test_context::TestContext;

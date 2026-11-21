@@ -345,9 +345,9 @@ async fn test_beyonce_fleet_management_and_space_rpcs() {
     }
     drop(bp);
 
-    // BF-BM-01: Already in warp returns ShipNotInSpace
+    // BF-BM-01: Already in warp returns ShipAlreadyInWarp
     let warp_err = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.unwrap_err();
-    assert_eq!(warp_err.code, "ShipNotInSpace");
+    assert_eq!(warp_err.code, "ShipAlreadyInWarp");
 
     // Sub-warp for near bookmark (sets GotoDirection)
     handle.ballpark.write().unwrap().balls.get_mut(&ship1).unwrap().mode = MovementMode::Stop;

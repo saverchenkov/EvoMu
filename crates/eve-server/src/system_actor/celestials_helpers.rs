@@ -616,6 +616,14 @@ pub(crate) fn clear_landed_warp_tracking_from_events(
             {
                 removed_ids.insert(*ball_id);
             }
+            eve_destiny::DestinyEvent::RemoveBalls { ball_ids } => {
+                for &ball_id in ball_ids {
+                    if !ballpark.is_static_ball(ball_id) && !ballpark.balls.contains_key(&ball_id)
+                    {
+                        removed_ids.insert(ball_id);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1162,6 +1170,7 @@ pub(crate) fn record_warp_stops_from_events_in_map(
             eve_destiny::DestinyEvent::SetBallMassive { is_massive: true, .. }
                 | eve_destiny::DestinyEvent::WarpTo { .. }
                 | eve_destiny::DestinyEvent::RemoveBall { .. }
+                | eve_destiny::DestinyEvent::RemoveBalls { .. }
         )
     });
     if !has_relevant {
@@ -1180,6 +1189,11 @@ pub(crate) fn record_warp_stops_from_events_in_map(
             eve_destiny::DestinyEvent::WarpTo { ball_id, .. }
             | eve_destiny::DestinyEvent::RemoveBall { ball_id } => {
                 guard.remove(ball_id);
+            }
+            eve_destiny::DestinyEvent::RemoveBalls { ball_ids } => {
+                for id in ball_ids {
+                    guard.remove(id);
+                }
             }
             _ => {}
         }

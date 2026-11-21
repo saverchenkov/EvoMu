@@ -1497,16 +1497,16 @@ async fn spawn_1230_veldspar_queues_static_add_balls2_wire_and_slim_item() {
     let (_tick2, rem_events, _) = handle.drain_observer_updates(ship_id).await.unwrap();
     assert!(
         rem_events.iter().any(|ev| {
-            matches!(ev, eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id)
+            matches!(ev, eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[ast_id])
         }),
-        "/unspawn must emit RemoveBall to ship observer: {rem_events:?}"
+        "/unspawn must emit RemoveBalls([{ast_id}]) to ship observer: {rem_events:?}"
     );
     let (_far_tick2, far_rem_events, _) = handle.drain_observer_updates(far_ship_id).await.unwrap();
     assert!(
         far_rem_events.iter().any(|ev| {
-            matches!(ev, eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id)
+            matches!(ev, eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[ast_id])
         }),
-        "/unspawn must emit RemoveBall to all system grid observers: {far_rem_events:?}"
+        "/unspawn must emit RemoveBalls([{ast_id}]) to all system grid observers: {far_rem_events:?}"
     );
 
     // Spawning another static asteroid near `ship_id` must allow `ship_grid` to delete cleanly

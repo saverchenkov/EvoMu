@@ -194,6 +194,7 @@ pub(crate) fn step_guided_missiles_in_actor(
     if active_missiles.is_empty() {
         return;
     }
+    let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(db_opt.as_deref());
     let dt_pos = if dt_sim > 0.0 && dt_sim.is_finite() {
         dt_sim
     } else {

@@ -622,6 +622,7 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
     {
         return suppressor_destroyed;
     }
+    let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(db_opt.map(|d| &**d));
     let mut pocket_by_ship: HashMap<i64, i64> = HashMap::new();
     let mut room_center_by_ship: HashMap<i64, DVec3> = HashMap::new();
     let mut room_center_by_char: HashMap<i64, DVec3> = HashMap::new();

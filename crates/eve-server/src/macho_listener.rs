@@ -2255,6 +2255,7 @@ async fn execute_call_req_wire_inner(
                     matches!(
                         ev,
                         eve_destiny::DestinyEvent::AddBalls2 { .. }
+                            | eve_destiny::DestinyEvent::RemoveBalls { .. }
                             | eve_destiny::DestinyEvent::RemoveBall { .. }
                     )
                 });

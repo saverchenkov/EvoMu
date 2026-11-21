@@ -642,6 +642,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
     deactivation_hook: Option<&ModuleDeactivationHook>,
     pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
 ) -> Vec<(BallId, Option<CharacterId>)> {
+    let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(db_opt.as_deref());
     let tidi_factor = if tidi_factor.is_finite() {
         tidi_factor.clamp(0.10, 1.0)
     } else {
@@ -2454,6 +2455,7 @@ pub(crate) fn step_module_reloads_sim_clock(
     dt_sim: f64,
     tidi_factor: f64,
 ) {
+    let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(db_opt.as_deref());
     if reload_sim_remaining.is_empty() && db_opt.is_none() {
         return;
     }
@@ -2599,6 +2601,7 @@ impl SystemHandle {
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
             warp_provenance, warp_tracking, ..
         } = &mut *st;
+        let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(db_opt.as_deref());
         let tidi = self.tidi_factor();
         let dt_sim = if dt > 0.0 && dt.is_finite() {
             dt * tidi
@@ -2848,7 +2851,7 @@ impl SystemHandle {
         self.record_warp_stops_from_events(&warp_events);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             if !death_futs.is_empty() || step_fut.is_some() || destroyed_lease.is_some() {
-                let _ = handle.spawn(async move {
+                let _ = handle.spawn(crate::router::delta_item_compare::with_compare_tick_scope(async move {
                     for fut in death_futs {
                         fut.await;
                     }
@@ -2858,7 +2861,7 @@ impl SystemHandle {
                     if let Some(lease) = destroyed_lease {
                         lease.ack();
                     }
-                });
+                }));
             }
         } else {
             // Without an active Tokio runtime we cannot execute downstream async hooks;
@@ -3182,6 +3185,7 @@ pub(crate) fn teardown_attacker_locks_and_cycles_for_destroyed_balls(
     deactivation_hook: Option<&ModuleDeactivationHook>,
     destroyed_ids: &[BallId],
 ) {
+    let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(db_opt.as_deref());
     if destroyed_ids.is_empty() {
         return;
     }

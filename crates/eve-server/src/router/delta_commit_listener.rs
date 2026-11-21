@@ -441,6 +441,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 now_unix,
                 &*db,
                 &emitted_effects.item_effects,
+                staging_scope_id.is_some(),
             );
 
             if !committed_records.is_empty() {
@@ -577,6 +578,13 @@ fn lookup_commit_bridge(ctx: &ServerContext) -> Option<Arc<DeltaCommitBridgeStat
 
 pub(crate) fn item_compare_bridge(ctx: &ServerContext) -> Option<Arc<ItemCompareBridge>> {
     lookup_commit_bridge(ctx).map(|b| Arc::clone(&b.item_compare))
+}
+
+pub(crate) fn item_compare_bridges_for_db(db_instance_id: u64) -> Vec<Arc<ItemCompareBridge>> {
+    commit_bridges().lock().unwrap_or_else(|e| e.into_inner()).iter()
+        .filter(|(&(id, _), _)| id == db_instance_id)
+        .filter_map(|(_, w)| w.upgrade().map(|b| Arc::clone(&b.item_compare)))
+        .collect()
 }
 
 /// Coordinates remaining unlocked manual `OnAccountChange` calls with same-epoch commit-projected

@@ -923,7 +923,7 @@
         "services/space_destiny.rs": 38,
         "services/space_docking_cloaking.rs": 14,
         "services/space_entity_mining.rs": 75,
-        "services/space_entity_ops.rs": 64,
+        "services/space_entity_ops.rs": 58,
         "services/space_nav_movement_guard.rs": 18,
         "services/space_nav_travel.rs": 35,
         "services/space_pochven_wormholes.rs": 1,

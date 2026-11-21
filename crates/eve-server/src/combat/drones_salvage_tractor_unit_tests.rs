@@ -683,9 +683,9 @@ async fn salvage_emits_item_change_flushes_remove_ball_and_clears_target_locks()
             .get(&ship_id)
             .is_some_and(|evs| evs.iter().any(|ev| matches!(
                 ev,
-                eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == wreck_empty
+                eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[wreck_empty]
             ))),
-        "flushed broadcast must include RemoveBall({wreck_empty}): {:?}",
+        "flushed broadcast must include RemoveBalls([{wreck_empty}]): {:?}",
         bcast_a.observer_events
     );
     assert!(
@@ -760,9 +760,9 @@ async fn salvage_emits_item_change_flushes_remove_ball_and_clears_target_locks()
     assert!(
         obs_evs_b.iter().any(|ev| matches!(
             ev,
-            eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == wreck_with_loot
+            eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[wreck_with_loot]
         )),
-        "flushed broadcast must include RemoveBall({wreck_with_loot}): {obs_evs_b:?}"
+        "flushed broadcast must include RemoveBalls([{wreck_with_loot}]): {obs_evs_b:?}"
     );
 
     let notifs_b = ctx.drain_notifications_for_char(char_id);
@@ -989,7 +989,7 @@ async fn repeating_salvager_salvage_end_flushes_remove_ball_before_single_deacti
                             .get(&ship_id)
                             .is_some_and(|evs| evs.iter().any(|ev| matches!(
                                 ev,
-                                eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == wreck_id
+                                eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[wreck_id]
                             )))
                         {
                             recorded.push(RecordedEvent::RemoveBall);
@@ -1270,7 +1270,7 @@ async fn salvaged_wreck_flushes_remove_ball_before_cross_pilot_sibling_deactivat
                                 .get(&obs_ship_id)
                                 .is_some_and(|evs| evs.iter().any(|ev| matches!(
                                     ev,
-                                    eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == wreck_id
+                                    eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[wreck_id]
                                 )))
                             {
                                 recorded.push(RecordedEvent::RemoveBall(obs_ship_id));
