@@ -12,6 +12,10 @@ use eve_sde::{attr_ids, InvType};
 use glam::DVec3;
 use std::collections::HashMap;
 
+#[path = "fitting_module_cycles_pending_actions.rs"]
+mod pending_actions;
+pub(crate) use pending_actions::*;
+
 pub(crate) fn resolve_snapshot_fitted_module(
     ctx: &ServerContext,
     ship_id: i64,
@@ -1617,6 +1621,7 @@ pub(crate) fn build_all_info(
     ])
 }
 
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_ecm_or_burst_jammer_activation(
     ctx: &ServerContext,
@@ -1936,6 +1941,87 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
     Ok(())
 }
 
+struct InstantModuleBallContext {
+    attacker_ball: eve_destiny::Ball,
+    m_eff: eve_dogma::FittedModule,
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+async fn run_pre_notify_tractor_or_aoe_effects(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    m: &eve_dogma::FittedModule,
+    mod_type: &InvType,
+    is_overloaded: bool,
+    target_id_opt: Option<i64>,
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<Option<PyRep>, BridgeRpcError> {
+    let Some((_, attacker_ball)) = sys.get_ball_snapshot(ship_id).await.ok().flatten() else {
+        return Ok(None);
+    };
+    let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.modified_system_securities.get(&sys_id).copied()
+    })
+    .unwrap_or_else(|| {
+        ctx.sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| s.security_status)
+            .unwrap_or(0.0)
+    });
+    let now_unix = ctx.now_unix_secs();
+    let mut m_eff = m.clone();
+    if is_overloaded {
+        m_eff.state = eve_dogma::ModuleState::Overloaded;
+    }
+    let ball_ctx = Box::new(InstantModuleBallContext {
+        attacker_ball,
+        m_eff,
+    });
+    let action_res = if mod_type.group_id == 650 {
+        crate::services::combat_crimewatch::activate_salvager_or_tractor_module(
+            ctx,
+            char_id,
+            ship_id,
+            sys_id,
+            module_id,
+            &ball_ctx.m_eff,
+            mod_type,
+            &ball_ctx.attacker_ball,
+            target_id_opt,
+            kwargs,
+        )
+        .await
+    } else {
+        // `fitting_module_cycles` already deducted capacitor in `add_module_cycle` and owns
+        // the single post-commit `commit_space_action_cloak_and_invuln_break` call (`#1441`).
+        crate::services::combat_crimewatch::activate_aoe_or_defender_module_with_options(
+            ctx,
+            char_id,
+            ship_id,
+            sys_id,
+            sys_sec,
+            now_unix,
+            module_id,
+            &ball_ctx.m_eff,
+            mod_type,
+            &ball_ctx.attacker_ball,
+            target_id_opt,
+            kwargs,
+            false,
+            false,
+        )
+        .await
+    };
+    action_res.transpose()
+}
+
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_pre_notify_instant_module_effects(
     ctx: &ServerContext,
@@ -1969,845 +2055,22 @@ pub(crate) async fn run_pre_notify_instant_module_effects(
         return Ok(None);
     }
     if matches!(mod_type.group_id, 72 | 650) {
-        if let Ok(Some((_, attacker_ball))) = sys.get_ball_snapshot(ship_id).await {
-            let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.modified_system_securities.get(&sys_id).copied()
-            })
-            .unwrap_or_else(|| {
-                ctx.sde
-                    .solar_systems
-                    .get(&sys_id)
-                    .map(|s| s.security_status)
-                    .unwrap_or(0.0)
-            });
-            let now_unix = ctx.now_unix_secs();
-            let mut m_eff = m.clone();
-            if is_overloaded {
-                m_eff.state = eve_dogma::ModuleState::Overloaded;
-            }
-            let action_res = if mod_type.group_id == 650 {
-                crate::services::combat_crimewatch::activate_salvager_or_tractor_module(
-                    ctx,
-                    char_id,
-                    ship_id,
-                    sys_id,
-                    module_id,
-                    &m_eff,
-                    mod_type,
-                    &attacker_ball,
-                    target_id_opt,
-                    kwargs,
-                )
-                .await
-            } else {
-                // `fitting_module_cycles` already deducted capacitor in `add_module_cycle` and owns
-                // the single post-commit `commit_space_action_cloak_and_invuln_break` call (`#1441`).
-                crate::services::combat_crimewatch::activate_aoe_or_defender_module_with_options(
-                    ctx,
-                    char_id,
-                    ship_id,
-                    sys_id,
-                    sys_sec,
-                    now_unix,
-                    module_id,
-                    &m_eff,
-                    mod_type,
-                    &attacker_ball,
-                    target_id_opt,
-                    kwargs,
-                    false,
-                    false,
-                )
-                .await
-            };
-            if let Some(res) = action_res {
-                return res.map(Some);
-            }
-        }
-    }
-    Ok(None)
-}
-
-async fn deactivate_repeating_cycle_after_action(
-    ctx: &ServerContext,
-    sys: &SystemHandle,
-    owner_char_id: Option<i64>,
-    ship_id: i64,
-    module_id: i64,
-    effect_name: &str,
-) {
-    let _ = deactivate_repeating_cycle_after_action_with_policy(
-        ctx,
-        sys,
-        owner_char_id,
-        ship_id,
-        module_id,
-        effect_name,
-        false,
-        None,
-    )
-    .await;
-}
-
-/// Stops a repeating module cycle after an action completes, optionally suppressing duplicate
-/// `OnGodmaShipEffect(false)` notifications if the actor already removed the cycle. Returns the
-/// resolved SDE effect ID when `OnGodmaShipEffect(false)` was emitted.
-#[allow(clippy::too_many_arguments)]
-async fn deactivate_repeating_cycle_after_action_with_policy(
-    ctx: &ServerContext,
-    sys: &SystemHandle,
-    owner_char_id: Option<i64>,
-    ship_id: i64,
-    module_id: i64,
-    effect_name: &str,
-    skip_notify_if_absent: bool,
-    module_type_id_opt: Option<u32>,
-) -> Option<i64> {
-    let removed_from_actor = sys
-        .remove_module_cycle(ship_id, module_id)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
-    let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
-        ctx,
-        owner_char_id.unwrap_or(0),
-        Some(sys.solar_system_id),
-        ship_id,
-        module_id,
-    );
-    crate::services::tactical_modules::remove_projected_remote_assistance(ctx, ship_id, module_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.module_active_states.remove(&module_id);
-        snap.module_active_charges.remove(&module_id);
-        crate::router::ServerContext::clear_persisted_module_overload(snap, ship_id, module_id);
-    });
-    let cid = owner_char_id?;
-    ctx.invalidate_and_push_fit(ship_id);
-    if skip_notify_if_absent && !removed_from_actor {
-        return None;
-    }
-    let resolved_effect_id = module_type_id_opt.and_then(|mod_type_id| {
-        crate::router::binding::effect_id_for_module_sde(&ctx.sde, mod_type_id, Some(effect_name))
-    });
-    let godma_effect = if effect_name.starts_with("superWeapon") {
-        let mod_type_id = ctx
-            .db
-            .with_snapshot(|snap| snap.items.get(&module_id).map(|i| i.type_id))
-            .unwrap_or(0);
-        let eff_id = crate::router::binding::effect_id_for_module_sde(
-            &ctx.sde,
-            mod_type_id,
-            Some(effect_name),
-        )
-        .unwrap_or(4489);
-        PyRep::Integer(eff_id)
-    } else if let Some(eff_id) = resolved_effect_id.filter(|&id| id > 0) {
-        PyRep::Integer(eff_id)
-    } else {
-        PyRep::String(effect_name.to_string())
-    };
-    ctx.emit_typed(
-        crate::router::NotificationTarget::Character(cid),
-        crate::router::notify_registry::OnGodmaShipEffect {
-            item_id: module_id,
-            effect: godma_effect,
-            start_or_time: PyRep::Bool(false),
-            start: None,
-            active: None,
-            environment: None,
-            start_time: None,
-            duration: None,
-            repeat: None,
-            error: None,
-            actual_stop_time: None,
-        },
-    );
-    Some(resolved_effect_id.unwrap_or(0))
-}
-
-fn emit_salvage_stop_special_fx(
-    ctx: &ServerContext,
-    char_id: i64,
-    ship_id: i64,
-    module_id: i64,
-    module_type_id: u32,
-    wreck_id: i64,
-    eff_id: i64,
-    effect_name: &str,
-) {
-    let Some((sfx_guid, is_offensive)) = crate::router::binding::special_fx_guid_for_module_sde(
-        &ctx.sde,
-        module_type_id,
-        eff_id,
-        Some(effect_name),
-    ) else {
-        return;
-    };
-    let now = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
-    let sfx_notif = crate::router::notify_registry::OnSpecialFX {
-        ship_id,
-        module_id: Some(module_id),
-        module_type_id: Some(i64::from(module_type_id)),
-        target_id: (wreck_id > 0).then_some(wreck_id),
-        other_type_id: None,
-        guid: sfx_guid,
-        is_offensive,
-        start: 0,
-        active: 0,
-        duration: 0.0,
-        repeat: 0,
-        start_time: now,
-        time_from_start: 0.0,
-        graphic_info: None,
-    };
-    ctx.emit_typed(
-        crate::router::NotificationTarget::Character(char_id),
-        sfx_notif.clone(),
-    );
-    for (obs_cid, _obs_uid) in ctx.space_observer_chars_for_ship(ship_id, char_id) {
-        ctx.emit_typed(
-            crate::router::NotificationTarget::Character(obs_cid),
-            sfx_notif.clone(),
-        );
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_salvage_end_action(
-    ctx: &ServerContext,
-    sys: &SystemHandle,
-    sys_id: u32,
-    char_id: i64,
-    ship_id: i64,
-    module_id: i64,
-    module_type_id: u32,
-    wreck_id: i64,
-    repeat: i32,
-    effect_name: String,
-    next_cycle_cap_deducted: bool,
-    deducted_cap_gj: f64,
-) {
-    let res = crate::combat::drones_salvage_tractor::execute_wreck_salvage_cycle_for_module(
-        ctx,
-        sys_id,
-        char_id,
-        ship_id,
-        wreck_id,
-        Some(module_type_id),
-        (repeat != 0).then_some(module_id),
-    )
-    .await;
-    if repeat == 0 {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.module_active_states.remove(&module_id);
-            snap.module_active_charges.remove(&module_id);
-        });
-        ctx.invalidate_and_push_fit(ship_id);
-        return;
-    }
-    let cycle_pre_removed = matches!(&res, Ok((_, true)));
-    let keep_repeating = matches!(
-        &res,
-        Ok((rep, _))
-            if rep.dict_get("salvaged").and_then(|v| v.as_bool()) == Some(false)
-                && rep.dict_get("reason").and_then(|v| v.as_str()) == Some("CycleRollFailed")
-    );
-    if keep_repeating {
-        let dur_s = ctx
-            .sde
-            .types
-            .get(&module_type_id)
-            .and_then(|t| t.default_attributes.get(&73).copied())
-            .unwrap_or(10_000.0)
-            / 1000.0;
-        ctx.record_module_reactivation_delay(ship_id, module_id, dur_s);
-        return;
-    }
-    if let Some(eff_id) = deactivate_repeating_cycle_after_action_with_policy(
-        ctx,
-        sys,
-        Some(char_id),
-        ship_id,
-        module_id,
-        &effect_name,
-        !cycle_pre_removed,
-        Some(module_type_id),
-    )
-    .await
-    {
-        emit_salvage_stop_special_fx(
+        return run_pre_notify_tractor_or_aoe_effects(
             ctx,
+            sys,
+            sys_id,
             char_id,
             ship_id,
             module_id,
-            module_type_id,
-            wreck_id,
-            eff_id,
-            &effect_name,
-        );
+            m,
+            mod_type,
+            is_overloaded,
+            target_id_opt,
+            kwargs,
+        )
+        .await;
     }
-    if next_cycle_cap_deducted && deducted_cap_gj > 0.0 {
-        if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-            let _ = sys
-                .set_capacitor(ship_id, (cs.capacitor + deducted_cap_gj).min(cs.max_capacitor))
-                .await;
-        }
-    }
-}
-
-/// Executes cycle-end wreck salvaging (`group 1122`) and auto-repeating (`repeat != 0`) AoE / tractor
-/// cycle-start pulses queued by `step_ballpark_and_cycles` (`R-AOE-SALVAGE-CYCLE-01`).
-pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u32) {
-    let actions = ctx.systems.take_pending_cycle_actions(sys_id);
-    execute_pending_cycle_actions_list(ctx, sys_id, actions).await;
-}
-
-pub(crate) fn emit_ship_charge_item_diffs(
-    ctx: &ServerContext,
-    char_id: i64,
-    ship_id: i64,
-    diffs: &[(
-        Option<eve_db::InventoryItemRecord>,
-        Option<eve_db::InventoryItemRecord>,
-    )],
-) {
-    let is_fitted_slot = |f: InventoryFlag| matches!(f as u16, 11..=34 | 125..=132);
-    for (pre, post) in diffs {
-        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
-        match (pre, post) {
-            (Some(old_it), Some(new_it)) if is_fitted_slot(new_it.flag) => {
-                if !is_fitted_slot(old_it.flag) {
-                    emit_godma_charge_sublocation_prime(ctx, char_id, ship_id, new_it);
-                }
-                let old_qty = if old_it.flag == new_it.flag {
-                    old_it.quantity
-                } else {
-                    0
-                };
-                if old_qty != new_it.quantity {
-                    emit_charge_sublocation_quantity_change(
-                        ctx,
-                        char_id,
-                        ship_id,
-                        new_it.flag,
-                        new_it.type_id,
-                        old_qty,
-                        new_it.quantity,
-                    );
-                }
-            }
-            (None, Some(new_it)) if is_fitted_slot(new_it.flag) => {
-                emit_godma_charge_sublocation_prime(ctx, char_id, ship_id, new_it);
-                emit_charge_sublocation_quantity_change(
-                    ctx,
-                    char_id,
-                    ship_id,
-                    new_it.flag,
-                    new_it.type_id,
-                    0,
-                    new_it.quantity,
-                );
-            }
-            (Some(old_it), None) if is_fitted_slot(old_it.flag) => {
-                emit_charge_sublocation_quantity_change(
-                    ctx,
-                    char_id,
-                    ship_id,
-                    old_it.flag,
-                    old_it.type_id,
-                    old_it.quantity,
-                    0,
-                );
-            }
-            _ => {}
-        }
-    }
-}
-
-fn emit_cycle_weapon_log_pair(
-    ctx: &ServerContext,
-    recipient_cid: i64,
-    msg_key: &str,
-    dict: PyRep,
-) {
-    ctx.emit_typed(
-        crate::router::NotificationTarget::Character(recipient_cid),
-        crate::router::notify_registry::OnDamageMessage {
-            damage_messages_args: dict.clone(),
-        },
-    );
-    ctx.emit_typed(
-        crate::router::NotificationTarget::Character(recipient_cid),
-        crate::router::notify_registry::OnDamageMessages {
-            dmgmsgs: vec![PyRep::Tuple(vec![
-                PyRep::String(msg_key.into()),
-                dict,
-            ])],
-        },
-    );
-}
-
-fn emit_cycle_weapon_log_entries(
-    ctx: &ServerContext,
-    attacker_char_id: Option<i64>,
-    attacker_ship_id: i64,
-    target_id: i64,
-    target_char_id: Option<i64>,
-    module_type_id: u32,
-    hit_damage: Option<f64>,
-) {
-    let (damage, hit_quality, attacker_msg_key, victim_msg_key) = match hit_damage {
-        Some(dmg) => (dmg, 3, "AttackHit", "AttackedBy"),
-        None => (0.0, 0, "AttackMiss", "AttackMissBy"),
-    };
-    let owner_cid = attacker_char_id.unwrap_or(0);
-    if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
-        let dmg_dict = crate::system_actor::build_cycle_damage_message_dict(
-            damage,
-            attacker_ship_id,
-            target_id,
-            acid,
-            module_type_id,
-            hit_quality,
-            "me",
-        );
-        emit_cycle_weapon_log_pair(ctx, acid, attacker_msg_key, dmg_dict);
-    }
-    if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
-        let vic_dict = crate::system_actor::build_cycle_damage_message_dict(
-            damage,
-            attacker_ship_id,
-            target_id,
-            owner_cid,
-            module_type_id,
-            hit_quality,
-            "other",
-        );
-        emit_cycle_weapon_log_pair(ctx, vcid, victim_msg_key, vic_dict);
-    }
-}
-
-pub(crate) async fn execute_pending_cycle_actions_list(
-    ctx: &ServerContext,
-    sys_id: u32,
-    actions: Vec<crate::system_actor::PendingCycleAction>,
-) {
-    if actions.is_empty() {
-        return;
-    }
-    let sys = ctx.systems.get_or_spawn(sys_id);
-    let empty_kw = HashMap::new();
-    for action in actions {
-        match action {
-            crate::system_actor::PendingCycleAction::SalvageEnd {
-                char_id,
-                ship_id,
-                module_id,
-                module_type_id,
-                wreck_id,
-                repeat,
-                effect_name,
-                next_cycle_cap_deducted,
-                deducted_cap_gj,
-            } => {
-                Box::pin(handle_salvage_end_action(
-                    ctx,
-                    &sys,
-                    sys_id,
-                    char_id,
-                    ship_id,
-                    module_id,
-                    module_type_id,
-                    wreck_id,
-                    repeat,
-                    effect_name,
-                    next_cycle_cap_deducted,
-                    deducted_cap_gj,
-                ))
-                .await;
-            }
-            crate::system_actor::PendingCycleAction::LanceBeamFired {
-                attacker_char_id,
-                attacker_ship_id,
-                attacker_ship_type_id,
-                module_id: _,
-                module_type_id,
-                hits,
-            } => {
-                let now_unix = ctx.now_unix_secs();
-                let mut msg_tuples = Vec::new();
-                for (victim_id, applied_dmg) in hits {
-                    crate::services::combat_crimewatch::record_killmail_assist_action(
-                        ctx,
-                        victim_id,
-                        attacker_char_id,
-                        attacker_ship_type_id,
-                        module_type_id,
-                        applied_dmg,
-                        false,
-                        now_unix,
-                    );
-                    crate::services::station_structure::structure_lifecycle_rpc::record_ship_damage_progression(
-                        ctx,
-                        sys_id,
-                        attacker_char_id,
-                        victim_id,
-                        applied_dmg,
-                    );
-                    let dmg_dict = PyRep::Dict(vec![
-                        (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
-                        (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
-                        (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
-                        (PyRep::String("target".into()), PyRep::Integer(victim_id)),
-                        (PyRep::String("target_ID".into()), PyRep::Integer(victim_id)),
-                        (
-                            PyRep::String("owner".into()),
-                            PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(attacker_char_id)]),
-                        ),
-                        (PyRep::String("weapon".into()), PyRep::Integer(module_type_id as i64)),
-                        (PyRep::String("hitQuality".into()), PyRep::Integer(5)),
-                        (PyRep::String("attackType".into()), PyRep::String("me".into())),
-                        (PyRep::String("isBanked".into()), PyRep::Bool(false)),
-                    ]);
-                    ctx.emit_typed(
-                        crate::router::NotificationTarget::Character(attacker_char_id),
-                        crate::router::notify_registry::OnDamageMessage {
-                            damage_messages_args: dmg_dict.clone(),
-                        },
-                    );
-                    crate::services::notify_emitters_ess_bounties::emit_combat_message(
-                        ctx,
-                        attacker_char_id,
-                        if applied_dmg > 0.0 { "AttackHit" } else { "AttackMiss" },
-                        victim_id,
-                        applied_dmg,
-                        module_type_id,
-                        false,
-                    );
-                    msg_tuples.push(PyRep::Tuple(vec![PyRep::String("AttackHit".into()), dmg_dict]));
-                    let victim_char_opt = ctx.db.with_snapshot(|snap| {
-                        snap.characters
-                            .values()
-                            .find(|c| c.active_ship_id == victim_id)
-                            .map(|c| c.character_id)
-                            .or_else(|| {
-                                snap.items
-                                    .get(&victim_id)
-                                    .map(|i| i.owner_id)
-                                    .filter(|oid| snap.characters.contains_key(oid))
-                            })
-                    });
-                    if let Some(victim_char_id) = victim_char_opt {
-                        crate::services::notify_emitters_ess_bounties::emit_combat_message(
-                            ctx,
-                            victim_char_id,
-                            if applied_dmg > 0.0 { "AttackedBy" } else { "AttackMissBy" },
-                            attacker_ship_id,
-                            applied_dmg,
-                            module_type_id,
-                            false,
-                        );
-                        let vic_dict = PyRep::Dict(vec![
-                            (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
-                            (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
-                            (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
-                            (PyRep::String("target".into()), PyRep::Integer(victim_id)),
-                            (PyRep::String("target_ID".into()), PyRep::Integer(victim_id)),
-                            (
-                                PyRep::String("owner".into()),
-                                PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(attacker_char_id)]),
-                            ),
-                            (PyRep::String("weapon".into()), PyRep::Integer(module_type_id as i64)),
-                            (PyRep::String("hitQuality".into()), PyRep::Integer(5)),
-                            (PyRep::String("attackType".into()), PyRep::String("other".into())),
-                            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
-                        ]);
-                        ctx.emit_typed(
-                            crate::router::NotificationTarget::Character(victim_char_id),
-                            crate::router::notify_registry::OnDamageMessage {
-                                damage_messages_args: vic_dict.clone(),
-                            },
-                        );
-                        ctx.emit_typed(
-                            crate::router::NotificationTarget::Character(victim_char_id),
-                            crate::router::notify_registry::OnDamageMessages {
-                                dmgmsgs: vec![PyRep::Tuple(vec![
-                                    PyRep::String("AttackedBy".into()),
-                                    vic_dict,
-                                ])],
-                            },
-                        );
-                    }
-                }
-                if !msg_tuples.is_empty() {
-                    ctx.emit_typed(
-                        crate::router::NotificationTarget::Character(attacker_char_id),
-                        crate::router::notify_registry::OnDamageMessages {
-                            dmgmsgs: msg_tuples,
-                        },
-                    );
-                }
-            }
-            crate::system_actor::PendingCycleAction::CycleWeaponDamage {
-                attacker_char_id,
-                attacker_ship_id,
-                attacker_ship_type_id,
-                target_id,
-                target_char_id,
-                module_type_id,
-                applied_dmg,
-                notified,
-            } => {
-                if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
-                    crate::services::combat_crimewatch::record_killmail_assist_action(
-                        ctx,
-                        target_id,
-                        acid,
-                        attacker_ship_type_id,
-                        module_type_id,
-                        applied_dmg,
-                        false,
-                        ctx.now_unix_secs(),
-                    );
-                    crate::services::station_structure::structure_lifecycle_rpc::record_ship_damage_progression(
-                        ctx,
-                        sys_id,
-                        acid,
-                        target_id,
-                        applied_dmg,
-                    );
-                }
-                if !notified && applied_dmg > 0.0 {
-                    let owner_cid = attacker_char_id.unwrap_or(0);
-                    let (sr, ar, hr) = if let Ok(Some(t_cs)) =
-                        ctx.systems.get_or_spawn(sys_id).get_combat_state(target_id).await
-                    {
-                        (
-                            (t_cs.shield_hp / t_cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
-                            (t_cs.armor_hp / t_cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
-                            (t_cs.structure_hp / t_cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
-                        )
-                    } else {
-                        (0.0, 0.0, 0.0)
-                    };
-                    if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
-                        let _ = ctx.notify_damage_state_change(
-                            crate::router::NotificationTarget::Character(acid),
-                            target_id,
-                            sr,
-                            ar,
-                            hr,
-                        );
-                    }
-                    if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
-                        crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change(
-                            ctx, vcid, target_id, sr, ar, hr,
-                        );
-                    }
-                    emit_cycle_weapon_log_entries(
-                        ctx,
-                        attacker_char_id,
-                        attacker_ship_id,
-                        target_id,
-                        target_char_id,
-                        module_type_id,
-                        Some(applied_dmg),
-                    );
-                }
-            }
-            crate::system_actor::PendingCycleAction::CycleWeaponMiss {
-                attacker_char_id,
-                attacker_ship_id,
-                target_id,
-                target_char_id,
-                module_type_id,
-                notified,
-            } => {
-                if !notified {
-                    emit_cycle_weapon_log_entries(
-                        ctx,
-                        attacker_char_id,
-                        attacker_ship_id,
-                        target_id,
-                        target_char_id,
-                        module_type_id,
-                        None,
-                    );
-                }
-            }
-            crate::system_actor::PendingCycleAction::RepeatCycleStart {
-                char_id,
-                ship_id,
-                module_id,
-                module_type_id,
-                target_id,
-                duration_s,
-                is_overloaded,
-                effect_name,
-            } => {
-                ctx.record_module_reactivation_delay(ship_id, module_id, duration_s);
-                let Some(mod_type) = ctx.sde.types.get(&module_type_id).cloned() else {
-                    continue;
-                };
-                let fit_opt = ctx.fit(char_id, ship_id).ok();
-                let mod_state = fit_opt
-                    .as_ref()
-                    .map(|f| {
-                        f.build_effective_module_state(
-                            module_id,
-                            module_type_id,
-                            is_overloaded,
-                            &ctx.sde,
-                        )
-                    })
-                    .unwrap_or_else(|| DogmaItemState::from_sde(char_id, module_type_id, &ctx.sde));
-                let m_eff = fit_opt
-                    .as_ref()
-                    .and_then(|f| f.modules.get(&module_id).cloned())
-                    .unwrap_or(eve_dogma::FittedModule {
-                        item_id: module_id,
-                        type_id: module_type_id,
-                        flag_id: 27,
-                        state: if is_overloaded {
-                            eve_dogma::ModuleState::Overloaded
-                        } else {
-                            eve_dogma::ModuleState::Active
-                        },
-                        charge_type_id: None,
-                        charge_quantity: 0,
-                        damage_hp: 0.0,
-                        max_hp: 40.0,
-                        dynamic_attribute_overrides: HashMap::new(),
-                    });
-                let pulse_res = run_pre_notify_instant_module_effects(
-                    ctx, &sys, sys_id, char_id, ship_id, module_id, &m_eff, &mod_type, &mod_state, is_overloaded, target_id, duration_s, &empty_kw,
-                ).await;
-                if pulse_res.is_err() {
-                    deactivate_repeating_cycle_after_action(ctx, &sys, Some(char_id), ship_id, module_id, &effect_name).await;
-                }
-            }
-            crate::system_actor::PendingCycleAction::SyncOverloadState { char_id, ship_id, module_id, is_overloaded } => {
-                if let Some(cid) = char_id.or_else(|| ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.owner_id))) {
-                    if let Ok(mut fit) = ctx.fit(cid, ship_id) {
-                        if let Some(fm) = fit.modules.get_mut(&module_id).filter(|m| m.state != eve_dogma::ModuleState::Offline) {
-                            fm.state = if is_overloaded { eve_dogma::ModuleState::Overloaded } else { eve_dogma::ModuleState::Active };
-                        }
-                        ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
-                        ctx.invalidate_and_push_fit(ship_id);
-                        crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, cid, sys_id, ship_id).await;
-                    }
-                }
-            }
-            crate::system_actor::PendingCycleAction::InvalidateShipFitting { char_id, ship_id } => {
-                ctx.invalidate_and_push_fit(ship_id);
-                if let Some(cid) = char_id.or_else(|| ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.owner_id))) {
-                    let _ = ctx.fit(cid, ship_id);
-                    crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, cid, sys_id, ship_id).await;
-                }
-            }
-            crate::system_actor::PendingCycleAction::CycleChargeItemMutations {
-                char_id,
-                ship_id,
-                diffs,
-            } => {
-                emit_ship_charge_item_diffs(ctx, char_id, ship_id, &diffs);
-            }
-            crate::system_actor::PendingCycleAction::AutoReloadStarted {
-                char_id,
-                module_ids,
-                charge_type_id,
-                time_ms,
-                sim_deadline_s,
-                notified,
-                ..
-            } => {
-                let sim_now = ctx.systems.get_system_sim_elapsed(sys_id);
-                ctx.systems.record_module_reload_sim_deadlines(
-                    &module_ids,
-                    sys_id,
-                    sim_now,
-                    sim_deadline_s,
-                );
-                if !notified && char_id > 0 && !module_ids.is_empty() {
-                    let _ = ctx.emit_typed(
-                        crate::router::NotificationTarget::Character(char_id),
-                        crate::router::notify_registry::OnChargeBeingLoadedToModule {
-                            item_ids: module_ids,
-                            charge_type_id: i64::from(charge_type_id),
-                            time_ms,
-                        },
-                    );
-                }
-            }
-            crate::system_actor::PendingCycleAction::NoChargesDeactivated {
-                char_id,
-                module_type_id,
-                notified,
-            } => {
-                if !notified && char_id > 0 {
-                    let _ = ctx.emit_typed(
-                        crate::router::NotificationTarget::Character(char_id),
-                        crate::router::notify_registry::OnRemoteMessage {
-                            msg_id: "NoCharges".into(),
-                            dict: Some(PyRep::Dict(vec![(
-                                PyRep::String("type".into()),
-                                PyRep::Tuple(vec![
-                                    PyRep::Integer(4),
-                                    PyRep::Integer(i64::from(module_type_id)),
-                                ]),
-                            )])),
-                            kw: None,
-                        },
-                    );
-                }
-            }
-            crate::system_actor::PendingCycleAction::ShipCapacitorChanged {
-                char_id,
-                ship_id,
-                new_cap,
-                max_cap,
-                old_cap,
-                notified,
-            } => {
-                if !notified {
-                    let _ = ctx.notify_ship_capacitor_change(
-                        char_id,
-                        ship_id,
-                        new_cap,
-                        max_cap,
-                        Some(old_cap),
-                    );
-                }
-            }
-            crate::system_actor::PendingCycleAction::CareerProgressEvent {
-                char_id,
-                source_ship_id,
-                target_id,
-                activity_kind,
-                sub_kind,
-                amount,
-            } => match activity_kind {
-                "ewar" => crate::services::quasar_career_goals::record_ewar_career_seconds(
-                    ctx, char_id, target_id, sub_kind, amount,
-                ),
-                "cap_warfare" => crate::services::quasar_career_goals::record_cap_warfare_career(
-                    ctx,
-                    char_id,
-                    source_ship_id,
-                    target_id,
-                    sub_kind,
-                    amount,
-                ),
-                "remote_repair" => {
-                    crate::services::quasar_career_goals::record_remote_repair_career(
-                        ctx, char_id, target_id, sub_kind, amount,
-                    );
-                }
-                _ => {}
-            },
-        }
-    }
+    Ok(None)
 }
 
 fn is_targeted_aggression_cycle_group(group_id: u32) -> bool {
@@ -2957,11 +2220,15 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
     if sys.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_tethered) {
         return Err(BridgeRpcError { code: "Tethered".into(), message: "Cannot activate remote assistance module while tethered".into(), client_error: None });
     }
-    let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
-    let mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
-    let opt_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
-    let falloff = eve_dogma::get_module_falloff(&mod_state, &ctx.sde);
-    let max_range = if opt_range > 0.0 { opt_range + falloff.max(0.0) } else { 40_000.0 };
+    let (is_overloaded, max_range, cap_need) = {
+        let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
+        let mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
+        let opt_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
+        let falloff = eve_dogma::get_module_falloff(&mod_state, &ctx.sde);
+        let max_range = if opt_range > 0.0 { opt_range + falloff.max(0.0) } else { 40_000.0 };
+        let cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);
+        (is_overloaded, max_range, cap_need)
+    };
     let attacker_pos = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position);
     let target_info = ctx.db.with_snapshot(|s| {
         s.structures
@@ -2979,7 +2246,6 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
             ));
         }
     }
-    let cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);
     if cap_need > 0.0 {
         let cs = sys.get_combat_state(ship_id).await.ok().flatten();
         let cur_cap = cs.as_ref().map(|c| c.capacitor).unwrap_or(0.0);
