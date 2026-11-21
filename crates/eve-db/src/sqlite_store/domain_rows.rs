@@ -2356,13 +2356,13 @@ pub(crate) fn sync_notes_lp_domain_rows(
 }
 
 // ============================================================================
-// Family 7 (`sp6_lifecycle`) lives in `domain_rows_sp6_lifecycle.rs` and is
-// re-exported here so `domain_rows` remains the single entry point for migrated families.
+// Lifecycle runtime persistence lives in `lifecycle_store.rs` and is re-exported
+// here so `domain_rows` remains the single entry point for migrated domains.
 // ============================================================================
 
 #[cfg(test)]
-pub(crate) use super::domain_rows_sp6_lifecycle::LEGACY_SP6_LIFECYCLE_STATE_SQL;
-pub(crate) use super::domain_rows_sp6_lifecycle::{
+pub(crate) use super::lifecycle_store::LEGACY_SP6_LIFECYCLE_STATE_SQL;
+pub(crate) use super::lifecycle_store::{
     drop_legacy_sp6_lifecycle_table, load_sp6_lifecycle_domain_rows,
     sync_sp6_lifecycle_domain_rows,
 };

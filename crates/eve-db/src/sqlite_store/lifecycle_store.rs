@@ -1,4 +1,4 @@
-//! Family 7 (`sp6_lifecycle`) `domain_rows` persistence with exhaustive struct destructuring (`#1490`).
+//! Lifecycle runtime `domain_rows` persistence with exhaustive struct destructuring (`#1490`).
 
 use super::domain_rows::{
     decode_map_entry, diff_cow_map_field, diff_scalar, fetch_domain_row_entries,
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS sp6_lifecycle_state (
     state_json TEXT NOT NULL
 );";
 
-macro_rules! for_each_sp6_lifecycle_field {
+macro_rules! for_each_lifecycle_field {
     ($cb:ident) => {
         $cb!(
             maps: [
@@ -42,7 +42,7 @@ macro_rules! for_each_sp6_lifecycle_field {
     };
 }
 
-macro_rules! impl_sp6_lifecycle_persist {
+macro_rules! impl_lifecycle_persist {
     (maps: [$($map_f:ident),* $(,)?], scalars: [$($scalar_f:ident),* $(,)?]) => {
         impl Persist for crate::Sp6PersistedState {
             fn collect_diff_ops(
@@ -152,9 +152,9 @@ macro_rules! impl_sp6_lifecycle_persist {
     };
 }
 
-for_each_sp6_lifecycle_field!(impl_sp6_lifecycle_persist);
+for_each_lifecycle_field!(impl_lifecycle_persist);
 
-/// Loads Family 7 (`sp6_lifecycle`) from `domain_rows` and migrates any remaining legacy
+/// Loads lifecycle runtime state from `domain_rows` and migrates any remaining legacy
 /// `sp6_lifecycle_state` table if present (`domain_rows` entries win on collision).
 ///
 /// Fails closed if any `domain_rows` or legacy row fails checked parsing and quarantine is disabled,
@@ -208,7 +208,7 @@ pub(crate) fn drop_legacy_sp6_lifecycle_table(tx: &Transaction<'_>) -> Result<()
         .map_err(|e| format!("drop legacy sp6_lifecycle_state table: {e}"))
 }
 
-/// Synchronizes Family 7 (`sp6_lifecycle`) into `domain_rows`.
+/// Synchronizes lifecycle runtime state into `domain_rows`.
 pub(crate) fn sync_sp6_lifecycle_domain_rows(
     tx: &Transaction<'_>,
     snap: &crate::WorldStateSnapshot,
