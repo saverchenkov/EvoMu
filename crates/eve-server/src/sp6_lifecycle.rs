@@ -31,7 +31,9 @@ pub use cluster_tick::{
     tick_background_cluster, tick_background_cluster_with_step, MAX_PHYSICS_BACKLOG_STEPS,
     PHYSICS_TICK_STEP_BUDGET, SYSTEM_STEP_ASK_TIMEOUT,
 };
-pub(crate) use cluster_tick::sweep_expired_cosmic_anomalies_and_signatures;
+pub(crate) use cluster_tick::{
+    populate_persisted_space_objects_with_warps, sweep_expired_cosmic_anomalies_and_signatures,
+};
 pub use cluster_tick_downtime::{
     cleanup_npc_wrecks_and_reset_missions_on_downtime, clear_safe_logoff,
     disconnect_safe_logoff_sessions, recover_scanner_probes_on_downtime,
@@ -1897,14 +1899,9 @@ pub fn handle_character_logoff_or_disconnect_sync(
         persist_ship_combat_hp_in_db(&ctx.db, ship_id, &cs);
     }
     abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
-    ctx.return_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&ship_id);
-    ctx.pending_warp_finished
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&ship_id);
+    if let Some(ref sys_handle) = sys_handle_opt {
+        sys_handle.clear_return_and_pending_warp(ship_id);
+    }
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
     });
@@ -2090,7 +2087,7 @@ pub fn reconnect_character_in_space_sync(
     let keep_client_warp =
         pre_warp_pos_opt.is_none() && sys_handle.committed_warp_destination_sync(ship_id).is_some();
     if !keep_client_warp {
-        crate::services::space_destiny::clear_warp_tracking(ctx, Some(&sys_handle), ship_id);
+        crate::services::space_destiny::clear_warp_tracking(&sys_handle, ship_id);
     }
     let (group_id, category_id, mass, radius, max_vel, inertia, warp_speed) =
         sde_ship_physics(&ctx.sde, ship_type_id);
@@ -2154,30 +2151,16 @@ pub fn reconnect_character_in_space_sync(
             bp.queue_set_state(ship_id);
         }
         if started_return_warp {
-            sys_handle.set_warp_provenance(
-                ship_id,
-                crate::system_actor::WarpProvenance::ReconnectReturnWarp,
-            );
-            ctx.return_warps
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(ship_id);
-        } else {
-            if !keep_client_warp {
-                sys_handle.clear_warp_provenance(ship_id);
-            }
-            ctx.return_warps
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&ship_id);
-        }
-        if keep_client_warp {
+            sys_handle.track_return_warp(ship_id);
+        } else if keep_client_warp {
             crate::services::space_destiny::track_player_or_fleet_warp(
-                ctx,
-                Some(&sys_handle),
+                &sys_handle,
                 ship_id,
                 char_id,
             );
+        } else {
+            sys_handle.clear_warp_provenance(ship_id);
+            sys_handle.clear_return_and_pending_warp(ship_id);
         }
         let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
             snap.item_positions
@@ -2288,27 +2271,12 @@ pub fn reconnect_character_in_space_sync(
         bp.queue_set_state(ship_id);
     }
     if started_return_warp {
-        sys_handle.set_warp_provenance(
-            ship_id,
-            crate::system_actor::WarpProvenance::ReconnectReturnWarp,
-        );
-        ctx.return_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(ship_id);
+        sys_handle.track_return_warp(ship_id);
     } else if resume_client_warp {
-        crate::services::space_destiny::track_player_or_fleet_warp(
-            ctx,
-            Some(&sys_handle),
-            ship_id,
-            char_id,
-        );
+        crate::services::space_destiny::track_player_or_fleet_warp(&sys_handle, ship_id, char_id);
     } else {
         sys_handle.clear_warp_provenance(ship_id);
-        ctx.return_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id);
+        sys_handle.clear_return_and_pending_warp(ship_id);
     }
 
     Some((sys_id, ship_id, final_pos))

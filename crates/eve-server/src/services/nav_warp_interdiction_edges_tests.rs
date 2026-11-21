@@ -456,10 +456,7 @@ async fn interdiction_bubbles_and_execute_agency_content_warp_paths() {
     assert!(!notifs.iter().any(|n| n.event == "OnWarpStarted"));
     let warped_ball = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
     assert!(matches!(warped_ball.mode, MovementMode::Warp { .. }));
-    assert_eq!(
-        ctx.active_warps.lock().unwrap().get(&ship_id).copied(),
-        Some(char_id)
-    );
+    assert_eq!(sys_handle.active_warp_char(ship_id), Some(char_id));
 
     // 8. Full capacitor normal warp (200 km) deducts < max_cap and retains remainder
     let short_dest = DVec3::new(200_000.0, 0.0, 0.0);

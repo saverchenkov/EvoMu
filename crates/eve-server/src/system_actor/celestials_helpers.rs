@@ -548,47 +548,16 @@ pub(crate) fn remove_ball_checkpoint_tracking(
 ) {
     state.ball_space_entry_epochs.remove(&ball_id);
     state.last_checkpointed_balls.remove(&ball_id);
-    state.warp_provenance.remove(&ball_id);
-    clear_shared_warp_tracking(&state.warp_tracking, ball_id, true);
+    state.warp_state.clear_ball(ball_id, true);
 }
 
-/// Clears shared `ServerContext` active-warp tracking tables for `ball_id` without holding
-/// multiple `RANK_LEAF` locks simultaneously (`#1175`).
-pub(crate) fn clear_shared_warp_tracking(
-    tracking: &crate::system_actor::types::SharedWarpTracking,
-    ball_id: BallId,
-    clear_pending_finished: bool,
-) {
-    if let Some(ref active_warps) = tracking.active_warps {
-        active_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ball_id);
-    }
-    if let Some(ref return_warps) = tracking.return_warps {
-        return_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ball_id);
-    }
-    if clear_pending_finished {
-        if let Some(ref pending) = tracking.pending_warp_finished {
-            pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&ball_id);
-        }
-    }
-}
-
-/// Prunes landed or deactivated warps from actor provenance and shared `active_warps` /
-/// `return_warps`, deferring `OnWarpFinished` delivery to `pending_warp_finished` when a
-/// player or fleet warp completes (`#1175`).
+/// Prunes landed or deactivated warps from actor `warp_state`, deferring `OnWarpFinished`
+/// delivery to `warp_state.pending_warp_finished` when a player, fleet, or return warp
+/// completes (`#1175`, `#1541`).
 pub(crate) fn clear_landed_warp_tracking_from_events(
     ballpark: &Ballpark,
     events: &[eve_destiny::DestinyEvent],
-    warp_provenance: &mut HashMap<BallId, crate::system_actor::types::WarpProvenance>,
-    warp_tracking: &crate::system_actor::types::SharedWarpTracking,
+    warp_state: &mut crate::system_actor::types::ActorWarpState,
 ) {
     let is_currently_warping = |ball_id: BallId| {
         matches!(
@@ -630,24 +599,10 @@ pub(crate) fn clear_landed_warp_tracking_from_events(
     if deactivated_ids.is_empty() && removed_ids.is_empty() {
         return;
     }
-    let mut finished_player_or_fleet: Vec<BallId> = Vec::new();
     for &ball_id in &deactivated_ids {
-        let prev_prov = warp_provenance.remove(&ball_id);
-        let mut removed_active = false;
-        if let Some(ref active_warps) = warp_tracking.active_warps {
-            removed_active = active_warps
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&ball_id)
-                .is_some();
-        }
-        let mut removed_return = false;
-        if let Some(ref return_warps) = warp_tracking.return_warps {
-            removed_return = return_warps
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&ball_id);
-        }
+        let prev_prov = warp_state.provenance.remove(&ball_id);
+        let removed_active = warp_state.active_warps.remove(&ball_id).is_some();
+        let removed_return = warp_state.return_warps.remove(&ball_id);
         if stopped_ids.contains(&ball_id)
             && (removed_active
                 || removed_return
@@ -659,20 +614,11 @@ pub(crate) fn clear_landed_warp_tracking_from_events(
                     )
                 ))
         {
-            finished_player_or_fleet.push(ball_id);
-        }
-    }
-    if !finished_player_or_fleet.is_empty() {
-        if let Some(ref pending) = warp_tracking.pending_warp_finished {
-            let mut guard = pending.lock().unwrap_or_else(|e| e.into_inner());
-            for &ball_id in &finished_player_or_fleet {
-                guard.insert(ball_id);
-            }
+            warp_state.pending_warp_finished.insert(ball_id);
         }
     }
     for &ball_id in &removed_ids {
-        warp_provenance.remove(&ball_id);
-        clear_shared_warp_tracking(warp_tracking, ball_id, true);
+        warp_state.clear_ball(ball_id, true);
     }
 }
 
@@ -972,8 +918,7 @@ pub(crate) fn fast_forward_clock_in_actor(
     event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
 ) {
     let empty_epochs = HashMap::new();
-    let mut empty_provenance = HashMap::new();
-    let empty_tracking = crate::system_actor::types::SharedWarpTracking::default();
+    let mut empty_warp_state = crate::system_actor::types::ActorWarpState::default();
     fast_forward_clock_in_actor_with_epochs(
         solar_system_id,
         ballpark,
@@ -985,8 +930,7 @@ pub(crate) fn fast_forward_clock_in_actor(
         ball_positions_actor,
         scrambled_balls_actor,
         event_tx_actor,
-        &mut empty_provenance,
-        &empty_tracking,
+        &mut empty_warp_state,
     );
 }
 
@@ -1002,8 +946,7 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs(
     ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
-    warp_provenance: &mut HashMap<BallId, crate::system_actor::types::WarpProvenance>,
-    warp_tracking: &crate::system_actor::types::SharedWarpTracking,
+    warp_state: &mut crate::system_actor::types::ActorWarpState,
 ) {
     fast_forward_clock_in_actor_with_epochs_and_seq(
         solar_system_id,
@@ -1017,8 +960,7 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs(
         scrambled_balls_actor,
         event_tx_actor,
         None,
-        warp_provenance,
-        warp_tracking,
+        warp_state,
     );
 }
 
@@ -1035,8 +977,7 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs_and_seq(
     scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
     broadcast_seq_gate: Option<&std::sync::Mutex<u64>>,
-    warp_provenance: &mut HashMap<BallId, crate::system_actor::types::WarpProvenance>,
-    warp_tracking: &crate::system_actor::types::SharedWarpTracking,
+    warp_state: &mut crate::system_actor::types::ActorWarpState,
 ) {
     let Some(ball0) = ballpark.balls.get(&ship_id) else {
         return;
@@ -1070,7 +1011,7 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs_and_seq(
         sim_steps += 1;
         let evs = ballpark.step(1.0);
         persist_landed_warps_in_db(ballpark, &evs, db_opt, ball_space_entry_epochs);
-        clear_landed_warp_tracking_from_events(ballpark, &evs, warp_provenance, warp_tracking);
+        clear_landed_warp_tracking_from_events(ballpark, &evs, warp_state);
         let warp_exited = evs.iter().any(|e| {
             matches!(
                 e,
@@ -1263,12 +1204,11 @@ impl SystemHandle {
             bp.current_tick
         };
         self.record_warp_stop(ball_id);
-        let tracking = {
+        {
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            st.warp_provenance.remove(&ball_id);
-            st.warp_tracking.clone()
-        };
-        clear_shared_warp_tracking(&tracking, ball_id, true);
+            st.warp_state.clear_ball(ball_id, true);
+        }
+        self.publish_view();
         Ok(tick)
     }
 

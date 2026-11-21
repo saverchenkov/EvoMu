@@ -2075,9 +2075,7 @@ struct RuntimeBaseline {
     db: WorldTablesSnapshot,
     bound_keys: HashMap<u64, (u64, u64, i64, String, i64)>,
     bound_entries: HashMap<u64, BoundObjectEntry>,
-    active_warps: HashMap<i64, i64>,
-    return_warps: HashSet<i64>,
-    pending_warp_finished: HashSet<i64>,
+    warp_states: BTreeMap<u32, eve_server::system_actor::ActorWarpState>,
     location_change_invuln: HashMap<i64, u64>,
     global_config_values: HashMap<String, PyRep>,
     ephemeral_counts: [usize; 8],
@@ -2154,6 +2152,21 @@ fn current_ephemeral_counts(ctx: &ServerContext) -> [usize; 8] {
     [c0, c1, c2, c3, c4, c5, c6, c7]
 }
 
+fn capture_warp_states(ctx: &ServerContext) -> BTreeMap<u32, eve_server::system_actor::ActorWarpState> {
+    ctx.systems
+        .active_system_handles()
+        .into_iter()
+        .filter_map(|(sid, h)| {
+            let st = h.snapshot_warp_state_for_test();
+            (!st.provenance.is_empty()
+                || !st.active_warps.is_empty()
+                || !st.return_warps.is_empty()
+                || !st.pending_warp_finished.is_empty())
+            .then_some((sid, st))
+        })
+        .collect()
+}
+
 fn capture_runtime_baseline(fix: &MatrixFixture) -> RuntimeBaseline {
     let db = fix.ctx.db.snapshot_tables();
     let bound_entries = fix
@@ -2177,14 +2190,7 @@ fn capture_runtime_baseline(fix: &MatrixFixture) -> RuntimeBaseline {
             )
         })
         .collect();
-    let active_warps = fix.ctx.active_warps.lock().expect("active_warps").clone();
-    let return_warps = fix.ctx.return_warps.lock().expect("return_warps").clone();
-    let pending_warp_finished = fix
-        .ctx
-        .pending_warp_finished
-        .lock()
-        .expect("pending_warp_finished")
-        .clone();
+    let warp_states = capture_warp_states(&fix.ctx);
     let location_change_invuln = fix
         .ctx
         .location_change_invuln
@@ -2227,9 +2233,7 @@ fn capture_runtime_baseline(fix: &MatrixFixture) -> RuntimeBaseline {
         db,
         bound_keys,
         bound_entries,
-        active_warps,
-        return_warps,
-        pending_warp_finished,
+        warp_states,
         location_change_invuln,
         global_config_values,
         ephemeral_counts,
@@ -2263,21 +2267,14 @@ fn check_runtime_changed(
                 })
             })
     };
-    let w0 = *fix.ctx.active_warps.lock().expect("active_warps") != base.active_warps;
-    let w1 = *fix.ctx.return_warps.lock().expect("return_warps") != base.return_warps;
-    let w2 = *fix
-        .ctx
-        .pending_warp_finished
-        .lock()
-        .expect("pending_warp_finished")
-        != base.pending_warp_finished;
-    let w3 = *fix
+    let warp_states_dirty = capture_warp_states(&fix.ctx) != base.warp_states;
+    let invuln_dirty = *fix
         .ctx
         .location_change_invuln
         .lock()
         .expect("location_change_invuln")
         != base.location_change_invuln;
-    let warps_dirty = w0 || w1 || w2 || w3;
+    let warps_dirty = warp_states_dirty || invuln_dirty;
     let config_dirty = *fix
         .ctx
         .global_config_values
@@ -2372,13 +2369,13 @@ async fn restore_world_state(
     if bound_dirty {
         *fix.ctx.bound_objects.write().expect("bound_objects") = base.bound_entries.clone();
     }
-    *fix.ctx.active_warps.lock().expect("active_warps") = base.active_warps.clone();
-    *fix.ctx.return_warps.lock().expect("return_warps") = base.return_warps.clone();
-    *fix
-        .ctx
-        .pending_warp_finished
-        .lock()
-        .expect("pending_warp_finished") = base.pending_warp_finished.clone();
+    for (sid, h) in fix.ctx.systems.active_system_handles() {
+        if let Some(st) = base.warp_states.get(&sid) {
+            h.restore_warp_state_for_test(st.clone());
+        } else {
+            h.clear_all_warp_tracking_for_test();
+        }
+    }
     *fix
         .ctx
         .location_change_invuln
@@ -4605,35 +4602,23 @@ fn target_b_state_mutated(
 
     // Target B's warp/invuln runtime entries must remain invariant (acquire one lock at a time for lock-rank safety).
     let b_ship_ids = [fix.b_ship_id, fix.b_space_ship_id];
-    let aw_dirty = {
-        let aw = fix.ctx.active_warps.lock().expect("active_warps");
-        b_ship_ids
-            .iter()
-            .any(|id| aw.get(id) != base.active_warps.get(id))
-    };
-    if aw_dirty {
-        return true;
-    }
-    let rw_dirty = {
-        let rw = fix.ctx.return_warps.lock().expect("return_warps");
-        b_ship_ids
-            .iter()
-            .any(|id| rw.contains(id) != base.return_warps.contains(id))
-    };
-    if rw_dirty {
-        return true;
-    }
-    let pw_dirty = {
-        let pw = fix
-            .ctx
-            .pending_warp_finished
-            .lock()
-            .expect("pending_warp_finished");
-        b_ship_ids
-            .iter()
-            .any(|id| pw.contains(id) != base.pending_warp_finished.contains(id))
-    };
-    if pw_dirty {
+    let warp_dirty = fix
+        .ctx
+        .systems
+        .active_system_handles()
+        .into_iter()
+        .any(|(sid, h)| {
+            let cur = h.snapshot_warp_state_for_test();
+            let base_ws = base.warp_states.get(&sid);
+            b_ship_ids.iter().any(|id| {
+                cur.active_warps.get(id) != base_ws.and_then(|b| b.active_warps.get(id))
+                    || cur.return_warps.contains(id)
+                        != base_ws.is_some_and(|b| b.return_warps.contains(id))
+                    || cur.pending_warp_finished.contains(id)
+                        != base_ws.is_some_and(|b| b.pending_warp_finished.contains(id))
+            })
+        });
+    if warp_dirty {
         return true;
     }
     let inv_dirty = {

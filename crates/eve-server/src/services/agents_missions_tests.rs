@@ -1411,7 +1411,7 @@ async fn agent_warp_guards_reject_docked_cloaked_and_scrambled_without_mutating_
     }
     let cs_cloak = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(cs_cloak.is_cloaked, "rejected cloaked warp must not decloak ship");
-    assert!(ctx.active_warps.lock().unwrap().is_empty());
+    assert!(sys_handle.view().active_warps.is_empty());
 
     // Combined active cloak + warp scramble also preserves cs.is_cloaked and initiates no warp
     let _ = sys_handle.try_update_combat_state(ship_id, |cs| {
@@ -1436,7 +1436,7 @@ async fn agent_warp_guards_reject_docked_cloaked_and_scrambled_without_mutating_
         err_cloak_scram.code
     );
     assert!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked);
-    assert!(ctx.active_warps.lock().unwrap().is_empty());
+    assert!(sys_handle.view().active_warps.is_empty());
 
     // 5. Uncloaked but scrambled -> WarpScrambled with zero ball/warp mutation
     let _ = sys_handle.try_update_combat_state(ship_id, |cs| {
@@ -1456,7 +1456,7 @@ async fn agent_warp_guards_reject_docked_cloaked_and_scrambled_without_mutating_
     .unwrap()
     .unwrap_err();
     assert_eq!(err_scram.code, CODE_WARP_SCRAMBLED);
-    assert!(ctx.active_warps.lock().unwrap().is_empty());
+    assert!(sys_handle.view().active_warps.is_empty());
 
     // 6. Subwarp GotoLocation guard when already in warp does not mutate cloak or mode
     let _ = sys_handle.try_update_combat_state(ship_id, |cs| {

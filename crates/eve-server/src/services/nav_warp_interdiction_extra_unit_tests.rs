@@ -654,7 +654,7 @@ async fn agency_warp_interdiction_bubbles_capacitor_tier_rollback_and_session_ti
         .expect("short warp succeeds with drained cap");
     let after_short = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(after_short.capacitor, 0.0);
-    assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(sys_handle.is_active_warp(ship_id));
     let b_warping = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
     assert!(matches!(b_warping.mode, MovementMode::Warp { .. }));
 

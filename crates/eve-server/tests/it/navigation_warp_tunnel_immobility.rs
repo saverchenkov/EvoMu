@@ -89,7 +89,7 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     .await
     .expect("CmdWarpToStuff");
     assert!(
-        ctx.active_warps.lock().unwrap().contains_key(&ship_id),
+        handle.is_active_warp(ship_id),
         "Active warp registry must track aligning ship"
     );
 
@@ -119,8 +119,8 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
         .await
         .expect("CmdStop must cancel WarpPhase::Aligning");
     assert!(
-        !ctx.active_warps.lock().unwrap().contains_key(&ship_id),
-        "Cancelling WarpPhase::Aligning via CmdStop must remove ship from ctx.active_warps"
+        !handle.is_active_warp(ship_id),
+        "Cancelling WarpPhase::Aligning via CmdStop must remove ship from system active_warps"
     );
     let obs_events = {
         let mut bp = handle.ballpark.write().unwrap();
@@ -158,7 +158,7 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     )
     .await
     .unwrap();
-    assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(handle.is_active_warp(ship_id));
     {
         let mut bp = handle.ballpark.write().unwrap();
         let _ = bp.drain_observer_events(observer_id);
@@ -183,7 +183,7 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     )
     .await
     .expect("CmdGotoPoint must cancel Aligning warp");
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!handle.is_active_warp(ship_id));
     let goto_events = {
         let mut bp = handle.ballpark.write().unwrap();
         bp.drain_observer_events(observer_id)
@@ -215,7 +215,7 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     )
     .await
     .unwrap();
-    assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(handle.is_active_warp(ship_id));
     ctx.dispatch_rpc(
         &mut sess,
         "beyonce",
@@ -227,7 +227,7 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     )
     .await
     .expect("CmdSetSpeedFraction(<0.75) must cancel Aligning warp");
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!handle.is_active_warp(ship_id));
 
     // 4. Verify align formula: align_time = ln(4)*inertia*mass/1e6 enters warp at >= 75% velocity.
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdStop", &[], &kw, None)
@@ -639,8 +639,8 @@ async fn venture_jita_to_maurasi_gate_cloak_break_52au_warp_and_next_jump() {
         .await
         .expect("UpdateStateRequest after warp completion");
     assert!(
-        !ctx.active_warps.lock().unwrap().contains_key(&ship_id),
-        "ctx.active_warps must be cleared once warp has landed"
+        !dest_handle.is_active_warp(ship_id),
+        "system active_warps must be cleared once warp has landed"
     );
 
     // Wait out the fixed wall-clock stargate session-change cooldown and jump back.

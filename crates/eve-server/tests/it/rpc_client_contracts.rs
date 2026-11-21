@@ -1741,14 +1741,9 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
     sess.ship_id = Some(SHIP_ID);
     sess.fleet_id = Some(FLEET_ID);
     eve_server::services::space_destiny::clear_session_change_timer(ctx, CHAR_ID);
-    ctx.active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&SHIP_ID);
-    ctx.return_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&SHIP_ID);
+    if let Some(sys_handle) = ctx.systems.get_handle(SYSTEM_ID) {
+        sys_handle.clear_warp_tracking(SHIP_ID);
+    }
     let cooldown_cleared = {
         let mut cd = ctx
             .module_reactivation_cooldowns

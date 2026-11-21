@@ -329,8 +329,6 @@ pub struct SystemRegistry {
     unrebased_clock_offset_secs: Arc<std::sync::atomic::AtomicU64>,
     /// Per-system in-flight physics-step atomic flags preventing a wedged system from accumulating overlapping ticks (`#1208`).
     physics_step_flags: RankedMutex<HashMap<SolarSystemId, Arc<std::sync::atomic::AtomicBool>>, RANK_LEAF>,
-    /// Shared `ServerContext` active-warp tracking tables wired into spawned system actors (`#1175`).
-    warp_tracking: types::SharedWarpTracking,
     /// Per-session `beyonce.UpdateStateRequest` cooldown guards owned by this `ServerContext` (`#1169`).
     pub(crate) explicit_update_state_guards:
         Arc<RankedMutex<HashMap<(u64, i64), types::ExplicitUpdateStateGuard>, RANK_LEAF>>,
@@ -376,7 +374,6 @@ impl SystemRegistry {
             lazy_stargate_activation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unrebased_clock_offset_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             physics_step_flags: RankedMutex::new(HashMap::new()),
-            warp_tracking: types::SharedWarpTracking::default(),
             explicit_update_state_guards: Arc::new(RankedMutex::new(HashMap::new())),
             location_invuln_ledger: RankedMutex::new(types::LocationInvulnLedger::default()),
         }
@@ -623,21 +620,6 @@ impl SystemRegistry {
         unrebased_clock_offset_secs: Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
         self.unrebased_clock_offset_secs = unrebased_clock_offset_secs;
-        self
-    }
-
-    /// Shares `ServerContext` warp-tracking tables with [`SystemRegistry`] so landed warps clear cleanly (`#1175`).
-    pub fn with_warp_tracking(
-        mut self,
-        active_warps: Arc<RankedMutex<HashMap<i64, i64>, RANK_LEAF>>,
-        return_warps: Arc<RankedMutex<std::collections::HashSet<i64>, RANK_LEAF>>,
-        pending_warp_finished: Arc<RankedMutex<std::collections::HashSet<i64>, RANK_LEAF>>,
-    ) -> Self {
-        self.warp_tracking = types::SharedWarpTracking {
-            active_warps: Some(active_warps),
-            return_warps: Some(return_warps),
-            pending_warp_finished: Some(pending_warp_finished),
-        };
         self
     }
 
@@ -1006,6 +988,22 @@ impl SystemRegistry {
         evicted
     }
 
+    /// Gracefully stops an active solar system actor task and removes it from the registry (`#1541`).
+    pub async fn stop_system(&self, solar_system_id: SolarSystemId) -> bool {
+        let removed = {
+            let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
+            guard.remove(&solar_system_id)
+        };
+        let Some(handle) = removed else {
+            return false;
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if handle.cmd_sender().send(SystemCommand::ShutdownActor { reply: tx }).await.is_ok() {
+            let _ = rx.await;
+        }
+        true
+    }
+
     /// Retrieves a running Solar System Actor handle, or spawns one only when a Tokio runtime
     /// reactor is currently active (`None` on headless non-Tokio teardown/unit threads).
     pub fn get_or_spawn_if_runtime(&self, solar_system_id: SolarSystemId) -> Option<SystemHandle> {
@@ -1072,6 +1070,7 @@ impl SystemRegistry {
         }
         let mut initial_asteroids = HashMap::new();
         let mut initial_asteroid_templates = HashMap::new();
+        let mut initial_warp_state = types::ActorWarpState::default();
         let initial_pending_disruptors = if let (Some(sde), Some(db)) = (&sde_opt, &db_opt) {
             if db_read_safe {
                 let first_sde_belt_ast_id =
@@ -1091,11 +1090,12 @@ impl SystemRegistry {
                         downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed),
                     );
                 }
-                let pending = crate::sp6_lifecycle::populate_persisted_space_objects(
+                let pending = crate::sp6_lifecycle::populate_persisted_space_objects_with_warps(
                     &mut initial_ballpark,
                     solar_system_id,
                     sde,
                     db,
+                    &mut initial_warp_state,
                 );
                 crate::services::cluster_macho_misc_services::populate_shipcaster_balls_with_sde(
                     solar_system_id,
@@ -1151,7 +1151,7 @@ impl SystemRegistry {
             idle_ticks: Arc::clone(&idle_ticks),
             dynamic_ball_count: Arc::clone(&dynamic_ball_count),
             pending_destroyed_balls: pending_destroyed_balls.clone(),
-            warp_tracking: self.warp_tracking.clone(),
+            warp_state: initial_warp_state,
             ..Default::default()
         };
         let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);
@@ -1235,6 +1235,10 @@ impl SystemRegistry {
             let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
             // parity: feat:lifecycle.world-unobserved-system-sim, plan:SP-7
             while let Some(cmd) = cmd_rx.recv().await {
+                if let SystemCommand::ShutdownActor { reply } = cmd {
+                    let _ = reply.send(());
+                    break;
+                }
                 let cmd_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 #[cfg(test)]
                 let countdown_hit = {
@@ -1332,8 +1336,7 @@ impl SystemRegistry {
                                     fit_projections,
                                     weapon_cycle_start_modules,
                                     pending_missile_launches,
-                                    warp_provenance,
-                                    warp_tracking,
+                                    warp_state,
                                     protection_registry,
                                     ..
                                 } = &mut *exec_ctx.actor_st;
@@ -1360,8 +1363,7 @@ impl SystemRegistry {
                                 }
                                 ballpark.add_ball(ball);
                                 if was_warping && !is_warp {
-                                    warp_provenance.remove(&ball_id);
-                                    celestials::clear_shared_warp_tracking(warp_tracking, ball_id, true);
+                                    warp_state.clear_ball(ball_id, true);
                                 }
                                 sync_protection_ball = Some(ball_id);
                                 *spawned_checkpoint_ball = Some(ball_id);

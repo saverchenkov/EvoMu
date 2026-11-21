@@ -339,7 +339,7 @@ fn map_destiny_nav_err(e: String) -> BridgeRpcError {
 }
 
 fn cancel_pending_warp_align_if_needed(
-    ctx: &ServerContext,
+    handle: &crate::system_actor::SystemHandle,
     ship_id: i64,
     prev_mode: &MovementMode,
 ) {
@@ -350,7 +350,7 @@ fn cancel_pending_warp_align_if_needed(
             ..
         }
     ) {
-        crate::services::space_destiny::clear_warp_tracking(ctx, None, ship_id);
+        crate::services::space_destiny::clear_warp_tracking(handle, ship_id);
     }
 }
 
@@ -394,7 +394,7 @@ pub(crate) async fn handle_cmd_goto_point(
         .await
         .map(|tick| PyRep::Integer(tick as i64))
         .map_err(map_destiny_nav_err)?;
-    cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
+    cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx, char_id, sys_id, ship_id, None,
     )
@@ -861,7 +861,7 @@ pub(crate) async fn handle_cmd_goto_direction(
         .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
         .await
         .map_err(map_destiny_nav_err)?;
-    cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
+    cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
     Ok(PyRep::Integer(tick as i64))
 }
 
@@ -921,7 +921,7 @@ pub(crate) async fn handle_cmd_stop(
         .set_movement_mode(ship_id, MovementMode::Stop)
         .await
         .map_err(map_destiny_nav_err)?;
-    cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
+    cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
     // Live TCP sessions (`!session.address.is_empty()`) receive `[SetSpeedFraction, Stop, SetBallVelocity]`
     // via `macho_listener` / `main` draining `observer_events` into a single `DoDestinyUpdate`.
     if session.address.is_empty() {
@@ -1039,7 +1039,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
                 .set_movement_mode(ship_id, MovementMode::Stop)
                 .await
                 .map_err(map_destiny_nav_err)?;
-            cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
+            cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
             return Ok(PyRep::Integer(tick as i64));
         } else if clamped < 0.75 {
             let dir = (destination - current_ball.position).normalize_or_zero();
@@ -1048,7 +1048,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
                 .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
                 .await
                 .map_err(map_destiny_nav_err)?;
-            cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
+            cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
         }
     }
     handle
@@ -1163,7 +1163,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         target_id,
         ctx.now_machonet_wallclock_ms(),
     );
-    cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
+    cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx,
         char_id,
@@ -1281,7 +1281,7 @@ pub(crate) async fn handle_cmd_align_to(
         );
     }
     let _ = handle.set_speed_fraction(ship_id, 1.0).await;
-    cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
+    cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx,
         char_id,

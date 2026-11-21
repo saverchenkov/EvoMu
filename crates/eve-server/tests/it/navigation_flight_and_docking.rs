@@ -232,7 +232,7 @@ async fn test_navigation_dock_at_warp_destination_before_server_tick_completes()
         assert!(matches!(dock_ok, PyRep::KeyVal(_)));
         assert_eq!(sess.station_id, Some(JITA_44_STATION));
     }
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!sys_handle.is_active_warp(ship_id));
 }
 
 #[tokio::test]
@@ -553,7 +553,7 @@ async fn test_navigation_warp_dock_emits_stop_warp_destiny_before_session_change
         .call_exchange("stationSvc", None, "Dock", &[PyRep::Integer(JITA_44_STATION)], &kw)
         .await;
     assert_warp_stop_precedes_session_change("stationSvc.Dock", ship_id, &dock_out1);
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!sys_handle.is_active_warp(ship_id));
 
     // 2. beyonce.CmdDock while arriving from warp (arrived_at_warp_dest == true).
     ctx.advance_secs(12);
@@ -601,7 +601,7 @@ async fn test_navigation_warp_dock_emits_stop_warp_destiny_before_session_change
         )
         .await;
     assert_warp_stop_precedes_session_change("beyonce.CmdDock", ship_id, &dock_out2);
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!sys_handle.is_active_warp(ship_id));
 }
 
 #[tokio::test]
