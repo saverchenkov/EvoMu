@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::contract_legacy_bid_div;
+use super::{contract_legacy_bid_div, rpc_err};
 use crate::domain::market_acl::ContractAvailability;
 use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 use eve_db::{ContractRecord, InventoryFlag, InventoryItemRecord, IskCents, TypeId, WorldStateSnapshot};
@@ -360,14 +360,6 @@ pub(crate) fn lazy_resolve_expired_and_notify(
         summary.push((cid, new_state));
     }
     summary
-}
-
-pub(crate) fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError {
-        code: code.into(),
-        message: message.into(),
-        client_error: None,
-    }
 }
 
 pub(crate) fn parse_requested_items(
@@ -1046,7 +1038,13 @@ pub(crate) fn handle_gm_expire_contract(
             .values()
             .find(|a| a.user_id == user_id)
             .map(|a| a.role)
-            .unwrap_or(session.role);
+            .unwrap_or_else(|| {
+                if user_id != 0 && !snap.accounts.is_empty() {
+                    0
+                } else {
+                    session.role
+                }
+            });
         let has_gm_role = (effective_role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
         if !has_gm_role {
             return Err(rpc_err("GMRoleRequired", "GM_ExpireContract requires GM role"));

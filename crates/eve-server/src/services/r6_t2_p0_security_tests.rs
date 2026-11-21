@@ -252,7 +252,7 @@ fn r6_t2_02_issue_371_contract_delete_multiple_security() {
         assert_eq!(parts[1].row_count(), Some(1));
     }
 
-    // 2. Contract Manager deleting corp contract restores item to corp_id + Deliveries (NOT personal hangar!)
+    // 2. Contract Manager deleting corp contract settles missing-orig-flag item to corp_id + CorpDeliveries (NOT personal hangar!)
     //    and rejects Expired contracts & unlocked foreign item_ids
     let mgr_sess = sess(issuer_id, corp_id, 30_000_142, Some(station_id), ROLE_CONTRACT_MANAGER);
     let r2 = handle_contract_delete_multiple(&ctx, &mgr_sess, &[PyRep::List(vec![
@@ -267,7 +267,7 @@ fn r6_t2_02_issue_371_contract_delete_multiple_security() {
         let ci = &snap.items[&corp_item];
         assert_eq!(ci.owner_id, corp_id);
         assert_eq!(ci.location_id, station_id);
-        assert_eq!(ci.flag, InventoryFlag::Deliveries);
+        assert_eq!(ci.flag, InventoryFlag::CorpDeliveries);
         assert!(ci.version > 1);
 
         let ei = &snap.items[&escrow_item];

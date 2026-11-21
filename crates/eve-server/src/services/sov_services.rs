@@ -1230,6 +1230,19 @@ pub(crate) fn corp_has_db_role_table(
         })
 }
 
+fn resolve_contract_caller_corp(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    session_corp_id: Option<i64>,
+) -> i64 {
+    snap.characters
+        .get(&char_id)
+        .map(|ch| ch.corporation_id)
+        .filter(|&id| id != 0)
+        .or(session_corp_id)
+        .unwrap_or(0)
+}
+
 fn effective_contract_helper_corp_roles(
     snap: &eve_db::WorldStateSnapshot,
     corp_id: i64,
@@ -1242,7 +1255,7 @@ fn effective_contract_helper_corp_roles(
         corp_id,
         char_id,
         None,
-        session_role,
+        0,
         now_unix,
     );
     if !is_ceo && r == 0 && session_role != 0 && !corp_has_db_role_table(snap, corp_id) {
@@ -1272,30 +1285,25 @@ pub fn handle_contract_delete_notif(
     let for_corp = args
         .get(1)
         .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64().unwrap_or(0) != 0);
-    let caller_corp = session.corporation_id.unwrap_or(0);
-    let owner_id = if for_corp { caller_corp } else { char_id };
+    let session_corp_id = session.corporation_id;
     let now_unix = ctx.now_unix();
     let changed = ctx.db.try_with_mut_snapshot(|snap| {
+        let effective_caller_corp = resolve_contract_caller_corp(snap, char_id, session_corp_id);
+        let owner_id = if for_corp { effective_caller_corp } else { char_id };
         if for_corp {
-            if caller_corp < 98_000_000 {
+            if effective_caller_corp < 98_000_000 {
                 return Err(BridgeRpcError {
                     code: "CrpAccessDenied".into(),
                     message: "Corporation contract notifications require a player corporation".into(),
                     client_error: None,
                 });
             }
-            let allowed = effective_contract_helper_corp_roles(
+            if !crate::services::contracts_service::has_corp_contract_role(
                 snap,
-                caller_corp,
                 char_id,
-                session.corp_role,
+                effective_caller_corp,
                 now_unix,
-            )
-            .is_some_and(|(is_ceo, r)| {
-                is_ceo
-                    || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
-            });
-            if !allowed {
+            ) {
                 return Err(BridgeRpcError {
                     code: "CrpAccessDenied".into(),
                     message: "Deleting corporation contract notifications requires Contract Manager or Director role".into(),
@@ -1368,34 +1376,16 @@ pub fn handle_contract_delete_multiple(
             client_error: None,
         });
     }
-    let caller_corp = session.corporation_id.unwrap_or(0);
+    let session_corp_id = session.corporation_id;
     let now_unix = ctx.now_unix();
     let (deleted, failed, item_changes, transferred_ids) = ctx.db.try_with_mut_snapshot(|snap| {
-        let effective_caller_corp = snap
-            .characters
-            .get(&char_id)
-            .map(|ch| ch.corporation_id)
-            .filter(|&id| id != 0)
-            .unwrap_or(caller_corp);
-        let in_corp_db = snap.corporations.get(&effective_caller_corp).is_some_and(|corp| {
-            corp.ceo_id == char_id
-                || corp.members.contains(&char_id)
-                || corp.member_roles.contains_key(&char_id)
-                || (corp.members.is_empty()
-                    && corp.member_roles.is_empty()
-                    && snap.characters.get(&char_id).is_some_and(|ch| ch.corporation_id == effective_caller_corp))
-        });
-        let corp_mgr = effective_contract_helper_corp_roles(
+        let effective_caller_corp = resolve_contract_caller_corp(snap, char_id, session_corp_id);
+        let corp_mgr = crate::services::contracts_service::has_corp_contract_role(
             snap,
-            effective_caller_corp,
             char_id,
-            if in_corp_db { session.corp_role } else { 0 },
+            effective_caller_corp,
             now_unix,
-        )
-        .is_some_and(|(is_ceo, r)| {
-            is_ceo
-                || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
-        });
+        );
         let mut del = Vec::new();
         let mut fail = Vec::new();
         let mut changes: Vec<(eve_db::InventoryItemRecord, i64, i64, eve_db::InventoryFlag)> = Vec::new();

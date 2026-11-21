@@ -714,8 +714,8 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
         assert!(!s.sov_runtime.mercenary_dens.contains_key(&den_id));
     });
 
-    // handle_contract_delete_multiple for_corp restores escrow items to CorpDeliveries & returns failed missing id
-    sess.corp_role = eve_db::corp_roles::ROLE_CONTRACT_MANAGER;
+    // handle_contract_delete_multiple for_corp restores escrow items to CorpDeliveries & returns failed missing id (DB-authoritative even when sess.corp_role == 0)
+    sess.corp_role = 0;
     let del_res = handle_contract_delete_multiple(
         &ctx,
         &sess,
@@ -743,6 +743,8 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
             c.ticker = "BRC".into();
             c
         });
+        // In-corp member of DB-backed corp_id lacking member_roles/corp_role_assignments must still get 0
+        s.corporations.get_mut(&corp_id).unwrap().members.insert(other_char);
     });
     ctx.db.with_snapshot(|s| {
         assert!(!super::corp_has_db_role_table(s, 999_999_999));

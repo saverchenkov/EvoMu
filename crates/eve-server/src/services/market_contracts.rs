@@ -1893,13 +1893,13 @@ pub fn handle(
                     c.issuer_id
                 };
                 let winner = c.current_bidder_id.filter(|_| has_winner).unwrap_or(issuer_entity_id);
-                let target_flag = if has_winner && snap.corporations.contains_key(&winner) {
-                    InventoryFlag::CorpDeliveries
-                } else if !has_winner && c.for_corp && c.issuer_corp_id != 0 {
-                    InventoryFlag::CorpSAG1
-                } else {
-                    InventoryFlag::Hangar
-                };
+                let default_flag_override = has_winner.then(|| {
+                    if snap.corporations.contains_key(&winner) {
+                        InventoryFlag::CorpDeliveries
+                    } else {
+                        InventoryFlag::Hangar
+                    }
+                });
                 let finish_delta = super::contracts_service::ContractNotifyDelta::capture(
                     snap,
                     char_id,
@@ -1913,7 +1913,7 @@ pub fn handle(
                     &c.item_ids,
                     winner,
                     c.start_station_id,
-                    Some(target_flag),
+                    default_flag_override,
                     false,
                 );
                 snap.refund_contract_deposit(&c, now_unix, "finished auction");

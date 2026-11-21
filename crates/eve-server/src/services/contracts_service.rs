@@ -23,7 +23,7 @@ pub(crate) use contracts_service_ops::{
     has_corp_flag_take_role_at_location, has_corp_wallet_take_role, is_corp_contract_flag,
     is_item_in_asset_safety_wrap, is_valid_contract_location, lazy_resolve_expired_and_notify,
     parse_contract_availability, parse_item_ids, parse_requested_items, push_contract_party_chars,
-    rpc_err, unix_to_contract_filetime, ContractNotifyDelta,
+    unix_to_contract_filetime, ContractNotifyDelta,
 };
 
 use crate::domain::market_acl::ContractAvailability;
@@ -32,6 +32,14 @@ use eve_db::{ContractRecord, InventoryFlag, InventoryItemRecord, IskCents, TypeI
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use std::collections::HashMap;
+
+pub(crate) fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CreatedContractsReply {

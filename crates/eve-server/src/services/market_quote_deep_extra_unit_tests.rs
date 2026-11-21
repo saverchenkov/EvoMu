@@ -356,6 +356,6 @@ fn plex_sell_hangar_margin_cover_order_history_inference_and_corp_auction_finish
 
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.items[&auction_item_id].owner_id, corp_id);
-        assert_eq!(s.items[&auction_item_id].flag, InventoryFlag::CorpSAG1);
+        assert_eq!(s.items[&auction_item_id].flag, InventoryFlag::CorpDeliveries);
     });
 }
