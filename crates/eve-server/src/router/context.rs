@@ -58,6 +58,12 @@ pub struct ServerContext {
     pub cataloged_services: Arc<HashSet<String>>,
     pub quasar_domains: Arc<HashSet<String>>,
     pub bound_objects: Arc<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
+    pub(crate) transition_grace_store: Arc<
+        RankedRwLock<
+            crate::router::binding_transition_policy::ContextGraceStore,
+            { crate::router::binding_transition_policy::RANK_TRANSITION_GRACE },
+        >,
+    >,
     pub object_cache: Arc<RankedRwLock<HashMap<String, crate::router::cache_notifications::CachedObjectRecord>, RANK_LEAF>>,
     pub object_cache_timestamps: Arc<RankedRwLock<HashMap<String, i64>, RANK_LEAF>>,
     pub notification_records: Arc<RankedRwLock<Vec<crate::router::cache_notifications::NotificationRecord>, RANK_LEAF>>,
@@ -231,6 +237,12 @@ pub(crate) struct ServerContextWeak {
     cataloged_services: std::sync::Weak<HashSet<String>>,
     quasar_domains: std::sync::Weak<HashSet<String>>,
     bound_objects: std::sync::Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
+    transition_grace_store: std::sync::Weak<
+        RankedRwLock<
+            crate::router::binding_transition_policy::ContextGraceStore,
+            { crate::router::binding_transition_policy::RANK_TRANSITION_GRACE },
+        >,
+    >,
     object_cache: std::sync::Weak<RankedRwLock<HashMap<String, crate::router::cache_notifications::CachedObjectRecord>, RANK_LEAF>>,
     object_cache_timestamps: std::sync::Weak<RankedRwLock<HashMap<String, i64>, RANK_LEAF>>,
     notification_records: std::sync::Weak<RankedRwLock<Vec<crate::router::cache_notifications::NotificationRecord>, RANK_LEAF>>,
@@ -308,6 +320,7 @@ impl ServerContextWeak {
             cataloged_services: self.cataloged_services.upgrade()?,
             quasar_domains: self.quasar_domains.upgrade()?,
             bound_objects: self.bound_objects.upgrade()?,
+            transition_grace_store: self.transition_grace_store.upgrade()?,
             object_cache: self.object_cache.upgrade()?,
             object_cache_timestamps: self.object_cache_timestamps.upgrade()?,
             notification_records: self.notification_records.upgrade()?,
@@ -669,6 +682,7 @@ impl ServerContext {
             cataloged_services: Arc::downgrade(&self.cataloged_services),
             quasar_domains: Arc::downgrade(&self.quasar_domains),
             bound_objects: Arc::downgrade(&self.bound_objects),
+            transition_grace_store: Arc::downgrade(&self.transition_grace_store),
             object_cache: Arc::downgrade(&self.object_cache),
             object_cache_timestamps: Arc::downgrade(&self.object_cache_timestamps),
             notification_records: Arc::downgrade(&self.notification_records),
@@ -838,6 +852,9 @@ impl ServerContext {
             cataloged_services,
             quasar_domains,
             bound_objects: Arc::new(RankedRwLock::new(HashMap::new())),
+            transition_grace_store: Arc::new(RankedRwLock::new(
+                crate::router::binding_transition_policy::ContextGraceStore::default(),
+            )),
             object_cache: Arc::new(RankedRwLock::new(HashMap::new())),
             object_cache_timestamps: Arc::new(RankedRwLock::new(HashMap::new())),
             notification_records: Arc::new(RankedRwLock::new(persisted_notifications)),

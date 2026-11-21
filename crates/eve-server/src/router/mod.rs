@@ -6,6 +6,7 @@
 pub mod binding;
 mod binding_auth;
 mod binding_effects;
+pub(crate) mod binding_transition_policy;
 pub mod cache_notifications;
 pub mod client_compat;
 pub mod client_wire;
