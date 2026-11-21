@@ -385,6 +385,49 @@ pub async fn apply_damage_to_drone_in_space(
     (applied, destroyed)
 }
 
+/// Removes a destroyed drone's DB item, world positions, and `space_object_meta` from `snap`.
+pub(crate) fn purge_destroyed_drone_from_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    drone_item_id: Option<i64>,
+    drone_ball_id: i64,
+) {
+    if let Some(iid) = drone_item_id {
+        snap.items.remove(&iid);
+        snap.item_positions.remove(&iid);
+        snap.sp6_lifecycle.space_object_meta.remove(&iid);
+    }
+    snap.item_positions.remove(&drone_ball_id);
+    snap.sp6_lifecycle.space_object_meta.remove(&drone_ball_id);
+}
+
+/// Moves a live space drone item into `ship_id`'s `DroneBay` and clears its space position/meta.
+pub(crate) fn move_drone_item_to_bay_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    drone_item_id: i64,
+    drone_ball_id: i64,
+    owner_char_id: Option<i64>,
+    ship_id: i64,
+    clear_meta_entirely: bool,
+) -> bool {
+    let Some(it) = snap.items.get_mut(&drone_item_id) else {
+        return false;
+    };
+    if let Some(cid) = owner_char_id {
+        it.owner_id = cid;
+    }
+    it.location_id = ship_id;
+    it.flag = InventoryFlag::DroneBay;
+    it.version += 1;
+    snap.item_positions.remove(&drone_item_id);
+    snap.item_positions.remove(&drone_ball_id);
+    if clear_meta_entirely {
+        snap.sp6_lifecycle.space_object_meta.remove(&drone_ball_id);
+        snap.sp6_lifecycle.space_object_meta.remove(&drone_item_id);
+    } else if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&drone_item_id) {
+        meta.drone_ball_id = None;
+    }
+    true
+}
 
 pub(crate) fn pilot_drone_capacity(
     ctx: &ServerContext,

@@ -269,13 +269,7 @@ pub(crate) fn cleanup_destroyed_drone_db_item(
                     .find(|(_, m)| m.drone_ball_id == Some(drone_ball_id))
                     .map(|(&id, _)| id)
             });
-        if let Some(iid) = item_id {
-            snap.items.remove(&iid);
-            snap.item_positions.remove(&iid);
-            snap.sp6_lifecycle.space_object_meta.remove(&iid);
-        }
-        snap.item_positions.remove(&drone_ball_id);
-        snap.sp6_lifecycle.space_object_meta.remove(&drone_ball_id);
+        super::purge_destroyed_drone_from_snap(snap, item_id, drone_ball_id);
         item_id
     });
     if let Some(iid) = resolved_item_id {
@@ -961,11 +955,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             drone_ball_id,
             drone_item_id,
         ) {
-            snap.items.remove(&drone_item_id);
-            snap.item_positions.remove(&drone_item_id);
-            snap.item_positions.remove(&drone_ball_id);
-            snap.sp6_lifecycle.space_object_meta.remove(&drone_item_id);
-            snap.sp6_lifecycle.space_object_meta.remove(&drone_ball_id);
+            super::purge_destroyed_drone_from_snap(snap, Some(drone_item_id), drone_ball_id);
             let msg = format!("Drone {drone_item_id} was destroyed");
             return Err(BridgeRpcError::with_client_error(
                 "DroneNotInSpace",
@@ -973,17 +963,14 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 eve_proto::ClientError::CustomInfo(msg),
             ));
         }
-        if let Some(mut_it) = snap.items.get_mut(&drone_item_id) {
-            mut_it.owner_id = char_id;
-            mut_it.location_id = ship_id;
-            mut_it.flag = InventoryFlag::DroneBay;
-            mut_it.version += 1;
-        }
-        snap.item_positions.remove(&drone_item_id);
-        snap.item_positions.remove(&drone_ball_id);
-        if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&drone_item_id) {
-            meta.drone_ball_id = None;
-        }
+        let _ = super::move_drone_item_to_bay_in_snap(
+            snap,
+            drone_item_id,
+            drone_ball_id,
+            Some(char_id),
+            ship_id,
+            false,
+        );
         Ok(drone_item_id)
     });
     let drone_item_id = match db_res {

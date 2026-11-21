@@ -303,15 +303,11 @@ async fn try_atomic_scoop_drone(
                 || rt.is_recently_destroyed_item_id(claimed_drone.drone_item_id)
         }) {
             ctx.db.with_mut_snapshot(|snap| {
-                snap.items.remove(&claimed_drone.drone_item_id);
-                snap.item_positions.remove(&claimed_drone.ball_id);
-                snap.item_positions.remove(&claimed_drone.drone_item_id);
-                snap.sp6_lifecycle
-                    .space_object_meta
-                    .remove(&claimed_drone.ball_id);
-                snap.sp6_lifecycle
-                    .space_object_meta
-                    .remove(&claimed_drone.drone_item_id);
+                crate::services::combat_crimewatch::combat_npcs_drones::purge_destroyed_drone_from_snap(
+                    snap,
+                    Some(claimed_drone.drone_item_id),
+                    claimed_drone.ball_id,
+                );
             });
         }
         return false;
@@ -356,15 +352,11 @@ async fn try_atomic_scoop_drone(
             claimed_drone.ball_id,
             claimed_drone.drone_item_id,
         ) {
-            snap.items.remove(&claimed_drone.drone_item_id);
-            snap.item_positions.remove(&claimed_drone.ball_id);
-            snap.item_positions.remove(&claimed_drone.drone_item_id);
-            snap.sp6_lifecycle
-                .space_object_meta
-                .remove(&claimed_drone.ball_id);
-            snap.sp6_lifecycle
-                .space_object_meta
-                .remove(&claimed_drone.drone_item_id);
+            crate::services::combat_crimewatch::combat_npcs_drones::purge_destroyed_drone_from_snap(
+                snap,
+                Some(claimed_drone.drone_item_id),
+                claimed_drone.ball_id,
+            );
             return ScoopOutcome::Destroyed;
         }
         if !is_ship_available_for_scoop_in_snap(snap, target_ship_id, claimed_drone.solar_system_id) {
@@ -396,20 +388,16 @@ async fn try_atomic_scoop_drone(
         if ship_cap > 0.0 && used_vol + drone_vol > ship_cap + 1e-4 {
             return ScoopOutcome::BayFull;
         }
-        let Some(it) = snap.items.get_mut(&claimed_drone.drone_item_id) else {
+        if !crate::services::combat_crimewatch::combat_npcs_drones::move_drone_item_to_bay_in_snap(
+            snap,
+            claimed_drone.drone_item_id,
+            claimed_drone.ball_id,
+            None,
+            target_ship_id,
+            true,
+        ) {
             return ScoopOutcome::ItemMissing;
-        };
-        it.location_id = target_ship_id;
-        it.flag = eve_db::InventoryFlag::DroneBay;
-        it.version += 1;
-        snap.item_positions.remove(&claimed_drone.ball_id);
-        snap.item_positions.remove(&claimed_drone.drone_item_id);
-        snap.sp6_lifecycle
-            .space_object_meta
-            .remove(&claimed_drone.ball_id);
-        snap.sp6_lifecycle
-            .space_object_meta
-            .remove(&claimed_drone.drone_item_id);
+        }
         ScoopOutcome::Moved
     });
     match outcome {
