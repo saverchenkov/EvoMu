@@ -933,15 +933,14 @@ async fn release_and_warp_off_rorqual(ctx: &ServerContext, sys_id: u32, rorqual_
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle.set_warp_scramble_strength(rorqual_ball_id, 0).await;
-    sys_handle.scrambled_balls.write().unwrap_or_else(|e| e.into_inner()).remove(&rorqual_ball_id);
-    let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-    if let Some(cs) = bp.combat_states.get_mut(&rorqual_ball_id) {
-        cs.warp_scramble_strength = 0;
+    if let Some(pos) = sys_handle.view().ball_position(rorqual_ball_id) {
+        let _ = sys_handle
+            .set_movement_mode(
+                rorqual_ball_id,
+                MovementMode::new_warp(pos, pos + DVec3::new(0.0, 0.0, 5_000_000_000.0), 3.0),
+            )
+            .await;
     }
-    if let Some(pos) = bp.balls.get(&rorqual_ball_id).map(|b| b.position) {
-        let _ = bp.set_mode(rorqual_ball_id, MovementMode::new_warp(pos, pos + DVec3::new(0.0, 0.0, 5_000_000_000.0), 3.0));
-    }
-    crate::system_actor::sync_ball_positions(&bp, &sys_handle.ball_positions, &sys_handle.scrambled_balls);
 }
 
 pub async fn on_insurgency_npc_destroyed(

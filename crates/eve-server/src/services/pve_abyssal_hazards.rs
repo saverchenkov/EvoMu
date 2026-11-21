@@ -817,31 +817,32 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
         ctx.build_type_combat_state(ship_type)
     };
 
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let ball_opt = bp.balls.get(&ship_id).cloned();
-        if let (Some(b), Some(cs)) = (ball_opt, bp.combat_states.get_mut(&ship_id)) {
+    let base_max_velocity = fitted_ball.max_velocity;
+    let base_inertia = fitted_ball.inertia;
+    let base_signature_radius = fitted_cs.signature_radius;
+    let base_cap_recharge_ms = fitted_cs.capacitor_recharge_time_ms;
+    let _ = sys_handle
+        .modify_combat_state(ship_id, move |cs| {
             if cs.base_max_velocity.is_none() {
-                cs.base_max_velocity = Some(fitted_ball.max_velocity);
+                cs.base_max_velocity = Some(base_max_velocity);
             }
             if cs.base_inertia.is_none() {
-                cs.base_inertia = Some(fitted_ball.inertia);
+                cs.base_inertia = Some(base_inertia);
             }
             if cs.base_signature_radius.is_none() {
-                cs.base_signature_radius = Some(fitted_cs.signature_radius);
+                cs.base_signature_radius = Some(base_signature_radius);
             }
             if cs.base_capacitor_recharge_time_ms.is_none() {
-                cs.base_capacitor_recharge_time_ms = Some(fitted_cs.capacitor_recharge_time_ms);
+                cs.base_capacitor_recharge_time_ms = Some(base_cap_recharge_ms);
             }
-            cs.capture_missing_baselines(&b);
             cs.cloud_velocity_multiplier = (vel_mult != 1.0).then_some(vel_mult);
             cs.cloud_inertia_multiplier = (inertia_mult != 1.0).then_some(inertia_mult);
             cs.cloud_sig_multiplier = (sig_mult != 1.0).then_some(sig_mult);
             cs.shield_boost_multiplier = boost_mult;
             cs.cloud_cap_recharge_multiplier = (cap_rech_mult != 1.0).then_some(cap_rech_mult);
-        }
-        bp.recompute_ball_attributes(ship_id);
-    }
+            cs.recompute_combat_attributes();
+        })
+        .await;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(cid) = active_cloud {
             snap.abyssal_state.active_clouds.insert(ship_id, cid);
