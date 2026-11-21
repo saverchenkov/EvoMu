@@ -5782,6 +5782,112 @@ class TestStargateTargetResolution(unittest.TestCase):
         self.assertIsNone(err_generic)
         self.assertEqual(bid_generic, 50017729)
 
+    def test_suitability_outranks_exact_name_tier_for_space_commands(self):
+        """Regression test: off-grid exact-name asteroid (7.9 AU) must not beat on-grid substring match."""
+        hook = _load_hook_with_py2_stubs()
+        dists = {
+            750000210: 1.1753e12,  # 7.9 AU off-grid exact "Veldspar"
+            750000058: 2884.5,     # on-grid "Veldspar II-Grade"
+            750000900: 1200.0,     # on-grid container exact "Station"
+            60003754: 4.4e10,      # warpable/dockable station substring "Perimeter Station"
+        }
+        bp = types.SimpleNamespace(
+            slimItems={
+                750000210: types.SimpleNamespace(groupID=462, categoryID=25, typeID=1230, name="Veldspar"),
+                750000058: types.SimpleNamespace(groupID=462, categoryID=25, typeID=17470, name="Veldspar II-Grade"),
+                750000900: types.SimpleNamespace(groupID=12, categoryID=2, typeID=23, name="Station"),
+                60003754: types.SimpleNamespace(groupID=15, categoryID=3, typeID=1529, name="Perimeter Station"),
+            },
+            GetBall=lambda bid: types.SimpleNamespace(surfaceDist=dists.get(int(bid), 0.0), mode=2),
+            GetSurfaceDist=lambda _sid, bid: dists.get(int(bid), 0.0),
+        )
+
+        for sub in ("lock_target", "approach", "orbit", "keep_at_range"):
+            bid, err = hook._resolve_space_command_item_id(bp, 1001, sub, "Veldspar")
+            self.assertIsNone(err, sub)
+            self.assertEqual(bid, 750000058, sub)
+
+        bid_warp, err_warp = hook._resolve_space_command_item_id(bp, 1001, "warp_to", "Station")
+        self.assertIsNone(err_warp)
+        self.assertEqual(bid_warp, 60003754)
+
+        bid_dock, err_dock = hook._resolve_space_command_item_id(bp, 1001, "dock", "Station")
+        self.assertIsNone(err_dock)
+        self.assertEqual(bid_dock, 60003754)
+
+    def test_reverse_substring_celestial_ancestors_do_not_hijack_exact_targets(self):
+        """Regression test (BF-01): reverse-substring parent celestials must never outrank exact matches via suitability."""
+        hook = _load_hook_with_py2_stubs()
+        dists = {
+            40009001: 500000000.0,  # Off-grid Moon: "Jita IV - Moon 4"
+            40009002: 4000.0,       # On-grid Planet: "Jita IV"
+            60003760: 500.0,        # On-grid exact station: "Jita IV - Moon 4 - Caldari Navy Assembly Plant"
+            750000058: 3000.0,      # On-grid shorter ore name: "Veldspar"
+            750000210: 500000.0,    # Off-grid exact ore: "Veldspar II-Grade"
+        }
+        bp = types.SimpleNamespace(
+            slimItems={
+                40009001: types.SimpleNamespace(groupID=8, categoryID=2, typeID=14, name="Jita IV - Moon 4"),
+                40009002: types.SimpleNamespace(groupID=7, categoryID=2, typeID=11, name="Jita IV"),
+                60003760: types.SimpleNamespace(groupID=15, categoryID=3, typeID=57, name="Jita IV - Moon 4 - Caldari Navy Assembly Plant"),
+                750000058: types.SimpleNamespace(groupID=462, categoryID=25, typeID=1230, name="Veldspar"),
+                750000210: types.SimpleNamespace(groupID=462, categoryID=25, typeID=17470, name="Veldspar II-Grade"),
+            },
+            GetBall=lambda bid: types.SimpleNamespace(surfaceDist=dists.get(int(bid), 0.0), mode=2),
+            GetSurfaceDist=lambda _sid, bid: dists.get(int(bid), 0.0),
+        )
+        # warp_to exact on-grid station must not hijack to off-grid "Jita IV - Moon 4"
+        bid_warp, err_warp = hook._resolve_space_command_item_id(
+            bp, 1001, "warp_to", "Jita IV - Moon 4 - Caldari Navy Assembly Plant"
+        )
+        self.assertIsNone(err_warp)
+        self.assertEqual(bid_warp, 60003760)
+
+        # approach / lock_target exact off-grid target must not hijack to on-grid shorter-named ball
+        for sub in ("lock_target", "approach"):
+            bid_ore, err_ore = hook._resolve_space_command_item_id(bp, 1001, sub, "Veldspar II-Grade")
+            self.assertIsNone(err_ore)
+            self.assertEqual(bid_ore, 750000210)
+            dists[60003760] = 600000000.0
+            bid_st, err_st = hook._resolve_space_command_item_id(
+                bp, 1001, sub, "Jita IV - Moon 4 - Caldari Navy Assembly Plant"
+            )
+            self.assertIsNone(err_st)
+            self.assertEqual(bid_st, 60003760)
+            dists[60003760] = 500.0
+
+    def test_stargate_prefix_match_never_hijacks_exact_dest_across_suitability_boundary(self):
+        """Regression test (BF-02): stargate prefix/substring matches (st_tier >= 2) stay behind exact destination (st_tier <= 1)."""
+        hook = _load_hook_with_py2_stubs()
+        dists = {
+            50017730: 2100.0,       # On-grid Stargate (Tar)
+            50017731: 450000000.0,  # Off-grid Stargate (Tarta)
+        }
+        bp = types.SimpleNamespace(
+            slimItems={
+                50017730: types.SimpleNamespace(groupID=10, categoryID=2, typeID=16, name="Stargate (Tar)", jumps=[types.SimpleNamespace(locationID=30005199)]),
+                50017731: types.SimpleNamespace(groupID=10, categoryID=2, typeID=16, name="Stargate (Tarta)", jumps=[types.SimpleNamespace(locationID=30005201)]),
+            },
+            GetBall=lambda bid: types.SimpleNamespace(surfaceDist=dists.get(int(bid), 0.0), mode=2),
+            GetSurfaceDist=lambda _sid, bid: dists.get(int(bid), 0.0),
+        )
+        # warp_to "Tar" while on-grid at Stargate (Tar) must not warp to off-grid Stargate (Tarta)
+        bid_warp, err_warp = hook._resolve_space_command_item_id(bp, 1001, "warp_to", "Tar")
+        self.assertIsNone(err_warp)
+        self.assertEqual(bid_warp, 50017730)
+
+        # approach "Tar" while on-grid at Stargate (Tarta) must not pick Tarta over off-grid exact Tar
+        dists[50017730] = 450000000.0
+        dists[50017731] = 2100.0
+        bid_app, err_app = hook._resolve_space_command_item_id(bp, 1001, "approach", "Tar")
+        self.assertIsNone(err_app)
+        self.assertEqual(bid_app, 50017730)
+
+        # Generic "stargate" still uses suitability so warp_to picks off-grid stargate
+        bid_gen, err_gen = hook._resolve_space_command_item_id(bp, 1001, "warp_to", "stargate")
+        self.assertIsNone(err_gen)
+        self.assertEqual(bid_gen, 50017730)
+
     def test_execute_jump_gate_and_select_overview_with_tar(self):
         hook = _load_hook_with_py2_stubs()
         helpers = _load_helpers_with_py2_stubs()
