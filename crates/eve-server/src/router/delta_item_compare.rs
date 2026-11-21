@@ -31,6 +31,9 @@ use std::thread::ThreadId;
 const MAX_COMPARE_SAMPLES: usize = 16;
 const MAX_NDJSON_SAMPLES: usize = 4;
 const MAX_RECENT_COMPARE_RECORDS: usize = 4096;
+const MAX_COMPARE_BREAKDOWN_BUCKETS: usize = 512;
+const OTHER_CLASS_BUCKET: &str = "<other_class>";
+const OTHER_RPC_BUCKET: &str = "<other_rpc>";
 
 pub(crate) const PAIRED_MULTI_ITEM_SKIP_SOURCE: &str = "__paired_multi_item_skip__";
 
@@ -68,6 +71,76 @@ pub enum CompareOriginScope {
     Neither,
 }
 
+impl CompareOriginScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dispatch => "dispatch",
+            Self::Tick => "tick",
+            Self::Neither => "neither",
+        }
+    }
+}
+
+impl std::fmt::Display for CompareOriginScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn is_valid_rpc_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg.len() <= 64
+        && seg != crate::flight_recorder::UNKNOWN_RPC_LABEL
+        && seg != OTHER_RPC_BUCKET
+        && seg != OTHER_CLASS_BUCKET
+        && !seg
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace() || b == b'.')
+}
+
+pub(crate) fn normalize_dispatch_method_label(service: &str, method: &str) -> String {
+    if is_valid_rpc_segment(method) {
+        if is_valid_rpc_segment(service) {
+            let label = format!("{service}.{method}");
+            if label.len() <= 128 {
+                return label;
+            }
+        } else if service.is_empty() {
+            return method.to_string();
+        }
+    }
+    crate::flight_recorder::UNKNOWN_RPC_LABEL.to_string()
+}
+
+pub(crate) struct DispatchRpcMethodGuard {
+    pend_ptr: Option<usize>,
+}
+
+impl Drop for DispatchRpcMethodGuard {
+    fn drop(&mut self) {
+        if let Some(pend_ptr) = self.pend_ptr {
+            super::cache_notifications::pop_dispatch_rpc_method(pend_ptr);
+        }
+    }
+}
+
+pub(crate) fn push_dispatch_rpc_method_guard(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<
+        HashMap<i64, Vec<super::cache_notifications::PendingMachoNotification>>,
+    >,
+    notify_tx: &tokio::sync::broadcast::Sender<(
+        i64,
+        super::cache_notifications::PendingMachoNotification,
+    )>,
+    rpc_method: String,
+) -> DispatchRpcMethodGuard {
+    DispatchRpcMethodGuard {
+        pend_ptr: super::cache_notifications::push_dispatch_rpc_method(
+            pend, notify_tx, rpc_method,
+        ),
+    }
+}
+
 /// Three-way execution-scope breakdown (`dispatch`, `tick`, `neither`) (`#931` Track 2.5).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ItemCompareByScope<T> {
@@ -86,7 +159,7 @@ impl<T> ItemCompareByScope<T> {
     }
 }
 
-/// Compare counts for one [`CompareOriginScope`] bucket (`#931` Track 2.5).
+/// Compare counts for one [`CompareOriginScope`] bucket (`#931` Track 2.5 / 3A).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ItemCompareScopeCounts {
     pub matched: u64,
@@ -94,6 +167,8 @@ pub struct ItemCompareScopeCounts {
     pub projected_only: u64,
     pub pending: usize,
     pub by_helper: BTreeMap<String, HelperCompareCounts>,
+    pub projected_only_by_class: BTreeMap<String, u64>,
+    pub projected_only_by_dispatch_method: BTreeMap<String, u64>,
     pub sample_projected_only: Vec<String>,
     pub sample_hand_written_only: Vec<String>,
 }
@@ -110,16 +185,21 @@ pub struct HelperCompareCounts {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ItemCompareEventSummary {
     pub matched: u64,
+    pub matched_across_scopes: u64,
+    pub matched_across_scopes_by_helper: BTreeMap<String, u64>,
+    pub matched_across_scopes_by_scope_pair: BTreeMap<String, u64>,
     pub hand_written_only: u64,
     pub projected_only: u64,
     pub pending: usize,
     pub by_helper: BTreeMap<String, HelperCompareCounts>,
+    pub projected_only_by_class: BTreeMap<String, u64>,
+    pub projected_only_by_dispatch_method: BTreeMap<String, u64>,
     pub sample_projected_only: Vec<String>,
     pub sample_hand_written_only: Vec<String>,
     pub by_scope: ItemCompareByScope<ItemCompareScopeCounts>,
 }
 
-/// Combined compare-only diagnostics for `#931` Track 2 (`OnItemChange` & `OnBlueprintsUpdated`).
+/// Combined compare-only diagnostics for `#931` Tracks 2 & 3A (`OnItemChange` & `OnBlueprintsUpdated`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ItemCompareSummary {
     pub item_change: ItemCompareEventSummary,
@@ -131,9 +211,11 @@ pub struct ItemCompareSummary {
 impl ItemCompareSummary {
     fn total_activity(&self) -> u64 {
         self.item_change.matched
+            + self.item_change.matched_across_scopes
             + self.item_change.hand_written_only
             + self.item_change.projected_only
             + self.blueprints_updated.matched
+            + self.blueprints_updated.matched_across_scopes
             + self.blueprints_updated.hand_written_only
             + self.blueprints_updated.projected_only
             + self.explicit_in_tx_effects
@@ -150,14 +232,77 @@ struct ItemCompareNdjsonRecord {
     explicit_in_tx_effects_by_scope: ItemCompareByScope<u64>,
 }
 
+fn increment_breakdown_bucket(
+    map: &mut BTreeMap<String, u64>,
+    key: &str,
+    overflow_key: &str,
+) -> String {
+    let target = if map.contains_key(key) || map.len() < MAX_COMPARE_BREAKDOWN_BUCKETS {
+        key
+    } else {
+        overflow_key
+    };
+    *map.entry(target.to_string()).or_insert(0) += 1;
+    target.to_string()
+}
+
+fn decrement_breakdown_bucket(map: &mut BTreeMap<String, u64>, key: &str, overflow_key: &str) {
+    let target = if map.contains_key(key) {
+        key
+    } else if map.contains_key(overflow_key) {
+        overflow_key
+    } else {
+        return;
+    };
+    if let Some(cnt) = map.get_mut(target) {
+        *cnt = cnt.saturating_sub(1);
+        if *cnt == 0 {
+            map.remove(target);
+        }
+    }
+}
+
+fn merge_breakdown_counts(dst: &mut BTreeMap<String, u64>, src: &BTreeMap<String, u64>) {
+    for (k, v) in src {
+        *dst.entry(k.clone()).or_insert(0) += v;
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct CrossScopeCompareCounters {
+    matched_across_scopes: u64,
+    by_helper: BTreeMap<String, u64>,
+    by_scope_pair: BTreeMap<String, u64>,
+}
+
+impl CrossScopeCompareCounters {
+    fn record_pair(
+        &mut self,
+        helper: &str,
+        proj_scope: CompareOriginScope,
+        hw_scope: CompareOriginScope,
+    ) {
+        self.matched_across_scopes += 1;
+        *self.by_helper.entry(helper.to_string()).or_insert(0) += 1;
+        let pair_key = format!(
+            "projected:{}->hand_written:{}",
+            proj_scope.as_str(),
+            hw_scope.as_str()
+        );
+        *self.by_scope_pair.entry(pair_key).or_insert(0) += 1;
+    }
+}
+
 #[derive(Debug, Default)]
 struct CompareCounters {
     matched: u64,
     hand_written_only: u64,
     projected_only: u64,
     by_helper: BTreeMap<String, HelperCompareCounts>,
-    sample_projected_only: Vec<String>,
-    sample_hand_written_only: Vec<String>,
+    projected_only_by_class: BTreeMap<String, u64>,
+    projected_only_by_dispatch_method: BTreeMap<String, u64>,
+    sample_projected_only: Vec<(u64, String)>,
+    sample_hand_written_only: Vec<(u64, String)>,
 }
 
 impl CompareCounters {
@@ -166,7 +311,12 @@ impl CompareCounters {
         self.by_helper.entry(helper.to_string()).or_default().matched += 1;
     }
 
-    fn record_hand_written_only(&mut self, helper: &str, detail: impl FnOnce() -> String) {
+    fn record_hand_written_only(
+        &mut self,
+        seq: u64,
+        helper: &str,
+        detail: impl FnOnce() -> String,
+    ) {
         self.hand_written_only += 1;
         self.by_helper
             .entry(helper.to_string())
@@ -175,26 +325,79 @@ impl CompareCounters {
         if self.sample_hand_written_only.len() < MAX_COMPARE_SAMPLES {
             let msg = detail();
             tracing::debug!(target: "delta_item_compare", "hand_written_only: {msg}");
-            self.sample_hand_written_only.push(msg);
+            self.sample_hand_written_only.push((seq, msg));
         }
+    }
+
+    fn undo_hand_written_only(&mut self, seq: u64, helper: &str) {
+        self.hand_written_only = self.hand_written_only.saturating_sub(1);
+        if let Some(counts) = self.by_helper.get_mut(helper) {
+            counts.hand_written_only = counts.hand_written_only.saturating_sub(1);
+            if counts.matched == 0 && counts.hand_written_only == 0 && counts.projected_only == 0 {
+                self.by_helper.remove(helper);
+            }
+        }
+        self.sample_hand_written_only.retain(|(s, _)| *s != seq);
     }
 
     fn record_projected_only(
         &mut self,
+        seq: u64,
         mismatched_helper: Option<&str>,
+        class_key: Option<&str>,
+        dispatch_method: Option<&str>,
         detail: impl FnOnce() -> String,
-    ) {
+    ) -> (Option<String>, Option<String>) {
         self.projected_only += 1;
         let bucket = mismatched_helper.unwrap_or("<no_helper>");
         self.by_helper
             .entry(bucket.to_string())
             .or_default()
             .projected_only += 1;
+        let recorded_class = class_key.map(|ck| {
+            increment_breakdown_bucket(&mut self.projected_only_by_class, ck, OTHER_CLASS_BUCKET)
+        });
+        let recorded_method = dispatch_method.map(|dm| {
+            increment_breakdown_bucket(
+                &mut self.projected_only_by_dispatch_method,
+                dm,
+                OTHER_RPC_BUCKET,
+            )
+        });
         if self.sample_projected_only.len() < MAX_COMPARE_SAMPLES {
             let msg = detail();
             tracing::debug!(target: "delta_item_compare", "projected_only: {msg}");
-            self.sample_projected_only.push(msg);
+            self.sample_projected_only.push((seq, msg));
         }
+        (recorded_class, recorded_method)
+    }
+
+    fn undo_projected_only(
+        &mut self,
+        seq: u64,
+        mismatched_helper: Option<&str>,
+        class_bucket: Option<&str>,
+        method_bucket: Option<&str>,
+    ) {
+        self.projected_only = self.projected_only.saturating_sub(1);
+        let bucket = mismatched_helper.unwrap_or("<no_helper>");
+        if let Some(counts) = self.by_helper.get_mut(bucket) {
+            counts.projected_only = counts.projected_only.saturating_sub(1);
+            if counts.matched == 0 && counts.hand_written_only == 0 && counts.projected_only == 0 {
+                self.by_helper.remove(bucket);
+            }
+        }
+        if let Some(cb) = class_bucket {
+            decrement_breakdown_bucket(&mut self.projected_only_by_class, cb, OTHER_CLASS_BUCKET);
+        }
+        if let Some(mb) = method_bucket {
+            decrement_breakdown_bucket(
+                &mut self.projected_only_by_dispatch_method,
+                mb,
+                OTHER_RPC_BUCKET,
+            );
+        }
+        self.sample_projected_only.retain(|(s, _)| *s != seq);
     }
 
     fn to_scope_counts(&self, pending: usize) -> ItemCompareScopeCounts {
@@ -204,17 +407,35 @@ impl CompareCounters {
             projected_only: self.projected_only,
             pending,
             by_helper: self.by_helper.clone(),
-            sample_projected_only: self.sample_projected_only.clone(),
-            sample_hand_written_only: self.sample_hand_written_only.clone(),
+            projected_only_by_class: self.projected_only_by_class.clone(),
+            projected_only_by_dispatch_method: self.projected_only_by_dispatch_method.clone(),
+            sample_projected_only: self
+                .sample_projected_only
+                .iter()
+                .map(|(_, s)| s.clone())
+                .collect(),
+            sample_hand_written_only: self
+                .sample_hand_written_only
+                .iter()
+                .map(|(_, s)| s.clone())
+                .collect(),
         }
     }
 }
 
 impl ItemCompareByScope<CompareCounters> {
-    fn to_summary(&self, pending: ItemCompareByScope<usize>) -> ItemCompareEventSummary {
+    fn to_summary(
+        &self,
+        pending: ItemCompareByScope<usize>,
+        cross_scope: &CrossScopeCompareCounters,
+    ) -> ItemCompareEventSummary {
         let mut total = CompareCounters::default();
-        let push_samples = |dst: &mut Vec<String>, src: &[String]| {
-            dst.extend(src.iter().take(MAX_COMPARE_SAMPLES.saturating_sub(dst.len())).cloned());
+        let push_samples = |dst: &mut Vec<(u64, String)>, src: &[(u64, String)]| {
+            dst.extend(
+                src.iter()
+                    .take(MAX_COMPARE_SAMPLES.saturating_sub(dst.len()))
+                    .cloned(),
+            );
         };
         for sc in [&self.dispatch, &self.tick, &self.neither] {
             total.matched += sc.matched;
@@ -226,17 +447,38 @@ impl ItemCompareByScope<CompareCounters> {
                 d.hand_written_only += v.hand_written_only;
                 d.projected_only += v.projected_only;
             }
+            merge_breakdown_counts(&mut total.projected_only_by_class, &sc.projected_only_by_class);
+            merge_breakdown_counts(
+                &mut total.projected_only_by_dispatch_method,
+                &sc.projected_only_by_dispatch_method,
+            );
             push_samples(&mut total.sample_projected_only, &sc.sample_projected_only);
-            push_samples(&mut total.sample_hand_written_only, &sc.sample_hand_written_only);
+            push_samples(
+                &mut total.sample_hand_written_only,
+                &sc.sample_hand_written_only,
+            );
         }
         ItemCompareEventSummary {
             matched: total.matched,
+            matched_across_scopes: cross_scope.matched_across_scopes,
+            matched_across_scopes_by_helper: cross_scope.by_helper.clone(),
+            matched_across_scopes_by_scope_pair: cross_scope.by_scope_pair.clone(),
             hand_written_only: total.hand_written_only,
             projected_only: total.projected_only,
             pending: pending.dispatch + pending.tick + pending.neither,
             by_helper: total.by_helper,
-            sample_projected_only: total.sample_projected_only,
-            sample_hand_written_only: total.sample_hand_written_only,
+            projected_only_by_class: total.projected_only_by_class,
+            projected_only_by_dispatch_method: total.projected_only_by_dispatch_method,
+            sample_projected_only: total
+                .sample_projected_only
+                .into_iter()
+                .map(|(_, s)| s)
+                .collect(),
+            sample_hand_written_only: total
+                .sample_hand_written_only
+                .into_iter()
+                .map(|(_, s)| s)
+                .collect(),
             by_scope: ItemCompareByScope {
                 dispatch: self.dispatch.to_scope_counts(pending.dispatch),
                 tick: self.tick.to_scope_counts(pending.tick),
@@ -280,7 +522,9 @@ struct PendingItemCompare {
     char_id: i64,
     id_type: &'static str,
     fields: ItemChangeFields,
+    class_key: String,
     scope: CompareOriginScope,
+    dispatch_method: Option<String>,
     mismatched_helper: Option<String>,
 }
 
@@ -289,7 +533,182 @@ struct PendingBlueprintCompare {
     char_id: i64,
     owner_id: i64,
     scope: CompareOriginScope,
+    dispatch_method: Option<String>,
     mismatched_helper: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct UnmatchedProjectedItem {
+    seq: u64,
+    char_id: i64,
+    id_type: &'static str,
+    fields: ItemChangeFields,
+    recorded_class_key: String,
+    scope: CompareOriginScope,
+    recorded_dispatch_method: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct UnmatchedHandWrittenItem {
+    seq: u64,
+    char_id: i64,
+    id_type: String,
+    fields: ItemChangeFields,
+    scope: CompareOriginScope,
+    helper: String,
+}
+
+#[derive(Debug, Clone)]
+struct UnmatchedProjectedBp {
+    seq: u64,
+    char_id: i64,
+    owner_id: i64,
+    scope: CompareOriginScope,
+    recorded_dispatch_method: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct UnmatchedHandWrittenBp {
+    seq: u64,
+    char_id: i64,
+    owner_id: i64,
+    scope: CompareOriginScope,
+    helper: String,
+}
+
+fn push_window_capped<T>(queue: &mut VecDeque<T>, entry: T) {
+    while queue.len() >= MAX_RECENT_COMPARE_RECORDS {
+        let _ = queue.pop_front();
+    }
+    queue.push_back(entry);
+}
+
+fn select_best_cross_scope_index<T>(
+    items: &VecDeque<T>,
+    mut candidate: impl FnMut(&T) -> Option<(bool, bool)>,
+) -> Option<usize> {
+    items
+        .iter()
+        .position(|item| matches!(candidate(item), Some((true, true))))
+}
+
+type ItemBeforeAfter<'a> = (
+    Option<&'a eve_db::InventoryItemRecord>,
+    Option<&'a eve_db::InventoryItemRecord>,
+);
+
+fn is_structure_location(
+    loc_id: i64,
+    snap: &WorldStateSnapshot,
+    changes: &ChangeSet,
+    item_changes_by_id: &HashMap<i64, ItemBeforeAfter<'_>>,
+    sde: &SdeRegistry,
+) -> bool {
+    if snap.structures.contains_key(&loc_id) || changes.structures.iter().any(|c| c.key == loc_id) {
+        return true;
+    }
+    let type_id = snap.items.get(&loc_id).map(|r| r.type_id).or_else(|| {
+        item_changes_by_id
+            .get(&loc_id)
+            .and_then(|(before, after)| after.or(*before).map(|r| r.type_id))
+    });
+    type_id.is_some_and(|tid| sde.types.get(&tid).is_some_and(|t| t.category_id == 65))
+}
+
+fn classify_location_kind(
+    loc_id: Option<i64>,
+    snap: &WorldStateSnapshot,
+    changes: &ChangeSet,
+    item_changes_by_id: &HashMap<i64, ItemBeforeAfter<'_>>,
+    sde: &SdeRegistry,
+) -> &'static str {
+    let Some(id) = loc_id else {
+        return "none";
+    };
+    if id == 0 {
+        return "none";
+    }
+    if id == 6 {
+        return "recycling_loc_6";
+    }
+    if is_structure_location(id, snap, changes, item_changes_by_id, sde) {
+        return "structure";
+    }
+    let known_item = snap.items.contains_key(&id)
+        || item_changes_by_id
+            .get(&id)
+            .is_some_and(|(before, after)| before.is_some() || after.is_some());
+    if known_item {
+        return "ship_or_container";
+    }
+    if sde.stations.contains_key(&id) || (60_000_000..=64_000_000).contains(&id) {
+        return "station";
+    }
+    if u32::try_from(id)
+        .ok()
+        .is_some_and(|sid| sde.solar_systems.contains_key(&sid))
+        || (30_000_000..=39_999_999).contains(&id)
+    {
+        return "solar_system";
+    }
+    "other"
+}
+
+fn classify_owner_kind(
+    owner_id: i64,
+    snap: &WorldStateSnapshot,
+    changes: &ChangeSet,
+    sde: &SdeRegistry,
+) -> &'static str {
+    if owner_id <= 0
+        || sde.npc_corporations.contains_key(&owner_id)
+        || (1_000_000..=1_999_999).contains(&owner_id)
+    {
+        return "npc_corp_or_other";
+    }
+    if snap.characters.contains_key(&owner_id)
+        || changes
+            .characters
+            .iter()
+            .any(|c| c.key == owner_id && (c.before.is_some() || c.after.is_some()))
+        || (90_000_000..98_000_000).contains(&owner_id)
+    {
+        return "character";
+    }
+    if snap.corporations.contains_key(&owner_id) || (98_000_000..99_000_000).contains(&owner_id) {
+        return "player_corp";
+    }
+    "npc_corp_or_other"
+}
+
+fn classify_projected_item(
+    before_rec: Option<&eve_db::InventoryItemRecord>,
+    fields: &ItemChangeFields,
+    snap: &WorldStateSnapshot,
+    changes: &ChangeSet,
+    item_changes_by_id: &HashMap<i64, ItemBeforeAfter<'_>>,
+    sde: &SdeRegistry,
+) -> String {
+    let loc_before = classify_location_kind(
+        before_rec.map(|r| r.location_id),
+        snap,
+        changes,
+        item_changes_by_id,
+        sde,
+    );
+    let loc_after = classify_location_kind(
+        Some(fields.location_id),
+        snap,
+        changes,
+        item_changes_by_id,
+        sde,
+    );
+    let owner_kind = classify_owner_kind(fields.owner_id, snap, changes, sde);
+    let singleton = fields.wire_qty < 0;
+    format!(
+        "before={},after={},flag={},owner={},singleton={}",
+        loc_before, loc_after, fields.flag_id, owner_kind, singleton
+    )
 }
 
 fn row_col_i64(row: &PyRep, col: &str) -> Option<i64> {
@@ -402,10 +821,17 @@ impl TxItemEffectKeys {
 
 #[derive(Debug, Default)]
 struct ItemCompareLedger {
+    next_entry_seq: u64,
     pending_items: VecDeque<PendingItemCompare>,
     pending_bps: VecDeque<PendingBlueprintCompare>,
+    unmatched_projected_items: VecDeque<UnmatchedProjectedItem>,
+    unmatched_hand_written_items: VecDeque<UnmatchedHandWrittenItem>,
+    unmatched_projected_bps: VecDeque<UnmatchedProjectedBp>,
+    unmatched_hand_written_bps: VecDeque<UnmatchedHandWrittenBp>,
     item_counts: ItemCompareByScope<CompareCounters>,
     bp_counts: ItemCompareByScope<CompareCounters>,
+    item_cross_scope: CrossScopeCompareCounters,
+    bp_cross_scope: CrossScopeCompareCounters,
     explicit_in_tx_effects: u64,
     explicit_in_tx_effects_by_scope: ItemCompareByScope<u64>,
     // Synchronous call-stack helper labels keyed by ThreadId so fixed-signature `ServerContext::notify`
@@ -420,6 +846,11 @@ struct ItemCompareLedger {
 }
 
 impl ItemCompareLedger {
+    fn next_seq(&mut self) -> u64 {
+        self.next_entry_seq += 1;
+        self.next_entry_seq
+    }
+
     fn is_enabled(&self) -> bool {
         self.enabled_override
             .unwrap_or_else(is_item_compare_enabled)
@@ -433,32 +864,127 @@ impl ItemCompareLedger {
     }
 
     fn retire_item(&mut self, entry: PendingItemCompare) {
+        if entry.mismatched_helper.is_none() {
+            if let Some(pos) = select_best_cross_scope_index(
+                &self.unmatched_hand_written_items,
+                |hw| {
+                    (hw.scope != entry.scope
+                        && hw.char_id == entry.char_id
+                        && hw.fields.item_id == entry.fields.item_id)
+                        .then(|| {
+                            (
+                                entry.fields.matches(&hw.fields),
+                                hw.id_type == entry.id_type,
+                            )
+                        })
+                },
+            ) {
+                let hw = self
+                    .unmatched_hand_written_items
+                    .remove(pos)
+                    .expect("cross-scope hand-written item index valid");
+                self.item_counts
+                    .get_mut(hw.scope)
+                    .undo_hand_written_only(hw.seq, &hw.helper);
+                self.item_cross_scope
+                    .record_pair(&hw.helper, entry.scope, hw.scope);
+                return;
+            }
+        }
+        let seq = self.next_seq();
         let helper = entry.mismatched_helper.clone();
-        self.item_counts.get_mut(entry.scope).record_projected_only(helper.as_deref(), || {
-            format!(
-                "cid={} id_type={} {} mismatched_helper={:?}",
-                entry.char_id,
-                entry.id_type,
-                format_item_fields(&entry.fields),
-                helper
-            )
-        });
+        let class_key = entry.class_key.clone();
+        let dispatch_method = entry.dispatch_method.clone();
+        let fields_desc = format_item_fields(&entry.fields);
+        let (recorded_class, recorded_method) = self
+            .item_counts
+            .get_mut(entry.scope)
+            .record_projected_only(
+                seq,
+                helper.as_deref(),
+                Some(&class_key),
+                dispatch_method.as_deref(),
+                || {
+                    format!(
+                        "cid={} id_type={} {} class={} rpc={:?} mismatched_helper={:?}",
+                        entry.char_id,
+                        entry.id_type,
+                        fields_desc,
+                        class_key,
+                        dispatch_method,
+                        helper
+                    )
+                },
+            );
+        if entry.mismatched_helper.is_none() {
+            push_window_capped(
+                &mut self.unmatched_projected_items,
+                UnmatchedProjectedItem {
+                    seq,
+                    char_id: entry.char_id,
+                    id_type: entry.id_type,
+                    fields: entry.fields,
+                    recorded_class_key: recorded_class.unwrap_or(entry.class_key),
+                    scope: entry.scope,
+                    recorded_dispatch_method: recorded_method,
+                },
+            );
+        }
     }
 
     fn retire_bp(&mut self, entry: PendingBlueprintCompare) {
+        if entry.mismatched_helper.is_none() {
+            if let Some(pos) = self.unmatched_hand_written_bps.iter().position(|hw| {
+                hw.scope != entry.scope
+                    && hw.char_id == entry.char_id
+                    && hw.owner_id == entry.owner_id
+            }) {
+                let hw = self
+                    .unmatched_hand_written_bps
+                    .remove(pos)
+                    .expect("cross-scope hand-written bp index valid");
+                self.bp_counts
+                    .get_mut(hw.scope)
+                    .undo_hand_written_only(hw.seq, &hw.helper);
+                self.bp_cross_scope
+                    .record_pair(&hw.helper, entry.scope, hw.scope);
+                return;
+            }
+        }
+        let seq = self.next_seq();
         let helper = entry.mismatched_helper.clone();
-        self.bp_counts.get_mut(entry.scope).record_projected_only(helper.as_deref(), || {
-            format!(
-                "cid={} owner={} mismatched_helper={:?}",
-                entry.char_id, entry.owner_id, helper
-            )
-        });
+        let dispatch_method = entry.dispatch_method.clone();
+        let (_, recorded_method) = self.bp_counts.get_mut(entry.scope).record_projected_only(
+            seq,
+            helper.as_deref(),
+            None,
+            dispatch_method.as_deref(),
+            || {
+                format!(
+                    "cid={} owner={} rpc={:?} mismatched_helper={:?}",
+                    entry.char_id, entry.owner_id, dispatch_method, helper
+                )
+            },
+        );
+        if entry.mismatched_helper.is_none() {
+            push_window_capped(
+                &mut self.unmatched_projected_bps,
+                UnmatchedProjectedBp {
+                    seq,
+                    char_id: entry.char_id,
+                    owner_id: entry.owner_id,
+                    scope: entry.scope,
+                    recorded_dispatch_method: recorded_method,
+                },
+            );
+        }
     }
 
     fn record_projected_batch(
         &mut self,
         scope: CompareOriginScope,
-        projected_items: Vec<(i64, &'static str, ItemChangeFields)>,
+        dispatch_method: Option<String>,
+        projected_items: Vec<(i64, &'static str, ItemChangeFields, String)>,
         projected_bps: Vec<(i64, i64)>,
         explicit_effects: u64,
     ) {
@@ -468,8 +994,16 @@ impl ItemCompareLedger {
         }
         self.explicit_in_tx_effects += explicit_effects;
         *self.explicit_in_tx_effects_by_scope.get_mut(scope) += explicit_effects;
+        let effective_dispatch_method = if scope == CompareOriginScope::Dispatch {
+            Some(
+                dispatch_method
+                    .unwrap_or_else(|| crate::flight_recorder::UNKNOWN_RPC_LABEL.to_string()),
+            )
+        } else {
+            None
+        };
         let mut retired_items = Vec::new();
-        for (char_id, id_type, fields) in projected_items {
+        for (char_id, id_type, fields, class_key) in projected_items {
             let item_id = fields.item_id;
             push_pending_capped(
                 &mut self.pending_items,
@@ -477,10 +1011,17 @@ impl ItemCompareLedger {
                     char_id,
                     id_type,
                     fields,
+                    class_key,
                     scope,
+                    dispatch_method: effective_dispatch_method.clone(),
                     mismatched_helper: None,
                 },
-                |p| p.char_id == char_id && p.id_type == id_type && p.fields.item_id == item_id,
+                |p| {
+                    p.scope == scope
+                        && p.char_id == char_id
+                        && p.id_type == id_type
+                        && p.fields.item_id == item_id
+                },
                 |old| retired_items.push(old),
             );
         }
@@ -496,9 +1037,10 @@ impl ItemCompareLedger {
                     char_id,
                     owner_id,
                     scope,
+                    dispatch_method: effective_dispatch_method.clone(),
                     mismatched_helper: None,
                 },
-                |p| p.char_id == char_id && p.owner_id == owner_id,
+                |p| p.scope == scope && p.char_id == char_id && p.owner_id == owner_id,
                 |old| retired_bps.push(old),
             );
         }
@@ -517,38 +1059,96 @@ impl ItemCompareLedger {
     ) {
         for &(cid, _) in recipients {
             let Some(actual) = actual_opt else {
-                self.item_counts.get_mut(scope).record_hand_written_only(helper, || {
-                    format!("helper={helper} cid={cid} id_type={id_type} unparsed_args")
-                });
+                let seq = self.next_seq();
+                self.item_counts
+                    .get_mut(scope)
+                    .record_hand_written_only(seq, helper, || {
+                        format!("helper={helper} cid={cid} id_type={id_type} unparsed_args")
+                    });
                 continue;
             };
             if let Some(pos) = self.pending_items.iter().position(|p| {
-                p.char_id == cid && p.id_type == id_type && p.fields.matches(actual)
+                p.scope == scope
+                    && p.char_id == cid
+                    && p.id_type == id_type
+                    && p.fields.matches(actual)
             }) {
                 let _ = self.pending_items.remove(pos);
                 self.item_counts.get_mut(scope).record_matched(helper);
-            } else {
-                let near = self
+            } else if let Some(p) = self.pending_items.iter_mut().rev().find(|p| {
+                p.scope == scope && p.char_id == cid && p.fields.item_id == actual.item_id
+            }) {
+                p.mismatched_helper = Some(helper.to_string());
+                let near_desc = format!(
+                    " vs_projected(id_type={} {})",
+                    p.id_type,
+                    format_item_fields(&p.fields)
+                );
+                let seq = self.next_seq();
+                self.item_counts
+                    .get_mut(scope)
+                    .record_hand_written_only(seq, helper, || {
+                        format!(
+                            "helper={helper} cid={cid} id_type={id_type} {}{near_desc}",
+                            format_item_fields(actual)
+                        )
+                    });
+            } else if let Some(pos) = select_best_cross_scope_index(&self.pending_items, |p| {
+                (p.scope != scope
+                    && p.mismatched_helper.is_none()
+                    && p.char_id == cid
+                    && p.fields.item_id == actual.item_id)
+                    .then(|| (p.fields.matches(actual), p.id_type == id_type))
+            }) {
+                let matched_proj = self
                     .pending_items
-                    .iter_mut()
-                    .rev()
-                    .find(|p| p.char_id == cid && p.fields.item_id == actual.item_id);
-                let near_desc = if let Some(p) = near {
-                    p.mismatched_helper = Some(helper.to_string());
-                    format!(
-                        " vs_projected(id_type={} {})",
-                        p.id_type,
-                        format_item_fields(&p.fields)
-                    )
-                } else {
-                    String::new()
-                };
-                self.item_counts.get_mut(scope).record_hand_written_only(helper, || {
-                    format!(
-                        "helper={helper} cid={cid} id_type={id_type} {}{near_desc}",
-                        format_item_fields(actual)
-                    )
-                });
+                    .remove(pos)
+                    .expect("cross-scope pending item index valid");
+                self.item_cross_scope
+                    .record_pair(helper, matched_proj.scope, scope);
+            } else if let Some(pos) =
+                select_best_cross_scope_index(&self.unmatched_projected_items, |u| {
+                    (u.scope != scope
+                        && u.char_id == cid
+                        && u.fields.item_id == actual.item_id)
+                        .then(|| (u.fields.matches(actual), u.id_type == id_type))
+                })
+            {
+                let unmatched_proj = self
+                    .unmatched_projected_items
+                    .remove(pos)
+                    .expect("cross-scope unmatched projected item index valid");
+                self.item_counts
+                    .get_mut(unmatched_proj.scope)
+                    .undo_projected_only(
+                        unmatched_proj.seq,
+                        None,
+                        Some(&unmatched_proj.recorded_class_key),
+                        unmatched_proj.recorded_dispatch_method.as_deref(),
+                    );
+                self.item_cross_scope
+                    .record_pair(helper, unmatched_proj.scope, scope);
+            } else {
+                let seq = self.next_seq();
+                self.item_counts
+                    .get_mut(scope)
+                    .record_hand_written_only(seq, helper, || {
+                        format!(
+                            "helper={helper} cid={cid} id_type={id_type} {}",
+                            format_item_fields(actual)
+                        )
+                    });
+                push_window_capped(
+                    &mut self.unmatched_hand_written_items,
+                    UnmatchedHandWrittenItem {
+                        seq,
+                        char_id: cid,
+                        id_type: id_type.to_string(),
+                        fields: actual.clone(),
+                        scope,
+                        helper: helper.to_string(),
+                    },
+                );
             }
         }
     }
@@ -597,22 +1197,59 @@ impl ItemCompareLedger {
                 let owner_opt = extract_blueprint_owner_id(payload_args);
                 for &(cid, _) in recipients {
                     let Some(owner_id) = owner_opt else {
-                        self.bp_counts.get_mut(scope).record_hand_written_only(helper, || {
+                        let seq = self.next_seq();
+                        self.bp_counts.get_mut(scope).record_hand_written_only(seq, helper, || {
                             format!("helper={helper} cid={cid} unparsed_owner")
                         });
                         continue;
                     };
-                    if let Some(pos) = self
-                        .pending_bps
-                        .iter()
-                        .position(|p| p.char_id == cid && p.owner_id == owner_id)
-                    {
+                    if let Some(pos) = self.pending_bps.iter().position(|p| {
+                        p.scope == scope && p.char_id == cid && p.owner_id == owner_id
+                    }) {
                         let _ = self.pending_bps.remove(pos);
                         self.bp_counts.get_mut(scope).record_matched(helper);
+                    } else if let Some(pos) = self.pending_bps.iter().position(|p| {
+                        p.scope != scope
+                            && p.mismatched_helper.is_none()
+                            && p.char_id == cid
+                            && p.owner_id == owner_id
+                    }) {
+                        let matched_bp = self
+                            .pending_bps
+                            .remove(pos)
+                            .expect("cross-scope pending bp index valid");
+                        self.bp_cross_scope
+                            .record_pair(helper, matched_bp.scope, scope);
+                    } else if let Some(pos) = self.unmatched_projected_bps.iter().position(|u| {
+                        u.scope != scope && u.char_id == cid && u.owner_id == owner_id
+                    }) {
+                        let unmatched_bp = self
+                            .unmatched_projected_bps
+                            .remove(pos)
+                            .expect("cross-scope unmatched projected bp index valid");
+                        self.bp_counts.get_mut(unmatched_bp.scope).undo_projected_only(
+                            unmatched_bp.seq,
+                            None,
+                            None,
+                            unmatched_bp.recorded_dispatch_method.as_deref(),
+                        );
+                        self.bp_cross_scope
+                            .record_pair(helper, unmatched_bp.scope, scope);
                     } else {
-                        self.bp_counts.get_mut(scope).record_hand_written_only(helper, || {
+                        let seq = self.next_seq();
+                        self.bp_counts.get_mut(scope).record_hand_written_only(seq, helper, || {
                             format!("helper={helper} cid={cid} owner={owner_id}")
                         });
+                        push_window_capped(
+                            &mut self.unmatched_hand_written_bps,
+                            UnmatchedHandWrittenBp {
+                                seq,
+                                char_id: cid,
+                                owner_id,
+                                scope,
+                                helper: helper.to_string(),
+                            },
+                        );
                     }
                 }
             }
@@ -627,13 +1264,23 @@ impl ItemCompareLedger {
         while let Some(bp) = self.pending_bps.pop_front() {
             self.retire_bp(bp);
         }
+        self.unmatched_projected_items.clear();
+        self.unmatched_hand_written_items.clear();
+        self.unmatched_projected_bps.clear();
+        self.unmatched_hand_written_bps.clear();
         self.summary()
     }
 
     fn summary(&self) -> ItemCompareSummary {
         ItemCompareSummary {
-            item_change: self.item_counts.to_summary(pending_counts_by_scope(&self.pending_items, |p| p.scope)),
-            blueprints_updated: self.bp_counts.to_summary(pending_counts_by_scope(&self.pending_bps, |p| p.scope)),
+            item_change: self.item_counts.to_summary(
+                pending_counts_by_scope(&self.pending_items, |p| p.scope),
+                &self.item_cross_scope,
+            ),
+            blueprints_updated: self.bp_counts.to_summary(
+                pending_counts_by_scope(&self.pending_bps, |p| p.scope),
+                &self.bp_cross_scope,
+            ),
             explicit_in_tx_effects: self.explicit_in_tx_effects,
             explicit_in_tx_effects_by_scope: self.explicit_in_tx_effects_by_scope.clone(),
         }
@@ -648,10 +1295,19 @@ fn collect_compare_item_expectations(
     now_unix: u64,
     online: &impl OnlineCharacterLookup,
     emitted_effects: &TxItemEffectKeys,
-) -> (Vec<(i64, &'static str, ItemChangeFields)>, Vec<(i64, i64)>) {
+) -> (Vec<(i64, &'static str, ItemChangeFields, String)>, Vec<(i64, i64)>) {
     let item_input = DeltaProjectionInput::new(None, snap, changes, sde, now_unix);
     let resolved_items = item_projector.project_and_resolve(&item_input, online);
-    let mut projected_items: Vec<(i64, &'static str, ItemChangeFields)> = Vec::new();
+    let item_changes_by_id = {
+        let mut map: HashMap<i64, ItemBeforeAfter<'_>> = HashMap::new();
+        for ch in &changes.items {
+            map.entry(ch.key)
+                .and_modify(|entry| entry.1 = ch.after.as_deref())
+                .or_insert((ch.before.as_deref(), ch.after.as_deref()));
+        }
+        map
+    };
+    let mut projected_items: Vec<(i64, &'static str, ItemChangeFields, String)> = Vec::new();
     let mut seen_items: HashMap<(i64, &'static str, i64), usize> = HashMap::new();
     let mut projected_bps: Vec<(i64, i64)> = Vec::new();
     let mut seen_bps: HashSet<(i64, i64)> = HashSet::new();
@@ -668,12 +1324,23 @@ fn collect_compare_item_expectations(
                 {
                     continue;
                 }
+                let before_rec = item_changes_by_id
+                    .get(&fields.item_id)
+                    .and_then(|(before, _)| *before);
+                let class_key = classify_projected_item(
+                    before_rec,
+                    &fields,
+                    snap,
+                    changes,
+                    &item_changes_by_id,
+                    sde,
+                );
                 let key = (r.recipient_char_id, r.id_type, fields.item_id);
                 if let Some(&idx) = seen_items.get(&key) {
-                    projected_items[idx] = (r.recipient_char_id, r.id_type, fields);
+                    projected_items[idx] = (r.recipient_char_id, r.id_type, fields, class_key);
                 } else {
                     seen_items.insert(key, projected_items.len());
-                    projected_items.push((r.recipient_char_id, r.id_type, fields));
+                    projected_items.push((r.recipient_char_id, r.id_type, fields, class_key));
                 }
             }
             "OnBlueprintsUpdated" => {
@@ -733,15 +1400,21 @@ fn emit_summary_log(summary: &ItemCompareSummary, msg: &str) {
     tracing::info!(
         target: "delta_item_compare",
         item_matched = summary.item_change.matched,
+        item_matched_across_scopes = summary.item_change.matched_across_scopes,
         item_hand_written_only = summary.item_change.hand_written_only,
         item_projected_only = summary.item_change.projected_only,
         item_pending = summary.item_change.pending,
         bp_matched = summary.blueprints_updated.matched,
+        bp_matched_across_scopes = summary.blueprints_updated.matched_across_scopes,
         bp_hand_written_only = summary.blueprints_updated.hand_written_only,
         bp_projected_only = summary.blueprints_updated.projected_only,
         bp_pending = summary.blueprints_updated.pending,
         explicit_in_tx = summary.explicit_in_tx_effects,
         item_helpers = ?summary.item_change.by_helper,
+        item_cross_scope_helpers = ?summary.item_change.matched_across_scopes_by_helper,
+        item_cross_scope_pairs = ?summary.item_change.matched_across_scopes_by_scope_pair,
+        item_projected_only_by_class = ?summary.item_change.projected_only_by_class,
+        item_projected_only_by_dispatch_method = ?summary.item_change.projected_only_by_dispatch_method,
         bp_helpers = ?summary.blueprints_updated.by_helper,
         "{msg}"
     );
@@ -772,7 +1445,7 @@ impl ItemCompareBridge {
         now_unix: u64,
         online: &impl OnlineCharacterLookup,
         effects: &TxItemEffectKeys,
-        in_dispatch: bool,
+        dispatch_scope_info: Option<(u64, Option<String>)>,
     ) {
         {
             let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
@@ -798,9 +1471,17 @@ impl ItemCompareBridge {
         };
         if !projected_items.is_empty() || !projected_bps.is_empty() || effects.explicit_count > 0 {
             let tid = std::thread::current().id();
+            let in_dispatch = dispatch_scope_info.is_some();
+            let dispatch_method = dispatch_scope_info.and_then(|(_, method)| method);
             let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
             let scope = resolve_compare_origin_scope(in_dispatch, ledger.tick_sync_depths_by_thread.contains_key(&tid));
-            ledger.record_projected_batch(scope, projected_items, projected_bps, effects.explicit_count);
+            ledger.record_projected_batch(
+                scope,
+                dispatch_method,
+                projected_items,
+                projected_bps,
+                effects.explicit_count,
+            );
         }
     }
 
@@ -979,7 +1660,11 @@ pub(crate) fn record_legacy_item_compare(
     let Some(bridge) = super::delta_commit_listener::item_compare_bridge(ctx) else {
         return;
     };
-    let in_dispatch = super::cache_notifications::current_dispatch_staging_scope_id(Some(&*ctx.pending_notifications), Some(&ctx.notify_tx)).is_some();
+    let in_dispatch = super::cache_notifications::current_dispatch_staging_scope_info(
+        Some(&*ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+    )
+    .is_some();
     let tid = std::thread::current().id();
     let mut ledger = bridge.ledger.lock().unwrap_or_else(|e| e.into_inner());
     if !ledger.is_enabled() {
@@ -1032,3 +1717,7 @@ pub(crate) fn set_item_compare_override_for_test(
     ledger.enabled_override = enabled;
     ledger.report_path_override = report_path;
 }
+
+#[cfg(test)]
+#[path = "delta_item_compare_tests.rs"]
+mod tests;

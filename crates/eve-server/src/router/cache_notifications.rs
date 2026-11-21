@@ -243,6 +243,7 @@ struct DispatchNotificationStage {
     target_pend_ptr: usize,
     target_notify_tx: tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
     staged: Vec<StagedDispatchNotification>,
+    rpc_method_stack: Vec<String>,
 }
 
 static NEXT_STAGING_SCOPE_ID: std::sync::atomic::AtomicU64 =
@@ -290,21 +291,51 @@ where
         target_pend_ptr: pending_notifications_ptr(pend),
         target_notify_tx: notify_tx.clone(),
         staged: Vec::new(),
+        rpc_method_stack: Vec::new(),
     };
     DISPATCH_STAGED_NOTIFICATIONS
         .scope(std::cell::RefCell::new(stage), fut)
         .await
 }
 
-pub(crate) fn current_dispatch_staging_scope_id(
+pub(crate) fn push_dispatch_rpc_method(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
+    rpc_method: String,
+) -> Option<usize> {
+    let pend_ptr = pending_notifications_ptr(pend);
+    let pushed = DISPATCH_STAGED_NOTIFICATIONS
+        .try_with(|cell| {
+            let mut stage = cell.borrow_mut();
+            stage_matches_target(&stage, Some(pend_ptr), Some(notify_tx)).then(|| {
+                stage.rpc_method_stack.push(rpc_method);
+            })
+        })
+        .ok()
+        .flatten()
+        .is_some();
+    pushed.then_some(pend_ptr)
+}
+
+pub(crate) fn pop_dispatch_rpc_method(pend_ptr: usize) {
+    let _ = DISPATCH_STAGED_NOTIFICATIONS.try_with(|cell| {
+        let mut stage = cell.borrow_mut();
+        if stage.target_pend_ptr == pend_ptr {
+            stage.rpc_method_stack.pop();
+        }
+    });
+}
+
+pub(crate) fn current_dispatch_staging_scope_info(
     pend: Option<&dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
-) -> Option<u64> {
+) -> Option<(u64, Option<String>)> {
     let pend_ptr = pend.map(pending_notifications_ptr);
     DISPATCH_STAGED_NOTIFICATIONS
         .try_with(|cell| {
             let stage = cell.borrow();
-            stage_matches_target(&stage, pend_ptr, notify_tx).then_some(stage.scope_id)
+            stage_matches_target(&stage, pend_ptr, notify_tx)
+                .then(|| (stage.scope_id, stage.rpc_method_stack.last().cloned()))
         })
         .ok()
         .flatten()
@@ -314,7 +345,7 @@ pub(crate) fn is_staging_dispatch_notifications(
     pend: Option<&dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
 ) -> bool {
-    current_dispatch_staging_scope_id(pend, notify_tx).is_some()
+    current_dispatch_staging_scope_info(pend, notify_tx).is_some()
 }
 
 pub(crate) fn try_stage_dispatch_notification(
