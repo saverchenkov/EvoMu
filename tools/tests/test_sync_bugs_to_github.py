@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import io
 import json
@@ -1709,6 +1711,227 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
                 with sync_mod._sync_lock(excl_lock):
                     self.assertTrue(excl_lock.exists())
             self.assertFalse(excl_lock.exists())
+
+    def test_dedup_same_step_macho_and_client_python_queue_bundles(self) -> None:
+        trace_py = (
+            'Traceback (most recent call last):\n'
+            '  File "packages/fitting/ui/fittingSlotController.py", line 91, in FitModule\n'
+            "UserError: User error, msg=ModuleFitFailed, dict={'reason': 'Low CPU'}\n"
+        )
+        client_bundle = {
+            "fingerprint": "be997965964ffe5b",
+            "stack_hash": 111111111,
+            "stack_key": "playtester:client-python:client_traceback",
+            "report_source": "f12_manual",
+            "step": 96364,
+            "git_head": "3c6b4a75c",
+            "kind": "client_traceback",
+            "subsystem": "client-python",
+            "summary": "User error, msg=ModuleFitFailed\nLocation: fittingSlotController.py:91",
+            "trace": trace_py,
+            "traceback": trace_py,
+            "manual_report": {
+                "report_key": "playtester_step96364_be997965964ffe5b",
+                "category_id": "client-python",
+                "category_name": "client_traceback",
+                "title": "Client exception: User error, msg=ModuleFitFailed",
+                "description": "User error, msg=ModuleFitFailed",
+            },
+            "flight_recorder": [],
+        }
+        macho_summary = json.dumps(
+            {
+                "service": "dogmaIM",
+                "method": "Fit",
+                "error": "UserError('ModuleFitFailed', {'reason': 'Low CPU'})",
+            }
+        )
+        macho_bundle = {
+            "fingerprint": "fc0c0ad7d60d499e",
+            "stack_hash": 222222222,
+            "stack_key": "playtester:macho:protocol_error",
+            "report_source": "f12_manual",
+            "step": 96364,
+            "git_head": "3c6b4a75c",
+            "kind": "protocol_error",
+            "subsystem": "macho",
+            "summary": macho_summary,
+            "trace": "",
+            "traceback": "",
+            "manual_report": {
+                "report_key": "playtester_step96364_fc0c0ad7d60d499e",
+                "category_id": "macho",
+                "category_name": "protocol_error",
+                "title": "MachoNet error on click_widget (dogmaIM.Fit): UserError('ModuleFitFailed')",
+                "description": macho_summary,
+            },
+            "flight_recorder": [
+                {
+                    "offset_ms": -8,
+                    "service": "dogmaIM",
+                    "method": "Fit",
+                    "args_summary": "(1001, 2002)",
+                    "status": "UserError('ModuleFitFailed')",
+                    "duration_micros": 3100,
+                }
+            ],
+        }
+
+        # Different step must NOT absorb.
+        other_step_client = dict(client_bundle, step=96365)
+        kept_diff, abs_diff = sync_mod._dedup_same_step_macho_client_bundles(
+            [("a.json", other_step_client), ("b.json", dict(macho_bundle))]
+        )
+        self.assertEqual(len(kept_diff), 2)
+        self.assertEqual(abs_diff, {})
+
+        # Mismatched UserError key on same step must NOT absorb.
+        other_key_client = dict(
+            client_bundle,
+            trace='File "x.py", line 1\nUserError: User error, msg=CannotFitStackedModule',
+            traceback='File "x.py", line 1\nUserError: User error, msg=CannotFitStackedModule',
+        )
+        kept_mismatch, abs_mismatch = sync_mod._dedup_same_step_macho_client_bundles(
+            [("a.json", other_key_client), ("b.json", dict(macho_bundle))]
+        )
+        self.assertEqual(len(kept_mismatch), 2)
+        self.assertEqual(abs_mismatch, {})
+
+        # Real matching pair (even with client filename sorting before macho): 1 issue + both files archived.
+        # Also verify BF-01: pre-existing `[Environment] Zero server requests` issue IS discoverable via
+        # find_existing_issue, yet `main()` must NOT collide onto it via alias hash.
+        env_zero_hash = sync_mod._fnv1a_i64("env:zero_server_requests")
+        fake_gh = FakeGitHubCLI()
+        fake_gh.created_issues.append(
+            {
+                "number": 999,
+                "title": "[Environment] Zero server requests reached server",
+                "labels": ["environment"],
+                "body": (
+                    f"**Signature Hash:** `0x{(env_zero_hash & 0xFFFFFFFFFFFFFFFF):016x}` "
+                    f"(or `{env_zero_hash}`)\n"
+                ),
+                "state": "OPEN",
+                "url": "https://github.com/saverchenkov/EvoMu/issues/999",
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            qdir = root / "queue"
+            udir = root / "uploaded"
+            qdir.mkdir(parents=True)
+            c_name = "playtester_step96364_be997965964ffe5b.json"
+            m_name = "playtester_step96364_fc0c0ad7d60d499e.json"
+            (qdir / c_name).write_text(json.dumps(client_bundle), encoding="utf-8")
+            (qdir / m_name).write_text(json.dumps(macho_bundle), encoding="utf-8")
+
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=fake_gh
+            ):
+                self.assertEqual(
+                    sync_mod.find_existing_issue("saverchenkov/EvoMu", env_zero_hash),
+                    (999, "OPEN"),
+                )
+                rc = sync_mod.main(["--queue-dir", str(qdir), "--uploaded-dir", str(udir), "--cache-file", ""])
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(fake_gh.created_issues), 2)
+            self.assertEqual(len(fake_gh.comments), 0)
+            issue = fake_gh.created_issues[-1]
+            self.assertIn("[macho]", issue["title"])
+            self.assertIn("**Occurrences Captured:** `1`", issue["body"])
+            self.assertIn("dogmaIM.Fit", issue["body"])
+            self.assertIn("MachoNet RPC Flight Recorder", issue["body"])
+            self.assertIn("### 🐍 Client Python Traceback", issue["body"])
+            self.assertIn("fittingSlotController.py", issue["body"])
+            self.assertNotIn(str(env_zero_hash), issue["body"])
+            self.assertEqual(list(qdir.glob("*.json")), [])
+            self.assertTrue((udir / c_name).exists())
+            self.assertTrue((udir / m_name).exists())
+
+        # Non-env client bundle records its effective alias hash on the absorbed macho bundle.
+        non_env_client = dict(
+            client_bundle,
+            flight_recorder=[
+                {
+                    "offset_ms": -5,
+                    "service": "dogmaIM",
+                    "method": "Fit",
+                    "args_summary": "(1001, 2002)",
+                    "status": "UserError('ModuleFitFailed')",
+                    "duration_micros": 1200,
+                }
+            ],
+        )
+        kept_non_env, _ = sync_mod._dedup_same_step_macho_client_bundles(
+            [("a.json", non_env_client), ("b.json", dict(macho_bundle))]
+        )
+        self.assertEqual(len(kept_non_env), 1)
+        self.assertIn(sync_mod._effective_bundle_hash(non_env_client), kept_non_env[0][1]["alias_hashes"])
+        self.assertIn(111111111, kept_non_env[0][1]["alias_hashes"])
+
+        # BF-02: Non-UserError client traceback (KeyError) mentioning UserError in Local variables / frame must NOT absorb.
+        keyerr_client_trace = (
+            'Traceback (most recent call last):\n'
+            '  File "packages/fitting/ui/fittingSlotController.py", line 91, in FitModule\n'
+            "    raise UserError('ModuleFitFailed')\n"
+            "KeyError: 'shipID'\n"
+            "Local variables:\n"
+            "  msg = \"User error, msg=ModuleFitFailed\"\n"
+            "EXCEPTION END\n"
+        )
+        keyerr_client = dict(
+            client_bundle,
+            summary="Client exception: KeyError: 'shipID' (UserError('ModuleFitFailed'))",
+            trace=keyerr_client_trace,
+            traceback=keyerr_client_trace,
+            manual_report={
+                "report_key": "playtester_step96364_deadbeef",
+                "category_id": "client-python",
+                "category_name": "client_traceback",
+                "title": "Client exception: KeyError: UserError('ModuleFitFailed')",
+                "description": keyerr_client_trace,
+            },
+        )
+        kept_keyerr, abs_keyerr = sync_mod._dedup_same_step_macho_client_bundles(
+            [("a.json", keyerr_client), ("b.json", dict(macho_bundle))]
+        )
+        self.assertEqual(len(kept_keyerr), 2)
+        self.assertEqual(abs_keyerr, {})
+
+        # P2 #2: Non-manual bundles must not match _is_macho_protocol_bundle.
+        non_manual_macho = {
+            "report_source": "exception",
+            "subsystem": "macho",
+            "kind": "protocol_error",
+            "stack_key": "playtester:macho:protocol_error",
+            "step": 96364,
+        }
+        self.assertFalse(sync_mod._is_macho_protocol_bundle(non_manual_macho))
+
+        # Dual-tagged manual macho bundle with client_traceback kind must not self-match as client candidate.
+        dual_tagged_macho = dict(macho_bundle, kind="client_traceback")
+        kept_dual, abs_dual = sync_mod._dedup_same_step_macho_client_bundles([("m.json", dual_tagged_macho)])
+        self.assertEqual(len(kept_dual), 1)
+        self.assertEqual(abs_dual, {})
+
+    def test_extract_client_user_error_key_custom_info_preserves_subkey_past_error_name(self) -> None:
+        self.assertEqual(
+            sync_mod.extract_client_user_error_key(
+                "User error, msg=CustomInfo, dict={'info': 'FittingError: no slots'}"
+            ),
+            "CustomInfo:FittingError",
+        )
+        self.assertEqual(
+            sync_mod.extract_client_user_error_key(
+                "UserError('CustomInfo', {'info': 'ValidationError: slot full'})"
+            ),
+            "CustomInfo:ValidationError",
+        )
+        self.assertIsNone(
+            sync_mod.extract_client_user_error_key(
+                "KeyError: \"User error, msg=CustomInfo, dict={'info': 'FittingError: no slots'}\""
+            )
+        )
 
 
 if __name__ == "__main__":

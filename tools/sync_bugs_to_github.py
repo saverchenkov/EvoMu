@@ -130,6 +130,7 @@ _NOISE_LINE_PREFIXES = (
     "Reported from:",
     "Stackhash:",
     "Thread Locals:",
+    "Local variables:",
     "Common path prefix",
     "CALLSTACK:",
     "Thrown at:",
@@ -178,11 +179,11 @@ _LOCATION_FUNC_RE = re.compile(r"^([^\s:]+):\d+\s+in\s+([^\s]+)$")
 
 
 def _strip_trace_locals_and_end(trace: str) -> str:
-    """Returns the trace text before any `Thread Locals:` or `EXCEPTION END` section."""
+    """Returns the trace text before any `Thread Locals:`, `Local variables:`, or `EXCEPTION END` section."""
     kept: List[str] = []
     for line in trace.replace("\r\n", "\n").splitlines():
         stripped = line.strip()
-        if stripped.startswith(("Thread Locals:", "EXCEPTION END")):
+        if stripped.startswith(("Thread Locals:", "Local variables:", "EXCEPTION END")):
             break
         kept.append(line)
     return "\n".join(kept)
@@ -857,6 +858,457 @@ def _is_client_python_exception_bundle(bundle: Dict[str, Any]) -> bool:
     if not is_manual_report(bundle):
         return True
     return _is_client_python_manual(bundle)
+
+
+_RE_USER_ERROR_CCP_MSG = re.compile(
+    r"User\s+error\s*,\s*msg\s*=\s*(?:u?['\"])?([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+_RE_USER_ERROR_CALL = re.compile(
+    r"UserError\s*:?\s*\(\s*(?:u?(['\"])([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*((?:(?!\1)[^)\r\n])+))?\1|([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*([^)\r\n]+))?)"
+)
+_RE_USER_ERROR_COLON = re.compile(
+    r"\bUserError\s*:\s*(?!User\s+error\b)([A-Za-z_][A-Za-z0-9_]*)"
+)
+_RE_CUSTOM_INFO_FIELD = re.compile(
+    r"['\"]info['\"]\s*:\s*u?(['\"])((?:\\.|(?!\1).)*)\1",
+    re.DOTALL,
+)
+_RE_CUSTOM_INFO_CONTAINER_KEY = re.compile(r"['\"]info['\"]\s*:\s*([(\[])")
+_RE_CUSTOM_INFO_SUBKEY = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:")
+_RE_CUSTOM_INFO_INLINE = re.compile(r"\bCustomInfo\s*:\s*([^\r\n]+)")
+_RE_CLIENT_HEADLINE_PREFIX = re.compile(
+    r"^(?:\[Playtester\]\s*)?(?:Client\s+(?:exception|traceback|crash)|Headline)\s*:\s*",
+    re.IGNORECASE,
+)
+_RE_EXCEPTION_LABEL = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Exit|Interrupt))\s*:"
+)
+_RE_TRACEBACK_INDICATORS = re.compile(
+    r"(?:^|\n)\s*(?:Traceback \(most recent call last\):|Formatted exception info:|EXCEPTION #|STACKTRACE #|Thread Locals:|Local variables:|EXCEPTION END|CALLSTACK:|INNER TRACEBACK:|File \"|logmodule\.|log\.Log|stdlogutils\.|service\.CoreMixIn\.|blue\.pyos\.exceptionHandler:|sys\.excepthook:)",
+    re.MULTILINE,
+)
+_WRAPPER_EXC_CLASSES = frozenset({"LogException", "LogTraceback", "UnknownException", "INNER TRACEBACK"})
+
+
+def _extract_balanced_container_repr(text: str) -> str:
+    if not text or text[0] not in "([":
+        return ""
+    open_ch = text[0]
+    close_ch = ")" if open_ch == "(" else "]"
+    depth = 0
+    quote: Optional[str] = None
+    escaped = False
+    for idx, ch in enumerate(text):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return text[: idx + 1]
+    return text.splitlines()[0]
+
+
+def _normalize_custom_info_hint(raw_hint: str, *, allow_paren: bool = True) -> str:
+    cleaned = raw_hint.replace("\\'", "'").replace('\\"', '"').strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ("'", '"'):
+        cleaned = cleaned[1:-1].strip()
+    if not cleaned or cleaned.startswith("{") or (not allow_paren and cleaned.startswith(("(", "["))):
+        return ""
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cleaned):
+        return f"CustomInfo:{cleaned}"
+    sub_match = _RE_CUSTOM_INFO_SUBKEY.match(cleaned)
+    if sub_match:
+        return f"CustomInfo:{sub_match.group(1)}"
+    norm = re.sub(r"\s+", " ", cleaned).strip().lower()[:120]
+    return f"CustomInfo:{norm}" if norm else ""
+
+
+def _extract_custom_info_key(text: str, subkey_hint: Optional[str] = None) -> str:
+    if subkey_hint:
+        norm_hint = _normalize_custom_info_hint(subkey_hint, allow_paren=False)
+        if norm_hint:
+            return norm_hint
+    info_match = _RE_CUSTOM_INFO_FIELD.search(text)
+    if info_match:
+        info_val = info_match.group(2).replace("\\'", "'").replace('\\"', '"')
+        norm_val = _normalize_custom_info_hint(info_val)
+        if norm_val:
+            return norm_val
+    container_match = _RE_CUSTOM_INFO_CONTAINER_KEY.search(text)
+    if container_match:
+        container_repr = _extract_balanced_container_repr(text[container_match.start(1) :])
+        if container_repr:
+            norm_container = re.sub(r"\bu(['\"])", r"\1", container_repr)
+            norm_container = re.sub(r"\s+", " ", norm_container).strip().lower()[:120]
+            if norm_container:
+                return f"CustomInfo:{norm_container}"
+    inline_match = _RE_CUSTOM_INFO_INLINE.search(text)
+    if inline_match:
+        norm_inline = _normalize_custom_info_hint(inline_match.group(1), allow_paren=False)
+        if norm_inline:
+            return norm_inline
+    return "CustomInfo"
+
+
+def extract_user_error_key(text: Any) -> Optional[str]:
+    """Extract canonical UserError key (including CustomInfo sub-key) from string/dict/list payloads."""
+    if text is None:
+        return None
+    if isinstance(text, dict):
+        manual = text.get("manual_report") if isinstance(text.get("manual_report"), dict) else {}
+        candidates: List[Any] = [
+            text.get("error"),
+            text.get("message"),
+            text.get("msg"),
+            text.get("traceback"),
+            text.get("trace"),
+            text.get("summary"),
+            text.get("headline"),
+            manual.get("description"),
+            text.get("description"),
+            text.get("action_error"),
+            manual.get("title"),
+            text.get("title"),
+        ]
+        for candidate in candidates:
+            key = extract_user_error_key(candidate)
+            if key:
+                return key
+        return None
+    if isinstance(text, (list, tuple)):
+        for item in text:
+            key = extract_user_error_key(item)
+            if key:
+                return key
+        return None
+
+    raw = str(text).strip()
+    if not raw:
+        return None
+    if raw.startswith("{"):
+        try:
+            decoded, _ = json.JSONDecoder().raw_decode(raw)
+        except Exception:
+            decoded = None
+        if isinstance(decoded, dict):
+            key = extract_user_error_key(decoded)
+            if key:
+                return key
+
+    ccp_match = _RE_USER_ERROR_CCP_MSG.search(raw)
+    if ccp_match:
+        key = ccp_match.group(1)
+        if key.lower() == "custominfo":
+            return _extract_custom_info_key(raw[ccp_match.start() :])
+        return key
+
+    call_match = _RE_USER_ERROR_CALL.search(raw)
+    if call_match:
+        key = call_match.group(2) or call_match.group(4)
+        sub_hint = call_match.group(3) if call_match.group(2) is not None else call_match.group(5)
+        if key.lower() == "custominfo":
+            return _extract_custom_info_key(raw[call_match.start() :], subkey_hint=sub_hint)
+        return key
+
+    colon_match = _RE_USER_ERROR_COLON.search(raw)
+    if colon_match:
+        key = colon_match.group(1)
+        if key.lower() == "custominfo":
+            return _extract_custom_info_key(raw[colon_match.start() :])
+        return key
+
+    return None
+
+
+def _inspect_client_headline_for_user_error(raw: str) -> Tuple[Optional[str], bool]:
+    """Return `(user_error_key, definite_non_user_error)` for a single headline/message line."""
+    cleaned = _RE_CLIENT_HEADLINE_PREFIX.sub("", raw).strip()
+    if not cleaned:
+        return None, False
+    for match in _RE_EXCEPTION_LABEL.finditer(cleaned):
+        cls_short = match.group(1).split(".")[-1]
+        if cls_short in _WRAPPER_EXC_CLASSES:
+            continue
+        if cls_short != "UserError":
+            before_key = extract_user_error_key(cleaned[: match.start()])
+            if before_key:
+                # Re-extract over full cleaned string so CustomInfo subkeys after the
+                # wrapper/dict marker aren't truncated off.
+                return extract_user_error_key(cleaned), False
+            return None, True
+        return extract_user_error_key(cleaned[match.start() :]), False
+    return extract_user_error_key(cleaned), False
+
+
+def _inspect_client_text_for_user_error(text: Any) -> Tuple[Optional[str], bool]:
+    """
+    Strictly inspect client-side traceback/error payloads for an actual raised UserError.
+
+    Strips `Local variables:` / `Thread Locals:` / `EXCEPTION END`, verifies the final parsed
+    exception class for tracebacks, and returns `(None, True)` immediately when a concrete
+    non-UserError exception (`KeyError`, `AttributeError`, etc.) is detected.
+    """
+    if text is None:
+        return None, False
+    if isinstance(text, dict):
+        manual = text.get("manual_report") if isinstance(text.get("manual_report"), dict) else {}
+        candidates: List[Any] = [
+            text.get("trace"),
+            text.get("traceback"),
+            text.get("error"),
+            text.get("message"),
+            text.get("msg"),
+            text.get("summary"),
+            text.get("headline"),
+            manual.get("description"),
+            text.get("description"),
+            text.get("action_error"),
+            manual.get("title"),
+            text.get("title"),
+        ]
+        for candidate in candidates:
+            key, non_ue = _inspect_client_text_for_user_error(candidate)
+            if key:
+                return key, False
+            if non_ue:
+                return None, True
+        return None, False
+    if isinstance(text, (list, tuple)):
+        for item in text:
+            key, non_ue = _inspect_client_text_for_user_error(item)
+            if key:
+                return key, False
+            if non_ue:
+                return None, True
+        return None, False
+
+    raw = str(text).strip()
+    if not raw:
+        return None, False
+    if raw.startswith("{"):
+        try:
+            decoded, _ = json.JSONDecoder().raw_decode(raw)
+        except Exception:
+            decoded = None
+        if isinstance(decoded, dict):
+            return _inspect_client_text_for_user_error(decoded)
+
+    if _RE_TRACEBACK_INDICATORS.search(raw):
+        stripped = _strip_trace_locals_and_end(raw).strip()
+        if not stripped:
+            return None, False
+        if "\n" not in stripped:
+            return _inspect_client_headline_for_user_error(stripped)
+        exc_class, exc_msg, _ = parse_traceback_summary(stripped, "")
+        cls_short = exc_class.split(".")[-1].strip()
+        if cls_short == "UserError" or exc_class.strip().lower().startswith("user error"):
+            target = f"{exc_class}: {exc_msg}" if exc_msg else exc_class
+            return extract_user_error_key(target), False
+        if (
+            cls_short in _WRAPPER_EXC_CLASSES
+            or not cls_short
+            or exc_class.startswith(("blue.pyos.", "logmodule.", "log.", "stdlogutils.", "[evomu_site]"))
+        ):
+            target = f"{exc_class}: {exc_msg}" if exc_msg else exc_class
+            return _inspect_client_headline_for_user_error(target)
+        return None, True
+
+    if "\n" in raw:
+        for line in raw.splitlines():
+            s_line = line.strip()
+            if not s_line:
+                continue
+            key, non_ue = _inspect_client_headline_for_user_error(s_line)
+            if key:
+                return key, False
+            if non_ue:
+                return None, True
+        return None, False
+
+    return _inspect_client_headline_for_user_error(raw)
+
+
+def extract_client_user_error_key(text: Any) -> Optional[str]:
+    """Extract canonical UserError key from client payloads only when UserError is the raised exception."""
+    key, _ = _inspect_client_text_for_user_error(text)
+    return key
+
+
+def merge_macho_client_user_error_fields(
+    macho_summary: str,
+    macho_trace: str,
+    client_summary: str,
+    client_trace: str,
+    user_error_key: str,
+    normalize_tb: Optional[Any] = None,
+) -> Tuple[str, str]:
+    """Combine MachoNet error summary + client-python summary/traceback without duplicating traces."""
+    norm = normalize_tb or (lambda s: s)
+    m_sum = str(macho_summary or "").strip()
+    c_sum = str(client_summary or "").strip()
+    if c_sum and c_sum not in m_sum:
+        header = f"Client exception ({user_error_key}):"
+        merged_summary = f"{m_sum}\n\n{header}\n{c_sum}" if m_sum else c_sum
+    else:
+        merged_summary = m_sum
+
+    m_tb = str(macho_trace or "").strip()
+    c_tb = str(client_trace or "").strip()
+    if not m_tb:
+        merged_trace = c_tb
+    elif not c_tb:
+        merged_trace = m_tb
+    else:
+        norm_m = norm(m_tb).strip()
+        norm_c = norm(c_tb).strip()
+        if norm_c and norm_c in norm_m:
+            merged_trace = m_tb
+        elif norm_m and norm_m in norm_c:
+            merged_trace = c_tb
+        else:
+            merged_trace = f"{m_tb}\n\n{c_tb}"
+    return merged_summary, merged_trace
+
+
+def _is_macho_protocol_bundle(bundle: Dict[str, Any]) -> bool:
+    if not is_manual_report(bundle):
+        return False
+    manual = bundle.get("manual_report") or {}
+    cat = str(manual.get("category_id") or "").strip().lower()
+    subsys = str(bundle.get("subsystem") or "").strip().lower()
+    kind = str(bundle.get("kind") or manual.get("category_name") or "").strip().lower()
+    stack_key = str(bundle.get("stack_key") or "").strip().lower()
+    is_macho = cat == "macho" or subsys == "macho" or stack_key.startswith("playtester:macho:")
+    return is_macho and (not kind or kind == "protocol_error")
+
+
+def _is_client_traceback_bundle(bundle: Dict[str, Any]) -> bool:
+    manual = bundle.get("manual_report") or {}
+    cat = str(manual.get("category_id") or "").strip().lower()
+    subsys = str(bundle.get("subsystem") or "").strip().lower()
+    kind = str(bundle.get("kind") or manual.get("category_name") or "").strip().lower()
+    stack_key = str(bundle.get("stack_key") or "").strip().lower()
+    return (
+        _is_client_python_manual(bundle)
+        or cat == "client-python"
+        or subsys == "client-python"
+        or kind == "client_traceback"
+        or stack_key.startswith("playtester:client-python:")
+    )
+
+
+def _extract_bundle_side_user_error_key(bundle: Dict[str, Any], side: str) -> Optional[str]:
+    """Extract UserError key strictly from either the 'macho' or 'client' error payload."""
+    manual = bundle.get("manual_report") or {}
+    if side == "macho":
+        fields = (
+            bundle.get("summary"),
+            manual.get("description"),
+            bundle.get("action_error"),
+            bundle.get("title"),
+            manual.get("title"),
+        )
+        for field in fields:
+            key = extract_user_error_key(field)
+            if key:
+                return key
+        return None
+
+    fields = (
+        _get_bundle_trace(bundle),
+        bundle.get("traceback"),
+        bundle.get("summary"),
+        manual.get("description"),
+        bundle.get("title"),
+        manual.get("title"),
+    )
+    for field in fields:
+        key, non_ue = _inspect_client_text_for_user_error(field)
+        if key:
+            return key
+        if non_ue:
+            return None
+    return None
+
+
+def _dedup_same_step_macho_client_bundles(
+    loaded_bundles: List[Tuple[str, Dict[str, Any]]],
+) -> Tuple[List[Tuple[str, Dict[str, Any]]], Dict[int, List[Tuple[str, Dict[str, Any]]]]]:
+    """Absorb pre-queued client-python UserError bundles into matching same-step macho bundles."""
+    macho_index: Dict[Tuple[Any, str], List[Dict[str, Any]]] = {}
+    for _, bundle in loaded_bundles:
+        step = bundle.get("step")
+        if step is None or not _is_macho_protocol_bundle(bundle):
+            continue
+        key = _extract_bundle_side_user_error_key(bundle, "macho")
+        if key:
+            macho_index.setdefault((step, key.lower()), []).append(bundle)
+
+    if not macho_index:
+        return loaded_bundles, {}
+
+    kept: List[Tuple[str, Dict[str, Any]]] = []
+    absorbed_by_macho_id: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
+    for filepath, bundle in loaded_bundles:
+        step = bundle.get("step")
+        absorbed_target: Optional[Dict[str, Any]] = None
+        if step is not None and _is_client_traceback_bundle(bundle) and not _is_macho_protocol_bundle(bundle):
+            c_key = _extract_bundle_side_user_error_key(bundle, "client")
+            if c_key:
+                c_head = str(bundle.get("git_head") or "").strip()
+                for cand in macho_index.get((step, c_key.lower()), ()):
+                    m_head = str(cand.get("git_head") or "").strip()
+                    if c_head and m_head and c_head != m_head:
+                        continue
+                    absorbed_target = cand
+                    break
+
+        if absorbed_target is not None:
+            m_manual = absorbed_target.get("manual_report") if isinstance(absorbed_target.get("manual_report"), dict) else None
+            c_manual = bundle.get("manual_report") if isinstance(bundle.get("manual_report"), dict) else {}
+            m_summary = str(absorbed_target.get("summary") or (m_manual.get("description") if m_manual else "") or "")
+            c_summary = str(bundle.get("summary") or c_manual.get("description") or "")
+            c_trace = _get_bundle_trace(bundle) or str(bundle.get("traceback") or "")
+            merged_summary, merged_trace = merge_macho_client_user_error_fields(
+                m_summary,
+                _get_bundle_trace(absorbed_target),
+                c_summary,
+                c_trace,
+                c_key or "",
+            )
+            absorbed_target["summary"] = merged_summary
+            if m_manual is not None:
+                m_manual["description"] = merged_summary
+            if merged_trace:
+                absorbed_target["trace"] = merged_trace
+                absorbed_target["traceback"] = merged_trace
+            alias_list = absorbed_target.setdefault("alias_hashes", [])
+            if isinstance(alias_list, list) and classify_environment_fault(bundle) is None:
+                eff_c_hash = _effective_bundle_hash(bundle)
+                if eff_c_hash not in alias_list:
+                    alias_list.append(eff_c_hash)
+                try:
+                    raw_c_hash = int(bundle.get("stack_hash", 0))
+                except (TypeError, ValueError):
+                    raw_c_hash = 0
+                if raw_c_hash and raw_c_hash not in alias_list:
+                    alias_list.append(raw_c_hash)
+            absorbed_by_macho_id.setdefault(id(absorbed_target), []).append((filepath, bundle))
+        else:
+            kept.append((filepath, bundle))
+
+    return kept, absorbed_by_macho_id
 
 
 def _normalize_exception_message(msg: str) -> str:
@@ -2016,7 +2468,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         print(f"[*] Discovered {len(json_files)} queued incident report(s) in '{args.queue_dir}'.")
 
-        groups: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
+        loaded_bundles: List[Tuple[str, Dict[str, Any]]] = []
         suppressed_benign: List[Tuple[str, Dict[str, Any]]] = []
         for filepath in json_files:
             try:
@@ -2025,10 +2477,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if is_benign_client_traceback_bundle(bundle):
                     suppressed_benign.append((filepath, bundle))
                     continue
-                h = _effective_bundle_hash(bundle)
-                groups.setdefault(h, []).append((filepath, bundle))
+                loaded_bundles.append((filepath, bundle))
             except Exception as e:
                 print(f"[warn] Skipping corrupt or unreadable file '{filepath}': {e}", file=sys.stderr)
+
+        kept_bundles, absorbed_by_macho_id = _dedup_same_step_macho_client_bundles(loaded_bundles)
+        groups: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
+        for filepath, bundle in kept_bundles:
+            h = _effective_bundle_hash(bundle)
+            groups.setdefault(h, []).append((filepath, bundle))
 
         for path, benign_bundle in suppressed_benign:
             print(f"[info] Suppressing known benign client UI traceback '{os.path.basename(path)}'.")
@@ -2037,6 +2494,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         for stack_hash, files in groups.items():
             total_occurrences = len(files)
+            group_file_count = total_occurrences + sum(
+                len(absorbed_by_macho_id.get(id(b), ())) for _, b in files
+            )
             unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
             (primary_path, primary_bundle), extra_files = _select_primary_and_extras(files)
             env_fault = classify_environment_fault(primary_bundle)
@@ -2066,21 +2526,25 @@ def main(argv: Optional[List[str]] = None) -> int:
                     f"[error] Failed creating/updating issue for group 0x{unsigned_hash:016x}: {e}",
                     file=sys.stderr,
                 )
-                failed_count += len(files)
+                failed_count += group_file_count
                 continue
 
             if not issue_id:
                 print(
-                    f"[error] Retaining {len(files)} bundle(s) for group 0x{unsigned_hash:016x} because issue sync did not succeed.",
+                    f"[error] Retaining {group_file_count} bundle(s) for group 0x{unsigned_hash:016x} because issue sync did not succeed.",
                     file=sys.stderr,
                 )
-                failed_count += len(files)
+                failed_count += group_file_count
                 continue
 
             _dispose_processed_bundle(primary_path, primary_bundle)
             success_count += 1
+            for abs_path, abs_bundle in absorbed_by_macho_id.get(id(primary_bundle), ()):
+                _dispose_processed_bundle(abs_path, abs_bundle)
+                success_count += 1
 
             for occ_idx, (extra_path, extra_bundle) in enumerate(extra_files, start=2):
+                absorbed_extra = absorbed_by_macho_id.get(id(extra_bundle), ())
                 if _should_comment_extra_bundle(primary_bundle, extra_bundle, env_fault):
                     comment_body = format_occurrence_comment(extra_bundle, occ_idx)
                     comment_ok = _post_issue_comment(
@@ -2095,10 +2559,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                             f"[error] Retaining '{os.path.basename(extra_path)}' in queue because commenting on #{issue_id} failed.",
                             file=sys.stderr,
                         )
-                        failed_count += 1
+                        failed_count += 1 + len(absorbed_extra)
                         continue
                 _dispose_processed_bundle(extra_path, extra_bundle)
                 success_count += 1
+                for abs_path, abs_bundle in absorbed_extra:
+                    _dispose_processed_bundle(abs_path, abs_bundle)
+                    success_count += 1
 
     print(f"[✓] Processed {success_count}/{len(json_files)} incident file(s).")
     return 1 if failed_count > 0 else 0
