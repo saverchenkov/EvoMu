@@ -1637,11 +1637,12 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         .chain(destroyed_in_call.iter().copied())
         .collect();
     let need_scram_write = !active_npc_scram_targets.is_empty() || has_scram;
-    let surviving_sys_ids: Option<HashSet<i64>> = if !dead_npcs_to_remove.is_empty()
+    if !dead_npcs_to_remove.is_empty()
         || !updated_npcs.is_empty()
+        || !cleared_ids.is_empty()
         || need_scram_write
     {
-        Some(with_mut_combat_ephemeral(ctx, |rt| {
+        with_mut_combat_ephemeral(ctx, |rt| {
             for dead_id in dead_npcs_to_remove {
                 rt.npc_entities.remove(&dead_id);
             }
@@ -1656,28 +1657,18 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             } else if has_scram {
                 rt.npc_scrambled_ships.remove(&solar_system_id);
             }
-            rt.npc_entities
-                .iter()
-                .filter(|(_, n)| n.solar_system_id == solar_system_id)
-                .map(|(&id, _)| id)
-                .collect()
-        }))
-    } else {
-        None
-    };
-    if !cleared_ids.is_empty() {
-        crate::combat::npc_ai_weapons_loot::clear_extended_npc_weapon_runtime(
-            ctx,
-            solar_system_id,
-            &cleared_ids,
-        );
-    }
-    if let Some(living) = surviving_sys_ids {
-        crate::combat::npc_ai_weapons_loot::retain_extended_npc_weapon_runtime(
-            ctx,
-            solar_system_id,
-            &living,
-        );
+            for bid in &cleared_ids {
+                rt.extended_npc_weapon_runtime
+                    .remove(&(solar_system_id, *bid));
+            }
+            rt.extended_npc_weapon_runtime
+                .retain(|&(sid, bid), _| {
+                    sid != solar_system_id
+                        || rt.npc_entities
+                            .get(&bid)
+                            .is_some_and(|n| n.solar_system_id == solar_system_id)
+                });
+        });
     }
 }
 

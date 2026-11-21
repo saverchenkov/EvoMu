@@ -5,7 +5,9 @@
 
 use crate::combat::npc_ai::{faction_damage_vector, regional_pirate_faction_id};
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{with_combat_ephemeral, ExtendedNpcEntity};
+use crate::services::combat_crimewatch::{
+    with_combat_ephemeral, with_mut_combat_ephemeral, ExtendedNpcEntity,
+};
 use crate::services::wormhole_pve_seeding::is_any_capital_group;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
 use eve_destiny::{
@@ -14,7 +16,7 @@ use eve_destiny::{
 use eve_sde::{AttributeId, EffectId, SdeRegistry};
 use glam::DVec3;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 const ATTR_GFX_TURRET_ID: AttributeId = 245;
 const ATTR_ENTITY_FLY_RANGE: AttributeId = 416;
@@ -41,12 +43,8 @@ const EFF_CHAIN_LIGHTNING: EffectId = 8037;
 const EFF_ENTITY_CHAIN_LIGHTNING: EffectId = 8088;
 
 const MAX_LOGGED_FALLBACK_NPC_TYPES: usize = 16_384;
-const MAX_EXTENDED_NPC_RUNTIME_ENTRIES: usize = 32_768;
 
 static LOGGED_FALLBACK_NPC_TYPES: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
-static EXTENDED_NPC_WEAPON_RUNTIME: OnceLock<
-    Mutex<HashMap<(usize, u32, i64), ExtendedNpcWeaponRuntime>>,
-> = OnceLock::new();
 
 pub(crate) fn fallback_log_registry() -> &'static Mutex<HashSet<u32>> {
     LOGGED_FALLBACK_NPC_TYPES.get_or_init(|| Mutex::new(HashSet::new()))
@@ -1087,7 +1085,10 @@ pub(crate) fn build_specialized_npc_components_with_empire_hint(
             attr(118).unwrap_or(0.0),
         );
         let dmg_mult = attr(64).filter(|&m| m > 0.0).unwrap_or(1.0);
-        let is_non_npc_asset = sde_type.is_some_and(|t| t.category_id == 2);
+        // Legacy fixture 56680 (`abs2_t1_enviroment_asset`, category 2) is reused as
+        // `PochvenHypnosianSleeper` in Pochven encounters and tests.
+        let is_non_npc_asset = sde_type.is_some_and(|t| t.category_id == 2)
+            && !(npc_type_id == 56_680 && archetype == "PochvenHypnosianSleeper");
         let opt = match archetype {
             "SleeperSentry" => attr(54).unwrap_or(250_000.0),
             "EmpireSentry" => attr(54).unwrap_or(500_000.0),
@@ -1441,15 +1442,6 @@ pub(crate) fn evaluate_npc_missile_or_vorton_hit(
     Some(base_damage.scaled(factor))
 }
 
-fn extended_runtime_ctx_key(ctx: &ServerContext) -> usize {
-    Arc::as_ptr(&ctx.combat_ephemeral) as usize
-}
-
-fn extended_runtime_map()
--> &'static Mutex<HashMap<(usize, u32, i64), ExtendedNpcWeaponRuntime>> {
-    EXTENDED_NPC_WEAPON_RUNTIME.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 pub(crate) fn clear_extended_npc_weapon_runtime(
     ctx: &ServerContext,
     solar_system_id: u32,
@@ -1458,21 +1450,12 @@ pub(crate) fn clear_extended_npc_weapon_runtime(
     if ball_ids.is_empty() {
         return;
     }
-    let ctx_key = extended_runtime_ctx_key(ctx);
-    let mut guard = extended_runtime_map().lock().unwrap_or_else(|e| e.into_inner());
-    for &bid in ball_ids {
-        guard.remove(&(ctx_key, solar_system_id, bid));
-    }
-}
-
-pub(crate) fn retain_extended_npc_weapon_runtime(
-    ctx: &ServerContext,
-    solar_system_id: u32,
-    living_ids: &HashSet<i64>,
-) {
-    let ctx_key = extended_runtime_ctx_key(ctx);
-    let mut guard = extended_runtime_map().lock().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|&(ck, sid, bid), _| ck != ctx_key || sid != solar_system_id || living_ids.contains(&bid));
+    with_mut_combat_ephemeral(ctx, |rt| {
+        for &bid in ball_ids {
+            rt.extended_npc_weapon_runtime
+                .remove(&(solar_system_id, bid));
+        }
+    });
 }
 
 pub(crate) fn take_or_init_extended_npc_weapon_runtime(
@@ -1480,11 +1463,10 @@ pub(crate) fn take_or_init_extended_npc_weapon_runtime(
     solar_system_id: u32,
     npc: &ExtendedNpcEntity,
 ) -> ExtendedNpcWeaponRuntime {
-    let ctx_key = extended_runtime_ctx_key(ctx);
-    let existing = {
-        let mut guard = extended_runtime_map().lock().unwrap_or_else(|e| e.into_inner());
-        guard.remove(&(ctx_key, solar_system_id, npc.ball_id))
-    };
+    let existing = with_mut_combat_ephemeral(ctx, |rt| {
+        rt.extended_npc_weapon_runtime
+            .remove(&(solar_system_id, npc.ball_id))
+    });
     let mut rt = match existing {
         Some(cached) if cached.npc_type_id == npc.type_id => cached,
         _ => {
@@ -1523,16 +1505,12 @@ pub(crate) fn store_extended_npc_weapon_runtime(
     ctx: &ServerContext,
     solar_system_id: u32,
     ball_id: i64,
-    rt: ExtendedNpcWeaponRuntime,
+    runtime: ExtendedNpcWeaponRuntime,
 ) {
-    let ctx_key = extended_runtime_ctx_key(ctx);
-    let mut guard = extended_runtime_map().lock().unwrap_or_else(|e| e.into_inner());
-    if guard.len() >= MAX_EXTENDED_NPC_RUNTIME_ENTRIES {
-        if let Some(&evict) = guard.keys().next() {
-            guard.remove(&evict);
-        }
-    }
-    guard.insert((ctx_key, solar_system_id, ball_id), rt);
+    with_mut_combat_ephemeral(ctx, |rt| {
+        rt.extended_npc_weapon_runtime
+            .insert((solar_system_id, ball_id), runtime);
+    });
 }
 
 /// Pre-collected hostility lookup metadata for EDENCOM Vorton chaining so `Ballpark` write locks
@@ -1541,6 +1519,7 @@ pub(crate) struct EdencomHostilityMeta {
     ship_owners: HashMap<i64, (Option<i64>, HashMap<i64, f64>)>,
     drone_owners: HashMap<i64, (i64, Option<i64>, HashMap<i64, f64>)>,
     hostile_npc_ids: HashSet<i64>,
+    location_invulnerable_balls: HashSet<i64>,
 }
 
 impl EdencomHostilityMeta {
@@ -1576,10 +1555,12 @@ impl EdencomHostilityMeta {
         });
 
         let ball_id_set: HashSet<i64> = ball_ids.iter().copied().collect();
-        let (ship_owners, drone_owners) = ctx.db.with_snapshot(|snap| {
+        let (ship_owners, drone_owners, active_ship_chars) = ctx.db.with_snapshot(|snap| {
             let mut ships: HashMap<i64, (Option<i64>, HashMap<i64, f64>)> = HashMap::new();
+            let mut ship_chars: Vec<(i64, i64)> = Vec::new();
             for ch in snap.characters.values() {
                 if ball_id_set.contains(&ch.active_ship_id) {
+                    ship_chars.push((ch.character_id, ch.active_ship_id));
                     ships
                         .entry(ch.active_ship_id)
                         .or_insert_with(|| (ch.fleet_id, ch.standings.clone()));
@@ -1599,14 +1580,27 @@ impl EdencomHostilityMeta {
                     }
                 }
             }
-            (ships, drones)
+            (ships, drones, ship_chars)
         });
+
+        let now_unix = ctx.now_unix();
+        let mut location_invulnerable_balls: HashSet<i64> = HashSet::new();
+        for (cid, sid) in active_ship_chars {
+            if crate::services::space_destiny::is_location_change_invulnerable(ctx, cid, now_unix) {
+                location_invulnerable_balls.insert(sid);
+            }
+        }
 
         Self {
             ship_owners,
             drone_owners,
             hostile_npc_ids,
+            location_invulnerable_balls,
         }
+    }
+
+    pub(crate) fn is_location_invulnerable(&self, ball_id: i64) -> bool {
+        self.location_invulnerable_balls.contains(&ball_id)
     }
 
     pub(crate) fn is_candidate_hostile(
@@ -1673,10 +1667,15 @@ fn collect_edencom_arc_hits(
     let candidates: Vec<(i64, DVec3)> = bp
         .balls
         .iter()
-        .filter(|(&other_id, _)| {
+        .filter(|(&other_id, other_ball)| {
             other_id != npc.ball_id
                 && other_id != target_id
                 && !destroyed_in_call.contains(&other_id)
+                && !matches!(other_ball.mode, MovementMode::Warp { .. })
+                && bp.combat_states.get(&other_id).is_some_and(|cs| {
+                    cs.structure_hp > 0.0 && !cs.is_cloaked && !cs.is_invulnerable()
+                })
+                && !edencom_meta.is_some_and(|meta| meta.is_location_invulnerable(other_id))
                 && (npc.threat_table.contains_key(&other_id)
                     || edencom_meta
                         .is_some_and(|meta| meta.is_candidate_hostile(npc, other_id, target_id)))
@@ -1716,6 +1715,10 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
                 npc.drifter_overshield_hp = 0.0;
             }
         }
+    }
+
+    if !bp.balls.contains_key(&nid) || !bp.balls.contains_key(&target_id) {
+        return false;
     }
 
     let drifter_doomsday = npc.archetype == "Drifter"
@@ -1823,6 +1826,9 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
         if surface_dist <= max_r && turret.shot_damage.total() > 0.0 {
             let mut shots = 0_u32;
             while weapon_rt.turret_cooldown_s <= 1e-9 && shots < 16 {
+                if !bp.balls.contains_key(&target_id) {
+                    break;
+                }
                 shots += 1;
                 weapon_rt.turret_cooldown_s += turret.cycle_duration_s;
                 fired = true;
@@ -1874,7 +1880,7 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
                                     nid,
                                     arc_id,
                                     turret.shot_damage.scaled(dmg_mult * 0.5),
-                                    turret.optimal_range,
+                                    f64::INFINITY,
                                     turret.vorton_explosion_radius,
                                     turret.vorton_explosion_velocity,
                                     turret.vorton_drf,
@@ -1914,16 +1920,26 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
                     );
                 }
             }
-            weapon_rt.turret_cooldown_s -= 1.0;
+            if bp.balls.contains_key(&target_id) {
+                weapon_rt.turret_cooldown_s -= 1.0;
+            } else {
+                weapon_rt.turret_cooldown_s = (weapon_rt.turret_cooldown_s - 1.0).max(0.0);
+            }
         } else {
             weapon_rt.turret_cooldown_s = (weapon_rt.turret_cooldown_s - 1.0).max(0.0);
         }
     }
 
     if let Some(missile) = &weapon_rt.profile.missile {
-        if surface_dist <= missile.max_flight_range && missile.volley_damage.total() > 0.0 {
+        if bp.balls.contains_key(&target_id)
+            && surface_dist <= missile.max_flight_range
+            && missile.volley_damage.total() > 0.0
+        {
             let mut volleys = 0_u32;
             while weapon_rt.missile_cooldown_s <= 1e-9 && volleys < 16 {
+                if !bp.balls.contains_key(&target_id) {
+                    break;
+                }
                 volleys += 1;
                 weapon_rt.missile_cooldown_s += missile.cycle_duration_s;
                 fired = true;
@@ -1957,7 +1973,11 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
                     );
                 }
             }
-            weapon_rt.missile_cooldown_s -= 1.0;
+            if bp.balls.contains_key(&target_id) {
+                weapon_rt.missile_cooldown_s -= 1.0;
+            } else {
+                weapon_rt.missile_cooldown_s = (weapon_rt.missile_cooldown_s - 1.0).max(0.0);
+            }
         } else {
             weapon_rt.missile_cooldown_s = (weapon_rt.missile_cooldown_s - 1.0).max(0.0);
         }

@@ -378,6 +378,7 @@ async fn test_c4_npc_spawn_groups_aggro_targeting_damage_types_loot_and_bounties
         .await
         .expect("spawn_group");
     let npc_ball_id = spawned[0];
+    let npc_type_id = spawn_mgr.entities[&npc_ball_id].type_id;
     let entity = &spawn_mgr.entities[&npc_ball_id];
 
     // Verify faction damage profiles
@@ -465,11 +466,15 @@ async fn test_c4_npc_spawn_groups_aggro_targeting_damage_types_loot_and_bounties
     );
 
     // Verify NPC wreck contains loot table items (feat:npc.npc-loot)
+    let expected_wreck_tid = ctx
+        .sde
+        .resolve_wreck_type_id(npc_type_id, None)
+        .unwrap_or(26557);
     ctx.db.with_snapshot(|snap| {
         let wreck = snap
             .items
             .values()
-            .find(|i| i.location_id == sys_id as i64 && i.type_id == 26557)
+            .find(|i| i.location_id == sys_id as i64 && i.type_id == expected_wreck_tid)
             .expect("npc wreck in space");
 
         let loot_items: Vec<&InventoryItemRecord> = snap

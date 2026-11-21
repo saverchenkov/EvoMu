@@ -392,7 +392,7 @@ async fn test_sleeper_mechanics_infinite_capacitor_spawn_leash_and_ewar_by_class
             },
         )
         .await;
-    let mut player_cs_before = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    let mut player_cs_before = ctx.build_type_combat_state(640);
     player_cs_before.max_capacitor = 5000.0;
     player_cs_before.capacitor = 4000.0;
     let _ = sys_handle.set_combat_state(ship_id, player_cs_before).await;
@@ -477,7 +477,10 @@ async fn test_sleeper_mechanics_infinite_capacitor_spawn_leash_and_ewar_by_class
     let _ = sys_handle.set_combat_state(cap_ship_id, dread_cs).await;
 
     let cap_cs_before = sys_handle.get_combat_state(cap_ship_id).await.unwrap().unwrap();
-    step_extended_npc_ai(&ctx, c3_system_id).await;
+    // Restless Sentry Tower (30462) has a 15.0s SDE turret cycle after firing at ship_id above
+    for _ in 0..15 {
+        step_extended_npc_ai(&ctx, c3_system_id).await;
+    }
     let cap_cs_after = sys_handle.get_combat_state(cap_ship_id).await.unwrap().unwrap();
     let cap_dmg_taken = (cap_cs_before.shield_hp - cap_cs_after.shield_hp).max(0.0);
     assert!(

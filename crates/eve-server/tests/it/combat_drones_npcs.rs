@@ -1084,8 +1084,10 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
             n.aggression_threat.insert(ship_id, 200.0);
         }
     });
-    step_extended_npc_ai(&ctx, sys_id).await;
-    step_extended_npc_ai(&ctx, sys_id).await;
+    // Step enough 1s ticks for Raznaborg Damavik (SDE cycle 3.0s) to spool >= 2 entropic cycles
+    for _ in 0..4 {
+        step_extended_npc_ai(&ctx, sys_id).await;
+    }
     let cycles_before = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities
             .get(&trig_npc)
@@ -1094,13 +1096,16 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
     });
     assert!(cycles_before >= 2, "Triglavian NPC must spool entropic cycles across ticks");
 
-    // Inject higher threat on `friend_ship_id` so Triglavian switches target and resets `entropic_cycles`
+    // Inject higher threat on `friend_ship_id` so Triglavian switches target, resets `entropic_cycles`,
+    // and completes its first 3.0s weapon cycle on the new target
     with_mut_combat_runtime(&ctx, |rt| {
         if let Some(n) = rt.npc_entities.get_mut(&trig_npc) {
             n.aggression_threat.insert(friend_ship_id, 500.0);
         }
     });
-    step_extended_npc_ai(&ctx, sys_id).await;
+    for _ in 0..3 {
+        step_extended_npc_ai(&ctx, sys_id).await;
+    }
     let (switched_target, cycles_after_switch) = with_combat_runtime(&ctx, |rt| {
         let n = &rt.npc_entities[&trig_npc];
         (n.target_id, n.entropic_cycles)

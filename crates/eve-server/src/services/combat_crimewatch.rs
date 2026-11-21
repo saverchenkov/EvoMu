@@ -427,6 +427,7 @@ pub struct CombatRuntimeState {
     pub self_destruct_sim_remaining_secs: HashMap<i64, f64>,
     pub gm_logi_soaks: HashMap<u32, crate::services::gm_soak_commands::GmLogiSoakState>,
     pub gm_deadwarps: HashMap<i64, crate::services::gm_soak_commands::GmDeadwarpState>,
+    pub(crate) extended_npc_weapon_runtime: HashMap<(u32, i64), crate::combat::npc_ai_weapons_loot::ExtendedNpcWeaponRuntime>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

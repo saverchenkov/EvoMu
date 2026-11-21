@@ -1,17 +1,21 @@
 //! Unit tests for the unified SDE NPC weapon/profile factory and atomic wreck/loot helpers.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use eve_db::InventoryFlag;
+use eve_destiny::{Ball, DestinyEvent, MovementMode, WarpPhase};
 use eve_sde::SdeRegistry;
 use glam::DVec3;
 
 use crate::router::ServerContext;
 
 use super::npc_ai_weapons_loot::{
-    build_npc_ball_from_sde, fallback_log_registry, inspect_npc_sde_profile,
+    build_npc_ball_from_sde, clear_extended_npc_weapon_runtime,
+    execute_extended_npc_attack_in_bp, fallback_log_registry, inspect_npc_sde_profile,
     resolve_npc_combat_profile, resolve_npc_weapon_ammo_loot, resolve_npc_wreck_type_id,
-    spawn_npc_wreck_and_loot_in_snap, NpcSizeClass, NpcWeaponKind,
+    spawn_npc_wreck_and_loot_in_snap, store_extended_npc_weapon_runtime,
+    take_or_init_extended_npc_weapon_runtime, NpcSizeClass, NpcWeaponKind,
 };
 
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
@@ -242,4 +246,288 @@ fn npc_atomic_wreck_and_weapon_matched_loot_builder() {
         assert!(loot.iter().any(|i| i.type_id == 15_331 && i.quantity == 10));
         assert!(loot.iter().any(|i| i.type_id == 199 && i.quantity == 120));
     });
+}
+
+#[test]
+fn npc_extended_weapon_runtime_is_context_scoped_and_pruned() {
+    let ctx_a = test_ctx();
+    let ctx_b = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let ball_id = 9_910_001_i64;
+    let (_ball, _cs, npc) = crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+        &ctx_a,
+        sys_id,
+        ball_id,
+        52_645,
+        "Triglavian",
+        500_026,
+        DVec3::ZERO,
+    );
+
+    let mut rt_a = take_or_init_extended_npc_weapon_runtime(&ctx_a, sys_id, &npc);
+    assert_eq!(rt_a.turret_cooldown_s, 0.0);
+    rt_a.turret_cooldown_s = 7.5;
+    store_extended_npc_weapon_runtime(&ctx_a, sys_id, ball_id, rt_a);
+
+    let rt_b = take_or_init_extended_npc_weapon_runtime(&ctx_b, sys_id, &npc);
+    assert_eq!(
+        rt_b.turret_cooldown_s, 0.0,
+        "weapon runtime must be isolated per ServerContext"
+    );
+
+    let rt_a_reloaded = take_or_init_extended_npc_weapon_runtime(&ctx_a, sys_id, &npc);
+    assert!((rt_a_reloaded.turret_cooldown_s - 7.5).abs() < 1e-9);
+    store_extended_npc_weapon_runtime(&ctx_a, sys_id, ball_id, rt_a_reloaded);
+
+    clear_extended_npc_weapon_runtime(&ctx_a, sys_id, &[ball_id]);
+    let has_entry = crate::services::combat_crimewatch::with_combat_ephemeral(&ctx_a, |rt| {
+        rt.extended_npc_weapon_runtime.contains_key(&(sys_id, ball_id))
+    });
+    assert!(!has_entry);
+    let rt_a_fresh = take_or_init_extended_npc_weapon_runtime(&ctx_a, sys_id, &npc);
+    assert_eq!(rt_a_fresh.turret_cooldown_s, 0.0);
+}
+
+#[tokio::test]
+async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_protected_targets() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let npc_id = 9_920_001_i64;
+    let (npc_ball, npc_cs, mut npc) =
+        crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+            &ctx,
+            sys_id,
+            npc_id,
+            56_188,
+            "EDENCOM",
+            500_027,
+            DVec3::ZERO,
+        );
+
+    let primary_id = 9_920_002_i64;
+    let secondary_beyond_opt_id = 9_920_003_i64;
+    let cloaked_id = 9_920_004_i64;
+    let warping_id = 9_920_005_i64;
+    let invuln_id = 9_920_006_i64;
+    let dead_id = 9_920_007_i64;
+
+    for tid in [
+        primary_id,
+        secondary_beyond_opt_id,
+        cloaked_id,
+        warping_id,
+        invuln_id,
+        dead_id,
+    ] {
+        npc.threat_table.insert(tid, 100.0);
+    }
+
+    let mut weapon_rt = take_or_init_extended_npc_weapon_runtime(&ctx, sys_id, &npc);
+    let opt = weapon_rt.profile.turret.as_ref().expect("56188 vorton").optimal_range;
+    assert!(opt > 10_000.0 && opt < 25_000.0);
+
+    let mk_target_ball = |id: i64, x: f64, mode: MovementMode| Ball {
+        id,
+        type_id: 587,
+        position: DVec3::new(x, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 365.0,
+        inertia: 3.45,
+        mass: 1_067_000.0,
+        radius: 37.0,
+        speed_fraction: 0.0,
+        mode,
+    };
+    let mk_target_cs = || {
+        let mut cs = ctx.build_type_combat_state(587);
+        cs.max_shield_hp = 5_000.0;
+        cs.shield_hp = 5_000.0;
+        cs.max_armor_hp = 5_000.0;
+        cs.armor_hp = 5_000.0;
+        cs.max_structure_hp = 5_000.0;
+        cs.structure_hp = 5_000.0;
+        cs
+    };
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (pri_after, sec_after, cloak_after, warp_after, invuln_after, dead_after) = {
+        let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.balls.insert(npc_id, npc_ball);
+        bp.combat_states.insert(npc_id, npc_cs);
+
+        // Primary within shooter optimal (18 km < 19.2 km); secondary 6 km from primary (<= 10 km)
+        // yet 24 km from shooter (> 19.2 km optimal).
+        bp.balls
+            .insert(primary_id, mk_target_ball(primary_id, 18_000.0, MovementMode::Stop));
+        bp.combat_states.insert(primary_id, mk_target_cs());
+
+        bp.balls.insert(
+            secondary_beyond_opt_id,
+            mk_target_ball(secondary_beyond_opt_id, 24_000.0, MovementMode::Stop),
+        );
+        bp.combat_states
+            .insert(secondary_beyond_opt_id, mk_target_cs());
+
+        bp.balls
+            .insert(cloaked_id, mk_target_ball(cloaked_id, 18_100.0, MovementMode::Stop));
+        let mut cs_cloak = mk_target_cs();
+        cs_cloak.is_cloaked = true;
+        bp.combat_states.insert(cloaked_id, cs_cloak);
+
+        bp.balls.insert(
+            warping_id,
+            mk_target_ball(
+                warping_id,
+                18_200.0,
+                MovementMode::Warp {
+                    origin: DVec3::ZERO,
+                    destination: DVec3::new(100_000.0, 0.0, 0.0),
+                    warp_speed_au_s: 3.0,
+                    total_distance: 100_000.0,
+                    phase: WarpPhase::Cruising,
+                    elapsed_warp_time: 1.0,
+                },
+            ),
+        );
+        bp.combat_states.insert(warping_id, mk_target_cs());
+
+        bp.balls
+            .insert(invuln_id, mk_target_ball(invuln_id, 18_300.0, MovementMode::Stop));
+        let mut cs_invuln = mk_target_cs();
+        cs_invuln.undock_invulnerable_remaining_ticks = 10;
+        bp.combat_states.insert(invuln_id, cs_invuln);
+
+        bp.balls
+            .insert(dead_id, mk_target_ball(dead_id, 18_400.0, MovementMode::Stop));
+        let mut cs_dead = mk_target_cs();
+        cs_dead.shield_hp = 0.0;
+        cs_dead.armor_hp = 0.0;
+        cs_dead.structure_hp = 0.0;
+        bp.combat_states.insert(dead_id, cs_dead);
+
+        let sigs = HashMap::new();
+        let destroyed_in_call = HashSet::new();
+        let mut destroyed_in_tick = Vec::new();
+        let mut homefront_events = Vec::new();
+        let fired = execute_extended_npc_attack_in_bp(
+            &ctx,
+            &mut bp,
+            &mut npc,
+            &mut weapon_rt,
+            primary_id,
+            &sigs,
+            false,
+            false,
+            None,
+            &destroyed_in_call,
+            &mut destroyed_in_tick,
+            &mut homefront_events,
+        );
+        assert!(fired);
+        (
+            bp.combat_states[&primary_id].shield_hp,
+            bp.combat_states[&secondary_beyond_opt_id].shield_hp,
+            bp.combat_states[&cloaked_id].shield_hp,
+            bp.combat_states[&warping_id].shield_hp,
+            bp.combat_states[&invuln_id].shield_hp,
+            bp.combat_states[&dead_id].shield_hp,
+        )
+    };
+
+    assert!(pri_after < 5_000.0, "primary target must take vorton damage");
+    assert!(
+        sec_after < 5_000.0,
+        "secondary arc within 10 km of primary must hit even beyond shooter optimal"
+    );
+    assert_eq!(cloak_after, 5_000.0, "cloaked target must not be hit by arc");
+    assert_eq!(warp_after, 5_000.0, "warping target must not be hit by arc");
+    assert_eq!(invuln_after, 5_000.0, "invulnerable target must not be hit by arc");
+    assert_eq!(dead_after, 0.0, "dead target must not be targeted by arc");
+}
+
+#[tokio::test]
+async fn npc_attack_skips_missile_fx_and_cooldown_after_turret_destroys_target() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let npc_id = 9_930_001_i64;
+    // Sleepless Patroller (30188) carries both a Hybrid/Laser turret and Phantasmata Missile (30426).
+    let (npc_ball, npc_cs, mut npc) =
+        crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+            &ctx,
+            sys_id,
+            npc_id,
+            30_188,
+            "Sleeper",
+            500_021,
+            DVec3::ZERO,
+        );
+    let mut weapon_rt = take_or_init_extended_npc_weapon_runtime(&ctx, sys_id, &npc);
+    assert!(weapon_rt.profile.turret.is_some());
+    assert!(weapon_rt.profile.missile.is_some());
+
+    let target_id = 9_930_002_i64;
+    let target_ball = Ball {
+        id: target_id,
+        type_id: 587,
+        position: DVec3::new(1_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 365.0,
+        inertia: 3.45,
+        mass: 1_067_000.0,
+        radius: 37.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let mut target_cs = ctx.build_type_combat_state(587);
+    target_cs.shield_hp = 0.0;
+    target_cs.armor_hp = 0.0;
+    target_cs.structure_hp = 1.0;
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (fired, target_still_exists, fx_count, missile_fx_count) = {
+        let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.balls.insert(npc_id, npc_ball);
+        bp.combat_states.insert(npc_id, npc_cs);
+        bp.balls.insert(target_id, target_ball);
+        bp.combat_states.insert(target_id, target_cs);
+        bp.pending_events.clear();
+
+        let sigs = HashMap::new();
+        let destroyed_in_call = HashSet::new();
+        let mut destroyed_in_tick = Vec::new();
+        let mut homefront_events = Vec::new();
+        let fired = execute_extended_npc_attack_in_bp(
+            &ctx,
+            &mut bp,
+            &mut npc,
+            &mut weapon_rt,
+            target_id,
+            &sigs,
+            false,
+            false,
+            None,
+            &destroyed_in_call,
+            &mut destroyed_in_tick,
+            &mut homefront_events,
+        );
+        let fx_events: Vec<&String> = bp
+            .pending_events
+            .iter()
+            .filter_map(|ev| match ev {
+                DestinyEvent::OnSpecialFX { guid, .. } => Some(guid),
+                _ => None,
+            })
+            .collect();
+        let m_fx = fx_events.iter().filter(|g| g.contains("Missile")).count();
+        (fired, bp.balls.contains_key(&target_id), fx_events.len(), m_fx)
+    };
+
+    assert!(fired);
+    assert!(!target_still_exists, "turret shot must destroy fragile target");
+    assert_eq!(fx_count, 1, "only turret SpecialFX may emit before target dies");
+    assert_eq!(missile_fx_count, 0, "missile FX must not emit on dead target");
+    assert_eq!(
+        weapon_rt.missile_cooldown_s, 0.0,
+        "missile cooldown must not be burned after turret destroys target"
+    );
 }

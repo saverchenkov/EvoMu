@@ -174,8 +174,9 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
     for &tid in &sl_loot {
         assert!(ctx.sde.types.contains_key(&tid), "Sleeper loot {tid} must exist in SDE types");
     }
+    let expected_sl_wreck = ctx.sde.resolve_wreck_type_id(30188, None);
     let wreck_type = ctx.db.with_snapshot(|snap| snap.items.get(&sl_wreck).map(|i| i.type_id));
-    assert_eq!(wreck_type, Some(30495), "Sleeper drops Sleeper Intermediate Wreck (30495)");
+    assert_eq!(wreck_type, expected_sl_wreck, "Sleeper 30188 must drop its SDE-resolved wreck type");
 
     // 3. Rogue Drone (`3744`): spawn dynamically, verify archetype and Drone Alloy drop
     let drone_npc = spawn_npc_entity_from_sde(&ctx, sys_id, 3744, 42, DVec3::new(6_000.0, 0.0, 0.0)).await;
@@ -185,15 +186,17 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, drone_npc, char_id).await;
     assert!(drone_loot.contains(&11732), "Rogue Drone must drop Drone Alloy (11732)");
 
-    // 4. EDENCOM (`54335`): spawn dynamically, verify archetype, damage vector, and vorton arc hostility filtering
-    let edencom_npc = spawn_specialized_npc_entity(&ctx, sys_id, 54335, "", 43, DVec3::new(7_000.0, 0.0, 0.0)).await;
+    // 4. EDENCOM (`56188` Skybreaker Disparu Troop): spawn dynamically, verify SDE damage vector and vorton arc hostility filtering
+    let edencom_npc = spawn_specialized_npc_entity(&ctx, sys_id, 56188, "", 43, DVec3::new(7_000.0, 0.0, 0.0)).await;
     let (ed_arch, ed_dmg) = with_combat_runtime(&ctx, |rt| {
         let n = &rt.npc_entities[&edencom_npc];
         (n.archetype.clone(), n.damage_vector)
     });
     assert_eq!(ed_arch, "EDENCOM");
-    assert_eq!(ed_dmg.em, 60.0);
-    assert_eq!(ed_dmg.kinetic, 60.0);
+    let ed_sde = &ctx.sde.types[&56188].default_attributes;
+    let ed_mult = ed_sde.get(&64).copied().unwrap_or(1.0);
+    assert_eq!(ed_dmg.em, ed_sde[&114] * ed_mult);
+    assert_eq!(ed_dmg.kinetic, ed_sde[&117] * ed_mult);
 
     // Set up primary hostile player target within range of EDENCOM NPC with negative standing
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
