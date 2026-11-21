@@ -1289,3 +1289,152 @@ async fn special_site_ball_spawn_guard_rollback_confirm_and_notify_wakeup() {
     assert!(w2_res.is_none(), "after confirm(), concurrent waiter must observe AlreadySpawned (None)");
     assert!(reg.begin_special_site_ball_spawn(sys_id, ball_id).await.is_none());
 }
+
+#[tokio::test]
+async fn unified_break_protection_and_force_decloak_return_unique_events() {
+    let reg = SystemRegistry::new();
+    let sys_id: SolarSystemId = 30_000_142;
+    let h = reg.get_or_spawn(sys_id);
+    let char_id: CharacterId = 90_000_001;
+    let ship_id: BallId = 8801;
+
+    let mut cs = CombatState {
+        shield_hp: 123.0,
+        max_shield_hp: 500.0,
+        capacitor: 321.0,
+        max_capacitor: 500.0,
+        is_tethered: true,
+        ..Default::default()
+    };
+    cs.apply_jump_cloak_and_invuln_timers(30);
+    cs.warp_exit_invulnerable_remaining_ticks = 15;
+    h.spawn_ball_with_meta(
+        make_actor_ball(ship_id, 587, DVec3::ZERO),
+        cs,
+        SlimItemMeta {
+            char_id: Some(char_id),
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Sync actor-side location_change_invuln and break simultaneously with undock + warp-exit + tether + gate cloak.
+    h.try_sync_location_change_invuln(char_id, Some(5_000));
+    let ev = h
+        .break_protection(
+            ship_id,
+            Some(char_id),
+            ProtectionBreakReason::TargetLock,
+            Some(5_000),
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(ev.gate_cloak_broken);
+    assert!(ev.invuln_cancelled);
+    assert!(ev.warp_exit_invuln_cancelled);
+    assert!(ev.tether_broken);
+    assert!(ev.slim_cloak_cleared);
+    assert!(ev.should_emit_jump_cloak_cancelled());
+
+    // Idempotent repeat break emits no duplicate cancellation flags.
+    let ev_repeat = h
+        .break_protection(
+            ship_id,
+            Some(char_id),
+            ProtectionBreakReason::ModuleActivation,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(!ev_repeat.invuln_cancelled);
+    assert!(!ev_repeat.any_cloak_broken());
+
+    // Covert cloak survives WarpInitiation, then ForceDecloak (EssGateEntry) strips cloak cycle atomically
+    // without touching non-cloak cycles, HP, or capacitor.
+    h.modify_combat_state(ship_id, |c| {
+        c.is_cloaked = true;
+        c.is_covert_cloak = true;
+        c.gate_cloak_remaining_ticks = 0;
+    })
+    .await
+    .unwrap();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id,
+        module_id: 9101,
+        module_type_id: 11578,
+        owner_char_id: Some(char_id),
+        effect_name: "cloakingWarpSafe".into(),
+        duration_s: 3600.0,
+        repeat: -1,
+        ..ActiveModuleCycle::default()
+    })
+    .await
+    .unwrap();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id,
+        module_id: 9102,
+        module_type_id: 438,
+        owner_char_id: Some(char_id),
+        effect_name: "afterburner".into(),
+        duration_s: 10.0,
+        repeat: 1,
+        ..ActiveModuleCycle::default()
+    })
+    .await
+    .unwrap();
+
+    let warp_ev = h
+        .break_protection(
+            ship_id,
+            Some(char_id),
+            ProtectionBreakReason::WarpInitiation,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(!warp_ev.covert_cloak_broken);
+    assert!(!warp_ev.should_emit_jump_cloak_cancelled());
+    assert!(h.has_module_cycle(ship_id, 9101).await);
+    assert!(h.is_ship_actively_cloaked(ship_id).await);
+
+    let forced_ev = h
+        .force_decloak(
+            ship_id,
+            Some(char_id),
+            ProtectionBreakReason::EssGateEntry,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(forced_ev.covert_cloak_broken);
+    assert_eq!(forced_ev.removed_cloak_cycles.len(), 1);
+    assert_eq!(forced_ev.removed_cloak_cycles[0].module_id, 9101);
+    assert!(forced_ev.removed_cloak_cycles[0].is_covert);
+    assert!(!h.has_module_cycle(ship_id, 9101).await);
+    assert!(h.has_module_cycle(ship_id, 9102).await);
+    assert!(!h.is_ship_actively_cloaked(ship_id).await);
+
+    let snap = h.get_protection_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(!snap.has_any_cloak());
+    assert!(!snap.is_protected(1_000));
+
+    let cs_after = h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_after.has_any_cloak());
+    assert!((cs_after.shield_hp - 123.0).abs() < 1e-6);
+    assert!((cs_after.capacitor - 321.0).abs() < 1e-6);
+    let slim_after = h
+        .ballpark
+        .read()
+        .unwrap()
+        .ball_slim_meta
+        .get(&ship_id)
+        .cloned()
+        .unwrap();
+    assert!(!slim_after.is_cloaked);
+}

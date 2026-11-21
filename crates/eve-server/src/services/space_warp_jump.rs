@@ -1100,27 +1100,22 @@ async fn handle_cmd_warp_to_stuff(
     if target_belt_id.is_some() {
         let _ = handle.populate_asteroid_belt_entities().await;
     }
-    // Snapshot active gate cloak and undock invulnerability read-only immediately before
-    // `set_warp_movement_mode`, which clears them inside `Ballpark::set_mode` so `Ok(tick)`
-    // can emit `OnJumpCloakCancelled` / `OnInvulnCancelled` without dropping them.
-    let (had_gate_cloak, had_undock_invuln) = match handle.get_combat_state(ship_id).await {
-        Ok(Some(live_cs)) => (
-            !is_covert_cloaked
-                && (live_cs.gate_cloak_remaining_ticks > 0
-                    || (live_cs.is_cloaked && !live_cs.is_covert_cloak)),
-            live_cs.undock_invulnerable_remaining_ticks > 0,
-        ),
-        _ => (false, false),
-    };
+    // Commit warp movement and break non-covert protection atomically in `SystemActor` (`#1486`),
+    // emitting `OnJumpCloakCancelled` / `OnInvulnCancelled` only when warp initiation succeeds.
+    let loc_until = crate::services::space_destiny::pop_active_location_change_invuln(ctx, char_id);
     match handle
-        .set_warp_movement_mode(
+        .set_warp_movement_mode_breaking_protection(
             ship_id,
+            Some(char_id),
             mode,
             crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+            crate::system_actor::ProtectionBreakReason::WarpInitiation,
+            loc_until,
+            ctx.now_unix(),
         )
         .await
     {
-        Ok(tick) => {
+        Ok((tick, mut protection_events)) => {
             if let Some((new_cap, max_cap, old_cap, _)) = cap_debit_update {
                 let _ = ctx.notify_ship_capacitor_change(
                     char_id,
@@ -1130,15 +1125,16 @@ async fn handle_cmd_warp_to_stuff(
                     Some(old_cap),
                 );
             }
-            if had_gate_cloak || had_undock_invuln {
-                crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
-                    ctx,
-                    char_id,
-                    ship_id,
-                    had_gate_cloak,
-                    had_undock_invuln,
-                );
+            if is_covert_cloaked {
+                protection_events.gate_cloak_broken = false;
+                protection_events.non_gate_cloak_broken = false;
             }
+            crate::services::space_destiny::emit_protection_break_notifications(
+                ctx,
+                char_id,
+                ship_id,
+                &protection_events,
+            );
             // Run tether & fitting cloak reconciliation only after `ball.mode` is `MovementMode::Warp`
             // so `sync_tether` breaks tether cleanly without granting a +25% capacitor repair.
             sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
@@ -1165,6 +1161,9 @@ async fn handle_cmd_warp_to_stuff(
             Ok(PyRep::Integer(tick as i64))
         }
         Err(e) => {
+            crate::services::space_destiny::restore_location_change_invuln(
+                ctx, char_id, loc_until,
+            );
             if let Some((_, _, _, pre_debit_cap)) = cap_debit_update {
                 let _ = handle
                     .modify_combat_state(ship_id, move |live_cs| {
@@ -2406,10 +2405,7 @@ async fn handle_cmd_stargate_jump(
         &mut combat_state,
         prev_combat_state.clone(),
     );
-    combat_state.is_cloaked = true;
-    combat_state.gate_cloak_remaining_ticks = 60;
-    combat_state.undock_invulnerable_remaining_ticks = 60;
-    combat_state.sync_invuln_with_undock_timer = true;
+    combat_state.apply_jump_cloak_and_invuln_timers(60);
     let mut slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
     slim_meta.is_cloaked = true;
     let spawn_token = next_stargate_spawn_token();

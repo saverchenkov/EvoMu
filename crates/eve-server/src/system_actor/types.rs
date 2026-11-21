@@ -4,8 +4,8 @@
 
 use eve_db::lock_rank::{RankedMutex, RankedRwLock, RANK_LEAF};
 use eve_destiny::{
-    Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, GridBubble, MovementMode,
-    SlimItemMeta, TargetLock, WarpBubbleMgr,
+    Ball, BallId, Ballpark, CombatProtectionSnapshot, CombatState, DamageVector, DestinyEvent,
+    GridBubble, MovementMode, SlimItemMeta, TargetLock, WarpBubbleMgr,
 };
 use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
@@ -655,9 +655,157 @@ pub(crate) struct ModuleReloadSimEntry {
     pub tidi_stretched: bool,
 }
 
+/// Canonical reason why ship cloak and/or invulnerability protection is evaluated or broken (`#1486`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProtectionBreakReason {
+    /// Activating a non-exempt module breaks gate cloak and undock/warp-exit/location invuln,
+    /// while leaving an active non-gate cloak module intact.
+    ModuleActivation,
+    /// Locking a target breaks gate cloak and undock/warp-exit/location invuln while preserving non-gate cloak.
+    TargetLock,
+    /// Initiating warp breaks gate cloak, non-covert active cloak, and invuln while preserving covert cloak.
+    WarpInitiation,
+    /// Issuing subwarp movement breaks gate cloak, non-covert active cloak, and invuln while preserving covert cloak.
+    SubwarpMovement,
+    /// Generic non-cloak space action breaks gate cloak and invuln while preserving active non-gate cloak.
+    SessionAction,
+    /// ESS acceleration gate entry forcibly strips all cloak types (gate, non-covert, covert) and cloak cycles.
+    EssGateEntry,
+    /// Explicit manual protection clear breaks all cloaks, cloak cycles, and invulnerability timers.
+    Manual,
+}
+
+impl ProtectionBreakReason {
+    /// Returns `true` when this reason forcibly strips an active Covert Ops cloak module.
+    pub const fn breaks_covert_cloak(self) -> bool {
+        matches!(self, Self::EssGateEntry | Self::Manual)
+    }
+
+    /// Returns `true` when this reason breaks an active non-covert cloak module (`!gate && !covert`).
+    pub const fn breaks_non_covert_module_cloak(self) -> bool {
+        matches!(
+            self,
+            Self::WarpInitiation | Self::SubwarpMovement | Self::EssGateEntry | Self::Manual
+        )
+    }
+
+    /// Returns `true` when this reason clears post-jump/undock/warp-exit/location invulnerability timers.
+    pub const fn clears_invuln(self) -> bool {
+        !matches!(self, Self::EssGateEntry)
+    }
+}
+
+/// Summary of an active cloak `ActiveModuleCycle` stripped atomically by forced decloak (`#1486`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedCloakCycleInfo {
+    pub module_id: ItemId,
+    pub module_type_id: u32,
+    pub is_covert: bool,
+    pub effect_name: String,
+}
+
+/// Structured transition events returned atomically by actor-owned `break_protection` / `force_decloak` (`#1486`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProtectionBreakEvents {
+    /// `true` if a post-jump/post-session gate cloak broke (`OnJumpCloakCancelled`).
+    pub gate_cloak_broken: bool,
+    /// `true` if an active non-gate module cloak (`!gate`) broke.
+    pub non_gate_cloak_broken: bool,
+    /// `true` if an active Covert Ops cloak (`!gate && covert`) broke.
+    pub covert_cloak_broken: bool,
+    /// `true` if either `undock_invulnerable_remaining_ticks` or `location_change_invuln` cancelled
+    /// (`OnInvulnCancelled` must emit at most once when `true`).
+    pub invuln_cancelled: bool,
+    /// `true` if `warp_exit_invulnerable_remaining_ticks` cleared on this transition.
+    pub warp_exit_invuln_cancelled: bool,
+    /// `true` if `is_tethered` cleared on this transition.
+    pub tether_broken: bool,
+    /// `true` if `slim_meta.is_cloaked` cleared or `deactivate_cloak` ran.
+    pub slim_cloak_cleared: bool,
+    /// Cloak `ActiveModuleCycle`s removed atomically during `EssGateEntry` / `Manual`.
+    pub removed_cloak_cycles: Vec<RemovedCloakCycleInfo>,
+    /// Post-decloak sensor recalibration targeting delay active after break (seconds).
+    pub decloak_targeting_delay_s: f64,
+    /// Monotonic simulation clock elapsed seconds when this break ran (`sim_elapsed_secs`).
+    pub sim_elapsed_secs: f64,
+}
+
+impl ProtectionBreakEvents {
+    /// Returns `true` if any cloak (gate or module) transitioned out of cloaked state.
+    pub fn any_cloak_broken(&self) -> bool {
+        self.gate_cloak_broken
+            || self.non_gate_cloak_broken
+            || self.slim_cloak_cleared
+            || !self.removed_cloak_cycles.is_empty()
+    }
+
+    /// Returns `true` when client `OnJumpCloakCancelled` should fire for a broken gate cloak or
+    /// non-covert module cloak.
+    pub fn should_emit_jump_cloak_cancelled(&self) -> bool {
+        self.gate_cloak_broken || (self.non_gate_cloak_broken && !self.covert_cloak_broken)
+    }
+}
+
+/// Actor-owned unified protection record tracked per ship ball on the actor sim clock (`#1486`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActorShipProtection {
+    pub owner_char_id: Option<CharacterId>,
+    pub snapshot: CombatProtectionSnapshot,
+    pub has_active_cloak_cycle: bool,
+    pub location_change_invuln_until_unix: Option<u64>,
+    pub updated_sim_elapsed_secs: f64,
+    pub updated_sim_unix_secs: u64,
+}
+
+impl ActorShipProtection {
+    /// Returns `true` when location-change invulnerability is active at `now_unix_secs`.
+    pub fn has_location_change_invuln(&self, now_unix_secs: u64) -> bool {
+        self.location_change_invuln_until_unix
+            .is_some_and(|until| until > now_unix_secs)
+    }
+
+    /// Returns `true` when any cloak state (gate or module) is engaged.
+    pub fn has_any_cloak(&self) -> bool {
+        self.snapshot.has_any_cloak() || self.has_active_cloak_cycle
+    }
+
+    /// Returns `true` when an active module cloak (excluding gate cloak) is engaged.
+    pub fn has_active_non_gate_cloak(&self) -> bool {
+        self.snapshot.has_active_non_gate_cloak_or_vel() || self.has_active_cloak_cycle
+    }
+
+    /// Returns `true` when any protection (tether, gate cloak, undock, warp exit, or location change) is active.
+    pub fn is_protected(&self, now_unix_secs: u64) -> bool {
+        self.snapshot.is_invulnerable() || self.has_location_change_invuln(now_unix_secs)
+    }
+}
+
+/// Atomic module-activation request executed inside the system actor loop (`#1486`).
+#[derive(Debug, Clone)]
+pub struct AtomicActivateCycleRequest {
+    pub char_id: CharacterId,
+    pub cycle: ActiveModuleCycle,
+    pub allow_while_warping: bool,
+    pub allow_while_cloaked: bool,
+    pub break_protection: bool,
+    pub break_reason: ProtectionBreakReason,
+    /// Optional caller-observed `location_change_invuln` expiry (`unix secs`) folded atomically.
+    pub location_change_invuln_until_unix: Option<u64>,
+    pub real_now_unix: u64,
+}
+
+/// Structured outcome returned by [`SystemCommand::ActivateModuleCycleAtomic`] (`#1486`).
+#[derive(Debug, Clone, Default)]
+pub struct AtomicActivateCycleOutcome {
+    pub protection_events: ProtectionBreakEvents,
+    pub capacitor_after: f64,
+}
+
 #[derive(Default)]
 pub(crate) struct SystemActorState {
     pub active_module_cycles: Vec<ActiveModuleCycle>,
+    pub protection_registry: HashMap<BallId, ActorShipProtection>,
+    pub location_invuln_by_char: HashMap<CharacterId, u64>,
     pub pending_anchoring_disruptors: Vec<PendingAnchoringDisruptor>,
     pub active_nanite_repairs: Vec<ActiveNaniteRepair>,
     pub ship_rack_heat: HashMap<BallId, [f64; 3]>,
@@ -1160,6 +1308,62 @@ pub enum SystemCommand {
         projection: eve_dogma::FitProjection,
         reply: Option<oneshot::Sender<bool>>,
     },
+    BreakProtection {
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        reason: ProtectionBreakReason,
+        location_invuln_until_unix: Option<u64>,
+        real_now_unix: u64,
+        reply: oneshot::Sender<Result<ProtectionBreakEvents, String>>,
+    },
+    ForceDecloak {
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        reason: ProtectionBreakReason,
+        location_invuln_until_unix: Option<u64>,
+        real_now_unix: u64,
+        reply: oneshot::Sender<Result<ProtectionBreakEvents, String>>,
+    },
+    GetProtectionSnapshot {
+        ball_id: BallId,
+        reply: oneshot::Sender<Option<ActorShipProtection>>,
+    },
+    SyncLocationChangeInvuln {
+        char_id: CharacterId,
+        until_unix: Option<u64>,
+    },
+    ActivateModuleCycleAtomic {
+        request: AtomicActivateCycleRequest,
+        reply: oneshot::Sender<Result<AtomicActivateCycleOutcome, String>>,
+    },
+    SetMovementModeBreakingProtection {
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        mode: MovementMode,
+        reason: ProtectionBreakReason,
+        location_invuln_until_unix: Option<u64>,
+        real_now_unix: u64,
+        reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
+    },
+    SetWarpMovementModeBreakingProtection {
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        mode: MovementMode,
+        provenance: WarpProvenance,
+        reason: ProtectionBreakReason,
+        location_invuln_until_unix: Option<u64>,
+        real_now_unix: u64,
+        reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
+    },
+    GotoPointBreakingProtection {
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        point: glam::DVec3,
+        reason: ProtectionBreakReason,
+        location_invuln_until_unix: Option<u64>,
+        real_now_unix: u64,
+        reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
+    },
 }
 
 pub type CharacterId = i64;
@@ -1340,13 +1544,13 @@ impl SystemView {
         let mut warp_disrupted_balls = HashSet::new();
 
         for (&ball_id, cs) in &ballpark.combat_states {
-            if cs.is_cloaked {
+            if cs.has_any_cloak() {
                 cloaked_balls.insert(ball_id);
             }
             if cs.is_tethered {
                 tethered_balls.insert(ball_id);
             }
-            if cs.is_invulnerable() {
+            if cs.is_protected() {
                 invulnerable_balls.insert(ball_id);
             }
             if cs.is_warp_scrambled() {
@@ -1544,7 +1748,7 @@ impl SystemView {
     pub fn is_gate_cloaked(&self, ball_id: BallId) -> bool {
         self.combat_states
             .get(&ball_id)
-            .is_some_and(|cs| cs.gate_cloak_remaining_ticks > 0)
+            .is_some_and(CombatState::has_gate_cloak)
     }
 
     pub fn is_ball_tethered(&self, ball_id: BallId) -> bool {

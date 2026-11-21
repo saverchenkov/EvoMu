@@ -494,6 +494,86 @@ impl Default for CombatState {
     }
 }
 
+/// Unified read-only snapshot of a [`CombatState`]'s cloak and invulnerability timers.
+///
+/// Reconciles `gate_cloak_remaining_ticks`, `undock_invulnerable_remaining_ticks`,
+/// `warp_exit_invulnerable_remaining_ticks`, `sync_invuln_with_undock_timer`, `is_cloaked`,
+/// `is_covert_cloak`, and `is_tethered` into a single consistent view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CombatProtectionSnapshot {
+    pub is_cloaked: bool,
+    pub is_covert_cloak: bool,
+    pub is_tethered: bool,
+    pub has_cloak_velocity_multiplier: bool,
+    pub gate_cloak_remaining_ticks: u32,
+    pub undock_invulnerable_remaining_ticks: u32,
+    pub warp_exit_invulnerable_remaining_ticks: u32,
+    pub sync_invuln_with_undock_timer: bool,
+}
+
+impl CombatProtectionSnapshot {
+    /// Returns `true` when post-jump/post-session gate cloak is active and not yet synced off.
+    pub fn has_gate_cloak(self) -> bool {
+        if self.sync_invuln_with_undock_timer && self.undock_invulnerable_remaining_ticks == 0 {
+            return false;
+        }
+        self.gate_cloak_remaining_ticks > 0
+    }
+
+    /// Returns `true` when any cloak state (gate cloak or active cloak module) is engaged.
+    pub fn has_any_cloak(self) -> bool {
+        if self.sync_invuln_with_undock_timer
+            && self.undock_invulnerable_remaining_ticks == 0
+            && self.gate_cloak_remaining_ticks > 0
+        {
+            return false;
+        }
+        self.is_cloaked || self.has_gate_cloak()
+    }
+
+    /// Returns `true` when an active module cloak (excluding gate cloak) is engaged.
+    pub fn has_active_non_gate_cloak(self) -> bool {
+        self.has_any_cloak() && !self.has_gate_cloak()
+    }
+
+    /// Returns `true` when non-gate cloak or residual cloak velocity dampening is active.
+    pub fn has_active_non_gate_cloak_or_vel(self) -> bool {
+        self.has_active_non_gate_cloak()
+            || (!self.has_gate_cloak() && self.has_cloak_velocity_multiplier)
+    }
+
+    /// Returns `true` when an active Covert Ops cloak module is engaged (excluding gate cloak).
+    pub fn has_active_covert_cloak(self) -> bool {
+        self.has_active_non_gate_cloak() && self.is_covert_cloak
+    }
+
+    /// Returns `true` when an active non-covert cloak module is engaged (excluding gate cloak).
+    pub fn has_active_non_covert_cloak(self) -> bool {
+        self.has_active_non_gate_cloak() && !self.is_covert_cloak
+    }
+
+    /// Returns `true` when warp-exit invulnerability is active and not yet synced off.
+    pub fn has_warp_exit_invuln(self) -> bool {
+        if self.sync_invuln_with_undock_timer && self.undock_invulnerable_remaining_ticks == 0 {
+            return false;
+        }
+        self.warp_exit_invulnerable_remaining_ticks > 0
+    }
+
+    /// Returns `true` when any form of invulnerability is active (tether, gate cloak, undock, or warp exit).
+    pub fn is_invulnerable(self) -> bool {
+        self.is_tethered
+            || self.has_gate_cloak()
+            || self.undock_invulnerable_remaining_ticks > 0
+            || self.has_warp_exit_invuln()
+    }
+
+    /// Alias for callers checking whether damage/tackle protection is active.
+    pub fn is_protected(self) -> bool {
+        self.is_invulnerable()
+    }
+}
+
 impl CombatState {
     pub fn new() -> Self {
         Self::default()
@@ -691,6 +771,93 @@ impl CombatState {
     }
 
     /// Reconciles external module activation or target lock initiation that cleared `undock_invulnerable_remaining_ticks`.
+    /// Returns a consistent protection snapshot across all cloak and invulnerability fields.
+    pub fn protection_snapshot(&self) -> CombatProtectionSnapshot {
+        CombatProtectionSnapshot {
+            is_cloaked: self.is_cloaked,
+            is_covert_cloak: self.is_covert_cloak,
+            is_tethered: self.is_tethered,
+            has_cloak_velocity_multiplier: self.cloak_velocity_multiplier.is_some(),
+            gate_cloak_remaining_ticks: self.gate_cloak_remaining_ticks,
+            undock_invulnerable_remaining_ticks: self.undock_invulnerable_remaining_ticks,
+            warp_exit_invulnerable_remaining_ticks: self.warp_exit_invulnerable_remaining_ticks,
+            sync_invuln_with_undock_timer: self.sync_invuln_with_undock_timer,
+        }
+    }
+
+    /// Returns `true` when post-jump/post-session gate cloak is active and not synced off.
+    pub fn has_gate_cloak(&self) -> bool {
+        self.protection_snapshot().has_gate_cloak()
+    }
+
+    /// Returns `true` when any cloak state (gate cloak or active module cloak) is active.
+    pub fn has_any_cloak(&self) -> bool {
+        self.protection_snapshot().has_any_cloak()
+    }
+
+    /// Returns `true` when an active module cloak (excluding gate cloak) is engaged.
+    pub fn has_active_non_gate_cloak(&self) -> bool {
+        self.protection_snapshot().has_active_non_gate_cloak()
+    }
+
+    /// Returns `true` when an active Covert Ops cloak module is engaged (excluding gate cloak).
+    pub fn has_active_covert_cloak(&self) -> bool {
+        self.protection_snapshot().has_active_covert_cloak()
+    }
+
+    /// Returns `true` when an active non-covert cloak module is engaged (excluding gate cloak).
+    pub fn has_active_non_covert_cloak(&self) -> bool {
+        self.protection_snapshot().has_active_non_covert_cloak()
+    }
+
+    /// Returns `true` when tether, gate cloak, undock, or warp-exit invulnerability is active.
+    pub fn is_protected(&self) -> bool {
+        self.protection_snapshot().is_protected()
+    }
+
+    /// Initializes synchronized gate cloak and session-change invulnerability timers after jump/gate transit.
+    pub fn apply_jump_cloak_and_invuln_timers(&mut self, ticks: u32) {
+        self.is_cloaked = ticks > 0;
+        self.gate_cloak_remaining_ticks = ticks;
+        self.undock_invulnerable_remaining_ticks = ticks;
+        self.warp_exit_invulnerable_remaining_ticks = 0;
+        self.sync_invuln_with_undock_timer = ticks > 0;
+    }
+
+    /// Clears synchronized action-breakable protection timers (gate cloak, undock invuln, warp-exit invuln),
+    /// returning `(gate_cloak_broken, undock_invuln_cancelled)` while preserving active non-gate module cloaks.
+    pub fn clear_action_invuln(&mut self) -> (bool, bool) {
+        self.sync_action_breaks();
+        let gate_cloak_broken = self.gate_cloak_remaining_ticks > 0;
+        let undock_invuln_cancelled = self.undock_invulnerable_remaining_ticks > 0;
+        if gate_cloak_broken {
+            self.gate_cloak_remaining_ticks = 0;
+            self.is_cloaked = false;
+            self.cloak_velocity_multiplier = None;
+        }
+        self.undock_invulnerable_remaining_ticks = 0;
+        self.warp_exit_invulnerable_remaining_ticks = 0;
+        self.sync_invuln_with_undock_timer = false;
+        (gate_cloak_broken, undock_invuln_cancelled)
+    }
+
+    /// Clears all cloak state (gate cloak, non-covert cloak, covert cloak) and velocity/stabilization timers.
+    /// Returns `(was_gate_cloak, was_non_gate_cloak)`.
+    pub fn clear_all_cloak_state(&mut self) -> (bool, bool) {
+        self.sync_action_breaks();
+        let was_gate = self.gate_cloak_remaining_ticks > 0;
+        let was_non_gate = self.is_cloaked && !was_gate;
+        self.is_cloaked = false;
+        self.was_cloaked_last_tick = false;
+        self.is_covert_cloak = false;
+        self.gate_cloak_remaining_ticks = 0;
+        self.cloak_velocity_multiplier = None;
+        self.cloak_stabilization_remaining_s = 0.0;
+        (was_gate, was_non_gate)
+    }
+
+    /// Synchronizes action-induced `undock_invulnerable_remaining_ticks == 0` breaks onto
+    /// `warp_exit_invulnerable_remaining_ticks` and `gate_cloak_remaining_ticks` (`#1245`, `#1384`).
     pub fn sync_action_breaks(&mut self) {
         if self.sync_invuln_with_undock_timer && self.undock_invulnerable_remaining_ticks == 0 {
             self.warp_exit_invulnerable_remaining_ticks = 0;
@@ -704,21 +871,12 @@ impl CombatState {
 
     /// Returns `true` if the ship is currently inside its 10s post-warp invulnerability window.
     pub fn is_warp_exit_invulnerable(&self) -> bool {
-        if self.sync_invuln_with_undock_timer && self.undock_invulnerable_remaining_ticks == 0 {
-            return false;
-        }
-        self.warp_exit_invulnerable_remaining_ticks > 0
+        self.protection_snapshot().has_warp_exit_invuln()
     }
 
     /// Returns `true` if the ship is currently invulnerable due to tether, gate cloak, undock, or post-warp invulnerability.
     pub fn is_invulnerable(&self) -> bool {
-        if self.sync_invuln_with_undock_timer && self.undock_invulnerable_remaining_ticks == 0 {
-            return self.is_tethered;
-        }
-        self.is_tethered
-            || self.gate_cloak_remaining_ticks > 0
-            || self.undock_invulnerable_remaining_ticks > 0
-            || self.warp_exit_invulnerable_remaining_ticks > 0
+        self.protection_snapshot().is_invulnerable()
     }
 
     /// Applies a [`DamageVector`] through Shield -> Armor -> Structure layers using each layer's
@@ -726,11 +884,7 @@ impl CombatState {
     /// Returns `(total_applied_damage, destroyed)`.
     pub fn apply_damage(&mut self, dmg: DamageVector) -> (f64, bool) {
         self.sync_action_breaks();
-        if self.is_tethered
-            || self.gate_cloak_remaining_ticks > 0
-            || self.undock_invulnerable_remaining_ticks > 0
-            || self.warp_exit_invulnerable_remaining_ticks > 0
-        {
+        if self.is_invulnerable() {
             return (0.0, false);
         }
         let mut rem_vec = DamageVector {

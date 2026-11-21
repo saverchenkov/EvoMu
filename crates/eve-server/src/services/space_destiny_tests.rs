@@ -1804,3 +1804,86 @@ async fn update_state_request_structure_view_outside_observes_structure_and_neve
         "destroyed structure View Outside must not mark ballpark bootstrapped"
     );
 }
+
+#[tokio::test]
+async fn break_ship_protection_with_location_invuln_emits_single_invuln_cancelled_and_mirrors_actor() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 9486_i64;
+    let ship_id = 88686_i64;
+    let now_unix = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&90_000_001].clone();
+        ch.character_id = char_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        ch.solar_system_id = sys_id;
+        snap.characters.insert(char_id, ch);
+    });
+    ctx.db
+        .acquire_online_lock(1, char_id as u64, Some(char_id), true, now_unix)
+        .expect("online lock for 9486");
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let mut combat = eve_destiny::CombatState::default();
+    combat.apply_jump_cloak_and_invuln_timers(50);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        combat,
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_id),
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    grant_location_change_invulnerability(&ctx, char_id, now_unix + 60);
+    let mirrored = sys.get_protection_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(mirrored.is_protected(now_unix));
+    assert_eq!(mirrored.location_change_invuln_until_unix, Some(now_unix + 60));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let events = break_ship_protection_with_location_invuln(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        crate::system_actor::ProtectionBreakReason::ModuleActivation,
+    )
+    .await;
+    assert!(events.gate_cloak_broken);
+    assert!(events.invuln_cancelled);
+    assert!(!is_location_change_invulnerable(&ctx, char_id, now_unix));
+
+    let notes = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(notes.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), 1);
+    assert_eq!(notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+
+    // Second invocation emits no duplicate notifications.
+    let events_again = break_ship_protection_with_location_invuln(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        crate::system_actor::ProtectionBreakReason::ModuleActivation,
+    )
+    .await;
+    assert!(!events_again.invuln_cancelled);
+    assert!(!events_again.any_cloak_broken());
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+}

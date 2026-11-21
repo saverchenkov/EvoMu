@@ -108,24 +108,105 @@ pub fn grant_location_change_invulnerability(ctx: &ServerContext, char_id: i64, 
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(char_id, until_unix);
+    ctx.systems
+        .try_sync_location_change_invuln_for_char(char_id, Some(until_unix));
 }
 
-pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) {
+pub(crate) fn pop_active_location_change_invuln(ctx: &ServerContext, char_id: i64) -> Option<u64> {
     let removed = ctx
         .location_change_invuln
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&char_id);
-    if let Some(until) = removed {
+    ctx.systems
+        .try_sync_location_change_invuln_for_char(char_id, None);
+    let now = ctx.now_unix();
+    removed.filter(|&until| now < until)
+}
+
+pub(crate) fn restore_location_change_invuln(
+    ctx: &ServerContext,
+    char_id: i64,
+    until_unix: Option<u64>,
+) {
+    if let Some(until) = until_unix {
         if ctx.now_unix() < until {
-            let ship_id = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.active_ship_id))
-                .unwrap_or(0);
-            if ship_id > 0 {
+            ctx.location_change_invuln
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(char_id, until);
+            ctx.systems
+                .try_sync_location_change_invuln_for_char(char_id, Some(until));
+        }
+    }
+}
+
+pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) {
+    if pop_active_location_change_invuln(ctx, char_id).is_some() {
+        let ship_id = ctx
+            .db
+            .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.active_ship_id))
+            .unwrap_or(0);
+        if ship_id > 0 {
+            crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
+                ctx, char_id, ship_id, false, true,
+            );
+        }
+    }
+}
+
+pub(crate) fn emit_protection_break_notifications(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    events: &crate::system_actor::ProtectionBreakEvents,
+) {
+    let cloak_cancelled = events.should_emit_jump_cloak_cancelled();
+    let invuln_cancelled = events.invuln_cancelled && ship_id > 0;
+    if cloak_cancelled || invuln_cancelled {
+        crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
+            ctx,
+            char_id,
+            ship_id,
+            cloak_cancelled,
+            invuln_cancelled,
+        );
+    }
+}
+
+pub(crate) async fn break_ship_protection_with_location_invuln(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    reason: crate::system_actor::ProtectionBreakReason,
+) -> crate::system_actor::ProtectionBreakEvents {
+    let loc_until = pop_active_location_change_invuln(ctx, char_id);
+    let now = ctx.now_unix();
+    if ship_id <= 0 {
+        return crate::system_actor::ProtectionBreakEvents {
+            invuln_cancelled: loc_until.is_some(),
+            ..Default::default()
+        };
+    }
+    match sys
+        .break_protection(ship_id, Some(char_id), reason, loc_until, now)
+        .await
+    {
+        Ok(events) => {
+            emit_protection_break_notifications(ctx, char_id, ship_id, &events);
+            events
+        }
+        Err(_) => {
+            let had_loc = loc_until.is_some();
+            if had_loc {
                 crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
                     ctx, char_id, ship_id, false, true,
                 );
+            }
+            crate::system_actor::ProtectionBreakEvents {
+                invuln_cancelled: had_loc,
+                ..Default::default()
             }
         }
     }

@@ -711,3 +711,201 @@ async fn heal_flush_peer_observer_updates_preserves_fx_floor_and_single_stamp() 
         assert!(saw_dmg, "missing OnDamageStateChange for observer {obs_id}");
     }
 }
+
+#[tokio::test]
+async fn activate_module_cycle_atomic_validates_preconditions_without_rollback_or_protection_loss() {
+    let reg = SystemRegistry::new();
+    let sys_id: SolarSystemId = 30_000_142;
+    let h = reg.get_or_spawn(sys_id);
+    let char_id: CharacterId = 90_000_001;
+    let ship_id: BallId = 7701;
+
+    let mut cs = CombatState {
+        capacitor: 100.0,
+        max_capacitor: 500.0,
+        ..Default::default()
+    };
+    cs.apply_jump_cloak_and_invuln_timers(40);
+    h.spawn_ball_with_meta(
+        make_ball(ship_id, 587, DVec3::ZERO),
+        cs,
+        SlimItemMeta {
+            char_id: Some(char_id),
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let make_req = |module_id: i64, cap_need: f64, is_mwd_or_mjd: bool| AtomicActivateCycleRequest {
+        char_id,
+        cycle: ActiveModuleCycle {
+            ship_id,
+            module_id,
+            owner_char_id: Some(char_id),
+            duration_s: 5.0,
+            repeat: 1,
+            cap_need_per_cycle: cap_need,
+            is_mwd_or_mjd,
+            ..ActiveModuleCycle::default()
+        },
+        allow_while_warping: false,
+        allow_while_cloaked: false,
+        break_protection: true,
+        break_reason: ProtectionBreakReason::ModuleActivation,
+        location_change_invuln_until_unix: Some(2_000_000_000),
+        real_now_unix: 1_999_999_990,
+    };
+
+    // 1. Mid-warp rejection preserves capacitor, gate cloak, and undock invulnerability.
+    h.set_movement_mode(
+        ship_id,
+        MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: DVec3::new(1_000_000.0, 0.0, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 1_000_000.0,
+            phase: eve_destiny::WarpPhase::Cruising,
+            elapsed_warp_time: 5.0,
+        },
+    )
+    .await
+    .unwrap();
+    let warp_err = h
+        .activate_module_cycle_atomic(make_req(5001, 25.0, false))
+        .await
+        .unwrap_err();
+    assert!(warp_err.contains("CantActivateInWarp"));
+    assert!(!h.has_module_cycle(ship_id, 5001).await);
+
+    // 2. Non-gate active cloak rejection preserves capacitor and cloak state.
+    h.force_stop_warp(ship_id).unwrap();
+    h.set_movement_mode(ship_id, MovementMode::Stop)
+        .await
+        .unwrap();
+    h.modify_combat_state(ship_id, |c| {
+        c.is_cloaked = true;
+        c.gate_cloak_remaining_ticks = 0;
+        c.undock_invulnerable_remaining_ticks = 40;
+        c.capacitor = 100.0;
+    })
+    .await
+    .unwrap();
+    let cloak_err = h
+        .activate_module_cycle_atomic(make_req(5001, 25.0, false))
+        .await
+        .unwrap_err();
+    assert!(cloak_err.contains("CannotActivateCloaked"));
+    let cs_cloaked = h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_cloaked.is_cloaked);
+    assert!((cs_cloaked.capacitor - 100.0).abs() < 1e-6);
+
+    // 3. Scrammed propulsion and insufficient capacitor reject with zero undock/gate-cloak loss.
+    let scram_ship: BallId = 8702;
+    h.spawn_ball_with_meta(
+        make_ball(scram_ship, 587, DVec3::ZERO),
+        CombatState { capacitor: 500.0, max_capacitor: 500.0, ..Default::default() },
+        SlimItemMeta::default(),
+    )
+    .await
+    .unwrap();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: scram_ship,
+        module_id: 9501,
+        target_id: Some(ship_id),
+        duration_s: 10.0,
+        repeat: 1,
+        disables_target_mwd_mjd: true,
+        warp_scramble_points: 2,
+        ..ActiveModuleCycle::default()
+    })
+    .await
+    .unwrap();
+    h.modify_combat_state(ship_id, |c| {
+        c.apply_jump_cloak_and_invuln_timers(40);
+        c.capacitor = 100.0;
+    })
+    .await
+    .unwrap();
+    let scram_err = h
+        .activate_module_cycle_atomic(make_req(5001, 25.0, true))
+        .await
+        .unwrap_err();
+    assert!(scram_err.contains("WarpScrambled"));
+
+    let _ = h.remove_module_cycle(scram_ship, 9501).await;
+    let cap_err = h
+        .activate_module_cycle_atomic(make_req(5001, 250.0, false))
+        .await
+        .unwrap_err();
+    assert!(cap_err.contains("Insufficient capacitor"));
+    let cs_after_errs = h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_after_errs.gate_cloak_remaining_ticks, 40);
+    assert_eq!(cs_after_errs.undock_invulnerable_remaining_ticks, 40);
+    assert!((cs_after_errs.capacitor - 100.0).abs() < 1e-6);
+
+    // 4. Atomic success debits cap, adds cycle, breaks gate cloak + invuln in one turn, and prevents duplicates.
+    let outcome = h
+        .activate_module_cycle_atomic(make_req(5001, 40.0, false))
+        .await
+        .unwrap();
+    assert!((outcome.capacitor_after - 60.0).abs() < 1e-6);
+    assert!(outcome.protection_events.gate_cloak_broken);
+    assert!(outcome.protection_events.invuln_cancelled);
+    assert!(outcome.protection_events.slim_cloak_cleared);
+    assert!(outcome.protection_events.should_emit_jump_cloak_cancelled());
+    assert!(h.has_module_cycle(ship_id, 5001).await);
+    assert!(reg.is_module_active_sync(sys_id, ship_id, 5001));
+
+    let dup_err = h
+        .activate_module_cycle_atomic(make_req(5001, 10.0, false))
+        .await
+        .unwrap_err();
+    assert!(dup_err.contains("ModuleAlreadyActive"));
+    let cs_final = h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((cs_final.capacitor - 60.0).abs() < 1e-6);
+
+    // 5. Aligning warp phase remains permitted to activate non-warp modules atomically.
+    let ship_align: BallId = 7702;
+    let mut align_ball = make_ball(ship_align, 587, DVec3::new(1_000.0, 0.0, 0.0));
+    align_ball.mode = MovementMode::new_warp(
+        align_ball.position,
+        DVec3::new(1_000_000.0, 0.0, 0.0),
+        3.0,
+    );
+    h.spawn_ball_with_meta(
+        align_ball,
+        CombatState {
+            capacitor: 200.0,
+            max_capacitor: 500.0,
+            ..Default::default()
+        },
+        SlimItemMeta::default(),
+    )
+    .await
+    .unwrap();
+    let align_ok = h
+        .activate_module_cycle_atomic(AtomicActivateCycleRequest {
+            char_id,
+            cycle: ActiveModuleCycle {
+                ship_id: ship_align,
+                module_id: 5002,
+                owner_char_id: Some(char_id),
+                duration_s: 5.0,
+                repeat: 1,
+                cap_need_per_cycle: 20.0,
+                ..ActiveModuleCycle::default()
+            },
+            allow_while_warping: false,
+            allow_while_cloaked: false,
+            break_protection: true,
+            break_reason: ProtectionBreakReason::ModuleActivation,
+            location_change_invuln_until_unix: None,
+            real_now_unix: 1_999_999_990,
+        })
+        .await
+        .unwrap();
+    assert!((align_ok.capacitor_after - 180.0).abs() < 1e-6);
+    assert!(reg.is_module_active_sync(sys_id, ship_align, 5002));
+}

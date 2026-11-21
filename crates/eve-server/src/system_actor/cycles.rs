@@ -2576,7 +2576,7 @@ impl SystemHandle {
             return true;
         }
         let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        bp.combat_states.get(&ball_id).is_some_and(|cs| cs.is_cloaked)
+        bp.combat_states.get(&ball_id).is_some_and(eve_destiny::CombatState::has_any_cloak)
             || bp.ball_slim_meta.get(&ball_id).is_some_and(|m| m.is_cloaked)
     }
 
@@ -2914,8 +2914,7 @@ impl SystemHandle {
     pub fn reconcile_disconnected_warp_sync(&self, ship_id: BallId, dest: DVec3) -> (DVec3, bool) {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.undock_invulnerable_remaining_ticks = 0;
-            cs.warp_exit_invulnerable_remaining_ticks = 0;
+            let _ = cs.clear_action_invuln();
         }
         let arrived = bp.balls.get(&ship_id).is_none_or(|b| {
             !matches!(b.mode, MovementMode::Warp { .. }) || (b.position - dest).length() <= 2_500.0

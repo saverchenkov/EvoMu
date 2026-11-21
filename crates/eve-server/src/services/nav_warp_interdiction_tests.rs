@@ -974,4 +974,49 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
             .count(),
         1
     );
+
+    // 5. Failed subwarp move while mid-warp restores location_change_invuln and leaves protection untouched
+    // with zero OnInvulnCancelled / OnJumpCloakCancelled notifications.
+    sys_handle
+        .set_movement_mode(
+            ship_id,
+            MovementMode::Warp {
+                origin: star_pos,
+                destination: star_pos + DVec3::new(1_000_000.0, 0.0, 0.0),
+                warp_speed_au_s: 3.0,
+                total_distance: 1_000_000.0,
+                phase: eve_destiny::WarpPhase::Cruising,
+                elapsed_warp_time: 5.0,
+            },
+        )
+        .await
+        .unwrap();
+    sys_handle
+        .modify_combat_state(ship_id, |cs| cs.apply_jump_cloak_and_invuln_timers(25))
+        .await
+        .unwrap();
+    arm_safe_logoff_and_location_invuln(&ctx, char_id, ship_id, sys_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let err_move = execute_subwarp_goto_point(
+        &ctx,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        &start_ball,
+        star_pos + DVec3::new(10_000.0, 0.0, 0.0),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_move.code, ERR_SHIP_ALREADY_IN_WARP);
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(
+        &ctx,
+        char_id,
+        ctx.now_unix(),
+    ));
+    let cs_err = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_err.gate_cloak_remaining_ticks, 25);
+    assert_eq!(cs_err.undock_invulnerable_remaining_ticks, 25);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 }
