@@ -1988,3 +1988,118 @@ async fn create_newbie_ship_spawn_enforces_racial_corvette_skill_prerequisites()
     assert_eq!(spawned.dict_get("typeID").and_then(PyRep::as_i64), Some(601));
     assert_eq!(sess.ship_id, Some(spawned_id));
 }
+
+#[tokio::test]
+async fn leave_ship_enforces_ownership_for_active_and_explicit_ships() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_a = 90_000_001i64;
+    let char_b = 90_000_002i64;
+    let station_id = 60_003_760i64;
+    let sys_id = 30_000_142u32;
+    let own_ship_id = 955_100_001i64;
+    let other_ship_id = 955_100_002i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_a) {
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = other_ship_id;
+        }
+        snap.items.insert(
+            own_ship_id,
+            InventoryItemRecord {
+                item_id: own_ship_id,
+                type_id: 587,
+                owner_id: char_a,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            other_ship_id,
+            InventoryItemRecord {
+                item_id: other_ship_id,
+                type_id: 587,
+                owner_id: char_b,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(1);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_a);
+    sess.station_id = Some(station_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(other_ship_id);
+
+    // 1. Active ship owned by another pilot -> OwnershipViolation
+    let err_active = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "ship",
+        "LeaveShip",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_active.code, "OwnershipViolation");
+    assert_eq!(sess.ship_id, Some(other_ship_id));
+
+    // 2. Active ship owned by caller, but explicit arg names another pilot's ship -> OwnershipViolation
+    sess.ship_id = Some(own_ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_a) {
+            ch.active_ship_id = own_ship_id;
+        }
+    });
+    let err_explicit = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "ship",
+        "LeaveShip",
+        &[PyRep::Integer(other_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_explicit.code, "OwnershipViolation");
+    assert_eq!(sess.ship_id, Some(own_ship_id));
+
+    // 3. Explicit active ship owned by caller succeeds
+    let ok_leave = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "ship",
+        "LeaveShip",
+        &[PyRep::Integer(own_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("LeaveShip with owned explicit active ship succeeds");
+    let capsule_id = ok_leave.as_i64().expect("returns capsule ID");
+    assert_ne!(capsule_id, own_ship_id);
+    assert_eq!(sess.ship_id, Some(capsule_id));
+}
+

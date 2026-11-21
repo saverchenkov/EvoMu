@@ -197,6 +197,137 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
     }
 }
 
+struct ReservedAbilitySlot {
+    squadron_size: u32,
+    remaining_charges: i64,
+    prev_cooldown: Option<u64>,
+    prev_mwd_active: bool,
+    spent_charge: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reserve_fighter_ability_slot(
+    ctx: &ServerContext,
+    char_id: i64,
+    fighter_ball_id: i64,
+    parent_ship_id: i64,
+    slot_id: u32,
+    ability_id: u32,
+    now_unix: u64,
+    effective_gate_sec: f64,
+    charge_count: i64,
+) -> Result<ReservedAbilitySlot, BridgeRpcError> {
+    let mut fg = ctx.fighters.write().unwrap();
+    let (squadron_size, prev_mwd_active) = {
+        let Some(live) = fg.active_fighters.get(&fighter_ball_id) else {
+            let message = format!("Fighter squadron {fighter_ball_id} not found or not launched");
+            return Err(BridgeRpcError::with_client_error(
+                "FighterNotFound",
+                message.clone(),
+                eve_proto::ClientError::CustomInfo(message),
+            ));
+        };
+        if live.owner_char_id != char_id || live.is_abandoned || live.parent_ship_id != parent_ship_id {
+            let message = format!(
+                "Fighter squadron {fighter_ball_id} is not controlled by character {char_id}"
+            );
+            return Err(BridgeRpcError::with_client_error(
+                "FighterNotOwned",
+                message.clone(),
+                eve_proto::ClientError::CustomInfo(message),
+            ));
+        }
+        if live.squadron_size == 0 {
+            let message = format!("Fighter squadron {fighter_ball_id} has no remaining fighters");
+            return Err(BridgeRpcError::with_client_error(
+                "FighterNotFound",
+                message.clone(),
+                eve_proto::ClientError::CustomInfo(message),
+            ));
+        }
+        (live.squadron_size, live.mwd_active)
+    };
+    if let Some(&ready_at) = fg.cooldown_state.get(&(fighter_ball_id, slot_id)) {
+        if now_unix < ready_at {
+            let message = format!(
+                "Fighter ability slot {slot_id} on {fighter_ball_id} is on cooldown until {ready_at}"
+            );
+            return Err(BridgeRpcError::with_client_error(
+                "AbilityOnCooldown",
+                message.clone(),
+                eve_proto::ClientError::CustomInfo(message),
+            ));
+        }
+    }
+    let (remaining_charges, spent_charge) = if charge_count > 0 {
+        let entry = fg.charge_state.entry((fighter_ball_id, slot_id)).or_insert(0);
+        if *entry >= charge_count as u32 {
+            let message = format!(
+                "Fighter ability slot {slot_id} on {fighter_ball_id} has exhausted all {} charges",
+                charge_count
+            );
+            return Err(BridgeRpcError::with_client_error(
+                "OutOfCharges",
+                message.clone(),
+                eve_proto::ClientError::CustomInfo(message),
+            ));
+        }
+        *entry = entry.saturating_add(1);
+        ((charge_count as i64).saturating_sub(*entry as i64), true)
+    } else {
+        (0, false)
+    };
+    let prev_cooldown = fg.cooldown_state.insert(
+        (fighter_ball_id, slot_id),
+        now_unix.saturating_add(effective_gate_sec.ceil() as u64),
+    );
+    if matches!(ability_id, 4 | 9 | 13) {
+        if let Some(live) = fg.active_fighters.get_mut(&fighter_ball_id) {
+            live.mwd_active = true;
+        }
+    }
+    let prev_mwd_active = if matches!(ability_id, 4 | 9 | 13) {
+        prev_mwd_active
+    } else {
+        false
+    };
+    Ok(ReservedAbilitySlot {
+        squadron_size,
+        remaining_charges,
+        prev_cooldown,
+        prev_mwd_active,
+        spent_charge,
+    })
+}
+
+fn rollback_fighter_ability_slot(
+    ctx: &ServerContext,
+    fighter_ball_id: i64,
+    slot_id: u32,
+    ability_id: u32,
+    reserved: &ReservedAbilitySlot,
+) {
+    let mut fg = ctx.fighters.write().unwrap();
+    if let Some(old_cd) = reserved.prev_cooldown {
+        fg.cooldown_state.insert((fighter_ball_id, slot_id), old_cd);
+    } else {
+        fg.cooldown_state.remove(&(fighter_ball_id, slot_id));
+    }
+    if reserved.spent_charge {
+        if let Some(used) = fg.charge_state.get_mut(&(fighter_ball_id, slot_id)) {
+            *used = used.saturating_sub(1);
+            if *used == 0 {
+                fg.charge_state.remove(&(fighter_ball_id, slot_id));
+            }
+        }
+    }
+    if matches!(ability_id, 4 | 9 | 13) {
+        if let Some(live) = fg.active_fighters.get_mut(&fighter_ball_id) {
+            live.mwd_active = reserved.prev_mwd_active;
+        }
+    }
+}
+
 async fn activate_single_fighter_ability(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -378,10 +509,39 @@ async fn activate_single_fighter_ability(
         fighter_attrs.and_then(|m| m.get(&id).copied())
     };
 
-    let squad_mult = fighter.squadron_size.max(1) as f64;
+    let cycle_duration_ms = match ability_id {
+        18..=27 | 29..=32 => attr(2177).unwrap_or(4_000.0),
+        44 | 45 => attr(2233).unwrap_or(5_000.0),
+        33..=36 => attr(2182).unwrap_or(14_000.0),
+        38 => attr(2401).unwrap_or(10_000.0),
+        7 => attr(2349).unwrap_or(60_000.0),
+        2 => attr(2183).unwrap_or(10_000.0),
+        10 => attr(2203).unwrap_or(10_000.0),
+        11 => attr(2208).unwrap_or(6_000.0),
+        12 => attr(2220).unwrap_or(10_000.0),
+        16 => attr(2238).unwrap_or(10_000.0),
+        4 => attr(2157).unwrap_or(20_000.0),
+        5 => attr(2155).unwrap_or(10_000.0),
+        9 => attr(2158).unwrap_or(20_000.0),
+        13 => attr(2123).unwrap_or(10_000.0),
+        _ => 10_000.0,
+    };
+    let cooldown_sec = slot_def.cooldown_seconds.unwrap_or(0.0);
+    let effective_gate_sec = cooldown_sec.max((cycle_duration_ms / 1_000.0).max(1.0));
+
+    if target_mode == "untargeted" && target_id.is_some() {
+        let message = format!(
+            "Untargeted fighter ability {ability_id} does not accept a target entity ID"
+        );
+        return Some(Err(BridgeRpcError::with_client_error(
+            "UnexpectedTarget",
+            message.clone(),
+            eve_proto::ClientError::CustomInfo(message),
+        )));
+    }
 
     let mut ewar_strength_applied = 0.0f64;
-    if target_mode == "itemTargeted" {
+    let (live_squadron_size, remaining_charges) = if target_mode == "itemTargeted" {
         let Some(tid) = target_id else {
             return Some(Err(BridgeRpcError {
                 code: "TargetRequired".into(),
@@ -599,6 +759,22 @@ async fn activate_single_fighter_ability(
             }));
         }
 
+        let reserved = match reserve_fighter_ability_slot(
+            ctx,
+            char_id,
+            fighter_ball_id,
+            fighter.parent_ship_id,
+            slot_id,
+            ability_id,
+            now_unix,
+            effective_gate_sec,
+            charge_count,
+        ) {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e)),
+        };
+        let squad_mult = reserved.squadron_size.max(1) as f64;
+
         // Check if target is a fighter ball (for anti-fighter missiles bonus)
         let is_target_fighter = ctx.active_fighters.read().unwrap().contains_key(&tid);
 
@@ -718,7 +894,7 @@ async fn activate_single_fighter_ability(
             10 | 36 => {
                 // Siren I/II: Warp disruption (`feat:drones.fighter-support-cenotaph-scarab`, `feat:drones.support-fighter-abilities`)
                 let base_scram = attr(2205).or_else(|| attr(105)).unwrap_or(1.0) as i32;
-                let scram_pts = (base_scram * (fighter.squadron_size as i32)).max(1);
+                let scram_pts = (base_scram * (reserved.squadron_size as i32)).max(1);
                 ewar_strength_applied = scram_pts as f64;
                 let synth_id = -(fighter_ball_id * 10 + slot_id as i64);
                 let dur_s = (attr(2203).unwrap_or(5_000.0) / 1_000.0).max(5.0);
@@ -874,7 +1050,10 @@ async fn activate_single_fighter_ability(
             .await
             {
                 Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+                Err(e) => {
+                    rollback_fighter_ability_slot(ctx, fighter_ball_id, slot_id, ability_id, &reserved);
+                    return Some(Err(e));
+                }
             };
             if let Some((applied, destroyed, _)) = res
             {
@@ -968,102 +1147,73 @@ async fn activate_single_fighter_ability(
                 }
             }
         }
+        (reserved.squadron_size, reserved.remaining_charges)
     } else {
-        if target_id.is_some() && target_mode == "untargeted" {
-            return Some(Err(BridgeRpcError {
-                code: "UnexpectedTarget".into(),
-                message: format!(
-                    "Untargeted fighter ability {ability_id} does not accept a target entity ID"
-                ),
-                client_error: None,
-            }));
-        }
+        let reserved = match reserve_fighter_ability_slot(
+            ctx,
+            char_id,
+            fighter_ball_id,
+            fighter.parent_ship_id,
+            slot_id,
+            ability_id,
+            now_unix,
+            effective_gate_sec,
+            charge_count,
+        ) {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e)),
+        };
         match ability_id {
             5 => {
                 let mjd_dist = attr(2154).unwrap_or(100_000.0);
-                let _ = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await;
+                if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
+                    let _ = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await;
+                }
             }
             4 | 9 | 13 => {
                 // MWD / Evasive Maneuvers (`feat:drones.fighter-movement`, `feat:drones.light-fighter-space-superiority`):
                 // Increases fighter velocity by SDE speed bonus (`2151` / `2124`)
-                let was_mwd = ctx
-                    .active_fighters
-                    .write()
-                    .unwrap()
-                    .get_mut(&fighter_ball_id)
-                    .map(|f| {
-                        let prev = f.mwd_active;
-                        f.mwd_active = true;
-                        prev
-                    })
-                    .unwrap_or(false);
-                if !was_mwd {
+                if !reserved.prev_mwd_active && ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
                     let speed_bonus_pct = if ability_id == 13 {
                         attr(2224).unwrap_or(200.0)
                     } else {
                         attr(2151).or_else(|| attr(2124)).unwrap_or(400.0)
                     };
-                    if let Ok(Some(mut cs)) = sys_handle.get_combat_state(fighter_ball_id).await {
+                    if !sys_handle.try_recompute_combat_attributes(fighter_ball_id, |cs| {
                         cs.capture_missing_baselines(&fighter_ball);
                         cs.external_velocity_multiplier = Some(1.0 + speed_bonus_pct / 100.0);
                         if ability_id == 13 {
                             let sig_mult = (1.0 + attr(2225).unwrap_or(-80.0) / 100.0).clamp(0.10, 0.90);
                             cs.external_sig_multiplier = Some(sig_mult);
                         }
-                        let mut b = fighter_ball.clone();
-                        cs.recompute_attributes(&mut b);
-                        b.speed_fraction = 1.0;
-                        let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
-                    } else {
-                        let mut b = fighter_ball.clone();
-                        b.max_velocity *= 1.0 + speed_bonus_pct / 100.0;
-                        b.speed_fraction = 1.0;
-                        let _ = sys_handle.spawn_ball(b).await;
+                    }) {
+                        if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
+                            if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
+                                let _ = sys_handle
+                                    .set_ball_max_velocity(
+                                        fighter_ball_id,
+                                        b.max_velocity * (1.0 + speed_bonus_pct / 100.0),
+                                    )
+                                    .await;
+                            }
+                        }
                     }
                 }
-                let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
-            }
-            _ => {
-                if let Some(mjd_dist) = attr(2154) {
-                    let _ = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await;
-                } else {
+                if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
                     let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
                 }
             }
+            _ => {
+                if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
+                    if let Some(mjd_dist) = attr(2154) {
+                        let _ = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await;
+                    } else {
+                        let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
+                    }
+                }
+            }
         }
-    }
-
-    let cycle_duration_ms = match ability_id {
-        18..=27 | 29..=32 => attr(2177).unwrap_or(4_000.0),
-        44 | 45 => attr(2233).unwrap_or(5_000.0),
-        33..=36 => attr(2182).unwrap_or(14_000.0),
-        38 => attr(2401).unwrap_or(10_000.0),
-        7 => attr(2349).unwrap_or(60_000.0),
-        2 => attr(2183).unwrap_or(10_000.0),
-        10 => attr(2203).unwrap_or(10_000.0),
-        11 => attr(2208).unwrap_or(6_000.0),
-        12 => attr(2220).unwrap_or(10_000.0),
-        16 => attr(2238).unwrap_or(10_000.0),
-        4 => attr(2157).unwrap_or(20_000.0),
-        5 => attr(2155).unwrap_or(10_000.0),
-        9 => attr(2158).unwrap_or(20_000.0),
-        13 => attr(2123).unwrap_or(10_000.0),
-        _ => 10_000.0,
-    };
-    let cooldown_sec = slot_def.cooldown_seconds.unwrap_or(0.0);
-    let effective_gate_sec = cooldown_sec.max((cycle_duration_ms / 1_000.0).max(1.0));
-    ctx.fighter_cooldown_state.write().unwrap().insert(
-        (fighter_ball_id, slot_id),
-        now_unix.saturating_add(effective_gate_sec.ceil() as u64),
-    );
-
-    let remaining_charges = if charge_count > 0 {
-        let mut guard = ctx.fighter_charge_state.write().unwrap();
-        let entry = guard.entry((fighter_ball_id, slot_id)).or_insert(0);
-        *entry = entry.saturating_add(1);
-        (charge_count as i64).saturating_sub(*entry as i64)
-    } else {
-        0
+        (reserved.squadron_size, reserved.remaining_charges)
     };
 
     let now_ft = ctx.now_client_sim_filetime_ticks();
@@ -1093,7 +1243,7 @@ async fn activate_single_fighter_ability(
         ("abilityNameID", ability_name_id),
         ("tooltipTextID", tooltip_text_id),
         ("turretGraphicID", turret_graphic_id),
-        ("squadronSize", PyRep::Integer(fighter.squadron_size as i64)),
+        ("squadronSize", PyRep::Integer(live_squadron_size as i64)),
         ("ewarStrength", PyRep::Real(ewar_strength_applied)),
         ("success", PyRep::Bool(true)),
     ])))
@@ -1258,25 +1408,23 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
     }
 
     let charge_count = slot_def.charges.as_ref().map(|c| c.charge_count).unwrap_or(1);
-    let remaining_charges = {
-        let mut guard = ctx.fighter_charge_state.write().unwrap();
-        let entry = guard.entry((fighter_ball_id, slot_id)).or_insert(0);
-        if *entry >= charge_count {
-            return Some(Err(BridgeRpcError {
-                code: "OutOfCharges".into(),
-                message: "Fighter ability has exhausted charges".into(),
-                client_error: None,
-            }));
-        }
-        *entry = entry.saturating_add(1);
-        (charge_count as i64).saturating_sub(*entry as i64)
+    let reserved = match reserve_fighter_ability_slot(
+        ctx,
+        char_id,
+        fighter_ball_id,
+        fighter.parent_ship_id,
+        slot_id,
+        slot_def.ability_id,
+        now_unix,
+        cd_secs as f64,
+        charge_count as i64,
+    ) {
+        Ok(r) => r,
+        Err(e) => return Some(Err(e)),
     };
-    ctx.fighter_cooldown_state
-        .write()
-        .unwrap()
-        .insert((fighter_ball_id, slot_id), now_unix + cd_secs);
+    let remaining_charges = reserved.remaining_charges;
 
-    let squad_scale = fighter.squadron_size.max(1) as f64;
+    let squad_scale = reserved.squadron_size.max(1) as f64;
     let bomb_type_id = f_attrs
         .and_then(|m| m.get(&2324).copied())
         .map(|v| v as u32)
@@ -1610,9 +1758,17 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
                     cs.external_sig_multiplier = None;
                 }
             }) {
-                if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
-                    b.max_velocity /= 1.0 + speed_bonus_pct / 100.0;
-                    let _ = sys_handle.spawn_ball(b).await;
+                if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
+                    if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
+                        if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
+                            let _ = sys_handle
+                                .set_ball_max_velocity(
+                                    fighter_ball_id,
+                                    b.max_velocity / (1.0 + speed_bonus_pct / 100.0),
+                                )
+                                .await;
+                        }
+                    }
                 }
             }
         }

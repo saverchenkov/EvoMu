@@ -416,8 +416,25 @@ async fn drone_scoop_bay_full_missing_items_abandon_reconnect_limits_and_mining_
     with_combat_runtime(&ctx, |rt| {
         assert!(rt.active_drones_in_space.contains_key(&d_bay_full)); // restored on BayFull
         assert!(!rt.active_drones_in_space.contains_key(&d_item_missing)); // purged ItemMissing
-        assert!(!rt.active_drones_in_space.contains_key(&d_ghost_ship)); // purged missing ship
+        let abandoned_ghost = rt
+            .active_drones_in_space
+            .get(&d_ghost_ship)
+            .expect("ghost ship drone abandoned in space rather than deleted");
+        assert!(abandoned_ghost.is_abandoned);
+        assert_eq!(abandoned_ghost.owner_char_id, 0);
+        assert_eq!(abandoned_ghost.original_owner_char_id, char_id);
+        assert_eq!(abandoned_ghost.parent_ship_id, 0);
+        assert_eq!(abandoned_ghost.activity_state, 0);
     });
+    assert!(
+        ctx.systems
+            .get_or_spawn(sys_id)
+            .get_ball_snapshot(d_ghost_ship)
+            .await
+            .unwrap()
+            .is_some(),
+        "abandoned drone ball must stay in space when parent ship disappears"
+    );
 
     // `handle_cmd_abandon_drone` with PyRep::Integer single ID & `handle_cmd_reconnect_to_drones`
     // error branches (NoActiveShip, NoSolarSystem, empty reconnected -> finish_reconnect_drones(&[]),
@@ -586,4 +603,175 @@ async fn drone_scoop_bay_full_missing_items_abandon_reconnect_limits_and_mining_
         assert!(!rt.active_drone_miners.contains_key(&d_mine_hold));
     });
 }
+
+#[tokio::test]
+async fn returning_drones_abandon_on_ship_death_dock_cross_system_and_scoop_rejects_invalid_targets() {
+    use super::{handle_cmd_return_bay, step_returning_drones};
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let other_sys_id = 30_000_144u32;
+    let station_id = 60_003_760i64;
+    let char1 = 90_994_001i64;
+    let char2 = 90_994_002i64;
+    let char3 = 90_994_003i64;
+    let char4 = 90_994_004i64;
+    let ship1 = 944_000_001i64;
+    let ship2 = 944_000_002i64;
+    let ship3 = 944_000_003i64;
+    let ship4 = 944_000_004i64;
+    let d1 = 944_000_011i64;
+    let d2 = 944_000_012i64;
+    let d3 = 944_000_013i64;
+    let d4 = 944_000_014i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid, st_opt, cur_sys) in [
+            (char1, ship1, None, sys_id),
+            (char2, ship2, Some(station_id), sys_id),
+            (char3, ship3, None, other_sys_id),
+            (char4, ship4, None, sys_id),
+        ] {
+            let mut c = snap.characters[&90_000_001].clone();
+            c.character_id = cid;
+            c.user_id = cid as u64;
+            c.name = format!("DroneRetPilot-{cid}");
+            c.solar_system_id = cur_sys;
+            c.active_ship_id = sid;
+            c.station_id = st_opt;
+            c.structure_id = None;
+            snap.characters.insert(cid, c);
+        }
+        // ship1 intentionally removed/absent from DB to simulate parent ship destruction mid-return
+        snap.items.insert(
+            ship2,
+            InventoryItemRecord {
+                item_id: ship2,
+                type_id: 593,
+                owner_id: char2,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ship3,
+            InventoryItemRecord {
+                item_id: ship3,
+                type_id: 593,
+                owner_id: char3,
+                location_id: other_sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ship4,
+            InventoryItemRecord {
+                item_id: ship4,
+                type_id: 593,
+                owner_id: char4,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for (did, oid) in [(d1, char1), (d2, char2), (d3, char3), (d4, char4)] {
+            snap.items.insert(
+                did,
+                InventoryItemRecord {
+                    item_id: did,
+                    type_id: 2454,
+                    owner_id: oid,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    // Spawn ship4 (only in-space valid ship) + all 4 returning drone balls
+    spawn_ball(&ctx, sys_id, ship4, 593, DVec3::ZERO);
+    spawn_ball(&ctx, sys_id, d1, 2454, DVec3::new(100.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d2, 2454, DVec3::new(200.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d3, 2454, DVec3::new(300.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d4, 2454, DVec3::new(10_000.0, 0.0, 0.0)); // > 2500m from ship4
+
+    // CmdReturnBay when ship ball is absent rejects ShipNotInSpace without deleting d1
+    let mut sess_destroyed = SessionState {
+        user_id: Some(char1 as u64),
+        character_id: Some(char1),
+        ship_id: Some(ship1),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(d1, make_drone_state(d1, d1, 2454, char1, ship1, sys_id, false, 4));
+        rt.active_drones_in_space.insert(d2, make_drone_state(d2, d2, 2454, char2, ship2, sys_id, false, 4));
+        rt.active_drones_in_space.insert(d3, make_drone_state(d3, d3, 2454, char3, ship3, sys_id, false, 4));
+        rt.active_drones_in_space.insert(d4, make_drone_state(d4, d4, 2454, char4, ship4, sys_id, false, 4));
+    });
+    assert_eq!(
+        handle_cmd_return_bay(&ctx, &mut sess_destroyed, &[PyRep::Integer(d1)], &HashMap::new())
+            .await
+            .unwrap_err()
+            .code,
+        "ShipNotInSpace"
+    );
+
+    // Try atomic scoop on out-of-range returning drone d4 -> keeps d4 controlled & returning
+    let d4_state = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&d4].clone());
+    assert!(!super::try_atomic_scoop_drone(&ctx, &sys_handle, &d4_state, ship4).await);
+    with_combat_runtime(&ctx, |rt| {
+        let cur4 = rt.active_drones_in_space.get(&d4).expect("out-of-range drone restored");
+        assert!(!cur4.is_abandoned);
+        assert_eq!(cur4.parent_ship_id, ship4);
+        assert_eq!(cur4.activity_state, 4);
+    });
+    assert_eq!(ctx.db.get_item(d4).unwrap().location_id, sys_id as i64);
+
+    // Try atomic scoop on cross-system ship d3 -> abandons d3 in space without deleting or scooping
+    let d3_state = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&d3].clone());
+    assert!(!super::try_atomic_scoop_drone(&ctx, &sys_handle, &d3_state, ship3).await);
+
+    // Step returning drones -> abandons d1 (destroyed ship) and d2 (docked ship), keeps d4 controlled
+    step_returning_drones(&ctx).await;
+    with_combat_runtime(&ctx, |rt| {
+        for (did, orig_owner) in [(d1, char1), (d2, char2), (d3, char3)] {
+            let st = rt
+                .active_drones_in_space
+                .get(&did)
+                .unwrap_or_else(|| panic!("drone {did} must remain abandoned in space"));
+            assert!(st.is_abandoned);
+            assert_eq!(st.owner_char_id, 0);
+            assert_eq!(st.original_owner_char_id, orig_owner);
+            assert_eq!(st.parent_ship_id, 0);
+            assert_eq!(st.activity_state, 0);
+            let item = ctx.db.get_item(did).unwrap();
+            assert_eq!(item.location_id, sys_id as i64);
+            assert_eq!(item.flag, InventoryFlag::None);
+        }
+        let st4 = rt.active_drones_in_space.get(&d4).expect("valid far returning drone remains controlled");
+        assert!(!st4.is_abandoned);
+        assert_eq!(st4.parent_ship_id, ship4);
+    });
+    for did in [d1, d2, d3, d4] {
+        assert!(sys_handle.get_ball_snapshot(did).await.unwrap().is_some());
+    }
+}
+
 

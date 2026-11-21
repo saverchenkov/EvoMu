@@ -1206,3 +1206,151 @@ async fn movement_approach_rpc_args_errors_deactivate_point_ability_and_missing_
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recall_fighters_enforces_hull_surface_range_and_preserves_concurrent_attrition() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    // Large carrier hull radius = 3_000m at origin
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 23_915,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 120.0,
+                inertia: 0.5,
+                mass: 1_000_000_000.0,
+                radius: 3_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    let fid1 = 710_001i64;
+    let fid2 = 710_002i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(fid1, make_fighter_item(fid1, 23_057, char_id, ship_id, InventoryFlag::FighterBay, 9));
+        snap.items.insert(fid2, make_fighter_item(fid2, 23_057, char_id, ship_id, InventoryFlag::FighterBay, 9));
+    });
+    for (tube, fid) in [(0i64, fid1), (1i64, fid2)] {
+        handle_fighters(&ctx, &mut session, "fighterMgr", "LoadFightersToTube", &[PyRep::Integer(tube), PyRep::Integer(fid)], &kw)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "LaunchFightersFromTubes",
+        &[PyRep::List(vec![PyRep::Integer(0), PyRep::Integer(1)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let (ball1, ball2) = {
+        let active = ctx.active_fighters.read().unwrap();
+        let b1 = active.values().find(|f| f.item_id == fid1).unwrap().ball_id;
+        let b2 = active.values().find(|f| f.item_id == fid2).unwrap().ball_id;
+        (b1, b2)
+    };
+
+    // Place ball1 inside recall surface distance (center=5_000, ship_r=3_000, f_r=25 -> surface=1_975 <= 2_500)
+    // Place ball2 outside recall surface distance (center=5_600, ship_r=3_000, f_r=25 -> surface=2_575 > 2_500)
+    for (bid, x) in [(ball1, 5_000.0), (ball2, 5_600.0)] {
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: 23_057,
+                    position: DVec3::new(x, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 2_000.0,
+                    inertia: 0.5,
+                    mass: 25_000.0,
+                    radius: 25.0,
+                    speed_fraction: 1.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Recalling out-of-range fighter fails FighterOutOfRange and leaves both squadrons launched
+    let err_far = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "RecallFightersToTubes",
+        &[PyRep::List(vec![PyRep::Integer(ball1), PyRep::Integer(ball2)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_far.code, "FighterOutOfRange");
+    assert!(ctx.active_fighters.read().unwrap().contains_key(&ball1));
+    assert!(ctx.active_fighters.read().unwrap().contains_key(&ball2));
+
+    // Apply partial attrition to ball1 (kill 4 of 9 -> 5 remaining), then recall ball1 alone (within hull surface range)
+    let (lost, rem, wiped) = apply_damage_to_fighter_squadron(
+        &ctx,
+        sys_id,
+        ball1,
+        DamageVector::new(4_000.0, 0.0, 0.0, 0.0),
+    )
+    .await;
+    assert_eq!((lost, rem, wiped), (4, 5, false));
+
+    let recalled_1 = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "RecallFightersToTubes",
+        &[PyRep::List(vec![PyRep::Integer(ball1)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("in-range hull-surface recall succeeds");
+    assert_eq!(recalled_1, PyRep::List(vec![PyRep::Integer(ball1)]));
+    assert_eq!(ctx.db.get_item(fid1).unwrap().quantity, 5);
+    assert!(!ctx.active_fighters.read().unwrap().contains_key(&ball1));
+
+    // Wipe out ball2 completely and verify recalling it fails cleanly without resurrecting wiped units
+    let (_, _, wiped2) = apply_damage_to_fighter_squadron(
+        &ctx,
+        sys_id,
+        ball2,
+        DamageVector::new(20_000.0, 0.0, 0.0, 0.0),
+    )
+    .await;
+    assert!(wiped2);
+    assert!(ctx.db.get_item(fid2).is_none());
+    let err_dead = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "RecallFightersToTubes",
+        &[PyRep::List(vec![PyRep::Integer(ball2)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_dead.code, "FighterNotFound");
+    assert!(ctx.db.get_item(fid2).is_none());
+    assert!(!ctx.fighter_tube_loads.read().unwrap().contains_key(&(ship_id, 1)));
+}
+
+

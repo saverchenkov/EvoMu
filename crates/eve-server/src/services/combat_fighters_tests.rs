@@ -1284,3 +1284,160 @@ async fn fighter_r2_db_dock_structure_control_cloak_launch_and_movement_scoop_gu
     assert_eq!(err_no_cs_db_cloak.code, CODE_CANNOT_LAUNCH_CLOAKED);
     assert!(!sys_handle.get_combat_state(no_cs_carrier).await.unwrap().unwrap().is_tethered);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_fighter_ability_activations_and_death_never_double_spend_or_resurrect() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 23_915,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 120.0,
+                inertia: 1.0,
+                mass: 10_000_000.0,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+    let fid = 720_001i64;
+    let target_id = 720_999i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(fid, make_fighter_item(fid, 23_057, char_id, ship_id, InventoryFlag::FighterBay, 9));
+    });
+    handle_fighters(&ctx, &mut session, "fighterMgr", "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(fid)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    handle_fighters(&ctx, &mut session, "fighterMgr", "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let fball = ctx.active_fighters.read().unwrap().values().find(|f| f.item_id == fid).unwrap().ball_id;
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: target_id,
+                type_id: 587,
+                position: DVec3::new(1_200.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 10_000.0,
+                max_shield_hp: 10_000.0,
+                armor_hp: 10_000.0,
+                max_armor_hp: 10_000.0,
+                structure_hp: 10_000.0,
+                max_structure_hp: 10_000.0,
+                signature_radius: 40.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // 1. Seed 5/6 used charges on slot 2 -> concurrent dual CmdActivateAbilitySlots allows strictly one activation
+    ctx.fighter_charge_state.write().unwrap().insert((fball, 2), 5);
+    let mut s1 = session.clone();
+    let mut s2 = session.clone();
+    let act_args1 = [PyRep::List(vec![PyRep::Integer(fball)]), PyRep::Integer(2), PyRep::Integer(target_id)];
+    let act_args2 = [PyRep::List(vec![PyRep::Integer(fball)]), PyRep::Integer(2), PyRep::Integer(target_id)];
+    let (r1, r2) = tokio::join!(
+        handle_fighters(
+            &ctx,
+            &mut s1,
+            "fighterMgr",
+            "CmdActivateAbilitySlots",
+            &act_args1,
+            &kw,
+        ),
+        handle_fighters(
+            &ctx,
+            &mut s2,
+            "fighterMgr",
+            "CmdActivateAbilitySlots",
+            &act_args2,
+            &kw,
+        ),
+    );
+    let ok_count = [r1.unwrap(), r2.unwrap()].iter().filter(|r| r.is_ok()).count();
+    assert_eq!(ok_count, 1, "strictly one concurrent activation on 1-charge slot may succeed");
+    assert_eq!(ctx.fighter_charge_state.read().unwrap().get(&(fball, 2)).copied(), Some(6));
+
+    // 2. Concurrent damage hits split safely (no lost unit loss across join!) and wiping prevents ball resurrection via MWD
+    let ((l1, _, _), (l2, _, _)) = tokio::join!(
+        apply_damage_to_fighter_squadron(&ctx, sys_id, fball, DamageVector::new(2_000.0, 0.0, 0.0, 0.0)),
+        apply_damage_to_fighter_squadron(&ctx, sys_id, fball, DamageVector::new(3_000.0, 0.0, 0.0, 0.0)),
+    );
+    assert_eq!(l1 + l2, 5);
+    assert_eq!(ctx.active_fighters.read().unwrap()[&fball].squadron_size, 4);
+    assert_eq!(ctx.db.get_item(fid).unwrap().quantity, 4);
+
+    let (_, _, wiped) = apply_damage_to_fighter_squadron(
+        &ctx,
+        sys_id,
+        fball,
+        DamageVector::new(10_000.0, 0.0, 0.0, 0.0),
+    )
+    .await;
+    assert!(wiped);
+    assert!(sys_handle.get_ball_snapshot(fball).await.unwrap().is_none());
+
+    let err_mwd = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "CmdActivateAbilitySlots",
+        &[PyRep::List(vec![PyRep::Integer(fball)]), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_mwd.code, "FighterNotFound");
+    assert!(sys_handle.get_ball_snapshot(fball).await.unwrap().is_none());
+
+    let err_move_mwd = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "ExecuteMovementCommandOnFighters",
+        &[PyRep::List(vec![PyRep::Integer(fball)]), PyRep::String("MWD".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_move_mwd.code, "FighterNotFound");
+    assert!(sys_handle.get_ball_snapshot(fball).await.unwrap().is_none());
+}
+

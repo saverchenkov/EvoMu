@@ -362,6 +362,8 @@ pub async fn apply_damage_to_drone_in_space(
     };
     if destroyed {
         let removed_drone = with_mut_combat_runtime(ctx, |rt| {
+            rt.active_drone_miners.remove(&drone_ball_id);
+            rt.drone_next_ready_unix.remove(&drone_ball_id);
             let d = rt.active_drones_in_space.remove(&drone_ball_id);
             if let Some(ref drone) = d {
                 rt.record_destroyed_item_id(drone.ball_id);
@@ -371,6 +373,7 @@ pub async fn apply_damage_to_drone_in_space(
             }
             d
         });
+        cycle_ops::clear_drone_web_cycle(&sys_handle, drone_ball_id).await;
         let _ = sys_handle.remove_ball(drone_ball_id).await;
         if let Some(d) = removed_drone {
             ctx.db.with_mut_snapshot(|snap| {
@@ -980,6 +983,7 @@ pub async fn handle_npcs_drones(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    Box::pin(async move {
     match (service, method) {
         ("ship", "LaunchDrones") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -1629,19 +1633,28 @@ pub async fn handle_npcs_drones(
                     .collect()
             });
             let mut count = 0;
-            for mut d in drones {
-                let dist = sys_handle
-                    .get_ball_snapshot(d.ball_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|(_, b)| ship_pos.distance(b.position))
-                    .unwrap_or(0.0);
-                if dist > max_ctrl_range {
+            for d in drones {
+                let Some((_, drone_ball)) = sys_handle.get_ball_snapshot(d.ball_id).await.ok().flatten() else {
+                    continue;
+                };
+                if ship_pos.distance(drone_ball.position) > max_ctrl_range {
                     continue;
                 }
-                d.target_id = None;
-                d.activity_state = 0;
+                let updated = with_mut_combat_runtime(ctx, |rt| {
+                    let Some(st) = rt.active_drones_in_space.get_mut(&d.ball_id) else {
+                        return false;
+                    };
+                    if st.is_abandoned || st.solar_system_id != sys_id || st.parent_ship_id != ship_id {
+                        return false;
+                    }
+                    st.target_id = None;
+                    st.activity_state = 0;
+                    true
+                });
+                if !updated {
+                    continue;
+                }
+                cycle_ops::clear_drone_web_cycle(&sys_handle, d.ball_id).await;
                 if d.is_sentry {
                     let _ = sys_handle.set_movement_mode(d.ball_id, MovementMode::Stop).await;
                 } else {
@@ -1666,9 +1679,6 @@ pub async fn handle_npcs_drones(
                 );
                 crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 0, None);
                 count += 1;
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.active_drones_in_space.insert(d.ball_id, d);
-                });
             }
             Some(Ok(PyRep::Integer(count as i64)))
         }
@@ -1826,9 +1836,25 @@ pub async fn handle_npcs_drones(
             let victim_char_opt = cycle_ops::resolve_victim_character_for_ball(ctx, target_id);
             let now_unix = ctx.now_unix();
 
-            for (mut d, drone_ball) in engaging_drones {
-                d.target_id = Some(target_id);
-                d.activity_state = 1;
+            for (d, drone_ball) in engaging_drones {
+                let claim_res = with_mut_combat_runtime(ctx, |rt| {
+                    let Some(st) = rt.active_drones_in_space.get_mut(&d.ball_id) else {
+                        return None;
+                    };
+                    if st.is_abandoned || st.solar_system_id != sys_id || st.parent_ship_id != ship_id || st.owner_char_id != char_id {
+                        return None;
+                    }
+                    let switched = st.target_id.is_some() && st.target_id != Some(target_id);
+                    st.target_id = Some(target_id);
+                    st.activity_state = 1;
+                    Some(switched)
+                });
+                let Some(switched_target) = claim_res else {
+                    continue;
+                };
+                if switched_target && d.web_speed_factor < 0.0 {
+                    cycle_ops::clear_drone_web_cycle(&sys_handle, d.ball_id).await;
+                }
                 if !d.is_sentry {
                     let _ = sys_handle.set_speed_fraction(d.ball_id, 1.0).await;
                     let _ = sys_handle.set_movement_mode(d.ball_id, MovementMode::Orbit { target_id, range: 1_500.0 }).await;
@@ -1851,9 +1877,18 @@ pub async fn handle_npcs_drones(
                 );
                 crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 1, Some("attack"));
 
-                let next_ready = with_combat_runtime(ctx, |rt| {
-                    rt.drone_next_ready_unix.get(&d.ball_id).copied().unwrap_or(0)
+                let (still_engaged, next_ready) = with_combat_runtime(ctx, |rt| {
+                    let ok = rt.active_drones_in_space.get(&d.ball_id).is_some_and(|st| {
+                        !st.is_abandoned
+                            && st.parent_ship_id == ship_id
+                            && st.activity_state == 1
+                            && st.target_id == Some(target_id)
+                    });
+                    (ok, rt.drone_next_ready_unix.get(&d.ball_id).copied().unwrap_or(0))
                 });
+                if !still_engaged {
+                    continue;
+                }
                 let cycle_ready = now_unix >= next_ready && !target_destroyed;
                 if cycle_ready {
                     if d.group_id == 640 {
@@ -1895,9 +1930,7 @@ pub async fn handle_npcs_drones(
                         .await;
                         let mut this_drone_ewar = false;
                         if !immune {
-                            if d.web_speed_factor < 0.0 {
-                                let mult = (1.0 + d.web_speed_factor / 100.0).clamp(0.1, 1.0);
-                                let _ = sys_handle.set_speed_fraction(target_id, (target_ball.speed_fraction.max(1.0)) * mult).await;
+                            if cycle_ops::apply_drone_web_cycle(ctx, &sys_handle, &d, target_id).await {
                                 this_drone_ewar = true;
                             }
                             if d.neut_amount > 0.0 {
@@ -1946,6 +1979,8 @@ pub async fn handle_npcs_drones(
                             {
                                 this_drone_ewar = true;
                             }
+                        } else if d.web_speed_factor < 0.0 {
+                            cycle_ops::clear_drone_web_cycle(&sys_handle, d.ball_id).await;
                         }
                         if this_drone_ewar {
                             ewar_applied = true;
@@ -1980,19 +2015,16 @@ pub async fn handle_npcs_drones(
                         }
                     }
                 }
-                if target_destroyed {
-                    d.target_id = None;
-                    d.activity_state = 0;
-                }
                 let next_cycle_unix = if cycle_ready {
                     now_unix.saturating_add(d.cycle_duration_secs(ctx))
                 } else {
                     next_ready
                 };
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.drone_next_ready_unix.insert(d.ball_id, next_cycle_unix);
-                    rt.active_drones_in_space.insert(d.ball_id, d);
-                });
+                cycle_ops::finish_engaged_drone_cycle(
+                    ctx, &sys_handle, d.ball_id, char_id, ship_id, target_id,
+                    target_destroyed, cycle_ready, next_cycle_unix,
+                )
+                .await;
             }
 
             if total_dmg_dealt > 0.0 || ewar_applied || target_destroyed {
@@ -2230,6 +2262,14 @@ pub async fn handle_npcs_drones(
                         });
                     }
                 }
+                if !snap.items.get(&ship_id).is_some_and(|sh| sh.location_id == sys_id as i64 && sh.flag == InventoryFlag::None) {
+                    let message = format!("Caller ship {ship_id} is not in space in solar system {sys_id}");
+                    return Err(BridgeRpcError::with_client_error(
+                        "DroneNotInSpace",
+                        message.clone(),
+                        eve_proto::ClientError::CustomInfo(message),
+                    ));
+                }
                 let drone_item_id = if let Some(ref drone_st) = claimed_drone {
                     drone_st.drone_item_id
                 } else if let Some(iid) = snap
@@ -2351,7 +2391,11 @@ pub async fn handle_npcs_drones(
                 Err(e) => {
                     if let Some(drone_st) = claimed_drone {
                         with_mut_combat_runtime(ctx, |rt| {
-                            rt.active_drones_in_space.insert(drone_ball_id, drone_st);
+                            if !rt.is_recently_destroyed_item_id(drone_ball_id)
+                                && !rt.is_recently_destroyed_item_id(drone_st.drone_item_id)
+                            {
+                                rt.active_drones_in_space.entry(drone_ball_id).or_insert(drone_st);
+                            }
                         });
                     }
                     return Some(Err(e));
@@ -2359,7 +2403,9 @@ pub async fn handle_npcs_drones(
             };
             with_mut_combat_runtime(ctx, |rt| {
                 rt.drone_next_ready_unix.remove(&drone_ball_id);
+                rt.active_drone_miners.remove(&drone_ball_id);
             });
+            cycle_ops::clear_drone_web_cycle(&sys_handle, drone_ball_id).await;
             let _ = sys_handle.remove_ball(drone_ball_id).await;
             Some(Ok(PyRep::keyval([
                 ("scoopedDroneItemID", PyRep::Integer(drone_item_id)),
@@ -2433,6 +2479,7 @@ pub async fn handle_npcs_drones(
 
         _ => None,
     }
+    }).await
 }
 
 #[cfg(test)]
