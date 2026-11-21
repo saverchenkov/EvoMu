@@ -1424,16 +1424,16 @@ pub async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
     }
     for (sys_id, sh_id) in repaired {
         if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
-            if let Ok(mut bp) = sys_h.ballpark.write() {
-                if let Some(cs) = bp.combat_states.get_mut(&sh_id) {
+            let _ = sys_h
+                .modify_combat_state(sh_id, |cs| {
                     cs.shield_hp = SKYHOOK_BASE_SHIELD_HP;
                     cs.max_shield_hp = SKYHOOK_BASE_SHIELD_HP;
                     cs.armor_hp = SKYHOOK_BASE_ARMOR_HP;
                     cs.max_armor_hp = SKYHOOK_BASE_ARMOR_HP;
                     cs.structure_hp = SKYHOOK_BASE_HULL_HP;
                     cs.max_structure_hp = SKYHOOK_BASE_HULL_HP;
-                }
-            }
+                })
+                .await;
         }
     }
     for (sys_id, sh_id) in newly_hackable {
