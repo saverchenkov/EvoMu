@@ -1431,8 +1431,13 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
         .unwrap_err();
     assert_eq!(non_gm_err.code, "InsufficientRole");
 
-    // Grant GM role (`ROLE_GML`) to s1 and call GM_ExpireContract
+    // Grant GM role (`ROLE_GML`) to s1 and its DB account and call GM_ExpireContract
     s1.role |= eve_machonet::service_roles::ROLE_GML;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.get_mut("demo") {
+            acc.role |= eve_db::service_roles::ROLE_GML;
+        }
+    });
     let gm_exp_rep = rpc(&ctx, &mut s1, "contractProxy", "GM_ExpireContract", &[PyRep::Integer(gm_cid)]).await
         .expect("GM_ExpireContract by GM");
     let PyRep::KeyVal(gm_exp_kv) = gm_exp_rep else { panic!("Expected KeyVal"); };

@@ -212,12 +212,76 @@ pub fn primary_online_industry_activity(snap: &WorldStateSnapshot, st: &UpwellSt
 }
 
 /// Returns `true` if `c` is a publicly listed unassigned contract.
+/// Closed canonical set of contract availability scopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractAvailability {
+    Public,
+    Personal,
+    Private,
+    Corporation,
+    Alliance,
+}
+
+impl ContractAvailability {
+    /// Parses a wire/record availability string case-insensitively.
+    /// Empty strings default to `Public` for legacy records; unknown values return `None`.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Some(Self::Public);
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
+            "public" => Some(Self::Public),
+            "personal" => Some(Self::Personal),
+            "private" | "myself" => Some(Self::Private),
+            "corporation" | "mycorp" | "my_corp" => Some(Self::Corporation),
+            "alliance" | "myalliance" | "my_alliance" => Some(Self::Alliance),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "Public",
+            Self::Personal => "Personal",
+            Self::Private => "Private",
+            Self::Corporation => "Corporation",
+            Self::Alliance => "Alliance",
+        }
+    }
+
+    pub const fn wire_code(self) -> i64 {
+        match self {
+            Self::Public => 0,
+            Self::Personal | Self::Private => 1,
+            Self::Corporation => 2,
+            Self::Alliance => 3,
+        }
+    }
+}
+
+/// Resolves the alliance ID of a contract's issuer (preferring issuer corp; falling back to issuer char only when corp record is absent).
+pub fn contract_issuer_alliance_id(snap: &WorldStateSnapshot, c: &ContractRecord) -> Option<i64> {
+    if let Some(corp) = (c.issuer_corp_id != 0)
+        .then(|| snap.corporations.get(&c.issuer_corp_id))
+        .flatten()
+    {
+        return corp.alliance_id.filter(|&a| a != 0);
+    }
+    snap.characters
+        .get(&c.issuer_id)
+        .and_then(|ch| ch.alliance_id)
+        .filter(|&a| a != 0)
+}
+
 pub fn is_public_available_contract(c: &ContractRecord) -> bool {
-    (c.availability.is_empty() || c.availability.eq_ignore_ascii_case("Public"))
+    ContractAvailability::parse(&c.availability) == Some(ContractAvailability::Public)
         && c.assignee_id == 0
 }
 
 /// Returns `true` if `char_id` (with `corp_id` and `alliance_id`) may view contract `c`.
+/// Fails closed on unknown availability scopes and unassigned `Alliance` contracts (use
+/// [`is_contract_visible_to_character_in_snap`] when snapshot state is available).
 pub fn is_contract_visible_to_character(
     c: &ContractRecord,
     char_id: i64,
@@ -227,7 +291,10 @@ pub fn is_contract_visible_to_character(
     if c.issuer_id == char_id {
         return true;
     }
-    if is_public_available_contract(c) {
+    let Some(avail) = ContractAvailability::parse(&c.availability) else {
+        return false;
+    };
+    if avail == ContractAvailability::Public && c.assignee_id == 0 {
         return true;
     }
     if c.assignee_id != 0 {
@@ -235,17 +302,70 @@ pub fn is_contract_visible_to_character(
             || (corp_id != 0 && c.assignee_id == corp_id)
             || alliance_id.is_some_and(|a| a != 0 && a == c.assignee_id);
     }
-    let avail = if c.availability.is_empty() {
-        "Public"
-    } else {
-        c.availability.as_str()
-    };
     match avail {
-        "Corporation" => c.issuer_corp_id != 0 && c.issuer_corp_id == corp_id,
-        "Alliance" => alliance_id.is_some() && alliance_id == Some(c.assignee_id),
-        "Personal" | "Private" => false,
-        _ => true,
+        ContractAvailability::Corporation => c.issuer_corp_id != 0 && c.issuer_corp_id == corp_id,
+        ContractAvailability::Alliance
+        | ContractAvailability::Public
+        | ContractAvailability::Personal
+        | ContractAvailability::Private => false,
     }
+}
+
+fn resolve_corp_and_alliance_in_snap(
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    fallback_corp_id: i64,
+    fallback_alliance_id: Option<i64>,
+) -> (i64, Option<i64>) {
+    if let Some(ch) = snap.characters.get(&char_id) {
+        let eff_corp = if ch.corporation_id != 0 {
+            ch.corporation_id
+        } else {
+            fallback_corp_id
+        };
+        let eff_alliance = if let Some(corp) = (eff_corp != 0)
+            .then(|| snap.corporations.get(&eff_corp))
+            .flatten()
+        {
+            corp.alliance_id.filter(|&a| a != 0)
+        } else {
+            ch.alliance_id.filter(|&a| a != 0)
+        };
+        return (eff_corp, eff_alliance);
+    }
+    let eff_alliance = if let Some(corp) = (fallback_corp_id != 0)
+        .then(|| snap.corporations.get(&fallback_corp_id))
+        .flatten()
+    {
+        corp.alliance_id.filter(|&a| a != 0)
+    } else {
+        fallback_alliance_id.filter(|&a| a != 0)
+    };
+    (fallback_corp_id, eff_alliance)
+}
+
+/// Snapshot-aware variant of [`is_contract_visible_to_character`] that resolves corp/alliance
+/// authoritatively from `snap` (falling back to caller parameters only when absent from `snap`),
+/// including legacy unassigned (`assignee_id == 0`) `"Alliance"` contracts.
+pub fn is_contract_visible_to_character_in_snap(
+    snap: &WorldStateSnapshot,
+    c: &ContractRecord,
+    char_id: i64,
+    corp_id: i64,
+    alliance_id: Option<i64>,
+) -> bool {
+    let (eff_corp, eff_alliance) =
+        resolve_corp_and_alliance_in_snap(snap, char_id, corp_id, alliance_id);
+    if is_contract_visible_to_character(c, char_id, eff_corp, eff_alliance) {
+        return true;
+    }
+    if ContractAvailability::parse(&c.availability) == Some(ContractAvailability::Alliance)
+        && c.assignee_id == 0
+    {
+        return eff_alliance
+            .is_some_and(|caller_a| contract_issuer_alliance_id(snap, c) == Some(caller_a));
+    }
+    false
 }
 
 /// Returns `true` if `char_id` is an issuer, assignee, acceptor, bidder, or matching corp/alliance
@@ -264,11 +384,19 @@ pub fn is_character_party_to_contract(
         return true;
     }
     snap.characters.get(&char_id).is_some_and(|ch| {
+        let (_, ch_alliance) = resolve_corp_and_alliance_in_snap(snap, char_id, 0, None);
         (ch.corporation_id != 0
             && (c.assignee_id == ch.corporation_id
-                || (c.availability.eq_ignore_ascii_case("Corporation")
+                || (ContractAvailability::parse(&c.availability)
+                    == Some(ContractAvailability::Corporation)
                     && c.issuer_corp_id == ch.corporation_id)))
-            || ch.alliance_id.is_some_and(|a| a != 0 && c.assignee_id == a)
+            || ch_alliance.is_some_and(|a| {
+                c.assignee_id == a
+                    || (ContractAvailability::parse(&c.availability)
+                        == Some(ContractAvailability::Alliance)
+                        && c.assignee_id == 0
+                        && contract_issuer_alliance_id(snap, c) == Some(a))
+            })
     })
 }
 

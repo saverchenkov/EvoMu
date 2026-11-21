@@ -520,6 +520,7 @@ fn courier_corp_acceptor_structure_destination_location_metadata_and_expiry() {
         snap.items.get_mut(&hauler_ship).unwrap().location_id = DEST_STRUCT_ID;
     });
     let div1_before = ctx.db.with_snapshot(|s| s.corporations[&hauler_corp].division_balance(1));
+    let div3_before_done = ctx.db.with_snapshot(|s| s.corporations[&hauler_corp].division_balance(3));
     let _ = ctx.drain_notifications_for_char(issuer_id);
     let done = handle(&ctx, &mut hauler_sess, "contractProxy", "CompleteContract", &[PyRep::Integer(cid)], &kw)
         .unwrap()
@@ -531,11 +532,12 @@ fn courier_corp_acceptor_structure_destination_location_metadata_and_expiry() {
         let it = snap.items.get(&pkg_item).unwrap();
         assert_eq!(it.owner_id, issuer_corp);
         assert_eq!(it.location_id, DEST_STRUCT_ID);
-        assert_eq!(it.flag, InventoryFlag::Hangar);
+        assert_eq!(it.flag, InventoryFlag::CorpDeliveries);
         assert_eq!(
-            snap.corporations[&hauler_corp].division_balance(1).0 - div1_before.0,
+            snap.corporations[&hauler_corp].division_balance(3).0 - div3_before_done.0,
             IskCents::from_isk(1_750_000).0
         );
+        assert_eq!(snap.corporations[&hauler_corp].division_balance(1), div1_before);
     });
     assert!(ctx.drain_notifications_for_char(issuer_id).iter().any(|n| n.event == "OnContractCompleted"));
 
@@ -928,4 +930,475 @@ fn auction_corp_bidding_division_refund_self_outbid_buyout_and_get_my_bids_filte
         .unwrap()
         .unwrap();
     assert!(contract_list_rows(&after_dismiss).is_empty());
+}
+
+#[test]
+fn bf01_and_bf02_stale_session_acl_bypass_finish_auction_div3_and_delete_multiple_regressions() {
+    let ctx = make_test_context();
+    let (issuer_id, kicked_id, bidder_id, ship_id, item_acl, item_auc, item_del) =
+        (915_001, 915_002, 915_003, 915_501, 915_101, 915_102, 915_103);
+    let (issuer_corp, kicked_corp, other_corp, ally_id) =
+        (98_915_001, 98_915_002, 98_915_003, 99_915_001);
+    for (cid, corp, ally, bal) in [
+        (issuer_id, issuer_corp, Some(ally_id), 10_000_000),
+        (kicked_id, kicked_corp, Some(ally_id), 10_000_000),
+        (bidder_id, other_corp, None, 10_000_000),
+    ] {
+        seed_char(&ctx, cid, corp, ally, Some(JITA_STATION_ID), ship_id, bal);
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, ceo, ally, mem) in [
+            (issuer_corp, issuer_id, Some(ally_id), issuer_id),
+            (kicked_corp, kicked_id, Some(ally_id), kicked_id),
+            (other_corp, bidder_id, None, bidder_id),
+        ] {
+            let mut c = eve_db::CorporationRecord::default();
+            (c.corporation_id, c.name, c.ceo_id, c.alliance_id) = (cid, format!("C{cid}"), ceo, ally);
+            c.members.insert(mem);
+            c.member_roles.insert(mem, u64::MAX);
+            c.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(IskCents::from_isk(5_000_000));
+            c.set_division_balance(1, IskCents::from_isk(5_000_000));
+            c.set_division_balance(2, IskCents::from_isk(5_000_000));
+            c.set_division_balance(3, IskCents::from_isk(5_000_000));
+            snap.corporations.insert(cid, c);
+        }
+        snap.skills.entry(issuer_id).or_default().insert(
+            25235,
+            eve_db::TrainedSkillRecord { type_id: 25235, level: 5, skill_points: 256_000.0 },
+        );
+    });
+    seed_item(&ctx, item_acl, 34, issuer_corp, JITA_STATION_ID, InventoryFlag::CorpDeliveries, 10, false);
+    seed_item(&ctx, item_auc, 34, issuer_corp, JITA_STATION_ID, InventoryFlag::CorpDeliveries, 10, false);
+    seed_item(&ctx, item_del, 34, issuer_corp, JITA_STATION_ID, InventoryFlag::CorpDeliveries, 10, false);
+
+    let mut issuer_sess = make_authed_session(915_001, issuer_id, issuer_corp, Some(ally_id), Some(JITA_STATION_ID), Some(ship_id));
+    issuer_sess.corp_account_key = 1002; // div 3
+    let mut kicked_sess = make_authed_session(915_002, kicked_id, kicked_corp, Some(ally_id), Some(JITA_STATION_ID), Some(ship_id));
+    let mut bidder_sess = make_authed_session(915_003, bidder_id, other_corp, None, Some(JITA_STATION_ID), Some(ship_id));
+    bidder_sess.corp_account_key = 1001; // div 2
+    let kw = HashMap::new();
+
+    // BF-01: Create Alliance auction + Corporation item-exchange, then kick kicked_id in DB while keeping stale session fields
+    let ally_auc = created_cid(&handle(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("Auction".into())), ("availability", PyRep::String("Alliance".into())),
+        ("startStationID", PyRep::Integer(JITA_STATION_ID)), ("price", PyRep::Real(100_000.0)),
+        ("buyout", PyRep::Real(500_000.0)), ("forCorp", PyRep::Bool(true)), ("itemList", PyRep::Integer(item_acl)),
+    ])], &kw).unwrap().unwrap()).unwrap();
+    let corp_vis = created_cid(&handle(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("ItemExchange".into())), ("availability", PyRep::String("Corporation".into())),
+        ("startStationID", PyRep::Integer(JITA_STATION_ID)), ("price", PyRep::Real(50_000.0)),
+        ("forCorp", PyRep::Bool(true)), ("itemList", PyRep::Integer(item_del)),
+    ])], &kw).unwrap().unwrap()).unwrap();
+    // Seed kicked_id outside issuer_corp in DB while keeping stale issuer_corp & ally_id on kicked_sess.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&kicked_corp).unwrap().alliance_id = None;
+        let ch = snap.characters.get_mut(&kicked_id).unwrap();
+        ch.corporation_id = 1_000_170;
+        ch.alliance_id = None;
+    });
+    kicked_sess.corporation_id = Some(issuer_corp);
+    kicked_sess.alliance_id = Some(ally_id);
+    assert_eq!(handle(&ctx, &mut kicked_sess, "contractProxy", "GetContract", &[PyRep::Integer(ally_auc)], &kw).unwrap().unwrap_err().code, "ContractAccessDenied");
+    assert_eq!(handle(&ctx, &mut kicked_sess, "contractProxy", "GetContract", &[PyRep::Integer(corp_vis)], &kw).unwrap().unwrap_err().code, "ContractAccessDenied");
+    assert_eq!(handle(&ctx, &mut kicked_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(corp_vis)], &kw).unwrap().unwrap_err().code, "ContractAccessDenied");
+    assert_eq!(handle(&ctx, &mut kicked_sess, "contractProxy", "PlaceBid", &[PyRep::Integer(ally_auc), PyRep::Real(120_000.0)], &kw).unwrap().unwrap_err().code, "ContractAccessDenied");
+    let visible = handle(&ctx, &mut kicked_sess, "contractProxy", "SearchContracts", &[], &kw).unwrap().unwrap();
+    assert!(!contract_list_rows(&visible).iter().any(|r| {
+        let cid = r.dict_get("contract").and_then(|c| c.dict_get("contractID")).and_then(PyRep::as_i64);
+        cid == Some(ally_auc) || cid == Some(corp_vis)
+    }));
+
+    // BF-02: DeleteMultipleContracts on public forCorp div-3 contract with non-zero reward & deposit
+    let item_pub_del = 915_104;
+    seed_item(&ctx, item_pub_del, 34, issuer_corp, JITA_STATION_ID, InventoryFlag::CorpDeliveries, 10, false);
+    let pub_del = created_cid(&handle(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("ItemExchange".into())), ("availability", PyRep::String("Public".into())),
+        ("startStationID", PyRep::Integer(JITA_STATION_ID)), ("price", PyRep::Real(200_000.0)),
+        ("reward", PyRep::Real(50_000.0)), ("forCorp", PyRep::Bool(true)), ("itemList", PyRep::Integer(item_pub_del)),
+    ])], &kw).unwrap().unwrap()).unwrap();
+    let (d3_before_del, j3_len_before_del) = ctx.db.with_snapshot(|s| {
+        assert_eq!(s.kv(eve_db::Ns::ContractOrigFlag).get::<u16>(pub_del, "issuer_div"), Some(3));
+        assert_eq!(
+            s.kv(eve_db::Ns::ContractOrigFlag).get::<u16>(pub_del, &item_pub_del.to_string()),
+            Some(InventoryFlag::CorpDeliveries as u16)
+        );
+        (
+            s.corporations[&issuer_corp].division_balance(3),
+            s.corp_wallet_journals.get(&(issuer_corp, 3)).map_or(0, Vec::len),
+        )
+    });
+    let del_res = crate::services::sov_services::handle_contract_delete_multiple(&ctx, &issuer_sess, &[PyRep::Integer(pub_del)]).unwrap();
+    assert!(matches!(del_res, PyRep::Tuple(parts) if parts[0].row_count() == Some(1)));
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.contracts[&pub_del].status, "Deleted");
+        let d3_after_del = s.corporations[&issuer_corp].division_balance(3);
+        assert_eq!(d3_after_del.0 - d3_before_del.0, IskCents::from_isk(150_000).0);
+        let new_j3 = &s.corp_wallet_journals[&(issuer_corp, 3)][j3_len_before_del..];
+        assert!(new_j3.iter().any(|e| e.ref_type == "ContractRewardRefund" && e.amount == 50_000.0));
+        assert!(new_j3.iter().any(|e| e.ref_type == "ContractDepositRefund" && e.amount == 100_000.0));
+        assert_eq!(new_j3.last().unwrap().balance, d3_after_del.to_wire_f64());
+        assert!(s.kv(eve_db::Ns::ContractOrigFlag).get::<u16>(pub_del, "issuer_div").is_none());
+        assert!(s.kv(eve_db::Ns::ContractOrigFlag).get::<u16>(pub_del, &item_pub_del.to_string()).is_none());
+        assert_eq!(s.items[&item_pub_del].flag, InventoryFlag::CorpDeliveries);
+    });
+
+    // BF-02: FinishAuction on div 3 corp auction journals to corp_wallet_journals[(issuer_corp, 3)], checks ContractBidDiv pre & post, and clears ContractOrigFlag
+    let div3_auc = created_cid(&handle(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("Auction".into())), ("availability", PyRep::String("Public".into())),
+        ("startStationID", PyRep::Integer(JITA_STATION_ID)), ("price", PyRep::Real(100_000.0)),
+        ("buyout", PyRep::Real(1_000_000.0)), ("forCorp", PyRep::Bool(true)), ("itemList", PyRep::Integer(item_auc)),
+    ])], &kw).unwrap().unwrap()).unwrap();
+    handle(&ctx, &mut bidder_sess, "contractProxy", "PlaceBid", &[PyRep::Integer(div3_auc), PyRep::Real(200_000.0), PyRep::Bool(true)], &kw).unwrap().unwrap();
+    ctx.db.with_mut_snapshot(|s| {
+        assert_eq!(s.kv(eve_db::Ns::ContractBidDiv).get::<u8>(div3_auc, &other_corp.to_string()), Some(2));
+        assert_eq!(s.kv(eve_db::Ns::ContractOrigFlag).get::<u16>(div3_auc, "issuer_div"), Some(3));
+        assert!(s.kv(eve_db::Ns::ContractOrigFlag).get::<u16>(div3_auc, &item_auc.to_string()).is_some());
+        s.contracts.get_mut(&div3_auc).unwrap().expiration_unix = ctx.now_unix().saturating_sub(5);
+    });
+    let fin_res = crate::services::market_contracts::handle(&ctx, &mut issuer_sess, "contractProxy", "FinishAuction", &[PyRep::Integer(div3_auc)], &kw).unwrap().unwrap();
+    assert_eq!(fin_res, PyRep::Bool(true));
+    ctx.db.with_snapshot(|s| {
+        let d3_bal = s.corporations[&issuer_corp].division_balance(3);
+        let j3 = s.corp_wallet_journals.get(&(issuer_corp, 3)).expect("div 3 corp journal");
+        let sold_entry = j3.iter().rfind(|e| e.ref_type == "ContractAuctionSold").expect("ContractAuctionSold journal in div 3");
+        assert_eq!(sold_entry.amount, 200_000.0);
+        assert_eq!(sold_entry.balance, d3_bal.to_wire_f64());
+        assert!(s.kv(eve_db::Ns::ContractOrigFlag).get::<u16>(div3_auc, "issuer_div").is_none());
+        assert!(s.kv(eve_db::Ns::ContractOrigFlag).get::<u16>(div3_auc, &item_auc.to_string()).is_none());
+        assert!(s.kv(eve_db::Ns::ContractBidDiv).get::<u8>(div3_auc, &other_corp.to_string()).is_none());
+        assert_eq!(s.items[&item_auc].flag, InventoryFlag::CorpDeliveries);
+    });
+}
+
+#[test]
+fn bf1478_01_corp_left_alliance_ignores_stale_char_alliance_in_create_and_visibility() {
+    let ctx = make_test_context();
+    let (char_id, ship_id, item_id, former_ally) = (915_201, 915_502, 915_202, 99_915_201);
+    let corp_id = 98_915_201;
+    seed_char(&ctx, char_id, corp_id, Some(former_ally), Some(JITA_STATION_ID), ship_id, 5_000_000);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut c = eve_db::CorporationRecord::default();
+        c.corporation_id = corp_id;
+        c.ceo_id = char_id;
+        c.alliance_id = None;
+        c.members.insert(char_id);
+        c.member_roles.insert(char_id, u64::MAX);
+        snap.corporations.insert(corp_id, c);
+        snap.skills.entry(char_id).or_default().insert(
+            25235,
+            eve_db::TrainedSkillRecord { type_id: 25235, level: 5, skill_points: 256_000.0 },
+        );
+    });
+    seed_item(&ctx, item_id, 34, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 10, false);
+
+    ctx.db.with_snapshot(|snap| {
+        let legacy_c = eve_db::ContractRecord {
+            contract_id: 915_901,
+            issuer_id: char_id,
+            issuer_corp_id: corp_id,
+            availability: "Alliance".into(),
+            assignee_id: 0,
+            ..Default::default()
+        };
+        assert_eq!(crate::domain::market_acl::contract_issuer_alliance_id(snap, &legacy_c), None);
+        assert!(!crate::domain::market_acl::is_contract_visible_to_character_in_snap(
+            snap,
+            &eve_db::ContractRecord {
+                contract_id: 915_902,
+                issuer_id: 999_001,
+                issuer_corp_id: 98_999_001,
+                availability: "Alliance".into(),
+                assignee_id: former_ally,
+                ..Default::default()
+            },
+            char_id,
+            corp_id,
+            Some(former_ally),
+        ));
+    });
+
+    let mut sess = make_authed_session(915_201, char_id, corp_id, Some(former_ally), Some(JITA_STATION_ID), Some(ship_id));
+    let kw = HashMap::new();
+    let err = handle(&ctx, &mut sess, "contractProxy", "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("ItemExchange".into())), ("availability", PyRep::String("Alliance".into())),
+        ("startStationID", PyRep::Integer(JITA_STATION_ID)), ("price", PyRep::Real(10_000.0)),
+        ("itemList", PyRep::Integer(item_id)),
+    ])], &kw).unwrap().unwrap_err();
+    assert_eq!(err.code, "CrpAccessDenied");
+}
+
+#[test]
+fn bf1478_03_delete_multiple_mixed_flags_orphans_and_stale_session_corp_role() {
+    let ctx = make_test_context();
+    let (ceo_id, kicked_id, missing_db_char, assignee_mgr, ship_id) =
+        (915_301, 915_302, 915_303, 915_304, 915_503);
+    let (bare_corp, assignee_corp) = (98_915_301, 98_915_302);
+    seed_char(&ctx, ceo_id, bare_corp, None, Some(JITA_STATION_ID), ship_id, 5_000_000);
+    seed_char(&ctx, kicked_id, 1_000_170, None, Some(JITA_STATION_ID), ship_id, 5_000_000);
+    seed_char(&ctx, assignee_mgr, assignee_corp, None, Some(JITA_STATION_ID), ship_id, 5_000_000);
+
+    let (cid_mixed, cid_rej, item_saved, item_unsaved, item_orphan, item_rej_saved, item_rej_unsaved) =
+        (915_910, 915_911, 915_311, 915_312, 915_313, 915_314, 915_315);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut bc = eve_db::CorporationRecord::default();
+        (bc.corporation_id, bc.name, bc.ceo_id) = (bare_corp, "BareCorp".into(), ceo_id);
+        snap.corporations.insert(bare_corp, bc);
+        let mut ac = eve_db::CorporationRecord::default();
+        (ac.corporation_id, ac.name, ac.ceo_id) = (assignee_corp, "AssCorp".into(), assignee_mgr);
+        ac.members.insert(assignee_mgr);
+        ac.member_roles.insert(assignee_mgr, eve_db::corp_roles::ROLE_CONTRACT_MANAGER);
+        snap.corporations.insert(assignee_corp, ac);
+
+        for (iid, loc) in [
+            (item_saved, cid_mixed),
+            (item_unsaved, cid_mixed),
+            (item_orphan, cid_mixed),
+            (item_rej_saved, cid_rej),
+            (item_rej_unsaved, cid_rej),
+        ] {
+            let mut it = eve_db::InventoryItemRecord::default();
+            (it.item_id, it.type_id, it.owner_id, it.location_id, it.flag, it.quantity) =
+                (iid, 34, bare_corp, loc, InventoryFlag::Locked, 10);
+            snap.items.insert(iid, it);
+        }
+        let now = ctx.now_unix();
+        let _ = snap.kv_mut(eve_db::Ns::ContractOrigFlag).set_with_unix(
+            cid_mixed,
+            &item_saved.to_string(),
+            &(InventoryFlag::CorpSAG2 as u16),
+            now,
+        );
+        let _ = snap.kv_mut(eve_db::Ns::ContractOrigFlag).set_with_unix(
+            cid_rej,
+            &item_rej_saved.to_string(),
+            &(InventoryFlag::CorpSAG5 as u16),
+            now,
+        );
+        snap.contracts.insert(cid_mixed, eve_db::ContractRecord {
+            contract_id: cid_mixed, issuer_id: ceo_id, issuer_corp_id: bare_corp, for_corp: true,
+            contract_type: "ItemExchange".into(), status: "Outstanding".into(),
+            start_station_id: JITA_STATION_ID, end_station_id: JITA_STATION_ID,
+            item_ids: vec![item_saved, item_unsaved], ..Default::default()
+        });
+        snap.contracts.insert(cid_rej, eve_db::ContractRecord {
+            contract_id: cid_rej, issuer_id: ceo_id, issuer_corp_id: bare_corp, for_corp: true,
+            availability: "Private".into(), assignee_id: assignee_corp,
+            contract_type: "ItemExchange".into(), status: "Outstanding".into(),
+            start_station_id: JITA_STATION_ID, end_station_id: JITA_STATION_ID,
+            item_ids: vec![item_rej_saved, item_rej_unsaved], ..Default::default()
+        });
+    });
+
+    let mut kicked_sess = make_authed_session(915_302, kicked_id, bare_corp, None, Some(JITA_STATION_ID), Some(ship_id));
+    kicked_sess.corp_role = eve_db::corp_roles::ROLE_CONTRACT_MANAGER;
+    let res_kicked = crate::services::sov_services::handle_contract_delete_multiple(
+        &ctx, &kicked_sess, &[PyRep::List(vec![PyRep::Integer(cid_mixed)])],
+    ).unwrap();
+    assert_eq!(res_kicked, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(cid_mixed)])]));
+
+    let mut ghost_sess = make_authed_session(915_303, missing_db_char, bare_corp, None, Some(JITA_STATION_ID), Some(ship_id));
+    ghost_sess.corp_role = eve_db::corp_roles::ROLE_CONTRACT_MANAGER;
+    let res_ghost = crate::services::sov_services::handle_contract_delete_multiple(
+        &ctx, &ghost_sess, &[PyRep::List(vec![PyRep::Integer(cid_mixed)])],
+    ).unwrap();
+    assert_eq!(res_ghost, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(cid_mixed)])]));
+    assert_eq!(ctx.db.with_snapshot(|s| s.contracts[&cid_mixed].status.clone()), "Outstanding");
+
+    let ceo_sess = make_authed_session(915_301, ceo_id, bare_corp, None, Some(JITA_STATION_ID), Some(ship_id));
+    let res_ok = crate::services::sov_services::handle_contract_delete_multiple(
+        &ctx, &ceo_sess, &[PyRep::List(vec![PyRep::Integer(cid_mixed)])],
+    ).unwrap();
+    assert_eq!(res_ok, PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(cid_mixed)]), PyRep::List(vec![])]));
+
+    let mut ass_sess = make_authed_session(915_304, assignee_mgr, assignee_corp, None, Some(JITA_STATION_ID), Some(ship_id));
+    let kw = HashMap::new();
+    handle(&ctx, &mut ass_sess, "contractProxy", "RejectContract", &[PyRep::Integer(cid_rej)], &kw).unwrap().unwrap();
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&item_saved].flag, InventoryFlag::CorpSAG2);
+        assert_eq!(s.items[&item_unsaved].flag, InventoryFlag::CorpDeliveries);
+        assert_eq!(s.items[&item_orphan].flag, InventoryFlag::CorpDeliveries);
+        assert_eq!(s.items[&item_rej_saved].flag, InventoryFlag::CorpSAG5);
+        assert_eq!(s.items[&item_rej_unsaved].flag, InventoryFlag::CorpDeliveries);
+        for iid in [item_saved, item_unsaved, item_orphan, item_rej_saved, item_rej_unsaved] {
+            assert_eq!(s.items[&iid].owner_id, bare_corp);
+            assert_eq!(s.items[&iid].location_id, JITA_STATION_ID);
+        }
+    });
+}
+
+#[test]
+fn bf1478_r4_01_delete_multiple_and_notif_deny_stale_session_for_db_member_without_role_and_bare_non_ceo() {
+    let ctx = make_test_context();
+    let (ceo_db, member_no_role, ceo_bare, non_ceo_bare, ship_id) =
+        (915_401, 915_402, 915_403, 915_404, 915_504);
+    let (db_corp, bare_corp) = (98_915_401, 98_915_402);
+    seed_char(&ctx, ceo_db, db_corp, None, Some(JITA_STATION_ID), ship_id, 5_000_000);
+    seed_char(&ctx, member_no_role, db_corp, None, Some(JITA_STATION_ID), ship_id, 5_000_000);
+    seed_char(&ctx, ceo_bare, bare_corp, None, Some(JITA_STATION_ID), ship_id, 5_000_000);
+    seed_char(&ctx, non_ceo_bare, bare_corp, None, Some(JITA_STATION_ID), ship_id, 5_000_000);
+
+    let (cid_db, cid_bare) = (915_920, 915_921);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut dc = eve_db::CorporationRecord::default();
+        (dc.corporation_id, dc.name, dc.ceo_id) = (db_corp, "DbCorp".into(), ceo_db);
+        // Member in DB-backed corp without explicit member_roles/corp_role_assignments (e.g. stripped title)
+        dc.members.insert(ceo_db);
+        dc.members.insert(member_no_role);
+        dc.member_roles.insert(ceo_db, u64::MAX);
+        snap.corporations.insert(db_corp, dc);
+
+        let mut bc = eve_db::CorporationRecord::default();
+        (bc.corporation_id, bc.name, bc.ceo_id) = (bare_corp, "BareCorp2".into(), ceo_bare);
+        snap.corporations.insert(bare_corp, bc);
+
+        snap.contracts.insert(cid_db, eve_db::ContractRecord {
+            contract_id: cid_db, issuer_id: ceo_db, issuer_corp_id: db_corp, for_corp: true,
+            contract_type: "ItemExchange".into(), status: "Outstanding".into(),
+            start_station_id: JITA_STATION_ID, end_station_id: JITA_STATION_ID,
+            ..Default::default()
+        });
+        snap.contracts.insert(cid_bare, eve_db::ContractRecord {
+            contract_id: cid_bare, issuer_id: ceo_bare, issuer_corp_id: bare_corp, for_corp: true,
+            contract_type: "ItemExchange".into(), status: "Outstanding".into(),
+            start_station_id: JITA_STATION_ID, end_station_id: JITA_STATION_ID,
+            ..Default::default()
+        });
+    });
+
+    // 1) In-corp member without member_roles/corp_role_assignments carrying stale session.corp_role is denied
+    let mut member_sess = make_authed_session(915_402, member_no_role, db_corp, None, Some(JITA_STATION_ID), Some(ship_id));
+    member_sess.corp_role = eve_db::corp_roles::ROLE_CONTRACT_MANAGER | eve_db::corp_roles::ROLE_DIRECTOR;
+    let res_db = crate::services::sov_services::handle_contract_delete_multiple(
+        &ctx, &member_sess, &[PyRep::List(vec![PyRep::Integer(cid_db)])],
+    ).unwrap();
+    assert_eq!(res_db, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(cid_db)])]));
+    assert_eq!(
+        crate::services::sov_services::handle_contract_delete_notif(
+            &ctx, &member_sess, "DeleteContractNotification", &[PyRep::Integer(cid_db), PyRep::Bool(true)],
+        ).unwrap_err().code,
+        "CrpAccessDenied"
+    );
+
+    // 2) Bare-corp non-CEO member carrying stale session.corp_role is denied
+    let mut bare_member_sess = make_authed_session(915_404, non_ceo_bare, bare_corp, None, Some(JITA_STATION_ID), Some(ship_id));
+    bare_member_sess.corp_role = eve_db::corp_roles::ROLE_CONTRACT_MANAGER | eve_db::corp_roles::ROLE_DIRECTOR;
+    let res_bare = crate::services::sov_services::handle_contract_delete_multiple(
+        &ctx, &bare_member_sess, &[PyRep::List(vec![PyRep::Integer(cid_bare)])],
+    ).unwrap();
+    assert_eq!(res_bare, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(cid_bare)])]));
+    assert_eq!(
+        crate::services::sov_services::handle_contract_delete_notif(
+            &ctx, &bare_member_sess, "DeleteContractNotification", &[PyRep::Integer(cid_bare), PyRep::Bool(true)],
+        ).unwrap_err().code,
+        "CrpAccessDenied"
+    );
+
+    // 3) Granting explicit DB role permits DeleteMultipleContracts even with session.corp_role == 0
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&db_corp).unwrap().member_roles.insert(member_no_role, eve_db::corp_roles::ROLE_CONTRACT_MANAGER);
+    });
+    member_sess.corp_role = 0;
+    let res_db_ok = crate::services::sov_services::handle_contract_delete_multiple(
+        &ctx, &member_sess, &[PyRep::List(vec![PyRep::Integer(cid_db)])],
+    ).unwrap();
+    assert_eq!(res_db_ok, PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(cid_db)]), PyRep::List(vec![])]));
+    assert_eq!(ctx.db.with_snapshot(|s| s.contracts[&cid_db].status.clone()), "Deleted");
+    assert_eq!(ctx.db.with_snapshot(|s| s.contracts[&cid_bare].status.clone()), "Outstanding");
+}
+
+#[test]
+fn bf1478_pre_01_finish_auction_no_winner_for_corp_restores_orig_flag_and_deliveries_and_gm_missing_account_fails_closed() {
+    let ctx = make_test_context();
+    let (ceo_id, ship_id, item_sag3, item_no_orig, item_gm) =
+        (915_451, 915_505, 915_461, 915_462, 915_463);
+    let corp_id = 98_915_451;
+    seed_char(&ctx, ceo_id, corp_id, None, Some(JITA_STATION_ID), ship_id, 50_000_000);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        (corp.corporation_id, corp.name, corp.ceo_id) = (corp_id, "AuctionCorp".into(), ceo_id);
+        corp.members.insert(ceo_id);
+        corp.member_roles.insert(ceo_id, u64::MAX);
+        corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+        snap.corporations.insert(corp_id, corp);
+        snap.skills.entry(ceo_id).or_default().insert(
+            25233,
+            eve_db::TrainedSkillRecord { type_id: 25233, level: 5, skill_points: 256_000.0 },
+        );
+        snap.skills.entry(ceo_id).or_default().insert(
+            25235,
+            eve_db::TrainedSkillRecord { type_id: 25235, level: 5, skill_points: 256_000.0 },
+        );
+        snap.items.insert(item_sag3, InventoryItemRecord {
+            item_id: item_sag3, type_id: 34, owner_id: corp_id, location_id: JITA_STATION_ID,
+            flag: InventoryFlag::CorpSAG3, quantity: 25, ..Default::default()
+        });
+        snap.items.insert(item_gm, InventoryItemRecord {
+            item_id: item_gm, type_id: 34, owner_id: ceo_id, location_id: JITA_STATION_ID,
+            flag: InventoryFlag::Hangar, quantity: 10, ..Default::default()
+        });
+    });
+
+    let mut ceo_sess = make_authed_session(915_451, ceo_id, corp_id, None, Some(JITA_STATION_ID), Some(ship_id));
+    let kw = HashMap::new();
+    let created = handle(&ctx, &mut ceo_sess, "contractProxy", "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("Auction".into())),
+        ("availability", PyRep::String("Public".into())),
+        ("startStationID", PyRep::Integer(JITA_STATION_ID)),
+        ("price", PyRep::Real(100_000.0)),
+        ("forCorp", PyRep::Bool(true)),
+        ("itemList", PyRep::Integer(item_sag3)),
+    ])], &kw).unwrap().unwrap();
+    let auc_sag3 = created_cid(&created).unwrap();
+
+    let auc_fallback = 915_950;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(item_no_orig, InventoryItemRecord {
+            item_id: item_no_orig, type_id: 34, owner_id: corp_id, location_id: auc_fallback,
+            flag: InventoryFlag::Locked, quantity: 30, ..Default::default()
+        });
+        snap.contracts.insert(auc_fallback, eve_db::ContractRecord {
+            contract_id: auc_fallback, issuer_id: ceo_id, issuer_corp_id: corp_id, for_corp: true,
+            contract_type: "Auction".into(), status: "Outstanding".into(),
+            start_station_id: JITA_STATION_ID, end_station_id: JITA_STATION_ID,
+            expiration_unix: ctx.now_unix().saturating_sub(10),
+            item_ids: vec![item_no_orig], ..Default::default()
+        });
+    });
+    ctx.clock().advance_secs(200_000);
+
+    for auc_cid in [auc_sag3, auc_fallback] {
+        assert_eq!(
+            crate::services::market_contracts::handle(&ctx, &mut ceo_sess, "contractProxy", "FinishAuction", &[PyRep::Integer(auc_cid)], &kw)
+                .unwrap()
+                .unwrap(),
+            PyRep::Bool(true)
+        );
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&item_sag3].owner_id, corp_id);
+        assert_eq!(snap.items[&item_sag3].flag, InventoryFlag::CorpSAG3);
+        assert!(snap.kv(eve_db::Ns::ContractOrigFlag).get::<u16>(auc_sag3, &item_sag3.to_string()).is_none());
+        assert_eq!(snap.items[&item_no_orig].owner_id, corp_id);
+        assert_eq!(snap.items[&item_no_orig].flag, InventoryFlag::CorpDeliveries);
+    });
+
+    // GM_ExpireContract fails closed when non-empty snap.accounts has no entry for session user_id
+    let gm_c = created_cid(&handle(&ctx, &mut ceo_sess, "contractProxy", "CreateContract", &[PyRep::keyval([
+        ("type", PyRep::String("ItemExchange".into())),
+        ("availability", PyRep::String("Public".into())),
+        ("startStationID", PyRep::Integer(JITA_STATION_ID)),
+        ("price", PyRep::Real(10_000.0)),
+        ("itemList", PyRep::Integer(item_gm)),
+    ])], &kw).unwrap().unwrap()).unwrap();
+    let mut phantom_gm_sess = make_authed_session(999_915_451, ceo_id, corp_id, None, Some(JITA_STATION_ID), Some(ship_id));
+    phantom_gm_sess.role = eve_machonet::service_roles::ROLE_GM_MASK;
+    assert!(ctx.db.with_snapshot(|s| !s.accounts.is_empty()));
+    assert_eq!(
+        handle(&ctx, &mut phantom_gm_sess, "contractProxy", "GM_ExpireContract", &[PyRep::Integer(gm_c)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "GMRoleRequired"
+    );
 }
