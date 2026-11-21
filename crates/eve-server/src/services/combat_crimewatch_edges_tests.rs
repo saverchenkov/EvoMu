@@ -633,6 +633,10 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
     let abandoned_drone = 750_838_839_i64;
     let untracked_drone = 750_846_013_i64;
     let active_drone = 750_846_999_i64;
+    let active_fighter_item = 750_847_001_i64;
+    let active_fighter_ball = 750_847_002_i64;
+    let npc_att_id = 880_000_001_i64;
+    let npc_ship_id = 880_000_002_i64;
 
     let vic_uid = ctx.db.with_mut_snapshot(|snap| {
         let mut vic = snap.characters[&vic_id].clone();
@@ -648,6 +652,7 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
             (abandoned_drone, 2454_u32),
             (untracked_drone, 2454_u32),
             (active_drone, 2454_u32),
+            (active_fighter_item, 23_057_u32),
         ] {
             snap.items.insert(
                 iid,
@@ -703,6 +708,21 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
             },
         );
     });
+    ctx.active_fighters.write().unwrap().insert(
+        active_fighter_ball,
+        crate::router::context::ActiveFighterSquadron {
+            ball_id: active_fighter_ball,
+            item_id: active_fighter_item,
+            type_id: 23_057,
+            owner_char_id: vic_id,
+            parent_ship_id: vic_ship,
+            tube_index: 0,
+            squadron_size: 5,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
 
     let victim_combat_events = || {
         ctx.drain_notifications_for_char(vic_id)
@@ -728,6 +748,11 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
     let ev_drone = victim_combat_events();
     assert!(ev_drone.contains(&"OnDamageMessage".to_string()));
     assert!(ev_drone.contains(&"OnDamageStateChange".to_string()));
+
+    emit_combat_log_and_damage_state(&ctx, npc_att_id, None, npc_ship_id, active_fighter_ball, 2_905, 25.0, false, 0.8, 1.0, 1.0);
+    let ev_fighter = victim_combat_events();
+    assert!(ev_fighter.contains(&"OnDamageMessage".to_string()));
+    assert!(ev_fighter.contains(&"OnDamageStateChange".to_string()));
 
     // 2. Abandoned drone, untracked drone, and stale unpiloted ship item -> zero notifications even with Some(vic_id)
     for target in [abandoned_drone, untracked_drone, stale_ship] {
@@ -757,10 +782,12 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
     assert!(victim_combat_events().is_empty(), "docked in structure must receive zero notifications");
 
     // 4. Undocked in different solar system (`sys_b` vs combat in `sys_a`) -> zero notifications
+    //    Includes moving `vic_ship.location_id` to `sys_b` (real stargate jump state) and an NPC-attacked active fighter.
     ctx.db.with_mut_snapshot(|snap| {
         let v = snap.characters.get_mut(&vic_id).unwrap();
         v.structure_id = None;
         v.solar_system_id = sys_b;
+        snap.items.get_mut(&vic_ship).unwrap().location_id = sys_b as i64;
     });
     for target in [vic_ship, active_drone] {
         for explicit in [None, Some(vic_id)] {
@@ -770,5 +797,12 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
                 "out-of-system victim must receive zero notifications for target={target}"
             );
         }
+    }
+    for explicit in [None, Some(vic_id)] {
+        emit_combat_log_and_damage_state(&ctx, npc_att_id, explicit, npc_ship_id, active_fighter_ball, 2_905, 25.0, false, 0.8, 1.0, 1.0);
+        assert!(
+            victim_combat_events().is_empty(),
+            "out-of-system fighter owner must receive zero notifications from NPC attacker (explicit={explicit:?})"
+        );
     }
 }

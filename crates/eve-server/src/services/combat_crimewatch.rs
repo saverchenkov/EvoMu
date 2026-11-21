@@ -1812,8 +1812,6 @@ pub(crate) fn emit_combat_log_and_damage_state(
         weapon_type_id,
         is_wrecking,
     );
-
-
     // Temporary stop-gap for #1565: block victim notifications for abandoned drones/fighters,
     // unpiloted stale items, or docked/out-of-system pilots. Remove when #1190 Track 3
     // (`outbound_sequencer.rs` epoch/scene-scoped outbound frames) lands.
@@ -1821,14 +1819,14 @@ pub(crate) fn emit_combat_log_and_damage_state(
         rt.active_drones_in_space.get(&target_ball_id).map(|d| (!d.is_abandoned && d.owner_char_id > 0, d.owner_char_id, d.solar_system_id))
     });
     let active_fighter = ctx.active_fighters.read().ok().and_then(|fs| {
-        fs.get(&target_ball_id).map(|sq| (!sq.is_abandoned && sq.owner_char_id > 0, sq.owner_char_id))
+        fs.get(&target_ball_id).map(|sq| (!sq.is_abandoned && sq.owner_char_id > 0, sq.owner_char_id, sq.item_id))
     });
-    let resolved_victim = if matches!(active_drone, Some((false, _, _))) || matches!(active_fighter, Some((false, _))) {
+    let resolved_victim = if matches!(active_drone, Some((false, _, _))) || matches!(active_fighter, Some((false, _, _))) {
         None
     } else {
         ctx.db.with_snapshot(|snap| {
             let cid = match (active_drone, active_fighter) {
-                (Some((true, oid, _)), _) | (_, Some((true, oid))) => victim_char_opt.filter(|&v| v == oid).or(Some(oid)),
+                (Some((true, oid, _)), _) | (_, Some((true, oid, _))) => Some(oid),
                 _ => victim_char_opt.or_else(|| {
                     snap.characters.get(&target_ball_id).or_else(|| snap.characters.values().find(|c| c.active_ship_id == target_ball_id)).map(|c| c.character_id)
                 }),
@@ -1838,10 +1836,13 @@ pub(crate) fn emit_combat_log_and_damage_state(
             if !active_craft && snap.items.contains_key(&target_ball_id) {
                 return None;
             }
-            let combat_sys = active_drone.map(|(_, _, sys)| sys).or_else(|| {
-                [target_ball_id, attacker_ship_id].into_iter().filter_map(|id| snap.items.get(&id))
-                    .find_map(|i| (30_000_000..40_000_000).contains(&i.location_id).then_some(i.location_id as u32))
-            }).or_else(|| snap.characters.get(&attacker_char_id).map(|a| a.solar_system_id));
+            let item_sys = |id: i64| snap.items.get(&id).and_then(|i| (30_000_000..40_000_000).contains(&i.location_id).then_some(i.location_id as u32));
+            let combat_sys = active_drone.map(|(_, _, sys)| sys)
+                .or_else(|| item_sys(attacker_ship_id))
+                .or_else(|| snap.structures.get(&attacker_ship_id).map(|s| s.solar_system_id))
+                .or_else(|| snap.characters.get(&attacker_char_id).map(|a| a.solar_system_id))
+                .or_else(|| active_fighter.and_then(|(_, _, iid)| item_sys(iid)))
+                .or_else(|| item_sys(target_ball_id));
             combat_sys.map_or(Some(cid), |sys| (vic.solar_system_id == sys).then_some(cid))
         })
     };
