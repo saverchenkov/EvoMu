@@ -1972,3 +1972,164 @@ async fn unfitting_loaded_module_relocates_charge_and_emits_on_item_change_947()
         "expected CapacityExceeded when loaded charge overflows container capacity, got {cont_err:?}"
     );
 }
+
+#[tokio::test]
+async fn invbroker_add_insufficient_cpu_encodes_module_name_and_reason() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let ab_type_id = 439_u32;
+    let ab_name = ctx
+        .sde
+        .get_type(ab_type_id)
+        .expect("1MN Afterburner I (439) in SDE")
+        .name
+        .clone();
+    assert!(!ab_name.is_empty());
+
+    let char_id = 96_509_569_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 96_509_570_i64;
+    let ab_item_id = 96_509_571_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.name = "AfterburnerCpuPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = Some(station_id);
+        ch.structure_id = None;
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        let skills = snap.skills.entry(char_id).or_default();
+        for (req_skill, level) in ctx
+            .sde
+            .required_skills_for_type(ab_type_id)
+            .into_iter()
+            .chain(ctx.sde.required_skills_for_type(587))
+        {
+            skills.insert(
+                req_skill,
+                TrainedSkillRecord {
+                    type_id: req_skill,
+                    level: level.max(1),
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter (130 CPU output without CPU Management)
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Occupy 120 CPU across LoSlot0..LoSlot2 (3x Ballistic Control System II @ 40 CPU each).
+        for (idx, flag) in [
+            InventoryFlag::LoSlot0,
+            InventoryFlag::LoSlot1,
+            InventoryFlag::LoSlot2,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fitted_id = 96_509_580_i64 + idx as i64;
+            snap.items.insert(
+                fitted_id,
+                InventoryItemRecord {
+                    item_id: fitted_id,
+                    type_id: 22291,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(fitted_id, true);
+        }
+        snap.items.insert(
+            ab_item_id,
+            InventoryItemRecord {
+                item_id: ab_item_id,
+                type_id: ab_type_id,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut session = SessionState::default();
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.station_id = Some(station_id);
+    session.solar_system_id = Some(30_000_142);
+    session.ship_id = Some(ship_id);
+
+    let err = handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(ab_item_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::MedSlot0 as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect_err("fitting 1MN Afterburner I without enough CPU must fail");
+
+    assert_eq!(err.code, "FittingValidationFailed");
+    assert!(
+        err.message.contains("Insufficient CPU"),
+        "expected Insufficient CPU reason, got {:?}",
+        err.message
+    );
+    assert_eq!(
+        err.rejection_facts(),
+        Some(&eve_proto::RejectionFacts::FittingValidationFailed {
+            ship_id: Some(ship_id),
+            item_id: Some(ab_item_id),
+            module_type_id: Some(i64::from(ab_type_id)),
+            reason: err.message.clone(),
+        })
+    );
+
+    let ce = err.to_client_error("invbroker", "Add");
+    let (key, args) = ce.as_user_error().expect("ClientError UserError");
+    assert_eq!(key, eve_proto::UserErrorKey::ModuleFitFailed);
+    let mod_name_val = args
+        .iter()
+        .find(|(k, _)| k == "moduleName")
+        .and_then(|(_, v)| v.as_str());
+    let reason_val = args
+        .iter()
+        .find(|(k, _)| k == "reason")
+        .and_then(|(_, v)| v.as_str());
+    assert_eq!(mod_name_val, Some(ab_name.as_str()));
+    assert_eq!(reason_val, Some(err.message.as_str()));
+}

@@ -1077,8 +1077,11 @@ pub async fn handle(
             {
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                 if cw.get_or_create(char_id).is_weapon_timer_active(now) {
-                    return Some(Err(rpc_err(
-                        "WeaponsTimerActive",
+                    return Some(Err(BridgeRpcError::weapons_timer_active(
+                        char_id,
+                        "shipcaster_jump",
+                        "weapons",
+                        true,
                         "Cannot jump through shipcaster while weapons timer is active",
                     )));
                 }

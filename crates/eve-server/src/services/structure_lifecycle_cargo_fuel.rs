@@ -93,7 +93,18 @@ pub async fn handle_jettison_structure_fuel(
                 return Err(err("NotDockedInStructure", format!("Must be docked in or actively controlling structure {structure_id} to jettison fuel")));
             }
             if !rules::has_structure_fuel_bay_role(snap, session, char_id, caller_corp) {
-                return Err(err("InsufficientRoles", "Jettisoning structure fuel requires Director, Station Manager, or Fuel Technician role"));
+                let (_, actual_role_mask) =
+                    snap.effective_corp_roles_at(caller_corp, char_id, None, session.corp_role, 0);
+                return Err(BridgeRpcError::insufficient_role_with_code(
+                    "InsufficientRoles",
+                    eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_STATION_MANAGER
+                        | eve_db::corp_roles::ROLE_STARBASE_OPERATOR
+                        | eve_db::corp_roles::ROLE_STARBASE_CONFIG,
+                    actual_role_mask,
+                    "JettisonStructureFuel",
+                    "Jettisoning structure fuel requires Director, Station Manager, or Fuel Technician role",
+                ));
             }
             let power_before = life::power_state(ctx, snap, &ext, &st, now);
             snap.next_entity_id += 1;
@@ -389,7 +400,11 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
             .ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not in solar system {sys_id}")))?;
         let prof = life::structure_profile(ctx, st.type_id);
         if prof.as_ref().is_some_and(|p| p.hull_class == life::HullClass::Flex) {
-            return Err(err("StructureNotDockable", format!("Structure {structure_id} is a FLEX structure and has no cargo dropoff bay")));
+            return Err(BridgeRpcError::structure_not_dockable(
+                structure_id,
+                st.state.as_str(),
+                format!("Structure {structure_id} is a FLEX structure and has no cargo dropoff bay"),
+            ));
         }
         if !is_structure_operational_for_cargo_dropoff(st) {
             return Err(err("StructureNotOperational", format!("Structure {structure_id} is in state '{}' (cored={}) and cannot accept cargo dropoff", st.state, st.quantum_core_installed)));

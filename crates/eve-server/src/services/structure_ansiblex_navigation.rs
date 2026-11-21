@@ -202,7 +202,13 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
     let now_unix = ctx.now_unix();
     if ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|st| st.is_weapon_timer_active(now_unix)) {
-        return Err(err("WeaponsTimerActive", "Cannot jump through structure stargate while weapons timer is active"));
+        return Err(BridgeRpcError::weapons_timer_active(
+            char_id,
+            "structure_stargate_jump",
+            "weapons",
+            true,
+            "Cannot jump through structure stargate while weapons timer is active",
+        ));
     }
     let (st_pos, st_type_id, dest_sys_id, dest_st_pos) = ctx.db.with_snapshot(|snap| {
         let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
