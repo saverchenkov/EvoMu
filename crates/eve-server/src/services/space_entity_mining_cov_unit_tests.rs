@@ -365,12 +365,11 @@ async fn reprocessing_quotes_and_reprocess_npc_structure_and_error_paths() {
 
 #[tokio::test]
 async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
-    use crate::router::ServerContext;
+    use crate::router::{client_wire::ClientWireSession, TestContext};
     use eve_db::{
         CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, UpwellStructureRecord,
         WorldRepository,
     };
-    use eve_machonet::SessionState;
     use eve_proto::PyRep;
     use eve_sde::SdeRegistry;
     use std::collections::HashMap;
@@ -384,8 +383,9 @@ async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
 
     let sde = Arc::new(SdeRegistry::with_canonical_seed());
     let db = Arc::new(WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let ctx = TestContext::with_sde_and_repository(sde, db).with_rpc_rate_budget_disabled();
 
+    let uid = ctx.db.provision_player_account("reproc1563", "reproc1563-secret");
     let char_id = 940_001;
     let other_char_id = 940_002;
     let corp_id = 98_940_001;
@@ -402,7 +402,7 @@ async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
     ctx.db.with_mut_snapshot(|snap| {
         let mut ch = snap.characters.values().next().unwrap().clone();
         ch.character_id = char_id;
-        ch.user_id = char_id as u64;
+        ch.user_id = uid;
         ch.name = "Jita Reprocessor".into();
         ch.corporation_id = corp_id;
         ch.station_id = Some(JITA_STATION_ID);
@@ -520,25 +520,40 @@ async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
         );
     });
 
-    let mut station_sess = SessionState {
-        session_id: char_id as u64,
-        user_id: Some(char_id as u64),
-        character_id: Some(char_id),
-        corporation_id: Some(corp_id),
-        station_id: Some(JITA_STATION_ID),
-        structure_id: None,
-        solar_system_id: Some(JITA_SYSTEM_ID),
-        constellation_id: Some(20_000_020),
-        region_id: Some(THE_FORGE_REGION_ID),
-        ship_id: Some(ship_id),
-        ..Default::default()
-    };
     let kw = HashMap::new();
+    let mut client = ClientWireSession::new(&ctx, char_id as u64);
+    let login_out = client
+        .call_wire(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("reproc1563".into()),
+                PyRep::String("reproc1563-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(login_out.marshal_errors.is_empty());
+    let login_rep = login_out.rpc_result.expect("Login must succeed");
+    assert!(!matches!(login_rep, PyRep::None));
+    let select_out = client
+        .call_wire(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+    assert!(select_out.marshal_errors.is_empty());
+    let select_rep = select_out.rpc_result.expect("SelectCharacterID must succeed");
+    assert!(!matches!(select_rep, PyRep::None));
+    assert_eq!(client.session.station_id, Some(JITA_STATION_ID));
 
     // 1. Exact #1563 V24 call after undocking from Perimeter (60002956) and redocking at Jita IV-4 (60003760).
-    let wire_res = ctx
-        .dispatch_rpc(
-            &mut station_sess,
+    let wire_out = client
+        .call_wire(
             "reprocessingSvc",
             None,
             "Reprocess",
@@ -550,9 +565,11 @@ async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
                 PyRep::Integer(InventoryFlag::Hangar as i64),
             ],
             &kw,
-            Some("machoNet:26000"),
         )
-        .await
+        .await;
+    assert!(wire_out.marshal_errors.is_empty());
+    let wire_res = wire_out
+        .rpc_result
         .expect("stale NPC station Item hangar output location must resolve to current docked station");
     let PyRep::Tuple(ref tuple_parts) = wire_res else {
         panic!("expected 2-tuple MachoNet reply, got {wire_res:?}");
@@ -572,23 +589,26 @@ async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
     assert!(trit_wire_qty > 0);
 
     // 2. Stale Upwell structure output hangar -> current NPC station Item hangar.
-    ctx.dispatch_rpc(
-        &mut station_sess,
-        "reprocessingSvc",
-        None,
-        "Reprocess",
-        &[
-            PyRep::List(vec![PyRep::Integer(ore_prev_struct_id)]),
-            PyRep::Integer(JITA_STATION_ID),
-            PyRep::None,
-            PyRep::Integer(prev_struct_id),
-            PyRep::Integer(InventoryFlag::Hangar as i64),
-        ],
-        &kw,
-        Some("machoNet:26000"),
-    )
-    .await
-    .expect("stale Upwell structure Item hangar output location must resolve to current station");
+    let prev_struct_out = client
+        .call_wire(
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_prev_struct_id)]),
+                PyRep::Integer(JITA_STATION_ID),
+                PyRep::None,
+                PyRep::Integer(prev_struct_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(prev_struct_out.marshal_errors.is_empty());
+    let prev_struct_rep = prev_struct_out
+        .rpc_result
+        .expect("stale Upwell structure Item hangar output location must resolve to current station");
+    assert!(matches!(prev_struct_rep, PyRep::Tuple(_)));
 
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&ore_npc_id));
@@ -616,34 +636,34 @@ async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
     });
 
     // 3. Stale NPC station output hangar -> current docked online Upwell structure.
-    let mut struct_sess = SessionState {
-        station_id: None,
-        structure_id: Some(cur_struct_id),
-        ..station_sess.clone()
-    };
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = None;
             ch.structure_id = Some(cur_struct_id);
         }
     });
-    ctx.dispatch_rpc(
-        &mut struct_sess,
-        "reprocessingSvc",
-        None,
-        "Reprocess",
-        &[
-            PyRep::List(vec![PyRep::Integer(ore_cur_struct_id)]),
-            PyRep::Integer(cur_struct_id),
-            PyRep::None,
-            PyRep::Integer(PERIMETER_STATION_ID),
-            PyRep::Integer(InventoryFlag::Hangar as i64),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("stale NPC station Item hangar must resolve to current docked structure hangar");
+    ctx.sync_session(&mut client.session);
+    assert_eq!(client.session.structure_id, Some(cur_struct_id));
+    let cur_struct_out = client
+        .call_wire(
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_cur_struct_id)]),
+                PyRep::Integer(cur_struct_id),
+                PyRep::None,
+                PyRep::Integer(PERIMETER_STATION_ID),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(cur_struct_out.marshal_errors.is_empty());
+    let cur_struct_rep = cur_struct_out
+        .rpc_result
+        .expect("stale NPC station Item hangar must resolve to current docked structure hangar");
+    assert!(matches!(cur_struct_rep, PyRep::Tuple(_)));
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&ore_cur_struct_id));
         assert!(snap.items.values().any(|i| {
@@ -662,6 +682,8 @@ async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
             ch.structure_id = None;
         }
     });
+    ctx.sync_session(&mut client.session);
+    assert_eq!(client.session.station_id, Some(JITA_STATION_ID));
 
     // 4. Security guards must still reject non-existent stations, mismatched owners, unrented offices, and non-hangar flags.
     let guard_cases: Vec<(PyRep, i64, InventoryFlag, &str)> = vec![
@@ -674,9 +696,8 @@ async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
         (PyRep::None, stale_office_id, InventoryFlag::CorpSAG1, "InvalidOutputLocation"),
     ];
     for (owner_rep, out_loc, out_flag, expected_code) in guard_cases {
-        let err = ctx
-            .dispatch_rpc(
-                &mut station_sess,
+        let err = client
+            .call_wire(
                 "reprocessingSvc",
                 None,
                 "Reprocess",
@@ -688,9 +709,9 @@ async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
                     PyRep::Integer(out_flag as i64),
                 ],
                 &kw,
-                None,
             )
             .await
+            .rpc_result
             .expect_err("negative security output-location guard must still reject");
         assert_eq!(
             err.code, expected_code,
