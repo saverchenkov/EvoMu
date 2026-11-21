@@ -1230,6 +1230,19 @@ pub(crate) fn corp_has_db_role_table(
         })
 }
 
+fn resolve_contract_caller_corp(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    session_corp_id: Option<i64>,
+) -> i64 {
+    snap.characters
+        .get(&char_id)
+        .map(|ch| ch.corporation_id)
+        .filter(|&id| id != 0)
+        .or(session_corp_id)
+        .unwrap_or(0)
+}
+
 fn effective_contract_helper_corp_roles(
     snap: &eve_db::WorldStateSnapshot,
     corp_id: i64,
@@ -1242,7 +1255,7 @@ fn effective_contract_helper_corp_roles(
         corp_id,
         char_id,
         None,
-        session_role,
+        0,
         now_unix,
     );
     if !is_ceo && r == 0 && session_role != 0 && !corp_has_db_role_table(snap, corp_id) {
@@ -1272,30 +1285,25 @@ pub fn handle_contract_delete_notif(
     let for_corp = args
         .get(1)
         .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64().unwrap_or(0) != 0);
-    let caller_corp = session.corporation_id.unwrap_or(0);
-    let owner_id = if for_corp { caller_corp } else { char_id };
+    let session_corp_id = session.corporation_id;
     let now_unix = ctx.now_unix();
     let changed = ctx.db.try_with_mut_snapshot(|snap| {
+        let effective_caller_corp = resolve_contract_caller_corp(snap, char_id, session_corp_id);
+        let owner_id = if for_corp { effective_caller_corp } else { char_id };
         if for_corp {
-            if caller_corp < 98_000_000 {
+            if effective_caller_corp < 98_000_000 {
                 return Err(BridgeRpcError {
                     code: "CrpAccessDenied".into(),
                     message: "Corporation contract notifications require a player corporation".into(),
                     client_error: None,
                 });
             }
-            let allowed = effective_contract_helper_corp_roles(
+            if !crate::services::contracts_service::has_corp_contract_role(
                 snap,
-                caller_corp,
                 char_id,
-                session.corp_role,
+                effective_caller_corp,
                 now_unix,
-            )
-            .is_some_and(|(is_ceo, r)| {
-                is_ceo
-                    || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
-            });
-            if !allowed {
+            ) {
                 return Err(BridgeRpcError {
                     code: "CrpAccessDenied".into(),
                     message: "Deleting corporation contract notifications requires Contract Manager or Director role".into(),
@@ -1368,23 +1376,20 @@ pub fn handle_contract_delete_multiple(
             client_error: None,
         });
     }
-    let caller_corp = session.corporation_id.unwrap_or(0);
+    let session_corp_id = session.corporation_id;
     let now_unix = ctx.now_unix();
-    let (deleted, failed, item_changes) = ctx.db.try_with_mut_snapshot(|snap| {
-        let corp_mgr = effective_contract_helper_corp_roles(
+    let (deleted, failed, item_changes, transferred_ids) = ctx.db.try_with_mut_snapshot(|snap| {
+        let effective_caller_corp = resolve_contract_caller_corp(snap, char_id, session_corp_id);
+        let corp_mgr = crate::services::contracts_service::has_corp_contract_role(
             snap,
-            caller_corp,
             char_id,
-            session.corp_role,
+            effective_caller_corp,
             now_unix,
-        )
-        .is_some_and(|(is_ceo, r)| {
-            is_ceo
-                || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
-        });
+        );
         let mut del = Vec::new();
         let mut fail = Vec::new();
         let mut changes: Vec<(eve_db::InventoryItemRecord, i64, i64, eve_db::InventoryFlag)> = Vec::new();
+        let mut transferred_ids = Vec::new();
         let mut restored_ids = std::collections::HashSet::new();
         for cid in cids {
             let Some(c) = snap.contracts.get(&cid).cloned() else {
@@ -1392,50 +1397,72 @@ pub fn handle_contract_delete_multiple(
                 continue;
             };
             let owns = if c.for_corp {
-                c.issuer_corp_id == caller_corp && corp_mgr
+                c.issuer_corp_id == effective_caller_corp && corp_mgr
             } else {
                 c.issuer_id == char_id
             };
             let has_bids = c.contract_type == "Auction"
                 && (c.current_bidder_id.is_some() || !c.bid_history.is_empty());
             if c.status == "Outstanding" && owns && !has_bids {
-                snap.credit_contract_issuer(&c, c.reward);
-                let (restore_owner, restore_flag) = if c.for_corp {
-                    (c.issuer_corp_id, eve_db::InventoryFlag::Deliveries)
+                snap.credit_contract_issuer_with_journal(
+                    &c,
+                    c.reward,
+                    "ContractRewardRefund",
+                    eve_db::ledger::ref_types::CONTRACT_REWARD,
+                    cid,
+                    now_unix,
+                    format!("Reward refunded on deleted contract {cid}"),
+                );
+                snap.refund_contract_deposit(&c, now_unix, "deleted");
+                let restore_owner = if c.for_corp && c.issuer_corp_id != 0 {
+                    c.issuer_corp_id
                 } else {
-                    (c.issuer_id, eve_db::InventoryFlag::Hangar)
+                    c.issuer_id
                 };
-                for iid in &c.item_ids {
-                    if restored_ids.contains(iid) {
-                        continue;
-                    }
-                    if let Some(it) = snap.items.get_mut(iid) {
-                        let in_escrow = it.location_id == cid
-                            || (it.location_id == c.start_station_id
-                                && it.flag == eve_db::InventoryFlag::Locked
-                                && (it.owner_id == c.issuer_id
-                                    || (c.for_corp && it.owner_id == c.issuer_corp_id)
-                                    || it.owner_id == 0));
-                        if in_escrow {
-                            let (po, pl, pf) = (it.owner_id, it.location_id, it.flag);
-                            it.owner_id = restore_owner;
-                            it.location_id = c.start_station_id;
-                            it.flag = restore_flag;
-                            it.version += 1;
-                            restored_ids.insert(it.item_id);
-                            changes.push((it.clone(), po, pl, pf));
-                        }
+                let escrow_item_ids: Vec<i64> = c
+                    .item_ids
+                    .iter()
+                    .copied()
+                    .filter(|iid| {
+                        !restored_ids.contains(iid)
+                            && snap.items.get(iid).is_some_and(|it| {
+                                it.location_id == cid
+                                    || (it.location_id == c.start_station_id
+                                        && it.flag == eve_db::InventoryFlag::Locked
+                                        && (it.owner_id == c.issuer_id
+                                            || (c.for_corp && it.owner_id == c.issuer_corp_id)
+                                            || it.owner_id == 0))
+                            })
+                    })
+                    .collect();
+                let mut prev_states: Vec<(i64, i64, i64, eve_db::InventoryFlag)> = escrow_item_ids
+                    .iter()
+                    .copied()
+                    .filter_map(|iid| snap.items.get(&iid).map(|it| (iid, it.owner_id, it.location_id, it.flag)))
+                    .collect();
+                for it in snap.items.values() {
+                    if it.location_id == cid
+                        && !restored_ids.contains(&it.item_id)
+                        && !prev_states.iter().any(|(id, _, _, _)| *id == it.item_id)
+                    {
+                        prev_states.push((it.item_id, it.owner_id, it.location_id, it.flag));
                     }
                 }
-                for it in snap.items.values_mut() {
-                    if !restored_ids.contains(&it.item_id) && it.location_id == cid {
-                        let (po, pl, pf) = (it.owner_id, it.location_id, it.flag);
-                        it.owner_id = restore_owner;
-                        it.location_id = c.start_station_id;
-                        it.flag = restore_flag;
-                        it.version += 1;
-                        restored_ids.insert(it.item_id);
-                        changes.push((it.clone(), po, pl, pf));
+                transferred_ids.extend(snap.settle_contract_escrow_items(
+                    cid,
+                    &escrow_item_ids,
+                    restore_owner,
+                    c.start_station_id,
+                    None,
+                    true,
+                ));
+                snap.clear_contract_divisions(cid);
+                for (iid, po, pl, pf) in prev_states {
+                    if let Some(it) = snap.items.get(&iid) {
+                        if it.owner_id != po || it.location_id != pl || it.flag != pf {
+                            restored_ids.insert(iid);
+                            changes.push((it.clone(), po, pl, pf));
+                        }
                     }
                 }
                 if let Some(cm) = snap.contracts.get_mut(&cid) {
@@ -1446,8 +1473,11 @@ pub fn handle_contract_delete_multiple(
                 fail.push(PyRep::Integer(cid));
             }
         }
-        Ok::<_, BridgeRpcError>((del, fail, changes))
+        Ok::<_, BridgeRpcError>((del, fail, changes, transferred_ids))
     })?;
+    if !transferred_ids.is_empty() {
+        crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
+    }
     for (it, prev_owner, prev_loc, prev_flag) in item_changes {
         let (group_id, category_id) = ctx
             .sde

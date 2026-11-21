@@ -3023,7 +3023,7 @@ mod market_acl_tests {
         };
         assert!(!is_contract_visible_to_character(&ally_unassigned, char_b, corp_other, None));
         assert!(!is_contract_visible_to_character(&ally_unassigned, char_b, corp_other, Some(ally_target)));
-        assert!(is_contract_visible_to_character(&ally_unassigned, char_b, corp_other, Some(0)));
+        assert!(!is_contract_visible_to_character(&ally_unassigned, char_b, corp_other, Some(0)));
 
         let personal_unassigned = ContractRecord {
             issuer_id: issuer,
@@ -3048,7 +3048,7 @@ mod market_acl_tests {
             assignee_id: 0,
             ..Default::default()
         };
-        assert!(is_contract_visible_to_character(&region_fallback, char_b, corp_other, None));
+        assert!(!is_contract_visible_to_character(&region_fallback, char_b, corp_other, None));
 
         // is_character_party_to_contract covering bid_history, assignee_id == char_id, corp & alliance snapshot paths
         let mut snap = WorldStateSnapshot::default();
