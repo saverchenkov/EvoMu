@@ -2,12 +2,51 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::notify_registry::{OnDroneControlLost, OnDroneStateChange, OnItemChange};
+use crate::router::notify_registry::{
+    push_typed_session_notification, OnDroneControlLost, OnDroneStateChange, OnItemChange,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DroneReturnErrorCode {
+    NoActiveShip,
+    ShipNotInSpace,
+    NoSolarSystem,
+    SentryDroneOutOfScoopRange,
+}
+
+impl DroneReturnErrorCode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoActiveShip => "NoActiveShip",
+            Self::ShipNotInSpace => "ShipNotInSpace",
+            Self::NoSolarSystem => "NoSolarSystem",
+            Self::SentryDroneOutOfScoopRange => "SentryDroneOutOfScoopRange",
+        }
+    }
+}
+
+fn drone_return_rpc_error(code: DroneReturnErrorCode, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.as_str().into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
+fn extract_drone_target_ids(args: &[PyRep], kwargs: &HashMap<String, PyRep>) -> Vec<i64> {
+    match crate::router::rpc_args::RpcArgs::new(args, kwargs).get_raw(0, "droneIDs") {
+        Some(PyRep::List(list) | PyRep::Tuple(list)) => {
+            list.iter().filter_map(|x| x.as_i64()).collect()
+        }
+        Some(v) => v.as_i64().into_iter().collect(),
+        None => Vec::new(),
+    }
+}
 
 /// Returns active drones in the same system to the drone bay (`feat:combat.drones-return-orbit`, `feat:drones.recall-drones`).
 pub async fn handle_cmd_return_bay(
@@ -18,35 +57,24 @@ pub async fn handle_cmd_return_bay(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let Some(ship_id) = session.ship_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))) else {
-        return Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into(), client_error: None });
+        return Err(drone_return_rpc_error(DroneReturnErrorCode::NoActiveShip, "Session has no active ship"));
     };
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError { code: "ShipNotInSpace".into(), message: "Cannot recall drones while docked in station or structure".into(), client_error: None });
+        return Err(drone_return_rpc_error(DroneReturnErrorCode::ShipNotInSpace, "Cannot recall drones while docked in station or structure"));
     }
     let Some(sys_id) = session.solar_system_id else {
-        return Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None });
+        return Err(drone_return_rpc_error(DroneReturnErrorCode::NoSolarSystem, "Session has no active solar system"));
     };
 
-    let raw_filter = match args.first() {
-        Some(PyRep::None) | None => kwargs.get("droneIDs"),
-        other => other,
-    };
-    let filter_drone_ids: Option<Vec<i64>> = match raw_filter {
-        Some(PyRep::List(items) | PyRep::Tuple(items)) => {
-            let v: Vec<i64> = items.iter().filter_map(|it| it.as_i64()).collect();
-            if v.is_empty() { None } else { Some(v) }
-        }
-        Some(PyRep::Integer(id)) => Some(vec![*id]),
-        _ => None,
-    };
+    let parsed_ids = extract_drone_target_ids(args, kwargs);
+    let filter_drone_ids = if parsed_ids.is_empty() { None } else { Some(parsed_ids) };
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Active ship {ship_id} is not in space"),
-            client_error: None,
-        });
+        return Err(drone_return_rpc_error(
+            DroneReturnErrorCode::ShipNotInSpace,
+            format!("Active ship {ship_id} is not in space"),
+        ));
     };
     let max_ctrl_range = crate::services::combat_crimewatch::combat_npcs_drones::compute_drone_control_range(ctx, char_id, ship_id);
 
@@ -68,11 +96,10 @@ pub async fn handle_cmd_return_bay(
         };
         let dist = ship_ball.surface_distance(&drone_ball);
         if d.is_sentry && dist > 2_500.0 {
-            return Err(BridgeRpcError {
-                code: "SentryDroneOutOfScoopRange".into(),
-                message: format!("Immobile sentry drone {} is {dist:.1} m away (must be within 2,500 m to return to bay)", d.ball_id),
-                client_error: None,
-            });
+            return Err(drone_return_rpc_error(
+                DroneReturnErrorCode::SentryDroneOutOfScoopRange,
+                format!("Immobile sentry drone {} is {dist:.1} m away (must be within 2,500 m to return to bay)", d.ball_id),
+            ));
         }
         drones_with_dist.push((d, dist));
     }
@@ -860,6 +887,173 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
             }
         });
     }
+}
+
+/// Abandons specified drones (or all drones) in space for the calling character (`rpc:entity.CmdAbandonDrone`).
+pub async fn handle_cmd_abandon_drone(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(sys_id) = session.solar_system_id else {
+        return Err(drone_return_rpc_error(
+            DroneReturnErrorCode::NoSolarSystem,
+            "Session has no active solar system",
+        ));
+    };
+    let target_ids = extract_drone_target_ids(args, kwargs);
+
+    let mut abandoned_balls = Vec::new();
+    with_mut_combat_runtime(ctx, |rt| {
+        for d in rt.active_drones_in_space.values_mut() {
+            if d.solar_system_id == sys_id && d.owner_char_id == char_id && !d.is_abandoned {
+                let matches_filter = target_ids.is_empty()
+                    || target_ids.contains(&d.ball_id)
+                    || target_ids.contains(&d.drone_item_id);
+                if matches_filter {
+                    d.is_abandoned = true;
+                    d.owner_char_id = 0;
+                    d.parent_ship_id = 0;
+                    d.target_id = None;
+                    d.activity_state = 0;
+                    abandoned_balls.push((d.ball_id, d.type_id));
+                    rt.active_drone_miners.remove(&d.ball_id);
+                }
+            }
+        }
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for &(bid, tid) in &abandoned_balls {
+        crate::services::combat_crimewatch::combat_npcs_drones::clear_drone_web_cycle(
+            &sys_handle,
+            bid,
+        )
+        .await;
+        let _ = sys_handle
+            .emit_destiny_event(
+                bid,
+                eve_destiny::DestinyEvent::OnDroneStateChange {
+                    drone_id: bid,
+                    owner_id: 0,
+                    controller_id: 0,
+                    activity_state: 0,
+                    type_id: tid,
+                    controller_owner_id: 0,
+                    target_id: None,
+                },
+            )
+            .await;
+    }
+
+    for &(bid, _) in &abandoned_balls {
+        let abandon_notif = OnDroneControlLost { drone_id: bid };
+        ctx.emit_typed(NotificationTarget::Character(char_id), abandon_notif.clone());
+        push_typed_session_notification(session, abandon_notif);
+    }
+
+    Ok(PyRep::Dict(vec![]))
+}
+
+/// Reconnects to abandoned drones within 250km and bandwidth/control count limits (`rpc:entity.CmdReconnectToDrones`, `feat:drones.reconnect-drones`).
+pub async fn handle_cmd_reconnect_to_drones(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(ship_id) = session.ship_id else {
+        return Err(drone_return_rpc_error(
+            DroneReturnErrorCode::NoActiveShip,
+            "Session has no active ship",
+        ));
+    };
+    let Some(sys_id) = session.solar_system_id else {
+        return Err(drone_return_rpc_error(
+            DroneReturnErrorCode::NoSolarSystem,
+            "Session has no active solar system",
+        ));
+    };
+    if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
+        return Err(e);
+    }
+
+    let target_ids = extract_drone_target_ids(args, kwargs);
+
+    let mut ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+    let snap_type_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id)).unwrap_or(0);
+    if snap_type_id > 0 && ship_fit_opt.as_ref().map(|f| f.ship.type_id) != Some(snap_type_id) {
+        ctx.invalidate_ship_fitting(ship_id);
+        ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+    }
+    let (max_drones_allowed, ship_bw, _) = crate::services::combat_crimewatch::combat_npcs_drones::pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
+    let (mut cur_count, mut cur_bw) = with_combat_runtime(ctx, |rt| {
+        let active: Vec<&DroneSpaceState> = rt
+            .active_drones_in_space.values().filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned).collect();
+        (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let ship_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(glam::DVec3::ZERO);
+
+    let candidates: Vec<(i64, i64, f64, u32)> = with_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space.values().filter(|d| {
+            d.solar_system_id == sys_id
+                && ((d.is_abandoned && d.original_owner_char_id == char_id) || (d.owner_char_id == char_id && d.parent_ship_id == 0))
+                && (target_ids.is_empty() || target_ids.contains(&d.ball_id) || target_ids.contains(&d.drone_item_id))
+        }).map(|d| (d.ball_id, d.drone_item_id, d.bandwidth_used, d.type_id)).collect()
+    });
+
+    let mut reconnected = Vec::new();
+    let mut errors: HashMap<String, Vec<i64>> = HashMap::new();
+
+    for (bid, did, bw, tid) in candidates {
+        let drone_pos = sys_handle
+            .get_ball_snapshot(bid)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| b.position);
+        if let Some(pos) = drone_pos {
+            if pos.distance(ship_pos) > 250_000.0 {
+                errors.entry("OutOfRange".into()).or_default().push(bid);
+                continue;
+            }
+        }
+        if cur_count >= max_drones_allowed {
+            errors.entry("MaxDronesExceeded".into()).or_default().push(bid);
+            continue;
+        }
+        if cur_bw + bw > ship_bw {
+            errors.entry("InsufficientBandwidth".into()).or_default().push(bid);
+            continue;
+        }
+
+        with_mut_combat_runtime(ctx, |rt| {
+            if let Some(d) = rt.active_drones_in_space.get_mut(&bid) {
+                d.is_abandoned = false;
+                d.owner_char_id = char_id;
+                d.parent_ship_id = ship_id;
+                d.activity_state = 0;
+                d.target_id = None;
+                cur_count += 1;
+                cur_bw += bw;
+                reconnected.push((bid, did, tid));
+            }
+        });
+    }
+
+    super::drone_reconnect_finish::finish_reconnect_drones(ctx, &sys_handle, char_id, ship_id, &reconnected)
+        .await;
+
+    let errors_py: Vec<(PyRep, PyRep)> = errors
+        .into_iter()
+        .map(|(k, v)| (PyRep::String(k), PyRep::List(v.into_iter().map(PyRep::Integer).collect())))
+        .collect();
+    Ok(PyRep::Dict(errors_py))
 }
 
 #[cfg(test)]

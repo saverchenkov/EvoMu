@@ -1398,5 +1398,56 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
         !sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid),
         "step_engaged_drones must clear web cycle when drone moves out of SDE web range"
     );
+
+    // 5. Re-engage, then CmdAbandonDrone clears active drone_web cycle and restores target velocity
+    assert!(sys_handle.set_ball_position(web_bid, DVec3::new(100.0, 0.0, 0.0)).await);
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.drone_next_ready_unix.insert(web_bid, 0);
+    });
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(web_bid)]), PyRep::Integer(target_a)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("re-engage before CmdAbandonDrone");
+    assert!(
+        sys_handle
+            .get_combat_state(target_a)
+            .await
+            .unwrap()
+            .unwrap()
+            .web_velocity_multiplier
+            < 1.0
+    );
+    handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdAbandonDrone",
+        &[PyRep::List(vec![PyRep::Integer(web_bid)])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("CmdAbandonDrone succeeds");
+    assert!(
+        !sys_handle
+            .actor_state
+            .read()
+            .unwrap()
+            .active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == web_bid),
+        "CmdAbandonDrone must clear drone_web cycle"
+    );
+    let (_, ball_after_abandon) = sys_handle.get_ball_snapshot(target_a).await.unwrap().unwrap();
+    let cs_after_abandon = sys_handle.get_combat_state(target_a).await.unwrap().unwrap();
+    assert!((cs_after_abandon.web_velocity_multiplier - 1.0).abs() < 1e-6);
+    assert!((ball_after_abandon.max_velocity - 300.0).abs() < 1e-3);
 }
 

@@ -129,7 +129,7 @@ impl DroneSpaceState {
 #[path = "combat_npcs_drones_cycle_ops.rs"]
 mod cycle_ops;
 pub use cycle_ops::{step_drone_auto_aggression_and_assist, step_engaged_drones};
-pub(crate) use cycle_ops::is_recently_destroyed_in_persisted;
+pub(crate) use cycle_ops::{clear_drone_web_cycle, is_recently_destroyed_in_persisted};
 
 /// Evaluates effective drone control range in meters for `char_id` flying `ship_id` (`feat:drones.drone-control-range`).
 /// Evaluates `charID` attribute `458` (`droneControlDistance`) via `ShipFittingEngine` (Drone Avionics `3437`,

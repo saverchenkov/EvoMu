@@ -3396,3 +3396,111 @@ fn propulsion_overload_skips_pre_group_and_stacking_exempt_sources_1444() {
         "stackable attribute 20 must bypass stacking penalty"
     );
 }
+
+#[test]
+fn drone_web_cycle_parsing_range_orphan_pruning_and_parent_unlock() {
+    assert_eq!(parse_drone_web_ids("drone_web:5001:6001"), Some((5001, 6001)));
+    assert_eq!(parse_drone_web_ids("siren_tackle:5001:6001"), None);
+    assert_eq!(parse_drone_web_ids("drone_web:5001"), None);
+    assert_eq!(parse_drone_web_ids("drone_web:abc:6001"), None);
+    assert_eq!(parse_drone_web_ids("drone_web:5001:xyz"), None);
+    assert_eq!(parse_drone_web_ids("drone_web:5001:6001:9"), None);
+
+    let mut bp = Ballpark::new(30_000_142);
+    let mut cycles = Vec::new();
+    let mut base_scram = HashMap::new();
+    let mut base_core = HashMap::new();
+    let parent_id = 5001_i64;
+    let drone_id = 5002_i64;
+    let target_id = 5003_i64;
+
+    let spawn_triad = |bp: &mut Ballpark,
+                       cycles: &mut Vec<ActiveModuleCycle>,
+                       base_scram: &mut HashMap<BallId, i32>,
+                       base_core: &mut HashMap<BallId, i32>| {
+        for (id, pos) in [
+            (parent_id, DVec3::ZERO),
+            (drone_id, DVec3::new(500.0, 0.0, 0.0)),
+            (target_id, DVec3::new(1_500.0, 0.0, 0.0)),
+        ] {
+            let mut cs = CombatState::default();
+            cs.base_max_velocity = Some(300.0);
+            spawn_ball_with_combat_in_actor(
+                bp,
+                cycles,
+                base_scram,
+                base_core,
+                &None,
+                &None,
+                None,
+                make_tackle_ball(id, 587, pos),
+                cs,
+                None,
+            );
+        }
+    };
+    let make_web_cycle = || ActiveModuleCycle {
+        ship_id: drone_id,
+        module_id: -drone_id,
+        effect_name: format!("drone_web:{parent_id}:9001"),
+        target_id: Some(target_id),
+        repeat: 1_000,
+        duration_s: 5.0,
+        target_velocity_multiplier: Some(0.5),
+        max_effective_range_m: Some(10_000.0),
+        ..ActiveModuleCycle::default()
+    };
+
+    // 1. In-range drone_web slows target; drifting beyond max_effective_range_m clears cycle & restores speed
+    spawn_triad(&mut bp, &mut cycles, &mut base_scram, &mut base_core);
+    cycles.push(make_web_cycle());
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    assert_eq!(cycles.len(), 1);
+    assert!((bp.combat_states[&target_id].web_velocity_multiplier - 0.5).abs() < 1e-6);
+    assert!((bp.balls[&target_id].max_velocity - 150.0).abs() < 1e-3);
+
+    bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(25_000.0, 0.0, 0.0);
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    assert!(cycles.is_empty(), "out-of-range drone_web must be cleared");
+    assert!((bp.combat_states[&target_id].web_velocity_multiplier - 1.0).abs() < 1e-6);
+    assert!((bp.balls[&target_id].max_velocity - 300.0).abs() < 1e-3);
+
+    // 2. Removing parent ship (or drone / target) prunes drone_web and restores target speed
+    bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(1_500.0, 0.0, 0.0);
+    cycles.push(make_web_cycle());
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    assert!((bp.combat_states[&target_id].web_velocity_multiplier - 0.5).abs() < 1e-6);
+    let _ = bp.remove_ball(parent_id);
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    assert!(cycles.is_empty(), "drone_web must be pruned when parent ship leaves space");
+    assert!((bp.combat_states[&target_id].web_velocity_multiplier - 1.0).abs() < 1e-6);
+
+    // 3. Removing drone ball prunes drone_web and restores target speed
+    spawn_triad(&mut bp, &mut cycles, &mut base_scram, &mut base_core);
+    cycles.push(make_web_cycle());
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    assert!((bp.combat_states[&target_id].web_velocity_multiplier - 0.5).abs() < 1e-6);
+    let _ = bp.remove_ball(drone_id);
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    assert!(cycles.is_empty(), "drone_web must be pruned when drone ball leaves space");
+    assert!((bp.combat_states[&target_id].web_velocity_multiplier - 1.0).abs() < 1e-6);
+
+    // 4. Parent unlocking target clears drone_web and restores target speed
+    spawn_triad(&mut bp, &mut cycles, &mut base_scram, &mut base_core);
+    cycles.push(make_web_cycle());
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    assert!((bp.combat_states[&target_id].web_velocity_multiplier - 0.5).abs() < 1e-6);
+    on_target_unlocked_in_actor(
+        &mut bp,
+        &mut cycles,
+        &base_scram,
+        &base_core,
+        &None,
+        parent_id,
+        Some(target_id),
+        None,
+    );
+    assert!(cycles.is_empty(), "parent unlock must clear drone_web");
+    assert!((bp.combat_states[&target_id].web_velocity_multiplier - 1.0).abs() < 1e-6);
+    assert!((bp.balls[&target_id].max_velocity - 300.0).abs() < 1e-3);
+}

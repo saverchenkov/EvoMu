@@ -32,10 +32,18 @@ pub(crate) fn is_sleeper_or_drifter_capacitor_immune(
         })
 }
 
-pub(crate) fn parse_siren_tackle_ids(effect_name: &str) -> Option<(BallId, i64)> {
-    let rest = effect_name.strip_prefix("siren_tackle:")?;
+fn parse_minion_cycle_ids(prefix: &str, effect_name: &str) -> Option<(BallId, i64)> {
+    let rest = effect_name.strip_prefix(prefix)?;
     let (parent_s, item_s) = rest.split_once(':')?;
     Some((parent_s.parse().ok()?, item_s.parse().ok()?))
+}
+
+pub(crate) fn parse_siren_tackle_ids(effect_name: &str) -> Option<(BallId, i64)> {
+    parse_minion_cycle_ids("siren_tackle:", effect_name)
+}
+
+pub(crate) fn parse_drone_web_ids(effect_name: &str) -> Option<(BallId, i64)> {
+    parse_minion_cycle_ids("drone_web:", effect_name)
 }
 
 pub(crate) fn active_tackle_and_core_deltas(
@@ -413,19 +421,20 @@ pub(crate) fn reconcile_tackle_and_bubbles(
     let effective_db = if reentrant_db { &None } else { db_opt };
     let mut aborted_cycles = Vec::new();
 
-    // 0. Prune synthetic Support Fighter Siren tackle cycles when the fighter ball, parent carrier,
-    //    or target ball leaves space (`CmdAbandonFighter` explicitly strips cycles on abandonment),
-    //    and deactivate targeted cycles whose balls have drifted beyond `max_effective_range_m`.
+    // 0. Prune synthetic Support Fighter Siren tackle and drone stasis web cycles when the
+    //    minion ball, parent ship, or target ball leaves space, and deactivate targeted
+    //    cycles whose balls have drifted beyond `max_effective_range_m`.
     for idx in (0..active_module_cycles.len()).rev() {
-        let is_siren = parse_siren_tackle_ids(&active_module_cycles[idx].effect_name);
-        let siren_missing = is_siren.is_some_and(|(parent_ship_id, _fighter_item_id)| {
+        let minion_ids = parse_siren_tackle_ids(&active_module_cycles[idx].effect_name)
+            .or_else(|| parse_drone_web_ids(&active_module_cycles[idx].effect_name));
+        let minion_missing = minion_ids.is_some_and(|(parent_ship_id, _minion_item_id)| {
             !ballpark.balls.contains_key(&active_module_cycles[idx].ship_id)
                 || !ballpark.balls.contains_key(&parent_ship_id)
                 || !active_module_cycles[idx]
                     .target_id
                     .is_some_and(|tid| ballpark.balls.contains_key(&tid))
         });
-        if siren_missing {
+        if minion_missing {
             active_module_cycles.remove(idx);
             continue;
         }
@@ -443,7 +452,7 @@ pub(crate) fn reconcile_tackle_and_bubbles(
         if out_of_range {
             let shut_down = active_module_cycles.remove(idx);
             cleanup_removed_module_cycle(ballpark, &shut_down, effective_db);
-            if is_siren.is_none() {
+            if minion_ids.is_none() {
                 aborted_cycles.push(shut_down);
             }
         }
@@ -755,6 +764,8 @@ pub(crate) fn on_target_unlocked_in_actor(
         };
         if (active_module_cycles[idx].ship_id == source_id
             || parse_siren_tackle_ids(&active_module_cycles[idx].effect_name)
+                .is_some_and(|(parent_id, _)| parent_id == source_id)
+            || parse_drone_web_ids(&active_module_cycles[idx].effect_name)
                 .is_some_and(|(parent_id, _)| parent_id == source_id))
             && matches_target
         {
