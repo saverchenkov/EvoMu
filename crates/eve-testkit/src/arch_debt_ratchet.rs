@@ -467,12 +467,12 @@ impl PatternKind {
             Self::SlashCommandPrefixParse
             | Self::RouterBindingGraceHelpers
             | Self::BallparkLocksOutsideSystemActor => None,
-            Self::HandwrittenItemChangeEmitters => {
-                Some(r"\b(?:emit|notify)_item_change[A-Za-z0-9_]*\s*\(")
-            }
-            Self::HandwrittenAccountChangeEmitters => {
-                Some(r"\b(?:emit|notify)_[A-Za-z0-9_]*account_change[A-Za-z0-9_]*\s*\(")
-            }
+            Self::HandwrittenItemChangeEmitters => Some(
+                r"\b(?:(?:notify_item_mutation|emit_inv_item_change|emit_inv_item_deleted|emit_item_change_routed|emit_item_deleted_routed|notify_item_record_change|emit_market_item_change|emit_ship_charge_item_diffs|notify_item_change|emit_item_change_with_industry_refresh|notify_item_record_change_with_target|notify_fitted_item_trashed|emit_item_change_with_target|emit_item_changes|emit_item_changes_with_sink|emit_store_item_mutations|emit_mission_item_reward_notification)\s*\(|(?:OnItemChange|OnMultipleItemChange|OnBlueprintsUpdated)\s*\{)",
+            ),
+            Self::HandwrittenAccountChangeEmitters => Some(
+                r"\b(?:(?:notify_wallet_balance|emit_market_account_change|notify_account_change)\s*\(|OnAccountChange\s*\{)",
+            ),
             Self::SystemTimeNowInGameplay => Some(r"\bSystemTime\s*::\s*now\s*\("),
             Self::IsWriteLockedByCurrentThread => Some(r"\bis_write_locked_by_current_thread\b"),
         }
@@ -516,9 +516,19 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
                 )
             }
         }
-        PatternKind::HandwrittenItemChangeEmitters => count_handwritten_change_emitters(text, true),
+        PatternKind::HandwrittenItemChangeEmitters => {
+            if rel_key.contains("router/delta_") {
+                0
+            } else {
+                count_handwritten_change_emitters(text, true)
+            }
+        }
         PatternKind::HandwrittenAccountChangeEmitters => {
-            count_handwritten_change_emitters(text, false)
+            if rel_key.contains("router/delta_") {
+                0
+            } else {
+                count_handwritten_change_emitters(text, false)
+            }
         }
         PatternKind::SystemTimeNowInGameplay => count_system_time_now(text),
         PatternKind::IsWriteLockedByCurrentThread => {
@@ -900,16 +910,49 @@ fn count_router_binding_grace_helpers(text: &str) -> usize {
 }
 
 fn count_handwritten_change_emitters(text: &str, item_change: bool) -> usize {
-    let needle = if item_change { "item_change" } else { "account_change" };
-    if !text.contains(needle) {
+    const ITEM_HELPERS: &[&str] = &[
+        "notify_item_mutation",
+        "emit_inv_item_change",
+        "emit_inv_item_deleted",
+        "emit_item_change_routed",
+        "emit_item_deleted_routed",
+        "notify_item_record_change",
+        "emit_market_item_change",
+        "emit_ship_charge_item_diffs",
+        "notify_item_change",
+        "emit_item_change_with_industry_refresh",
+        "notify_item_record_change_with_target",
+        "notify_fitted_item_trashed",
+        "emit_item_change_with_target",
+        "emit_item_changes",
+        "emit_item_changes_with_sink",
+        "emit_store_item_mutations",
+        "emit_mission_item_reward_notification",
+    ];
+    const ITEM_STRUCTS: &[&str] = &["OnItemChange", "OnMultipleItemChange", "OnBlueprintsUpdated"];
+    const WALLET_HELPERS: &[&str] = &[
+        "notify_wallet_balance",
+        "emit_market_account_change",
+        "notify_account_change",
+    ];
+    const WALLET_STRUCTS: &[&str] = &["OnAccountChange"];
+
+    if !text.contains("emit_") && !text.contains("notify_") && !text.contains("On") {
         return 0;
     }
+    let (helpers, structs) = if item_change {
+        (ITEM_HELPERS, ITEM_STRUCTS)
+    } else {
+        (WALLET_HELPERS, WALLET_STRUCTS)
+    };
     let b = text.as_bytes();
     let mut count = 0usize;
-    for prefix in ["emit_", "notify_"] {
+    for prefix in ["emit_", "notify_", "On"] {
         if !text.contains(prefix) {
             continue;
         }
+        let want_delim = if prefix == "On" { b'{' } else { b'(' };
+        let candidates = if prefix == "On" { structs } else { helpers };
         for (i, _) in text.match_indices(prefix) {
             if !has_word_boundary_before(b, i) {
                 continue;
@@ -918,15 +961,10 @@ fn count_handwritten_change_emitters(text: &str, item_change: bool) -> usize {
             while ident_end < b.len() && is_ident_byte(b[ident_end]) {
                 ident_end += 1;
             }
-            if let Ok(tail) = std::str::from_utf8(&b[i + prefix.len()..ident_end]) {
-                let matches_kind = if item_change {
-                    tail.starts_with("item_change")
-                } else {
-                    tail.contains("account_change")
-                };
-                if matches_kind {
-                    let lp = skip_ws(b, ident_end);
-                    if lp < b.len() && b[lp] == b'(' {
+            if let Ok(ident) = std::str::from_utf8(&b[i..ident_end]) {
+                if candidates.contains(&ident) {
+                    let delim_pos = skip_ws(b, ident_end);
+                    if delim_pos < b.len() && b[delim_pos] == want_delim {
                         count += 1;
                     }
                 }
@@ -1498,6 +1536,138 @@ pub fn member_base_roles() {}
         )
         .expect("write v1.json");
         assert!(ArchDebtRatchet::load_from_path(&v1_json).is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_scanners_cover_all_931_item_and_wallet_emitters_and_exclude_router_delta() {
+        let tmp = make_temp_dir("931_emitters");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("router")).expect("create router dir");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+
+        std::fs::write(
+            src.join("services/item_emitters.rs"),
+            r#"
+pub fn all_item_helpers_and_structs(ctx: &Ctx) {
+    ctx.notify_item_mutation(1);
+    ctx.emit_inv_item_change (2);
+    emit_inv_item_deleted(3);
+    ctx.emit_item_change_routed(4);
+    ctx.emit_item_deleted_routed(5);
+    ctx.notify_item_record_change(6);
+    emit_market_item_change(7);
+    emit_ship_charge_item_diffs(8);
+    ctx.notify_item_change(9);
+    ctx.emit_item_change_with_industry_refresh(10);
+    ctx.notify_item_record_change_with_target(11);
+    ctx.notify_fitted_item_trashed(12);
+    ctx.emit_item_change_with_target(13);
+    emit_item_changes(14);
+    emit_item_changes_with_sink(15);
+    emit_store_item_mutations(16);
+    emit_mission_item_reward_notification(17);
+    let _a = crate::router::notify_registry::OnItemChange { x: 1 };
+    let _b = OnMultipleItemChange
+    { x: 2 };
+    let _c = OnBlueprintsUpdated { owner_id: 3 };
+    // Near-misses and ignored sites:
+    let _ignored_comment = "// notify_item_mutation(1) OnItemChange {";
+    let _ignored_str = "emit_inv_item_change(1) OnMultipleItemChange {";
+    let _ignored_prefix = my_notify_item_mutation(1);
+    let _ignored_suffix = notify_item_mutation_extra(1);
+    let _ignored_other = emit_beacon_slim_item_change(1);
+    let _ignored_const = OnItemChange::EVENT;
+    let _ignored_ty: Option<OnItemChange> = None;
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ignored() {
+        notify_item_mutation(1);
+        let _ = OnItemChange { x: 1 };
+    }
+}
+"#,
+        )
+        .expect("write item_emitters.rs");
+
+        std::fs::write(
+            src.join("services/wallet_emitters.rs"),
+            r#"
+pub fn notify_special_site_account_changes(ctx: &Ctx) {
+    ctx.notify_wallet_balance(1);
+    emit_market_account_change (2);
+    ctx.notify_account_change(3);
+    let _d = crate::router::notify_registry::OnAccountChange { balance: 0.0 };
+    let _ignored = my_notify_account_change(4);
+    let _ignored_suffix = notify_wallet_balance_v2(5);
+    let _ignored_const = OnAccountChange::DEFAULT_ID_TYPE;
+}
+"#,
+        )
+        .expect("write wallet_emitters.rs");
+
+        // `router/delta_*` must be excluded; legacy `router/cache_notifications.rs` &
+        // `router/context.rs` must remain counted; `router/notify_registry.rs` macro arms must not match.
+        std::fs::write(
+            src.join("router/delta_projection.rs"),
+            "pub fn p() { let _ = OnItemChange {}; let _ = OnBlueprintsUpdated {}; let _ = OnAccountChange {}; }\n",
+        )
+        .expect("write delta_projection.rs");
+        std::fs::write(
+            src.join("router/delta_commit_listener.rs"),
+            "pub fn d(ctx: &Ctx) { ctx.notify_wallet_balance(1); let _ = OnAccountChange {}; }\n",
+        )
+        .expect("write delta_commit_listener.rs");
+        std::fs::write(
+            src.join("router/cache_notifications.rs"),
+            "pub fn c(ctx: &Ctx) { ctx.notify_item_mutation(1); }\n",
+        )
+        .expect("write cache_notifications.rs");
+        std::fs::write(
+            src.join("router/context.rs"),
+            "pub fn x(ctx: &Ctx) { ctx.notify_account_change(1); }\n",
+        )
+        .expect("write context.rs");
+        std::fs::write(
+            src.join("router/notify_registry.rs"),
+            "notify_def!(OnItemChange => \"OnItemChange\" (\"charid\") {}, OnAccountChange => \"OnAccountChange\" (\"charid\") {});\n",
+        )
+        .expect("write notify_registry.rs");
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan 931 emitters");
+        assert_eq!(report.patterns["handwritten_item_change_emitters"].occurrences, 21);
+        assert_eq!(report.patterns["handwritten_item_change_emitters"].files, 2);
+        assert_eq!(
+            report.patterns["handwritten_item_change_emitters"].per_file.get("services/item_emitters.rs"),
+            Some(&20)
+        );
+        assert_eq!(
+            report.patterns["handwritten_item_change_emitters"].per_file.get("router/cache_notifications.rs"),
+            Some(&1)
+        );
+        assert!(
+            !report.patterns["handwritten_item_change_emitters"].per_file.contains_key("router/delta_projection.rs")
+        );
+
+        assert_eq!(report.patterns["handwritten_account_change_emitters"].occurrences, 5);
+        assert_eq!(report.patterns["handwritten_account_change_emitters"].files, 2);
+        assert_eq!(
+            report.patterns["handwritten_account_change_emitters"].per_file.get("services/wallet_emitters.rs"),
+            Some(&4)
+        );
+        assert_eq!(
+            report.patterns["handwritten_account_change_emitters"].per_file.get("router/context.rs"),
+            Some(&1)
+        );
+        assert!(
+            !report.patterns["handwritten_account_change_emitters"].per_file.contains_key("router/delta_commit_listener.rs")
+        );
+        assert!(
+            !report.patterns["handwritten_account_change_emitters"].per_file.contains_key("router/delta_projection.rs")
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
