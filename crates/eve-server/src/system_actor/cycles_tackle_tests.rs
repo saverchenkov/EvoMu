@@ -3545,3 +3545,190 @@ fn drone_web_cycle_parsing_range_orphan_pruning_and_parent_unlock() {
         "ModuleDeactivationHook must fire ONLY for real ship modules, never synthetic drone_web or siren_tackle cycles"
     );
 }
+
+#[test]
+fn minion_cycle_deactivation_suppressed_on_physics_step_and_remove_ball() {
+    use crate::services::tactical_modules::TacticalModulesState;
+    use eve_db::lock_rank::RwLock;
+
+    let sde_opt = Some(make_tackle_sde());
+    let base_scram = HashMap::new();
+    let base_core = HashMap::new();
+    let parent_id = 5101i64;
+    let drone_id = 6101i64;
+    let siren_id = 7101i64;
+    let target_id = 9101i64;
+    let pilot_char_id = 42_001i64;
+
+    let mut bp = Ballpark::new();
+    bp.add_ball(make_tackle_ball(parent_id, 587, DVec3::ZERO));
+    bp.add_ball(make_tackle_ball(drone_id, 2488, DVec3::new(1_000.0, 0.0, 0.0)));
+    bp.add_ball(make_tackle_ball(siren_id, 40560, DVec3::new(1_200.0, 0.0, 0.0)));
+    bp.add_ball(make_tackle_ball(target_id, 587, DVec3::new(25_000.0, 0.0, 0.0)));
+    for &id in &[parent_id, drone_id, siren_id, target_id] {
+        bp.combat_states.insert(id, CombatState::default());
+    }
+    bp.ball_slim_meta.insert(
+        drone_id,
+        SlimItemMeta {
+            owner_id: pilot_char_id,
+            ..SlimItemMeta::default()
+        },
+    );
+    bp.ball_slim_meta.insert(
+        siren_id,
+        SlimItemMeta {
+            owner_id: pilot_char_id,
+            ..SlimItemMeta::default()
+        },
+    );
+
+    let hook_calls = Arc::new(std::sync::Mutex::new(Vec::<(i64, i64, String)>::new()));
+    let hook_calls_ref = Arc::clone(&hook_calls);
+    let rec_hook: ModuleDeactivationHook = Arc::new(move |cid, cyc| {
+        hook_calls_ref
+            .lock()
+            .unwrap()
+            .push((cid, cyc.module_id, cyc.effect_name.clone()));
+    });
+
+    // 1. Physics tick (`step_cycles_and_capacitor_with_missiles_and_tidi`): out-of-range
+    //    `drone_web:*` and `siren_tackle:*` end in `cycles.rs` before `reconcile_tackle_and_bubbles`,
+    //    yet only the real ship module emits `ModuleDeactivationHook`.
+    let mut cycles = vec![
+        ActiveModuleCycle {
+            ship_id: drone_id,
+            module_id: -drone_id,
+            effect_name: format!("drone_web:{parent_id}:9001"),
+            target_id: Some(target_id),
+            repeat: 1_000,
+            duration_s: 5.0,
+            target_velocity_multiplier: Some(0.5),
+            max_effective_range_m: Some(10_000.0),
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id: siren_id,
+            module_id: -siren_id,
+            effect_name: format!("siren_tackle:{parent_id}:9002"),
+            target_id: Some(target_id),
+            repeat: 1_000,
+            duration_s: 12.0,
+            warp_scramble_points: 2,
+            max_effective_range_m: Some(20_000.0),
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id: parent_id,
+            owner_char_id: Some(pilot_char_id),
+            module_id: 8101,
+            effect_name: "modulePoint".into(),
+            target_id: Some(target_id),
+            repeat: 1_000,
+            duration_s: 10.0,
+            warp_scramble_points: 1,
+            max_effective_range_m: Some(20_000.0),
+            ..ActiveModuleCycle::default()
+        },
+    ];
+    let tactical_state = RwLock::new(TacticalModulesState::default());
+    let mut pending_actions = Vec::new();
+    let mut pending_launches = Vec::new();
+    let mut rack_heat = HashMap::new();
+    let mut rah_dmg = HashMap::new();
+    let mut pending_anchoring = Vec::new();
+    let mut active_nanite = Vec::new();
+    let mut weapon_starts = std::collections::HashSet::new();
+    let empty_epochs = HashMap::new();
+    let empty_proj = HashMap::new();
+    let _ = crate::system_actor::cycles::step_cycles_and_capacitor_with_missiles_and_tidi(
+        &mut bp,
+        &mut cycles,
+        &mut pending_anchoring,
+        &mut active_nanite,
+        &mut rack_heat,
+        &mut rah_dmg,
+        &base_scram,
+        &base_core,
+        &sde_opt,
+        &None,
+        &empty_epochs,
+        &empty_proj,
+        &mut weapon_starts,
+        &mut pending_launches,
+        &None,
+        &tactical_state,
+        &mut pending_actions,
+        0.0,
+        1.0,
+        1.0,
+        None,
+        Some(&rec_hook),
+        None,
+    );
+    assert!(cycles.is_empty(), "all out-of-range cycles must terminate during physics step");
+    assert_eq!(
+        *hook_calls.lock().unwrap(),
+        vec![(pilot_char_id, 8101, "modulePoint".to_string())],
+        "physics step deactivation must never emit negative-ID hooks for synthetic minion cycles"
+    );
+
+    // 2. Ball removal (`remove_all_ship_module_cycles_preserving_own_db` via RemoveBall):
+    //    synthetic `drone_web:*` and `siren_tackle:*` stay silent while real module `8102` emits.
+    hook_calls.lock().unwrap().clear();
+    bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(1_500.0, 0.0, 0.0);
+    cycles.push(ActiveModuleCycle {
+        ship_id: drone_id,
+        module_id: -drone_id,
+        effect_name: format!("drone_web:{parent_id}:9001"),
+        target_id: Some(target_id),
+        repeat: 1_000,
+        duration_s: 5.0,
+        target_velocity_multiplier: Some(0.5),
+        max_effective_range_m: Some(10_000.0),
+        ..ActiveModuleCycle::default()
+    });
+    cycles.push(ActiveModuleCycle {
+        ship_id: siren_id,
+        module_id: -siren_id,
+        effect_name: format!("siren_tackle:{parent_id}:9002"),
+        target_id: Some(target_id),
+        repeat: 1_000,
+        duration_s: 12.0,
+        warp_scramble_points: 2,
+        max_effective_range_m: Some(25_000.0),
+        ..ActiveModuleCycle::default()
+    });
+    cycles.push(ActiveModuleCycle {
+        ship_id: parent_id,
+        owner_char_id: Some(pilot_char_id),
+        module_id: 8102,
+        effect_name: "moduleWeb".into(),
+        target_id: Some(target_id),
+        repeat: 1_000,
+        duration_s: 10.0,
+        target_velocity_multiplier: Some(0.4),
+        ..ActiveModuleCycle::default()
+    });
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, Some(&rec_hook));
+    assert!((bp.combat_states[&target_id].web_velocity_multiplier - 0.4).abs() < 1e-6);
+
+    let _ = crate::system_actor::cycles::remove_all_ship_module_cycles_preserving_own_db(
+        &mut bp,
+        &mut cycles,
+        &base_scram,
+        &base_core,
+        &None,
+        target_id,
+        false,
+        Some(&rec_hook),
+    );
+    assert!(cycles.is_empty(), "RemoveBall target cleanup must clear all targeted cycles");
+    assert_eq!(
+        *hook_calls.lock().unwrap(),
+        vec![(pilot_char_id, 8102, "moduleWeb".to_string())],
+        "RemoveBall deactivation must emit ONLY real ship module cycles"
+    );
+    assert!((bp.combat_states[&target_id].web_velocity_multiplier - 1.0).abs() < 1e-6);
+    assert!(!bp.combat_states[&target_id].is_warp_scrambled());
+}

@@ -1718,7 +1718,16 @@ async fn handle_execute_movement_command_on_fighters(
             Ok(committed)
         })();
         let committed = match reserved_batch {
-            Ok(v) => v,
+            Ok(v) if !v.is_empty() => v,
+            Ok(_) => {
+                let first_id = fighter_ids[0];
+                let message = format!("Fighter squadron {first_id} not found");
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "FighterNotFound",
+                    message.clone(),
+                    eve_proto::ClientError::CustomInfo(message),
+                )));
+            }
             Err(e) => return Some(Err(e)),
         };
         let mut first_err: Option<BridgeRpcError> = None;

@@ -981,13 +981,8 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 eve_proto::ClientError::CustomInfo(msg),
             ));
         }
-        let is_abandoned_meta = claimed_drone.as_ref().is_some_and(|d| d.is_abandoned)
-            || snap
-                .sp6_lifecycle
-                .space_object_meta
-                .get(&it.item_id)
-                .is_some_and(|m| m.drone_ball_id.is_some());
-        if it.owner_id != char_id && it.owner_id != 0 && !is_abandoned_meta {
+        let is_abandoned = claimed_drone.as_ref().is_some_and(|d| d.is_abandoned);
+        if it.owner_id != char_id && it.owner_id != 0 && !is_abandoned {
             let msg = "Cannot scoop a drone owned by another pilot".to_string();
             return Err(BridgeRpcError::with_client_error(
                 "DroneOwnedByOther",

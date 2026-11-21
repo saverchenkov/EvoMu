@@ -1934,6 +1934,7 @@ pub async fn handle_npcs_drones(
                     continue;
                 }
                 let cycle_ready = now_unix >= next_ready && !target_destroyed;
+                let mut this_drone_ewar = false;
                 if cycle_ready {
                     if d.group_id == 640 {
                         // Logistic drone (`feat:drones.logistic-drones`)
@@ -1972,7 +1973,6 @@ pub async fn handle_npcs_drones(
                             target_ball.type_id,
                         )
                         .await;
-                        let mut this_drone_ewar = false;
                         if !immune {
                             if cycle_ops::apply_drone_web_cycle(
                                 ctx,
@@ -2071,14 +2071,17 @@ pub async fn handle_npcs_drones(
                         }
                     }
                 }
-                let next_cycle_unix = if cycle_ready {
+                let is_ewar_only_drone =
+                    matches!(d.group_id, 639 | 641 | 544 | 545) && d.damage_vector.total() <= 0.0;
+                let cycle_acted = cycle_ready && (!is_ewar_only_drone || this_drone_ewar);
+                let next_cycle_unix = if cycle_acted {
                     now_unix.saturating_add(d.cycle_duration_secs(ctx))
                 } else {
                     next_ready
                 };
                 cycle_ops::finish_engaged_drone_cycle(
                     ctx, &sys_handle, d.ball_id, char_id, ship_id, target_id,
-                    target_destroyed, cycle_ready, next_cycle_unix,
+                    target_destroyed, cycle_acted, next_cycle_unix,
                 )
                 .await;
             }

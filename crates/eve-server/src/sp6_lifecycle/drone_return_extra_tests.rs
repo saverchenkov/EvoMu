@@ -1132,3 +1132,210 @@ async fn drone_return_and_scoop_use_surface_range_fail_closed_and_block_destroye
         );
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn launched_active_drone_cannot_be_stolen_during_return_or_scoop_race() {
+    use crate::services::combat_crimewatch::combat_npcs_drones::handle_npcs_drones;
+
+    let ctx = Arc::new(test_ctx());
+    let sys_id = 30_000_142u32;
+    let owner_char = 90_996_001i64;
+    let owner_ship = 956_000_001i64;
+    let thief_char = 90_996_002i64;
+    let thief_ship = 956_000_002i64;
+    let drone_stack_id = 956_000_101i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_char = snap.characters[&90_000_001].clone();
+        for (cid, sid, name) in [
+            (owner_char, owner_ship, "ActiveDroneOwner"),
+            (thief_char, thief_ship, "ActiveDroneThief"),
+        ] {
+            let mut ch = base_char.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.name = name.into();
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = sid;
+            ch.station_id = None;
+            ch.structure_id = None;
+            snap.characters.insert(cid, ch);
+
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 593,
+                    owner_id: cid,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            drone_stack_id,
+            InventoryItemRecord {
+                item_id: drone_stack_id,
+                type_id: 2454,
+                owner_id: owner_char,
+                location_id: owner_ship,
+                flag: InventoryFlag::DroneBay,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for sid in [owner_ship, thief_ship] {
+        spawn_ball(&ctx, sys_id, sid, 593, DVec3::ZERO);
+    }
+
+    let mut owner_sess = SessionState {
+        user_id: Some(owner_char as u64),
+        character_id: Some(owner_char),
+        ship_id: Some(owner_ship),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+    let mut thief_sess = SessionState {
+        user_id: Some(thief_char as u64),
+        character_id: Some(thief_char),
+        ship_id: Some(thief_ship),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    // Pilot A launches active drone (`LaunchDrones` sets `space_object_meta[drone_id].drone_ball_id`)
+    let PyRep::List(launched) = handle_npcs_drones(
+        &ctx,
+        &mut owner_sess,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Integer(drone_stack_id)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("LaunchDrones succeeds")
+    else {
+        panic!("expected LaunchDrones ID list");
+    };
+    let drone_bid = launched[0].as_i64().unwrap();
+    let drone_item_id = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&drone_bid].drone_item_id);
+    let _ = sys_handle.set_ball_position(drone_bid, DVec3::new(500.0, 0.0, 0.0)).await;
+
+    // Confirm space_object_meta has drone_ball_id populated, yet Pilot B CANNOT scoop it as "abandoned"
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.sp6_lifecycle
+                .space_object_meta
+                .get(&drone_item_id)
+                .and_then(|m| m.drone_ball_id),
+            Some(drone_bid)
+        );
+    });
+    let thief_pre_err = handle_npcs_drones(
+        &ctx,
+        &mut thief_sess,
+        "ship",
+        "ScoopToDroneBay",
+        &[PyRep::Integer(drone_bid)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(thief_pre_err.code, "DroneOwnedByOther");
+
+    // Race Pilot A `CmdReturnBay` (calls `try_atomic_scoop_drone`) against Pilot B `ScoopToDroneBay`
+    // across multiple iterations (including re-launch) — Pilot B must NEVER steal Pilot A's active drone.
+    let mut cur_bid = drone_bid;
+    let mut cur_item = drone_item_id;
+    for iter in 0..8 {
+        let _ = sys_handle.set_ball_position(cur_bid, DVec3::new(500.0, 0.0, 0.0)).await;
+        let c1 = Arc::clone(&ctx);
+        let c2 = Arc::clone(&ctx);
+        let mut s1 = owner_sess.clone();
+        let mut s2 = thief_sess.clone();
+        let ret_args = [PyRep::List(vec![PyRep::Integer(cur_bid)])];
+        let scoop_args = [PyRep::Integer(cur_bid)];
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let b1 = Arc::clone(&barrier);
+        let b2 = Arc::clone(&barrier);
+        let (ret_res, thief_res) = tokio::join!(
+            async move {
+                b1.wait().await;
+                handle_cmd_return_bay(&c1, &mut s1, &ret_args, &HashMap::new()).await
+            },
+            async move {
+                b2.wait().await;
+                handle_npcs_drones(&c2, &mut s2, "ship", "ScoopToDroneBay", &scoop_args, &HashMap::new()).await
+            }
+        );
+        assert!(ret_res.is_ok(), "iter {iter}: owner CmdReturnBay failed: {ret_res:?}");
+        let thief_err = thief_res
+            .expect("handled")
+            .expect_err("thief ScoopToDroneBay must NEVER succeed against active owner return");
+        assert!(
+            matches!(thief_err.code.as_str(), "DroneOwnedByOther" | "DroneNotInSpace"),
+            "iter {iter}: unexpected thief error {:?}",
+            thief_err
+        );
+        ctx.db.with_snapshot(|snap| {
+            let it = &snap.items[&cur_item];
+            assert_eq!(it.location_id, owner_ship);
+            assert_eq!(it.flag, InventoryFlag::DroneBay);
+            assert_eq!(it.owner_id, owner_char);
+        });
+
+        let PyRep::List(relaunched) = handle_npcs_drones(
+            &ctx,
+            &mut owner_sess,
+            "ship",
+            "LaunchDrones",
+            &[PyRep::List(vec![PyRep::Integer(cur_item)])],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("re-launch succeeds")
+        else {
+            panic!("expected LaunchDrones ID list");
+        };
+        cur_bid = relaunched[0].as_i64().unwrap();
+        cur_item = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&cur_bid].drone_item_id);
+    }
+
+    // Once Pilot A genuinely abandons the active drone (`CmdAbandonDrone`), Pilot B CAN scoop it.
+    let _ = sys_handle.set_ball_position(cur_bid, DVec3::new(500.0, 0.0, 0.0)).await;
+    super::handle_cmd_abandon_drone(&ctx, &mut owner_sess, &[PyRep::Integer(cur_bid)], &kw)
+        .await
+        .expect("CmdAbandonDrone succeeds");
+    let ok_thief = handle_npcs_drones(
+        &ctx,
+        &mut thief_sess,
+        "ship",
+        "ScoopToDroneBay",
+        &[PyRep::Integer(cur_bid)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ScoopToDroneBay on genuinely abandoned drone succeeds");
+    assert_eq!(
+        ok_thief.dict_get("scoopedDroneItemID").and_then(PyRep::as_i64),
+        Some(cur_item)
+    );
+    assert_eq!(
+        ok_thief.dict_get("newOwnerID").and_then(PyRep::as_i64),
+        Some(thief_char)
+    );
+}
