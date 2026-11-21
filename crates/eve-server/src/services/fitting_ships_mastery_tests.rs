@@ -2202,4 +2202,3 @@ async fn leave_ship_enforces_ownership_for_active_and_explicit_ships() {
     assert_ne!(ej_cap_id, ship_a);
     assert_eq!(ej_sess.ship_id, Some(ej_cap_id));
 }
-

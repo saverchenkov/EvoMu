@@ -1074,5 +1074,3 @@ async fn drone_return_and_scoop_use_surface_range_fail_closed_and_block_destroye
         );
     });
 }
-
-

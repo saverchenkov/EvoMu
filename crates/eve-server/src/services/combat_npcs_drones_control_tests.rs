@@ -1450,4 +1450,3 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
     assert!((cs_after_abandon.web_velocity_multiplier - 1.0).abs() < 1e-6);
     assert!((ball_after_abandon.max_velocity - 300.0).abs() < 1e-3);
 }
-

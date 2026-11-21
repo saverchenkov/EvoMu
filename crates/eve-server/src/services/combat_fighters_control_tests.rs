@@ -1352,5 +1352,3 @@ async fn recall_fighters_enforces_hull_surface_range_and_preserves_concurrent_at
     assert!(ctx.db.get_item(fid2).is_none());
     assert!(!ctx.fighter_tube_loads.read().unwrap().contains_key(&(ship_id, 1)));
 }
-
-

@@ -1648,4 +1648,3 @@ async fn fighter_mjd_batch_prevalidates_atomically_rolls_back_errors_and_multita
     assert_eq!(err_move_mjd.code, "MicroJumpFailed");
     assert!(!ctx.fighter_cooldown_state.read().unwrap().contains_key(&(heavy_ok, 1)));
 }
-
