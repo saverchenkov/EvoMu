@@ -494,7 +494,6 @@ DEFAULT_DOWNTIME_RESUME_BUFFER_SECS = 5.0
 
 _DOWNTIME_EXPLICIT_MARKERS = (
     "clustershuttingdown",
-    "onclustershutdowninitiated",
     "daily cluster downtime",
     "cluster shutdown in progress",
     "reason=clustershutdown",
@@ -624,6 +623,7 @@ def _extract_flight_recorder_failure_texts(
         "log_exceptions",
         "macho_exceptions",
         "quasar_errors",
+        "modals_opened",
         "client_restarted_unexpectedly",
     ):
         frag = _serialize_failure_fragment(flight_recorder.get(key))
@@ -7196,6 +7196,7 @@ class PlaytesterRunner:
         exc: Any = None,
         exec_res: Any = None,
         ui_snapshot: Any = None,
+        post_state: Any = None,
         last_flight_recorder: Any = None,
         now_unix: Optional[float] = None,
     ) -> bool:
@@ -7240,6 +7241,7 @@ class PlaytesterRunner:
                 disconnect_candidates.append(frag)
 
         disconnect_candidates.extend(_extract_downtime_modal_texts(ui_snapshot))
+        disconnect_candidates.extend(_extract_downtime_modal_texts(post_state))
 
         if isinstance(last_flight_recorder, dict):
             last_both, last_explicit = _extract_flight_recorder_failure_texts(
@@ -9446,6 +9448,15 @@ class PlaytesterRunner:
         )
         if not assert_ok and not benign_reject:
             log_warn(f"Step {step_num}: post-action assertion failed -> {assert_err}")
+        downtime_modal_frags = (
+            _extract_downtime_modal_texts(ui_snapshot)
+            + _extract_downtime_modal_texts(post_state_raw)
+            + [
+                frag
+                for frag in (_serialize_failure_fragment(post_fr.get("modals_opened")),)
+                if frag
+            ]
+        )
         has_downtime_signal = bool(
             (isinstance(exec_res, dict) and exec_res.get("action_ok") is False)
             or post_hard_error
@@ -9466,7 +9477,7 @@ class PlaytesterRunner:
             )
             or any(
                 _text_mentions_cluster_downtime(frag) or _text_mentions_disconnect(frag)
-                for frag in _extract_downtime_modal_texts(ui_snapshot)
+                for frag in downtime_modal_frags
             )
             or any(
                 _text_mentions_cluster_downtime(frag)
@@ -9479,6 +9490,7 @@ class PlaytesterRunner:
             and self._is_cluster_downtime_active(
                 exec_res=exec_res,
                 ui_snapshot=ui_snapshot,
+                post_state=post_state_raw,
                 last_flight_recorder=last_flight_recorder,
             )
         )
@@ -9681,6 +9693,13 @@ class PlaytesterRunner:
                         time.sleep(10)
                         continue
                 if self.client_proc is None or self.client_proc.poll() is not None or not self.rpc.ping():
+                    if getattr(self.args, "continuous", False) and self._is_cluster_downtime_active():
+                        resumed_fr = self._pause_and_resume_after_downtime(
+                            reason="inter-step client/RPC unreachable during cluster downtime"
+                        )
+                        last_fr = resumed_fr if resumed_fr is not None else {}
+                        last_burst = []
+                        continue
                     log_warn("EVE.app client or RPC bridge unreachable! Restarting client...")
                     self.reset_batch_state()
                     last_fr = {"client_restarted_unexpectedly": "client_or_rpc_unreachable"}

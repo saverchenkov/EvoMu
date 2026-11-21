@@ -6892,28 +6892,119 @@ class TestHarnessSettleAndDeepWindowInspect1190(unittest.TestCase):
         lbl.name = "offer_title"
         lbl.text = "30 Days Omega Clone State"
         lbl.children = []
+        hidden_vgs = _Dummy()
+        hidden_vgs.name = "l_virtual_goods_store"
+        hidden_vgs.display = False
+        hidden_vgs.children = []
         vgs_layer = _Dummy()
         vgs_layer.name = "l_virtual_goods_store"
+        vgs_layer.display = True
         vgs_layer.children = [lbl]
         vs_layer = _Dummy()
-        vs_layer.children = [vgs_layer]
+        vs_layer.children = [hidden_vgs, vgs_layer]
         layers = _Dummy()
+        layers.virtual_goods_store = hidden_vgs
         layers.viewstate = vs_layer
         uic = _Dummy()
         uic.layer = layers
 
+        fallback_layer = _Dummy()
+        fallback_layer.name = "l_hangar"
+        fallback_view = _Dummy()
+        fallback_view.layer = fallback_layer
+
         sec_vi = _Dummy()
         sec_vi.name = "virtual_goods_store"
         vs = _Dummy()
-        vs.activeView = None
+        vs.activeView = fallback_view
         vs.secondaryView = None
 
+        # Hidden candidates are skipped in favor of the visible layer, and activeView is gated off once sec_layer is found.
         view_obj, layer = hook._resolve_secondary_view_surface(vs, sec_vi, uicore=uic)
         self.assertIsNone(view_obj)
         self.assertIs(layer, vgs_layer)
+
+        # When neither sec_view_obj nor sec_layer resolves, activeView fallback supplies both.
+        empty_sec = _Dummy()
+        empty_sec.name = "nonexistent_secondary_view"
+        fb_view, fb_layer = hook._resolve_secondary_view_surface(vs, empty_sec, uicore=uic)
+        self.assertIs(fb_view, fallback_view)
+        self.assertIs(fb_layer, fallback_layer)
+
         inspected = hook._inspect_window_content(layer)
         self.assertGreaterEqual(inspected["populated_count"], 1)
         self.assertTrue(hook._target_matches_window("people", "addressbook", "Contacts", "AddressBookWindow"))
+
+    def test_type_text_uses_shared_editable_widget_writer(self):
+        hook = _load_hook_with_py2_stubs()
+        events = []
+
+        class _Controller(object):
+            text = ""
+
+            def clear_text(self):
+                events.append(("clear_text", True))
+
+            def replace_text(self, txt):
+                events.append(("replace_text", txt))
+
+            def on_return(self):
+                events.append(("on_return", True))
+
+        class _V24TextField(object):
+            name = "toField"
+            display = True
+            state = 0
+            destroyed = False
+            children = []
+            controller = _Controller()
+
+            def insert_text(self, txt):
+                events.append(("insert_text", txt))
+
+            def GetAbsolute(self):
+                return (800, 380, 160, 26)
+
+        field = _V24TextField()
+        win = types.SimpleNamespace(
+            name="NewMessageWindow",
+            display=True,
+            state=0,
+            destroyed=False,
+            children=[field],
+            GetAbsolute=lambda: (600, 300, 500, 400),
+        )
+        main_layer = types.SimpleNamespace(
+            name="l_main",
+            children=[win],
+            display=True,
+            state=0,
+            destroyed=False,
+            GetAbsolute=lambda: (0, 0, 1280, 720),
+        )
+        reg = types.SimpleNamespace(GetWindows=lambda: [win], GetFocus=lambda: field)
+        layers = types.SimpleNamespace(l_main=main_layer, main=main_layer)
+        fake_uicore = types.SimpleNamespace(registry=reg, layer=layers, desktop=None, cmd=None)
+        fake_sm = mock.MagicMock()
+
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_wait_session_settled"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}), \
+             mock.patch.object(hook, "_settle_after_action", return_value=20):
+            res = hook._execute_action(
+                fake_sm,
+                {"type": "type_text", "target": "toField", "command": "Aura Capsuleer\n"},
+            )
+
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("typed_into"), "toField")
+        self.assertIn(("clear_text", True), events)
+        self.assertIn(("insert_text", "Aura Capsuleer"), events)
+        self.assertIn(("on_return", True), events)
 
 
 if __name__ == "__main__":

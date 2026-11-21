@@ -5110,16 +5110,57 @@ class TestClusterDowntimeHandling1190(unittest.TestCase):
                         now_unix=outside,
                     )
                 )
-                # Explicit shutdown scatter & disconnect modal still trigger appropriately.
+                # 60m (10:00 UTC), 15m (10:45 UTC), and 5m (10:55 UTC) OnClusterShutdownInitiated countdown broadcasts
+                # occur while cluster is healthy online; they must NOT trigger downtime pauses alone or suppress real bugs.
+                warn_60m = datetime(2026, 11, 21, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+                warn_15m = datetime(2026, 11, 21, 10, 45, 0, tzinfo=timezone.utc).timestamp()
+                for ts, rem in ((warn_60m, 3600), (warn_15m, 900)):
+                    self.assertFalse(
+                        runner._is_cluster_downtime_active(
+                            exec_res={
+                                "action_ok": True,
+                                "flight_recorder": {
+                                    "scatters_observed": [{"event": "OnClusterShutdownInitiated", "remaining_secs": rem}]
+                                },
+                            },
+                            now_unix=ts,
+                        )
+                    )
+                    self.assertFalse(
+                        runner._is_cluster_downtime_active(
+                            exec_res={
+                                "action_ok": False,
+                                "action_error": "UnimplementedRPC: stationSvc.DoSomething",
+                                "flight_recorder": {
+                                    "macho_exceptions": ["UnimplementedRPC"],
+                                    "scatters_observed": [{"event": "OnClusterShutdownInitiated", "remaining_secs": rem}],
+                                },
+                            },
+                            now_unix=ts,
+                        )
+                    )
+                # Explicit shutdown message & disconnect modals (pre/post-state or modals_opened) DO trigger downtime.
                 self.assertTrue(
                     runner._is_cluster_downtime_active(
-                        exec_res={"flight_recorder": {"scatters_observed": [{"event": "OnClusterShutdownInitiated"}]}},
+                        exec_res={"flight_recorder": {"scatters_observed": [{"event": "ClusterShuttingDown"}]}},
                         now_unix=outside,
                     )
                 )
                 self.assertTrue(
                     runner._is_cluster_downtime_active(
                         ui_snapshot={"ui": {"modals": [{"text": "GPSTransportClosed"}]}},
+                        now_unix=inside,
+                    )
+                )
+                self.assertTrue(
+                    runner._is_cluster_downtime_active(
+                        post_state={"ui": {"modals": [{"text": "Connection Lost: GPSTransportClosed"}]}},
+                        now_unix=inside,
+                    )
+                )
+                self.assertTrue(
+                    runner._is_cluster_downtime_active(
+                        exec_res={"flight_recorder": {"modals_opened": [{"title": "Connection Lost", "text": "GPSTransportClosed"}]}},
                         now_unix=inside,
                     )
                 )
@@ -5298,6 +5339,199 @@ class TestClusterDowntimeHandling1190(unittest.TestCase):
                 self.assertTrue(ok)
                 self.assertEqual(popen_calls["n"], 2)
                 self.assertEqual(len(wait_calls), 1)
+            finally:
+                runner.oracle.flush()
+
+    def test_downtime_countdown_warnings_and_post_state_modal_in_execute_step_bf01_bf02(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged_eve"
+            staged.mkdir(parents=True)
+            args = playtester.parse_args(["--no-github-sync", "--continuous"])
+            args.worktree = str(root)
+            args.staged_app = str(staged)
+            runner = playtester.PlaytesterRunner(args)
+            try:
+                runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+                runner.batch_id = 1
+                runner.batch_step_index = 0
+                runner.batch_completed_flag = False
+                runner.active_batch_plan = {
+                    "plan_goal": "Test wait steps",
+                    "max_batch_steps": 6,
+                    "steps": [
+                        {
+                            "action_type": "wait",
+                            "wait_ms": 10,
+                            "expected_ui_and_state_change": "wait",
+                        }
+                        for _ in range(6)
+                    ],
+                }
+                fake_client = mock.MagicMock()
+                fake_client.pid = 42425
+                fake_client.poll.return_value = None
+                runner.client_proc = fake_client
+
+                pre_state = {
+                    "active_view": "hangar",
+                    "modals": [],
+                    "open_windows": [],
+                    "clickable_widgets": [],
+                    "ui": {"modals": [], "recent_modal_messages": []},
+                    "space": {},
+                    "skills_state": {},
+                    "wallet_state": {},
+                }
+                action_results = [
+                    # Step 1: 60m countdown warning on healthy step -> MUST NOT pause or skip oracle.
+                    {
+                        "ok": True,
+                        "action_ok": True,
+                        "flight_recorder": {
+                            "scatters_observed": ["OnClusterShutdownInitiated"],
+                            "macho_exceptions": [],
+                            "log_exceptions": [],
+                            "quasar_errors": [],
+                            "modals_opened": [],
+                        },
+                    },
+                    # Step 2: 15m countdown warning alongside a real bug -> MUST still invoke oracle.
+                    {
+                        "ok": False,
+                        "action_ok": False,
+                        "action_error": "UnimplementedRPC: stationSvc.DoSomething",
+                        "flight_recorder": {
+                            "scatters_observed": ["OnClusterShutdownInitiated"],
+                            "macho_exceptions": [{"headline": "UnimplementedRPC: stationSvc.DoSomething"}],
+                            "log_exceptions": [],
+                            "quasar_errors": [],
+                            "modals_opened": [],
+                        },
+                    },
+                    # Step 3: Disconnect modal appears ONLY in post_state (popped before checks) inside downtime.
+                    {
+                        "ok": True,
+                        "action_ok": True,
+                        "post_state": {
+                            "active_view": "hangar",
+                            "modals": [{"title": "Connection Lost", "text": "GPSTransportClosed"}],
+                            "ui": {"modals": [{"title": "Connection Lost", "text": "GPSTransportClosed"}]},
+                        },
+                        "flight_recorder": {
+                            "scatters_observed": [],
+                            "macho_exceptions": [],
+                            "log_exceptions": [],
+                            "quasar_errors": [],
+                            "modals_opened": [{"title": "Connection Lost", "text": "GPSTransportClosed"}],
+                        },
+                    },
+                ]
+                action_idx = {"i": 0}
+
+                def fake_rpc_call(method, params=None, timeout=None):
+                    if method == "get_state":
+                        return dict(pre_state)
+                    if method == "execute_action":
+                        idx = action_idx["i"]
+                        action_idx["i"] += 1
+                        return dict(action_results[idx])
+                    return {}
+
+                def fake_capture(path, **kw):
+                    Path(path).write_bytes(b"png")
+                    return Path(path), {}
+
+                with mock.patch("playtester.get_git_head", return_value="deadbeef"), \
+                     mock.patch("playtester.capture_window_screenshot", side_effect=fake_capture), \
+                     mock.patch.object(runner.rpc, "call", side_effect=fake_rpc_call), \
+                     mock.patch.object(runner.oracle, "evaluate_step") as eval_mock:
+                    with mock.patch("playtester._is_cluster_downtime_window", return_value=False):
+                        runner.execute_step(1, {}, [])
+                        self.assertFalse(getattr(runner, "_downtime_pause_requested", False))
+                        self.assertEqual(eval_mock.call_count, 1)
+
+                        runner.batch_completed_flag = False
+                        runner._escalate_to_diagnostic_planner = False
+                        runner.execute_step(2, {}, [])
+                        self.assertFalse(getattr(runner, "_downtime_pause_requested", False))
+                        self.assertEqual(eval_mock.call_count, 2)
+                        self.assertTrue(runner._escalate_to_diagnostic_planner)
+
+                    with mock.patch("playtester._is_cluster_downtime_window", return_value=True):
+                        runner.batch_completed_flag = False
+                        runner._escalate_to_diagnostic_planner = False
+                        runner._pending_assertion_escalation = None
+                        runner.execute_step(3, {}, [])
+                        self.assertTrue(runner._downtime_pause_requested)
+                        self.assertFalse(runner._escalate_to_diagnostic_planner)
+                        self.assertIsNone(runner._pending_assertion_escalation)
+                        self.assertEqual(eval_mock.call_count, 2)
+            finally:
+                runner.oracle.flush()
+
+    def test_inter_step_client_death_during_downtime_sets_downtime_fr_p2_2(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged_eve"
+            staged.mkdir(parents=True)
+            args = playtester.parse_args(["--no-github-sync", "--continuous", "--no-hybrid"])
+            args.worktree = str(root)
+            args.staged_app = str(staged)
+            runner = playtester.PlaytesterRunner(args)
+            try:
+                runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+                fake_server = mock.MagicMock()
+                fake_server.poll.return_value = None
+                dead_client = mock.MagicMock()
+                dead_client.poll.return_value = 1
+                healthy_client = mock.MagicMock()
+                healthy_client.poll.return_value = None
+
+                start_calls = {"n": 0}
+
+                def fake_start_server(reset_db=False):
+                    runner.server_proc = fake_server
+                    return True
+
+                def fake_start_client(_retry_after_downtime=True):
+                    start_calls["n"] += 1
+                    # Simulate client dying cleanly between initial boot and before step 1 during downtime.
+                    runner.client_proc = dead_client if start_calls["n"] == 1 else healthy_client
+                    return True
+
+                def fake_stop_client():
+                    runner.client_proc = None
+
+                received = []
+
+                def fake_execute_step(step_num, last_fr, last_burst):
+                    received.append(dict(last_fr))
+                    runner.stop_requested = True
+                    return {"macho_calls": ["ok"]}, []
+
+                with mock.patch("playtester.DEFAULT_CONTROL_FILE", root / "control"), \
+                     mock.patch("playtester.DEFAULT_PID_FILE", root / "pid"), \
+                     mock.patch.object(runner, "install_signal_handlers"), \
+                     mock.patch.object(runner, "start_server", side_effect=fake_start_server), \
+                     mock.patch.object(runner, "start_client", side_effect=fake_start_client), \
+                     mock.patch.object(runner, "stop_client", side_effect=fake_stop_client), \
+                     mock.patch.object(runner, "stop_server"), \
+                     mock.patch.object(runner, "check_external_reload_triggers", return_value=(False, 0.0)), \
+                     mock.patch.object(runner.rpc, "ping", return_value=True), \
+                     mock.patch.object(runner, "_write_run_summary"), \
+                     mock.patch.object(runner, "harvest_flight_recorder_anomalies"), \
+                     mock.patch("playtester._is_cluster_downtime_window", return_value=True), \
+                     mock.patch.object(runner, "_wait_out_cluster_downtime", side_effect=lambda **kw: fake_stop_client() or 10.0) as wait_mock, \
+                     mock.patch.object(runner, "execute_step", side_effect=fake_execute_step):
+                    rc = runner.run()
+
+                self.assertEqual(rc, 0)
+                self.assertEqual(wait_mock.call_count, 1)
+                self.assertEqual(start_calls["n"], 2)
+                self.assertEqual(len(received), 1)
+                self.assertIn("client_restarted_for_downtime", received[0])
+                self.assertNotIn("client_restarted_unexpectedly", received[0])
             finally:
                 runner.oracle.flush()
 
