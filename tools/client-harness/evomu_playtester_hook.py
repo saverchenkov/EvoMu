@@ -3924,7 +3924,10 @@ def _resolve_space_command_item_id(bp, sid, sub, query_target):
             suitability = 0 if bdist < 200000.0 else 1
         else:
             suitability = 0
-        cand_key = (tier, suitability, bdist, int(bid))
+        # Enforce action suitability (on-grid <200 km for lock/approach/orbit, >150 km for warp_to,
+        # dockable category for dock) before string tier so an off-grid 7.9 AU exact match like
+        # "Veldspar" never beats an on-grid "Veldspar II-Grade" asteroid in the current belt.
+        cand_key = (suitability, tier, bdist, int(bid))
         if best_key is None or cand_key < best_key:
             best_key = cand_key
             best_bid = int(bid)

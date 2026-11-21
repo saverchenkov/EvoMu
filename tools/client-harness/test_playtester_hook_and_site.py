@@ -5782,6 +5782,39 @@ class TestStargateTargetResolution(unittest.TestCase):
         self.assertIsNone(err_generic)
         self.assertEqual(bid_generic, 50017729)
 
+    def test_suitability_outranks_exact_name_tier_for_space_commands(self):
+        """Regression test: off-grid exact-name asteroid (7.9 AU) must not beat on-grid substring match."""
+        hook = _load_hook_with_py2_stubs()
+        dists = {
+            750000210: 1.1753e12,  # 7.9 AU off-grid exact "Veldspar"
+            750000058: 2884.5,     # on-grid "Veldspar II-Grade"
+            750000900: 1200.0,     # on-grid container exact "Station"
+            60003754: 4.4e10,      # warpable/dockable station substring "Perimeter Station"
+        }
+        bp = types.SimpleNamespace(
+            slimItems={
+                750000210: types.SimpleNamespace(groupID=462, categoryID=25, typeID=1230, name="Veldspar"),
+                750000058: types.SimpleNamespace(groupID=462, categoryID=25, typeID=17470, name="Veldspar II-Grade"),
+                750000900: types.SimpleNamespace(groupID=12, categoryID=2, typeID=23, name="Station"),
+                60003754: types.SimpleNamespace(groupID=15, categoryID=3, typeID=1529, name="Perimeter Station"),
+            },
+            GetBall=lambda bid: types.SimpleNamespace(surfaceDist=dists.get(int(bid), 0.0), mode=2),
+            GetSurfaceDist=lambda _sid, bid: dists.get(int(bid), 0.0),
+        )
+
+        for sub in ("lock_target", "approach", "orbit", "keep_at_range"):
+            bid, err = hook._resolve_space_command_item_id(bp, 1001, sub, "Veldspar")
+            self.assertIsNone(err, sub)
+            self.assertEqual(bid, 750000058, sub)
+
+        bid_warp, err_warp = hook._resolve_space_command_item_id(bp, 1001, "warp_to", "Veldspar")
+        self.assertIsNone(err_warp)
+        self.assertEqual(bid_warp, 750000210)
+
+        bid_dock, err_dock = hook._resolve_space_command_item_id(bp, 1001, "dock", "Station")
+        self.assertIsNone(err_dock)
+        self.assertEqual(bid_dock, 60003754)
+
     def test_execute_jump_gate_and_select_overview_with_tar(self):
         hook = _load_hook_with_py2_stubs()
         helpers = _load_helpers_with_py2_stubs()
