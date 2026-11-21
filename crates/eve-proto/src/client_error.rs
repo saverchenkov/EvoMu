@@ -2119,6 +2119,7 @@ impl BridgeRpcError {
             "OwnershipOrLocationViolation" => {
                 ClientError::user(UserErrorKey::CantDoThatWithSomeoneElsesStuff)
             }
+            "ContractOwnershipViolation" => ClientError::user(UserErrorKey::AccessDenied),
             "InsufficientRole"
             | "GM_InsufficientRole"
             | "UserError: GM_InsufficientRole"

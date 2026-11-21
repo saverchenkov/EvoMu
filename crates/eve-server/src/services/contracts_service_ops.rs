@@ -1173,6 +1173,27 @@ pub(crate) fn handle_break_plastic_wrap_rpc(
     ]))
 }
 
+fn validate_reject_contract_preconditions(
+    snap: &WorldStateSnapshot, c: &ContractRecord, cid: i64, char_id: i64, effective_corp: i64, now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    let is_assignee = c.assignee_id != 0 && (c.assignee_id == char_id || c.assignee_id == effective_corp);
+    if !is_assignee {
+        return Err(eve_proto::BridgeRpcError::contract_ownership_violation(
+            cid, char_id, (c.assignee_id != 0).then_some(c.assignee_id),
+            format!("Character {char_id} is not the assignee of contract {cid}"),
+        ));
+    }
+    if c.status != "Outstanding" {
+        return Err(eve_proto::BridgeRpcError::invalid_contract_state(
+            cid, "Outstanding", &c.status, format!("Contract {cid} in state '{}' cannot be rejected", c.status),
+        ));
+    }
+    if c.assignee_id == effective_corp && c.assignee_id != char_id && !has_corp_contract_role(snap, char_id, effective_corp, now_unix) {
+        return Err(rpc_err("CrpAccessDenied", "Corporate Contract Manager or Director role required to reject a corporate contract"));
+    }
+    Ok(())
+}
+
 pub(crate) fn handle_reject_delete_fail(
     ctx: &ServerContext,
     session: &SessionState,
@@ -1205,23 +1226,7 @@ pub(crate) fn handle_reject_delete_fail(
                 .map(|ch| ch.corporation_id)
                 .filter(|&id| id != 0)
                 .unwrap_or(caller_corp);
-            let is_assignee =
-                c.assignee_id != 0 && (c.assignee_id == char_id || c.assignee_id == effective_corp);
-            if !is_assignee || c.status != "Outstanding" {
-                return Err(rpc_err(
-                    "ContractOwnershipViolation",
-                    format!("Character {char_id} cannot reject contract {cid} in state '{}'", c.status),
-                ));
-            }
-            if c.assignee_id == effective_corp
-                && c.assignee_id != char_id
-                && !has_corp_contract_role(snap, char_id, effective_corp, now_unix)
-            {
-                return Err(rpc_err(
-                    "CrpAccessDenied",
-                    "Corporate Contract Manager or Director role required to reject a corporate contract",
-                ));
-            }
+            validate_reject_contract_preconditions(snap, c, cid, char_id, effective_corp, now_unix)?;
             Ok(is_contract_due(c, now_unix))
         })?;
         if should_lazy_expire && !lazy_resolve_expired_and_notify(ctx, Some(&[cid]), now_unix).is_empty() {
@@ -1267,20 +1272,7 @@ pub(crate) fn handle_reject_delete_fail(
         let has_caller_corp_contract_role = has_corp_contract_role(snap, char_id, effective_corp, now_unix);
 
         if method == "RejectContract" {
-            let is_assignee =
-                c.assignee_id != 0 && (c.assignee_id == char_id || c.assignee_id == effective_corp);
-            if !is_assignee || c.status != "Outstanding" {
-                return Err(rpc_err(
-                    "ContractOwnershipViolation",
-                    format!("Character {char_id} cannot reject contract {cid} in state '{}'", c.status),
-                ));
-            }
-            if c.assignee_id == effective_corp && c.assignee_id != char_id && !has_caller_corp_contract_role {
-                return Err(rpc_err(
-                    "CrpAccessDenied",
-                    "Corporate Contract Manager or Director role required to reject a corporate contract",
-                ));
-            }
+            validate_reject_contract_preconditions(snap, &c, cid, char_id, effective_corp, now_unix)?;
             if c.contract_type == "Auction" && c.current_bidder_id.is_some() {
                 return Err(eve_proto::BridgeRpcError::invalid_contract_state(
                     cid,
@@ -1312,8 +1304,15 @@ pub(crate) fn handle_reject_delete_fail(
         let is_corp_acceptor =
             effective_corp != 0 && c.acceptor_id == Some(effective_corp) && has_caller_corp_contract_role;
         if !can_manage_as_issuer && c.acceptor_id != Some(char_id) && !is_corp_acceptor {
-            return Err(rpc_err(
-                "ContractOwnershipViolation",
+            let required_owner_id = if method == "DeleteContract" {
+                Some(issuer_entity_id)
+            } else {
+                c.acceptor_id
+            };
+            return Err(eve_proto::BridgeRpcError::contract_ownership_violation(
+                cid,
+                char_id,
+                required_owner_id,
                 format!("Character {char_id} is neither issuer nor acceptor of contract {cid}"),
             ));
         }

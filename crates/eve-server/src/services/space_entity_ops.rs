@@ -397,7 +397,7 @@ pub async fn handle(
                         ship_id,
                         Some(char_id),
                         Some(sys_id),
-                        "WarpToBookmark",
+                        "CmdGotoBookmark",
                         "Active ship is not spawned in Ballpark",
                     )));
                 }

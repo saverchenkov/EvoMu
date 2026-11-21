@@ -52,97 +52,47 @@ fn all_user_error_keys_round_trip_and_produce_valid_macho_error_body() {
 
 #[test]
 fn user_error_arg_encodes_v24_tuples_and_6dp_reals() {
-    assert_eq!(
-        UserErrorArg::TypeId(587).to_pyrep(),
-        PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(587)])
-    );
-    assert_eq!(
-        UserErrorArg::Label(UI_LABEL_SHIP_TOO_LARGE).to_pyrep(),
-        PyRep::Tuple(vec![
-            PyRep::Integer(101),
-            PyRep::String(UI_LABEL_SHIP_TOO_LARGE.into())
-        ])
-    );
+    assert_eq!(UserErrorArg::TypeId(587).to_pyrep(), PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(587)]));
+    assert_eq!(UserErrorArg::Label(UI_LABEL_SHIP_TOO_LARGE).to_pyrep(), PyRep::Tuple(vec![PyRep::Integer(101), PyRep::String(UI_LABEL_SHIP_TOO_LARGE.into())]));
     assert_eq!(UserErrorArg::Int(42).to_pyrep(), PyRep::Integer(42));
-    assert_eq!(
-        UserErrorArg::Real(15.123456789).to_pyrep(),
-        PyRep::Real(15.123457)
-    );
+    assert_eq!(UserErrorArg::Real(15.123456789).to_pyrep(), PyRep::Real(15.123457));
     assert_eq!(UserErrorArg::Real(f64::NAN).to_pyrep(), PyRep::Real(0.0));
-    assert_eq!(
-        UserErrorArg::IskCents(IskCents::from_raw_cents(12_345)).to_pyrep(),
-        PyRep::Real(123.45)
-    );
+    assert_eq!(UserErrorArg::IskCents(IskCents::from_raw_cents(12_345)).to_pyrep(), PyRep::Real(123.45));
 
     let args_slice: &[(&str, UserErrorArg)] = &[("typeID", UserErrorArg::Int(3300))];
-    let from_slice = ClientError::user_with_args(UserErrorKey::SkillMissing, args_slice);
-    let from_array = ClientError::user_with_args(
-        UserErrorKey::SkillMissing,
-        [("typeID", UserErrorArg::Int(3300))],
+    assert_eq!(
+        ClientError::user_with_args(UserErrorKey::SkillMissing, args_slice),
+        ClientError::user_with_args(UserErrorKey::SkillMissing, [("typeID", UserErrorArg::Int(3300))]),
     );
-    assert_eq!(from_slice, from_array);
-
-    let arg_rt: UserErrorArg =
-        serde_json::from_str(&serde_json::to_string(&UserErrorArg::TypeId(670)).unwrap())
-            .unwrap();
+    let arg_rt: UserErrorArg = serde_json::from_str(&serde_json::to_string(&UserErrorArg::TypeId(670)).unwrap()).unwrap();
     assert_eq!(arg_rt, UserErrorArg::TypeId(670));
-    let lbl_rt: UserErrorArg = serde_json::from_str(
-        &serde_json::to_string(&UserErrorArg::Label(UI_LABEL_SHIP_TOO_LARGE)).unwrap(),
-    )
-    .unwrap();
+    let lbl_rt: UserErrorArg = serde_json::from_str(&serde_json::to_string(&UserErrorArg::Label(UI_LABEL_SHIP_TOO_LARGE)).unwrap()).unwrap();
     assert_eq!(lbl_rt, UserErrorArg::Label(UI_LABEL_SHIP_TOO_LARGE));
 }
 
 #[test]
 fn user_error_presentation_is_enforced_per_key_modal_vs_notify() {
-    assert_eq!(
-        UserErrorKey::CustomInfo.presentation(),
-        UserErrorPresentation::Modal
-    );
-    assert_eq!(
-        UserErrorKey::NotEnoughCargoSpace.presentation(),
-        UserErrorPresentation::Modal
-    );
-    assert_eq!(
-        UserErrorKey::ShipCannotUseStargate.presentation(),
-        UserErrorPresentation::Modal
-    );
-    assert_eq!(
-        UserErrorKey::CustomNotify.presentation(),
-        UserErrorPresentation::Notify
-    );
-    assert_eq!(
-        UserErrorKey::DockingRequestDenied.presentation(),
-        UserErrorPresentation::Notify
-    );
-    assert_eq!(
-        UserErrorKey::TargetTooFar.presentation(),
-        UserErrorPresentation::Notify
-    );
-    assert_eq!(
-        UserErrorKey::NoCharges.presentation(),
-        UserErrorPresentation::Notify
-    );
-    assert_eq!(
-        UserErrorKey::TargetNotLocked.presentation(),
-        UserErrorPresentation::Notify
-    );
+    for (k, p) in [
+        (UserErrorKey::CustomInfo, UserErrorPresentation::Modal),
+        (UserErrorKey::NotEnoughCargoSpace, UserErrorPresentation::Modal),
+        (UserErrorKey::ShipCannotUseStargate, UserErrorPresentation::Modal),
+        (UserErrorKey::CustomNotify, UserErrorPresentation::Notify),
+        (UserErrorKey::DockingRequestDenied, UserErrorPresentation::Notify),
+        (UserErrorKey::TargetTooFar, UserErrorPresentation::Notify),
+        (UserErrorKey::NoCharges, UserErrorPresentation::Notify),
+        (UserErrorKey::TargetNotLocked, UserErrorPresentation::Notify),
+    ] {
+        assert_eq!(k.presentation(), p);
+    }
 
     let notify = BridgeRpcError::custom_notify("Toast alert");
-    assert_eq!(notify.code, "CustomNotify");
-    assert_eq!(notify.message, "Toast alert");
-    assert_eq!(
-        notify.client_presentation("svc", "m"),
-        UserErrorPresentation::Notify
-    );
+    assert_eq!((notify.code.as_str(), notify.message.as_str()), ("CustomNotify", "Toast alert"));
+    assert_eq!(notify.client_presentation("svc", "m"), UserErrorPresentation::Notify);
     let client_notify = notify.to_client_error("svc", "m");
     assert_eq!(client_notify, ClientError::CustomNotify("Toast alert".into()));
     let (wire_key, wire_dict) = decode_wrapped_user_error(&client_notify.to_macho_error_body(6));
     assert_eq!(wire_key, "CustomNotify");
-    assert_eq!(
-        wire_dict,
-        vec![(PyRep::ascii_bytes("notify"), PyRep::ascii_bytes("Toast alert"))]
-    );
+    assert_eq!(wire_dict, vec![(PyRep::ascii_bytes("notify"), PyRep::ascii_bytes("Toast alert"))]);
 }
 
 #[test]
@@ -400,6 +350,7 @@ fn gh1195_all_17_error_codes_never_fall_back_to_custom_info_and_supply_v24_dict_
         ("InvalidContractState", K::ConContractNotOutstanding, P::Modal, &[]),
         ("ModuleNotFound", K::ItemNotFound, P::Modal, &[]),
         ("OwnershipOrLocationViolation", K::CantDoThatWithSomeoneElsesStuff, P::Notify, &[]),
+        ("ContractOwnershipViolation", K::AccessDenied, P::Notify, &[]),
         ("InsufficientRole", K::InsufficientRoles, P::Notify, &[]),
         ("GM_InsufficientRole", K::InsufficientRoles, P::Notify, &[]),
     ];

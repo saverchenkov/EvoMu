@@ -1577,20 +1577,20 @@ pub fn handle(
                         format!("Courier contract {cid} exceeded its delivery deadline; collateral and reward forfeited"),
                     ));
                 }
-                if c.acceptor_id != Some(char_id) && !is_corp_acceptor {
-                    return Err(eve_proto::BridgeRpcError::contract_ownership_violation(
-                        cid,
-                        char_id,
-                        c.acceptor_id,
-                        format!("Character {char_id} is not the acceptor of contract {cid}"),
-                    ));
-                }
                 if c.status != "InProgress" {
                     return Err(eve_proto::BridgeRpcError::invalid_contract_state(
                         cid,
                         "InProgress",
                         &c.status,
                         format!("Contract {cid} is in state '{}', not InProgress", c.status),
+                    ));
+                }
+                if c.acceptor_id != Some(char_id) && !is_corp_acceptor {
+                    return Err(eve_proto::BridgeRpcError::contract_ownership_violation(
+                        cid,
+                        char_id,
+                        c.acceptor_id,
+                        format!("Character {char_id} is not the acceptor of contract {cid}"),
                     ));
                 }
                 if c.contract_type != "Courier" {
