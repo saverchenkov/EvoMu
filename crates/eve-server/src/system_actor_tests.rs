@@ -1289,3 +1289,561 @@ async fn special_site_ball_spawn_guard_rollback_confirm_and_notify_wakeup() {
     assert!(w2_res.is_none(), "after confirm(), concurrent waiter must observe AlreadySpawned (None)");
     assert!(reg.begin_special_site_ball_spawn(sys_id, ball_id).await.is_none());
 }
+
+#[tokio::test]
+async fn unified_break_protection_and_force_decloak_return_unique_events() {
+    let reg = SystemRegistry::new();
+    let sys_id: SolarSystemId = 30_000_142;
+    let h = reg.get_or_spawn(sys_id);
+    let char_id: CharacterId = 90_000_001;
+    let ship_id: BallId = 8801;
+
+    let mut cs = CombatState {
+        shield_hp: 123.0,
+        max_shield_hp: 500.0,
+        capacitor: 321.0,
+        max_capacitor: 500.0,
+        is_tethered: true,
+        ..Default::default()
+    };
+    cs.apply_jump_cloak_and_invuln_timers(30);
+    cs.warp_exit_invulnerable_remaining_ticks = 15;
+    h.spawn_ball_with_meta(
+        make_actor_ball(ship_id, 587, DVec3::ZERO),
+        cs,
+        SlimItemMeta {
+            char_id: Some(char_id),
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Sync actor-side location_change_invuln and break simultaneously with undock + warp-exit + tether + gate cloak.
+    let tok_5k = LocationInvulnToken { seq: 1, until_unix: 5_000 };
+    h.try_sync_location_change_invuln(char_id, LocationChangeInvulnSyncOp::Grant(tok_5k));
+    let ev = h
+        .break_protection(
+            ship_id,
+            Some(char_id),
+            ProtectionBreakReason::TargetLock,
+            Some(tok_5k),
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(ev.gate_cloak_broken);
+    assert!(ev.invuln_cancelled);
+    assert!(ev.warp_exit_invuln_cancelled);
+    assert!(ev.tether_broken);
+    assert!(ev.slim_cloak_cleared);
+    assert!(ev.should_emit_jump_cloak_cancelled());
+
+    // Idempotent repeat break emits no duplicate cancellation flags.
+    let ev_repeat = h
+        .break_protection(
+            ship_id,
+            Some(char_id),
+            ProtectionBreakReason::ModuleActivation,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(!ev_repeat.invuln_cancelled);
+    assert!(!ev_repeat.any_cloak_broken());
+
+    // Covert cloak survives WarpInitiation, then ForceDecloak (EssGateEntry) strips cloak cycle atomically
+    // without touching non-cloak cycles, HP, or capacitor.
+    h.modify_combat_state(ship_id, |c| {
+        c.is_cloaked = true;
+        c.is_covert_cloak = true;
+        c.gate_cloak_remaining_ticks = 0;
+    })
+    .await
+    .unwrap();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id,
+        module_id: 9101,
+        module_type_id: 11578,
+        owner_char_id: Some(char_id),
+        effect_name: "cloakingWarpSafe".into(),
+        duration_s: 3600.0,
+        repeat: -1,
+        ..ActiveModuleCycle::default()
+    })
+    .await
+    .unwrap();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id,
+        module_id: 9102,
+        module_type_id: 438,
+        owner_char_id: Some(char_id),
+        effect_name: "afterburner".into(),
+        duration_s: 10.0,
+        repeat: 1,
+        ..ActiveModuleCycle::default()
+    })
+    .await
+    .unwrap();
+
+    let warp_ev = h
+        .break_protection(
+            ship_id,
+            Some(char_id),
+            ProtectionBreakReason::WarpInitiation,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(!warp_ev.covert_cloak_broken);
+    assert!(!warp_ev.should_emit_jump_cloak_cancelled());
+    assert!(h.has_module_cycle(ship_id, 9101).await);
+    assert!(h.is_ship_actively_cloaked(ship_id).await);
+
+    let forced_ev = h
+        .force_decloak(
+            ship_id,
+            Some(char_id),
+            ProtectionBreakReason::EssGateEntry,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(forced_ev.covert_cloak_broken);
+    assert_eq!(forced_ev.removed_cloak_cycles.len(), 1);
+    assert_eq!(forced_ev.removed_cloak_cycles[0].module_id, 9101);
+    assert!(forced_ev.removed_cloak_cycles[0].is_covert);
+    assert!(!h.has_module_cycle(ship_id, 9101).await);
+    assert!(h.has_module_cycle(ship_id, 9102).await);
+    assert!(!h.is_ship_actively_cloaked(ship_id).await);
+
+    let snap = h.get_protection_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(!snap.has_any_cloak());
+    assert!(!snap.is_protected(1_000));
+
+    let cs_after = h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_after.has_any_cloak());
+    assert!((cs_after.shield_hp - 123.0).abs() < 1e-6);
+    assert!((cs_after.capacitor - 321.0).abs() < 1e-6);
+    let slim_after = h
+        .ballpark
+        .read()
+        .unwrap()
+        .ball_slim_meta
+        .get(&ship_id)
+        .cloned()
+        .unwrap();
+    assert!(!slim_after.is_cloaked);
+}
+
+#[tokio::test]
+async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_cloak_mechanics() {
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    let reg = SystemRegistry::with_sde_and_db(sde, db.clone());
+    let sys_id: SolarSystemId = 30_000_142;
+    let h = reg.get_or_spawn(sys_id);
+
+    // 1. F1486-01: `add_module_cycle` zeroing `undock_invulnerable_remaining_ticks = 0` while
+    //    `sync_invuln_with_undock_timer = true` must NOT cause `BreakProtection` (`pre_snap: None`)
+    //    to skip `deactivate_cloak(ball_id)`, `CloakBall(0)`, `slim_meta.is_cloaked=false`, or `OnJumpCloakCancelled`.
+    let ship_gate: BallId = 91_486_001;
+    let char_gate: CharacterId = 9_486_001;
+    let mut cs_gate = CombatState {
+        capacitor: 500.0,
+        max_capacitor: 500.0,
+        ..Default::default()
+    };
+    cs_gate.apply_jump_cloak_and_invuln_timers(60);
+    h.spawn_ball_with_meta(
+        make_actor_ball(ship_gate, 587, DVec3::ZERO),
+        cs_gate,
+        SlimItemMeta {
+            char_id: Some(char_gate),
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    h.ballpark.write().unwrap().pending_events.clear();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: ship_gate,
+        module_id: 71_001,
+        owner_char_id: Some(char_gate),
+        duration_s: 5.0,
+        repeat: 1,
+        ..ActiveModuleCycle::default()
+    })
+    .await
+    .unwrap();
+    let cs_mid = h.get_combat_state(ship_gate).await.unwrap().unwrap();
+    assert_eq!(cs_mid.undock_invulnerable_remaining_ticks, 0);
+    assert_eq!(cs_mid.gate_cloak_remaining_ticks, 60);
+    let ev_gate = h
+        .break_protection(
+            ship_gate,
+            Some(char_gate),
+            ProtectionBreakReason::ModuleActivation,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(ev_gate.gate_cloak_broken);
+    assert!(ev_gate.slim_cloak_cleared);
+    assert!(ev_gate.should_emit_jump_cloak_cancelled());
+    let pending = h.ballpark.read().unwrap().pending_events.clone();
+    assert!(pending.iter().any(|ev| matches!(
+        ev,
+        DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == ship_gate
+    )));
+    assert!(pending.iter().any(|ev| matches!(
+        ev,
+        DestinyEvent::OnSpecialFX { ball_id, guid, is_active: false, .. }
+            if *ball_id == ship_gate && guid == "effects.Cloak"
+    )));
+    let slim_gate = h
+        .ballpark
+        .read()
+        .unwrap()
+        .ball_slim_meta
+        .get(&ship_gate)
+        .cloned()
+        .unwrap();
+    assert!(!slim_gate.is_cloaked);
+
+    // 2. F1486-02: Non-covert Prototype Cloak survives `SubwarpMovement`, breaks atomically on
+    //    `WarpInitiation` (stripping cycle + DB `module_active_states` without `OnJumpCloakCancelled`).
+    let ship_nc: BallId = 91_486_002;
+    let char_nc: CharacterId = 9_486_002;
+    let cloak_mod_id: ItemId = 71_002;
+    h.spawn_ball_with_meta(
+        make_actor_ball(ship_nc, 587, DVec3::new(10_000_000_000.0, 0.0, 0.0)),
+        CombatState {
+            is_cloaked: true,
+            is_covert_cloak: false,
+            cloak_velocity_multiplier: Some(0.25),
+            undock_invulnerable_remaining_ticks: 15,
+            ..Default::default()
+        },
+        SlimItemMeta {
+            char_id: Some(char_nc),
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: 11370,
+                owner_id: char_nc,
+                location_id: ship_nc,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: ship_nc,
+        module_id: cloak_mod_id,
+        module_type_id: 11370,
+        owner_char_id: Some(char_nc),
+        effect_name: "cloaking".into(),
+        duration_s: 3600.0,
+        repeat: -1,
+        ..ActiveModuleCycle::default()
+    })
+    .await
+    .unwrap();
+
+    let ev_subwarp = h
+        .break_protection(
+            ship_nc,
+            Some(char_nc),
+            ProtectionBreakReason::SubwarpMovement,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(!ev_subwarp.non_gate_cloak_broken);
+    assert!(!ev_subwarp.should_emit_jump_cloak_cancelled());
+    assert!(ev_subwarp.removed_cloak_cycles.is_empty());
+    assert!(h.has_module_cycle(ship_nc, cloak_mod_id).await);
+    assert!(h.is_ship_actively_cloaked(ship_nc).await);
+    assert!(db.with_snapshot(|s| s.module_active_states.contains(&cloak_mod_id)));
+
+    h.ballpark.write().unwrap().pending_events.clear();
+    let ev_warp = h
+        .break_protection(
+            ship_nc,
+            Some(char_nc),
+            ProtectionBreakReason::WarpInitiation,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(ev_warp.non_gate_cloak_broken);
+    assert!(!ev_warp.covert_cloak_broken);
+    assert!(!ev_warp.gate_cloak_broken);
+    assert!(!ev_warp.should_emit_jump_cloak_cancelled());
+    assert_eq!(ev_warp.removed_cloak_cycles.len(), 1);
+    assert_eq!(ev_warp.removed_cloak_cycles[0].module_id, cloak_mod_id);
+    assert!(!ev_warp.removed_cloak_cycles[0].is_covert);
+    assert!(!h.has_module_cycle(ship_nc, cloak_mod_id).await);
+    assert!(!h.is_ship_actively_cloaked(ship_nc).await);
+    assert!(!db.with_snapshot(|s| s.module_active_states.contains(&cloak_mod_id)));
+    assert!(!h.get_protection_snapshot(ship_nc).await.unwrap().unwrap().has_any_cloak());
+
+    // 3. F1486-04: `force_decloak` preserves `reason.clears_invuln()` for non-`Manual` reasons.
+    h.modify_combat_state(ship_nc, |c| {
+        c.is_cloaked = true;
+        c.is_covert_cloak = true;
+        c.undock_invulnerable_remaining_ticks = 35;
+    })
+    .await
+    .unwrap();
+    let ev_force = h
+        .force_decloak(
+            ship_nc,
+            Some(char_nc),
+            ProtectionBreakReason::ModuleActivation,
+            Some(LocationInvulnToken { seq: 2, until_unix: 2_000 }),
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(ev_force.covert_cloak_broken);
+    assert!(ev_force.invuln_cancelled);
+    let snap_force = h.get_protection_snapshot(ship_nc).await.unwrap().unwrap();
+    assert!(!snap_force.has_any_cloak());
+    assert_eq!(snap_force.snapshot.undock_invulnerable_remaining_ticks, 0);
+
+    // 4. F1486-05: `try_step_full_tick`, `SetSpeedFraction`, `reconcile_disconnected_warp_sync`,
+    //    and `apply_damage` destruction keep `protection_registry` synced/evicted without stale entries.
+    h.ballpark.write().unwrap().balls.get_mut(&ship_nc).unwrap().speed_fraction = 0.0;
+    h.modify_combat_state(ship_nc, |c| c.apply_jump_cloak_and_invuln_timers(45))
+        .await
+        .unwrap();
+    h.ballpark.write().unwrap().ball_slim_meta.get_mut(&ship_nc).unwrap().is_cloaked = true;
+    h.try_step_full_tick(1.0);
+    assert!(h.get_protection_snapshot(ship_nc).await.unwrap().unwrap().snapshot.has_gate_cloak());
+
+    h.set_speed_fraction(ship_nc, 0.5).await.unwrap();
+    let snap_spd = h.get_protection_snapshot(ship_nc).await.unwrap().unwrap();
+    assert!(!snap_spd.snapshot.has_gate_cloak());
+    assert_eq!(snap_spd.snapshot.undock_invulnerable_remaining_ticks, 0);
+
+    h.ballpark.write().unwrap().balls.get_mut(&ship_nc).unwrap().speed_fraction = 0.0;
+    h.modify_combat_state(ship_nc, |c| c.apply_jump_cloak_and_invuln_timers(45))
+        .await
+        .unwrap();
+    h.ballpark.write().unwrap().ball_slim_meta.get_mut(&ship_nc).unwrap().is_cloaked = true;
+    let (_, arrived) =
+        h.reconcile_disconnected_warp_sync(ship_nc, DVec3::new(10_000_000_000.0, 0.0, 0.0));
+    assert!(arrived);
+    assert!(!h.ballpark.read().unwrap().ball_slim_meta[&ship_nc].is_cloaked);
+    let snap_reconciled = h.get_protection_snapshot(ship_nc).await.unwrap().unwrap();
+    assert!(!snap_reconciled.snapshot.has_gate_cloak());
+    assert_eq!(snap_reconciled.snapshot.undock_invulnerable_remaining_ticks, 0);
+
+    h.modify_combat_state(ship_nc, |c| {
+        c.shield_hp = 1.0;
+        c.armor_hp = 1.0;
+        c.structure_hp = 1.0;
+        c.is_cloaked = true;
+    })
+    .await
+    .unwrap();
+    h.try_step_full_tick(1.0);
+    assert!(h.has_active_non_gate_cloak_sync(ship_nc));
+    let dmg_res = h
+        .apply_damage(ship_nc, DamageVector::new(1_000.0, 0.0, 0.0, 0.0))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(dmg_res.1);
+    assert!(h.get_protection_snapshot(ship_nc).await.unwrap().is_none());
+    assert!(!h.has_active_non_gate_cloak_sync(ship_nc));
+}
+
+#[tokio::test]
+async fn r4_try_emit_destiny_remove_cycle_and_db_ball_eviction_preserve_sync_and_lock_ranks() {
+    let reg = SystemRegistry::new();
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let (sys_id, other_sys_id): (SolarSystemId, SolarSystemId) = (30_000_142, 30_000_144);
+    let (h, other_h) = (reg.get_or_spawn(sys_id), reg.get_or_spawn(other_sys_id));
+    celestials::register_db_system_ballpark(&db, sys_id, &h);
+    let (s_emit, s_cyc, s_db1, s_db2, s_db3) = (9801, 9802, 9803, 9804, 9805);
+    for (bid, gate) in [(s_emit, true), (s_cyc, false), (s_db1, true), (s_db2, true), (s_db3, true)] {
+        let mut cs = CombatState::default();
+        if gate { cs.apply_jump_cloak_and_invuln_timers(45); }
+        h.spawn_ball_with_meta(
+            make_actor_ball(bid, 587, DVec3::ZERO), cs,
+            SlimItemMeta { char_id: Some(90_000_100 + bid), is_cloaked: gate, ..Default::default() },
+        ).await.unwrap();
+    }
+    // 1. F1486-R4-01: same-thread `try_emit_destiny_event` with `actor_state`, `ballpark`, and `RANK_LEAF` locks held.
+    {
+        let _st = h.actor_state.write().unwrap();
+        assert!(h.try_emit_destiny_event(s_emit, DestinyEvent::SetSpeedFraction { ball_id: s_emit, fraction: 0.5 }));
+    }
+    let _ = h.query_current_tick().await.unwrap();
+    assert!((h.ballpark.read().unwrap().balls[&s_emit].speed_fraction - 0.5).abs() < 1e-6);
+    {
+        let _bp = h.ballpark.read().unwrap();
+        let leaf = eve_db::lock_rank::RankedMutex::<(), { eve_db::lock_rank::RANK_LEAF }>::new(());
+        let _leaf = leaf.lock().unwrap();
+        assert!(h.try_emit_destiny_event(s_emit, DestinyEvent::Stop { ball_id: s_emit }));
+    }
+    let _ = h.query_current_tick().await.unwrap();
+    assert!(matches!(h.ballpark.read().unwrap().balls[&s_emit].mode, MovementMode::Stop));
+
+    // 2. F1486-R4-02a: `try_remove_module_cycle` updates `protection_registry` + `has_active_non_gate_cloak_sync`.
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: s_cyc, module_id: 99_001, module_type_id: 11578, effect_name: "cloakingWarpSafe".into(),
+        owner_char_id: Some(90_009_802), duration_s: 5.0, elapsed_s: 0.0, repeat: 1, ..Default::default()
+    }).await.unwrap();
+    h.modify_combat_state(s_cyc, |c| { c.is_covert_cloak = true; c.cloak_velocity_multiplier = Some(0.25); }).await.unwrap();
+    assert!(h.has_active_non_gate_cloak_sync(s_cyc));
+    assert!(h.actor_state.read().unwrap().protection_registry[&s_cyc].has_active_cloak_cycle);
+    let _ = h.try_remove_module_cycle(s_cyc, 99_001);
+    let snap_cyc = h.actor_state.read().unwrap().protection_registry[&s_cyc];
+    assert!(!snap_cyc.has_active_cloak_cycle && !snap_cyc.snapshot.has_cloak_velocity_multiplier && !snap_cyc.snapshot.is_covert_cloak);
+    assert!(!h.has_active_non_gate_cloak_sync(s_cyc));
+
+    // 3. F1486-R4-02b: `try_remove_ball_for_db` evicts `protection_registry` outside and inside held locks.
+    for bid in [s_db1, s_db2, s_db3] { assert!(h.actor_state.read().unwrap().protection_registry.contains_key(&bid)); }
+    try_remove_ball_for_db(&db, sys_id, s_db1);
+    {
+        let _bp_other = other_h.ballpark.write().unwrap();
+        try_remove_ball_for_db(&db, sys_id, s_db2);
+        let _st_other = other_h.actor_state.write().unwrap();
+        try_remove_ball_for_db(&db, sys_id, s_db3);
+    }
+    let (bp_r, st_r) = (h.ballpark.read().unwrap(), h.actor_state.read().unwrap());
+    for bid in [s_db1, s_db2, s_db3] {
+        assert!(!bp_r.balls.contains_key(&bid) && !st_r.protection_registry.contains_key(&bid));
+    }
+}
+
+#[tokio::test]
+async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_and_destiny_event() {
+    let reg = SystemRegistry::new();
+    let h = reg.get_or_spawn(30_000_142);
+
+    // 1. `try_remove_ball` and `try_remove_destroyed_ball` evict `protection_registry`.
+    let (ship_a, ship_b, ship_c, ship_d, ship_e, ship_f) = (95_001, 95_002, 95_003, 95_004, 95_005, 95_006);
+    h.spawn_ball_with_combat(make_actor_ball(ship_a, 587, DVec3::ZERO), CombatState { undock_invulnerable_remaining_ticks: 15, ..Default::default() }).await.unwrap();
+    h.spawn_ball_with_combat(make_actor_ball(ship_b, 587, DVec3::new(500.0, 0.0, 0.0)), CombatState { is_cloaked: true, cloak_velocity_multiplier: Some(0.1), ..Default::default() }).await.unwrap();
+    assert!(h.get_protection_snapshot(ship_a).await.unwrap().is_some() && h.has_active_non_gate_cloak_sync(ship_b));
+
+    h.try_remove_ball(ship_a);
+    assert!(h.actor_state.read().unwrap().protection_registry.get(&ship_a).is_none());
+    assert!(h.get_protection_snapshot(ship_a).await.unwrap().is_none());
+
+    h.try_remove_destroyed_ball(ship_b);
+    assert!(h.actor_state.read().unwrap().protection_registry.get(&ship_b).is_none());
+    assert!(!h.has_active_non_gate_cloak_sync(ship_b) && h.get_protection_snapshot(ship_b).await.unwrap().is_none());
+
+    // 2. `try_step_manual` steps and syncs `protection_registry`.
+    h.spawn_ball_with_combat(
+        Ball { speed_fraction: 0.0, ..make_actor_ball(ship_c, 587, DVec3::new(1_000.0, 0.0, 0.0)) },
+        CombatState { is_cloaked: true, gate_cloak_remaining_ticks: 2, undock_invulnerable_remaining_ticks: 2, ..Default::default() },
+    ).await.unwrap();
+    h.try_step_manual(1.0);
+    let snap_c1 = h.actor_state.read().unwrap().protection_registry[&ship_c];
+    assert_eq!((snap_c1.snapshot.gate_cloak_remaining_ticks, snap_c1.snapshot.undock_invulnerable_remaining_ticks), (1, 1));
+    h.try_step_manual(1.0);
+    let snap_c2 = h.actor_state.read().unwrap().protection_registry[&ship_c];
+    assert_eq!((snap_c2.snapshot.gate_cloak_remaining_ticks, snap_c2.snapshot.undock_invulnerable_remaining_ticks, snap_c2.snapshot.is_cloaked), (0, 0, false));
+
+    // 3. `prepare_disconnected_warp_sync` clears gate cloak/invuln via `set_mode` and syncs registry.
+    h.spawn_ball_with_combat(make_actor_ball(ship_d, 587, DVec3::ZERO), CombatState { is_cloaked: true, gate_cloak_remaining_ticks: 20, undock_invulnerable_remaining_ticks: 20, ..Default::default() }).await.unwrap();
+    assert!(h.actor_state.read().unwrap().protection_registry[&ship_d].snapshot.has_gate_cloak());
+    h.prepare_disconnected_warp_sync(ship_d, 587, 40.0, 1_200_000.0, 2.5, 350.0, 3.0, DVec3::ZERO, DVec3::new(1_000_000.0, 0.0, 0.0));
+    let snap_d = h.actor_state.read().unwrap().protection_registry[&ship_d];
+    assert!(!snap_d.snapshot.has_gate_cloak() && !snap_d.snapshot.is_cloaked && snap_d.snapshot.undock_invulnerable_remaining_ticks == 0);
+
+    // 4. `SystemCommand::EmitDestinyEvent` (`SetSpeedFraction`) breaks protection and syncs `protection_registry`.
+    h.spawn_ball_with_combat(
+        Ball { speed_fraction: 0.0, ..make_actor_ball(ship_e, 587, DVec3::new(2_000.0, 0.0, 0.0)) },
+        CombatState { is_cloaked: true, gate_cloak_remaining_ticks: 30, undock_invulnerable_remaining_ticks: 30, ..Default::default() },
+    ).await.unwrap();
+    assert!(h.get_protection_snapshot(ship_e).await.unwrap().unwrap().snapshot.has_gate_cloak());
+    assert!(h.emit_destiny_event(ship_e, DestinyEvent::SetSpeedFraction { ball_id: ship_e, fraction: 0.5 }).await);
+    let snap_e = h.get_protection_snapshot(ship_e).await.unwrap().unwrap().snapshot;
+    assert!(!snap_e.has_gate_cloak() && !snap_e.is_cloaked && snap_e.undock_invulnerable_remaining_ticks == 0);
+
+    // 5. `cleaned_stale` in `activate_module_cycle_atomic` (even on err) and `reconcile_module_cycle_before_activate` clear `has_active_cloak_cycle`.
+    h.spawn_ball_with_meta(
+        make_actor_ball(ship_f, 587, DVec3::new(3_000.0, 0.0, 0.0)),
+        CombatState { capacitor: 1.0, max_capacitor: 100.0, ..Default::default() },
+        SlimItemMeta { char_id: Some(95_906), owner_id: 95_906, category_id: 6, group_id: 25, ..Default::default() },
+    ).await.unwrap();
+    let stale_cycle = |module_id, repeat, elapsed_s, cap_need_per_cycle| ActiveModuleCycle {
+        ship_id: ship_f, module_id, module_type_id: 11_370, owner_char_id: Some(95_906),
+        effect_name: "cloaking".to_string(), repeat, duration_s: 1.0, elapsed_s, cap_need_per_cycle,
+        started_at_unix: 1_000, ..ActiveModuleCycle::default()
+    };
+    h.add_module_cycle(stale_cycle(995_001, 0, 1.5, 0.0)).await.unwrap();
+    assert!(h.get_protection_snapshot(ship_f).await.unwrap().unwrap().has_active_cloak_cycle);
+    let err = h.activate_module_cycle_atomic(AtomicActivateCycleRequest {
+        char_id: 95_906, cycle: stale_cycle(995_001, 1, 0.0, 500.0),
+        allow_while_warping: false, allow_while_cloaked: true, break_protection: true,
+        break_reason: ProtectionBreakReason::ModuleActivation, location_change_invuln: None, real_now_unix: 1_700_000_000,
+    }).await.unwrap_err();
+    assert!(err.contains("Insufficient capacitor"), "got unexpected err: {err}");
+    assert!(!h.get_protection_snapshot(ship_f).await.unwrap().unwrap().has_active_cloak_cycle);
+
+    h.add_module_cycle(stale_cycle(995_002, 0, 1.5, 0.0)).await.unwrap();
+    assert!(h.get_protection_snapshot(ship_f).await.unwrap().unwrap().has_active_cloak_cycle);
+    let (existing, cleaned) = h.reconcile_module_cycle_before_activate(ship_f, 995_002, 1_700_000_000).await;
+    assert!(existing.is_none() && cleaned);
+    assert!(!h.get_protection_snapshot(ship_f).await.unwrap().unwrap().has_active_cloak_cycle);
+
+    // 6. All 5 synchronous SystemHandle mutators keep `protection_registry` and `has_active_non_gate_cloak_sync` synced.
+    let (ship_g, ship_h) = (95_007, 95_008);
+    h.try_spawn_ball_with_meta(
+        make_actor_ball(ship_g, 587, DVec3::new(4_000.0, 0.0, 0.0)),
+        CombatState { is_cloaked: true, gate_cloak_remaining_ticks: 20, undock_invulnerable_remaining_ticks: 20, ..Default::default() },
+        SlimItemMeta { char_id: Some(95_907), owner_id: 95_907, is_cloaked: true, ..Default::default() },
+    );
+    assert_eq!(h.actor_state.read().unwrap().protection_registry[&ship_g].owner_char_id, Some(95_907));
+    assert!(h.actor_state.read().unwrap().protection_registry[&ship_g].snapshot.has_gate_cloak());
+    assert!(h.try_emit_destiny_event(ship_g, DestinyEvent::Stop { ball_id: ship_g }));
+    let snap_g = h.actor_state.read().unwrap().protection_registry[&ship_g].snapshot;
+    assert!(!snap_g.has_gate_cloak() && snap_g.undock_invulnerable_remaining_ticks == 0);
+
+    h.try_spawn_ball_with_combat(
+        make_actor_ball(ship_h, 587, DVec3::new(5_000.0, 0.0, 0.0)),
+        CombatState { is_cloaked: true, cloak_velocity_multiplier: Some(0.1), ..Default::default() },
+    );
+    assert!(h.has_active_non_gate_cloak_sync(ship_h));
+    assert!(h.try_update_combat_state(ship_h, |cs| { cs.is_cloaked = false; cs.cloak_velocity_multiplier = None; }));
+    assert!(!h.has_active_non_gate_cloak_sync(ship_h));
+    assert!(h.try_recompute_combat_attributes(ship_h, |cs| { cs.is_cloaked = true; cs.gate_cloak_remaining_ticks = 15; }));
+    assert!(h.actor_state.read().unwrap().protection_registry[&ship_h].snapshot.has_gate_cloak());
+    let ((tx1, rx1), (tx2, rx2), h2) = (std::sync::mpsc::channel(), std::sync::mpsc::channel(), h.clone());
+    let holder = std::thread::spawn(move || { let _g = h2.actor_state.write().unwrap(); let _ = tx1.send(()); let _ = rx2.recv(); });
+    rx1.recv().unwrap();
+    assert!(h.try_emit_destiny_event(ship_h, DestinyEvent::SetSpeedFraction { ball_id: ship_h, fraction: 0.5 }));
+    assert_eq!(h.ballpark.read().unwrap().combat_states[&ship_h].gate_cloak_remaining_ticks, 15);
+    let _ = tx2.send(());
+    holder.join().unwrap();
+    assert!(!h.get_protection_snapshot(ship_h).await.unwrap().unwrap().snapshot.has_gate_cloak());
+}

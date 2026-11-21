@@ -93,7 +93,13 @@ pub(crate) async fn handle_mining_and_deactivate(
                 };
             let is_cloak_exempt_group = matches!(mod_group_id, Some(330 | 481 | 4117));
             if !is_cloak_exempt_group
-                && !is_module_currently_active(ctx, session, char_id, ship_id, module_id).await
+                && !is_module_currently_active_sync(
+                    ctx,
+                    session.solar_system_id,
+                    char_id,
+                    ship_id,
+                    module_id,
+                )
             {
                 if let Err(e) = super::fitting_module_cycles::enforce_space_active_cloak_module_guard(
                     ctx,
@@ -1146,9 +1152,9 @@ fn validate_ship_and_fitted_module(
     Ok((mod_type_id, mod_group_id))
 }
 
-async fn is_module_currently_active(
+pub(crate) fn is_module_currently_active_sync(
     ctx: &ServerContext,
-    session: &SessionState,
+    solar_system_id: Option<u32>,
     char_id: i64,
     ship_id: i64,
     module_id: i64,
@@ -1167,11 +1173,8 @@ async fn is_module_currently_active(
     {
         return true;
     }
-    if let Some(sys) = session
-        .solar_system_id
-        .and_then(|sid| ctx.systems.get_handle(sid))
-    {
-        if sys.has_module_cycle(ship_id, module_id).await {
+    if let Some(sys_id) = solar_system_id {
+        if ctx.systems.is_module_active_sync(sys_id, ship_id, module_id) {
             return true;
         }
     }
