@@ -1528,17 +1528,29 @@ def _auto_position_structure_deployment(w):
 
 
 def _is_effectively_opaque(node, root=None, max_depth=24):
-    """Return False when node or an ancestor up to root has faded opacity <= 0.01."""
+    """Return True when node and ancestors up to root are visible and cumulative opacity > 0.01."""
     cur = node
+    eff = 1.0
     for _ in range(max_depth):
         if cur is None:
             return True
-        op = getattr(cur, "opacity", None)
-        if isinstance(op, (int, float)) and not isinstance(op, bool) and float(op) <= 0.01:
+        try:
+            if not _is_visible(cur):
+                return False
+            op = getattr(cur, "opacity", None)
+            if op is not None and not isinstance(op, bool) and isinstance(op, _PY_INT_TYPES + (float,)):
+                fop = float(op)
+                if math.isnan(fop) or math.isinf(fop):
+                    return False
+                eff *= min(1.0, fop)
+                if eff <= 0.01:
+                    return False
+            if root is not None and cur is root:
+                return True
+            cur = getattr(cur, "parent", None)
+        except Exception:
+            _clear_py2_exc()
             return False
-        if root is not None and cur is root:
-            return True
-        cur = getattr(cur, "parent", None)
     return True
 
 
@@ -3861,10 +3873,17 @@ def _get_state_snapshot(sm):
         space_info["ego"] = _sample_ego_warp_state(sm)
         nearby = []
         slims_by_id = {}
+        nearby_by_id = {}
         try:
             michelle = getattr(sm, "services", {}).get("michelle")
             bp = michelle.GetBallpark() if michelle is not None else None
             sid = sess_dict.get("shipid", 0)
+            sid_int = None
+            try:
+                if sid is not None and not isinstance(sid, bool):
+                    sid_int = int(sid)
+            except (TypeError, ValueError):
+                sid_int = None
             if bp is not None:
                 now_sim = None
                 try:
@@ -3879,14 +3898,20 @@ def _get_state_snapshot(sm):
                         pass
                 slims = getattr(bp, "slimItems", {}) or {}
                 for bid, slim in list(slims.items()):
-                    slims_by_id[int(bid)] = slim
-                    if int(bid) == int(sid):
+                    try:
+                        if isinstance(bid, bool):
+                            continue
+                        bid_int = int(bid)
+                    except (TypeError, ValueError):
+                        continue
+                    slims_by_id[bid_int] = slim
+                    if sid_int is not None and bid_int == sid_int:
                         continue
                     b = bp.GetBall(bid)
                     dist = _resolve_ball_surface_dist(bp, sid, bid, ball=b, now_sim=now_sim, ego_ball=ego_ball)
                     raw_bname = _resolve_ball_name(slim, bid)
                     ball_entry = {
-                        "item_id": int(bid),
+                        "item_id": bid_int,
                         "type_id": int(getattr(slim, "typeID", 0) or 0),
                         "group_id": int(getattr(slim, "groupID", 0) or 0),
                         "category_id": int(getattr(slim, "categoryID", 0) or 0),
@@ -3896,14 +3921,15 @@ def _get_state_snapshot(sm):
                     }
                     try:
                         if hasattr(bp, "GetDamageState"):
-                            b_ds = bp.GetDamageState(int(bid))
+                            b_ds = bp.GetDamageState(bid_int)
                             if isinstance(b_ds, (tuple, list)) and len(b_ds) >= 3 and b_ds[0] is not None:
                                 sh, ar, hu = round(float(b_ds[0]), 3), round(float(b_ds[1]), 3), round(float(b_ds[2]), 3)
-                                if sh < 1.0 or ar < 1.0 or hu < 1.0 or int(bid) in locked_targets:
+                                if sh < 1.0 or ar < 1.0 or hu < 1.0 or bid_int in locked_targets:
                                     ball_entry["damage_state"] = {"shield": sh, "armor": ar, "hull": hu}
                     except Exception:
                         pass
                     nearby.append(ball_entry)
+                    nearby_by_id[bid_int] = ball_entry
                 nearby.sort(key=lambda x: x["distance_m"])
                 stargates = [b for b in nearby if int(b.get("group_id") or 0) == 10][:10]
                 stations = [b for b in nearby if int(b.get("category_id") or 0) in (3, 65)][:8]
@@ -3926,15 +3952,10 @@ def _get_state_snapshot(sm):
         if selected_id is not None:
             try:
                 sel_id_i = int(selected_id)
-                sel_ball = next((b for b in nearby if int(b.get("item_id", 0)) == sel_id_i), None)
+                sel_ball = nearby_by_id.get(sel_id_i)
                 space_info["selected_item"] = dict(sel_ball) if sel_ball is not None else {"item_id": sel_id_i}
             except Exception:
                 pass
-        nearby_by_id = {
-            int(_nb["item_id"]): _nb
-            for _nb in nearby
-            if _nb.get("item_id") is not None
-        }
         overview_entries = []
         try:
             uc_ov = _get_uicore()
@@ -3948,54 +3969,73 @@ def _get_state_snapshot(sm):
                 scroll_ov = getattr(ov_w, "scroll", None)
                 if scroll_ov is not None and hasattr(scroll_ov, "GetNodes"):
                     for nd in list(scroll_ov.GetNodes() or [])[:40]:
-                        bid_ov = getattr(nd, "itemID", None)
-                        slim_ov = getattr(nd, "slimItem", None) or getattr(nd, "ball", None)
-                        if bid_ov is None and slim_ov is not None:
-                            bid_ov = getattr(slim_ov, "itemID", None)
-                        bid_int = int(bid_ov) if bid_ov is not None else None
-                        if slim_ov is None and bid_int is not None:
-                            slim_ov = slims_by_id.get(bid_int)
-                        nb_ov = nearby_by_id.get(bid_int) if bid_int is not None else None
-                        gid_ov = int(
-                            (getattr(slim_ov, "groupID", 0) if slim_ov is not None else 0)
-                            or getattr(nd, "groupID", 0)
-                            or (nb_ov.get("group_id") if nb_ov else 0)
-                            or 0
-                        )
-                        cid_ov = int(
-                            (getattr(slim_ov, "categoryID", 0) if slim_ov is not None else 0)
-                            or getattr(nd, "categoryID", 0)
-                            or (nb_ov.get("category_id") if nb_ov else 0)
-                            or 0
-                        )
-                        name_ov = _strip_tags(
-                            _safe_str(
-                                getattr(nd, "label", "")
-                                or getattr(nd, "name", "")
-                                or (nb_ov.get("name") if nb_ov else "")
-                                or _resolve_ball_name(slim_ov, bid_ov),
-                                64,
+                        try:
+                            bid_ov = getattr(nd, "itemID", None)
+                            slim_ov = getattr(nd, "slimItem", None) or getattr(nd, "ball", None)
+                            if bid_ov is None and slim_ov is not None:
+                                bid_ov = getattr(slim_ov, "itemID", None)
+                            bid_int = None
+                            if bid_ov is not None:
+                                if isinstance(bid_ov, bool):
+                                    continue
+                                try:
+                                    bid_int = int(bid_ov)
+                                except (TypeError, ValueError):
+                                    continue
+                            if slim_ov is None and bid_int is not None:
+                                slim_ov = slims_by_id.get(bid_int)
+                            nb_ov = nearby_by_id.get(bid_int) if bid_int is not None else None
+                            try:
+                                gid_ov = int(
+                                    (getattr(slim_ov, "groupID", 0) if slim_ov is not None else 0)
+                                    or getattr(nd, "groupID", 0)
+                                    or (nb_ov.get("group_id") if nb_ov else 0)
+                                    or 0
+                                )
+                            except (TypeError, ValueError):
+                                gid_ov = 0
+                            try:
+                                cid_ov = int(
+                                    (getattr(slim_ov, "categoryID", 0) if slim_ov is not None else 0)
+                                    or getattr(nd, "categoryID", 0)
+                                    or (nb_ov.get("category_id") if nb_ov else 0)
+                                    or 0
+                                )
+                            except (TypeError, ValueError):
+                                cid_ov = 0
+                            name_ov = _strip_tags(
+                                _safe_str(
+                                    getattr(nd, "label", "")
+                                    or getattr(nd, "name", "")
+                                    or (nb_ov.get("name") if nb_ov else "")
+                                    or _resolve_ball_name(slim_ov, bid_int if bid_int is not None else bid_ov),
+                                    64,
+                                )
                             )
-                        )
-                        dist_ov = getattr(nd, "distance", None)
-                        if not isinstance(dist_ov, (int, float)) or isinstance(dist_ov, bool):
-                            dist_ov = getattr(nd, "rawDistance", None)
-                        if not isinstance(dist_ov, (int, float)) or isinstance(dist_ov, bool):
-                            dist_ov = getattr(nd, "surfaceDist", None)
-                        if (not isinstance(dist_ov, (int, float)) or isinstance(dist_ov, bool)) and nb_ov is not None:
-                            dist_ov = nb_ov.get("distance_m")
-                        if bid_ov is not None or name_ov:
-                            overview_entries.append({
-                                "item_id": bid_int,
-                                "name": name_ov,
-                                "group_id": gid_ov,
-                                "category_id": cid_ov,
-                                "distance_m": (
-                                    round(float(dist_ov), 1)
-                                    if isinstance(dist_ov, (int, float)) and not isinstance(dist_ov, bool)
-                                    else None
-                                ),
-                            })
+                            num_types = _PY_INT_TYPES + (float,)
+                            dist_ov = getattr(nd, "distance", None)
+                            if not isinstance(dist_ov, num_types) or isinstance(dist_ov, bool):
+                                dist_ov = getattr(nd, "rawDistance", None)
+                            if not isinstance(dist_ov, num_types) or isinstance(dist_ov, bool):
+                                dist_ov = getattr(nd, "surfaceDist", None)
+                            if (not isinstance(dist_ov, num_types) or isinstance(dist_ov, bool)) and nb_ov is not None:
+                                dist_ov = nb_ov.get("distance_m")
+                            dist_val = None
+                            if isinstance(dist_ov, num_types) and not isinstance(dist_ov, bool):
+                                fdist = float(dist_ov)
+                                if not (math.isnan(fdist) or math.isinf(fdist)):
+                                    dist_val = round(fdist, 1)
+                            if bid_int is not None or name_ov:
+                                overview_entries.append({
+                                    "item_id": bid_int,
+                                    "name": name_ov,
+                                    "group_id": gid_ov,
+                                    "category_id": cid_ov,
+                                    "distance_m": dist_val,
+                                })
+                        except Exception:
+                            _clear_py2_exc()
+                            continue
         except Exception:
             pass
         space_info["overview_entries"] = overview_entries[:30]

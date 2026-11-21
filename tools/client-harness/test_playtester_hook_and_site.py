@@ -5924,6 +5924,49 @@ class TestStargateTargetResolution(unittest.TestCase):
         faded_parent_wnd = _RegionalMarket(_MarketTicker(wheel_opacity=1.0, self_opacity=0.0))
         self.assertFalse(hook._inspect_window_content(faded_parent_wnd)["has_loading"])
 
+        # Cumulative multiplicative opacity: 0.05 * 0.05 = 0.0025 <= 0.01 must count as faded.
+        mult_faded_wnd = _RegionalMarket(_MarketTicker(wheel_opacity=0.05, self_opacity=0.05))
+        self.assertFalse(hook._inspect_window_content(mult_faded_wnd)["has_loading"])
+
+        # Ancestor hidden via display=False or state=2 (UI_HIDDEN) rejects direct _is_effectively_opaque calls.
+        hidden_display_ticker = _MarketTicker(wheel_opacity=1.0)
+        hidden_display_ticker.display = False
+        self.assertFalse(hook._is_effectively_opaque(hidden_display_ticker.children[0]))
+        hidden_state_ticker = _MarketTicker(wheel_opacity=1.0)
+        hidden_state_ticker.state = 2
+        self.assertFalse(hook._is_effectively_opaque(hidden_state_ticker.children[0]))
+
+        # Non-finite opacity and property getter exceptions are caught safely without crashing window inspection.
+        class _BrokenOpacityWheel(_LoadingWheel):
+            @property
+            def opacity(self):
+                raise RuntimeError("trinity destroyed")
+
+            @opacity.setter
+            def opacity(self, _v):
+                pass
+
+        broken_ticker = _MarketTicker(wheel_opacity=1.0)
+        broken_wheel = _BrokenOpacityWheel(parent=broken_ticker)
+        broken_ticker.children = [broken_wheel]
+        broken_wnd = _RegionalMarket(broken_ticker)
+        self.assertFalse(hook._inspect_window_content(broken_wnd)["has_loading"])
+
+        # Loading text obeys effective opacity too: faded "Loading..." ignored, opaque flagged.
+        faded_lbl = _Label("Loading...")
+        faded_lbl.opacity = 0.0
+        faded_txt_wnd = _RegionalMarket(_MarketTicker(wheel_opacity=0.0))
+        faded_lbl.parent = faded_txt_wnd
+        faded_txt_wnd.children.append(faded_lbl)
+        self.assertFalse(hook._inspect_window_content(faded_txt_wnd)["has_loading"])
+
+        opaque_lbl = _Label("Loading...")
+        opaque_lbl.opacity = 1.0
+        opaque_txt_wnd = _RegionalMarket(_MarketTicker(wheel_opacity=0.0))
+        opaque_lbl.parent = opaque_txt_wnd
+        opaque_txt_wnd.children.append(opaque_lbl)
+        self.assertTrue(hook._inspect_window_content(opaque_txt_wnd)["has_loading"])
+
         active_wnd = _RegionalMarket(_MarketTicker(wheel_opacity=1.0))
         self.assertTrue(hook._inspect_window_content(active_wnd)["has_loading"])
 
@@ -6000,6 +6043,28 @@ class TestStargateTargetResolution(unittest.TestCase):
         nodes_pvp_only = [types.SimpleNamespace(itemID=100009999, label="Rifter")]
         st_filtered = _collect_with(nodes_pvp_only, slims_plus_frigate)
         self.assertFalse(st_filtered["space"]["celestials_in_overview"])
+
+        # >22 non-stargate/non-station balls: ballpark distance fallback works even beyond nearby truncation,
+        # and malformed overview node IDs (e.g. group headers) do not abort subsequent valid nodes.
+        slims_crowded = dict(slims_celestials)
+        for idx in range(1, 28):
+            bid_planet = 40000100 + idx
+            slims_crowded[bid_planet] = types.SimpleNamespace(
+                itemID=bid_planet, typeID=11, groupID=7, categoryID=2, name="Planet %d" % idx
+            )
+        far_planet_id = 40000127
+        nodes_crowded = [
+            types.SimpleNamespace(itemID="", label="Empty Header"),
+            types.SimpleNamespace(itemID="group_ships", label="Ships Header"),
+            types.SimpleNamespace(itemID=far_planet_id, groupID="bad", categoryID="bad", label="Planet 27"),
+            types.SimpleNamespace(itemID=60003760, label="Jita IV - Moon 4"),
+        ]
+        st_crowded = _collect_with(nodes_crowded, slims_crowded)
+        crowded_by_id = {e["item_id"]: e for e in st_crowded["space"]["overview_entries"]}
+        self.assertIn(far_planet_id, crowded_by_id)
+        self.assertEqual(crowded_by_id[far_planet_id]["group_id"], 7)
+        self.assertIsNotNone(crowded_by_id[far_planet_id]["distance_m"])
+        self.assertIn(60003760, crowded_by_id)
 
 
 if __name__ == "__main__":
