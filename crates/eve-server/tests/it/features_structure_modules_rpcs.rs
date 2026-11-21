@@ -205,11 +205,12 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
     let keepstar_id = 77_102_001_i64;
     let pds_id = 77_102_002_i64;
     let flak_id = 77_102_003_i64;
-    let corp_id = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).map(|c| c.corporation_id).unwrap_or(98_000_001));
+    let corp_id = 98_102_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.member_roles.insert(PILOT_1, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STATION_MANAGER);
-        }
+        let mut corp = eve_db::CorporationRecord::new(corp_id, "B22 Keepstar Corp", "B22", PILOT_1);
+        corp.members.insert(PILOT_1);
+        corp.member_roles.insert(PILOT_1, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STATION_MANAGER);
+        snap.corporations.insert(corp_id, corp);
         snap.structures.insert(
             keepstar_id,
             UpwellStructureRecord {
@@ -272,10 +273,12 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
             },
         );
         if let Some(c) = snap.characters.get_mut(&PILOT_1) {
+            c.corporation_id = corp_id;
             c.structure_id = Some(keepstar_id);
             c.active_ship_id = keepstar_id;
         }
     });
+    s1.corporation_id = Some(corp_id);
     s1.structure_id = Some(keepstar_id);
     s1.ship_id = Some(keepstar_id);
     s1.corp_role |= corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STATION_MANAGER;

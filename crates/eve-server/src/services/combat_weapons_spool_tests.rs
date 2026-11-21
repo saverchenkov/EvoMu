@@ -1217,3 +1217,230 @@ async fn handle_link_all_weapons_atomic_excludes_offline_weapons() {
         );
     });
 }
+
+#[tokio::test]
+async fn is_linkable_weapon_type_rejects_charge_group_non_weapons_and_mining_lasers() {
+    let (ctx, sess, char_id, ship_id, sys_id) = make_spool_test_ctx();
+
+    let positive_types = [
+        450u32,  // Gatling Pulse Laser I (group 53)
+        484,     // 125mm Gatling AutoCannon I (group 55)
+        561,     // 75mm Gatling Rail I (group 74)
+        47_272,  // Light Entropic Disintegrator I (group 1986)
+        54_739,  // Small Vorton Projector I (group 4060)
+        13_320,  // Cruise Missile Launcher I (group 506)
+        499,     // Light Missile Launcher I (group 509)
+        501,     // Heavy Missile Launcher I (group 510)
+        35_921,  // Standup Anticapital Missile Launcher I (cat 66, group 1327)
+        35_922,  // Standup Multirole Missile Launcher I (cat 66, group 1562)
+        47_240,  // Synthetic test disintegrator turret
+    ];
+    for tid in positive_types {
+        let ty = ctx
+            .sde
+            .types
+            .get(&tid)
+            .unwrap_or_else(|| panic!("missing positive type {tid}"));
+        assert!(
+            is_linkable_weapon_type(ty),
+            "expected linkable weapon for {tid} ({})",
+            ty.name
+        );
+    }
+
+    let negative_types = [
+        483u32,  // Miner I (turretFitted group 54)
+        18_068,  // Modulated Deep Core Miner II (turretFitted + chargeGroup1)
+        25_266,  // Gas Cloud Scoop I (turretFitted group 737)
+        17_482,  // Strip Miner I (group 464)
+        17_912,  // Modulated Strip Miner II (chargeGroup1)
+        42_526,  // Armor Command Burst I (chargeGroup1)
+        41_476,  // Small Ancillary Remote Armor Repairer (chargeGroup1)
+        41_480,  // Small Ancillary Remote Shield Booster (chargeGroup1)
+        4_258,   // Core Probe Launcher II (chargeGroup1)
+        27_914,  // Bomb Launcher I (chargeGroup1)
+        35_923,  // Standup Guided Bomb Launcher I (chargeGroup1)
+        22_782,  // Interdiction Sphere Launcher I (chargeGroup1)
+        85_084,  // Small Breacher Pod Launcher (chargeGroup1)
+        19_660,  // Festival Launcher (chargeGroup1)
+        35_926,  // Standup Point Defense Battery I (chargeGroup1)
+        35_928,  // Standup Arcing Vorton Projector I (Doomsday)
+    ];
+    for tid in negative_types {
+        let ty = ctx
+            .sde
+            .types
+            .get(&tid)
+            .unwrap_or_else(|| panic!("missing negative type {tid}"));
+        assert!(
+            !is_linkable_weapon_type(ty),
+            "non-weapon type {tid} ({}) must not be linkable",
+            ty.name
+        );
+    }
+
+    let mut wrong_group = ctx.sde.types.get(&450).expect("450").clone();
+    wrong_group.group_id = 54;
+    assert!(!is_linkable_weapon_type(&wrong_group));
+
+    let mut missing_effect = ctx.sde.types.get(&450).expect("450").clone();
+    missing_effect.effect_ids.clear();
+    assert!(!is_linkable_weapon_type(&missing_effect));
+
+    let _ = spawn_spool_ball(&ctx, sys_id, ship_id, 47_271, DVec3::ZERO, 1_000.0, 1_000.0, 1_000.0, 1_000.0).await;
+
+    let mod_a = 9_476_101i64;
+    let mod_b = 9_476_102i64;
+    for bad_tid in [42_526u32, 17_912, 483, 41_476, 4_258, 27_914] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                mod_a,
+                eve_db::InventoryItemRecord {
+                    item_id: mod_a,
+                    type_id: bad_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: eve_db::InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                mod_b,
+                eve_db::InventoryItemRecord {
+                    item_id: mod_b,
+                    type_id: bad_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: eve_db::InventoryFlag::HiSlot1,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        });
+        let err = handle_link_all_weapons_atomic(&ctx, Some(&sess), char_id, ship_id, true)
+            .expect_err("non-weapon pair must not link");
+        assert_eq!(err.code, "InvalidWeaponGroup");
+        ctx.db.with_snapshot(|snap| {
+            assert!(snap.weapon_banks.get(&ship_id).map_or(true, |b| b.is_empty()));
+        });
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod_a).expect("mod_a").type_id = 450;
+        snap.items.get_mut(&mod_b).expect("mod_b").type_id = 450;
+    });
+    assert!(handle_link_all_weapons_atomic(&ctx, Some(&sess), char_id, ship_id, true).is_ok());
+    ctx.db.with_snapshot(|snap| {
+        let banks = snap.weapon_banks.get(&ship_id).expect("banks");
+        assert_eq!(banks.get(&mod_a), Some(&vec![mod_a, mod_b]));
+    });
+}
+
+#[tokio::test]
+async fn handle_link_all_weapons_atomic_emits_weapon_group_destroyed_for_removed_masters() {
+    let (ctx, sess, char_id, ship_id, sys_id) = make_spool_test_ctx();
+    ctx.db
+        .acquire_online_lock(
+            sess.user_id.unwrap_or(1),
+            999_476,
+            Some(char_id),
+            true,
+            ctx.now_unix(),
+        )
+        .unwrap();
+    let _ = spawn_spool_ball(&ctx, sys_id, ship_id, 47_271, DVec3::ZERO, 1_000.0, 1_000.0, 1_000.0, 1_000.0).await;
+
+    let m1 = 9_476_201i64;
+    let m2 = 9_476_202i64;
+    let m3 = 9_476_203i64;
+    let old_k1 = 9_476_210i64;
+    let old_k2 = 9_476_211i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (item_id, type_id, flag) in [
+            (m1, 47_240u32, eve_db::InventoryFlag::HiSlot0),
+            (m2, 47_240, eve_db::InventoryFlag::HiSlot1),
+            (m3, 47_240, eve_db::InventoryFlag::HiSlot2),
+            (old_k1, 450, eve_db::InventoryFlag::HiSlot3),
+            (old_k2, 450, eve_db::InventoryFlag::HiSlot4),
+        ] {
+            snap.items.insert(
+                item_id,
+                eve_db::InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.weapon_banks.insert(
+            ship_id,
+            std::collections::HashMap::from([(m2, vec![m2, m3]), (old_k1, vec![old_k1, old_k2])]),
+        );
+        snap.module_online_states.insert(old_k2, false);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    assert!(handle_link_all_weapons_atomic(&ctx, Some(&sess), char_id, ship_id, true).is_ok());
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let destroyed: Vec<(i64, i64)> = notifs
+        .iter()
+        .filter(|n| n.event == "OnWeaponGroupDestroyed")
+        .map(|n| match n.args.as_slice() {
+            [eve_proto::PyRep::Integer(s), eve_proto::PyRep::Integer(m)] => (*s, *m),
+            other => panic!("unexpected OnWeaponGroupDestroyed args: {other:?}"),
+        })
+        .collect();
+    assert_eq!(destroyed, vec![(ship_id, m2), (ship_id, old_k1)]);
+    assert_eq!(
+        notifs.iter().filter(|n| n.event == "OnWeaponBanksChanged").count(),
+        1
+    );
+    ctx.db.with_snapshot(|snap| {
+        let banks = snap.weapon_banks.get(&ship_id).expect("banks");
+        assert_eq!(banks.len(), 1);
+        assert_eq!(banks.get(&m1), Some(&vec![m1, m2, m3]));
+    });
+
+    assert!(handle_link_all_weapons_atomic(&ctx, Some(&sess), char_id, ship_id, true).is_ok());
+    let idem_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        idem_notifs.iter().filter(|n| n.event == "OnWeaponGroupDestroyed").count(),
+        0
+    );
+    assert_eq!(
+        idem_notifs.iter().filter(|n| n.event == "OnWeaponBanksChanged").count(),
+        1
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(m2, false);
+        snap.module_online_states.insert(m3, false);
+    });
+    assert!(handle_link_all_weapons_atomic(&ctx, Some(&sess), char_id, ship_id, false).is_ok());
+    let dissolve_notifs = ctx.drain_notifications_for_char(char_id);
+    let dissolved: Vec<(i64, i64)> = dissolve_notifs
+        .iter()
+        .filter(|n| n.event == "OnWeaponGroupDestroyed")
+        .map(|n| match n.args.as_slice() {
+            [eve_proto::PyRep::Integer(s), eve_proto::PyRep::Integer(m)] => (*s, *m),
+            other => panic!("unexpected OnWeaponGroupDestroyed args: {other:?}"),
+        })
+        .collect();
+    assert_eq!(dissolved, vec![(ship_id, m1)]);
+    assert_eq!(
+        dissolve_notifs.iter().filter(|n| n.event == "OnWeaponBanksChanged").count(),
+        1
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.weapon_banks.get(&ship_id).map_or(true, |b| b.is_empty()));
+    });
+}
