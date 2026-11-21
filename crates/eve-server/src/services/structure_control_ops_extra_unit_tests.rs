@@ -616,10 +616,9 @@ async fn flex_take_control_manager_takeover_and_destroyed_structure_error_branch
         mgr_ch.character_id = mgr_id;
         mgr_ch.structure_id = Some(flex_sid);
         snap.characters.insert(mgr_id, mgr_ch);
-        snap.corporations
-            .get_mut(&corp_id)
-            .unwrap()
-            .member_roles
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.insert(mgr_id);
+        corp.member_roles
             .insert(mgr_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
         snap.characters.get_mut(&ceo_id).unwrap().structure_id = None;
         snap.characters.get_mut(&ceo_id).unwrap().station_id = None;

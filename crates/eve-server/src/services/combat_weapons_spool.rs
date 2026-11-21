@@ -1278,11 +1278,37 @@ pub fn notify_weapon_banks_updated(
     );
 }
 
-/// Returns `true` if `ty` is a linkable high-slot turret or missile launcher.
+/// Returns `true` if `ty` is a genuine linkable turret or missile launcher weapon.
 pub(crate) fn is_linkable_weapon_type(ty: &InvType) -> bool {
-    ty.effect_ids.contains(&42)
-        || ty.effect_ids.contains(&40)
-        || ty.default_attributes.contains_key(&604)
+    const LINKABLE_TURRET_GROUPS: &[u32] = &[
+        53,   // Energy Weapon
+        55,   // Projectile Weapon
+        74,   // Hybrid Weapon
+        1986, // Precursor Weapon
+        4060, // Vorton Projector
+    ];
+    const LINKABLE_SHIP_LAUNCHER_GROUPS: &[u32] = &[
+        506,  // Missile Launcher Cruise
+        507,  // Missile Launcher Rocket
+        508,  // Missile Launcher Torpedo
+        509,  // Missile Launcher Light
+        510,  // Missile Launcher Heavy
+        511,  // Missile Launcher Rapid Light
+        524,  // Missile Launcher XL Torpedo
+        771,  // Missile Launcher Heavy Assault
+        1245, // Missile Launcher Rapid Heavy
+        1673, // Missile Launcher Rapid Torpedo
+        1674, // Missile Launcher XL Cruise
+    ];
+    match ty.category_id {
+        7 => {
+            (ty.effect_ids.contains(&42) && LINKABLE_TURRET_GROUPS.contains(&ty.group_id))
+                || (ty.effect_ids.contains(&40)
+                    && LINKABLE_SHIP_LAUNCHER_GROUPS.contains(&ty.group_id))
+        }
+        66 => ty.effect_ids.contains(&40) && matches!(ty.group_id, 1327 | 1562),
+        _ => false,
+    }
 }
 
 fn resolve_weapon_link_sys_id_in_snapshot(
@@ -1454,7 +1480,7 @@ pub(crate) fn handle_link_all_weapons_atomic(
     ship_id: i64,
     require_linkable_pair: bool,
 ) -> Result<PyRep, BridgeRpcError> {
-    let info = run_with_weapon_link_context(ctx, session_opt, char_id, ship_id, |snap| {
+    let (destroyed_masters, info) = run_with_weapon_link_context(ctx, session_opt, char_id, ship_id, |snap| {
         let mut by_type: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         for item in snap.items.values() {
             if item.location_id == ship_id && matches!(item.flag as u16, 27..=34) {
@@ -1482,26 +1508,41 @@ pub(crate) fn handle_link_all_weapons_atomic(
                 client_error: None,
             });
         }
+        let prior_masters: Vec<i64> = snap
+            .weapon_banks
+            .get(&ship_id)
+            .map(|banks| banks.keys().copied().collect())
+            .unwrap_or_default();
         if !has_linkable_pair {
             if let Some(banks) = snap.weapon_banks.get_mut(&ship_id) {
                 if !banks.is_empty() {
                     banks.clear();
                 }
             }
-            return Ok(build_weapon_banks_dict(snap, ship_id));
-        }
-        let banks = snap.weapon_banks.entry(ship_id).or_default();
-        banks.clear();
-        for (_type_id, mut mods) in by_type {
-            if mods.len() >= 2 {
-                mods.sort();
-                let master = mods[0];
-                banks.insert(master, mods);
+        } else {
+            let banks = snap.weapon_banks.entry(ship_id).or_default();
+            banks.clear();
+            for (_type_id, mut mods) in by_type {
+                if mods.len() >= 2 {
+                    mods.sort();
+                    let master = mods[0];
+                    banks.insert(master, mods);
+                }
             }
         }
-        Ok(build_weapon_banks_dict(snap, ship_id))
+        let mut destroyed_masters: Vec<i64> = prior_masters
+            .into_iter()
+            .filter(|master| {
+                !snap
+                    .weapon_banks
+                    .get(&ship_id)
+                    .is_some_and(|banks| banks.contains_key(master))
+            })
+            .collect();
+        destroyed_masters.sort_unstable();
+        Ok((destroyed_masters, build_weapon_banks_dict(snap, ship_id)))
     })?;
-    notify_weapon_banks_updated(ctx, char_id, ship_id, &[], &info);
+    notify_weapon_banks_updated(ctx, char_id, ship_id, &destroyed_masters, &info);
     Ok(info)
 }
 

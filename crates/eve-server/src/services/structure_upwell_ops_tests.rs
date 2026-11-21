@@ -1605,3 +1605,190 @@ async fn structure_guests_get_guests_enforces_db_authz_and_is_read_pure() {
     assert_eq!(ctx.db.tx_commit_count(), commits_before);
     assert_eq!(ctx.db.state_epoch(), epoch_before);
 }
+
+#[test]
+fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_members() {
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let corp_id = 98_476_001i64;
+    let other_corp_id = 98_476_002i64;
+    let corp_legacy_empty = 98_476_003i64;
+    let corp_assign_only = 98_476_004i64;
+    let corp_title_only = 98_476_005i64;
+    let registered_npc_corp = 1_000_199i64;
+    let unregistered_corp_id = 98_476_099i64;
+    let sid = 1_094_760_000_001i64;
+
+    let ceo_id = 9_476_001i64;
+    let op_id = 9_476_002i64;
+    let assigned_op_id = 9_476_003i64;
+    let roleless_id = 9_476_004i64;
+    let outsider_id = 9_476_005i64;
+    let ex_member_id = 9_476_006i64;
+    let legacy_char_id = 9_476_007i64;
+    let assign_op_id = 9_476_008i64;
+    let assign_roleless_id = 9_476_009i64;
+    let excluded_role_id = 9_476_010i64;
+    let excluded_assign_id = 9_476_011i64;
+    let missing_char_id = 9_476_012i64;
+    let title_op_id = 9_476_013i64;
+    let title_roleless_id = 9_476_014i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_char = snap.characters.values().next().cloned().expect("seed char");
+        for (cid, cid_corp) in [
+            (ceo_id, corp_id),
+            (op_id, corp_id),
+            (assigned_op_id, corp_id),
+            (roleless_id, corp_id),
+            (outsider_id, other_corp_id),
+            (ex_member_id, other_corp_id),
+            (legacy_char_id, corp_legacy_empty),
+            (assign_op_id, corp_assign_only),
+            (assign_roleless_id, corp_assign_only),
+            (excluded_role_id, corp_id),
+            (excluded_assign_id, corp_id),
+            (title_op_id, corp_title_only),
+            (title_roleless_id, corp_title_only),
+        ] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: cid_corp,
+                    ..base_char.clone()
+                },
+            );
+        }
+
+        let mut corp = CorporationRecord::new(corp_id, "HF1476 Ops Corp", "H76", ceo_id);
+        for cid in [
+            ceo_id,
+            op_id,
+            assigned_op_id,
+            roleless_id,
+            ex_member_id,
+            missing_char_id,
+        ] {
+            corp.members.insert(cid);
+        }
+        corp.member_roles
+            .insert(op_id, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
+        corp.member_roles
+            .insert(roleless_id, eve_db::corp_roles::ROLE_ACCOUNTANT);
+        corp.member_roles
+            .insert(ex_member_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        corp.member_roles
+            .insert(excluded_role_id, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
+        corp.member_roles
+            .insert(missing_char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+
+        snap.corp_role_assignments.insert(
+            (corp_id, assigned_op_id),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: assigned_op_id,
+                roles: eve_db::corp_roles::ROLE_STARBASE_OPERATOR,
+                ..Default::default()
+            },
+        );
+        snap.corp_role_assignments.insert(
+            (corp_id, excluded_assign_id),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: excluded_assign_id,
+                roles: eve_db::corp_roles::ROLE_DIRECTOR,
+                ..Default::default()
+            },
+        );
+
+        let mut npc_corp =
+            CorporationRecord::new(registered_npc_corp, "Registered NPC", "RNPC", ceo_id);
+        npc_corp.members.insert(ceo_id);
+        snap.corporations.insert(registered_npc_corp, npc_corp);
+
+        let mut legacy_corp = CorporationRecord::new(corp_legacy_empty, "Legacy Empty", "LEM", 0);
+        legacy_corp.members.insert(legacy_char_id);
+        snap.corporations.insert(corp_legacy_empty, legacy_corp);
+
+        let mut assign_corp = CorporationRecord::new(corp_assign_only, "Assign Only", "AO", 0);
+        assign_corp.members.insert(assign_op_id);
+        assign_corp.members.insert(assign_roleless_id);
+        snap.corporations.insert(corp_assign_only, assign_corp);
+        snap.corp_role_assignments.insert(
+            (corp_assign_only, assign_op_id),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: assign_op_id,
+                roles: eve_db::corp_roles::ROLE_STARBASE_OPERATOR,
+                ..Default::default()
+            },
+        );
+
+        let mut title_corp = CorporationRecord::new(corp_title_only, "Title Only", "TO", 0);
+        title_corp.members.insert(title_op_id);
+        title_corp.members.insert(title_roleless_id);
+        snap.corporations.insert(corp_title_only, title_corp);
+        let gov = snap.corp_governance.entry(corp_title_only).or_default();
+        gov.titles.insert(
+            1,
+            (
+                "Structure Gunner".into(),
+                eve_db::corp_roles::ROLE_STARBASE_OPERATOR,
+            ),
+        );
+        gov.member_titles.insert(title_op_id, 1);
+    });
+
+    let mk_st = |owner_corp_id: i64| UpwellStructureRecord {
+        structure_id: sid,
+        type_id: 35_832,
+        owner_corp_id,
+        solar_system_id: 30_000_142,
+        state: "ShieldVulnerable".into(),
+        quantum_core_installed: true,
+        ..Default::default()
+    };
+
+    ctx.db.with_snapshot(|snap| {
+        let st_ok = mk_st(corp_id);
+        assert!(require_structure_control_role_at(snap, ceo_id, &st_ok, now).is_ok());
+        assert!(require_structure_control_role_at(snap, op_id, &st_ok, now).is_ok());
+        assert!(require_structure_control_role_at(snap, assigned_op_id, &st_ok, now).is_ok());
+
+        for denied in [
+            roleless_id,
+            outsider_id,
+            ex_member_id,
+            excluded_role_id,
+            excluded_assign_id,
+            missing_char_id,
+        ] {
+            let err = require_structure_control_role_at(snap, denied, &st_ok, now)
+                .expect_err("non-member, roleless member, excluded member, or missing character must be denied");
+            assert_eq!(err.code, "CorpRoleDenied");
+        }
+
+        for invalid_corp in [0, -1, 1_000_009, registered_npc_corp, unregistered_corp_id] {
+            let st_bad = mk_st(invalid_corp);
+            let err = require_structure_control_role_at(snap, ceo_id, &st_bad, now)
+                .expect_err("invalid owner corp must fail closed");
+            assert_eq!(err.code, "CorpRoleDenied");
+        }
+
+        let st_assign = mk_st(corp_assign_only);
+        assert!(require_structure_control_role_at(snap, assign_op_id, &st_assign, now).is_ok());
+        let err = require_structure_control_role_at(snap, assign_roleless_id, &st_assign, now)
+            .expect_err("role assignment table counts as populated role registry");
+        assert_eq!(err.code, "CorpRoleDenied");
+
+        let st_legacy = mk_st(corp_legacy_empty);
+        let err = require_structure_control_role_at(snap, legacy_char_id, &st_legacy, now)
+            .expect_err("CEO-less/roleless corp member must fail closed without control role");
+        assert_eq!(err.code, "CorpRoleDenied");
+
+        let st_title = mk_st(corp_title_only);
+        assert!(require_structure_control_role_at(snap, title_op_id, &st_title, now).is_ok());
+        let err = require_structure_control_role_at(snap, title_roleless_id, &st_title, now)
+            .expect_err("roleless member in title-governed corp must fail closed");
+        assert_eq!(err.code, "CorpRoleDenied");
+    });
+}

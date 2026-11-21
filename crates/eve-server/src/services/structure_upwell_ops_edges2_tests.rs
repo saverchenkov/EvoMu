@@ -933,14 +933,19 @@ async fn mutants_cov_ext_state_safety_roles_and_profile_managers() {
         let mut s_plain = make_session(char_id, corp_id, None, 0);
         s_plain.corp_role = 0;
 
-        // Legacy corp (ceo_id == 0 && member_roles.is_empty()) -> allowed
+        // CEO-less / empty role-registry corp without control roles -> denied fail-closed
         {
             let corp = snap.corporations.get_mut(&corp_id).unwrap();
             corp.ceo_id = 0;
             corp.member_roles.clear();
         }
         let st = snap.structures[&sid].clone();
-        assert!(require_structure_control_role_at(snap, char_id, &st, 1_800_000_000).is_ok());
+        assert_eq!(
+            require_structure_control_role_at(snap, char_id, &st, 1_800_000_000)
+                .unwrap_err()
+                .code,
+            "CorpRoleDenied"
+        );
 
         // ceo_id == 0 but member_roles non-empty (other_char has role) -> char_id with 0 role denied!
         snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(other_char_id, ROLE_DIRECTOR);

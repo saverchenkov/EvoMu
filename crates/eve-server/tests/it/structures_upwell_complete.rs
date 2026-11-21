@@ -818,24 +818,26 @@ async fn structure_control_take_and_release_wire_tcp_client_harness() {
     crate::common::pin_clock(&ctx);
 
     let char_id: i64 = 90_000_001;
+    let corp_id: i64 = 98_000_901;
     let sys_id: u32 = 30_000_142;
     let struct_id: i64 = 991_000_901;
-    let (_corp_id, orig_ship_id) = ctx.db.with_mut_snapshot(|snap| {
-        let (corp_id, orig_ship_id) = {
+    let orig_ship_id = ctx.db.with_mut_snapshot(|snap| {
+        let orig_ship_id = {
             let ch = snap.characters.get_mut(&char_id).expect("demo character");
             ch.solar_system_id = sys_id;
             ch.station_id = None;
             ch.structure_id = Some(struct_id);
-            (ch.corporation_id, ch.active_ship_id)
+            ch.corporation_id = corp_id;
+            ch.active_ship_id
         };
         if let Some(ship_item) = snap.items.get_mut(&orig_ship_id) {
             ship_item.location_id = struct_id;
             ship_item.flag = InventoryFlag::Hangar;
         }
-        let corp = snap.corporations.entry(corp_id).or_default();
-        corp.corporation_id = corp_id;
-        corp.ceo_id = char_id;
+        let mut corp = eve_db::CorporationRecord::new(corp_id, "Wire Control Corp", "WCC", char_id);
+        corp.members.insert(char_id);
         *corp.member_roles.entry(char_id).or_insert(0) |= eve_db::corp_roles::ROLE_DIRECTOR;
+        snap.corporations.insert(corp_id, corp);
         snap.structures.insert(
             struct_id,
             eve_db::types::UpwellStructureRecord {
@@ -857,7 +859,7 @@ async fn structure_control_take_and_release_wire_tcp_client_harness() {
                 self_destruct_at_unix: None,
             },
         );
-        (corp_id, orig_ship_id)
+        orig_ship_id
     });
 
     let listener = TcpListener::bind("127.0.0.1:0")
