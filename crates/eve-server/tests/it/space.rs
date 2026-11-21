@@ -821,7 +821,7 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
     assert!(!jump_kv.contains_key("destinyUpdates"));
     assert_eq!(sess.solar_system_id, Some(30_000_144));
 
-    // Gate observer in Jita must have received RemoveBall for the jumping ship
+    // Gate observer in Jita must have received RemoveBalls([ship_id]) for the jumping ship (#1531)
     let (_t, gate_obs_evs, gate_obs_pyrep) = jita_handle
         .drain_observer_updates(gate_observer_id)
         .await
@@ -829,19 +829,20 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
     assert!(
         gate_obs_evs
             .iter()
-            .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id } if *ball_id == ship_id)),
-        "Jita gate observer must receive RemoveBall when ship jumps through stargate"
+            .any(|e| matches!(e, DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[ship_id])),
+        "Jita gate observer must receive RemoveBalls([{ship_id}]) when ship jumps through stargate"
     );
     let PyRep::List(gate_obs_list) = &gate_obs_pyrep else {
         panic!("Expected DoDestinyUpdate list for gate observer");
     };
     assert!(!gate_obs_list.is_empty());
-    let has_1arg_remove_ball = gate_obs_list.iter().any(|entry| {
+    let has_remove_balls = gate_obs_list.iter().any(|entry| {
         if let PyRep::Tuple(outer) = entry {
             if let Some(PyRep::Tuple(inner)) = outer.get(1) {
-                if inner.first().and_then(|v| v.as_str()) == Some("RemoveBall") {
+                if inner.first().and_then(|v| v.as_str()) == Some("RemoveBalls") {
                     if let Some(PyRep::Tuple(args)) = inner.get(1) {
-                        return args.as_slice() == [PyRep::Integer(ship_id)];
+                        return args.as_slice()
+                            == [PyRep::List(vec![PyRep::Integer(ship_id)])];
                     }
                 }
             }
@@ -849,8 +850,8 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
         false
     });
     assert!(
-        has_1arg_remove_ball,
-        "RemoveBall wire action must be 1-arg (entityID,) per Destiny.xmlp:339-348"
+        has_remove_balls,
+        "RemoveBalls wire action must wrap [entityID] per #1531"
     );
 
     // Jumping ship in Perimeter (30000144) must have received SetState (index 0) with all 34 Perimeter

@@ -1495,26 +1495,29 @@ async fn pod_ejection_handoff_in_space_emits_incremental_destiny_without_set_sta
     assert!(!saw_remove_ball, "same-system pod ejection must defer RemoveBall past SessionChangeNotification (#1018)");
     assert!(saw_add_balls2, "same-system pod ejection must emit AddBalls2 (#970)");
 
-    // #1018: Advancing 2 ballpark ticks delivers the deferred RemoveBall for old_ship_id.
+    // #1018, #1531: Advancing 2 ballpark ticks delivers the deferred RemoveBalls([old_ship_id]).
     let b1 = jita.tick().await.unwrap();
-    assert!(!b1
-        .observer_events
-        .get(&capsule_id)
-        .is_some_and(|evs| evs.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == old_ship_id))));
+    assert!(!b1.observer_events.get(&capsule_id).is_some_and(|evs| {
+        evs.iter().any(|e| match e {
+            eve_destiny::DestinyEvent::RemoveBall { ball_id } => *ball_id == old_ship_id,
+            eve_destiny::DestinyEvent::RemoveBalls { ball_ids } => ball_ids.contains(&old_ship_id),
+            _ => false,
+        })
+    }));
     let b2 = jita.tick().await.unwrap();
     assert!(
-        b2.observer_events.get(&capsule_id).is_some_and(|evs| evs
-            .iter()
-            .any(|e| matches!(e, eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == old_ship_id))),
-        "deferred RemoveBall(old_ship_id) must be emitted on tick +2 (#970/#1018)"
+        b2.observer_events.get(&capsule_id).is_some_and(|evs| evs.iter().any(
+            |e| matches!(e, eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[old_ship_id])
+        )),
+        "deferred RemoveBalls([old_ship_id]) must be emitted on tick +2 (#970/#1018/#1531)"
     );
     let rep2 = b2
         .observer_updates_pyrep
         .get(&capsule_id)
         .expect("encoded observer DoDestinyUpdate payload on tick +2");
     assert!(
-        pyrep_contains_ascii(rep2, "RemoveBall"),
-        "tick +2 DoDestinyUpdate payload must encode RemoveBall (#1018)"
+        pyrep_contains_ascii(rep2, "RemoveBalls"),
+        "tick +2 DoDestinyUpdate payload must encode RemoveBalls (#1018/#1531)"
     );
 }
 
@@ -1654,7 +1657,7 @@ async fn ship_eject_and_board_in_space_emit_incremental_destiny_without_set_stat
         {
             board_dest_pos.get_or_insert(idx);
             board_set_state |= pyrep_contains_ascii(&raw, "SetState");
-            board_remove_ball |= pyrep_contains_ascii(&raw, "RemoveBall");
+            board_remove_ball |= pyrep_contains_ascii(&raw, "RemoveBalls");
         } else if pkt.packet_type == MachoPacketType::SessionChangeNotification {
             board_sess_pos.get_or_insert(idx);
         } else if pkt.packet_type == MachoPacketType::CallRsp {

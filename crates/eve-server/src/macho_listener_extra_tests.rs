@@ -2718,3 +2718,447 @@ async fn notify_rx_displaced_session_preserves_notifications_and_observer_update
     );
 }
 
+#[test]
+fn test_1531_canonical_ballpark_and_sequencer_emit_remove_balls() {
+    use crate::outbound_sequencer::{normalize_server_destiny_batch, sequence_tick, DestinyBatch, OutFrame, SessionWireState};
+    use eve_destiny::wire::encode_destiny_updates;
+    use eve_destiny::{Ball, Ballpark, DestinyEvent, MovementMode};
+    use glam::DVec3;
+
+    let ctx = ServerContext::new();
+    let observer_ship_id = 1_897_000_001_i64;
+    let new_ship_id = 1_897_000_002_i64;
+    let npc_id = 900_000_002_i64;
+    let drone_id = 1_898_125_074_i64;
+    let scout_id = 1_898_125_075_i64;
+
+    let make_ball = |id: i64, x: f64| Ball {
+        id,
+        type_id: 587,
+        position: DVec3::new(x, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+
+    // 1. Canonical `Ballpark::remove_ball` queues `DestinyEvent::RemoveBalls([id])` to
+    //    observers so both `:26000` (`build_destiny_batch`) and bridge (`observer_updates_pyrep`)
+    //    emit `RemoveBalls([id])` instead of 1-arg `RemoveBall`.
+    let mut bp = Ballpark::new(30_000_142);
+    bp.current_tick = 100;
+    bp.add_ball(make_ball(observer_ship_id, 0.0));
+    bp.add_ball(make_ball(npc_id, 1_000.0));
+    bp.add_ball(make_ball(drone_id, 500.0));
+    bp.add_ball(make_ball(scout_id, 600.0));
+    bp.queue_set_state(observer_ship_id);
+    bp.drain_all_observer_events();
+
+    bp.emit_event(
+        Some(npc_id),
+        DestinyEvent::OnSpecialFXTimed {
+            ball_id: npc_id,
+            module_id: None,
+            target_id: Some(drone_id),
+            guid: "effects.HybridWeapon".into(),
+            start: true,
+            is_active: true,
+            duration_ms: Some(2_000.0),
+            repeat: Some(1),
+            graphic_info: None,
+        },
+    );
+    bp.emit_event(
+        Some(drone_id),
+        DestinyEvent::TerminalExplosion {
+            ball_id: drone_id,
+            destruction_effect_id: None,
+        },
+    );
+    assert!(bp.remove_ball(drone_id).is_some());
+    assert!(bp.remove_ball(scout_id).is_some());
+
+    let obs_evs = bp.drain_observer_events(observer_ship_id);
+    let bridge_pyrep = encode_destiny_updates(100, &obs_evs, Some(&bp));
+    let bridge_actions = collect_destiny_actions_from_list(&bridge_pyrep);
+    assert_eq!(
+        bridge_actions.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        vec![
+            "OnSpecialFX",
+            "TerminalPlayDestructionEffect",
+            "RemoveBalls",
+            "RemoveBalls",
+        ]
+    );
+    assert_eq!(bridge_actions[2].1, vec![PyRep::List(vec![PyRep::Integer(drone_id)])]);
+    assert_eq!(bridge_actions[3].1, vec![PyRep::List(vec![PyRep::Integer(scout_id)])]);
+
+    let batch = build_destiny_batch(
+        &ctx,
+        1,
+        100,
+        &obs_evs,
+        bridge_pyrep,
+        &[observer_ship_id],
+        SelfDestinyWireContext::NonDock,
+    )
+    .expect("destruction batch must not collapse");
+    assert_eq!(
+        collect_destiny_actions_from_list(&batch.updates),
+        bridge_actions,
+        "MachoNet :26000 and bridge wire updates must match identically (#1531)"
+    );
+
+    // 2. Canonical `Ballpark::queue_in_space_ship_handoff` schedules `RemoveBalls([old_ship_id])`
+    //    for tick +2 without `SetState`.
+    bp.add_ball(make_ball(new_ship_id, 50.0));
+    assert!(bp.queue_in_space_ship_handoff(observer_ship_id, new_ship_id, &[new_ship_id]));
+    let immediate_handoff = bp.drain_observer_events(new_ship_id);
+    assert!(!immediate_handoff
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::RemoveBall { .. } | DestinyEvent::RemoveBalls { .. })));
+    bp.step(1.0);
+    assert!(!bp
+        .drain_observer_events(new_ship_id)
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::RemoveBall { .. } | DestinyEvent::RemoveBalls { .. })));
+    bp.step(1.0);
+    let handoff_tick2 = bp.drain_observer_events(new_ship_id);
+    assert!(handoff_tick2.iter().any(
+        |e| matches!(e, DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[observer_ship_id])
+    ));
+    let handoff_pyrep = encode_destiny_updates(bp.current_tick as u32, &handoff_tick2, Some(&bp));
+    assert_eq!(
+        collect_destiny_actions_from_list(&handoff_pyrep),
+        vec![(
+            "RemoveBalls".into(),
+            vec![PyRep::List(vec![PyRep::Integer(observer_ship_id)])],
+        )]
+    );
+
+    // 3. `OutboundSequencer` deferred removal always emits `RemoveBalls([id])`, never `RemoveBall`.
+    let mut wire = SessionWireState::new(98_153_101, 9101);
+    let ep = wire.enter_space(Some(30_000_142));
+    assert!(sequence_tick(
+        &mut wire,
+        DestinyBatch::new(
+            ep,
+            10,
+            true,
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(10),
+                PyRep::Tuple(vec![
+                    PyRep::String("SetState".into()),
+                    PyRep::Tuple(vec![PyRep::keyval([("ego", PyRep::Integer(observer_ship_id))])]),
+                ]),
+            ])]),
+        ),
+    )
+    .is_some());
+    let deferred = normalize_server_destiny_batch(
+        &mut wire,
+        DestinyBatch::new(
+            ep,
+            11,
+            false,
+            PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(11),
+                    PyRep::Tuple(vec![
+                        PyRep::String("AddBalls2".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(scout_id)]),
+                    ]),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(11),
+                    PyRep::Tuple(vec![
+                        PyRep::String("RemoveBalls".into()),
+                        PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(scout_id)])]),
+                    ]),
+                ]),
+            ]),
+        ),
+    );
+    assert_eq!(deferred.len(), 2);
+    assert_eq!(deferred[1].stamp, 12);
+    assert_eq!(
+        collect_destiny_actions_from_list(&deferred[1].updates),
+        vec![(
+            "RemoveBalls".into(),
+            vec![PyRep::List(vec![PyRep::Integer(scout_id)])],
+        )]
+    );
+    let mut deferred_iter = deferred.into_iter();
+    assert!(matches!(
+        sequence_tick(&mut wire, deferred_iter.next().unwrap()),
+        Some(OutFrame::DoDestinyUpdate { stamp: 11, .. })
+    ));
+    let out = sequence_tick(&mut wire, deferred_iter.next().unwrap());
+    match out {
+        Some(OutFrame::DoDestinyUpdate { stamp: 12, updates, .. }) => {
+            assert_eq!(
+                collect_destiny_actions_from_list(&updates),
+                vec![(
+                    "RemoveBalls".into(),
+                    vec![PyRep::List(vec![PyRep::Integer(scout_id)])],
+                )]
+            );
+        }
+        other => panic!("expected sequenced DoDestinyUpdate at stamp 12, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_1531_wire_live_ball_removal_and_destruction_with_active_fx_emit_remove_balls() {
+    use crate::router::client_wire::ClientWireSession;
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+    use eve_destiny::{Ball, CombatState, DestinyEvent, MovementMode};
+    use glam::DVec3;
+
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    ctx.session_change_timers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+
+    let sys_id = 30_000_142_u32;
+    let st_pos = ctx.sde.stations[&60_003_760_i64].position;
+    let ego_char_id = 90_000_001_i64;
+    let ego_ship = 895_251_i64;
+    let npc_attacker = 900_125_001_i64;
+    let drone_target = 1_898_125_074_i64;
+    let scooped_drone = 1_898_125_075_i64;
+    let tayra_type_id = 649_u32;
+    let ego_pos = st_pos + DVec3::new(500_000_000.0, 0.0, 0.0);
+
+    let ego_corp_id = ctx.db.with_mut_snapshot(|snap| {
+        let corp_id = snap
+            .characters
+            .get_mut(&ego_char_id)
+            .map(|ch| {
+                ch.active_ship_id = ego_ship;
+                ch.solar_system_id = sys_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.corporation_id
+            })
+            .expect("seeded character");
+        snap.items.insert(
+            ego_ship,
+            InventoryItemRecord {
+                item_id: ego_ship,
+                type_id: tayra_type_id,
+                owner_id: ego_char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        corp_id
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let full_combat = CombatState {
+        shield_hp: 1_000.0,
+        max_shield_hp: 1_000.0,
+        armor_hp: 1_000.0,
+        max_armor_hp: 1_000.0,
+        structure_hp: 1_000.0,
+        max_structure_hp: 1_000.0,
+        capacitor: 1_000.0,
+        max_capacitor: 1_000.0,
+        ..Default::default()
+    };
+    let make_ball = |id: i64, offset: DVec3| Ball {
+        id,
+        type_id: tayra_type_id,
+        position: ego_pos + offset,
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.0,
+        mass: 1_100_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+
+    sys_handle
+        .spawn_ball_with_combat(make_ball(ego_ship, DVec3::ZERO), full_combat.clone())
+        .await
+        .unwrap();
+    sys_handle.push_set_state(ego_ship).await.unwrap();
+    let _ = sys_handle.drain_observer_updates(ego_ship).await;
+    sys_handle.step_manual(1.0).await.unwrap();
+    let _ = sys_handle.drain_observer_updates(ego_ship).await;
+
+    let mut ego_sess = SessionState::new(15_311);
+    ego_sess.user_id = Some(1);
+    ego_sess.character_id = Some(ego_char_id);
+    ego_sess.corporation_id = Some(ego_corp_id);
+    ego_sess.solar_system_id = Some(sys_id);
+    ego_sess.ship_id = Some(ego_ship);
+    ego_sess.live_notify_listener = true;
+    ctx.db
+        .acquire_online_lock(
+            1,
+            ego_sess.session_id,
+            Some(ego_char_id),
+            true,
+            ctx.now_unix_secs(),
+        )
+        .unwrap();
+    ctx.sync_session(&mut ego_sess);
+
+    let mut ego_wire = ClientWireSession::from_session(&ctx, ego_sess);
+    let _ = ego_wire.drain_pending_frames();
+
+    // 1. Spawn and materialize attacker + two drones on ego's live wire session.
+    sys_handle
+        .spawn_ball_with_combat(
+            make_ball(npc_attacker, DVec3::new(1_000.0, 0.0, 0.0)),
+            full_combat.clone(),
+        )
+        .await
+        .unwrap();
+    sys_handle
+        .spawn_ball_with_combat(
+            make_ball(drone_target, DVec3::new(500.0, 0.0, 0.0)),
+            full_combat.clone(),
+        )
+        .await
+        .unwrap();
+    sys_handle
+        .spawn_ball_with_combat(
+            make_ball(scooped_drone, DVec3::new(600.0, 0.0, 0.0)),
+            full_combat,
+        )
+        .await
+        .unwrap();
+    let _step_spawn = sys_handle.step_manual(1.0).await.unwrap();
+    let _ = ego_wire.drain_pending_frames();
+    assert!(ego_wire.wire_state.materialized.contains(&drone_target));
+    assert!(ego_wire.wire_state.materialized.contains(&scooped_drone));
+
+    // 2. Emit targeted NPC weapon FX alongside TerminalExplosion + remove_ball(drone_target) and
+    //    verify the MachoNet wire frame delivers RemoveBalls([drone_target]) instead of RemoveBall.
+    assert!(
+        sys_handle
+            .emit_destiny_event(
+                npc_attacker,
+                DestinyEvent::OnSpecialFXTimed {
+                    ball_id: npc_attacker,
+                    module_id: None,
+                    target_id: Some(drone_target),
+                    guid: "effects.HybridWeapon".into(),
+                    start: true,
+                    is_active: true,
+                    duration_ms: Some(2_000.0),
+                    repeat: Some(1),
+                    graphic_info: None,
+                },
+            )
+            .await
+    );
+    assert!(
+        sys_handle
+            .emit_destiny_event(
+                drone_target,
+                DestinyEvent::TerminalExplosion {
+                    ball_id: drone_target,
+                    destruction_effect_id: None,
+                },
+            )
+            .await
+    );
+    assert!(sys_handle.remove_ball(drone_target).await.is_some());
+    let step_destroy = sys_handle.step_manual(1.0).await.unwrap();
+    let (destroy_frames, _) = ego_wire.drain_pending_frames();
+    let destroy_actions = collect_destiny_actions_from_frames(&destroy_frames);
+
+    assert!(
+        !destroy_actions.iter().any(|(name, _)| name == "RemoveBall"),
+        "MachoNet Destiny wire must never emit 1-arg RemoveBall (#1531): {destroy_actions:?}"
+    );
+    assert!(
+        destroy_actions.iter().any(|(name, args)| {
+            name == "OnSpecialFX" && args.get(3).and_then(PyRep::as_i64) == Some(drone_target)
+        }),
+        "targeted NPC FX must remain in tick batch: {destroy_actions:?}"
+    );
+    assert!(
+        destroy_actions.iter().any(|(name, args)| {
+            name == "TerminalPlayDestructionEffect"
+                && args.first().and_then(PyRep::as_i64) == Some(drone_target)
+        }),
+        "TerminalPlayDestructionEffect must remain paired with RemoveBalls: {destroy_actions:?}"
+    );
+    assert!(
+        destroy_actions.iter().any(|(name, args)| {
+            name == "RemoveBalls"
+                && matches!(
+                    args.first(),
+                    Some(PyRep::List(ids)) if ids.iter().filter_map(PyRep::as_i64).collect::<Vec<_>>() == vec![drone_target]
+                )
+        }),
+        "dying ball must be emitted via RemoveBalls([drone_target]): {destroy_actions:?}"
+    );
+    assert_eq!(
+        ego_wire.wire_state.sequencer_counters().invariant_violations,
+        0
+    );
+    assert!(!ego_wire.wire_state.materialized.contains(&drone_target));
+
+    // 3. Also verify canonical empty-jetcan despawn (`inventory_stacking::despawn_empty_jetcan_if_needed`)
+    //    emits `DoDestinyUpdate` with `RemoveBalls([scooped_drone])` directly on the wire.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            scooped_drone,
+            InventoryItemRecord {
+                item_id: scooped_drone,
+                type_id: 23,
+                owner_id: ego_char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    assert!(
+        crate::services::inventory_stacking::despawn_empty_jetcan_if_needed(
+            &ctx,
+            Some(sys_id),
+            scooped_drone,
+        )
+        .await
+    );
+    let _ = step_destroy;
+    let (notif_frames, _) = ego_wire.drain_pending_frames();
+    let notif_remove_balls: Vec<_> = notif_frames
+        .iter()
+        .filter_map(|f| match f {
+            crate::outbound_sequencer::OutFrame::Notification { event, args }
+                if event == "DoDestinyUpdate" =>
+            {
+                Some(collect_destiny_actions_from_list(&args[0]))
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        notif_remove_balls,
+        vec![(
+            "RemoveBalls".into(),
+            vec![PyRep::List(vec![PyRep::Integer(scooped_drone)])],
+        )]
+    );
+}
+
