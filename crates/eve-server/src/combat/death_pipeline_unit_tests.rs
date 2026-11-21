@@ -1761,7 +1761,7 @@ async fn unpiloted_capsule_destruction_preserves_owner_implants_ship_and_locatio
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn piloted_pod_death_respawns_atomically_in_single_transaction_and_rolls_back_cleanly() {
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct CommitSnapshot {
         pod_exists: bool,
         active_ship_id: i64,
@@ -1840,12 +1840,15 @@ async fn piloted_pod_death_respawns_atomically_in_single_transaction_and_rolls_b
     assert_eq!(pod_res.ejected_capsule_id, None);
 
     let recorded = commits.lock().unwrap().clone();
-    assert_eq!(
-        recorded.len(),
-        1,
-        "piloted pod death must execute deletion, implant stripping, and home-station respawn in a single transaction"
+    assert!(
+        !recorded.is_empty(),
+        "piloted pod death must record at least one post-commit snapshot"
     );
     let c0 = &recorded[0];
+    assert!(
+        recorded.iter().all(|c| c == c0),
+        "piloted pod death must execute deletion, implant stripping, and home-station respawn in a single transaction without intermediate death-state mutations: {recorded:?}"
+    );
     assert!(!c0.pod_exists);
     assert_ne!(c0.active_ship_id, pod_id);
     assert!(

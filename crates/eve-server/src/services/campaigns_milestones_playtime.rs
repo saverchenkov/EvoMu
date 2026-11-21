@@ -288,25 +288,6 @@ pub fn resolve_reward_label_message_id(
     i64::from(msg_id)
 }
 
-/// Emits `OnAccountChange` (and pushes to `session` for direct unit-test handles) on ISK balance update.
-pub fn emit_account_change_isk(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    char_id: i64,
-    bal_after_cents: i64,
-) {
-    let bal_f64 = (bal_after_cents as f64) / 100.0;
-    let notif = crate::router::notify_registry::OnAccountChange {
-        account_key: "cash".into(),
-        owner_id: char_id,
-        balance: bal_f64,
-    };
-    if !session.live_notify_listener {
-        crate::router::notify_registry::push_typed_session_notification(session, notif.clone());
-    }
-    ctx.emit_typed(crate::router::NotificationTarget::Character(char_id), notif);
-}
-
 /// Resolves the character's reward delivery station/structure from active session docking or
 /// persistent character docking (`None` when undocked in space so rewards enqueue in redeeming bay).
 pub fn resolve_reward_station_id(

@@ -1476,7 +1476,7 @@ impl WorldRepository {
                 std::sync::Arc::new(writer.working.clone());
         }
 
-        if !effects.is_empty() {
+        if did_mutate || !effects.is_empty() {
             let listeners: Vec<PostCommitListener> = self
                 .post_commit_listeners
                 .lock()
@@ -1487,7 +1487,9 @@ impl WorldRepository {
             for listener in listeners {
                 listener(&writer.working, &changes, &effects);
             }
-            effects.run_callbacks(&changes);
+            if !effects.is_empty() {
+                effects.run_callbacks(&changes);
+            }
         }
 
         Ok(val)

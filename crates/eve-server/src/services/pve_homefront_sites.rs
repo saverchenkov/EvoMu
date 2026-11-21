@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::notify_registry::{OnAccountChange, OnLPChange};
+use crate::router::notify_registry::OnLPChange;
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::combat_crimewatch::{
     with_combat_ephemeral, with_mut_combat_ephemeral, ExtendedNpcEntity,
@@ -3436,19 +3436,9 @@ fn emit_payout_notifications(
     ctx: &ServerContext,
     payouts: &[(HomefrontPilotPayout, IskCents, Option<(i64, i64, i64)>)],
 ) {
-    for (payout, new_balance, lp_change_opt) in payouts {
+    for (payout, _new_balance, lp_change_opt) in payouts {
         if !payout.eligible {
             continue;
-        }
-        if payout.isk_cents.raw_cents() > 0 {
-            ctx.emit_typed(
-                NotificationTarget::Character(payout.character_id),
-                OnAccountChange {
-                    account_key: "cash".into(),
-                    owner_id: payout.character_id,
-                    balance: new_balance.to_wire_f64(),
-                },
-            );
         }
         if let Some((issuer_corp_id, lp_before, lp_after)) = *lp_change_opt {
             ctx.emit_typed(

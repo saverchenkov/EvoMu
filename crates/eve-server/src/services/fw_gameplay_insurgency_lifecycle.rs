@@ -460,21 +460,7 @@ pub fn emit_campaign_resolution_effects_core(
 ) {
     let now_unix = db.clock().now_unix_secs();
     let now_ft = db.clock().now_blueos_filetime_ticks();
-    for &(cid, new_bal) in &res.updated_balances {
-        crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
-            pending_notifications,
-            notify_tx,
-            cid,
-            None,
-            "cash",
-            now_ft,
-            crate::router::notify_registry::OnAccountChange {
-                account_key: "cash".into(),
-                owner_id: cid,
-                balance: new_bal,
-            },
-        );
-    }
+    let _ = &res.updated_balances;
     let outcome_state = match res.outcome.as_str() {
         "PirateWin" => crate::services::insurgency_services::CAMPAIGN_STATE_PIRATE_WIN,
         "EmpireWin" | "AntiPirateWin" => {

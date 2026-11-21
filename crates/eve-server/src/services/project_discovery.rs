@@ -631,9 +631,7 @@ pub fn handle_project_discovery(
 
             match res {
                 Ok(out) => {
-                    if let Some(bal) = out.new_bal {
-                        let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
-                    }
+                    let _ = &out.new_bal;
                     crate::services::notify_emitters_skills_trade_godma::emit_player_state_updated(
                         ctx,
                         char_id,

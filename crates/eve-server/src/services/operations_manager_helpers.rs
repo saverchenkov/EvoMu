@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use crate::router::notify_registry::{
-    OnAccountChange, OnItemChange, OnOperationTaskCompleted, OnRedeemingQueueUpdated,
+    OnItemChange, OnOperationTaskCompleted, OnRedeemingQueueUpdated,
     OnRedeemingTokensUpdated, TypedNotification,
 };
 use crate::router::{NotificationTarget, ServerContext};
@@ -558,7 +558,6 @@ pub fn grant_category_completion_rewards(
 }
 
 enum OperationRewardNotif {
-    AccountChange(OnAccountChange),
     ItemChange(OnItemChange),
     RedeemingQueueUpdated(OnRedeemingQueueUpdated),
     RedeemingTokensUpdated(OnRedeemingTokensUpdated),
@@ -567,9 +566,6 @@ enum OperationRewardNotif {
 impl OperationRewardNotif {
     fn emit_typed(self, ctx: &ServerContext, target: NotificationTarget) {
         match self {
-            Self::AccountChange(n) => {
-                let _ = ctx.emit_typed(target, n);
-            }
             Self::ItemChange(n) => {
                 let _ = ctx.emit_typed(target, n);
             }
@@ -584,11 +580,6 @@ impl OperationRewardNotif {
 
     fn into_raw(self) -> (&'static str, &'static str, Vec<PyRep>) {
         match self {
-            Self::AccountChange(n) => (
-                OnAccountChange::EVENT,
-                OnAccountChange::DEFAULT_ID_TYPE,
-                n.into_args(),
-            ),
             Self::ItemChange(n) => (
                 OnItemChange::EVENT,
                 OnItemChange::DEFAULT_ID_TYPE,
@@ -616,16 +607,6 @@ fn emit_operation_reward_notifications_impl<F>(
 ) where
     F: FnMut(NotificationTarget, OperationRewardNotif),
 {
-    if let Some(bal_cents) = outcome.new_balance_cents {
-        emit(
-            NotificationTarget::Character(char_id),
-            OperationRewardNotif::AccountChange(OnAccountChange {
-                account_key: "cash".into(),
-                owner_id: char_id,
-                balance: eve_db::IskCents(bal_cents).to_f64_isk(),
-            }),
-        );
-    }
     for &(item_id, type_id, loc_id, qty) in &outcome.created_hangar_items {
         let (group_id, category_id) = sde
             .types

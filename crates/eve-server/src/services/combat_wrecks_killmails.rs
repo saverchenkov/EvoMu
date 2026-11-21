@@ -325,14 +325,6 @@ pub fn process_ship_insurance_payout(
     if settlement.payout_isk <= 0.0 {
         return 0.0;
     }
-    if !settlement.is_corp && settlement.credited_owner_id == victim_char_id {
-        let _ = ctx.notify_account_change(
-            victim_char_id,
-            "cash",
-            victim_char_id,
-            settlement.balance_after_isk,
-        );
-    }
     if let Some(mid) = settlement.mail_id {
         let sent = crate::services::mail_notify::SentMail {
             message_id: mid,
