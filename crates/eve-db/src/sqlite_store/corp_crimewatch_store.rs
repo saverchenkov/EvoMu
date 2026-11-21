@@ -91,6 +91,13 @@ macro_rules! impl_decomposed_domain_struct {
                 prefix: &str,
                 out: &mut Vec<DomainRowChange>,
             ) {
+                let Self {
+                    $($map_f: _,)*
+                    $($ssmap_f: _,)*
+                    $($set_f: _,)*
+                    $($scalar_f: _,)*
+                    $($sub_f: _,)*
+                } = self;
                 let def = Self::default();
                 let _ = &def;
                 $(
@@ -1008,30 +1015,42 @@ impl StagedCorpCrimewatch {
         macro_rules! assign_fields {
             (
                 $src:expr,
+                $src_ty:ident,
                 maps: [ $($map_f:ident),* $(,)? ],
                 sorted_set_maps: [ $($ssmap_f:ident),* $(,)? ],
                 scalars: [ $($scalar_f:ident),* $(,)? ],
                 substructs: [ $(($sub_f:ident, $_sub_prefix:literal)),* $(,)? ]
             ) => {{
-                $(snap.$map_f = $src.$map_f.into();)*
-                $(snap.$ssmap_f = $src.$ssmap_f.into();)*
-                $(snap.$scalar_f = $src.$scalar_f.into();)*
-                $(snap.$sub_f = $src.$sub_f.into();)*
+                let $src_ty {
+                    $($map_f,)*
+                    $($ssmap_f,)*
+                    $($scalar_f,)*
+                    $($sub_f,)*
+                } = $src;
+                $(snap.$map_f = $map_f.into();)*
+                $(snap.$ssmap_f = $ssmap_f.into();)*
+                $(snap.$scalar_f = $scalar_f.into();)*
+                $(snap.$sub_f = $sub_f.into();)*
             }};
         }
+        let Self {
+            corp_governance,
+            crimewatch,
+            warfare,
+        } = self;
         macro_rules! apply_corp {
             ($($rest:tt)*) => {
-                assign_fields!(self.corp_governance, $($rest)*);
+                assign_fields!(corp_governance, CorpGovernanceDomain, $($rest)*);
             };
         }
         macro_rules! apply_cw {
             ($($rest:tt)*) => {
-                assign_fields!(self.crimewatch, $($rest)*);
+                assign_fields!(crimewatch, CrimewatchDomain, $($rest)*);
             };
         }
         macro_rules! apply_war {
             ($($rest:tt)*) => {
-                assign_fields!(self.warfare, $($rest)*);
+                assign_fields!(warfare, WarfareDomain, $($rest)*);
             };
         }
         for_each_corp_governance_fields!(apply_corp);
