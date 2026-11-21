@@ -10,9 +10,9 @@
 use crate::router::cache_notifications::{
     assemble_pending_notification, current_dispatch_staging_scope_id,
     enqueue_or_stage_pending_batch, find_staged_notification_by_seq,
-    insert_before_staged_seq_or_stage, is_active_dispatch_char, pending_notifications_ptr,
-    push_pending_notification_capped, try_stage_dispatch_notification, NotificationTarget,
-    PendingMachoNotification, MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR,
+    insert_before_staged_seq_or_stage, is_active_dispatch_char, next_notification_seq_id,
+    pending_notifications_ptr, push_pending_notification_capped, try_stage_dispatch_notification,
+    NotificationTarget, PendingMachoNotification, MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR,
     MAX_PENDING_NOTIFICATIONS_PER_CHAR,
 };
 use crate::router::context::ServerContext;
@@ -527,6 +527,7 @@ pub(crate) fn try_handle_legacy_account_change_emit(
             .unwrap_or_else(|e| e.into_inner())
     });
     let mut emitted = Vec::with_capacity(recipients.len());
+    let mut seq_updates: Vec<(i64, u64, u64)> = Vec::new();
 
     for &(cid, uid) in recipients {
         let make_notif = || {
@@ -539,73 +540,83 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                 now_ft,
             )
         };
-        let latest_rec_opt = matching.iter().rfind(|r| r.char_id == cid);
-        let exact_rec_opt = matching
+        let cid_records: Vec<&ProjectedAccountRecord> =
+            matching.iter().filter(|r| r.char_id == cid).collect();
+        let latest_rec_opt = cid_records.last().copied();
+        let exact_idx_opt = cid_records
             .iter()
-            .rev()
-            .find(|r| r.char_id == cid && (r.balance - manual_bal).abs() < 1e-6);
-        match (exact_rec_opt, latest_rec_opt, queues.as_mut()) {
-            (Some(exact), _, Some(queues)) => {
+            .rposition(|r| (r.balance - manual_bal).abs() < 1e-6);
+        match (latest_rec_opt, queues.as_mut()) {
+            (Some(latest), Some(queues)) => {
                 let queue = queues.entry(cid).or_default();
-                if let Some(pos) = queue.iter().position(|n| n.seq_id == exact.seq_id) {
-                    emitted.push(queue[pos].clone());
-                } else {
-                    // `exact.seq_id` was already drained to live listeners: do not re-push
-                    // duplicates onto the queue or live stream.
-                    emitted.push(make_notif());
+                let latest_pos = queue.iter().position(|n| n.seq_id == latest.seq_id);
+                if let Some(exact_idx) = exact_idx_opt {
+                    let exact = cid_records[exact_idx];
+                    if let Some(pos) = queue.iter().position(|n| n.seq_id == exact.seq_id) {
+                        emitted.push(queue[pos].clone());
+                        continue;
+                    }
+                    // `exact` was already drained. Keep suppressing unless a newer wallet
+                    // commit intervened before a still-queued `latest` (cross-epoch round-trip).
+                    let round_tripped_alias =
+                        exact_idx + 1 < cid_records.len() - 1 && latest_pos.is_some();
+                    if !round_tripped_alias {
+                        emitted.push(make_notif());
+                        continue;
+                    }
                 }
-            }
-            (None, Some(rec), Some(queues)) => {
-                let queue = queues.entry(cid).or_default();
-                if let Some(pos) = queue.iter().position(|n| n.seq_id == rec.seq_id) {
-                    let notif = make_notif();
+                if let Some(pos) = latest_pos {
+                    let mut notif = make_notif();
+                    let new_tail_seq = next_notification_seq_id();
+                    notif.seq_id = latest.seq_id;
+                    queue[pos].seq_id = new_tail_seq;
                     insert_before_pos_with_cap(queue, pos, notif.clone());
+                    seq_updates.push((cid, latest.seq_id, new_tail_seq));
                     // Do not re-broadcast stale pre-settlement balance on `notify_tx`
-                    // after `rec.seq_id` (`B_final`) was already sent at commit time.
+                    // after `latest.seq_id` (`B_final`) was already sent at commit time.
                     emitted.push(notif);
                 } else {
-                    // `rec.seq_id` was already drained to live listeners: do not re-push
+                    // `latest.seq_id` was already drained to live listeners: do not re-push
                     // duplicates or stale intermediate balances onto the live stream.
                     emitted.push(make_notif());
                 }
             }
-            (None, None, Some(queues)) => {
+            (None, Some(queues)) => {
                 let notif = make_notif();
                 push_pending_notification_capped(queues.entry(cid).or_default(), notif.clone());
                 let _ = ctx.notify_tx.send((cid, notif.clone()));
                 emitted.push(notif);
             }
-            (Some(_), _, None) => {
-                if let Some(existing) = matching.iter().rev().find_map(|r| {
-                    if r.char_id == cid && (r.balance - manual_bal).abs() < 1e-6 {
+            (Some(latest), None) => {
+                if let Some(existing) = cid_records.iter().rev().find_map(|r| {
+                    if (r.balance - manual_bal).abs() < 1e-6 {
                         find_staged_notification_by_seq(&*ctx.pending_notifications, r.seq_id)
                     } else {
                         None
                     }
                 }) {
                     emitted.push(existing);
-                } else {
+                } else if exact_idx_opt.is_some() {
                     // Exact balance for this staged scope was already flushed or drained.
                     emitted.push(make_notif());
-                }
-            }
-            (None, Some(rec), None) => {
-                if find_staged_notification_by_seq(&*ctx.pending_notifications, rec.seq_id)
+                } else if find_staged_notification_by_seq(&*ctx.pending_notifications, latest.seq_id)
                     .is_some()
                 {
-                    let notif = make_notif();
-                    insert_before_staged_seq_or_stage(
+                    let mut notif = make_notif();
+                    if let Some(new_tail_seq) = insert_before_staged_seq_or_stage(
                         &*ctx.pending_notifications,
                         &ctx.notify_tx,
-                        rec.seq_id,
-                        &notif,
-                    );
+                        latest.seq_id,
+                        &mut notif,
+                    ) {
+                        seq_updates.push((cid, latest.seq_id, new_tail_seq));
+                    }
                     emitted.push(notif);
                 } else {
                     emitted.push(make_notif());
                 }
             }
-            (None, None, None) => {
+            (None, None) => {
                 let notif = make_notif();
                 let _ = try_stage_dispatch_notification(
                     Some(&*ctx.pending_notifications),
@@ -614,6 +625,20 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                     None,
                 );
                 emitted.push(notif);
+            }
+        }
+    }
+    drop(queues);
+    if !seq_updates.is_empty() {
+        let mut ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+        for (cid, old_seq, new_seq) in seq_updates {
+            if let Some(rec) = ledger
+                .records
+                .iter_mut()
+                .rev()
+                .find(|r| r.char_id == cid && r.seq_id == old_seq)
+            {
+                rec.seq_id = new_seq;
             }
         }
     }

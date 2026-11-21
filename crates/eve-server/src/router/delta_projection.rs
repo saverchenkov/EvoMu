@@ -1078,7 +1078,11 @@ fn project_wallet_changes(
                 let after_leg = after_legacy_by_uid.get(&user_id).copied().unwrap_or(0);
                 let delta_before = legacy_before_by_uid.get(&user_id).copied().unwrap_or(0);
                 let delta_after = legacy_after_by_uid.get(&user_id).copied().unwrap_or(0);
-                old_vault.saturating_add(after_leg - delta_after + delta_before)
+                old_vault.saturating_add(
+                    after_leg
+                        .saturating_sub(delta_after)
+                        .saturating_add(delta_before),
+                )
             };
             let new_plex = input.after.unified_plex_balance_for_user(user_id);
             if old_plex != new_plex {

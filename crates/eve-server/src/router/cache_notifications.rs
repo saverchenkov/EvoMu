@@ -374,30 +374,33 @@ pub(crate) fn insert_before_staged_seq_or_stage(
     pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
     seq_id: u64,
-    notif: &PendingMachoNotification,
-) {
+    notif: &mut PendingMachoNotification,
+) -> Option<u64> {
     let pend_ptr = pending_notifications_ptr(pend);
-    let inserted = DISPATCH_STAGED_NOTIFICATIONS
+    let new_tail_seq = DISPATCH_STAGED_NOTIFICATIONS
         .try_with(|cell| {
             let mut stage = cell.borrow_mut();
             if stage.target_pend_ptr != pend_ptr {
-                return false;
+                return None;
             }
-            if let Some(pos) = stage.staged.iter().position(|i| i.notif.seq_id == seq_id) {
-                stage.staged.insert(pos, StagedDispatchNotification {
-                    write_queue: true,
-                    send_tx: true,
-                    notif: notif.clone(),
-                    explicit_queue_cap: None,
-                });
-                return true;
-            }
-            false
+            let pos = stage.staged.iter().position(|i| i.notif.seq_id == seq_id)?;
+            let tail_seq = next_notification_seq_id();
+            notif.seq_id = seq_id;
+            stage.staged[pos].notif.seq_id = tail_seq;
+            stage.staged.insert(pos, StagedDispatchNotification {
+                write_queue: true,
+                send_tx: true,
+                notif: notif.clone(),
+                explicit_queue_cap: None,
+            });
+            Some(tail_seq)
         })
-        .unwrap_or(false);
-    if !inserted {
+        .ok()
+        .flatten();
+    if new_tail_seq.is_none() {
         let _ = try_stage_dispatch_notification(Some(pend), Some(notify_tx), notif, None);
     }
+    new_tail_seq
 }
 
 pub(crate) fn assemble_pending_notification(
@@ -1229,7 +1232,7 @@ impl ServerContext {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(&char_id)
-            .and_then(|q| q.last().map(|n| n.seq_id))
+            .and_then(|q| q.iter().map(|n| n.seq_id).max())
             .unwrap_or(0)
     }
 

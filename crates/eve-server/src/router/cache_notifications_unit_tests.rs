@@ -1111,3 +1111,177 @@ async fn commit_listener_regression_bf01_bf02_bf03_bf04_matrix() {
     let bf04: Vec<_> = bf04_raw.iter().filter_map(account_change_summary).collect();
     assert_eq!(bf04, vec![("plex".to_string(), pilot_id, 100.0, "charid")]);
 }
+
+#[tokio::test]
+async fn intermediate_insertion_preserves_monotonic_seq_ids_and_prevents_rpc_replay() {
+    let ctx = test_ctx();
+    let pilot_id = 90_000_001_i64;
+    let now = 1_700_000_000_u64;
+    let (uid, corp_id, sol_id, ship_id) = ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&pilot_id];
+        (ch.user_id, ch.corporation_id, ch.solar_system_id, ch.active_ship_id)
+    });
+    ctx.db
+        .acquire_online_lock(uid, 705, Some(pilot_id), true, now)
+        .expect("online lock");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    let mut sess = eve_machonet::SessionState {
+        session_id: 705,
+        user_id: Some(uid),
+        character_id: Some(pilot_id),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(sol_id),
+        station_id: Some(60_003_760),
+        ship_id: Some(ship_id),
+        role: eve_machonet::service_roles::ROLE_PLAYER,
+        live_notify_listener: false,
+        ..Default::default()
+    };
+    ctx.sync_session(&mut sess);
+    let kw = HashMap::new();
+
+    // 1. Staged intermediate insertions (`B_mid_1`, `B_mid_2` ahead of committed `B_final`).
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+                eve_db::IskCents::from_isk(110_000);
+        });
+        let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 108_000.0);
+        let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 109_000.0);
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+
+    let staged_snapshot: Vec<(u64, f64)> = {
+        let queues = ctx.pending_notifications.read().expect("read pending");
+        queues[&pilot_id]
+            .iter()
+            .filter_map(|n| account_change_summary(n).map(|(_, _, bal, _)| (n.seq_id, bal)))
+            .collect()
+    };
+    assert_eq!(
+        staged_snapshot.iter().map(|&(_, b)| b).collect::<Vec<_>>(),
+        vec![108_000.0, 109_000.0, 110_000.0]
+    );
+    assert!(
+        staged_snapshot.windows(2).all(|w| w[0].0 < w[1].0),
+        "staged queue seq_ids must remain strictly ascending: {staged_snapshot:?}"
+    );
+    assert_eq!(
+        ctx.latest_notification_seq_for_char(pilot_id),
+        staged_snapshot.last().unwrap().0
+    );
+
+    sess.notifications.clear();
+    ctx.dispatch_rpc(&mut sess, "petitioner", None, "MayPetition", &[], &kw, None)
+        .await
+        .expect("MayPetition read-only RPC after staged intermediate");
+    assert!(
+        sess.notifications.is_empty(),
+        "subsequent read-only RPC must not replay stale staged B_mid: {:?}",
+        sess.notifications
+    );
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 2. Unstaged intermediate insertions (`B_mid_1`, `B_mid_2` ahead of committed `B_final`).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+            eve_db::IskCents::from_isk(115_000);
+    });
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 112_000.0);
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 114_000.0);
+
+    let unstaged_snapshot: Vec<(u64, f64)> = {
+        let queues = ctx.pending_notifications.read().expect("read pending");
+        queues[&pilot_id]
+            .iter()
+            .filter_map(|n| account_change_summary(n).map(|(_, _, bal, _)| (n.seq_id, bal)))
+            .collect()
+    };
+    assert_eq!(
+        unstaged_snapshot.iter().map(|&(_, b)| b).collect::<Vec<_>>(),
+        vec![112_000.0, 114_000.0, 115_000.0]
+    );
+    assert!(
+        unstaged_snapshot.windows(2).all(|w| w[0].0 < w[1].0),
+        "unstaged queue seq_ids must remain strictly ascending: {unstaged_snapshot:?}"
+    );
+    assert_eq!(
+        ctx.latest_notification_seq_for_char(pilot_id),
+        unstaged_snapshot.last().unwrap().0
+    );
+
+    sess.notifications.clear();
+    ctx.dispatch_rpc(&mut sess, "petitioner", None, "MayPetition", &[], &kw, None)
+        .await
+        .expect("MayPetition read-only RPC after unstaged intermediate");
+    assert!(
+        sess.notifications.is_empty(),
+        "subsequent read-only RPC must not replay stale unstaged B_mid: {:?}",
+        sess.notifications
+    );
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 3. Defense-in-depth: `latest_notification_seq_for_char` takes `.max()` even when a lower-seq
+    // non-account notification follows `B_final` before an intermediate `B_mid` arrives.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+            eve_db::IskCents::from_isk(119_000);
+    });
+    {
+        let mut queues = ctx.pending_notifications.write().expect("write pending");
+        let n = assemble_pending_notification(
+            pilot_id,
+            Some(uid),
+            "OnSkillTrainingCompleted",
+            "charid",
+            vec![],
+            0,
+        );
+        push_pending_notification_capped(queues.entry(pilot_id).or_default(), n);
+    }
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 118_500.0);
+    let max_seq = {
+        let queues = ctx.pending_notifications.read().expect("read pending");
+        queues[&pilot_id].iter().map(|n| n.seq_id).max().unwrap_or(0)
+    };
+    assert_eq!(ctx.latest_notification_seq_for_char(pilot_id), max_seq);
+    sess.notifications.clear();
+    ctx.dispatch_rpc(&mut sess, "petitioner", None, "MayPetition", &[], &kw, None)
+        .await
+        .expect("MayPetition read-only RPC after non-tail bump");
+    assert!(sess.notifications.is_empty());
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 4. Unstaged cross-epoch round-trip (`116_000` drained -> `117_000` drained -> `118_000` queued):
+    // intermediate `116_000.0` before `118_000.0` must NOT alias the stale drained `116_000` commit.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+            eve_db::IskCents::from_isk(116_000);
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+            eve_db::IskCents::from_isk(117_000);
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+            eve_db::IskCents::from_isk(118_000);
+    });
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 116_000.0);
+    let rt_snapshot: Vec<(u64, f64)> = {
+        let queues = ctx.pending_notifications.read().expect("read pending");
+        queues[&pilot_id]
+            .iter()
+            .filter_map(|n| account_change_summary(n).map(|(_, _, bal, _)| (n.seq_id, bal)))
+            .collect()
+    };
+    assert_eq!(
+        rt_snapshot.iter().map(|&(_, b)| b).collect::<Vec<_>>(),
+        vec![116_000.0, 118_000.0]
+    );
+    assert!(rt_snapshot[0].0 < rt_snapshot[1].0);
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+}
