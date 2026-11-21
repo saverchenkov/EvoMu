@@ -291,14 +291,6 @@ pub fn purchase_skills_direct_for_char(
         Ok((bought, total_cost, new_bal))
     })?;
 
-    ctx.emit_typed(
-        NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnAccountChange {
-            account_key: "cash".into(),
-            owner_id: char_id,
-            balance: eve_db::IskCents(new_bal_cents).to_f64_isk(),
-        },
-    );
     super::jump_clone_names::emit_server_skills_changed(
         ctx,
         char_id,

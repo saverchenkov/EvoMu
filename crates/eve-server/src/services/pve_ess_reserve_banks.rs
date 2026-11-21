@@ -1200,7 +1200,7 @@ pub fn tick_ess_main_bank_autopayout(ctx: &ServerContext, now_unix: u64) -> usiz
     if !has_due {
         return 0;
     }
-    let (paid_events, acct_changes): (Vec<(SolarSystemId, f64, f64)>, Vec<(CharacterId, f64)>) =
+    let (paid_events, _acct_changes): (Vec<(SolarSystemId, f64, f64)>, Vec<(CharacterId, f64)>) =
         ctx.db.with_mut_snapshot(|snap| {
             let sys_ids: Vec<SolarSystemId> = snap
                 .system_states
@@ -1286,9 +1286,6 @@ pub fn tick_ess_main_bank_autopayout(ctx: &ServerContext, now_unix: u64) -> usiz
             }
             (events, changes)
         });
-    for &(cid, bal_f64) in &acct_changes {
-        ctx.notify_account_change(cid, "cash", cid, bal_f64);
-    }
     for &(sys_id, post_main, post_reserve) in &paid_events {
         let ess_data = PyRep::keyval([
             ("solarSystemID", PyRep::Integer(sys_id as i64)),
@@ -1425,7 +1422,7 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
         let rt_until = super::combat_crimewatch::with_combat_runtime(ctx, |rt| {
             rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
         });
-        let (pulse_payouts, bal_wire, post_banks, terminated, clear_rt_unlock) =
+        let (pulse_payouts, _bal_wire, post_banks, terminated, clear_rt_unlock) =
             ctx.db.with_mut_snapshot(|snap| {
                 let mut pulse_st = super::space_destiny::get_ess_reserve_pulses(snap, sys_id);
                 if pulse_st.reserve_linked_character_id != Some(char_id) {
@@ -1519,9 +1516,6 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
                 st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(weapon_until);
             }
             super::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
-            if let Some(bal_f64) = bal_wire {
-                ctx.notify_account_change(char_id, "cash", char_id, bal_f64);
-            }
             super::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                 let list = rt.ess_reserve_bank_thefts.entry(sys_id).or_default();
                 for &(amt, ts) in &pulse_payouts {

@@ -296,29 +296,11 @@ pub(super) fn handle_insure_ship(
         Ok((cost, payout, rec, new_bal, is_corp, div_id))
     })?;
 
-    let (cost, payout, rec, new_bal, is_corp, div_id) = res;
+    let (cost, payout, rec, _new_bal, _is_corp, _div_id) = res;
     ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnShipInsured {},
     );
-    if is_corp {
-        let acct_key = if div_id == 1 {
-            "cash".to_string()
-        } else {
-            format!("cash{div_id}")
-        };
-        ctx.emit_typed_with_id_type(
-            crate::router::NotificationTarget::Corporation(rec.owner_id),
-            "corpid",
-            crate::router::notify_registry::OnAccountChange {
-                account_key: acct_key,
-                owner_id: rec.owner_id,
-                balance: new_bal.to_wire_f64(),
-            },
-        );
-    } else {
-        let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal.to_wire_f64());
-    }
     Ok(PyRep::keyval([
         ("shipID", PyRep::Integer(ship_id)),
         ("typeID", PyRep::Integer(rec.ship_type_id as i64)),
@@ -548,9 +530,7 @@ pub(super) fn handle_repair_all(
         }
         Ok(new_char_bal)
     })?;
-    if let Some(bal) = debited_new_bal {
-        ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
-    }
+    let _ = debited_new_bal;
     if ship_at_dock {
         ctx.invalidate_and_push_fit(ship_id);
     }

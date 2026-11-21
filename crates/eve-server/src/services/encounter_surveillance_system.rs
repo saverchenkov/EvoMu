@@ -628,9 +628,7 @@ pub async fn handle_ess_link(
     emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
 
     if payout > 0.0 {
-        if let Some(bal_f64) = new_bal_f64 {
-            ctx.notify_account_change(char_id, "cash", char_id, bal_f64);
-        }
+        let _ = new_bal_f64;
         let now_u = ctx.now_unix();
         with_mut_combat_runtime(ctx, |rt| {
             let list = if method == "AttemptLinkToReserveBank" {

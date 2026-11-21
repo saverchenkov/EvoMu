@@ -134,8 +134,8 @@
       "description": "Hand-written item-change emitters instead of unified typed notification path (#931)."
     },
     "handwritten_account_change_emitters": {
-      "max_occurrences": 43,
-      "max_files": 27,
+      "max_occurrences": 19,
+      "max_files": 12,
       "exact": false,
       "owning_issue": 931,
       "regex": "\\b(?:emit|notify)_[A-Za-z0-9_]*account_change[A-Za-z0-9_]*\\s*\\(",

@@ -18,11 +18,10 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
 };
-use crate::router::NotificationTarget;
 use crate::services::industry_pi::{ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE};
 use eve_db::ledger::{ref_types, JournalEntryInput, JournalMeta};
 use eve_db::{IskCents, WorldRepository};
-use eve_proto::{pb, PyRep};
+use eve_proto::pb;
 use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry,
 };
@@ -1445,7 +1444,7 @@ pub fn register_economy_planetary_industry_handlers(
             };
             let now_unix = ctx.now_unix();
 
-            let (src_bal, dst_bal) = db_isk_xfer.try_with_mut_snapshot(|snap| {
+            let (_src_bal, _dst_bal) = db_isk_xfer.try_with_mut_snapshot(|snap| {
                 // Preflight recipient capacity before mutating source balance.
                 let dst_next = match dst_owner {
                     WalletOwnerId::Character(id) => {
@@ -1546,37 +1545,7 @@ pub fn register_economy_planetary_industry_handlers(
                     "failed to encode GrantCommanded notice"
                 ),
             }
-            let sink = isk_macho_sink
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .cloned();
-            if let Some(sink) = sink {
-                let emit_acct = |owner: WalletOwnerId, bal: IskCents| match owner {
-                    WalletOwnerId::Character(id) => sink(
-                        NotificationTarget::Character(id),
-                        "OnAccountChange",
-                        "charid",
-                        vec![
-                            PyRep::String("cash".into()),
-                            PyRep::Integer(id),
-                            PyRep::Real(bal.to_wire_f64()),
-                        ],
-                    ),
-                    WalletOwnerId::Corporation(id) => sink(
-                        NotificationTarget::Corporation(id),
-                        "OnAccountChange",
-                        "corpid",
-                        vec![
-                            PyRep::String("cash".into()),
-                            PyRep::Integer(id),
-                            PyRep::Real(bal.to_wire_f64()),
-                        ],
-                    ),
-                };
-                emit_acct(src_owner, src_bal);
-                emit_acct(dst_owner, dst_bal);
-            }
+            let _ = &isk_macho_sink;
             pb::message("eve.isk.wallet.api.TransferByOwnerResponse")
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))

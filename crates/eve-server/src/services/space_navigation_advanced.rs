@@ -668,7 +668,7 @@ pub fn process_zarzakh_gate_toll_with_amount(
         });
         Ok::<eve_db::IskCents, BridgeRpcError>(bal_after)
     })?;
-    ctx.notify_account_change(char_id, "cash", char_id, bal_after.to_wire_f64());
+    let _ = bal_after;
     Ok((effective_toll_cents.0 > 0).then_some(effective_toll_cents))
 }
 
