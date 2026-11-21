@@ -62,7 +62,7 @@ fn out_frame_to_wire_frame(
 }
 
 #[allow(dead_code)]
-fn to_wire_exchange(out: ClientWireCallOutcome) -> ClientWireExchange {
+pub fn to_wire_exchange(out: ClientWireCallOutcome) -> ClientWireExchange {
     let rpc_result = match out.rpc_result {
         Ok(rep) => Ok(rep),
         Err(err) => Err(ClientErrorResponse {
