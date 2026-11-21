@@ -2317,3 +2317,101 @@ async fn seasonal_npc_spawn_racing_step_extended_npc_ai_sync_preserves_ai_and_em
         );
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seasonal_sentinel_zero_killer_does_not_hijack_shipless_character() {
+    let sde = shared_sde();
+    let sys_id: SolarSystemId = 30_000_142;
+    let shipless_pilot: i64 = 90_060_941;
+    let ship_id: i64 = 1_060_941;
+    let ctx = setup_seasonal_test_ctx(
+        sde,
+        1_776_270_000,
+        1,
+        "Crimson Harvest",
+        7,
+        shipless_pilot,
+        ship_id,
+        sys_id,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&shipless_pilot) {
+            ch.active_ship_id = 0;
+            ch.balance = IskCents(0);
+        }
+    });
+
+    let sites = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    assert_eq!(sites.len(), 1);
+    let site = &sites[0];
+    assert!(site.loot_type_id > 0);
+    let details = get_seasonal_site_details(&ctx, site.instance_id).expect("details");
+    let anom_key = format!("dng-{}-{}", site.dungeon_id, site.instance_id);
+    let cont_type = resolve_loot_container_type_id(&ctx.sde);
+
+    let mut kill_order = vec![site.boss_npc_ball_id];
+    kill_order.extend_from_slice(&site.escort_ball_ids);
+    for bid in kill_order {
+        let acct_changes = on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_id,
+            bid,
+            Some(0),
+        )
+        .await;
+        assert!(
+            acct_changes.is_empty(),
+            "sentinel Some(0) killer must never emit ISK account changes (ball {bid})"
+        );
+    }
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&shipless_pilot].balance.0, 0);
+        let season_st = crate::services::season_manager::load_season_state(snap, shipless_pilot);
+        assert_eq!(season_st.season_points, 0);
+        assert!(
+            !snap.items.values().any(|it| {
+                it.owner_id == shipless_pilot
+                    && it.item_id != ship_id
+                    && (it.type_id == cont_type || it.type_id == site.loot_type_id)
+            }),
+            "shipless character must receive zero loot items or overflow containers"
+        );
+        assert!(
+            !snap
+                .items
+                .values()
+                .any(|it| it.type_id == cont_type && it.location_id == i64::from(sys_id)),
+            "sentinel Some(0) killer must not spawn an overflow cargo container in space"
+        );
+        assert!(snap.pve_special_sites.seasonal_event_sites[&sys_id]
+            .iter()
+            .any(|s| s.instance_id == site.instance_id && s.completed));
+        assert!(!load_seasonal_site_details_map(snap).contains_key(&site.instance_id));
+        assert!(load_seasonal_cooldown_store(snap)
+            .until_by_system
+            .contains_key(&sys_id));
+        assert!(snap.cosmic_anomalies[&sys_id]
+            .iter()
+            .any(|a| a.anomaly_id == anom_key && a.cleared));
+        assert!(!snap.transient_items.contains_key(&details.relay_ball_id));
+        assert!(!snap.item_positions.contains_key(&details.relay_ball_id));
+    });
+    let exp_still_present = crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&sys_id)
+            .is_some_and(|l| l.iter().any(|s| s.site_id == details.exploration_site_id))
+    });
+    assert!(!exp_still_present);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(
+        sys_handle
+            .get_ball_snapshot(details.relay_ball_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "relay ball must be removed from Ballpark after sentinel Some(0) completion"
+    );
+}

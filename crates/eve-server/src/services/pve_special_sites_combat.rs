@@ -991,13 +991,19 @@ pub async fn on_special_site_npc_destroyed_core(
                     exp_ids.push(stale_details.exploration_site_id);
                 }
             }
-            remove_seasonal_exploration_sites_in_snap(
+            if let Err(err) = remove_seasonal_exploration_sites_in_snap(
                 snap,
                 solar_system_id,
                 now_sec,
                 &exp_ids,
                 &extra_cans,
-            )?;
+            ) {
+                tracing::warn!(
+                    solar_system_id,
+                    error = %err,
+                    "Failed to prune expired seasonal exploration sites"
+                );
+            }
             save_seasonal_site_details_map(snap, &details_map);
             let anom_key = format!("dng-{}-{}", stale_site.dungeon_id, stale_site.instance_id);
             if let Some(list) = snap.cosmic_anomalies.get_mut(&solar_system_id) {
@@ -1093,13 +1099,19 @@ pub async fn on_special_site_npc_destroyed_core(
         } else {
             Vec::new()
         };
-        remove_seasonal_exploration_sites_in_snap(
+        if let Err(err) = remove_seasonal_exploration_sites_in_snap(
             snap,
             solar_system_id,
             now_sec,
             &completed_exp_ids,
             &completed_can_ids,
-        )?;
+        ) {
+            tracing::warn!(
+                solar_system_id,
+                error = %err,
+                "Failed to prune completed seasonal exploration sites"
+            );
+        }
 
         let anom_key = format!("dng-{did}-{iid}");
         if let Some(list) = snap.cosmic_anomalies.get_mut(&solar_system_id) {
@@ -1117,7 +1129,7 @@ pub async fn on_special_site_npc_destroyed_core(
             None
         };
 
-        let resolved_killer_cid = killer_char_id.and_then(|kid| {
+        let resolved_killer_cid = killer_char_id.filter(|&kid| kid > 0).and_then(|kid| {
             if snap.characters.contains_key(&kid) {
                 Some(kid)
             } else {
