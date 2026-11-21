@@ -829,14 +829,14 @@ fn contract_credit_expiration_fallback_courier_errors_and_append_journal() {
     assert!(!snap.applied_ship_skins.contains_key(&400_001));
     assert!(!snap.applied_ship_skins.contains_key(&400_002));
 
-    // Auction with no bids expires -> refunds reward + deposit and restores orig_flag (or Hangar if Locked/invalid)
+    // Auction with no bids expires -> refunds reward + deposit and restores orig_flag (or CorpDeliveries/Hangar if Locked/invalid)
     snap.items.insert(400_010, sample_item(400_010, 34, 90_001, 4, InventoryFlag::Locked, 10));
     snap.items.insert(400_011, sample_item(400_011, 35, 90_001, 4, InventoryFlag::Locked, 10));
     snap.items.insert(400_012, sample_item(400_012, 36, 90_001, 4, InventoryFlag::Locked, 10));
     snap.service_state_blobs.insert("contract_deposit:4".into(), "2500".into());
     snap.service_state_blobs.insert("contract_orig_flag:4:400010".into(), "5".into()); // Cargo
-    snap.service_state_blobs.insert("contract_orig_flag:4:400011".into(), "63".into()); // Locked -> Hangar fallback
-    snap.service_state_blobs.insert("contract_orig_flag:4:400012".into(), "bad".into()); // invalid -> Hangar fallback
+    snap.service_state_blobs.insert("contract_orig_flag:4:400011".into(), "63".into()); // Locked -> CorpDeliveries fallback
+    snap.service_state_blobs.insert("contract_orig_flag:4:400012".into(), "bad".into()); // invalid -> CorpDeliveries fallback
     snap.contracts.insert(
         4,
         ContractRecord {
@@ -861,8 +861,8 @@ fn contract_credit_expiration_fallback_courier_errors_and_append_journal() {
     );
     assert_eq!(snap.items[&400_010].flag, InventoryFlag::Cargo);
     assert_eq!(snap.items[&400_010].owner_id, 98_001);
-    assert_eq!(snap.items[&400_011].flag, InventoryFlag::Hangar);
-    assert_eq!(snap.items[&400_012].flag, InventoryFlag::Hangar);
+    assert_eq!(snap.items[&400_011].flag, InventoryFlag::CorpDeliveries);
+    assert_eq!(snap.items[&400_012].flag, InventoryFlag::CorpDeliveries);
 
     // fail_courier_contract false branches + acceptor_id == None + deposit + Hangar fallback
     assert!(!snap.fail_courier_contract(999, 100));
@@ -904,15 +904,18 @@ fn contract_credit_expiration_fallback_courier_errors_and_append_journal() {
         IskCents(before_corp2.0 + 3000 + 1500)
     );
     assert_eq!(snap.items[&400_020].owner_id, 98_001);
-    assert_eq!(snap.items[&400_020].flag, InventoryFlag::Hangar);
+    assert_eq!(snap.items[&400_020].flag, InventoryFlag::CorpDeliveries);
 
-    // append_journal
+    // append_journal (preceding contract settlement steps already recorded contract journal entries)
+    let before_j = snap.wallet_journal.len();
+    assert!(before_j >= 1);
     let jid = snap.append_journal(90_001, "Bounty", IskCents::from_isk(500), IskCents::from_isk(1_550), "Ratting");
-    assert_eq!(snap.wallet_journal.len(), 1);
-    assert_eq!(snap.wallet_journal[0].entry_id, jid);
-    assert_eq!(snap.wallet_journal[0].character_id, 90_001);
-    assert_eq!(snap.wallet_journal[0].entry_type, "Bounty");
-    assert_eq!(snap.wallet_journal[0].reason, "Ratting");
+    assert_eq!(snap.wallet_journal.len(), before_j + 1);
+    let entry = snap.wallet_journal.last().unwrap();
+    assert_eq!(entry.entry_id, jid);
+    assert_eq!(entry.character_id, 90_001);
+    assert_eq!(entry.entry_type, "Bounty");
+    assert_eq!(entry.reason, "Ratting");
 }
 
 #[test]

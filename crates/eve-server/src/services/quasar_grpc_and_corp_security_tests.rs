@@ -785,7 +785,7 @@ fn domain_market_acl_contract_visibility_party_and_region_resolution() {
     ally_c.availability = "Alliance".into();
     assert!(!is_contract_visible_to_character(&ally_c, 999, 0, None));
     assert!(!is_contract_visible_to_character(&ally_c, other_char, other_corp, Some(ally_id)));
-    assert!(is_contract_visible_to_character(&ally_c, other_char, other_corp, Some(0)));
+    assert!(!is_contract_visible_to_character(&ally_c, other_char, other_corp, Some(0)));
 
     let mut private_c = base.clone();
     private_c.availability = "Private".into();
@@ -793,7 +793,7 @@ fn domain_market_acl_contract_visibility_party_and_region_resolution() {
 
     let mut custom_c = base.clone();
     custom_c.availability = "Regional".into();
-    assert!(is_contract_visible_to_character(&custom_c, other_char, other_corp, None));
+    assert!(!is_contract_visible_to_character(&custom_c, other_char, other_corp, None));
 
     // 3. `is_character_party_to_contract`
     let mut party_c = ContractRecord {
