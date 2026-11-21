@@ -2453,3 +2453,98 @@ async fn extended_npc_weapon_runtime_survives_concurrent_epoch_bumps_and_two_sys
         assert!(wrt.contains_key(&(sys_a, npc_a)) && wrt.contains_key(&(sys_b, npc_b)));
     });
 }
+
+#[tokio::test]
+async fn ci_sentry_79507_enforces_sde_turret_cycle_across_target_switch_while_applying_ewar() {
+    let (base_ctx, _, _, _, _) = make_fighter_ctx_and_session();
+    let (ctx, char_crim, ship_crim, sys_id) =
+        make_isolated_extended_npc_ctx(std::sync::Arc::clone(&base_ctx.sde));
+
+    let (prof, _) =
+        crate::combat::npc_ai_weapons_loot::inspect_npc_sde_profile(&ctx.sde, 79_507, None, 500_001);
+    let turret = prof.turret.as_ref().expect("79507 must expose SDE turret");
+    assert_eq!(turret.cycle_duration_s, 5.0, "79507 SDE speed attr 51 is 5000 ms");
+
+    let (char_susp, ship_susp) = (char_crim + 1, ship_crim + 1);
+    let (char_pir, ship_pir) = (char_crim + 2, ship_crim + 2);
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters[&char_crim].clone();
+        if let Some(ch) = snap.characters.get_mut(&char_crim) {
+            ch.war_faction_id = None;
+        }
+        for (cid, sid, wf) in [(char_susp, ship_susp, None), (char_pir, ship_pir, Some(500_010_i64))] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.active_ship_id = sid;
+            ch.solar_system_id = sys_id;
+            ch.war_faction_id = wf;
+            snap.characters.insert(cid, ch);
+            snap.items.insert(
+                sid,
+                crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item(
+                    sid, 587, cid, sys_id as i64, eve_db::InventoryFlag::None, 1,
+                ),
+            );
+        }
+    });
+
+    let now0 = ctx.now_unix();
+    {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        cw.trigger_suspect_flag(char_susp, now0);
+        cw.get_or_create(char_crim).criminal_flag_until_unix = now0 + 900;
+    }
+
+    let base_sig = 100.0;
+    let initial_shield = 50_000.0;
+    spawn_extended_test_ship(&ctx, sys_id, ship_susp, DVec3::new(15_000.0, 0.0, 0.0), DVec3::ZERO, base_sig, initial_shield).await;
+    spawn_extended_test_ship(&ctx, sys_id, ship_crim, DVec3::new(30_000.0, 0.0, 0.0), DVec3::ZERO, base_sig, initial_shield).await;
+    spawn_extended_test_ship(&ctx, sys_id, ship_pir, DVec3::new(120_000.0, 0.0, 0.0), DVec3::ZERO, base_sig, initial_shield).await;
+
+    let ci_id = spawn_specialized_npc_entity(
+        &ctx,
+        sys_id,
+        79_507,
+        "CounterInsurgencySentry",
+        500_001,
+        DVec3::ZERO,
+    )
+    .await;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+
+    // Tick 1: ignores closer Suspect (15 km), fires immediately on Criminal (30 km -> dmg + TP + ECM), leaving 4.0s cooldown.
+    step_extended_npc_ai_sync(&ctx, sys_id);
+    let susp_cs1 = sys_h.get_combat_state(ship_susp).await.unwrap().unwrap();
+    let crim_cs1 = sys_h.get_combat_state(ship_crim).await.unwrap().unwrap();
+    assert_eq!((susp_cs1.shield_hp, susp_cs1.signature_radius, susp_cs1.ecm_jammed_remaining_s), (initial_shield, base_sig, 0.0));
+    assert!(crim_cs1.shield_hp < initial_shield);
+    assert!((crim_cs1.signature_radius - base_sig * 1.50).abs() < 1e-3);
+    assert!((crim_cs1.ecm_jammed_remaining_s - 5.0).abs() < 1e-6);
+    crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx, |wrt| {
+        assert!((wrt[&(sys_id, ci_id)].turret_cooldown_s - 4.0).abs() < 1e-6);
+    });
+
+    // Tick 2: removing `ship_crim` switches target to `ship_pir` (120 km -> TP only, no ECM) while preserving turret cooldown (`4.0 -> 3.0`).
+    sys_h.try_remove_ball(ship_crim);
+    step_extended_npc_ai_sync(&ctx, sys_id);
+    let pir_cs2 = sys_h.get_combat_state(ship_pir).await.unwrap().unwrap();
+    assert_eq!(pir_cs2.shield_hp, initial_shield, "turret cooldown must not reset on target switch");
+    assert!((pir_cs2.signature_radius - base_sig * 1.50).abs() < 1e-3);
+    assert_eq!(pir_cs2.ecm_jammed_remaining_s, 0.0);
+    crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx, |wrt| {
+        assert!((wrt[&(sys_id, ci_id)].turret_cooldown_s - 3.0).abs() < 1e-6);
+    });
+
+    // Ticks 3..=5: remaining 3.0s cooldown ticks down to 0.0 without firing early; Tick 6 completes the 5.0s cycle and hits `ship_pir`.
+    for _ in 0..3 {
+        step_extended_npc_ai_sync(&ctx, sys_id);
+    }
+    assert_eq!(sys_h.get_combat_state(ship_pir).await.unwrap().unwrap().shield_hp, initial_shield);
+    step_extended_npc_ai_sync(&ctx, sys_id);
+    let pir_cs6 = sys_h.get_combat_state(ship_pir).await.unwrap().unwrap();
+    let susp_cs6 = sys_h.get_combat_state(ship_susp).await.unwrap().unwrap();
+    assert!(pir_cs6.shield_hp < initial_shield, "79507 must fire on new target once 5.0s cycle completes");
+    assert!((pir_cs6.signature_radius - base_sig * 1.50).abs() < 1e-3);
+    assert_eq!(pir_cs6.ecm_jammed_remaining_s, 0.0);
+    assert_eq!((susp_cs6.shield_hp, susp_cs6.signature_radius, susp_cs6.ecm_jammed_remaining_s), (initial_shield, base_sig, 0.0));
+}
