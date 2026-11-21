@@ -8,6 +8,7 @@ Mirrors the exact Rust ratchet implementations in:
   - `crates/eve-db/src/lock_rank.rs` (`crates/eve-db/lock_rank_ratchet.txt`)
   - Conditional (#1189): `crates/eve-testkit/ratchets/client_compat_ratchet.json`
   - Conditional (#1197): `crates/eve-testkit/ratchets/arch_debt_ratchet.json`
+  - Conditional (#1540): `crates/eve-testkit/ratchets/test_fixture_ratchet.json`
 
 Also enforces the review-branch commit-message guard blocking GitHub auto-closing keywords
 (`Fixes #N`, `Closes #N`, `Resolves #N`) against open RFC/architecture umbrella issues or non-zero
@@ -22,9 +23,11 @@ import subprocess
 
 import review_lib as rl
 
-RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v6.json"
-RATCHET_STAT_FILENAME = "ratchet_stat_index_v6.json"
+RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v7.json"
+RATCHET_STAT_FILENAME = "ratchet_stat_index_v7.json"
 UNTYPED_USER_ERROR_REL = "crates/eve-testkit/ratchets/untyped_user_error_ratchet.json"
+TEST_FIXTURE_REL = "crates/eve-testkit/ratchets/test_fixture_ratchet.json"
+TEST_FIXTURE_PATTERNS = ("hand_built_sessions", "discarded_rpc_results")
 CLIENT_COMPAT_COUNTER_KEYS = (
     "rpc_rules",
     "suppress_rules",
@@ -81,6 +84,15 @@ FN_KW_BEFORE_RE = re.compile(r"\bfn\s+$")
 
 DISPATCH_RPC_RE = re.compile(r"\.dispatch_rpc\s*\(")
 COMMA_PAREN_RE = re.compile(r"[(),]")
+
+# Exact regex mirrors of `crates/eve-testkit/src/test_fixture_ratchet.rs` (#1540)
+TEST_FIXTURE_SESSION_LIT_RE = re.compile(r"(?<![A-Za-z0-9_])SessionState[ \t\n\x0c\r]*\{")
+TEST_FIXTURE_LET_DISCARD_RE = re.compile(r"(?<![A-Za-z0-9_])let[ \t\n\x0c\r]+_[A-Za-z0-9_]*[ \t\n\x0c\r]*=(?![=>])")
+TEST_FIXTURE_DELIM_RE = re.compile(r"[()\[\]{};]")
+TEST_FIXTURE_STMT_RPC_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:dispatch_rpc|call_rpc|rpc|rpc_res|call_exchange|call_wire|wire_session_call_ok)[ \t\n\x0c\r]*\("
+    r"|\.[ \t\n\x0c\r]*(?:call|call_ok)[ \t\n\x0c\r]*\("
+)
 
 DIRECT_LAYER_FNS = (
     "normalize_macho_rpc_reply_at",
@@ -592,9 +604,15 @@ def _scan_it_file(path, rel_in_it, it_cache, stat_it=None):
     has_disp = False
     raw_none = 0
     dl_test = 0
-    if ".dispatch_rpc" in raw or "normalize_macho_" in raw or "should_suppress_macho_notification" in raw:
+    hbs = 0
+    drpc = 0
+    has_disp_kw = ".dispatch_rpc" in raw
+    has_dl_kw = "normalize_macho_" in raw or "should_suppress_macho_notification" in raw
+    has_hbs_kw = "SessionState" in raw
+    has_drpc_kw = "let" in raw and "_" in raw and "=" in raw and "(" in raw
+    if has_disp_kw or has_dl_kw or has_hbs_kw or has_drpc_kw:
         clean = strip_rust_comments_and_literals(raw)
-        if ".dispatch_rpc" in raw:
+        if has_disp_kw:
             idx = 0
             while True:
                 m = DISPATCH_RPC_RE.search(clean, idx)
@@ -623,9 +641,13 @@ def _scan_it_file(path, rel_in_it, it_cache, stat_it=None):
                 if last_arg == "None":
                     raw_none += 1
                 idx = pos + 1
-        if "normalize_macho_" in raw or "should_suppress_macho_notification" in raw:
+        if has_dl_kw:
             dl_test = count_direct_layer_calls(clean)
-    rec = {"has_disp": has_disp, "raw_none": raw_none, "dl_test": dl_test}
+        if has_hbs_kw:
+            hbs = count_hand_built_sessions_clean(clean)
+        if has_drpc_kw:
+            drpc = count_discarded_rpc_results_clean(clean)
+    rec = {"has_disp": has_disp, "raw_none": raw_none, "dl_test": dl_test, "hbs": hbs, "drpc": drpc}
     it_cache[ckey] = rec
     if stat_it is not None:
         stat_it[rel_in_it] = {"sig": sig, "rec": rec}
@@ -1397,6 +1419,127 @@ def _validate_per_file_map(category, label, rel_path, baseline_map, observed_map
     return viols
 
 
+def count_hand_built_sessions_clean(clean):
+    """Exact mirror of `test_fixture_ratchet.rs::count_hand_built_sessions` on already-stripped Rust source."""
+    if "SessionState" not in clean:
+        return 0
+    return len(TEST_FIXTURE_SESSION_LIT_RE.findall(clean))
+
+
+def count_hand_built_sessions(src):
+    """Count hand-built `SessionState { ... }` struct literals in Rust source (#1540)."""
+    return count_hand_built_sessions_clean(strip_rust_comments_and_literals(src))
+
+
+def count_discarded_rpc_results_clean(clean):
+    """Exact mirror of `test_fixture_ratchet.rs::count_discarded_rpc_results` on already-stripped Rust source."""
+    if "let" not in clean:
+        return 0
+    n = len(clean)
+    count = 0
+    pos = 0
+    while pos < n:
+        m = TEST_FIXTURE_LET_DISCARD_RE.search(clean, pos)
+        if not m:
+            break
+        start_stmt = m.end()
+        pd = bd = cd = 0
+        end_stmt = n
+        for dm in TEST_FIXTURE_DELIM_RE.finditer(clean, start_stmt):
+            ch = dm.group(0)
+            if ch == "(":
+                pd += 1
+            elif ch == ")":
+                if pd > 0:
+                    pd -= 1
+            elif ch == "[":
+                bd += 1
+            elif ch == "]":
+                if bd > 0:
+                    bd -= 1
+            elif ch == "{":
+                cd += 1
+            elif ch == "}":
+                if cd == 0:
+                    end_stmt = dm.start()
+                    break
+                cd -= 1
+            elif ch == ";" and pd == 0 and bd == 0 and cd == 0:
+                end_stmt = dm.start()
+                break
+        if TEST_FIXTURE_STMT_RPC_RE.search(clean, start_stmt, end_stmt):
+            count += 1
+        pos = end_stmt + 1
+    return count
+
+
+def count_discarded_rpc_results(src):
+    """Count `let _ = <rpc>;` / `let _name = <rpc>;` discarded RPC statements in Rust source (#1540)."""
+    return count_discarded_rpc_results_clean(strip_rust_comments_and_literals(src))
+
+
+def scan_test_fixture_per_file(root, it_cache=None, stat_it=None):
+    """Exact per-file mirror of `test_fixture_ratchet.rs::scan_it_fixture_counts` (#1540)."""
+    it_dir = os.path.join(root, "crates", "eve-server", "tests", "it")
+    sessions = {}
+    discards = {}
+    if not os.path.isdir(it_dir):
+        return {"hand_built_sessions": sessions, "discarded_rpc_results": discards}
+    cache = {} if it_cache is None else it_cache
+    for p in sorted(glob.glob(os.path.join(it_dir, "**", "*.rs"), recursive=True)):
+        rel_in_it = os.path.relpath(p, it_dir).replace("\\", "/")
+        rec, _, _ = _scan_it_file(p, rel_in_it, cache, stat_it=stat_it)
+        key = "crates/eve-server/tests/it/" + rel_in_it
+        if rec.get("hbs", 0) > 0:
+            sessions[key] = int(rec["hbs"])
+        if rec.get("drpc", 0) > 0:
+            discards[key] = int(rec["drpc"])
+    return {
+        "hand_built_sessions": dict(sorted(sessions.items())),
+        "discarded_rpc_results": dict(sorted(discards.items())),
+    }
+
+
+def check_test_fixture_ratchet(root, rel_path=TEST_FIXTURE_REL, observed_per_file=None):
+    """Validate v2 per-file `test_fixture_ratchet.json` (#1540 / #1538) when present."""
+    full_path = os.path.join(root, rel_path)
+    if not os.path.isfile(full_path):
+        return []
+    try:
+        doc = _read_json(full_path)
+    except (OSError, ValueError) as e:
+        return [("RATCHET_TEST_FIXTURE", "Failed to parse %s: %s" % (rel_path, e), rel_path, 1)]
+    if not isinstance(doc, dict) or int(doc.get("version", 0) or 0) != 2:
+        return [("RATCHET_TEST_FIXTURE", "%s expected version 2 ratchet" % rel_path, rel_path, 1)]
+    patterns = doc.get("patterns")
+    if not isinstance(patterns, dict):
+        return [("RATCHET_TEST_FIXTURE", "%s missing `patterns` map" % rel_path, rel_path, 1)]
+
+    obs = scan_test_fixture_per_file(root) if observed_per_file is None else observed_per_file
+    violations = []
+    for pat in TEST_FIXTURE_PATTERNS:
+        spec = patterns.get(pat)
+        if not isinstance(spec, dict):
+            violations.append((
+                "RATCHET_TEST_FIXTURE",
+                "Missing `%s` pattern in %s" % (pat, rel_path),
+                rel_path,
+                1,
+            ))
+            continue
+        violations.extend(
+            _validate_per_file_map(
+                "RATCHET_TEST_FIXTURE",
+                "test_fixture pattern '%s'" % pat,
+                rel_path,
+                spec.get("files"),
+                obs.get(pat, {}),
+                zero_required=bool(spec.get("zero_required") is True),
+            )
+        )
+    return violations
+
+
 def scan_untyped_user_error_per_file(root):
     """Exact per-file mirror of `client_contract.rs::count_untyped_user_error_call_sites`."""
     src_dir = os.path.join(root, "crates", "eve-server", "src")
@@ -1957,12 +2100,14 @@ def check_all_ratchets(root, cache_path=None):
     dispatch_ratchet_rel = "crates/eve-testkit/ratchets/raw_dispatch_ratchet.json"
     compat_ratchet_rel = "crates/eve-testkit/ratchets/client_compat_ratchet.json"
     untyped_ue_rel = UNTYPED_USER_ERROR_REL
+    test_fixture_rel = TEST_FIXTURE_REL
 
     has_enc = os.path.isfile(os.path.join(root, enc_ratchet_rel))
     has_notify = os.path.isfile(os.path.join(root, notify_ratchet_rel))
     has_dispatch = os.path.isfile(os.path.join(root, dispatch_ratchet_rel))
     has_compat = os.path.isfile(os.path.join(root, compat_ratchet_rel))
     has_untyped_ue = os.path.isfile(os.path.join(root, untyped_ue_rel))
+    has_test_fixture = os.path.isfile(os.path.join(root, test_fixture_rel))
 
     src_dir = os.path.join(root, "crates", "eve-server", "src")
     it_dir = os.path.join(root, "crates", "eve-server", "tests", "it")
@@ -2007,19 +2152,26 @@ def check_all_ratchets(root, cache_path=None):
 
     disp_none_calls = disp_none_files = 0
     it_dispatch_files = set()
-    if (has_dispatch or has_compat) and os.path.isdir(it_dir):
+    test_fixture_hbs_pf = {}
+    test_fixture_drpc_pf = {}
+    if (has_dispatch or has_compat or has_test_fixture) and os.path.isdir(it_dir):
         for p in sorted(glob.glob(os.path.join(it_dir, "**", "*.rs"), recursive=True)):
             rel_in_it = os.path.relpath(p, it_dir).replace("\\", "/")
             rec, chg, st_chg = _scan_it_file(p, rel_in_it, it_cache, stat_it=stat_it)
             dirty = dirty or chg
             stat_dirty = stat_dirty or st_chg
+            repo_rel_it = "crates/eve-server/tests/it/" + rel_in_it
             if rec["raw_none"] > 0:
                 disp_none_calls += rec["raw_none"]
                 disp_none_files += 1
             if rec["has_disp"]:
                 it_dispatch_files.add(rel_in_it)
             if rec["dl_test"] > 0:
-                direct_layer_test_calls_pf["crates/eve-server/tests/it/" + rel_in_it] = rec["dl_test"]
+                direct_layer_test_calls_pf[repo_rel_it] = rec["dl_test"]
+            if rec.get("hbs", 0) > 0:
+                test_fixture_hbs_pf[repo_rel_it] = int(rec["hbs"])
+            if rec.get("drpc", 0) > 0:
+                test_fixture_drpc_pf[repo_rel_it] = int(rec["drpc"])
 
     # Also check top-level `crates/eve-server/*.rs` and `crates/eve-server/tests/*.rs` for `client_compat`
     if has_compat:
@@ -2236,6 +2388,18 @@ def check_all_ratchets(root, cache_path=None):
     if has_untyped_ue:
         violations.extend(check_untyped_user_error_ratchet(root, rel_path=untyped_ue_rel, observed_per_file=ue_per_file))
 
+    if has_test_fixture:
+        violations.extend(
+            check_test_fixture_ratchet(
+                root,
+                rel_path=test_fixture_rel,
+                observed_per_file={
+                    "hand_built_sessions": test_fixture_hbs_pf,
+                    "discarded_rpc_results": test_fixture_drpc_pf,
+                },
+            )
+        )
+
     ad_viol, ad_dirty, ad_sdirty = _check_arch_debt_ratchet_cached(
         root, arch_cache=arch_cache, stat_arch=stat_arch
     )
@@ -2352,6 +2516,24 @@ def protected_umbrella_issues(root):
                     protected[iss] = "non-zero arch_debt_ratchet.json (%s)" % ", ".join(nonzero[:3])
                 elif iss not in DEFAULT_UMBRELLA_ISSUES:
                     protected.pop(iss, None)
+        except (OSError, ValueError, TypeError):
+            pass
+
+    tf_path = os.path.join(root, TEST_FIXTURE_REL)
+    if os.path.isfile(tf_path):
+        try:
+            tf = _read_json(tf_path)
+            if isinstance(tf, dict) and isinstance(tf.get("patterns"), dict):
+                nonzero = []
+                for pat_name, spec in tf["patterns"].items():
+                    if isinstance(spec, dict) and isinstance(spec.get("files"), dict):
+                        if sum(int(v or 0) for v in spec["files"].values()) > 0:
+                            nonzero.append(str(pat_name))
+                for iss in _parse_issue_numbers(tf.get("owning_issue")):
+                    if nonzero:
+                        protected[iss] = "non-zero test_fixture_ratchet.json (%s)" % ", ".join(nonzero[:3])
+                    elif iss not in DEFAULT_UMBRELLA_ISSUES:
+                        protected.pop(iss, None)
         except (OSError, ValueError, TypeError):
             pass
 

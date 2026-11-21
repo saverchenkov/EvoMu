@@ -149,7 +149,7 @@ Ship holds also filter by content: `is_item_allowed_in_ship_hold` decides which 
 `is_container_group` treats type 23 (the jettison container) and a fixed list of SDE groups (cargo, secure, audit log and freight containers, mobile depots and similar) as containers. An item inside a container has the container's `item_id` as its `location_id`.
 
 - **Assembly.** `invbroker.AssembleCargoContainer` turns one unit of a packaged container into a singleton (splitting one off a stack if needed) and writes an audit log entry.
-- **Passwords and audit log containers.** `SetPassword`, the `ALSC*` calls and `RetrievePassword` manage container passwords, per-item locks and the audit log. This state lives in `ContainerShipRuntimeState`, stored as JSON in a reserved `owner_notes` row. Items locked this way are refused by move, split, merge, stack, trash and contract paths. A container with audit log entries younger than `21 × 86,400` s cannot be trashed or repackaged (`ContainerHasActiveAuditLog`).
+- **Passwords and audit log containers.** `SetPassword`, the `ALSC*` calls and `RetrievePassword` manage container passwords, per-item locks and the audit log. This state lives per-entity in `entity_kv` (`Ns::ContainerPassword`, `Ns::ContainerConfig`, `Ns::ContainerUnlockedChar`, `Ns::ContainerAlscLogs`, `Ns::AlscLockedItem` in [`entity_kv.rs`](../../../crates/eve-db/src/service_domains/entity_kv.rs)). Items locked this way are refused by move, split, merge, stack, trash and contract paths. A container with audit log entries younger than `21 × 86,400` s cannot be trashed or repackaged (`ContainerHasActiveAuditLog`).
 - **Jettison.** `ship.Jettison` / `invbroker.Jettison` work only in space. They create a type 23 container 500 m from the ship, owned by the character, and move the listed cargo items into it. Fitted modules, stored ships, ships, containers and courier cargo are refused; the total volume must fit `max(SDE capacity, 55,000)` m³; a 180 s per-character cooldown applies. An emptied jettison container is despawned.
 - **Wraps.** A courier Plastic Wrap (type 3468) and an asset safety wrap (type 60) are items that hold other items and count as locked for every inventory operation.
 
@@ -244,7 +244,7 @@ A newly created stack (from a split) is announced with `{3: 0}`, a previous loca
 | `item_positions` | Coordinates of items that are objects in space |
 | `module_online_states`, `module_active_states`, `module_active_charges`, `applied_ship_skins` | Per-item state cleared by `remove_system_cleanup_item` |
 | `committed_idempotency_keys` | `(character, key)` pairs for replay protection; cleared when it reaches 4,096 entries |
-| `owner_notes[CONTAINER_SHIP_NOTE_ID]` | `ContainerShipRuntimeState` JSON: container passwords, unlocks, audit log locks and logs, ship bay access settings |
+| `entity_kv` (`Ns::ContainerPassword`, `ContainerConfig`, `ContainerUnlockedChar`, `ContainerAlscLogs`, `AlscLockedItem`, `ShipAccessConfig`, `CustomItemFlag`) | Per-entity container passwords, unlocks, audit log locks and bounded logs, ship bay access settings, and custom item flags |
 | `corp_container_logs` | Corporation container log entries |
 
 In the SQLite store, items are rows of the `items` table (`item_id`, `type_id`, `owner_id`, `location_id`, `flag`, `quantity`, `singleton`, `version`, `record_json`) defined in [`schema.rs`](../../../crates/eve-db/src/sqlite_store/schema.rs).

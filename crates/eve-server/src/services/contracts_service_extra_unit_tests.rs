@@ -1016,9 +1016,13 @@ fn contract_fitted_ship_and_non_empty_container_lifecycle_and_validation() {
 
         snap.items.insert(bad_alsc_cont, mk(bad_alsc_cont, 17_366, station_id, InventoryFlag::Hangar, 1, true));
         snap.items.insert(bad_alsc_child, mk(bad_alsc_child, 34, bad_alsc_cont, InventoryFlag::Hangar, 1, false));
-        crate::services::fitting_containers_ships::write_container_ship_state_snap(snap, |st| {
-            st.alsc_locked_items.insert(bad_alsc_child);
-        });
+        crate::services::fitting_containers_ships::set_alsc_item_locked_snap(
+            snap,
+            bad_alsc_child,
+            true,
+            0,
+        )
+        .unwrap();
 
         snap.items.insert(bad_courier_cont, mk(bad_courier_cont, 17_366, station_id, InventoryFlag::Hangar, 1, true));
         snap.items.insert(bad_courier_child, mk(bad_courier_child, 34, bad_courier_cont, InventoryFlag::Hangar, 1, false));

@@ -557,7 +557,7 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
         NotificationTarget::SolarSystem(sys_id),
         crate::router::notify_registry::OnSlimItemChange {
             old_slim: PyRep::Integer(beacon_id),
-            new_slim: PyRep::keyval([
+            new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
                 ("crabPhase", PyRep::String("LootRestricted".into())),
                 ("crabSelfDestructAt", PyRep::Integer(self_destruct_at_sec as i64)),
             ]),
@@ -701,7 +701,7 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
         NotificationTarget::SolarSystem(sys_id),
         crate::router::notify_registry::OnSlimItemChange {
             old_slim: PyRep::Integer(beacon_id),
-            new_slim: PyRep::keyval([
+            new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
                 ("crabPhase", PyRep::String("SelfDestructed".into())),
                 ("openContainerID", PyRep::Integer(spawned_can_id.unwrap_or(0))),
             ]),
@@ -1122,7 +1122,7 @@ pub async fn handle_crab_component_call(
                 NotificationTarget::SolarSystem(sys_id),
                 crate::router::notify_registry::OnSlimItemChange {
                     old_slim: PyRep::Integer(beacon_id),
-                    new_slim: PyRep::keyval([
+                    new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
                         ("crabPhase", PyRep::String("Linking".into())),
                         ("crabLinkedShipID", PyRep::Integer(ship_id)),
                         ("crabLinkCompletesAt", PyRep::Integer(link_completes as i64)),

@@ -452,13 +452,14 @@ fn test_contract_item_flags_asset_safety_alsc_and_corp_rbac_security() {
             auc_item_id,
             make_fighter_item(auc_item_id, 34, issuer_id, station_id, InventoryFlag::Hangar, 5),
         );
+        crate::services::inventory_fitting::fitting_containers_ships::set_alsc_item_locked_snap(
+            snap,
+            alsc_item_id,
+            true,
+            0,
+        )
+        .unwrap();
     });
-    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
-        &ctx,
-        |cs| {
-            cs.alsc_locked_items.insert(alsc_item_id);
-        },
-    );
 
     // 1. Fitted rig/module rejected for personal contract
     let err_rig = handle(
