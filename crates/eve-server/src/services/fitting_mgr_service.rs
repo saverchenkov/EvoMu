@@ -284,6 +284,20 @@ fn handle_get_fittings(
         if (!args.is_empty() || method == "GetFittings") && owner_id != expected_owner {
             return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into(), client_error: None }));
         }
+        // In V24.02, opening Fitting Management (`fittingSvc.GetAllFittingsForCharacter` / `GetAllFittings`)
+        // calls `corpFittingMgr.GetFittings(session.corpid)` alongside `charFittingMgr.GetFittings` and
+        // `corpFittingMgr.GetCommunityFittings`, including for NPC-corp pilots whose corporation has no
+        // player corporation row. Return `{}` cleanly for the caller's own NPC corporation without
+        // querying `saved_fittings`, while keeping all mutations and non-NPC/alliance paths fail-closed.
+        if service == "corpFittingMgr"
+            && method == "GetFittings"
+            && caller_corp > 0
+            && is_npc_corporation_id(ctx, caller_corp)
+            && owner_id == caller_corp
+            && !excluded_member
+        {
+            return Some(Ok(PyRep::Dict(Vec::new())));
+        }
         let is_shared_fitting_service = matches!(service, "corpFittingMgr" | "allianceFittingMgr");
         if is_shared_fitting_service
             && (is_npc_corporation_id(ctx, caller_corp) || !corp_exists || excluded_member)

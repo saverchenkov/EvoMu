@@ -11,13 +11,13 @@ use crate::services::inventory_fitting::fitting_containers_ships::rpc_err;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
-/// Authorizes mutating certificate operations: requires GM role (`ROLE_GM_MASK` or `has_gm_role()`).
+/// Authorizes mutating certificate operations: requires GM role (`ServerContext::has_canonical_gm_role`).
 fn check_target_auth(
     session: &SessionState,
     _caller_cid: i64,
     _target_cid: i64,
 ) -> Result<(), BridgeRpcError> {
-    if session.has_gm_role() || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0 {
+    if crate::router::ServerContext::has_canonical_gm_role(session) {
         return Ok(());
     }
     Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::AccessDenied))
@@ -30,8 +30,7 @@ fn check_flags_auth(
     target_cid: i64,
 ) -> Result<(), BridgeRpcError> {
     if target_cid == caller_cid
-        || session.has_gm_role()
-        || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
+        || crate::router::ServerContext::has_canonical_gm_role(session)
     {
         return Ok(());
     }
@@ -171,8 +170,7 @@ pub fn get_my_certificates_pyrep(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let mut cert_map = derive_certificate_levels(ctx, char_id);
-    if session.has_gm_role()
-        || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
+    if crate::router::ServerContext::has_canonical_gm_role(session)
     {
         ctx.db.with_snapshot(|snap| {
             let state = load_certificate_state(snap, char_id);
@@ -235,8 +233,7 @@ pub fn handle(
                     }
                 },
             };
-            let is_gm = session.has_gm_role()
-                || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
+            let is_gm = crate::router::ServerContext::has_canonical_gm_role(session);
             if target_char_id != char_id && !is_gm {
                 let char_exists = ctx
                     .db

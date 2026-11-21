@@ -50,7 +50,10 @@ pub fn notice_to_pyrep(notice: &EvePublicNotice) -> PyRep {
 }
 
 pub fn require_admin_role(ctx: &AuthoritativeContext) -> Result<(), (u32, String)> {
-    if (ctx.service_role_mask & eve_machonet::service_roles::ROLE_GM_MASK) == 0 {
+    if !crate::router::ServerContext::has_gm_role_mask(
+        ctx.service_role_mask,
+        crate::router::ServerContext::ROLE_GM_CANONICAL_MASK,
+    ) {
         return Err((STATUS_FORBIDDEN, "Admin/GM role required".into()));
     }
     Ok(())
@@ -324,6 +327,49 @@ impl PublicGatewayRouter {
                 None
             }
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod gm_mask_tests {
+    use super::require_admin_role;
+    use eve_machonet::service_roles;
+    use eve_proto::quasar::AuthoritativeContext;
+
+    #[test]
+    fn require_admin_role_uses_canonical_gm_mask() {
+        for blocked in [
+            0,
+            service_roles::ROLE_PLAYER_DEFAULT,
+            service_roles::ROLE_PLAYER_DEFAULT | service_roles::ROLE_QA,
+            service_roles::ROLE_PLAYER_DEFAULT | service_roles::ROLE_PROGRAMMER,
+        ] {
+            let ctx = AuthoritativeContext {
+                service_role_mask: blocked,
+                ..Default::default()
+            };
+            assert!(
+                require_admin_role(&ctx).is_err(),
+                "role mask {blocked:#x} must not authorize quasar admin endpoints"
+            );
+        }
+
+        for allowed in [
+            service_roles::ROLE_ADMIN,
+            service_roles::ROLE_GMH,
+            service_roles::ROLE_GML,
+            service_roles::ROLE_GMS,
+            service_roles::ROLE_WORLDMOD,
+        ] {
+            let ctx = AuthoritativeContext {
+                service_role_mask: service_roles::ROLE_PLAYER_DEFAULT | allowed,
+                ..Default::default()
+            };
+            assert!(
+                require_admin_role(&ctx).is_ok(),
+                "canonical GM bit {allowed:#x} must authorize quasar admin endpoints"
+            );
         }
     }
 }

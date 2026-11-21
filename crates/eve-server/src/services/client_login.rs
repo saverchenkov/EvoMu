@@ -278,11 +278,10 @@ pub async fn handle(
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
-            let admin_or_qa = eve_db::service_roles::ROLE_ADMIN
-                | eve_machonet::service_roles::ROLE_PROGRAMMER
-                | eve_db::service_roles::ROLE_GMH
-                | eve_db::service_roles::ROLE_GML;
-            if !session.has_gm_role() && (session.role & admin_or_qa) == 0 {
+            if !ServerContext::has_gm_role_mask(
+                session.role,
+                ServerContext::ROLE_GM_PROGRAMMER_MASK,
+            ) {
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),
@@ -805,7 +804,7 @@ pub async fn handle(
             }
             let is_owner = ctx.db.with_snapshot(|s| {
                 s.characters.get(&char_id).is_some_and(|c| c.user_id == user_id)
-            }) || session.has_gm_role();
+            }) || ServerContext::has_canonical_gm_role(session);
             if !is_owner {
                 return Some(Err(BridgeRpcError {
                     code: "CharacterOwnershipError".into(),

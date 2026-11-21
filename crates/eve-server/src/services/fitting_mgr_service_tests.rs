@@ -767,8 +767,10 @@ async fn corp_and_alliance_fittings_enforce_npc_rejection_uninserted_rbac_member
         );
     });
 
-    // 1. NPC corporations are rejected on corpFittingMgr and allianceFittingMgr even with max corp_role,
-    // while curated community fittings (1_000_282) stay gated strictly on GM/Content role.
+    // 1. NPC corporations allow read-only `corpFittingMgr.GetFittings(own_npc_corp)` returning `{}`
+    // without touching/exposing DB fittings, while ALL mutations, foreign queries, and
+    // `allianceFittingMgr` stay fail-closed even with max corp_role; curated community fittings
+    // (1_000_282) remain gated strictly on GM/Content role for writes.
     let mut npc_sess = SessionState::new(91_801);
     npc_sess.user_id = Some(1);
     npc_sess.character_id = Some(npc_char);
@@ -777,22 +779,173 @@ async fn corp_and_alliance_fittings_enforce_npc_rejection_uninserted_rbac_member
     npc_sess.role = eve_machonet::service_roles::ROLE_PLAYER;
     npc_sess.corp_role = u64::MAX;
 
+    // Seed a synthetic fitting under npc_corp_id to prove the NPC GetFittings fast-path
+    // does not expose DB entries under NPC corporation IDs.
+    let synthetic_npc_fit_id = 91_777_990_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.saved_fittings.insert(
+            synthetic_npc_fit_id,
+            eve_db::SavedFittingRecord {
+                fitting_id: synthetic_npc_fit_id,
+                owner_id: npc_corp_id,
+                name: "Should Never Expose".into(),
+                ship_type_id: 587,
+                description: "npc-guard".into(),
+                items: Vec::new(),
+            },
+        );
+    });
+
     assert_eq!(
         handle_fitting_mgr(
             &ctx,
             &mut npc_sess,
             None,
             "corpFittingMgr",
-            "SaveFitting",
-            &[PyRep::Integer(npc_corp_id), fit_kv.clone()],
+            "GetFittings",
+            &[PyRep::Integer(npc_corp_id)],
             &kw,
         )
         .await
         .unwrap()
-        .unwrap_err()
-        .code,
-        "CorpRoleDenied"
+        .expect("NPC corp GetFittings(own_npc_corp) succeeds with empty dict"),
+        PyRep::Dict(Vec::new())
     );
+    assert_eq!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut npc_sess,
+            None,
+            "corpFittingMgr",
+            "GetFittings",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("NPC corp GetFittings() with default owner succeeds with empty dict"),
+        PyRep::Dict(Vec::new())
+    );
+    // Clean up synthetic row and confirm non-empty/foreign queries stay rejected.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.saved_fittings.remove(&synthetic_npc_fit_id);
+    });
+    for foreign_oid in [seeded_corp_id, 1_000_170_i64, COMMUNITY_FITTING_CORP_ID, npc_char] {
+        let mismatch_err = handle_fitting_mgr(
+            &ctx,
+            &mut npc_sess,
+            None,
+            "corpFittingMgr",
+            "GetFittings",
+            &[PyRep::Integer(foreign_oid)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(mismatch_err.code, "UserError");
+        assert_eq!(mismatch_err.message, "FittingOwnerMismatch");
+    }
+
+    for (svc, method, args) in [
+        (
+            "corpFittingMgr",
+            "SaveFitting",
+            vec![PyRep::Integer(npc_corp_id), fit_kv.clone()],
+        ),
+        (
+            "corpFittingMgr",
+            "SaveManyFittings",
+            vec![PyRep::Integer(npc_corp_id), PyRep::List(vec![fit_kv.clone()])],
+        ),
+        (
+            "corpFittingMgr",
+            "UpdateNameAndDescription",
+            vec![
+                PyRep::Integer(9_999),
+                PyRep::Integer(npc_corp_id),
+                PyRep::String("Edited".into()),
+                PyRep::String("Desc".into()),
+            ],
+        ),
+        (
+            "corpFittingMgr",
+            "UpdateFitting",
+            vec![
+                PyRep::Integer(9_999),
+                PyRep::Integer(npc_corp_id),
+                PyRep::String("Edited".into()),
+                PyRep::String("Desc".into()),
+            ],
+        ),
+        (
+            "corpFittingMgr",
+            "UpdateFitting",
+            vec![
+                PyRep::Integer(9_999),
+                PyRep::String("Edited".into()),
+                PyRep::String("Desc".into()),
+            ],
+        ),
+        (
+            "corpFittingMgr",
+            "DeleteFitting",
+            vec![PyRep::Integer(npc_corp_id), PyRep::Integer(9_999)],
+        ),
+        (
+            "corpFittingMgr",
+            "DeleteManyFittings",
+            vec![
+                PyRep::Integer(npc_corp_id),
+                PyRep::List(vec![PyRep::Integer(9_999)]),
+            ],
+        ),
+        (
+            "allianceFittingMgr",
+            "GetFittings",
+            vec![PyRep::Integer(alliance_id)],
+        ),
+        (
+            "allianceFittingMgr",
+            "SaveFitting",
+            vec![PyRep::Integer(alliance_id), fit_kv.clone()],
+        ),
+        (
+            "allianceFittingMgr",
+            "UpdateFitting",
+            vec![
+                PyRep::Integer(alliance_id),
+                PyRep::Integer(9_999),
+                PyRep::String("Edited".into()),
+                PyRep::String("Desc".into()),
+            ],
+        ),
+        (
+            "allianceFittingMgr",
+            "DeleteFitting",
+            vec![PyRep::Integer(alliance_id), PyRep::Integer(9_999)],
+        ),
+    ] {
+        assert_eq!(
+            handle_fitting_mgr(&ctx, &mut npc_sess, None, svc, method, &args, &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "CorpRoleDenied",
+            "{svc}.{method} must fail closed with CorpRoleDenied for NPC corporations"
+        );
+    }
+
+    // Even if an NPC corp record exists in snap.corporations with explicit membership excluding the caller,
+    // `corpFittingMgr.GetFittings` still fails closed with CorpRoleDenied.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut npc_rec = CorporationRecord::default();
+        npc_rec.corporation_id = npc_corp_id;
+        npc_rec.ceo_id = seeded_ceo;
+        npc_rec.members.insert(seeded_ceo);
+        snap.corporations.insert(npc_corp_id, npc_rec);
+    });
     assert_eq!(
         handle_fitting_mgr(
             &ctx,
@@ -809,22 +962,10 @@ async fn corp_and_alliance_fittings_enforce_npc_rejection_uninserted_rbac_member
         .code,
         "CorpRoleDenied"
     );
-    assert_eq!(
-        handle_fitting_mgr(
-            &ctx,
-            &mut npc_sess,
-            None,
-            "allianceFittingMgr",
-            "SaveFitting",
-            &[PyRep::Integer(alliance_id), fit_kv.clone()],
-            &kw,
-        )
-        .await
-        .unwrap()
-        .unwrap_err()
-        .code,
-        "CorpRoleDenied"
-    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.remove(&npc_corp_id);
+    });
+
     assert_eq!(
         handle_fitting_mgr(
             &ctx,
@@ -1065,6 +1206,22 @@ async fn corp_and_alliance_fittings_enforce_npc_rejection_uninserted_rbac_member
     .unwrap_err();
     assert_eq!(stale_ally_err.code, "UserError");
     assert_eq!(stale_ally_err.message, "FittingOwnerMismatch");
+    let mut stale_npc_sess = stale_sess.clone();
+    stale_npc_sess.corporation_id = Some(npc_corp_id);
+    let stale_npc_err = handle_fitting_mgr(
+        &ctx,
+        &mut stale_npc_sess,
+        None,
+        "corpFittingMgr",
+        "GetFittings",
+        &[PyRep::Integer(npc_corp_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(stale_npc_err.code, "UserError");
+    assert_eq!(stale_npc_err.message, "FittingOwnerMismatch");
     assert!(
         handle_fitting_mgr(
             &ctx,
@@ -1092,6 +1249,217 @@ async fn corp_and_alliance_fittings_enforce_npc_rejection_uninserted_rbac_member
         .await
         .unwrap()
         .is_ok()
+    );
+
+    // 5. Player corporation with no alliance fails closed on allianceFittingMgr.GetFittings.
+    let no_ally_corp_id = 98_777_901_i64;
+    let no_ally_char = 91_777_901_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut nac = CorporationRecord::default();
+        nac.corporation_id = no_ally_corp_id;
+        nac.name = "Solo Corp".into();
+        nac.ticker = "SOLO".into();
+        nac.ceo_id = no_ally_char;
+        nac.alliance_id = None;
+        nac.members.insert(no_ally_char);
+        nac.ensure_wallet_divisions();
+        snap.corporations.insert(no_ally_corp_id, nac);
+        snap.characters.insert(
+            no_ally_char,
+            eve_db::CharacterRecord {
+                character_id: no_ally_char,
+                corporation_id: no_ally_corp_id,
+                alliance_id: None,
+                ..Default::default()
+            },
+        );
+    });
+    let mut no_ally_sess = SessionState::new(91_807);
+    no_ally_sess.user_id = Some(7);
+    no_ally_sess.character_id = Some(no_ally_char);
+    no_ally_sess.corporation_id = Some(no_ally_corp_id);
+    no_ally_sess.alliance_id = None;
+    let no_ally_err = handle_fitting_mgr(
+        &ctx,
+        &mut no_ally_sess,
+        None,
+        "allianceFittingMgr",
+        "GetFittings",
+        &[PyRep::Integer(alliance_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(no_ally_err.code, "UserError");
+    assert_eq!(no_ally_err.message, "FittingOwnerMismatch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_npc_corp_player_fitting_window_startup_sequence_succeeds_without_gm_bits() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let npc_corp_id = 1_000_170_i64; // Republic Military School (seeded demo char's NPC corp)
+    let jita_station_id = 60_003_760_i64;
+    let personal_fid = 950_001_i64;
+    let community_fid = 950_002_i64;
+
+    ctx.db.with_snapshot(|snap| {
+        let demo_acc = &snap.accounts["demo"];
+        assert_eq!(demo_acc.role, eve_db::service_roles::ROLE_PLAYER_DEFAULT);
+        assert_eq!(demo_acc.role & eve_db::service_roles::ROLE_GM_MASK, 0);
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.corporation_id, npc_corp_id);
+        assert_eq!(ch.alliance_id, None);
+        assert_eq!(ch.station_id, Some(jita_station_id));
+        assert!(!snap.corporations.contains_key(&npc_corp_id));
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.saved_fittings.insert(
+            personal_fid,
+            eve_db::SavedFittingRecord {
+                fitting_id: personal_fid,
+                owner_id: char_id,
+                name: "Demo Personal Rifter".into(),
+                ship_type_id: 587,
+                description: "Starter fit".into(),
+                items: vec![(439, InventoryFlag::MedSlot0, 1)],
+            },
+        );
+        snap.saved_fittings.insert(
+            community_fid,
+            eve_db::SavedFittingRecord {
+                fitting_id: community_fid,
+                owner_id: COMMUNITY_FITTING_CORP_ID,
+                name: "Community Starter Rifter".into(),
+                ship_type_id: 587,
+                description: "CCP community fit".into(),
+                items: vec![(439, InventoryFlag::MedSlot0, 1)],
+            },
+        );
+    });
+    let expected_fitting_count = ctx.db.with_snapshot(|snap| snap.saved_fittings.len());
+    let kw = HashMap::new();
+
+    for role in [eve_machonet::service_roles::ROLE_PLAYER_DEFAULT, 0_u64] {
+        assert_eq!(role & eve_machonet::service_roles::ROLE_GM_MASK, 0);
+        let mut sess = SessionState::new(91_900 + role);
+        sess.user_id = Some(1);
+        sess.character_id = Some(char_id);
+        sess.corporation_id = Some(npc_corp_id);
+        sess.alliance_id = None;
+        sess.solar_system_id = Some(30_000_142);
+        sess.station_id = Some(jita_station_id);
+        sess.ship_id = Some(100_000_001);
+        sess.role = role;
+        sess.corp_role = 0;
+
+        // V24.02 Fitting window startup sequence (`fittingSvc.GetAllFittingsForCharacter`):
+        // 1) charFittingMgr.GetFittings(char_id)
+        let char_fits = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "charFittingMgr",
+                None,
+                "GetFittings",
+                &[PyRep::Integer(char_id)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("charFittingMgr.GetFittings must succeed for ordinary NPC-corp player");
+        let PyRep::Dict(char_entries) = char_fits else {
+            panic!("expected Dict from charFittingMgr.GetFittings");
+        };
+        assert_eq!(char_entries.len(), 1);
+        assert_eq!(char_entries[0].0, PyRep::Integer(personal_fid));
+        assert_eq!(
+            char_entries[0].1.dict_get("name").and_then(|v| v.as_str()),
+            Some("Demo Personal Rifter")
+        );
+
+        // 2) corpFittingMgr.GetFittings(npc_corp_id) -> empty dict `{}` (never CorpRoleDenied)
+        let corp_fits = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "corpFittingMgr",
+                None,
+                "GetFittings",
+                &[PyRep::Integer(npc_corp_id)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("corpFittingMgr.GetFittings(npc_corp_id) must succeed for ordinary NPC-corp player");
+        assert_eq!(corp_fits, PyRep::Dict(Vec::new()));
+
+        // 3) corpFittingMgr.GetCommunityFittings()
+        let community_fits = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "corpFittingMgr",
+                None,
+                "GetCommunityFittings",
+                &[],
+                &kw,
+                None,
+            )
+            .await
+            .expect("corpFittingMgr.GetCommunityFittings must succeed for ordinary NPC-corp player");
+        let PyRep::Dict(community_entries) = community_fits else {
+            panic!("expected Dict from corpFittingMgr.GetCommunityFittings");
+        };
+        assert_eq!(community_entries.len(), 1);
+        assert_eq!(community_entries[0].0, PyRep::Integer(community_fid));
+        assert_eq!(
+            community_entries[0].1.dict_get("name").and_then(|v| v.as_str()),
+            Some("Community Starter Rifter")
+        );
+
+        // Cross-corp / community-corp GetFittings and NPC-corp mutations remain denied.
+        for foreign_corp in [98_000_001_i64, COMMUNITY_FITTING_CORP_ID] {
+            let err = ctx
+                .dispatch_rpc(
+                    &mut sess,
+                    "corpFittingMgr",
+                    None,
+                    "GetFittings",
+                    &[PyRep::Integer(foreign_corp)],
+                    &kw,
+                    None,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "UserError");
+            assert_eq!(err.message, "FittingOwnerMismatch");
+        }
+        let save_err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "corpFittingMgr",
+                None,
+                "SaveFitting",
+                &[
+                    PyRep::Integer(npc_corp_id),
+                    PyRep::keyval([
+                        ("name", PyRep::String("Denied Fit".into())),
+                        ("shipTypeID", PyRep::Integer(587)),
+                        ("description", PyRep::String("should fail".into())),
+                        ("fitData", PyRep::List(vec![])),
+                    ]),
+                ],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(save_err.code, "CorpRoleDenied");
+    }
+
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.saved_fittings.len()),
+        expected_fitting_count
     );
 }
 
