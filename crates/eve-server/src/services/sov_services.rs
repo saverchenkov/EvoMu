@@ -1371,11 +1371,25 @@ pub fn handle_contract_delete_multiple(
     let caller_corp = session.corporation_id.unwrap_or(0);
     let now_unix = ctx.now_unix();
     let (deleted, failed, item_changes, transferred_ids) = ctx.db.try_with_mut_snapshot(|snap| {
+        let effective_caller_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|ch| ch.corporation_id)
+            .filter(|&id| id != 0)
+            .unwrap_or(caller_corp);
+        let in_corp_db = snap.corporations.get(&effective_caller_corp).is_some_and(|corp| {
+            corp.ceo_id == char_id
+                || corp.members.contains(&char_id)
+                || corp.member_roles.contains_key(&char_id)
+                || (corp.members.is_empty()
+                    && corp.member_roles.is_empty()
+                    && snap.characters.get(&char_id).is_some_and(|ch| ch.corporation_id == effective_caller_corp))
+        });
         let corp_mgr = effective_contract_helper_corp_roles(
             snap,
-            caller_corp,
+            effective_caller_corp,
             char_id,
-            session.corp_role,
+            if in_corp_db { session.corp_role } else { 0 },
             now_unix,
         )
         .is_some_and(|(is_ceo, r)| {
@@ -1393,7 +1407,7 @@ pub fn handle_contract_delete_multiple(
                 continue;
             };
             let owns = if c.for_corp {
-                c.issuer_corp_id == caller_corp && corp_mgr
+                c.issuer_corp_id == effective_caller_corp && corp_mgr
             } else {
                 c.issuer_id == char_id
             };
@@ -1415,12 +1429,6 @@ pub fn handle_contract_delete_multiple(
                 } else {
                     c.issuer_id
                 };
-                let has_saved_item_flag = c
-                    .item_ids
-                    .iter()
-                    .any(|iid| snap.has_saved_contract_orig_flag(cid, *iid));
-                let restore_flag = (c.for_corp && !has_saved_item_flag)
-                    .then_some(eve_db::InventoryFlag::CorpDeliveries);
                 let mut prev_states: Vec<(i64, i64, i64, eve_db::InventoryFlag)> = c
                     .item_ids
                     .iter()
@@ -1441,7 +1449,7 @@ pub fn handle_contract_delete_multiple(
                     &c.item_ids,
                     restore_owner,
                     c.start_station_id,
-                    restore_flag,
+                    None,
                     true,
                 ));
                 snap.clear_contract_divisions(cid);

@@ -883,17 +883,14 @@ pub fn handle(
                 };
                 let mut resolved_assignee_id = assignee_id;
                 if parsed_avail == ContractAvailability::Alliance && resolved_assignee_id == 0 {
-                    let issuer_alliance = snap
-                        .corporations
-                        .get(&issuer_corp_id)
-                        .and_then(|corp| corp.alliance_id)
-                        .filter(|&a| a != 0)
-                        .or_else(|| {
-                            snap.characters
-                                .get(&char_id)
-                                .and_then(|ch| ch.alliance_id)
-                                .filter(|&a| a != 0)
-                        });
+                    let issuer_alliance = if let Some(corp) = snap.corporations.get(&issuer_corp_id) {
+                        corp.alliance_id.filter(|&a| a != 0)
+                    } else {
+                        snap.characters
+                            .get(&char_id)
+                            .and_then(|ch| ch.alliance_id)
+                            .filter(|&a| a != 0)
+                    };
                     resolved_assignee_id = issuer_alliance.ok_or_else(|| {
                         rpc_err(
                             "CrpAccessDenied",

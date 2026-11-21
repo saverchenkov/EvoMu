@@ -260,17 +260,13 @@ impl ContractAvailability {
     }
 }
 
-/// Resolves the alliance ID of a contract's issuer (preferring issuer corp, falling back to issuer char).
+/// Resolves the alliance ID of a contract's issuer (preferring issuer corp; falling back to issuer char only when corp record is absent).
 pub fn contract_issuer_alliance_id(snap: &WorldStateSnapshot, c: &ContractRecord) -> Option<i64> {
-    if c.issuer_corp_id != 0 {
-        if let Some(aid) = snap
-            .corporations
-            .get(&c.issuer_corp_id)
-            .and_then(|corp| corp.alliance_id)
-            .filter(|&a| a != 0)
-        {
-            return Some(aid);
-        }
+    if let Some(corp) = (c.issuer_corp_id != 0)
+        .then(|| snap.corporations.get(&c.issuer_corp_id))
+        .flatten()
+    {
+        return corp.alliance_id.filter(|&a| a != 0);
     }
     snap.characters
         .get(&c.issuer_id)

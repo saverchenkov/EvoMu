@@ -1760,18 +1760,13 @@ impl WorldStateSnapshot {
         transferred
     }
 
-    /// Returns true if a per-item `ContractOrigFlag` entry exists in KV or legacy `service_state_blobs`.
-    pub fn has_saved_contract_orig_flag(&self, contract_id: i64, item_id: i64) -> bool {
-        self.kv(crate::service_domains::Ns::ContractOrigFlag).get::<u16>(contract_id, &item_id.to_string()).is_some()
-            || self.service_state_blobs.contains_key(&format!("contract_orig_flag:{contract_id}:{item_id}"))
-    }
-
     /// Completes escrow settlement of `item_ids` (plus any orphaned items directly at
     /// `contract_id` when `include_contract_location_orphans` is true): moves top-level roots to
     /// `target_location_id` with `target_flag` (or restores each root's saved `ContractOrigFlag`
-    /// defaulting to `Hangar` when `target_flag` is `None`), transfers ownership of both top-level
-    /// roots and all nested descendants to `target_owner_id`, clears `ContractOrigFlag` entries
-    /// and `self_destructs`, and returns every item ID whose `owner_id` changed.
+    /// defaulting to `CorpDeliveries` for corporations or `Hangar` otherwise when `target_flag`
+    /// is `None`), transfers ownership of both top-level roots and all nested descendants to
+    /// `target_owner_id`, clears `ContractOrigFlag` entries and `self_destructs`, and returns every
+    /// item ID whose `owner_id` changed.
     pub fn settle_contract_escrow_items(
         &mut self,
         contract_id: i64,
@@ -1793,6 +1788,11 @@ impl WorldStateSnapshot {
             roots.extend(extra_ids);
         }
         let descendants = self.collect_item_descendants_many(&roots);
+        let default_flag = if self.corporations.contains_key(&target_owner_id) {
+            InventoryFlag::CorpDeliveries
+        } else {
+            InventoryFlag::Hangar
+        };
         let mut transferred_ids = Vec::new();
         for &iid in &roots {
             let iid_sub = iid.to_string();
@@ -1810,7 +1810,7 @@ impl WorldStateSnapshot {
                     .or(blob_flag)
                     .map(InventoryFlag::from_u16)
                     .filter(|f| *f != InventoryFlag::Locked)
-                    .unwrap_or(InventoryFlag::Hangar)
+                    .unwrap_or(default_flag)
             });
             self.sp6_lifecycle.self_destructs.remove(&iid);
             if let Some(item) = self.items.get_mut(&iid) {
