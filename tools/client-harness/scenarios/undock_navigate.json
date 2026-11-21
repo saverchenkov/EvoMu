@@ -41,6 +41,15 @@
     {
       "id": "approach_station",
       "action": {"type": "approach", "target": "60003760", "item_id": 60003760, "wait_ms": 3500},
+      "wait_until": {
+        "timeout_ms": 15000,
+        "poll_interval_ms": 600,
+        "checks": {
+          "ship_mode": 1,
+          "target_distance": {"target_id": 60003760, "decreased": true},
+          "state_checks": [{"field": "ship_speed", "min": 1.0}]
+        }
+      },
       "checks": {
         "ship_mode": 1,
         "target_distance": {"target_id": 60003760, "decreased": true},
