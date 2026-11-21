@@ -776,12 +776,12 @@ async fn sync_insurgency_system_npcs(
         if !idle_roamers.is_empty() || need_pirate || need_enforcer {
             let waypoints = system_roamer_waypoints(ctx, sys_id);
             if !idle_roamers.is_empty() {
-                let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+                let view = sys_handle.view();
+                let mut roamer_cmds = Vec::with_capacity(idle_roamers.len());
                 for (bid, is_pir, cur_anchor) in idle_roamers {
                     let offset = if is_pir { pirate_offset } else { enforcer_offset };
-                    let Some((cur_pos, is_warping)) = bp
-                        .balls
-                        .get(&bid)
+                    let Some((cur_pos, is_warping)) = view
+                        .ball(bid)
                         .map(|b| (b.position, matches!(b.mode, eve_destiny::MovementMode::Warp { .. })))
                     else {
                         continue;
@@ -801,17 +801,18 @@ async fn sync_insurgency_system_npcs(
                         .unwrap_or(0);
                     let next_idx = (cur_idx + 1) % waypoints.len();
                     let next_pos = waypoints[next_idx] + offset;
+                    roamer_cmds.push((bid, cur_pos, next_pos));
+                }
+                drop(view);
+                for (bid, cur_pos, next_pos) in roamer_cmds {
                     if cur_pos.distance(next_pos) >= 150_000.0 {
-                        let _ = bp.set_mode(bid, eve_destiny::MovementMode::new_warp(cur_pos, next_pos, 3.0));
+                        let _ = sys_handle
+                            .set_movement_mode(bid, eve_destiny::MovementMode::new_warp(cur_pos, next_pos, 3.0))
+                            .await;
                     } else {
-                        let _ = bp.goto_point(bid, next_pos);
+                        let _ = sys_handle.goto_point(bid, next_pos).await;
                     }
                 }
-                crate::system_actor::sync_ball_positions(
-                    &bp,
-                    &sys_handle.ball_positions,
-                    &sys_handle.scrambled_balls,
-                );
             }
             if let Some(tid) = desired_pirate.filter(|_| !has_pirate) {
                 spawn_specs.push((tid, "InsurgencyPirateRoamer", pirate_fac as u32, waypoints[0] + pirate_offset));

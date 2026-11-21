@@ -904,76 +904,85 @@ pub async fn handle_structure_module_activate(
             let mut affected = Vec::new();
             let mut total_drained = 0.0;
             let mut jammed_count = 0usize;
-            if let Ok(mut bp) = sys_handle.ballpark.write() {
-                let candidates: Vec<(i64, u32, f64)> = bp
-                    .balls
+            let candidates: Vec<(i64, u32, f64)> = {
+                let view = sys_handle.view();
+                view.balls
                     .values()
                     .filter(|b| b.id != structure_id && b.position.distance(primary_ball.position) <= aoe)
+                    .filter(|b| {
+                        view.combat_state(b.id)
+                            .is_some_and(|cs| !cs.is_cloaked && !cs.is_tethered)
+                    })
                     .map(|b| (b.id, b.type_id, b.position.distance(primary_ball.position)))
-                    .collect();
-                for (bid, b_type_id, dist_m) in candidates {
-                    let is_valid = bp
-                        .combat_states
-                        .get(&bid)
-                        .is_some_and(|cs| !cs.is_cloaked && !cs.is_tethered);
-                    if !is_valid || ctx.db.with_snapshot(|s| s.structures.contains_key(&bid)) {
-                        continue;
-                    }
-                    if crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
-                        ctx,
-                        char_id,
-                        structure_id,
-                        sys_id,
-                        bid,
-                        b_type_id == 670,
-                    )
-                    .is_err()
-                    {
-                        continue;
-                    }
-                    affected.push(bid);
-                    if neut_gj > 0.0 {
-                        if let Some(cs) = bp.combat_states.get_mut(&bid) {
+                    .collect()
+            };
+            for (bid, b_type_id, dist_m) in candidates {
+                if ctx.db.with_snapshot(|s| s.structures.contains_key(&bid)) {
+                    continue;
+                }
+                if crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
+                    ctx,
+                    char_id,
+                    structure_id,
+                    sys_id,
+                    bid,
+                    b_type_id == 670,
+                )
+                .is_err()
+                {
+                    continue;
+                }
+                affected.push(bid);
+                if neut_gj > 0.0 {
+                    let drained_bits = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let drained_ref = std::sync::Arc::clone(&drained_bits);
+                    if sys_handle
+                        .modify_combat_state(bid, move |cs| {
                             let d = cs.capacitor.min(neut_gj);
                             cs.capacitor = (cs.capacitor - d).max(0.0);
-                            total_drained += d;
+                            drained_ref.store(d.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                        })
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some()
+                    {
+                        total_drained +=
+                            f64::from_bits(drained_bits.load(std::sync::atomic::Ordering::Relaxed));
+                    }
+                }
+                if jam_str > 0.0 {
+                    let mut best_sensor_idx = 0usize;
+                    let mut target_sensor_strength = 0.0;
+                    if let Some(t_type) = ctx.sde.types.get(&b_type_id) {
+                        for (idx, s_attr) in [208u16, 209, 210, 211].into_iter().enumerate() {
+                            let val = t_type.default_attributes.get(&s_attr).copied().unwrap_or(0.0);
+                            if val > target_sensor_strength {
+                                target_sensor_strength = val;
+                                best_sensor_idx = idx;
+                            }
                         }
                     }
-                    if jam_str > 0.0 {
-                        let mut best_sensor_idx = 0usize;
-                        let mut target_sensor_strength = 0.0;
-                        if let Some(t_type) = ctx.sde.types.get(&b_type_id) {
-                            for (idx, s_attr) in [208u16, 209, 210, 211].into_iter().enumerate() {
-                                let val = t_type.default_attributes.get(&s_attr).copied().unwrap_or(0.0);
-                                if val > target_sensor_strength {
-                                    target_sensor_strength = val;
-                                    best_sensor_idx = idx;
-                                }
-                            }
-                        }
-                        if target_sensor_strength <= 0.0 {
-                            target_sensor_strength = 12.0;
-                        }
-                        let jam_attr_id = 238u16 + (best_sensor_idx as u16);
-                        let eff_jam_str = mod_sde
-                            .default_attributes
-                            .get(&jam_attr_id)
-                            .copied()
-                            .filter(|&v| v > 0.0)
-                            .unwrap_or(jam_str);
-                        let jam_chance = eve_dogma::compute_ecm_jam_chance(
-                            eff_jam_str,
-                            target_sensor_strength,
-                            dist_m,
-                            optimal_range,
-                            falloff_range,
-                        );
-                        let roll = super::inventory_fitting::csprng_unit_f64(ctx);
-                        if roll < jam_chance && jam_chance > 0.0 {
-                            if let Some(cs) = bp.combat_states.get_mut(&bid) {
-                                cs.ecm_jammed_remaining_s = jam_dur_s;
-                            }
-                            bp.target_locks.remove(&bid);
+                    if target_sensor_strength <= 0.0 {
+                        target_sensor_strength = 12.0;
+                    }
+                    let jam_attr_id = 238u16 + (best_sensor_idx as u16);
+                    let eff_jam_str = mod_sde
+                        .default_attributes
+                        .get(&jam_attr_id)
+                        .copied()
+                        .filter(|&v| v > 0.0)
+                        .unwrap_or(jam_str);
+                    let jam_chance = eve_dogma::compute_ecm_jam_chance(
+                        eff_jam_str,
+                        target_sensor_strength,
+                        dist_m,
+                        optimal_range,
+                        falloff_range,
+                    );
+                    let roll = super::inventory_fitting::csprng_unit_f64(ctx);
+                    if roll < jam_chance && jam_chance > 0.0 {
+                        if sys_handle.apply_ecm_jam(bid, jam_dur_s).await.unwrap_or(false) {
                             jammed_count += 1;
                         }
                     }

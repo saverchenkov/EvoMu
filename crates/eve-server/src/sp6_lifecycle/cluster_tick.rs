@@ -1654,7 +1654,7 @@ pub fn on_advance_secs_internal(
                             .is_some_and(|mgr| !mgr.entities.is_empty())
                     };
                     if has_spawns {
-                        let tick = handle.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
+                        let tick = handle.view().current_tick;
                         crate::combat::npc_ai::step_system_npc_spawns_ai_sync(ctx, sys_id, tick, 1.0);
                     }
                 }
@@ -2720,7 +2720,7 @@ async fn step_single_system_physics_step_with_lateness(
                     .get(&sys_id)
                     .is_some_and(|mgr| !mgr.entities.is_empty());
                 if has_spawns {
-                    let tick = handle_ai.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
+                    let tick = handle_ai.view().current_tick;
                     let tidi = crate::services::serverops_cluster::get_system_tidi_factor(
                         &ctx_ai, sys_id,
                     );
