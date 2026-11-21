@@ -323,48 +323,87 @@ macro_rules! social_domain_ops {
     };
 }
 
-social_domain_ops!(
-    diff_social_mail,
-    sync_social_mail,
-    load_social_mail_domain_rows,
-    DOMAIN_SOCIAL_MAIL,
-    sets: [read_mails, deleted_mails, trashed_mails],
-    maps: [mail_labels, mail_assigned_labels, mailing_lists]
-);
+macro_rules! define_social_domains {
+    (
+        $(
+            ($diff_fn:ident, $sync_fn:ident, $load_fn:ident, $domain:ident,
+             sets: [$($set_field:ident),* $(,)?],
+             maps: [$($map_field:ident),* $(,)?])
+        ),+ $(,)?;
+        chat_calendar: [$cal_ev:ident, $chat_ch:ident, $chat_acl:ident $(,)?]
+    ) => {
+        $(
+            social_domain_ops!(
+                $diff_fn,
+                $sync_fn,
+                $load_fn,
+                $domain,
+                sets: [$($set_field),*],
+                maps: [$($map_field),*]
+            );
+        )+
 
-social_domain_ops!(
-    diff_social_bookmarks,
-    sync_social_bookmarks,
-    load_social_bookmarks_domain_rows,
-    DOMAIN_SOCIAL_BOOKMARKS,
-    sets: [],
-    maps: [
-        bookmark_folders,
-        bookmark_subfolders,
-        bookmark_subfolder_parents,
-        bookmark_expiries,
-        bookmark_folder_acls,
-        access_groups,
-        bookmark_folder_known_by,
-    ]
-);
+        fn apply_staged_social(staged: StagedSocialState, snap: &mut WorldStateSnapshot) {
+            let StagedSocialState {
+                $($($set_field,)* $($map_field,)*)+
+                $cal_ev,
+                $chat_ch,
+                $chat_acl,
+            } = staged;
+            $(
+                $(snap.$set_field = $set_field.into();)*
+                $(snap.$map_field = $map_field.into();)*
+            )+
+            snap.$cal_ev = $cal_ev.into();
+            snap.$chat_ch = $chat_ch.into();
+            snap.$chat_acl = $chat_acl.into();
+        }
+    };
+}
 
-social_domain_ops!(
-    diff_social_contacts_notes,
-    sync_social_contacts_notes,
-    load_social_contacts_notes_domain_rows,
-    DOMAIN_SOCIAL_CONTACTS_NOTES,
-    sets: [],
-    maps: [
-        char_contacts,
-        char_contact_notifications,
-        char_contact_labels,
-        corp_contacts,
-        corp_contact_labels,
-        alliance_contacts,
-        alliance_contact_labels,
-        char_notes,
-    ]
+define_social_domains!(
+    (
+        diff_social_mail,
+        sync_social_mail,
+        load_social_mail_domain_rows,
+        DOMAIN_SOCIAL_MAIL,
+        sets: [read_mails, deleted_mails, trashed_mails],
+        maps: [mail_labels, mail_assigned_labels, mailing_lists]
+    ),
+    (
+        diff_social_bookmarks,
+        sync_social_bookmarks,
+        load_social_bookmarks_domain_rows,
+        DOMAIN_SOCIAL_BOOKMARKS,
+        sets: [],
+        maps: [
+            bookmark_folders,
+            bookmark_subfolders,
+            bookmark_subfolder_parents,
+            bookmark_expiries,
+            bookmark_folder_acls,
+            access_groups,
+            bookmark_folder_known_by,
+        ]
+    ),
+    (
+        diff_social_contacts_notes,
+        sync_social_contacts_notes,
+        load_social_contacts_notes_domain_rows,
+        DOMAIN_SOCIAL_CONTACTS_NOTES,
+        sets: [],
+        maps: [
+            char_contacts,
+            char_contact_notifications,
+            char_contact_labels,
+            corp_contacts,
+            corp_contact_labels,
+            alliance_contacts,
+            alliance_contact_labels,
+            char_notes,
+        ]
+    );
+    chat_calendar: [calendar_events, chat_channels, chat_channel_acl]
 );
 
 fn diff_social_chat_calendar(
@@ -843,33 +882,6 @@ fn load_staged_social(
     load_social_chat_calendar_domain_rows(conn, &mut staged, ctx)?;
     load_social_contacts_notes_domain_rows(conn, &mut staged, ctx)?;
     Ok((staged, had_legacy))
-}
-
-fn apply_staged_social(staged: StagedSocialState, snap: &mut WorldStateSnapshot) {
-    snap.read_mails = staged.read_mails.into();
-    snap.deleted_mails = staged.deleted_mails.into();
-    snap.trashed_mails = staged.trashed_mails.into();
-    snap.mail_labels = staged.mail_labels.into();
-    snap.mail_assigned_labels = staged.mail_assigned_labels.into();
-    snap.mailing_lists = staged.mailing_lists.into();
-    snap.calendar_events = staged.calendar_events.into();
-    snap.bookmark_folders = staged.bookmark_folders.into();
-    snap.bookmark_subfolders = staged.bookmark_subfolders.into();
-    snap.bookmark_subfolder_parents = staged.bookmark_subfolder_parents.into();
-    snap.bookmark_expiries = staged.bookmark_expiries.into();
-    snap.bookmark_folder_acls = staged.bookmark_folder_acls.into();
-    snap.access_groups = staged.access_groups.into();
-    snap.bookmark_folder_known_by = staged.bookmark_folder_known_by.into();
-    snap.chat_channels = staged.chat_channels.into();
-    snap.chat_channel_acl = staged.chat_channel_acl.into();
-    snap.char_contacts = staged.char_contacts.into();
-    snap.char_contact_notifications = staged.char_contact_notifications.into();
-    snap.char_contact_labels = staged.char_contact_labels.into();
-    snap.corp_contacts = staged.corp_contacts.into();
-    snap.corp_contact_labels = staged.corp_contact_labels.into();
-    snap.alliance_contacts = staged.alliance_contacts.into();
-    snap.alliance_contact_labels = staged.alliance_contact_labels.into();
-    snap.char_notes = staged.char_notes.into();
 }
 
 /// Loads all 24 Family 3 (`social`) collections from `domain_rows` (and any unmigrated legacy

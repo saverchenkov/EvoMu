@@ -191,12 +191,20 @@ macro_rules! define_staged_industry_market_pve {
 
         impl StagedIndustryMarketPve {
             fn apply_to(self, snap: &mut WorldStateSnapshot) {
+                let Self {
+                    $(
+                        $( $map_f, )*
+                        $( $set_f, )*
+                        $( $scalar_f, )*
+                    )*
+                    service_state_blobs,
+                } = self;
                 $(
-                    $( AssignFrom::assign_from(&mut snap.$map_f, self.$map_f); )*
-                    $( AssignFrom::assign_from(&mut snap.$set_f, self.$set_f); )*
-                    $( AssignFrom::assign_from(&mut snap.$scalar_f, self.$scalar_f); )*
+                    $( AssignFrom::assign_from(&mut snap.$map_f, $map_f); )*
+                    $( AssignFrom::assign_from(&mut snap.$set_f, $set_f); )*
+                    $( AssignFrom::assign_from(&mut snap.$scalar_f, $scalar_f); )*
                 )*
-                snap.service_state_blobs = self.service_state_blobs.into();
+                snap.service_state_blobs = service_state_blobs.into();
             }
         }
     };
