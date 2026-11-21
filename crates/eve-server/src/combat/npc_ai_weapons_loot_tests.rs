@@ -10,12 +10,13 @@ use glam::DVec3;
 
 use crate::router::ServerContext;
 
+use super::npc_ai::spawn_npc_wreck_and_loot_in_snap;
 use super::npc_ai_weapons_loot::{
     build_npc_ball_from_sde, clear_extended_npc_weapon_runtime,
     execute_extended_npc_attack_in_bp, fallback_log_registry, inspect_npc_sde_profile,
     resolve_npc_combat_profile, resolve_npc_weapon_ammo_loot, resolve_npc_wreck_type_id,
-    spawn_npc_wreck_and_loot_in_snap, store_extended_npc_weapon_runtime,
-    take_or_init_extended_npc_weapon_runtime, NpcSizeClass, NpcWeaponKind,
+    store_extended_npc_weapon_runtime, take_or_init_extended_npc_weapon_runtime,
+    EdencomHostilityMeta, NpcSizeClass, NpcWeaponKind,
 };
 
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
@@ -310,6 +311,8 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
     let warping_id = 9_920_005_i64;
     let invuln_id = 9_920_006_i64;
     let dead_id = 9_920_007_i64;
+    let loc_invuln_id = 9_920_008_i64;
+    let loc_char_id = 90_000_099_i64;
 
     for tid in [
         primary_id,
@@ -318,9 +321,40 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
         warping_id,
         invuln_id,
         dead_id,
+        loc_invuln_id,
     ] {
         npc.threat_table.insert(tid, 100.0);
     }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut ch) = snap.characters.values().next().cloned() {
+            ch.character_id = loc_char_id;
+            ch.active_ship_id = loc_invuln_id;
+            ch.standings.insert(500_027, -5.0);
+            snap.characters.insert(loc_char_id, ch);
+        }
+    });
+    crate::services::space_destiny::grant_location_change_invulnerability(
+        &ctx,
+        loc_char_id,
+        ctx.now_unix().saturating_add(60),
+    );
+    let edencom_meta = EdencomHostilityMeta::collect(
+        &ctx,
+        &[
+            primary_id,
+            secondary_beyond_opt_id,
+            cloaked_id,
+            warping_id,
+            invuln_id,
+            dead_id,
+            loc_invuln_id,
+        ],
+    );
+    assert!(
+        edencom_meta.is_location_invulnerable(loc_invuln_id),
+        "EdencomHostilityMeta::collect must detect active location-change invulnerability"
+    );
 
     let mut weapon_rt = take_or_init_extended_npc_weapon_runtime(&ctx, sys_id, &npc);
     let opt = weapon_rt.profile.turret.as_ref().expect("56188 vorton").optimal_range;
@@ -350,7 +384,7 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
     };
 
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let (pri_after, sec_after, cloak_after, warp_after, invuln_after, dead_after) = {
+    let (pri_after, sec_after, cloak_after, warp_after, invuln_after, loc_invuln_after, dead_after) = {
         let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.balls.insert(npc_id, npc_ball);
         bp.combat_states.insert(npc_id, npc_cs);
@@ -405,6 +439,12 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
         cs_dead.structure_hp = 0.0;
         bp.combat_states.insert(dead_id, cs_dead);
 
+        bp.balls.insert(
+            loc_invuln_id,
+            mk_target_ball(loc_invuln_id, 18_350.0, MovementMode::Stop),
+        );
+        bp.combat_states.insert(loc_invuln_id, mk_target_cs());
+
         let sigs = HashMap::new();
         let destroyed_in_call = HashSet::new();
         let mut destroyed_in_tick = Vec::new();
@@ -418,7 +458,7 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
             &sigs,
             false,
             false,
-            None,
+            Some(&edencom_meta),
             &destroyed_in_call,
             &mut destroyed_in_tick,
             &mut homefront_events,
@@ -430,6 +470,7 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
             bp.combat_states[&cloaked_id].shield_hp,
             bp.combat_states[&warping_id].shield_hp,
             bp.combat_states[&invuln_id].shield_hp,
+            bp.combat_states[&loc_invuln_id].shield_hp,
             bp.combat_states[&dead_id].shield_hp,
         )
     };
@@ -442,6 +483,10 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
     assert_eq!(cloak_after, 5_000.0, "cloaked target must not be hit by arc");
     assert_eq!(warp_after, 5_000.0, "warping target must not be hit by arc");
     assert_eq!(invuln_after, 5_000.0, "invulnerable target must not be hit by arc");
+    assert_eq!(
+        loc_invuln_after, 5_000.0,
+        "location-change invulnerable target must not be hit by arc"
+    );
     assert_eq!(dead_after, 0.0, "dead target must not be targeted by arc");
 }
 

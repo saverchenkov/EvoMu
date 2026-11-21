@@ -9,7 +9,6 @@ use crate::services::combat_crimewatch::{
     with_combat_ephemeral, with_mut_combat_ephemeral, ExtendedNpcEntity,
 };
 use crate::services::wormhole_pve_seeding::is_any_capital_group;
-use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
 use eve_destiny::{
     Ball, Ballpark, CombatState, DamageVector, DestinyEvent, MovementMode, SpecialFxWireMeta,
 };
@@ -230,6 +229,13 @@ pub(crate) struct ExtendedNpcWeaponRuntime {
     pub baseline_optimal_range: f64,
     pub turret_cooldown_s: f64,
     pub missile_cooldown_s: f64,
+}
+
+impl ExtendedNpcWeaponRuntime {
+    pub(crate) fn decay_cooldowns(&mut self, elapsed_s: f64) {
+        self.turret_cooldown_s = (self.turret_cooldown_s - elapsed_s).max(0.0);
+        self.missile_cooldown_s = (self.missile_cooldown_s - elapsed_s).max(0.0);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1718,6 +1724,7 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
     }
 
     if !bp.balls.contains_key(&nid) || !bp.balls.contains_key(&target_id) {
+        weapon_rt.decay_cooldowns(1.0);
         return false;
     }
 
@@ -1727,6 +1734,7 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
         && !npc.drifter_doomsday_fired;
     if drifter_doomsday {
         npc.drifter_doomsday_fired = true;
+        weapon_rt.decay_cooldowns(1.0);
         let fx_guid = weapon_rt
             .profile
             .turret
@@ -1746,10 +1754,12 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
     }
 
     if npc.archetype == "SleeperSentry" && !sleeper_sentry_can_fire {
+        weapon_rt.decay_cooldowns(1.0);
         return false;
     }
 
     if weapon_rt.uses_synthetic_legacy {
+        weapon_rt.decay_cooldowns(1.0);
         let mut cycle_dmg = npc.damage_vector;
         if npc.archetype == "Triglavian" {
             let mult = 1.0 + (npc.entropic_cycles as f64 * 0.10).min(1.50);
@@ -1802,6 +1812,7 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
         .zip(bp.balls.get(&target_id))
         .map(|(a, b)| a.surface_distance(b))
     else {
+        weapon_rt.decay_cooldowns(1.0);
         return false;
     };
 
@@ -2181,52 +2192,4 @@ pub(crate) fn resolve_npc_weapon_ammo_loot(
     };
     let tid = resolve_turret_ammo_type_id(sde, kind, size, profile.nominal_damage_vector)?;
     Some((tid, size.ammo_quantity(kind)))
-}
-
-/// Atomically inserts a physical NPC wreck item and all contained loot items inside a single
-/// [`WorldStateSnapshot`] transaction.
-pub(crate) fn spawn_npc_wreck_and_loot_in_snap(
-    snap: &mut WorldStateSnapshot,
-    solar_system_id: u32,
-    owner_char_id: i64,
-    pos: DVec3,
-    now_unix: u64,
-    wreck_type_id: u32,
-    loot_entries: &[(u32, i32, bool)],
-) -> i64 {
-    let make_item = |item_id, type_id, location_id, quantity, singleton, is_bpc| InventoryItemRecord {
-        item_id,
-        type_id,
-        owner_id: owner_char_id,
-        location_id,
-        flag: InventoryFlag::Cargo,
-        quantity,
-        singleton,
-        version: 1,
-        dynamic_attributes: HashMap::new(),
-        source_mutaplasmid_id: None,
-        insured_payout_isk: 0.0,
-        is_blueprint_copy: is_bpc,
-        blueprint_runs_remaining: is_bpc.then_some(1),
-    };
-
-    let wreck_id = snap.alloc_entity_id();
-    crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wreck_id, now_unix, true);
-    snap.items.insert(
-        wreck_id,
-        make_item(wreck_id, wreck_type_id, solar_system_id as i64, 1, true, false),
-    );
-    snap.item_positions
-        .insert(wreck_id, [pos.x, pos.y, pos.z]);
-
-    for &(loot_type_id, raw_qty, is_bpc) in loot_entries {
-        let lid = snap.alloc_entity_id();
-        let qty = if is_bpc { 1 } else { raw_qty.max(1) };
-        snap.items.insert(
-            lid,
-            make_item(lid, loot_type_id, wreck_id, qty, is_bpc, is_bpc),
-        );
-    }
-
-    wreck_id
 }

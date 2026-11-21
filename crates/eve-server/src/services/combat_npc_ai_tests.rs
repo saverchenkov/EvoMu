@@ -2196,3 +2196,207 @@ async fn step_extended_npc_ai_sync_never_holds_db_lock_under_ballpark_write_and_
         .unwrap();
     assert!(ship_cs.shield_hp < 10_000_000.0);
 }
+
+#[tokio::test]
+async fn extended_npc_ai_idle_cooldown_decays_between_engagements() {
+    let (base_ctx, _, _, _, _) = make_fighter_ctx_and_session();
+    let (ctx, _char_id, ship_id, sys_id) =
+        make_isolated_extended_npc_ctx(std::sync::Arc::clone(&base_ctx.sde));
+    spawn_extended_test_ship(
+        &ctx,
+        sys_id,
+        ship_id,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        DVec3::ZERO,
+        1_000.0,
+        100_000.0,
+    )
+    .await;
+
+    // Arch Angel Raelek (17641) has multi-second turret & missile cycles from SDE.
+    let npc_id =
+        spawn_specialized_npc_entity(&ctx, sys_id, 17_641, "Pirate", 500_011, DVec3::ZERO).await;
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    step_extended_npc_ai_sync(&ctx, sys_id);
+    let shield_after_t0 = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp;
+    assert!(
+        shield_after_t0 < 100_000.0,
+        "17641 must fire immediately on initial engagement"
+    );
+
+    let (t_cd0, m_cd0) = with_combat_ephemeral(&ctx, |rt| {
+        let wrt = rt
+            .extended_npc_weapon_runtime
+            .get(&(sys_id, npc_id))
+            .expect("17641 runtime must be initialized after firing");
+        (wrt.turret_cooldown_s, wrt.missile_cooldown_s)
+    });
+    assert!(
+        t_cd0 > 1.0 || m_cd0 > 1.0,
+        "17641 should retain >1s cooldown immediately after firing (t={t_cd0}, m={m_cd0})"
+    );
+
+    // Drop the target so the NPC takes the idle / early-continue path for enough ticks to decay.
+    sys_handle.try_remove_ball(ship_id);
+    let idle_ticks = (t_cd0.max(m_cd0).ceil() as usize).max(2) + 2;
+    for _ in 0..idle_ticks {
+        step_extended_npc_ai_sync(&ctx, sys_id);
+    }
+
+    with_combat_ephemeral(&ctx, |rt| {
+        let wrt = rt
+            .extended_npc_weapon_runtime
+            .get(&(sys_id, npc_id))
+            .expect("live idle NPC must keep its weapon runtime");
+        assert_eq!(wrt.turret_cooldown_s, 0.0, "turret cooldown must decay to 0 while idle");
+        assert_eq!(wrt.missile_cooldown_s, 0.0, "missile cooldown must decay to 0 while idle");
+    });
+
+    // Re-engaging with a fresh target must fire on the very first tick (zero frozen cooldown).
+    spawn_extended_test_ship(
+        &ctx,
+        sys_id,
+        ship_id,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        DVec3::ZERO,
+        1_000.0,
+        100_000.0,
+    )
+    .await;
+    step_extended_npc_ai_sync(&ctx, sys_id);
+    let shield_after_reengage = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp;
+    assert!(
+        shield_after_reengage < 100_000.0,
+        "NPC must fire immediately on first tick of new engagement after idle decay"
+    );
+}
+
+#[tokio::test]
+async fn extended_npc_weapon_runtime_pruned_on_death_pipeline_empty_system_and_persisted_sync() {
+    let (base_ctx, _, _, _, _) = make_fighter_ctx_and_session();
+    let (ctx, char_id, ship_id, sys_id) =
+        make_isolated_extended_npc_ctx(std::sync::Arc::clone(&base_ctx.sde));
+    spawn_extended_test_ship(
+        &ctx,
+        sys_id,
+        ship_id,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        DVec3::ZERO,
+        1_000.0,
+        100_000.0,
+    )
+    .await;
+
+    // 1. death_pipeline::on_ball_destroyed_sync clears runtime even for the last NPC in a system.
+    let npc_a =
+        spawn_specialized_npc_entity(&ctx, sys_id, 2_386, "Pirate", 500_010, DVec3::ZERO).await;
+    step_extended_npc_ai_sync(&ctx, sys_id);
+    with_combat_ephemeral(&ctx, |rt| {
+        assert!(rt.extended_npc_weapon_runtime.contains_key(&(sys_id, npc_a)));
+    });
+    let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(
+        &ctx,
+        sys_id,
+        npc_a,
+        Some(char_id),
+        DVec3::ZERO,
+    )
+    .expect("death pipeline cleanup");
+    with_combat_ephemeral(&ctx, |rt| {
+        assert!(!rt.npc_entities.contains_key(&npc_a));
+        assert!(!rt.extended_npc_weapon_runtime.contains_key(&(sys_id, npc_a)));
+    });
+
+    // 2. step_extended_npc_ai_sync prunes stale weapon runtime before empty-system early exits
+    // and also prunes orphans on live systems when no entity state changed.
+    let (_b, _cs, npc_sample_ent) =
+        crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+            &ctx,
+            sys_id,
+            9_990_001,
+            2_386,
+            "Pirate",
+            500_010,
+            DVec3::ZERO,
+        );
+    let sample_wrt = crate::combat::npc_ai_weapons_loot::take_or_init_extended_npc_weapon_runtime(
+        &ctx,
+        sys_id,
+        &npc_sample_ent,
+    );
+    crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(
+        &ctx,
+        sys_id,
+        9_990_001,
+        sample_wrt.clone(),
+    );
+    step_extended_npc_ai_sync(&ctx, sys_id);
+    with_combat_ephemeral(&ctx, |rt| {
+        assert!(!rt.extended_npc_weapon_runtime.contains_key(&(sys_id, 9_990_001)));
+    });
+
+    ctx.systems.get_or_spawn(sys_id).try_remove_ball(ship_id);
+    let npc_b =
+        spawn_specialized_npc_entity(&ctx, sys_id, 2_386, "Pirate", 500_010, DVec3::ZERO).await;
+    let npc_b_ent = with_combat_ephemeral(&ctx, |rt| rt.npc_entities[&npc_b].clone());
+    let wrt_b = crate::combat::npc_ai_weapons_loot::take_or_init_extended_npc_weapon_runtime(
+        &ctx,
+        sys_id,
+        &npc_b_ent,
+    );
+    crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(
+        &ctx,
+        sys_id,
+        npc_b,
+        wrt_b.clone(),
+    );
+    crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(
+        &ctx,
+        sys_id,
+        9_990_002,
+        wrt_b.clone(),
+    );
+    step_extended_npc_ai_sync(&ctx, sys_id);
+    with_combat_ephemeral(&ctx, |rt| {
+        assert!(rt.extended_npc_weapon_runtime.contains_key(&(sys_id, npc_b)));
+        assert!(!rt.extended_npc_weapon_runtime.contains_key(&(sys_id, 9_990_002)));
+    });
+
+    // 3. CombatRuntimeState::sync_from_persisted retains matching live (sid, bid, type_id) only,
+    // drops stale/mismatched entries, and clears all entries on empty persisted payloads.
+    let mut persisted =
+        crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.to_persisted());
+    let wrong_sys_id = sys_id + 1;
+    let mut rt_clone = crate::services::combat_crimewatch::CombatRuntimeState::default();
+    rt_clone.npc_entities.insert(npc_b, npc_b_ent.clone());
+    rt_clone.extended_npc_weapon_runtime.insert(
+        (sys_id, npc_b),
+        wrt_b.clone(),
+    );
+    rt_clone
+        .extended_npc_weapon_runtime
+        .insert((sys_id, 9_990_003), sample_wrt.clone());
+    rt_clone
+        .extended_npc_weapon_runtime
+        .insert((wrong_sys_id, npc_b), sample_wrt);
+    rt_clone.sync_from_persisted(&persisted);
+    assert!(rt_clone.extended_npc_weapon_runtime.contains_key(&(sys_id, npc_b)));
+    assert!(!rt_clone.extended_npc_weapon_runtime.contains_key(&(sys_id, 9_990_003)));
+    assert!(!rt_clone.extended_npc_weapon_runtime.contains_key(&(wrong_sys_id, npc_b)));
+
+    // Type-ID mismatch is also pruned on sync_from_persisted.
+    if let Some(wrt_live) = rt_clone.extended_npc_weapon_runtime.get_mut(&(sys_id, npc_b)) {
+        wrt_live.npc_type_id = npc_b_ent.type_id.saturating_add(999);
+    }
+    rt_clone.sync_from_persisted(&persisted);
+    assert!(!rt_clone.extended_npc_weapon_runtime.contains_key(&(sys_id, npc_b)));
+
+    // Empty persisted extended JSON clears everything.
+    persisted.extended_runtime_json.clear();
+    rt_clone
+        .extended_npc_weapon_runtime
+        .insert((sys_id, npc_b), wrt_b);
+    rt_clone.sync_from_persisted(&persisted);
+    assert!(rt_clone.extended_npc_weapon_runtime.is_empty());
+}

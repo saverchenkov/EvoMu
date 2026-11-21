@@ -722,6 +722,7 @@ impl CombatRuntimeState {
             self.active_drones_in_space.clear();
             self.drone_next_ready_unix.clear();
             self.npc_entities.clear();
+            self.extended_npc_weapon_runtime.clear();
             self.encounter_waves.clear();
             self.fighter_unit_damage_accum.clear();
             self.fighter_tube_rearm_until.clear();
@@ -756,6 +757,11 @@ impl CombatRuntimeState {
             self.active_drones_in_space = ext.active_drones_in_space;
             self.drone_next_ready_unix = ext.drone_next_ready_unix;
             self.npc_entities = ext.npc_entities;
+            self.extended_npc_weapon_runtime.retain(|&(sid, bid), wrt| {
+                self.npc_entities
+                    .get(&bid)
+                    .is_some_and(|n| n.solar_system_id == sid && n.type_id == wrt.npc_type_id)
+            });
             if !ext.pending_bounty_ticks.is_empty() || p.pending_bounty_ticks.is_empty() {
                 self.pending_bounty_ticks = ext.pending_bounty_ticks.into_iter().collect();
             }

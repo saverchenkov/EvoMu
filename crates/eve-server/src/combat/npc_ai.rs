@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use eve_db::KillmailRecord;
+use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord, WorldStateSnapshot};
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_sde::SdeRegistry;
 use glam::DVec3;
@@ -228,7 +228,7 @@ pub(crate) use super::npc_ai_weapons_loot::{
     build_npc_ball_from_sde, damage_vector_approx_eq, emit_npc_special_fx,
     evaluate_npc_missile_or_vorton_hit, evaluate_npc_turret_shot, inspect_npc_sde_profile,
     resolve_npc_combat_profile, resolve_npc_weapon_ammo_loot, resolve_npc_wreck_type_id,
-    spawn_npc_wreck_and_loot_in_snap, NpcCombatProfile, NpcSizeClass, NpcWeaponKind,
+    NpcCombatProfile, NpcSizeClass, NpcWeaponKind,
 };
 
 #[derive(Debug, Clone)]
@@ -343,8 +343,8 @@ impl NpcSpawnManager {
                 base_dps: profile.total_nominal_dps,
                 damage_vector: profile.nominal_damage_vector,
                 last_attack_tick: 0,
-                has_shield_rep: true,
-                has_armor_rep: true,
+                has_shield_rep: false,
+                has_armor_rep: false,
             };
 
             spawned_entities.push((ball_id, entity));
@@ -1979,6 +1979,54 @@ fn finalize_ai_step_cleanup(
     if !actions.remaining_destructions.is_empty() {
         handle_npc_ai_ball_destructions(ctx, sys_id, actions.remaining_destructions);
     }
+}
+
+/// Atomically inserts a physical NPC wreck item and all contained loot items inside a single
+/// [`WorldStateSnapshot`] transaction.
+pub(crate) fn spawn_npc_wreck_and_loot_in_snap(
+    snap: &mut WorldStateSnapshot,
+    solar_system_id: u32,
+    owner_char_id: i64,
+    pos: DVec3,
+    now_unix: u64,
+    wreck_type_id: u32,
+    loot_entries: &[(u32, i32, bool)],
+) -> i64 {
+    let make_item = |item_id, type_id, location_id, quantity, singleton, is_bpc| InventoryItemRecord {
+        item_id,
+        type_id,
+        owner_id: owner_char_id,
+        location_id,
+        flag: InventoryFlag::Cargo,
+        quantity,
+        singleton,
+        version: 1,
+        dynamic_attributes: HashMap::new(),
+        source_mutaplasmid_id: None,
+        insured_payout_isk: 0.0,
+        is_blueprint_copy: is_bpc,
+        blueprint_runs_remaining: is_bpc.then_some(1),
+    };
+
+    let wreck_id = snap.alloc_entity_id();
+    crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wreck_id, now_unix, true);
+    snap.items.insert(
+        wreck_id,
+        make_item(wreck_id, wreck_type_id, solar_system_id as i64, 1, true, false),
+    );
+    snap.item_positions
+        .insert(wreck_id, [pos.x, pos.y, pos.z]);
+
+    for &(loot_type_id, raw_qty, is_bpc) in loot_entries {
+        let lid = snap.alloc_entity_id();
+        let qty = if is_bpc { 1 } else { raw_qty.max(1) };
+        snap.items.insert(
+            lid,
+            make_item(lid, loot_type_id, wreck_id, qty, is_bpc, is_bpc),
+        );
+    }
+
+    wreck_id
 }
 
 fn finalize_destroyed_npc_side_effects(
