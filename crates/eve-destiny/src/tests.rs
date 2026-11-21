@@ -236,9 +236,9 @@ fn test_spatial_bubbles_10000km_isolation_and_warp_transitions() {
     park.remove_ball(100_000_004);
     let ev_a_rem = park.drain_observer_events(100_000_001);
     let ev_b_rem = park.drain_observer_events(100_000_002);
-    assert!(ev_a_rem
-        .iter()
-        .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id: 100_000_004 })));
+    assert!(ev_a_rem.iter().any(
+        |e| matches!(e, DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[100_000_004])
+    ));
     assert!(ev_b_rem.is_empty());
     let _ = park.drain_all_observer_events();
 

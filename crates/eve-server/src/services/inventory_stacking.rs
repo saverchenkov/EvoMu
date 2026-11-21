@@ -2019,8 +2019,8 @@ fn verify_and_collect_foreign_ship_rows(
 }
 
 /// Immediately removes an empty jettisoned cargo container (`type_id == 23`) from inventory,
-/// `container_lifetimes`, and the solar system `Ballpark`, broadcasting `RemoveBall` with the
-/// ballpark's current destiny tick stamp (`feat:lifecycle.jetcan-empty`).
+/// `container_lifetimes`, and the solar system `Ballpark`, broadcasting `RemoveBalls` with the
+/// ballpark's current destiny tick stamp (`feat:lifecycle.jetcan-empty`, `#1531`).
 pub async fn despawn_empty_jetcan_if_needed(
     ctx: &ServerContext,
     sys_id: Option<u32>,
@@ -2069,8 +2069,8 @@ pub async fn despawn_empty_jetcan_if_needed(
                 state: PyRep::List(vec![PyRep::Tuple(vec![
                     PyRep::Integer(stamp),
                     PyRep::Tuple(vec![
-                        PyRep::String("RemoveBall".into()),
-                        PyRep::Tuple(vec![PyRep::Integer(cont_id)]),
+                        PyRep::String("RemoveBalls".into()),
+                        PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(cont_id)])]),
                     ]),
                 ])]),
                 wait_for_bubble: PyRep::Bool(false),

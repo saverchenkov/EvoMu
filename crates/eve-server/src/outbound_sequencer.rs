@@ -1205,12 +1205,17 @@ impl ServerDestinyNormalizer {
                         if ids.is_empty() {
                             continue;
                         }
-                        restamp_entry_stamp(&mut removed_entry, target_stamp);
+                        let deferred_entry = if action == "RemoveBalls" {
+                            restamp_entry_stamp(&mut removed_entry, target_stamp);
+                            removed_entry
+                        } else {
+                            make_remove_balls_entry(target_stamp, ids)
+                        };
                         pending
                             .entry(target_stamp)
                             .or_insert_with(PendingNormalizeChunk::followup)
                             .entries
-                            .push(removed_entry);
+                            .push(deferred_entry);
                         continue;
                     }
 
@@ -1221,7 +1226,6 @@ impl ServerDestinyNormalizer {
                         idx += 1;
                     }
 
-                    let single_remove_action = action == "RemoveBall";
                     for (target_stamp, ids) in grouped {
                         if ids.is_empty() {
                             continue;
@@ -1229,16 +1233,11 @@ impl ServerDestinyNormalizer {
                         max_deferred_stamp = Some(
                             max_deferred_stamp.map_or(target_stamp, |prev| prev.max(target_stamp)),
                         );
-                        let deferred_entry = if single_remove_action && ids.len() == 1 {
-                            make_remove_ball_entry(target_stamp, ids[0])
-                        } else {
-                            make_remove_balls_entry(target_stamp, &ids)
-                        };
                         pending
                             .entry(target_stamp)
                             .or_insert_with(PendingNormalizeChunk::followup)
                             .entries
-                            .push(deferred_entry);
+                            .push(make_remove_balls_entry(target_stamp, &ids));
                     }
                     continue;
                 }
@@ -1434,16 +1433,6 @@ fn collect_later_added_ids(entries: &[PyRep]) -> HashSet<BallId> {
         ids.extend(tmp.iter().copied());
     }
     ids
-}
-
-fn make_remove_ball_entry(stamp: u32, ball_id: BallId) -> PyRep {
-    PyRep::Tuple(vec![
-        PyRep::Integer(i64::from(stamp)),
-        PyRep::Tuple(vec![
-            PyRep::String("RemoveBall".into()),
-            PyRep::Tuple(vec![PyRep::Integer(ball_id)]),
-        ]),
-    ])
 }
 
 fn make_remove_balls_entry(stamp: u32, ball_ids: &[BallId]) -> PyRep {
@@ -2212,6 +2201,12 @@ mod tests {
         PyRep::List(vec![named_entry(stamp, action, args)])
     }
 
+    fn frame_actions(frame: &OutFrame) -> Option<Vec<&str>> {
+        let OutFrame::DoDestinyUpdate { updates, .. } = frame else { return None };
+        let PyRep::List(items) = updates else { return Some(Vec::new()) };
+        Some(items.iter().filter_map(|e| crate::sequencer_invariants::parse_destiny_entry(e).map(|(_, a, _)| a)).collect())
+    }
+
     #[test]
     fn entity_materialization_gate_orders_same_dispatch_and_drops_unknown_balls() {
         let fr = Arc::new(FlightRecorder::new());
@@ -2558,6 +2553,7 @@ mod tests {
             }
         }
         assert_eq!(frames.len(), 2);
+        assert_eq!(frame_actions(&frames[1]), Some(vec!["RemoveBalls"]));
         assert!(!wire.materialized.contains(&202));
         assert_eq!(wire.sequencer_counters().invariant_violations, 0);
 
@@ -2631,6 +2627,8 @@ mod tests {
             })
             .collect();
         assert_eq!(stamps, vec![1, 2]);
+        let attach_actions: Vec<_> = attach_outcome.frames.iter().filter_map(frame_actions).collect();
+        assert_eq!(attach_actions.get(1).map(Vec::as_slice), Some(["RemoveBalls"].as_slice()));
         assert!(!wire.materialized.contains(&202));
 
         // At stamp 10, materialize 555 cleanly.
@@ -2656,7 +2654,7 @@ mod tests {
                         named_entry(12, "AddBalls2", vec![PyRep::Integer(666)]),
                         make_remove_balls_entry(12, &[555, 666]),
                         named_entry(12, "AddBalls2", vec![PyRep::Integer(777)]),
-                        make_remove_ball_entry(12, 777),
+                        make_remove_balls_entry(12, &[777]),
                         named_entry(12, "AddBalls2", vec![PyRep::Integer(777)]),
                     ]),
                 )],
@@ -2667,7 +2665,7 @@ mod tests {
                         false,
                         PyRep::List(vec![
                             named_entry(12, "AddBalls2", vec![PyRep::Integer(888)]),
-                            make_remove_ball_entry(12, 888),
+                            make_remove_balls_entry(12, &[888]),
                         ]),
                     )),
                 },

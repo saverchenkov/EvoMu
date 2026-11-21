@@ -83,11 +83,7 @@ fn collect_remove_ball_ids(out: &ClientCallOutput) -> Vec<i64> {
                     if let Some(PyRep::Tuple(fa)) = pair.get(1) {
                         let action = fa.first().and_then(|v| v.as_str());
                         if let Some(PyRep::Tuple(args) | PyRep::List(args)) = fa.get(1) {
-                            if action == Some("RemoveBall") {
-                                if let Some(id) = args.first().and_then(|v| v.as_i64()) {
-                                    ids.push(id);
-                                }
-                            } else if action == Some("RemoveBalls") {
+                            if action == Some("RemoveBalls") {
                                 if let Some(PyRep::List(ball_ids) | PyRep::Tuple(ball_ids)) =
                                     args.first()
                                 {
@@ -688,7 +684,7 @@ async fn space_boarding_consumes_pod_and_keeps_ballpark() {
     assert!(sys_handle.get_ball_snapshot(pod_id).await.unwrap().is_none(), "pod ball must be removed from ballpark");
     assert!(
         collect_remove_ball_ids(&board_from_pod).contains(&pod_id),
-        "boarding from pod must emit RemoveBall({pod_id})"
+        "boarding from pod must emit RemoveBalls([{pod_id}])"
     );
 
     // Negative: boarding an out-of-range ship fails cleanly without changing ship or emitting SetState.

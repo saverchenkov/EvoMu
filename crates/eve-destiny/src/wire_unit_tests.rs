@@ -797,7 +797,7 @@ fn non_free_stop_and_rigid_static_balls_encode_flags_omit_data_sector_and_resist
     assert_eq!(park.balls[&wreck_id].velocity, DVec3::ZERO);
 
     // 5. Tractor beam (`set_ball_position`) still repositions a pinned non-free wreck cleanly,
-    //    and removing the static asteroid notifies grid observers via `RemoveBall`.
+    //    and removing the static asteroid notifies grid observers via `RemoveBalls`.
     let tractored_pos = DVec3::new(0.0, 150.0, 0.0);
     assert!(park.set_ball_position(wreck_id, tractored_pos));
     assert_eq!(park.balls[&wreck_id].position, tractored_pos);
@@ -807,7 +807,7 @@ fn non_free_stop_and_rigid_static_balls_encode_flags_omit_data_sector_and_resist
     let obs_evs = park.drain_observer_events(rammer_ast);
     assert!(obs_evs
         .iter()
-        .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id)));
+        .any(|e| matches!(e, DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[ast_id])));
 }
 
 #[test]

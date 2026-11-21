@@ -567,10 +567,9 @@ async fn test_damage_state_change_and_destruction_effect() {
     assert_eq!(dmg.len(), 1);
     assert_eq!(dmg[0], &[PyRep::Integer(SHIP_B), damage_tuple(0.8, 24_000.0, tick, 1.0, 1.0)]);
 
-    // Lethal damage: neighbours get the final damage state, the destruction effect, then the
-    // removal. Client `Park.TerminalPlayDestructionEffect(shipID, destructionEffectId)`
-    // (michelle.pyj:1596); `None` selects destructionEffectType.EXPLOSION (michelle.pyj:1609), and
-    // `RemoveBall(ballID, terminal=False)` follows (michelle.pyj:1762).
+    // Lethal damage: neighbours get the final damage state, the destruction effect, then
+    // `RemoveBalls([shipID])` (#1531: avoids V24 `Park.RemoveBall` deleting from `self.balls`
+    // before `fxSequencer` reads `destructionEffectId`).
     let (_, destroyed, _) = park
         .apply_damage_to_ball(SHIP_B, DamageVector::new(5_000.0, 0.0, 0.0, 0.0))
         .expect("ball exists");
@@ -578,13 +577,13 @@ async fn test_damage_state_change_and_destruction_effect() {
     assert!(!park.balls.contains_key(&SHIP_B));
     let actions = wire_for(&mut park, SHIP_A);
     let order: Vec<String> = names(&actions).into_iter().filter(|n| n != "OnFleetDamageStateChange").collect();
-    assert_eq!(order, vec!["OnDamageStateChange", "TerminalPlayDestructionEffect", "RemoveBall"]);
+    assert_eq!(order, vec!["OnDamageStateChange", "TerminalPlayDestructionEffect", "RemoveBalls"]);
     assert_eq!(args_of(&actions, "OnDamageStateChange")[0], &[
         PyRep::Integer(SHIP_B),
         damage_tuple(0.0, 24_000.0, tick, 0.0, 0.0),
     ]);
     assert_eq!(args_of(&actions, "TerminalPlayDestructionEffect")[0], &[PyRep::Integer(SHIP_B), PyRep::None]);
-    assert_eq!(args_of(&actions, "RemoveBall")[0], &[PyRep::Integer(SHIP_B)]);
+    assert_eq!(args_of(&actions, "RemoveBalls")[0], &[PyRep::List(vec![PyRep::Integer(SHIP_B)])]);
 }
 
 #[tokio::test]
@@ -659,7 +658,7 @@ async fn test_ball_flags_harmonic_packaged_action_and_docking_accepted() {
         assert_eq!(names(&inner), vec!["OnSlimItemChange", "SetBallInteractive"]);
     }
 
-    // Docking removes SHIP_A from space and notifies grid observers with RemoveBall (#1188).
+    // Docking removes SHIP_A from space and notifies grid observers with RemoveBalls (#1188, #1531).
     let station_id: BallId = 60_003_760;
     let station_pos = DVec3::new(1_000.0, -500.0, 250.0);
     park.add_static_ball(ship(station_id, station_pos, MovementMode::Rigid), 15);
@@ -670,7 +669,8 @@ async fn test_ball_flags_harmonic_packaged_action_and_docking_accepted() {
     let a_actions = wire_for(&mut park, SHIP_A);
     assert!(a_actions.is_empty(), "docking no longer emits destiny OnDockingAccepted (#1188): {a_actions:?}");
     let b_actions = wire_for(&mut park, SHIP_B);
-    assert_eq!(names(&b_actions), vec!["RemoveBall"]);
+    assert_eq!(names(&b_actions), vec!["RemoveBalls"]);
+    assert_eq!(args_of(&b_actions, "RemoveBalls")[0], &[PyRep::List(vec![PyRep::Integer(SHIP_A)])]);
 }
 
 #[tokio::test]

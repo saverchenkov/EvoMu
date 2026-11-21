@@ -494,7 +494,7 @@ fn asteroid_depletion_and_downtime_restore_preserve_lod0_hibernation_and_notify_
     let deplete_evs = bp.drain_observer_events(miner_id);
     assert!(deplete_evs
         .iter()
-        .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id)));
+        .any(|e| matches!(e, DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[ast_id])));
 
     let restored = respawn_depleted_belts_on_downtime_inner(
         &mut bp,

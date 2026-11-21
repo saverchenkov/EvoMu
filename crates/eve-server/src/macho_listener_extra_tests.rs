@@ -2719,19 +2719,46 @@ async fn notify_rx_displaced_session_preserves_notifications_and_observer_update
 }
 
 #[test]
-fn test_1531_v24_remove_ball_rewrites_to_remove_balls_across_batches_and_notifications() {
+fn test_1531_canonical_ballpark_and_sequencer_emit_remove_balls() {
+    use crate::outbound_sequencer::{normalize_server_destiny_batch, sequence_tick, DestinyBatch, OutFrame, SessionWireState};
     use eve_destiny::wire::encode_destiny_updates;
-    use eve_destiny::DestinyEvent;
+    use eve_destiny::{Ball, Ballpark, DestinyEvent, MovementMode};
+    use glam::DVec3;
 
     let ctx = ServerContext::new();
     let observer_ship_id = 1_897_000_001_i64;
+    let new_ship_id = 1_897_000_002_i64;
     let npc_id = 900_000_002_i64;
     let drone_id = 1_898_125_074_i64;
     let scout_id = 1_898_125_075_i64;
 
-    // 1. Destruction sequence while NPC weapon FX targets the dying drone must emit
-    //    TerminalPlayDestructionEffect followed by RemoveBalls([drone_id]) and never RemoveBall.
-    let events = vec![
+    let make_ball = |id: i64, x: f64| Ball {
+        id,
+        type_id: 587,
+        position: DVec3::new(x, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+
+    // 1. Canonical `Ballpark::remove_ball` queues `DestinyEvent::RemoveBalls([id])` to
+    //    observers so both `:26000` (`build_destiny_batch`) and bridge (`observer_updates_pyrep`)
+    //    emit `RemoveBalls([id])` instead of 1-arg `RemoveBall`.
+    let mut bp = Ballpark::new(30_000_142);
+    bp.current_tick = 100;
+    bp.add_ball(make_ball(observer_ship_id, 0.0));
+    bp.add_ball(make_ball(npc_id, 1_000.0));
+    bp.add_ball(make_ball(drone_id, 500.0));
+    bp.add_ball(make_ball(scout_id, 600.0));
+    bp.queue_set_state(observer_ship_id);
+    bp.drain_all_observer_events();
+
+    bp.emit_event(
+        Some(npc_id),
         DestinyEvent::OnSpecialFXTimed {
             ball_id: npc_id,
             module_id: None,
@@ -2743,190 +2770,145 @@ fn test_1531_v24_remove_ball_rewrites_to_remove_balls_across_batches_and_notific
             repeat: Some(1),
             graphic_info: None,
         },
+    );
+    bp.emit_event(
+        Some(drone_id),
         DestinyEvent::TerminalExplosion {
             ball_id: drone_id,
             destruction_effect_id: None,
         },
-        DestinyEvent::RemoveBall { ball_id: drone_id },
-        DestinyEvent::RemoveBall { ball_id: scout_id },
-        DestinyEvent::CloakBall {
-            ball_id: observer_ship_id,
-            cloaked: 1,
-        },
-    ];
-    let updates = encode_destiny_updates(100, &events, None);
-    let batch = build_destiny_batch(
-        &ctx,
-        1,
-        100,
-        &events,
-        updates,
-        &[observer_ship_id],
-        SelfDestinyWireContext::NonDock,
-    )
-    .expect("destruction batch must not collapse");
-    assert_eq!(batch.stamp, 100);
+    );
+    assert!(bp.remove_ball(drone_id).is_some());
+    assert!(bp.remove_ball(scout_id).is_some());
 
-    let actions = collect_destiny_actions_from_list(&batch.updates);
-    let action_names: Vec<&str> = actions.iter().map(|(n, _)| n.as_str()).collect();
+    let obs_evs = bp.drain_observer_events(observer_ship_id);
+    let bridge_pyrep = encode_destiny_updates(100, &obs_evs, Some(&bp));
+    let bridge_actions = collect_destiny_actions_from_list(&bridge_pyrep);
     assert_eq!(
-        action_names,
+        bridge_actions.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
         vec![
             "OnSpecialFX",
             "TerminalPlayDestructionEffect",
             "RemoveBalls",
             "RemoveBalls",
-            "CloakBall",
         ]
     );
-    assert_eq!(
-        actions[2].1,
-        vec![PyRep::List(vec![PyRep::Integer(drone_id)])]
-    );
-    assert_eq!(
-        actions[3].1,
-        vec![PyRep::List(vec![PyRep::Integer(scout_id)])]
-    );
-    assert_eq!(actions[1].1, vec![PyRep::Integer(drone_id), PyRep::None]);
-    assert_eq!(actions[0].1.get(3).and_then(PyRep::as_i64), Some(drone_id));
+    assert_eq!(bridge_actions[2].1, vec![PyRep::List(vec![PyRep::Integer(drone_id)])]);
+    assert_eq!(bridge_actions[3].1, vec![PyRep::List(vec![PyRep::Integer(scout_id)])]);
 
-    // Preserve outer stamps on every rewritten entry.
-    if let PyRep::List(entries) = &batch.updates {
-        for entry in entries {
-            let PyRep::Tuple(pair) = entry else {
-                panic!("expected stamped tuple entry: {entry:?}");
-            };
-            assert_eq!(pair.first().and_then(PyRep::as_i64), Some(100));
-        }
-    } else {
-        panic!("expected PyRep::List updates: {:?}", batch.updates);
-    }
-
-    // 2. Typed notifications ("DoDestinyUpdate" stamped, ASCII bytes, bare action, and
-    //    "DoDestinyUpdates") also normalize RemoveBall -> RemoveBalls([id]).
-    let direct_update = build_typed_notification(
+    let batch = build_destiny_batch(
         &ctx,
-        "DoDestinyUpdate".into(),
-        None,
-        vec![
-            PyRep::List(vec![
-                PyRep::Tuple(vec![
-                    PyRep::Integer(201),
-                    PyRep::Tuple(vec![
-                        PyRep::ascii_bytes("RemoveBall"),
-                        PyRep::Tuple(vec![PyRep::Integer(drone_id)]),
-                    ]),
-                ]),
-                PyRep::Tuple(vec![
-                    PyRep::String("RemoveBall".into()),
-                    PyRep::Tuple(vec![PyRep::Integer(scout_id)]),
-                ]),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(201),
-                    PyRep::Tuple(vec![
-                        PyRep::String("CloakBall".into()),
-                        PyRep::Tuple(vec![PyRep::Integer(observer_ship_id), PyRep::Bool(false)]),
-                    ]),
-                ]),
-            ]),
-            PyRep::Bool(false),
-        ],
+        1,
+        100,
+        &obs_evs,
+        bridge_pyrep,
+        &[observer_ship_id],
+        SelfDestinyWireContext::NonDock,
     )
-    .expect("DoDestinyUpdate notification");
-    assert_eq!(direct_update.args.get(1), Some(&PyRep::Bool(false)));
-    let PyRep::List(direct_entries) = &direct_update.args[0] else {
-        panic!("expected list in DoDestinyUpdate args[0]");
-    };
+    .expect("destruction batch must not collapse");
     assert_eq!(
-        direct_entries[0],
-        PyRep::Tuple(vec![
-            PyRep::Integer(201),
-            PyRep::Tuple(vec![
-                PyRep::String("RemoveBalls".into()),
-                PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(drone_id)])]),
-            ]),
-        ])
-    );
-    assert_eq!(
-        direct_entries[1],
-        PyRep::Tuple(vec![
-            PyRep::String("RemoveBalls".into()),
-            PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(scout_id)])]),
-        ])
-    );
-    assert_eq!(
-        destiny_entry_action(&direct_entries[2]).map(|(n, _)| n),
-        Some("UncloakBall")
+        collect_destiny_actions_from_list(&batch.updates),
+        bridge_actions,
+        "MachoNet :26000 and bridge wire updates must match identically (#1531)"
     );
 
-    let batched_updates = build_typed_notification(
-        &ctx,
-        "DoDestinyUpdates".into(),
-        None,
-        vec![PyRep::List(vec![
-            PyRep::Tuple(vec![
-                PyRep::List(vec![PyRep::Tuple(vec![
-                    PyRep::Integer(305),
-                    PyRep::Tuple(vec![
-                        PyRep::String("RemoveBall".into()),
-                        PyRep::Tuple(vec![PyRep::Integer(drone_id)]),
-                    ]),
-                ])]),
-                PyRep::Bool(true),
-            ]),
-            PyRep::Tuple(vec![
-                PyRep::Integer(306),
-                PyRep::Tuple(vec![
-                    PyRep::String("RemoveBall".into()),
-                    PyRep::Tuple(vec![PyRep::Integer(scout_id)]),
-                ]),
-            ]),
-        ])],
-    )
-    .expect("DoDestinyUpdates notification");
-    let PyRep::List(batches) = &batched_updates.args[0] else {
-        panic!("expected outer list in DoDestinyUpdates");
-    };
-    let PyRep::Tuple(sub_batch) = &batches[0] else {
-        panic!("expected sub-batch tuple");
-    };
-    assert_eq!(sub_batch.get(1), Some(&PyRep::Bool(true)));
+    // 2. Canonical `Ballpark::queue_in_space_ship_handoff` schedules `RemoveBalls([old_ship_id])`
+    //    for tick +2 without `SetState`.
+    bp.add_ball(make_ball(new_ship_id, 50.0));
+    assert!(bp.queue_in_space_ship_handoff(observer_ship_id, new_ship_id, &[new_ship_id]));
+    let immediate_handoff = bp.drain_observer_events(new_ship_id);
+    assert!(!immediate_handoff
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::RemoveBall { .. } | DestinyEvent::RemoveBalls { .. })));
+    bp.step(1.0);
+    assert!(!bp
+        .drain_observer_events(new_ship_id)
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::RemoveBall { .. } | DestinyEvent::RemoveBalls { .. })));
+    bp.step(1.0);
+    let handoff_tick2 = bp.drain_observer_events(new_ship_id);
+    assert!(handoff_tick2.iter().any(
+        |e| matches!(e, DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[observer_ship_id])
+    ));
+    let handoff_pyrep = encode_destiny_updates(bp.current_tick as u32, &handoff_tick2, Some(&bp));
     assert_eq!(
-        collect_destiny_actions_from_list(&sub_batch[0]),
+        collect_destiny_actions_from_list(&handoff_pyrep),
         vec![(
             "RemoveBalls".into(),
-            vec![PyRep::List(vec![PyRep::Integer(drone_id)])],
+            vec![PyRep::List(vec![PyRep::Integer(observer_ship_id)])],
         )]
     );
-    assert_eq!(
-        batches[1],
-        PyRep::Tuple(vec![
+
+    // 3. `OutboundSequencer` deferred removal always emits `RemoveBalls([id])`, never `RemoveBall`.
+    let mut wire = SessionWireState::new(98_153_101, 9101);
+    let ep = wire.enter_space(Some(30_000_142));
+    assert!(sequence_tick(
+        &mut wire,
+        DestinyBatch::new(
+            ep,
+            10,
+            true,
             PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::Integer(306),
+                PyRep::Integer(10),
                 PyRep::Tuple(vec![
-                    PyRep::String("RemoveBalls".into()),
-                    PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(scout_id)])]),
+                    PyRep::String("SetState".into()),
+                    PyRep::Tuple(vec![PyRep::keyval([("ego", PyRep::Integer(observer_ship_id))])]),
                 ]),
             ])]),
-            PyRep::Bool(false),
-        ])
+        ),
+    )
+    .is_some());
+    let deferred = normalize_server_destiny_batch(
+        &mut wire,
+        DestinyBatch::new(
+            ep,
+            11,
+            false,
+            PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(11),
+                    PyRep::Tuple(vec![
+                        PyRep::String("AddBalls2".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(scout_id)]),
+                    ]),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(11),
+                    PyRep::Tuple(vec![
+                        PyRep::String("RemoveBalls".into()),
+                        PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(scout_id)])]),
+                    ]),
+                ]),
+            ]),
+        ),
     );
-
-    let mut raw_batches = vec![PyRep::List(vec![PyRep::Tuple(vec![
-        PyRep::Integer(307),
-        PyRep::Tuple(vec![
-            PyRep::String("RemoveBall".into()),
-            PyRep::Tuple(vec![PyRep::Integer(scout_id)]),
-        ]),
-    ])])];
-    normalize_v24_destiny_notification_args("DoDestinyUpdates", &mut raw_batches);
+    assert_eq!(deferred.len(), 2);
+    assert_eq!(deferred[1].stamp, 12);
     assert_eq!(
-        collect_destiny_actions_from_list(&raw_batches[0]),
+        collect_destiny_actions_from_list(&deferred[1].updates),
         vec![(
             "RemoveBalls".into(),
             vec![PyRep::List(vec![PyRep::Integer(scout_id)])],
         )]
     );
+    let mut deferred_iter = deferred.into_iter();
+    assert!(matches!(
+        sequence_tick(&mut wire, deferred_iter.next().unwrap()),
+        Some(OutFrame::DoDestinyUpdate { stamp: 11, .. })
+    ));
+    let out = sequence_tick(&mut wire, deferred_iter.next().unwrap());
+    match out {
+        Some(OutFrame::DoDestinyUpdate { stamp: 12, updates, .. }) => {
+            assert_eq!(
+                collect_destiny_actions_from_list(&updates),
+                vec![(
+                    "RemoveBalls".into(),
+                    vec![PyRep::List(vec![PyRep::Integer(scout_id)])],
+                )]
+            );
+        }
+        other => panic!("expected sequenced DoDestinyUpdate at stamp 12, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -3132,23 +3114,32 @@ async fn test_1531_wire_live_ball_removal_and_destruction_with_active_fx_emit_re
     );
     assert!(!ego_wire.wire_state.materialized.contains(&drone_target));
 
-    // 3. Also verify character-targeted raw DoDestinyUpdate notifications (e.g. jetcan despawn)
-    //    normalize RemoveBall -> RemoveBalls cleanly on drain.
-    ctx.notify(
-        crate::router::NotificationTarget::Character(ego_char_id),
-        "DoDestinyUpdate",
-        "charid",
-        vec![
-            PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::Integer(i64::from(step_destroy.tick as u32)),
-                PyRep::Tuple(vec![
-                    PyRep::String("RemoveBall".into()),
-                    PyRep::Tuple(vec![PyRep::Integer(scooped_drone)]),
-                ]),
-            ])]),
-            PyRep::Bool(false),
-        ],
+    // 3. Also verify canonical empty-jetcan despawn (`inventory_stacking::despawn_empty_jetcan_if_needed`)
+    //    emits `DoDestinyUpdate` with `RemoveBalls([scooped_drone])` directly on the wire.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            scooped_drone,
+            InventoryItemRecord {
+                item_id: scooped_drone,
+                type_id: 23,
+                owner_id: ego_char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    assert!(
+        crate::services::inventory_stacking::despawn_empty_jetcan_if_needed(
+            &ctx,
+            Some(sys_id),
+            scooped_drone,
+        )
+        .await
     );
+    let _ = step_destroy;
     let (notif_frames, _) = ego_wire.drain_pending_frames();
     let notif_remove_balls: Vec<_> = notif_frames
         .iter()
