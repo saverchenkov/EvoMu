@@ -161,6 +161,11 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
             }
         }
     });
+    let p1_uid = ctx.db.with_snapshot(|s| s.characters[&90_060_001].user_id);
+    ctx.db
+        .acquire_online_lock(p1_uid, 9_001, Some(90_060_001), true, ctx.now_unix())
+        .expect("p1 online");
+    let _ = ctx.drain_notifications_for_char(90_060_001);
     let hf_changes = on_special_site_npc_destroyed_core(
         &ctx.systems,
         &ctx.db,
@@ -171,8 +176,6 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
     )
     .await;
     assert_eq!(hf_changes.len(), 5);
-    notify_special_site_account_changes(&ctx.db, &ctx.pending_notifications, &ctx.notify_tx, &hf_changes);
-    notify_special_site_account_changes(&ctx.db, &ctx.pending_notifications, &ctx.notify_tx, &[]);
     let p1_notifs = ctx.drain_notifications_for_char(90_060_001);
     assert!(p1_notifs.iter().any(|n| n.event == "OnAccountChange"));
 

@@ -1349,17 +1349,18 @@ fn test_issue_789_795_place_buy_order_v24_buystuff_9tuple_and_self_trade_account
         .filter(|n| n.event == "OnAccountChange")
         .filter_map(|n| n.args.get(2).and_then(PyRep::as_f64))
         .collect();
-    assert!(
-        acct_balances.len() >= 2,
-        "Self-trade must emit buyer debit and seller credit OnAccountChange notifications"
+    assert_eq!(
+        acct_balances.len(),
+        1,
+        "Transactional self-trade must emit one coalesced OnAccountChange with final net balance: {acct_balances:?}"
     );
     assert!(
-        acct_balances[0] < acct_balances[1],
-        "Buyer debit OnAccountChange must precede seller credit so last notification is final balance: {acct_balances:?}"
+        acct_balances[0] < 1_000_000.0,
+        "Self-trade sales tax must leave net balance below 1_000_000.0 so notification reflects net deduction: {acct_balances:?}"
     );
     assert!(
-        (acct_balances.last().copied().unwrap() - final_bal).abs() < 1e-2,
-        "Last OnAccountChange balance must equal final wallet balance ({final_bal})"
+        (acct_balances[0] - final_bal).abs() < 1e-2,
+        "OnAccountChange balance must equal final wallet balance ({final_bal})"
     );
 }
 
