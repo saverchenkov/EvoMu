@@ -55,12 +55,21 @@ pub fn check_starter_shipcaster_eligibility(
     {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let st_cw = cw.get_or_create(char_id);
-        if st_cw.is_weapon_timer_active(now)
-            || st_cw.is_pvp_active(now)
-            || st_cw.criminal_flag_until_unix > now
-        {
-            return Err(rpc_err(
-                "WeaponsTimerActive",
+        let timer_kind = if st_cw.is_weapon_timer_active(now) {
+            Some("weapons")
+        } else if st_cw.is_pvp_active(now) {
+            Some("pvp")
+        } else if st_cw.criminal_flag_until_unix > now {
+            Some("criminal")
+        } else {
+            None
+        };
+        if let Some(timer_kind) = timer_kind {
+            return Err(BridgeRpcError::weapons_timer_active(
+                char_id,
+                "starter_shipcaster_jump",
+                timer_kind,
+                true,
                 "Cannot jump through starter shipcaster while a combat or weapons timer is active",
             ));
         }
@@ -368,8 +377,11 @@ pub async fn prevalidate_shipcaster_jump(
     {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         if cw.get_or_create(char_id).is_weapon_timer_active(now_unix) {
-            return Err(rpc_err(
-                "WeaponsTimerActive",
+            return Err(BridgeRpcError::weapons_timer_active(
+                char_id,
+                "shipcaster_jump",
+                "weapons",
+                true,
                 "Cannot jump through shipcaster while weapons timer is active",
             ));
         }

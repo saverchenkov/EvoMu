@@ -622,12 +622,25 @@ pub fn check_service_domain_acl_and_tax(
         ) {
             Some(Ok(bps)) => return Ok(Some(bps)),
             Some(Err(())) => {
-                return Err(err(
-                    err_code,
-                    format!(
-                        "Character {char_id} is denied {service_label} service on structure {structure_id} by service access profile"
-                    ),
-                ));
+                let message = format!(
+                    "Character {char_id} is denied {service_label} service on structure {structure_id} by service access profile"
+                );
+                if err_code == "StructureServiceAccessDenied" {
+                    let st_name = snap
+                        .structures
+                        .get(&structure_id)
+                        .map(|s| s.name.as_str())
+                        .unwrap_or("");
+                    return Err(BridgeRpcError::structure_service_access_denied(
+                        structure_id,
+                        char_id,
+                        st_name,
+                        service_label,
+                        "service_access_profile",
+                        message,
+                    ));
+                }
+                return Err(err(err_code, message));
             }
             None => {}
         }
@@ -695,10 +708,22 @@ pub fn require_structure_service_access_in_snap(
                 "StructureDestroyed",
                 format!("Structure {structure_id} has been destroyed"),
             ),
-            _ => err(
-                "StructureServiceAccessDenied",
-                format!("Structure {structure_id} has been destroyed"),
-            ),
+            kind => {
+                let service = match kind {
+                    StructureServiceKind::Docking => "docking",
+                    StructureServiceKind::Industry { .. } => "industry",
+                    StructureServiceKind::JumpBridge => "jump_bridge",
+                    _ => "service",
+                };
+                BridgeRpcError::structure_service_access_denied(
+                    structure_id,
+                    char_id,
+                    &st.name,
+                    service,
+                    "structure_destroyed",
+                    format!("Structure {structure_id} has been destroyed"),
+                )
+            }
         });
     }
 
@@ -708,8 +733,12 @@ pub fn require_structure_service_access_in_snap(
         StructureServiceKind::Docking => {
             if !ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, now_opt)
             {
-                return Err(err(
-                    "StructureServiceAccessDenied",
+                return Err(BridgeRpcError::structure_service_access_denied(
+                    structure_id,
+                    char_id,
+                    &st.name,
+                    "docking",
+                    "docking_acl_denied",
                     format!("Character {char_id} is denied docking access to structure {structure_id}"),
                 ));
             }
@@ -736,16 +765,24 @@ pub fn require_structure_service_access_in_snap(
                     snap, char_id, st,
                 ))
             {
-                return Err(err(
-                    "StructureServiceAccessDenied",
+                return Err(BridgeRpcError::structure_service_access_denied(
+                    structure_id,
+                    char_id,
+                    &st.name,
+                    "market",
+                    "acl_excluded",
                     format!("Character {char_id} is excluded by structure {structure_id} access list"),
                 ));
             }
             let ext = load_ext_state(snap);
             if let Some(prof) = effective_profile_for_structure(&ext, structure_id, now_opt) {
                 if prof.general_settings.get(&SETTING_MARKET_TAX) == Some(&false) {
-                    return Err(err(
-                        "StructureServiceAccessDenied",
+                    return Err(BridgeRpcError::structure_service_access_denied(
+                        structure_id,
+                        char_id,
+                        &st.name,
+                        "market",
+                        "profile_setting_disabled",
                         format!(
                             "Character {char_id} is denied market service on structure {structure_id} by service access profile"
                         ),
@@ -859,14 +896,16 @@ pub fn require_structure_service_access_in_snap(
                     .map(|p| p.core_type_id.is_some())
                     .unwrap_or(true);
                 if requires_core && !st.quantum_core_installed {
-                    return Err(err(
-                        "QuantumCoreRequired",
+                    return Err(BridgeRpcError::quantum_core_required_repair(
+                        structure_id,
+                        &st.name,
                         format!("Structure {structure_id} requires a quantum core for repairs"),
                     ));
                 }
             } else if !st.quantum_core_installed {
-                return Err(err(
-                    "QuantumCoreRequired",
+                return Err(BridgeRpcError::quantum_core_required_repair(
+                    structure_id,
+                    &st.name,
                     format!("Structure {structure_id} requires a quantum core for repairs"),
                 ));
             }
@@ -933,8 +972,12 @@ pub fn require_structure_service_access_in_snap(
                 char_id,
                 now_opt,
             ) {
-                return Err(err(
-                    "StructureServiceAccessDenied",
+                return Err(BridgeRpcError::structure_service_access_denied(
+                    structure_id,
+                    char_id,
+                    &st.name,
+                    "industry",
+                    "acl_denied",
                     format!("Character {char_id} is denied access to structure {structure_id}"),
                 ));
             }
@@ -976,16 +1019,24 @@ pub fn require_structure_service_access_in_snap(
                             })))
             };
             if !has_jb_service {
-                return Err(err(
-                    "StructureServiceAccessDenied",
+                return Err(BridgeRpcError::structure_service_access_denied(
+                    structure_id,
+                    char_id,
+                    &st.name,
+                    "jump_bridge",
+                    "service_offline",
                     format!("Structure {structure_id} does not have an online jump bridge service"),
                 ));
             }
             let ext = load_ext_state(snap);
             if let Some(prof) = effective_profile_for_structure(&ext, structure_id, now_opt) {
                 if prof.blocked_characters.contains(&char_id) {
-                    return Err(err(
-                        "StructureServiceAccessDenied",
+                    return Err(BridgeRpcError::structure_service_access_denied(
+                        structure_id,
+                        char_id,
+                        &st.name,
+                        "jump_bridge",
+                        "character_blocked",
                         format!("Character {char_id} is blocked from jump bridge {structure_id}"),
                     ));
                 }
@@ -993,8 +1044,12 @@ pub fn require_structure_service_access_in_snap(
                 if (char_corp > 0 && prof.blocked_corporations.contains(&char_corp))
                     || (char_ally > 0 && prof.blocked_alliances.contains(&char_ally))
                 {
-                    return Err(err(
-                        "StructureServiceAccessDenied",
+                    return Err(BridgeRpcError::structure_service_access_denied(
+                        structure_id,
+                        char_id,
+                        &st.name,
+                        "jump_bridge",
+                        "corp_or_alliance_blocked",
                         format!("Character {char_id} is blocked from jump bridge {structure_id}"),
                     ));
                 }
@@ -1008,8 +1063,12 @@ pub fn require_structure_service_access_in_snap(
                 ) {
                     return match res {
                         Ok(bps) => Ok(Some(bps)),
-                        Err(()) => Err(err(
-                            "StructureServiceAccessDenied",
+                        Err(()) => Err(BridgeRpcError::structure_service_access_denied(
+                            structure_id,
+                            char_id,
+                            &st.name,
+                            "jump_bridge",
+                            "service_access_profile",
                             format!("Character {char_id} is denied jump bridge {structure_id}"),
                         )),
                     };
@@ -1021,8 +1080,12 @@ pub fn require_structure_service_access_in_snap(
                 char_id,
                 now_opt,
             ) {
-                return Err(err(
-                    "StructureServiceAccessDenied",
+                return Err(BridgeRpcError::structure_service_access_denied(
+                    structure_id,
+                    char_id,
+                    &st.name,
+                    "jump_bridge",
+                    "acl_denied",
                     format!("Character {char_id} is denied jump bridge {structure_id}"),
                 ));
             }

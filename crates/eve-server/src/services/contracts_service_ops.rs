@@ -1049,7 +1049,13 @@ pub(crate) fn handle_gm_expire_contract(
             });
         let has_gm_role = (effective_role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
         if !has_gm_role {
-            return Err(rpc_err("GMRoleRequired", "GM_ExpireContract requires GM role"));
+            return Err(BridgeRpcError::insufficient_role_with_code(
+                "GMRoleRequired",
+                eve_machonet::service_roles::ROLE_GM_MASK,
+                effective_role,
+                "GM_ExpireContract",
+                "GM_ExpireContract requires GM role",
+            ));
         }
         let c_snap = snap
             .contracts

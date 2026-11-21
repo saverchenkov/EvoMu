@@ -1181,7 +1181,12 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         let online_fuel = rules::service_module_online_fuel_cost(ctx, st.type_id, src.type_id);
         if is_service && explicit_online == Some(true) {
             if profile.core_type_id.is_some() && !st.quantum_core_installed {
-                return Err(err("QuantumCoreRequired", format!("Structure {structure_id} requires an installed Quantum Core to online service modules")));
+                return Err(BridgeRpcError::quantum_core_required_service(
+                    structure_id,
+                    &st.name,
+                    "service modules",
+                    format!("Structure {structure_id} requires an installed Quantum Core to online service modules"),
+                ));
             }
             if avail_fuel < online_fuel {
                 return Err(err("InsufficientStructureFuelToOnline", format!("Onlining service module requires {online_fuel} fuel blocks (bay has {avail_fuel})")));
@@ -1291,7 +1296,12 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
             if let Some(st0) = snap.structures.get(&structure_id) {
                 let is_svc0 = snap.items.get(&module_id).is_some_and(|i| i.location_id == structure_id && (164..=171).contains(&(i.flag as u16)));
                 if is_svc0 && !st0.quantum_core_installed && life::structure_profile(ctx, st0.type_id).is_some_and(|p| p.core_type_id.is_some()) {
-                    return Err(err("QuantumCoreRequired", format!("Structure {structure_id} requires an installed Quantum Core to online service modules")));
+                    return Err(BridgeRpcError::quantum_core_required_service(
+                        structure_id,
+                        &st0.name,
+                        "service modules",
+                        format!("Structure {structure_id} requires an installed Quantum Core to online service modules"),
+                    ));
                 }
             }
         }
@@ -1317,7 +1327,12 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
             && ext.lifecycle.get(&structure_id).is_some_and(|l| l.online_modules.contains(&module_id));
         if set_online && is_service {
             if profile.core_type_id.is_some() && !st.quantum_core_installed {
-                return Err(err("QuantumCoreRequired", format!("Structure {structure_id} requires an installed Quantum Core to online service modules")));
+                return Err(BridgeRpcError::quantum_core_required_service(
+                    structure_id,
+                    &st.name,
+                    "service modules",
+                    format!("Structure {structure_id} requires an installed Quantum Core to online service modules"),
+                ));
             }
             if !was_online {
                 rules::sync_seeded_structure_fuel_bay(ctx, snap, structure_id);

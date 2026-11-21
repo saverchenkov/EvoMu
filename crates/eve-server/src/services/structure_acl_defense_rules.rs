@@ -1395,8 +1395,9 @@ pub fn validate_docked_ship_fitting_facility_in_snap(
         if (!st.quantum_core_installed || matches!(st.state.as_str(), "NoCore" | "Onlining"))
             && life::structure_profile(ctx, st.type_id).is_some_and(|p| p.core_type_id.is_some())
         {
-            return Err(err(
-                "QuantumCoreRequired",
+            return Err(BridgeRpcError::quantum_core_required_fitting(
+                dock_id,
+                &st.name,
                 format!("Ship fitting service is disabled at structure {dock_id} until its Quantum Core is online"),
             ));
         }
@@ -1408,8 +1409,12 @@ pub fn validate_docked_ship_fitting_facility_in_snap(
             if prof.general_settings.get(&prof_svc::SERVICE_FITTING) == Some(&false)
                 || prof.general_settings.get(&prof_svc::SETTING_HOUSING_CAN_DOCK) == Some(&false)
             {
-                return Err(err(
-                    "StructureServiceAccessDenied",
+                return Err(BridgeRpcError::structure_service_access_denied(
+                    dock_id,
+                    0,
+                    &st.name,
+                    "fitting",
+                    "profile_setting_disabled",
                     format!(
                         "Ship fitting service on structure {dock_id} is disabled by profile settings"
                     ),
@@ -1520,15 +1525,39 @@ pub(crate) fn handle_character_check_service(ctx: &ServerContext, session: &mut 
     let (structure_id, service_id) = parse_struct_svc_args(session, args, "CharacterCheckService")?;
     ops::sync_pending_profiles_in_ctx(ctx);
     ctx.db.with_snapshot(|snap| {
-        if !snap.structures.contains_key(&structure_id) {
+        let Some(st) = snap.structures.get(&structure_id) else {
             return Err(err("StructureNotFound", format!("Structure {structure_id} not found")));
-        }
+        };
         if crate::services::structure_profile_services::evaluate_character_service_bps(
             ctx, snap, structure_id, char_id, service_id, DEFAULT_STRUCTURE_SERVICE_TAX_BPS,
         )
         .is_none()
         {
-            return Err(err("StructureServiceAccessDenied", "Character is denied structure service access"));
+            use crate::services::structure_profile_services as prof_svc;
+            let service_name = match service_id {
+                prof_svc::SERVICE_DOCKING => "docking",
+                prof_svc::SERVICE_FITTING => "fitting",
+                prof_svc::SERVICE_OFFICES => "offices",
+                prof_svc::SERVICE_REPROCESSING => "reprocessing",
+                prof_svc::SERVICE_MARKET => "market",
+                prof_svc::SERVICE_MEDICAL => "medical",
+                prof_svc::SERVICE_REPAIR => "repair",
+                prof_svc::SERVICE_JUMP_CLONE => "jump_clone",
+                prof_svc::SERVICE_MOONMINING => "moonmining",
+                prof_svc::SERVICE_JUMP_BRIDGE => "jump_bridge",
+                prof_svc::SERVICE_CYNO_BEACON => "cyno_beacon",
+                prof_svc::SERVICE_AUTOMOONMINING => "automoonmining",
+                prof_svc::SERVICE_INDUSTRY..=prof_svc::SERVICE_REACTIONS_HYBRID => "industry",
+                _ => "service",
+            };
+            return Err(BridgeRpcError::structure_service_access_denied(
+                structure_id,
+                char_id,
+                &st.name,
+                service_name,
+                "service_access_denied",
+                "Character is denied structure service access",
+            ));
         }
         Ok(PyRep::None)
     })

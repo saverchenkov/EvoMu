@@ -1147,8 +1147,9 @@ pub(crate) fn resolve_upwell_dock_target(
         ));
     }
     if matches!(st.state.as_str(), "Unanchored" | "AnchorVulnerable" | "Anchoring") {
-        return Err(err(
-            "StructureNotDockable",
+        return Err(BridgeRpcError::structure_not_dockable(
+            dock_id,
+            st.state.as_str(),
             format!("Structure {dock_id} is in state '{}' and cannot be docked at", st.state),
         ));
     }

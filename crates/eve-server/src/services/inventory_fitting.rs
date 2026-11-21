@@ -1063,11 +1063,18 @@ async fn handle_invbroker_add(
                 if let Err(msg) =
                     fit.fit_module_with_state(item_id, mod_type_id, flag_u16, online, &ctx.sde)
                 {
-                    return Some(Err(BridgeRpcError {
-                        code: "FittingValidationFailed".into(),
-                        message: msg,
-                        client_error: None,
-                    }));
+                    let module_name = ctx
+                        .sde
+                        .get_type(mod_type_id)
+                        .map(|t| t.name.as_str())
+                        .unwrap_or("Module");
+                    return Some(Err(BridgeRpcError::fitting_validation_failed(
+                        Some(new_loc),
+                        Some(item_id),
+                        Some(i64::from(mod_type_id)),
+                        module_name,
+                        msg,
+                    )));
                 }
             }
 

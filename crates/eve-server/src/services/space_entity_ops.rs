@@ -636,7 +636,13 @@ pub async fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             // Administrative command: GM role strictly required.
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError { code: "GmRoleRequired".into(), message: "CmdTurboDock requires GM role".into(), client_error: None }));
+                return Some(Err(BridgeRpcError::insufficient_role_with_code(
+                    "GmRoleRequired",
+                    eve_db::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "CmdTurboDock",
+                    "CmdTurboDock requires GM role",
+                )));
             }
             if let Some(ship_id) = session.ship_id {
                 if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "dock")

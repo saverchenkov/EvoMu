@@ -2995,11 +2995,13 @@ async fn handle_dock(
         let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
         if let Some(cw_state) = cw.states.get(&char_id) {
             if cw_state.is_weapon_timer_active(now_unix) {
-                return Err(BridgeRpcError {
-                    code: "WeaponsTimerActive".into(),
-                    message: "Cannot dock while a 60s Weapons Timer is active".into(),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError::weapons_timer_active(
+                    char_id,
+                    "dock",
+                    "weapons",
+                    false,
+                    "Cannot dock while a 60s Weapons Timer is active",
+                ));
             }
             if sys_sec >= 0.45 && cw_state.is_criminal(now_unix) && !is_capsule {
                 return Err(BridgeRpcError {
@@ -3048,11 +3050,11 @@ async fn handle_dock(
             });
         }
         if matches!(st.state.as_str(), "Unanchored" | "AnchorVulnerable" | "Anchoring") {
-            return Err(BridgeRpcError {
-                code: "StructureNotDockable".into(),
-                message: format!("Structure {dock_id} is in state '{}' and cannot be docked at", st.state),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::structure_not_dockable(
+                dock_id,
+                st.state.as_str(),
+                format!("Structure {dock_id} is in state '{}' and cannot be docked at", st.state),
+            ));
         }
         crate::services::structure_acl_defense_rules::apply_pending_profile_applications(ctx);
         let acl_denied = ctx.db.with_snapshot(|snap| {

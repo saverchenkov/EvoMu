@@ -353,6 +353,8 @@ fn gh1195_all_17_error_codes_never_fall_back_to_custom_info_and_supply_v24_dict_
         ("ContractOwnershipViolation", K::AccessDenied, P::Notify, &[]),
         ("InsufficientRole", K::InsufficientRoles, P::Notify, &[]),
         ("GM_InsufficientRole", K::InsufficientRoles, P::Notify, &[]),
+        ("GMRoleRequired", K::InsufficientRoles, P::Notify, &[]),
+        ("GmRoleRequired", K::InsufficientRoles, P::Notify, &[]),
     ];
 
     for &(code, expected_key, expected_pres, req_keys) in expected {
@@ -445,6 +447,8 @@ fn gh1195_typed_rejection_constructors_preserve_facts_and_wire_payloads_across_s
         (E::module_not_found(901, Some(501), Some(3170), false, "missing"), "ModuleNotFound", K::ItemNotFound, F::ModuleNotFound { module_id: 901, owner_entity_id: Some(501), type_id: Some(3170) }),
         (E::ownership_or_location_violation(705, Some(9002), Some(60003760), Some(9001), Some(501), "not owner"), "OwnershipOrLocationViolation", K::CantDoThatWithSomeoneElsesStuff, F::OwnershipOrLocationViolation { item_id: 705, owner_id: Some(9002), location_id: Some(60003760), required_owner_id: Some(9001), required_location_id: Some(501) }),
         (E::insufficient_role(0x0100_0000_0000_0000, 0x6000_0000_0000_0000, "machoNet.GetMetrics", "gm role required"), "InsufficientRole", K::InsufficientRoles, F::InsufficientRole { required_role_mask: 0x0100_0000_0000_0000, actual_role_mask: 0x6000_0000_0000_0000, action: "machoNet.GetMetrics".into() }),
+        (E::insufficient_role_with_code("GMRoleRequired", 0x0040_0000_0000_0000, 0, "GM_ExpireContract", "gm role required"), "GMRoleRequired", K::InsufficientRoles, F::InsufficientRole { required_role_mask: 0x0040_0000_0000_0000, actual_role_mask: 0, action: "GM_ExpireContract".into() }),
+        (E::insufficient_role_with_code("GmRoleRequired", 0x0040_0000_0000_0000, 0, "CmdTurboDock", "gm role required"), "GmRoleRequired", K::InsufficientRoles, F::InsufficientRole { required_role_mask: 0x0040_0000_0000_0000, actual_role_mask: 0, action: "CmdTurboDock".into() }),
     ];
 
     for (err, expected_code, expected_key, expected_facts) in cases {
@@ -482,4 +486,55 @@ fn gh1195_typed_rejection_constructors_preserve_facts_and_wire_payloads_across_s
     let (slash_key, slash_dict) = decode_wrapped_user_error(&slash_denied.to_client_error("slash", "SlashCmd").to_macho_error_body(6));
     assert_eq!(slash_key, "SlashError");
     assert_eq!(dict_get(&slash_dict, "reason").and_then(PyRep::as_str), Some("InsufficientRole: GM required"));
+
+    // #1569 / #1568: ModuleFitFailed defaults and untyped/empty-name FittingValidationFailed never emit empty moduleName.
+    for args in [
+        K::ModuleFitFailed.default_args(),
+        K::ModuleFitFailed.default_args_with_message("Insufficient CPU: need 15, available 5"),
+    ] {
+        let name = args.iter().find(|(k, _)| k == "moduleName").and_then(|(_, v)| v.as_str());
+        assert_eq!(name, Some("Module"));
+    }
+    let legacy_fit_err = E {
+        code: "FittingValidationFailed".into(),
+        message: "Insufficient CPU: need 15, available 5".into(),
+        client_error: None,
+    };
+    let (fit_key, fit_dict) = decode_wrapped_user_error(
+        &legacy_fit_err.to_client_error("invbroker", "Add").to_macho_error_body(6),
+    );
+    assert_eq!(fit_key, "ModuleFitFailed");
+    assert_eq!(dict_get(&fit_dict, "moduleName").and_then(PyRep::as_str), Some("Module"));
+    assert_eq!(
+        dict_get(&fit_dict, "reason").and_then(PyRep::as_str),
+        Some("Insufficient CPU: need 15, available 5")
+    );
+
+    let typed_ab = E::fitting_validation_failed(
+        Some(501),
+        Some(701),
+        Some(439),
+        "1MN Afterburner I",
+        "Insufficient CPU: need 15, available 5",
+    );
+    let (ab_key, ab_dict) =
+        decode_wrapped_user_error(&typed_ab.to_client_error("invbroker", "Add").to_macho_error_body(6));
+    assert_eq!(ab_key, "ModuleFitFailed");
+    assert_eq!(dict_get(&ab_dict, "moduleName").and_then(PyRep::as_str), Some("1MN Afterburner I"));
+    assert_eq!(
+        dict_get(&ab_dict, "reason").and_then(PyRep::as_str),
+        Some("Insufficient CPU: need 15, available 5")
+    );
+
+    let empty_name_ab = E::fitting_validation_failed(
+        Some(501),
+        Some(701),
+        Some(439),
+        "",
+        "Insufficient CPU: need 15, available 5",
+    );
+    let (_, empty_ab_dict) = decode_wrapped_user_error(
+        &empty_name_ab.to_client_error("invbroker", "Add").to_macho_error_body(6),
+    );
+    assert_eq!(dict_get(&empty_ab_dict, "moduleName").and_then(PyRep::as_str), Some("Module"));
 }
