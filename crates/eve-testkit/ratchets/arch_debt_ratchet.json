@@ -570,7 +570,6 @@
         "macho_listener.rs": 4,
         "outbound_sequencer.rs": 1,
         "quasar_gateway_helpers.rs": 4,
-        "router/binding.rs": 1,
         "router/cache_notifications.rs": 3,
         "router/client_compat.rs": 10,
         "router/dispatch.rs": 9,
@@ -973,9 +972,7 @@
       "owning_issue": 1190,
       "path_include": "router/binding.rs",
       "description": "Per-method/service grace helper functions in router/binding.rs (#1190).",
-      "files": {
-        "router/binding.rs": 5
-      }
+      "files": {}
     },
     "ballpark_locks_outside_system_actor": {
       "zero_required": false,
