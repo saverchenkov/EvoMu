@@ -129,6 +129,8 @@ pub(crate) struct TransitionEpochRecord {
     pub(crate) reason: String,
     pub(crate) departed_solar_system_id: Option<u32>,
     pub(crate) departed_dock_id: Option<i64>,
+    pub(crate) entered_solar_system_id: Option<u32>,
+    pub(crate) entered_dock_id: Option<i64>,
     pub(crate) invalidated_bound_ids: Vec<u64>,
     pub(crate) recorded_ticks: i64,
 }
@@ -828,6 +830,14 @@ impl ServerContext {
                 }
             }
 
+            let departed_solar_system_id = loc_record.iter().find_map(|&(kind, lid)| {
+                (kind == DepartedLocationKind::SolarSystem)
+                    .then(|| u32::try_from(lid).ok())
+                    .flatten()
+            });
+            let departed_dock_id = loc_record
+                .iter()
+                .find_map(|&(kind, lid)| (kind == DepartedLocationKind::Dock).then_some(lid));
             let epoch_rec = TransitionEpochRecord {
                 session_id,
                 user_id,
@@ -836,8 +846,10 @@ impl ServerContext {
                 entered_scene_epoch: entered_epoch,
                 kind_label,
                 reason: reason.to_string(),
-                departed_solar_system_id: prev_sys,
-                departed_dock_id: prev_dock,
+                departed_solar_system_id,
+                departed_dock_id,
+                entered_solar_system_id: (!is_logout).then_some(next_sys).flatten(),
+                entered_dock_id: (!is_logout).then_some(next_dock).flatten(),
                 invalidated_bound_ids,
                 recorded_ticks: now_ticks,
             };
@@ -1137,14 +1149,15 @@ impl ServerContext {
     }
 
     pub(crate) fn purge_transition_grace_for_user(&self, user_id: u64) {
-        self.purge_transition_grace_with(
-            |_, e| e.user_id == user_id,
-            |_, _| false,
-        );
         self.with_existing_grace_store_mut_and_prune(|store| {
+            store.entries.retain(|_, v| v.entry.user_id != user_id);
             store
                 .departed_locations
                 .retain(|_, v| v.user_id != user_id);
+            store.epoch_records.retain(|_, recs| {
+                recs.retain(|r| r.user_id != Some(user_id));
+                !recs.is_empty()
+            });
         });
     }
 
@@ -1280,21 +1293,34 @@ impl ServerContext {
                 if preserve_existing {
                     continue;
                 }
-                if let Some(matching_rec) = store
-                    .epoch_records
-                    .get(&session.session_id)
-                    .and_then(|records| {
-                        records.iter().rev().find(|rec| {
-                            rec.entered_scene_epoch <= epoch
-                                && match kind {
-                                    DepartedLocationKind::SolarSystem => {
-                                        rec.departed_solar_system_id.map(i64::from) == Some(lid)
-                                    }
-                                    DepartedLocationKind::Dock => rec.departed_dock_id == Some(lid),
-                                }
-                        })
-                    })
-                {
+                let mut matching_rec: Option<&TransitionEpochRecord> = None;
+                if let Some(records) = store.epoch_records.get(&session.session_id) {
+                    for rec in records.iter().rev() {
+                        if rec.entered_scene_epoch > epoch {
+                            continue;
+                        }
+                        let departed_here = match kind {
+                            DepartedLocationKind::SolarSystem => {
+                                rec.departed_solar_system_id.map(i64::from) == Some(lid)
+                            }
+                            DepartedLocationKind::Dock => rec.departed_dock_id == Some(lid),
+                        };
+                        if departed_here {
+                            matching_rec = Some(rec);
+                            break;
+                        }
+                        let entered_here = match kind {
+                            DepartedLocationKind::SolarSystem => {
+                                rec.entered_solar_system_id.map(i64::from) == Some(lid)
+                            }
+                            DepartedLocationKind::Dock => rec.entered_dock_id == Some(lid),
+                        };
+                        if entered_here {
+                            break;
+                        }
+                    }
+                }
+                if let Some(matching_rec) = matching_rec {
                     if Self::is_grace_ticks_active(matching_rec.recorded_ticks, now_ticks) {
                         store.departed_locations.insert(
                             (session.session_id, kind, lid),

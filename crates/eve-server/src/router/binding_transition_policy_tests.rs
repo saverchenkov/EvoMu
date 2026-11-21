@@ -1418,3 +1418,491 @@ fn out_of_band_transition_followed_by_sync_session_preserves_departed_epoch_and_
         )
         .is_none());
 }
+
+#[test]
+fn epoch_record_tracks_only_changed_departed_and_entered_locations() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let sid = 880_010_u64;
+    let jita_sys = 30_000_142_u32;
+    let perimeter_sys = 30_000_144_u32;
+    let jita_station = 60_003_760_i64;
+    let ship_a = 1_897_400_501_i64;
+
+    seed_ships_for_policy_tests(
+        &ctx,
+        char_id,
+        other_char,
+        jita_station,
+        &[ship_a],
+        1_897_400_598,
+        1_897_400_599,
+    );
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_id);
+
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::CharacterLogin {
+                solar_system_id: jita_sys,
+                dock_id: Some((jita_station, false)),
+                ship_id: Some(ship_a),
+            },
+            "login",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("character login");
+    let login_rec = ctx
+        .current_transition_epoch_record(sid)
+        .expect("login epoch record");
+    assert_eq!(login_rec.departed_solar_system_id, None);
+    assert_eq!(login_rec.departed_dock_id, None);
+    assert_eq!(login_rec.entered_solar_system_id, Some(jita_sys));
+    assert_eq!(login_rec.entered_dock_id, Some(jita_station));
+
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::Undock {
+                solar_system_id: jita_sys,
+            },
+            "undock",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("same-system undock");
+    let undock_rec = ctx
+        .current_transition_epoch_record(sid)
+        .expect("undock epoch record");
+    assert_eq!(undock_rec.departed_solar_system_id, None);
+    assert_eq!(undock_rec.departed_dock_id, Some(jita_station));
+    assert_eq!(undock_rec.entered_solar_system_id, Some(jita_sys));
+    assert_eq!(undock_rec.entered_dock_id, None);
+
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::Dock {
+                dock_id: jita_station,
+                is_structure: false,
+            },
+            "dock",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("same-system dock");
+    let dock_rec = ctx
+        .current_transition_epoch_record(sid)
+        .expect("dock epoch record");
+    assert_eq!(dock_rec.departed_solar_system_id, None);
+    assert_eq!(dock_rec.departed_dock_id, None);
+    assert_eq!(dock_rec.entered_solar_system_id, Some(jita_sys));
+    assert_eq!(dock_rec.entered_dock_id, Some(jita_station));
+
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::Undock {
+                solar_system_id: jita_sys,
+            },
+            "undock_for_jump",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("undock for jump");
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::JumpSystem {
+                solar_system_id: perimeter_sys,
+            },
+            "jump_perimeter",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("jump perimeter");
+    let jump_rec = ctx
+        .current_transition_epoch_record(sid)
+        .expect("jump epoch record");
+    assert_eq!(jump_rec.departed_solar_system_id, Some(jita_sys));
+    assert_eq!(jump_rec.departed_dock_id, None);
+    assert_eq!(jump_rec.entered_solar_system_id, Some(perimeter_sys));
+    assert_eq!(jump_rec.entered_dock_id, None);
+
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(char_id, TransitionKind::Logout, "logout")
+            .with_emit_on_session_changed(false),
+    )
+    .expect("logout");
+    let logout_rec = ctx
+        .current_transition_epoch_record(sid)
+        .expect("logout epoch record");
+    assert_eq!(logout_rec.departed_solar_system_id, None);
+    assert_eq!(logout_rec.departed_dock_id, None);
+    assert_eq!(logout_rec.entered_solar_system_id, None);
+    assert_eq!(logout_rec.entered_dock_id, None);
+
+    ctx.purge_transition_grace_for_user(user_id);
+    assert!(ctx.current_transition_epoch_record(sid).is_none());
+}
+
+#[test]
+fn undock_after_30s_followed_by_out_of_band_system_sync_grants_fresh_grace() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let sid = 880_011_u64;
+    let jita_sys = 30_000_142_u32;
+    let perimeter_sys = 30_000_144_u32;
+    let jita_station = 60_003_760_i64;
+    let ship_a = 1_897_400_601_i64;
+
+    seed_ships_for_policy_tests(
+        &ctx,
+        char_id,
+        other_char,
+        jita_station,
+        &[ship_a],
+        1_897_400_698,
+        1_897_400_699,
+    );
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_id);
+
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::CharacterLogin {
+                solar_system_id: jita_sys,
+                dock_id: Some((jita_station, false)),
+                ship_id: Some(ship_a),
+            },
+            "login",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("character login");
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::Undock {
+                solar_system_id: jita_sys,
+            },
+            "undock",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("undock");
+
+    // Advance past the 30s Undock grace horizon before an out-of-band system sync occurs.
+    ctx.advance_secs(45);
+
+    let prev = sess.clone();
+    sess.solar_system_id = Some(perimeter_sys);
+    ctx.sync_transition_grace_on_session_change(&prev, &sess);
+
+    let kw = HashMap::new();
+    let sys_bid = ctx
+        .allocate_late_call_grace_binding(
+            &sess,
+            "crimewatch",
+            i64::from(jita_sys),
+            "GetClientStates",
+            &[],
+            &kw,
+        )
+        .expect("fresh 30s Jita SolarSystem grace after Undock + 45s");
+
+    ctx.advance_secs(20);
+    assert!(matches!(
+        ctx.resolve_late_call_with_policy(&sess, sys_bid, "GetClientStates", &[], &kw),
+        LateCallResolution::DispatchWithBinding(entry) if entry.object_id == i64::from(jita_sys)
+    ));
+
+    ctx.advance_secs(11);
+    assert!(matches!(
+        ctx.resolve_late_call_with_policy(&sess, sys_bid, "GetClientStates", &[], &kw),
+        LateCallResolution::RejectStale
+    ));
+    assert!(ctx
+        .allocate_late_call_grace_binding(
+            &sess,
+            "crimewatch",
+            i64::from(jita_sys),
+            "GetClientStates",
+            &[],
+            &kw,
+        )
+        .is_none());
+}
+
+#[test]
+fn return_visit_to_departed_system_and_dock_grants_fresh_grace_after_reentry() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let sid = 880_012_u64;
+    let jita_sys = 30_000_142_u32;
+    let perimeter_sys = 30_000_144_u32;
+    let amarr_sys = 30_002_187_u32;
+    let jita_station = 60_003_760_i64;
+    let ship_a = 1_897_400_701_i64;
+
+    seed_ships_for_policy_tests(
+        &ctx,
+        char_id,
+        other_char,
+        jita_station,
+        &[ship_a],
+        1_897_400_798,
+        1_897_400_799,
+    );
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_id);
+
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::CharacterLogin {
+                solar_system_id: jita_sys,
+                dock_id: Some((jita_station, false)),
+                ship_id: Some(ship_a),
+            },
+            "login",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("character login");
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::Undock {
+                solar_system_id: jita_sys,
+            },
+            "undock",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("undock");
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::JumpSystem {
+                solar_system_id: perimeter_sys,
+            },
+            "jump_out",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("jump Jita -> Perimeter");
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        SessionTransitionSpec::for_kind(
+            char_id,
+            TransitionKind::JumpSystem {
+                solar_system_id: jita_sys,
+            },
+            "jump_return",
+        )
+        .with_emit_on_session_changed(false)
+        .with_sync_local_chat(false),
+    )
+    .expect("jump Perimeter -> Jita");
+
+    // Advance past 30s after returning to Jita, then depart Jita via out-of-band sync.
+    ctx.advance_secs(45);
+    let prev = sess.clone();
+    sess.solar_system_id = Some(amarr_sys);
+    ctx.sync_transition_grace_on_session_change(&prev, &sess);
+
+    let kw = HashMap::new();
+    let sys_bid = ctx
+        .allocate_late_call_grace_binding(
+            &sess,
+            "crimewatch",
+            i64::from(jita_sys),
+            "GetClientStates",
+            &[],
+            &kw,
+        )
+        .expect("fresh 30s Jita grace after returning to Jita and departing again");
+
+    ctx.advance_secs(20);
+    assert!(matches!(
+        ctx.resolve_late_call_with_policy(&sess, sys_bid, "GetClientStates", &[], &kw),
+        LateCallResolution::DispatchWithBinding(entry) if entry.object_id == i64::from(jita_sys)
+    ));
+    ctx.advance_secs(11);
+    assert!(matches!(
+        ctx.resolve_late_call_with_policy(&sess, sys_bid, "GetClientStates", &[], &kw),
+        LateCallResolution::RejectStale
+    ));
+    assert!(ctx
+        .allocate_late_call_grace_binding(
+            &sess,
+            "crimewatch",
+            i64::from(jita_sys),
+            "GetClientStates",
+            &[],
+            &kw,
+        )
+        .is_none());
+
+    // Dock return-visit parity: Undock(Jita 4-4) -> Dock(Jita 4-4) -> >30s -> out-of-band undock.
+    let dock_ctx = test_ctx();
+    let dock_sid = 880_013_u64;
+    seed_ships_for_policy_tests(
+        &dock_ctx,
+        char_id,
+        other_char,
+        jita_station,
+        &[ship_a],
+        1_897_400_798,
+        1_897_400_799,
+    );
+    dock_ctx
+        .db
+        .acquire_online_lock(user_id, dock_sid, Some(char_id), true, dock_ctx.now_unix())
+        .expect("online lock");
+
+    let mut dock_sess = SessionState::new(dock_sid);
+    dock_sess.user_id = Some(user_id);
+    dock_sess.character_id = Some(char_id);
+
+    dock_ctx
+        .execute_session_transition_sync(
+            Some(&mut dock_sess),
+            SessionTransitionSpec::for_kind(
+                char_id,
+                TransitionKind::CharacterLogin {
+                    solar_system_id: jita_sys,
+                    dock_id: Some((jita_station, false)),
+                    ship_id: Some(ship_a),
+                },
+                "login",
+            )
+            .with_emit_on_session_changed(false)
+            .with_sync_local_chat(false),
+        )
+        .expect("character login");
+    dock_ctx
+        .execute_session_transition_sync(
+            Some(&mut dock_sess),
+            SessionTransitionSpec::for_kind(
+                char_id,
+                TransitionKind::Undock {
+                    solar_system_id: jita_sys,
+                },
+                "undock",
+            )
+            .with_emit_on_session_changed(false)
+            .with_sync_local_chat(false),
+        )
+        .expect("undock");
+    dock_ctx
+        .execute_session_transition_sync(
+            Some(&mut dock_sess),
+            SessionTransitionSpec::for_kind(
+                char_id,
+                TransitionKind::Dock {
+                    dock_id: jita_station,
+                    is_structure: false,
+                },
+                "dock_return",
+            )
+            .with_emit_on_session_changed(false)
+            .with_sync_local_chat(false),
+        )
+        .expect("dock back at Jita 4-4");
+
+    dock_ctx.advance_secs(45);
+    let prev_dock = dock_sess.clone();
+    dock_sess.station_id = None;
+    dock_ctx.sync_transition_grace_on_session_change(&prev_dock, &dock_sess);
+
+    let dock_bid = dock_ctx
+        .allocate_late_call_grace_binding(
+            &dock_sess,
+            "ship",
+            jita_station,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        )
+        .expect("fresh 30s Jita 4-4 dock grace after returning and departing via sync");
+
+    dock_ctx.advance_secs(20);
+    assert!(matches!(
+        dock_ctx.resolve_late_call_with_policy(
+            &dock_sess,
+            dock_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        ),
+        LateCallResolution::DispatchWithBinding(entry) if entry.object_id == jita_station
+    ));
+    dock_ctx.advance_secs(11);
+    assert!(matches!(
+        dock_ctx.resolve_late_call_with_policy(
+            &dock_sess,
+            dock_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        ),
+        LateCallResolution::RejectStale
+    ));
+    assert!(dock_ctx
+        .allocate_late_call_grace_binding(
+            &dock_sess,
+            "ship",
+            jita_station,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        )
+        .is_none());
+}
