@@ -964,3 +964,77 @@ async fn deactivate_enforces_active_space_cloak_and_ownership_guards_without_mut
     .expect("gate-cloaked Deactivate(cloak_id, \"online\") must remain allowed");
     assert_eq!(gate_off_ok.dict_get("online"), Some(&PyRep::Bool(false)));
 }
+
+#[tokio::test]
+async fn consolidated_active_module_lookup_reads_actor_cycle_registry() {
+    let ctx = test_ctx_with_custom(|_| {});
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 88_101_i64;
+    let mod_id = 88_201_i64;
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(!is_module_currently_active_sync(
+        &ctx,
+        Some(sys_id),
+        char_id,
+        ship_id,
+        mod_id
+    ));
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id,
+        module_id: mod_id,
+        owner_char_id: Some(char_id),
+        duration_s: 10.0,
+        repeat: 1,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    assert!(is_module_currently_active_sync(
+        &ctx,
+        Some(sys_id),
+        char_id,
+        ship_id,
+        mod_id
+    ));
+    assert!(!is_module_currently_active_sync(
+        &ctx, None, char_id, ship_id, mod_id
+    ));
+    assert!(!is_module_currently_active_sync(
+        &ctx,
+        Some(sys_id),
+        char_id,
+        ship_id,
+        mod_id + 1
+    ));
+
+    let _ = sys.remove_module_cycle(ship_id, mod_id).await.unwrap();
+    assert!(!is_module_currently_active_sync(
+        &ctx,
+        Some(sys_id),
+        char_id,
+        ship_id,
+        mod_id
+    ));
+}

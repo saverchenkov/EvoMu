@@ -727,10 +727,11 @@ async fn group_2b_board_stored_ship_corp_password_space_guards_and_capsule_swap(
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&stored_pw_ship_id).unwrap().location_id = corp_host_sag2_id;
     });
-    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(&ctx, |st| {
-        let cfg = st.ship_configs.entry(corp_host_sag2_id).or_default();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cfg = crate::services::inventory_fitting::fitting_containers_ships::ship_access_config_snap(snap, corp_host_sag2_id);
         cfg.allow_corp_smb = true;
         cfg.password = Some("secret_bay".into());
+        crate::services::inventory_fitting::fitting_containers_ships::set_ship_access_config_snap(snap, corp_host_sag2_id, &cfg, 0).unwrap();
     });
     assert_eq!(
         board_stored_ship(&ctx, &mut sess, &[PyRep::Integer(corp_host_sag2_id), PyRep::Integer(stored_pw_ship_id)], &kw)

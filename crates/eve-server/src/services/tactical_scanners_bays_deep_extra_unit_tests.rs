@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use super::inventory_fitting::fitting_containers_ships::{
-    write_container_ship_state, ShipAccessConfig,
+    set_ship_access_config_snap, ShipAccessConfig,
 };
 use super::inventory_fitting::fitting_scanners_superweapons::{
     active_hacking_target_for_char, apply_active_dbuffs_and_system_effects_to_ship_attrs,
@@ -517,8 +517,18 @@ async fn fitting_ship_bays_board_jettison_drop_and_scoop_deep() {
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&frig_id].flag), InventoryFlag::ShipHangar);
     assert!(ship_scoop_and_store(&ctx, &mut sess, "Scoop", &[PyRep::Integer(jetcan_id)], &kw).await.is_ok());
 
-    write_container_ship_state(&ctx, |st| {
-        st.ship_configs.insert(carrier_id, ShipAccessConfig { allow_corp_smb: true, allow_fleet_hangar: true, ..Default::default() });
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
+            carrier_id,
+            &ShipAccessConfig {
+                allow_corp_smb: true,
+                allow_fleet_hangar: true,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
     });
     let mut sess2 = SessionState {
         user_id: Some(2),

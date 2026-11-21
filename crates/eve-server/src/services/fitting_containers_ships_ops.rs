@@ -216,6 +216,124 @@ pub(crate) fn apply_add_move_kv_side_effects_in_snap(
     Ok(())
 }
 
+fn validate_clear_charges_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    ship_id: i64,
+    char_skills: &std::collections::HashMap<u32, u8>,
+) -> Result<(Vec<i64>, Vec<i64>), BridgeRpcError> {
+    let Some(ship) = snap.items.get(&ship_id) else {
+        return Err(BridgeRpcError {
+            code: "ShipNotFound".into(),
+            message: format!("Ship {ship_id} not found"),
+            client_error: None,
+        });
+    };
+    let ship_cat = ctx.sde.types.get(&ship.type_id).map(|t| t.category_id).unwrap_or(0);
+    if ship.owner_id != char_id || ship_cat != 6 {
+        return Err(BridgeRpcError {
+            code: "InvalidFittingTarget".into(),
+            message: format!("Target {ship_id} is not a ship owned by character {char_id}"),
+            client_error: None,
+        });
+    }
+    let charges: Vec<(i64, InventoryFlag, f64, i32, bool)> = snap
+        .items
+        .values()
+        .filter(|it| {
+            it.owner_id == char_id
+                && it.location_id == ship_id
+                && matches!(it.flag as u16, 11..=34)
+                && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 8)
+        })
+        .map(|it| {
+            let vol = ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(0.0);
+            let locked = it.flag == InventoryFlag::Locked
+                || snap.is_item_or_ancestor_locked_or_impounded(it.item_id)
+                || snap.is_item_in_alsc_lock(it.item_id);
+            (it.item_id, it.flag, vol, it.quantity.max(0), locked)
+        })
+        .collect();
+    if ship.flag == InventoryFlag::Locked
+        || snap.is_item_or_ancestor_locked_or_impounded(ship_id)
+        || charges.iter().any(|&(_, _, _, _, locked)| locked)
+    {
+        return Err(BridgeRpcError {
+            code: "ItemLocked".into(),
+            message: format!("Ship {ship_id} is locked"),
+            client_error: None,
+        });
+    }
+
+    let occupied_flags: std::collections::HashSet<InventoryFlag> =
+        charges.iter().map(|&(_, flg, _, _, _)| flg).collect();
+
+    let mod_ids: Vec<i64> = snap
+        .items
+        .values()
+        .filter(|it| {
+            it.location_id == ship_id
+                && occupied_flags.contains(&it.flag)
+                && ctx.sde.types.get(&it.type_id).is_none_or(|t| t.category_id != 8)
+        })
+        .map(|it| it.item_id)
+        .collect();
+
+    for &mid in &mod_ids {
+        if snap.module_active_states.contains(&mid) {
+            return Err(BridgeRpcError {
+                code: "ModuleIsActive".into(),
+                message: format!("Cannot unload charges while module {mid} is active"),
+                client_error: None,
+            });
+        }
+    }
+
+    let mut engine = eve_dogma::ShipFittingEngine::from_sde(ship_id, ship.type_id, &ctx.sde)
+        .with_character_skills(char_skills.clone());
+    for it in snap.items.values() {
+        if it.location_id == ship_id
+            && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132)
+            && ctx.sde.types.get(&it.type_id).is_none_or(|t| t.category_id != 8)
+        {
+            let online = snap.module_online_states.get(&it.item_id).copied().unwrap_or(true);
+            let _ = engine.fit_module_with_state(it.item_id, it.type_id, it.flag as u16, online, &ctx.sde);
+        }
+    }
+    let eval_ctx = engine.evaluated_context(&ctx.sde);
+    let cargo_cap = eval_ctx
+        .ship
+        .get_attribute(eve_sde::attr_ids::CAPACITY, &ctx.sde)
+        .max(0.0);
+    let existing_cargo_vol: f64 = snap
+        .items
+        .values()
+        .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+        .map(|i| {
+            ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.0)
+                * (i.quantity.max(0) as f64)
+        })
+        .sum();
+    let incoming_vol: f64 = charges
+        .iter()
+        .map(|&(_, _, vol, qty, _)| vol * (qty as f64))
+        .sum();
+    if incoming_vol > 0.0 && existing_cargo_vol + incoming_vol > cargo_cap + 1e-4 {
+        return Err(BridgeRpcError {
+            code: "CapacityExceeded".into(),
+            message: format!(
+                "Ship cargo capacity {cargo_cap} m³ exceeded: total {:.1} m³",
+                existing_cargo_vol + incoming_vol
+            ),
+            client_error: None,
+        });
+    }
+
+    let c_ids: Vec<i64> = charges.into_iter().map(|(id, _, _, _, _)| id).collect();
+    Ok((c_ids, mod_ids))
+}
+
 pub(crate) async fn handle_clear_charges(
     ctx: &ServerContext,
     session: &SessionState,
@@ -239,112 +357,12 @@ pub(crate) async fn handle_clear_charges(
     }
 
     let char_skills = ctx.character_skill_levels(char_id);
-    let (charge_ids, mod_ids_in_charge_slots) = ctx.db.with_snapshot(|snap| {
-        let Some(ship) = snap.items.get(&ship_id) else {
-            return Err(BridgeRpcError {
-                code: "ShipNotFound".into(),
-                message: format!("Ship {ship_id} not found"),
-                client_error: None,
-            });
-        };
-        let ship_cat = ctx.sde.types.get(&ship.type_id).map(|t| t.category_id).unwrap_or(0);
-        if ship.owner_id != char_id || ship_cat != 6 {
-            return Err(BridgeRpcError {
-                code: "InvalidFittingTarget".into(),
-                message: format!("Target {ship_id} is not a ship owned by character {char_id}"),
-                client_error: None,
-            });
-        }
-        if ship.flag == InventoryFlag::Locked || snap.is_item_or_ancestor_locked_or_impounded(ship_id) {
-            return Err(BridgeRpcError {
-                code: "ItemLocked".into(),
-                message: format!("Ship {ship_id} is locked"),
-                client_error: None,
-            });
-        }
-
-        let charges: Vec<(i64, InventoryFlag, f64, i32)> = snap
-            .items
-            .values()
-            .filter(|it| {
-                it.owner_id == char_id
-                    && it.location_id == ship_id
-                    && matches!(it.flag as u16, 11..=34)
-                    && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 8)
-            })
-            .map(|it| {
-                let vol = ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(0.0);
-                (it.item_id, it.flag, vol, it.quantity.max(0))
-            })
-            .collect();
-
-        let occupied_flags: std::collections::HashSet<InventoryFlag> =
-            charges.iter().map(|&(_, flg, _, _)| flg).collect();
-
-        let mod_ids: Vec<i64> = snap
-            .items
-            .values()
-            .filter(|it| {
-                it.location_id == ship_id
-                    && occupied_flags.contains(&it.flag)
-                    && ctx.sde.types.get(&it.type_id).is_none_or(|t| t.category_id != 8)
-            })
-            .map(|it| it.item_id)
-            .collect();
-
-        for &mid in &mod_ids {
-            if snap.module_active_states.contains(&mid) {
-                return Err(BridgeRpcError {
-                    code: "ModuleIsActive".into(),
-                    message: format!("Cannot unload charges while module {mid} is active"),
-                    client_error: None,
-                });
-            }
-        }
-
-        let mut engine = eve_dogma::ShipFittingEngine::from_sde(ship_id, ship.type_id, &ctx.sde)
-            .with_character_skills(char_skills);
-        for it in snap.items.values() {
-            if it.location_id == ship_id
-                && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132)
-                && ctx.sde.types.get(&it.type_id).is_none_or(|t| t.category_id != 8)
-            {
-                let online = snap.module_online_states.get(&it.item_id).copied().unwrap_or(true);
-                let _ = engine.fit_module_with_state(it.item_id, it.type_id, it.flag as u16, online, &ctx.sde);
-            }
-        }
-        let eval_ctx = engine.evaluated_context(&ctx.sde);
-        let cargo_cap = eval_ctx
-            .ship
-            .get_attribute(eve_sde::attr_ids::CAPACITY, &ctx.sde)
-            .max(0.0);
-        let existing_cargo_vol: f64 = snap
-            .items
-            .values()
-            .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
-            .map(|i| {
-                ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.0)
-                    * (i.quantity.max(0) as f64)
-            })
-            .sum();
-        let incoming_vol: f64 = charges
-            .iter()
-            .map(|&(_, _, vol, qty)| vol * (qty as f64))
-            .sum();
-        if incoming_vol > 0.0 && existing_cargo_vol + incoming_vol > cargo_cap + 1e-4 {
-            return Err(BridgeRpcError {
-                code: "CapacityExceeded".into(),
-                message: format!(
-                    "Ship cargo capacity {cargo_cap} m³ exceeded: total {:.1} m³",
-                    existing_cargo_vol + incoming_vol
-                ),
-                client_error: None,
-            });
-        }
-
-        let c_ids: Vec<i64> = charges.into_iter().map(|(id, _, _, _)| id).collect();
-        Ok((c_ids, mod_ids))
-    })?;
+    let (pre_charge_ids, mod_ids_in_charge_slots) = ctx
+        .db
+        .with_snapshot(|snap| validate_clear_charges_in_snap(ctx, snap, char_id, ship_id, &char_skills))?;
+    if pre_charge_ids.is_empty() && mod_ids_in_charge_slots.is_empty() {
+        return Ok(PyRep::None);
+    }
 
     if let Some(sys_id) = session.solar_system_id {
         let sys = ctx.systems.get_or_spawn(sys_id);
@@ -359,24 +377,20 @@ pub(crate) async fn handle_clear_charges(
         }
     }
 
-    ctx.db.with_mut_snapshot(|snap| {
-        for &mid in &mod_ids_in_charge_slots {
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        let (charge_ids, mod_ids) =
+            validate_clear_charges_in_snap(ctx, snap, char_id, ship_id, &char_skills)?;
+        for &mid in &mod_ids {
             snap.module_active_charges.remove(&mid);
         }
         for cid in charge_ids {
-            let Some(c_flag) = snap
-                .items
-                .get(&cid)
-                .filter(|c| {
-                    c.owner_id == char_id
-                        && c.location_id == ship_id
-                        && matches!(c.flag as u16, 11..=34)
-                })
-                .map(|c| c.flag)
-            else {
+            if !snap.items.get(&cid).is_some_and(|c| {
+                c.owner_id == char_id
+                    && c.location_id == ship_id
+                    && matches!(c.flag as u16, 11..=34)
+            }) {
                 continue;
-            };
-            let _ = c_flag;
+            }
             if let Some(it) = snap.items.get_mut(&cid) {
                 it.singleton = false;
             }
@@ -390,9 +404,11 @@ pub(crate) async fn handle_clear_charges(
             spec.reject_fitted = false;
             spec.merge_at_destination = true;
             spec.active_ship_id = Some(ship_id);
-            let _ = snap.transfer_inventory_item(cid, spec);
+            snap.transfer_inventory_item(cid, spec)
+                .map_err(|e| BridgeRpcError::custom_info(e.to_string()))?;
         }
-    });
+        Ok(())
+    })?;
 
     ctx.invalidate_ship_fitting(ship_id);
     Ok(PyRep::None)
@@ -1692,16 +1708,17 @@ fn handle_has_existing_password_set(
             client_error: None,
         });
     }
-    super::fitting_containers_ships::authorize_container_inspect(
-        ctx,
-        session,
-        char_id,
-        container_id,
-        true,
-    )?;
-    let has_pw = ctx.db.with_snapshot(|snap| {
-        container_password_snap(snap, container_id, which).is_some()
-    });
+    let has_pw = ctx.db.with_snapshot(|snap| -> Result<bool, BridgeRpcError> {
+        super::fitting_containers_ships::authorize_container_inspect_in_snap(
+            ctx,
+            session,
+            snap,
+            char_id,
+            container_id,
+            true,
+        )?;
+        Ok(container_password_snap(snap, container_id, which).is_some())
+    })?;
     Ok(PyRep::Bool(has_pw))
 }
 
@@ -1844,9 +1861,10 @@ fn handle_retrieve_password(
     Ok(pw_opt.map(PyRep::String).unwrap_or(PyRep::None))
 }
 
-/// Temporary `#[cfg(test)]` compatibility view over `entity_kv` (`#1180` Track 1).
-/// Zero non-test code reads or compiles these shims; Track 2 migrates remaining unit tests
-/// directly onto the typed `entity_kv` helpers and deletes this module completely.
+/// Temporary `#[cfg(test)]` compatibility view over `entity_kv` (`#1180`).
+/// Zero non-test code reads or compiles these shims. Minimal subset retained only for
+/// 6 external test files outside `#1180` Track 2's file lock (`contracts_service_*`,
+/// `industry_jobs_edges2_tests.rs`, `fitting_containers_ships_ops_*`).
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) mod legacy_container_ship_test_shim {
@@ -1954,10 +1972,6 @@ pub(crate) mod legacy_container_ship_test_shim {
         st
     }
 
-    pub(crate) fn read_container_ship_state(ctx: &ServerContext) -> ContainerShipRuntimeState {
-        ctx.db.with_snapshot(read_container_ship_state_snap)
-    }
-
     pub(crate) fn save_container_ship_state_snap(
         snap: &mut eve_db::WorldStateSnapshot,
         now_unix: u64,
@@ -2036,16 +2050,6 @@ pub(crate) mod legacy_container_ship_test_shim {
         out
     }
 
-    pub(crate) fn save_container_ship_state(ctx: &ServerContext, state: &ContainerShipRuntimeState) {
-        let now_unix = ctx.now_unix();
-        ctx.db
-            .try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                save_container_ship_state_snap(snap, now_unix, state);
-                Ok(())
-            })
-            .expect("test entity_kv save");
-    }
-
     pub(crate) fn write_container_ship_state<R>(
         ctx: &ServerContext,
         f: impl FnOnce(&mut ContainerShipRuntimeState) -> R,
@@ -2059,6 +2063,185 @@ pub(crate) mod legacy_container_ship_test_shim {
                 Ok(out)
             })
             .expect("test entity_kv write")
+    }
+}
+
+pub(crate) fn edge_distance_in_space_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+    ship_id: i64,
+    target_id: i64,
+    target_type_id: u32,
+) -> Option<f64> {
+    let sys_h = ctx.systems.get_or_spawn_if_runtime(sys_id);
+    let pos = |id: i64| {
+        sys_h
+            .as_ref()
+            .and_then(|h| h.get_ball_position_sync(id))
+            .or_else(|| snap.item_positions.get(&id).copied().map(glam::DVec3::from))
+    };
+    let (s, u) = pos(ship_id).zip(pos(target_id))?;
+    let ship_r = snap
+        .items
+        .get(&ship_id)
+        .and_then(|si| ctx.sde.types.get(&si.type_id))
+        .map(|t| t.radius)
+        .unwrap_or(0.0);
+    let target_r = ctx.sde.types.get(&target_type_id).map(|t| t.radius).unwrap_or(0.0);
+    Some((s.distance(u) - ship_r - target_r).max(0.0))
+}
+
+/// Verifies caller docking co-location or in-space <=2,500m edge distance to `ship`.
+/// Returns `Ok(false)` when the caller is in space and `ship` is not in space (e.g. docked/stored).
+pub(crate) fn verify_ship_proximity_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    ship: &eve_db::InventoryItemRecord,
+    target_id: i64,
+    is_host_ship: bool,
+) -> Result<bool, BridgeRpcError> {
+    let ch_dock = session.station_id.or(session.structure_id).unwrap_or(0);
+    if ch_dock > 0 {
+        if ship.location_id != ch_dock {
+            let what = if is_host_ship {
+                format!("container {target_id}'s host ship")
+            } else {
+                format!("ship {target_id}'s location")
+            };
+            let msg = format!("Character {char_id} is not docked at {what}");
+            return Err(BridgeRpcError::with_client_error(
+                "BoundObjectOwnershipViolation",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        }
+        return Ok(true);
+    }
+    if (30_000_000..=39_999_999).contains(&ship.location_id) {
+        let sys_id = session.solar_system_id.unwrap_or(0);
+        if sys_id == 0 || ship.location_id != sys_id as i64 {
+            let msg = if is_host_ship {
+                format!("Caller must be in space in system {} to list container {target_id}", ship.location_id)
+            } else {
+                format!("Caller must be in space in system {} to list ship {target_id}", ship.location_id)
+            };
+            return Err(BridgeRpcError::with_client_error(
+                "NotInSameSolarSystem",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        }
+        let caller_ship_id = session.ship_id.unwrap_or(0);
+        let Some(edge_dist) =
+            edge_distance_in_space_snap(ctx, snap, sys_id, caller_ship_id, ship.item_id, ship.type_id)
+        else {
+            let msg = if is_host_ship {
+                format!("Host ship {} position is out of range", ship.item_id)
+            } else {
+                format!("Ship {target_id} position is out of range")
+            };
+            return Err(BridgeRpcError::with_client_error(
+                "OutOfRange",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        };
+        if edge_dist > 2_500.0 {
+            let msg = if is_host_ship {
+                format!("Container {target_id} is out of range ({edge_dist:.1}m > 2500m)")
+            } else {
+                format!("Ship {target_id} is out of range ({edge_dist:.1}m > 2500m)")
+            };
+            return Err(BridgeRpcError::with_client_error(
+                "OutOfRange",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+pub(crate) fn list_with_optional_ship_unlock<F>(
+    ctx: &ServerContext,
+    char_id: i64,
+    try_unlock: bool,
+    f: F,
+) -> Result<Vec<Vec<PyRep>>, BridgeRpcError>
+where
+    F: Fn(&eve_db::WorldStateSnapshot) -> Result<(Option<i64>, Vec<Vec<PyRep>>), BridgeRpcError>,
+{
+    if try_unlock {
+        let now_unix = ctx.now_unix_secs();
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let (unlock_ship_id, rows) = f(snap)?;
+            if let Some(sid) = unlock_ship_id {
+                set_container_unlocked_snap(snap, sid, char_id, true, now_unix)?;
+            }
+            Ok(rows)
+        })
+    } else {
+        ctx.db.with_snapshot(|snap| Ok(f(snap)?.1))
+    }
+}
+
+pub(crate) fn verify_nested_unit_list_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    bound_loc_id: i64,
+    supplied_pw_opt: Option<&str>,
+) -> Result<Option<i64>, BridgeRpcError> {
+    let Some(it) = snap.items.get(&bound_loc_id) else {
+        let msg = format!("Container {bound_loc_id} no longer exists");
+        return Err(BridgeRpcError::with_client_error(
+            "BoundObjectOwnershipViolation",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        ));
+    };
+    if session.has_gm_role() {
+        return Ok(None);
+    }
+    if let Some((host_ship, _)) = crate::services::inventory_bound::find_ship_bay_ancestor_in_snap(
+        ctx, snap, it.location_id, it.flag as u16,
+    ) {
+        if host_ship.owner_id != char_id {
+            let live_host_id = crate::services::inventory_bound::check_foreign_ship_bay_ancestor_chain_in_snap(
+                ctx, snap, session, char_id, it.location_id, it.flag as u16, supplied_pw_opt, false,
+            )?;
+            if !verify_ship_proximity_in_snap(ctx, snap, session, char_id, host_ship, bound_loc_id, true)? {
+                let msg = format!("Character {char_id} lacks spatial access to container {bound_loc_id}'s host ship");
+                return Err(BridgeRpcError::with_client_error(
+                    "BoundObjectOwnershipViolation",
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
+                ));
+            }
+            return Ok(live_host_id);
+        }
+    }
+    if it.owner_id != char_id && it.owner_id != 0 {
+        let msg = format!("Character {char_id} lacks access to container {bound_loc_id}");
+        return Err(BridgeRpcError::with_client_error(
+            "BoundObjectOwnershipViolation",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        ));
+    }
+    Ok(None)
+}
+
+pub(crate) fn foreign_ship_deny_err(deny_sma: bool, msg: String) -> BridgeRpcError {
+    if deny_sma {
+        BridgeRpcError::with_client_error("SMAAccessDenied", msg.clone(), eve_proto::ClientError::CustomInfo(msg))
+    } else {
+        BridgeRpcError::with_client_error("FleetHangarAccessDenied", msg.clone(), eve_proto::ClientError::CustomInfo(msg))
     }
 }
 

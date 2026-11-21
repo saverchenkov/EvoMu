@@ -702,11 +702,7 @@ async fn activate_superweapon_with_args_inner(
             if tcs.is_cloaked {
                 return Err(BridgeRpcError::user_error("CannotTargetCloaked"));
             }
-            if tcs.is_tethered
-                || tcs.is_invulnerable()
-                || tcs.undock_invulnerable_remaining_ticks > 0
-                || tcs.gate_cloak_remaining_ticks > 0
-            {
+            if tcs.is_protected() {
                 return Err(BridgeRpcError::user_error("TargetInvulnerable"));
             }
         }
@@ -1060,13 +1056,10 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
         let along = to_b.dot(beam_dir);
         let perp = (to_b - beam_dir * along).length();
         if along > 0.0 && along <= beam_len && perp <= beam_radius {
-            let skip_target = ballpark.combat_states.get(&bid).is_some_and(|v_cs| {
-                v_cs.is_cloaked
-                    || v_cs.is_tethered
-                    || v_cs.is_invulnerable()
-                    || v_cs.undock_invulnerable_remaining_ticks > 0
-                    || v_cs.gate_cloak_remaining_ticks > 0
-            });
+            let skip_target = ballpark
+                .combat_states
+                .get(&bid)
+                .is_some_and(|v_cs| v_cs.has_any_cloak() || v_cs.is_protected());
             if skip_target {
                 continue;
             }

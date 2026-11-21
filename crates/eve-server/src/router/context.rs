@@ -922,10 +922,9 @@ impl ServerContext {
                         r,
                     );
                 }
-                let acct_changes = crate::services::pve_special_sites::on_special_site_npc_destroyed_core(sys, db, sde, sys_id, npc_id, killer_opt).await;
+                let _ = crate::services::pve_special_sites::on_special_site_npc_destroyed_core(sys, db, sde, sys_id, npc_id, killer_opt).await;
                 let _ = crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(sys, db, sys_id, npc_id).await;
                 crate::services::pve_special_sites_abyssal::on_abyssal_cache_destroyed_core(sys, db, sys_id, npc_id, killer_opt).await;
-                for (cid, bal) in acct_changes { let _ = ctx.notify_account_change(cid, "cash", cid, bal); }
                 crate::services::agents_missions::on_mission_npc_destroyed_core(db, sys_id, npc_id, killer_opt);
                 crate::services::shipcaster_ops::on_landing_pad_ball_destroyed_core(
                     &ctx.cluster_misc_state,

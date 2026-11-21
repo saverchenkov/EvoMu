@@ -2576,7 +2576,7 @@ impl SystemHandle {
             return true;
         }
         let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        bp.combat_states.get(&ball_id).is_some_and(|cs| cs.is_cloaked)
+        bp.combat_states.get(&ball_id).is_some_and(eve_destiny::CombatState::has_any_cloak)
             || bp.ball_slim_meta.get(&ball_id).is_some_and(|m| m.is_cloaked)
     }
 
@@ -2836,6 +2836,7 @@ impl SystemHandle {
             mod_guard.clear();
             mod_guard.extend(active_module_cycles.iter().map(|c| c.ship_id));
         }
+        super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         let tick = bp.current_tick;
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
         drop(st);
@@ -2900,23 +2901,18 @@ impl SystemHandle {
             false
         };
         sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        let tracking = warp_started.then(|| {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
+            st.warp_provenance.insert(ship_id, super::WarpProvenance::DisconnectedEmergencyWarp);
+            st.warp_tracking.clone()
+        });
         drop(bp);
-        if warp_started {
-            let tracking = {
-                let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-                st.warp_provenance.insert(ship_id, super::WarpProvenance::DisconnectedEmergencyWarp);
-                st.warp_tracking.clone()
-            };
-            super::clear_shared_warp_tracking(&tracking, ship_id, true);
-        }
+        if let Some(tracking) = tracking { super::clear_shared_warp_tracking(&tracking, ship_id, true); }
     }
 
     pub fn reconcile_disconnected_warp_sync(&self, ship_id: BallId, dest: DVec3) -> (DVec3, bool) {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.undock_invulnerable_remaining_ticks = 0;
-            cs.warp_exit_invulnerable_remaining_ticks = 0;
-        }
         let arrived = bp.balls.get(&ship_id).is_none_or(|b| {
             !matches!(b.mode, MovementMode::Warp { .. }) || (b.position - dest).length() <= 2_500.0
         });
@@ -2935,13 +2931,16 @@ impl SystemHandle {
         }
         sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         let final_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(dest);
-        drop(bp);
-        if arrived {
-            let tracking = {
-                let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let tracking = {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            super::protection::finish_disconnected_warp_protection_sync(&mut bp, &mut st, ship_id);
+            if arrived {
                 st.warp_provenance.remove(&ship_id);
-                st.warp_tracking.clone()
-            };
+            }
+            arrived.then(|| st.warp_tracking.clone())
+        };
+        drop(bp);
+        if let Some(tracking) = tracking {
             super::clear_shared_warp_tracking(&tracking, ship_id, false);
         }
         (final_pos, arrived)

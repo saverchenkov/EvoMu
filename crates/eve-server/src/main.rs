@@ -547,6 +547,7 @@ async fn run_clean_shutdown(
     }
 
     let flushed = eve_server::sp6_lifecycle::flush_all_systems_final_checkpoints(ctx).await;
+    eve_server::router::log_item_compare_summary(ctx);
 
     let wal_res = if !ctx.db.is_write_locked_by_current_thread() {
         Some(ctx.db.with_sqlite_conn(|conn| -> Result<(i64, i64, i64), String> {

@@ -573,7 +573,8 @@ async fn test_ship_bays_access_configuration_and_capacity() {
         ("SMB_AllowCorpAccess", false),
     ]);
     call(&ctx, &mut s1, "ship", "ConfigureShip", vec![PyRep::Integer(710_001), all_off]).await.expect("lock down");
-    let cfg = call(&ctx, &mut s2, "ship", "GetShipConfiguration", vec![PyRep::Integer(710_001)]).await.unwrap();
+    let cfg = call(&ctx, &mut s1, "ship", "GetShipConfiguration", vec![PyRep::Integer(710_001)]).await.unwrap();
+    assert_eq!(call(&ctx, &mut s2, "ship", "GetShipConfiguration", vec![PyRep::Integer(710_001)]).await.unwrap_err().code, "OwnershipViolation");
     for key in ["FleetHangar_AllowFleetAccess", "FleetHangar_AllowCorpAccess", "SMB_AllowFleetAccess", "SMB_AllowCorpAccess"] {
         assert!(!cfg_get(&cfg, key), "{key} must be off");
     }
@@ -603,7 +604,7 @@ async fn test_ship_bays_access_configuration_and_capacity() {
     .await
     .expect("ConfigureShip");
     assert!(cfg_get(&cfg, "FleetHangar_AllowFleetAccess") && cfg_get(&cfg, "SMB_AllowFleetAccess"));
-    let cfg = call(&ctx, &mut s2, "ship", "GetShipConfiguration", vec![PyRep::Integer(710_001)]).await.unwrap();
+    let cfg = call(&ctx, &mut s1, "ship", "GetShipConfiguration", vec![PyRep::Integer(710_001)]).await.unwrap();
     assert!(cfg_get(&cfg, "FleetHangar_AllowFleetAccess") && !cfg_get(&cfg, "FleetHangar_AllowCorpAccess"));
 
     // Fleet member now uses the fleet hangar and (in space) the SMB.

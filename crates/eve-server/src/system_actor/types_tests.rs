@@ -462,6 +462,14 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::TrackModuleReloadSim { .. } => "TrackModuleReloadSim",
             SystemCommand::RepairCombatState { .. } => "RepairCombatState",
             SystemCommand::CurrentTick { .. } => "CurrentTick",
+            SystemCommand::BreakProtection { .. } => "BreakProtection",
+            SystemCommand::ForceDecloak { .. } => "ForceDecloak",
+            SystemCommand::GetProtectionSnapshot { .. } => "GetProtectionSnapshot",
+            SystemCommand::SyncLocationChangeInvuln { .. } => "SyncLocationChangeInvuln",
+            SystemCommand::ActivateModuleCycleAtomic { .. } => "ActivateModuleCycleAtomic",
+            SystemCommand::SetMovementModeBreakingProtection { .. } => "SetMovementModeBreakingProtection",
+            SystemCommand::SetWarpMovementModeBreakingProtection { .. } => "SetWarpMovementModeBreakingProtection",
+            SystemCommand::GotoPointBreakingProtection { .. } => "GotoPointBreakingProtection",
         }
     }
 

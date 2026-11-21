@@ -1804,3 +1804,286 @@ async fn update_state_request_structure_view_outside_observes_structure_and_neve
         "destroyed structure View Outside must not mark ballpark bootstrapped"
     );
 }
+
+#[tokio::test]
+async fn break_ship_protection_with_location_invuln_emits_single_invuln_cancelled_and_mirrors_actor() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 9486_i64;
+    let ship_id = 88686_i64;
+    let now_unix = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&90_000_001].clone();
+        ch.character_id = char_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        ch.solar_system_id = sys_id;
+        snap.characters.insert(char_id, ch);
+    });
+    ctx.db
+        .acquire_online_lock(1, char_id as u64, Some(char_id), true, now_unix)
+        .expect("online lock for 9486");
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let mut combat = eve_destiny::CombatState::default();
+    combat.apply_jump_cloak_and_invuln_timers(50);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        combat,
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_id),
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    grant_location_change_invulnerability(&ctx, char_id, now_unix + 60);
+    let mirrored = sys.get_protection_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(mirrored.is_protected(now_unix));
+    assert_eq!(mirrored.location_change_invuln_until_unix, Some(now_unix + 60));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let events = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, crate::system_actor::ProtectionBreakReason::ModuleActivation).await;
+    assert!(events.gate_cloak_broken && events.invuln_cancelled && !is_location_change_invulnerable(&ctx, char_id, now_unix));
+    let notes = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(notes.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), 1);
+    assert_eq!(notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+
+    // Second invocation emits no duplicate notifications.
+    let events_again = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, crate::system_actor::ProtectionBreakReason::ModuleActivation).await;
+    assert!(!events_again.invuln_cancelled && !events_again.any_cloak_broken() && ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // Racing `break_location_change_invulnerability` against an in-flight `BreakProtection(Some(t1))` emits `OnInvulnCancelled` once.
+    let t_race = now_unix + 75;
+    grant_location_change_invulnerability(&ctx, char_id, t_race);
+    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+    let peeked = peek_active_location_change_invuln(&ctx, char_id);
+    assert_eq!(peeked.map(|t| t.until_unix), Some(t_race));
+    break_location_change_invulnerability(&ctx, char_id);
+    let mut ev_race = sys.break_protection(ship_id, Some(char_id), crate::system_actor::ProtectionBreakReason::ModuleActivation, peeked, now_unix).await.unwrap();
+    finalize_committed_location_change_invuln(&ctx, char_id, peeked, now_unix, &mut ev_race);
+    emit_protection_break_notifications(&ctx, char_id, ship_id, &ev_race);
+    assert!(!ev_race.invuln_cancelled && ev_race.location_invuln_already_consumed);
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+
+    // Reverse interleaving (`F1486-R6-01`): actor consumes `tok1` before `break_location_change_invulnerability` pops it,
+    // followed by a newer `tok2` grant that stays notify-eligible, plus `undock_invuln` preservation.
+    let mod_act = crate::system_actor::ProtectionBreakReason::ModuleActivation;
+    grant_location_change_invulnerability(&ctx, char_id, now_unix + 80);
+    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+    let peek_rev = peek_active_location_change_invuln(&ctx, char_id);
+    let mut ev_rev = sys.break_protection(ship_id, Some(char_id), mod_act, peek_rev, now_unix).await.unwrap();
+    assert!(ev_rev.invuln_cancelled && !ev_rev.location_invuln_already_consumed && !ev_rev.undock_invuln_cancelled);
+    break_location_change_invulnerability(&ctx, char_id);
+    grant_location_change_invulnerability(&ctx, char_id, now_unix + 90);
+    finalize_committed_location_change_invuln(&ctx, char_id, peek_rev, now_unix, &mut ev_rev);
+    emit_protection_break_notifications(&ctx, char_id, ship_id, &ev_rev);
+    assert!(!ev_rev.invuln_cancelled);
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    break_location_change_invulnerability(&ctx, char_id);
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+}
+
+#[tokio::test]
+async fn break_ship_protection_with_location_invuln_ess_gate_entry_preserves_location_invuln() {
+    let ctx = test_ctx();
+    let char_id = 91_384_889_i64;
+    let ship_id = 1_091_384_889_i64;
+    let sys_id = 30_000_142_u32;
+    let now_unix = ctx.now_unix();
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    let mut combat = eve_destiny::CombatState {
+        is_cloaked: true,
+        is_covert_cloak: true,
+        undock_invulnerable_remaining_ticks: 40,
+        warp_exit_invulnerable_remaining_ticks: 15,
+        ..Default::default()
+    };
+    combat.gate_cloak_remaining_ticks = 0;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        combat,
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_id),
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // EssGateEntry with ship_id <= 0, unloaded/unknown ball, and live ball MUST all preserve location_change_invuln.
+    grant_location_change_invulnerability(&ctx, char_id, now_unix + 60);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let ev_zero = break_ship_protection_with_location_invuln(
+        &ctx,
+        &sys,
+        char_id,
+        0,
+        crate::system_actor::ProtectionBreakReason::EssGateEntry,
+    )
+    .await;
+    assert!(!ev_zero.invuln_cancelled);
+    assert!(is_location_change_invulnerable(&ctx, char_id, now_unix));
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    let ev_ess = break_ship_protection_with_location_invuln(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        crate::system_actor::ProtectionBreakReason::EssGateEntry,
+    )
+    .await;
+    assert!(ev_ess.covert_cloak_broken);
+    assert!(!ev_ess.invuln_cancelled);
+    assert!(!ev_ess.warp_exit_invuln_cancelled);
+    assert!(is_location_change_invulnerable(&ctx, char_id, now_unix));
+    let mirrored = sys.get_protection_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(!mirrored.has_any_cloak());
+    assert_eq!(mirrored.snapshot.undock_invulnerable_remaining_ticks, 40);
+    assert_eq!(
+        mirrored.location_change_invuln_until_unix,
+        Some(now_unix + 60)
+    );
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // Reverse interleaving (`F1486-R6-01`): ship undock_invuln remains preserved when location_change_invuln was already popped.
+    let peek_undock = peek_active_location_change_invuln(&ctx, char_id);
+    let mut ev_undock = sys.break_protection(ship_id, Some(char_id), crate::system_actor::ProtectionBreakReason::ModuleActivation, peek_undock, now_unix).await.unwrap();
+    break_location_change_invulnerability(&ctx, char_id);
+    finalize_committed_location_change_invuln(&ctx, char_id, peek_undock, now_unix, &mut ev_undock);
+    assert!(ev_undock.undock_invuln_cancelled && ev_undock.invuln_cancelled);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn break_ship_protection_with_location_invuln_concurrent_and_newer_grant_preservation() {
+    use crate::system_actor::ProtectionBreakReason::SubwarpMovement as Move;
+    let ctx = Arc::new(test_ctx());
+    let (char_id, ship_id, sys_id, now) = (91_486_001_i64, 1_091_486_001_i64, 30_000_142_u32, 0);
+    let _ = now;
+    let now = ctx.now_unix();
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        test_ship_ball(ship_id, 587, DVec3::ZERO),
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_id),
+            owner_id: char_id,
+            category_id: 6,
+            group_id: 25,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // 1. Concurrent callers observing one grant flip `invuln_cancelled` once across tasks.
+    grant_location_change_invulnerability(&ctx, char_id, now + 60);
+    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+    let (c1, s1, c2, s2) = (Arc::clone(&ctx), sys.clone(), Arc::clone(&ctx), sys.clone());
+    let (ra, rb) = tokio::join!(
+        tokio::spawn(async move {
+            break_ship_protection_with_location_invuln(
+                &c1, &s1, char_id, ship_id, crate::system_actor::ProtectionBreakReason::ModuleActivation,
+            )
+            .await
+        }),
+        tokio::spawn(async move {
+            break_ship_protection_with_location_invuln(
+                &c2, &s2, char_id, ship_id, crate::system_actor::ProtectionBreakReason::ModuleActivation,
+            )
+            .await
+        })
+    );
+    let (ev_a, ev_b) = (ra.unwrap(), rb.unwrap());
+    assert!(ev_a.invuln_cancelled ^ ev_b.invuln_cancelled, "{ev_a:?} / {ev_b:?}");
+    assert!(!is_location_change_invulnerable(&ctx, char_id, now));
+    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+
+    // 2. Stale `T1` / `None` preserves newer `T2 > T1`, `t_new == t1`, and `t_new < t1` grants;
+    //    post-consumption stale `Grant`/`ClearUpTo` never re-inserts or erases newer grants.
+    let (t1, t2, t3) = (now + 20, now + 90, now + 10);
+    grant_location_change_invulnerability(&ctx, char_id, t1);
+    let tok1 = peek_active_location_change_invuln(&ctx, char_id).unwrap();
+    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+    grant_location_change_invulnerability(&ctx, char_id, t2);
+    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+
+    for expected in [Some(tok1), None] {
+        let ev = sys.break_protection(ship_id, Some(char_id), Move, expected, now).await.unwrap();
+        assert!(!ev.invuln_cancelled && !ev.location_invuln_already_consumed);
+        assert_eq!(peek_active_location_change_invuln(&ctx, char_id).map(|t| t.until_unix), Some(t2));
+        assert_eq!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(t2));
+    }
+
+    let ev_clear = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, Move).await;
+    assert!(ev_clear.invuln_cancelled && peek_active_location_change_invuln(&ctx, char_id).is_none());
+    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+
+    let ev_stale_post = sys.break_protection(ship_id, Some(char_id), Move, Some(tok1), now).await.unwrap();
+    assert!(!ev_stale_post.invuln_cancelled && ev_stale_post.location_invuln_already_consumed);
+    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+
+    // 3. Same-second `t_new == t1` and shorter `t_new < t1` races keep the newer grant active across
+    //    `break_protection`, `finalize_committed_location_change_invuln`, and delayed `ClearUpTo`/`Grant`.
+    for (older_t, newer_t) in [(t3, t3), (t2, t3)] {
+        grant_location_change_invulnerability(&ctx, char_id, older_t);
+        let stale_tok = peek_active_location_change_invuln(&ctx, char_id).unwrap();
+        grant_location_change_invulnerability(&ctx, char_id, newer_t);
+        let newer_tok = peek_active_location_change_invuln(&ctx, char_id).unwrap();
+        assert!(newer_tok.seq > stale_tok.seq);
+        let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+
+        let mut ev_stale = sys.break_protection(ship_id, Some(char_id), Move, Some(stale_tok), now).await.unwrap();
+        finalize_committed_location_change_invuln(&ctx, char_id, Some(stale_tok), now, &mut ev_stale);
+        assert!(!ev_stale.invuln_cancelled);
+        sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo { seq: stale_tok.seq });
+        assert_eq!(peek_active_location_change_invuln(&ctx, char_id), Some(newer_tok));
+        assert_eq!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(newer_t));
+
+        let ev_cur = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, Move).await;
+        assert!(ev_cur.invuln_cancelled && !is_location_change_invulnerable(&ctx, char_id, now));
+        sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::Grant(stale_tok));
+        sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::Grant(newer_tok));
+        assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+    }
+
+    // 4. Stale `ClearUpTo` after `Grant` preserves newer actor grant even after `pop_active_location_change_invuln`.
+    grant_location_change_invulnerability(&ctx, char_id, t1);
+    let popped_tok = pop_active_location_change_invuln(&ctx, char_id).unwrap();
+    grant_location_change_invulnerability(&ctx, char_id, t2);
+    sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo { seq: popped_tok.seq });
+    sys.try_sync_location_change_invuln(char_id, crate::system_actor::LocationChangeInvulnSyncOp::Grant(popped_tok));
+    assert_eq!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(t2));
+    assert_eq!(peek_active_location_change_invuln(&ctx, char_id).map(|t| t.until_unix), Some(t2));
+}
