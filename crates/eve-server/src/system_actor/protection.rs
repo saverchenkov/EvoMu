@@ -717,12 +717,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 slim_meta,
             );
             if was_warping && !is_warp {
-                exec_ctx.actor_st.warp_provenance.remove(&ball_id);
-                celestials::clear_shared_warp_tracking(
-                    &exec_ctx.actor_st.warp_tracking,
-                    ball_id,
-                    true,
-                );
+                exec_ctx.actor_st.warp_state.clear_ball(ball_id, true);
             }
             *exec_ctx.spawned_checkpoint_ball = Some(ball_id);
             sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ball_id);
@@ -839,12 +834,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             if !exec_ctx.ballpark.balls.contains_key(&ball_id) {
                 let _ = exec_ctx.ballpark.remove_ball(ball_id);
                 exec_ctx.actor_st.protection_registry.remove(&ball_id);
-                exec_ctx.actor_st.warp_provenance.remove(&ball_id);
-                celestials::clear_shared_warp_tracking(
-                    &exec_ctx.actor_st.warp_tracking,
-                    ball_id,
-                    true,
-                );
+                exec_ctx.actor_st.warp_state.clear_ball(ball_id, true);
                 defer_reply(exec_ctx.deferred_replies, reply, None);
                 return None;
             }
@@ -1140,8 +1130,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 exec_ctx.scrambled_balls_actor,
                 exec_ctx.event_tx_actor,
                 Some(exec_ctx.broadcast_seq_gate_actor),
-                &mut exec_ctx.actor_st.warp_provenance,
-                &exec_ctx.actor_st.warp_tracking,
+                &mut exec_ctx.actor_st.warp_state,
             );
             sync_all_protection_registry_in_actor(exec_ctx.ballpark, exec_ctx.actor_st);
             exec_ctx.sim_elapsed_secs_bits_actor.store(

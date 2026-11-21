@@ -1611,3 +1611,69 @@ fn advance_skill_queues_completing_last_skill_removes_key_and_passes_sqlite_pre_
     assert_eq!(reloaded.skills[&char_a][&skill_tid].level, 1);
     assert_eq!(reloaded.skills[&char_b][&skill_tid].level, 1);
 }
+
+#[test]
+fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
+    let src = include_str!("context.rs");
+    let ctx_body = src
+        .split("pub struct ServerContext {")
+        .nth(1)
+        .and_then(|s| s.split("\n}").next())
+        .expect("ServerContext struct body");
+    let weak_body = src
+        .split("pub(crate) struct ServerContextWeak {")
+        .nth(1)
+        .and_then(|s| s.split("\n}").next())
+        .expect("ServerContextWeak struct body");
+    for forbidden in ["active_warps:", "return_warps:", "pending_warp_finished:"] {
+        assert!(
+            !ctx_body.contains(forbidden),
+            "ServerContext must not own `{forbidden}` (#1541)"
+        );
+        assert!(
+            !weak_body.contains(forbidden),
+            "ServerContextWeak must not mirror `{forbidden}` (#1541)"
+        );
+    }
+    let mut normalized = String::new();
+    for line in ctx_body.lines() {
+        let trimmed = line.split("//").next().unwrap_or("").trim();
+        if trimmed.is_empty() || trimmed.starts_with("#[") {
+            continue;
+        }
+        normalized.push_str(trimmed);
+        normalized.push(' ');
+    }
+    let mut depth = 0usize;
+    let mut fields: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in normalized.chars() {
+        match ch {
+            '<' | '(' | '[' | '{' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            '>' | ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                if !cur.trim().is_empty() {
+                    fields.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.trim().is_empty() {
+        fields.push(cur);
+    }
+    let locked_fields = fields
+        .iter()
+        .filter(|f| f.contains("Mutex<") || f.contains("RwLock<"))
+        .count();
+    assert!(
+        locked_fields <= 43,
+        "ServerContext lock-guarded field count regressed above 43: {locked_fields} (#1541)"
+    );
+}

@@ -395,7 +395,9 @@ pub(super) fn build_disconnected_ship_entry_sync(
 
     let committed_warp_dest = sys_handle.and_then(|h| h.committed_warp_destination_sync(ship_id));
     if committed_warp_dest.is_none() {
-        crate::services::space_destiny::clear_warp_tracking(ctx, sys_handle, ship_id);
+        if let Some(handle) = sys_handle {
+            crate::services::space_destiny::clear_warp_tracking(handle, ship_id);
+        }
     }
 
     let (emergency_warp_dest, pre_warp_position) = if let Some(committed_dest) = committed_warp_dest

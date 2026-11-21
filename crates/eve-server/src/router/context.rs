@@ -99,9 +99,6 @@ pub struct ServerContext {
     pub(crate) combat_ephemeral: Arc<RankedRwLock<crate::services::combat_crimewatch::CombatRuntimeState, RANK_LEAF>>,
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
     pub session_change_timers: Arc<RankedMutex<HashMap<i64, crate::services::space_destiny::SessionChangeTimerState>, RANK_LEAF>>,
-    pub active_warps: Arc<RankedMutex<HashMap<i64, i64>, RANK_LEAF>>,
-    pub return_warps: Arc<RankedMutex<HashSet<i64>, RANK_LEAF>>,
-    pub pending_warp_finished: Arc<RankedMutex<HashSet<i64>, RANK_LEAF>>,
     pub location_change_invuln: Arc<RankedMutex<HashMap<i64, u64>, RANK_LEAF>>,
     pub feature_flags: Arc<RwLock<crate::config::FeatureFlagsConfig>>,
     pub esi_port: Arc<AtomicU16>,
@@ -272,9 +269,6 @@ pub(crate) struct ServerContextWeak {
     combat_ephemeral: std::sync::Weak<RankedRwLock<crate::services::combat_crimewatch::CombatRuntimeState, RANK_LEAF>>,
     tactical_state: std::sync::Weak<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
     session_change_timers: std::sync::Weak<RankedMutex<HashMap<i64, crate::services::space_destiny::SessionChangeTimerState>, RANK_LEAF>>,
-    active_warps: std::sync::Weak<RankedMutex<HashMap<i64, i64>, RANK_LEAF>>,
-    return_warps: std::sync::Weak<RankedMutex<HashSet<i64>, RANK_LEAF>>,
-    pending_warp_finished: std::sync::Weak<RankedMutex<HashSet<i64>, RANK_LEAF>>,
     location_change_invuln: std::sync::Weak<RankedMutex<HashMap<i64, u64>, RANK_LEAF>>,
     feature_flags: std::sync::Weak<RwLock<crate::config::FeatureFlagsConfig>>,
     esi_port: std::sync::Weak<AtomicU16>,
@@ -354,9 +348,6 @@ impl ServerContextWeak {
             combat_ephemeral: self.combat_ephemeral.upgrade()?,
             tactical_state: self.tactical_state.upgrade()?,
             session_change_timers: self.session_change_timers.upgrade()?,
-            active_warps: self.active_warps.upgrade()?,
-            return_warps: self.return_warps.upgrade()?,
-            pending_warp_finished: self.pending_warp_finished.upgrade()?,
             location_change_invuln: self.location_change_invuln.upgrade()?,
             feature_flags: self.feature_flags.upgrade()?,
             esi_port: self.esi_port.upgrade()?,
@@ -712,9 +703,6 @@ impl ServerContext {
             combat_ephemeral: Arc::downgrade(&self.combat_ephemeral),
             tactical_state: Arc::downgrade(&self.tactical_state),
             session_change_timers: Arc::downgrade(&self.session_change_timers),
-            active_warps: Arc::downgrade(&self.active_warps),
-            return_warps: Arc::downgrade(&self.return_warps),
-            pending_warp_finished: Arc::downgrade(&self.pending_warp_finished),
             location_change_invuln: Arc::downgrade(&self.location_change_invuln),
             feature_flags: Arc::downgrade(&self.feature_flags),
             esi_port: Arc::downgrade(&self.esi_port),
@@ -775,20 +763,12 @@ impl ServerContext {
         let tactical_state = Arc::new(RankedRwLock::new(
             crate::services::tactical_modules::TacticalModulesState::default(),
         ));
-        let active_warps = Arc::new(RankedMutex::new(HashMap::new()));
-        let return_warps = Arc::new(RankedMutex::new(HashSet::new()));
-        let pending_warp_finished = Arc::new(RankedMutex::new(HashSet::new()));
         let systems = Arc::new(
             SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db))
                 .with_mechanic_rng(Arc::clone(&mechanic_rng))
                 .with_tactical_state(Arc::clone(&tactical_state))
                 .with_notifications(Arc::clone(&pending_notifications), notify_tx.clone())
-                .with_unrebased_clock_offset_secs(Arc::clone(&unrebased_clock_offset_secs))
-                .with_warp_tracking(
-                    Arc::clone(&active_warps),
-                    Arc::clone(&return_warps),
-                    Arc::clone(&pending_warp_finished),
-                ),
+                .with_unrebased_clock_offset_secs(Arc::clone(&unrebased_clock_offset_secs)),
         );
         let combat_ephemeral = Arc::new(RankedRwLock::new(
             crate::services::combat_crimewatch::init_combat_runtime_state(&db),
@@ -888,9 +868,6 @@ impl ServerContext {
             combat_ephemeral,
             tactical_state,
             session_change_timers: Arc::new(RankedMutex::new(HashMap::new())),
-            active_warps,
-            return_warps,
-            pending_warp_finished,
             location_change_invuln: Arc::new(RankedMutex::new(HashMap::new())),
             feature_flags: Arc::new(RwLock::new(crate::config::FeatureFlagsConfig::default())),
             esi_port,

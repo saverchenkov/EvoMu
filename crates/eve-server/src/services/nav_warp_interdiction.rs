@@ -747,7 +747,7 @@ pub(crate) async fn execute_agency_content_warp(
     }
     emit_movement_protection_events(ctx, char_id, ship_id, is_covert_cloaked, protection_events);
     on_warp_initiated_hooks_with_options(ctx, sys_handle, char_id, ship_id, sys_id, false).await;
-    crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);
+    crate::services::space_destiny::track_player_or_fleet_warp(sys_handle, ship_id, char_id);
     Ok(())
 }
 
@@ -863,7 +863,7 @@ pub(crate) async fn execute_subwarp_goto_point(
             ..
         }
     ) {
-        crate::services::space_destiny::clear_warp_tracking(ctx, None, ship_id);
+        crate::services::space_destiny::clear_warp_tracking(sys_handle, ship_id);
     }
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx, char_id, sys_id, ship_id, None,
@@ -1171,7 +1171,7 @@ pub async fn handle_use_warp_vector(
     );
     on_warp_initiated_hooks_with_options(ctx, &sys_handle, char_id, ship_id, sys_id, false).await;
 
-    crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);
+    crate::services::space_destiny::track_player_or_fleet_warp(&sys_handle, ship_id, char_id);
 
     let align_dir = (dest_pos - ship_ball.position).normalize_or_zero();
     let entry_speed = (ship_ball.max_velocity * 0.75).max(1.0);

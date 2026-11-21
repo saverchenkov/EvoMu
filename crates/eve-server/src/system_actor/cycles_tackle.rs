@@ -2039,8 +2039,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
     celestials::clear_landed_warp_tracking_from_events(
         exec_ctx.ballpark,
         &events,
-        &mut exec_ctx.actor_st.warp_provenance,
-        &exec_ctx.actor_st.warp_tracking,
+        &mut exec_ctx.actor_st.warp_state,
     );
     cycles::flush_target_lost_notifications(
         exec_ctx.ballpark,

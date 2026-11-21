@@ -1168,12 +1168,12 @@ async fn cmd_stargate_jump_allows_arriving_warp_at_gate_and_rejects_non_arriving
             },
         )
         .await;
-    ctx.active_warps.lock().unwrap().insert(ship_id, gate.stargate_id);
+    handle.insert_active_warp_for_test(ship_id, gate.stargate_id);
     call_beyonce(&ctx, &mut sess, None, "CmdStargateJump", &[PyRep::Integer(gate.stargate_id)], &kw)
         .await
         .expect("arriving warp within gate jump range must jump");
     assert_eq!(sess.solar_system_id, Some(gate.to_solar_system_id));
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!handle.is_active_warp(ship_id));
 
     // (a2) Arriving warp in WarpPhase::Decelerating within <= 1.0 s of destination outside gate_radius + 2_500.0 succeeds
     ctx.db.clock().advance_secs(60);
@@ -1196,12 +1196,12 @@ async fn cmd_stargate_jump_allows_arriving_warp_at_gate_and_rejects_non_arriving
             },
         )
         .await;
-    ctx.active_warps.lock().unwrap().insert(ship_id, gate.stargate_id);
+    handle.insert_active_warp_for_test(ship_id, gate.stargate_id);
     call_beyonce(&ctx, &mut sess, None, "CmdStargateJump", &[PyRep::Integer(gate.stargate_id)], &kw)
         .await
         .expect("decelerating warp finishing within <= 1s at gate must jump");
     assert_eq!(sess.solar_system_id, Some(gate.to_solar_system_id));
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!handle.is_active_warp(ship_id));
 
     // (b1) Wrong warp destination still returns ShipInWarp
     ctx.db.clock().advance_secs(60);

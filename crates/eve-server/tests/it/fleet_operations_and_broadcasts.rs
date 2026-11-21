@@ -271,7 +271,8 @@ async fn test_fleet_warp_member_update_state_mid_tunnel_preserves_warp_and_clear
     assert_eq!(fw_kv.get("status").and_then(|s| s.as_str()), Some("FleetWarpInitiated"));
 
     {
-        let warps = ctx.active_warps.lock().unwrap();
+        let view = sys.view();
+        let warps = &view.active_warps;
         assert_eq!(warps.get(&ship1), Some(&PILOT_1));
         assert_eq!(warps.get(&ship2), Some(&PILOT_2));
     }
@@ -339,7 +340,8 @@ async fn test_fleet_warp_member_update_state_mid_tunnel_preserves_warp_and_clear
 
     // Active-warp tracking is pruned cleanly immediately upon landing.
     {
-        let warps = ctx.active_warps.lock().unwrap();
+        let view = sys.view();
+        let warps = &view.active_warps;
         assert!(!warps.contains_key(&ship1));
         assert!(!warps.contains_key(&ship2));
     }
@@ -360,7 +362,7 @@ async fn test_fleet_warp_member_update_state_mid_tunnel_preserves_warp_and_clear
     .expect("post-landing UpdateStateRequest");
     let post_notes = ctx.drain_notifications_for_char(PILOT_2);
     assert!(post_notes.iter().any(|n| n.event == "OnWarpFinished"));
-    assert!(!ctx.pending_warp_finished.lock().unwrap().contains(&ship2));
+    assert!(!sys.is_pending_warp_finished(ship2));
 
     ctx.dispatch_rpc(
         &mut s2,

@@ -287,8 +287,7 @@ pub(crate) fn apply_set_movement_mode_command(
     ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     ball_space_entry_epochs: &HashMap<BallId, u64>,
-    warp_provenance: &mut HashMap<BallId, WarpProvenance>,
-    warp_tracking: &SharedWarpTracking,
+    warp_state: &mut ActorWarpState,
 ) -> Result<u64, String> {
     if !ballpark.balls.contains_key(&ball_id) {
         return Err(format!("Ball {ball_id} not in system {solar_system_id}"));
@@ -349,20 +348,16 @@ pub(crate) fn apply_set_movement_mode_command(
                         if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
                             cs.is_emergency_warping = false;
                         }
+                    } else {
+                        warp_state.clear_ball(ball_id, false);
                     }
-                    warp_provenance.insert(ball_id, prov);
-                    if let Some(ref pending) = warp_tracking.pending_warp_finished {
-                        pending
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&ball_id);
-                    }
+                    warp_state.provenance.insert(ball_id, prov);
+                    warp_state.pending_warp_finished.remove(&ball_id);
                 } else {
-                    warp_provenance.remove(&ball_id);
+                    warp_state.provenance.remove(&ball_id);
                 }
             } else {
-                warp_provenance.remove(&ball_id);
-                celestials::clear_shared_warp_tracking(warp_tracking, ball_id, was_warping);
+                warp_state.clear_ball(ball_id, was_warping);
             }
             persist_ball_positions_in_db(ballpark, &[ball_id], db_opt, ball_space_entry_epochs);
             Ok(ballpark.current_tick)
@@ -393,8 +388,7 @@ fn run_set_movement_mode_from_ctx(
         exec_ctx.ball_positions_actor,
         exec_ctx.scrambled_balls_actor,
         &exec_ctx.actor_st.ball_space_entry_epochs,
-        &mut exec_ctx.actor_st.warp_provenance,
-        &exec_ctx.actor_st.warp_tracking,
+        &mut exec_ctx.actor_st.warp_state,
     )
 }
 
