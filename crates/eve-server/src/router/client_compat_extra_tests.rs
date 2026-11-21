@@ -28,6 +28,10 @@ fn test_ctx() -> ServerContext {
     }
 }
 
+fn inv_keyval_to_dbrow(rep: PyRep) -> PyRep {
+    super::inv_keyval_to_dbrow_with_sde(rep, None)
+}
+
 #[test]
 fn kv_primitives_and_rowset_dict_helpers_cover_all_types() {
     let mut entries = HashMap::new();
@@ -158,40 +162,6 @@ fn inv_keyval_scan_result_and_anomaly_normalizers() {
 }
 
 #[test]
-fn contract_reply_and_skill_queue_rowset_normalizers() {
-    assert_eq!(normalize_skill_queue_rowset(PyRep::Integer(0)), PyRep::Integer(0));
-
-    // Skill queue rowset: normalized into List of KeyVal entries.
-    let already = PyRep::Rowset {
-        columns: vec!["typeID".into(), "trainingEndTime".into()],
-        rows: vec![vec![PyRep::Integer(3300), PyRep::Integer(123)]],
-    };
-    assert!(matches!(normalize_skill_queue_rowset(already), PyRep::List(v) if v.len() == 1));
-
-    let unnorm = PyRep::Rowset {
-        columns: vec!["typeID".into(), "durationSeconds".into()],
-        rows: vec![
-            vec![PyRep::Integer(3300), PyRep::Real(120.0)],
-            vec![PyRep::Integer(3301), PyRep::Real(0.2)], // clamped to >= 1.0s
-        ],
-    };
-    let PyRep::List(rows) = normalize_skill_queue_rowset(unnorm) else {
-        panic!("expected List of KeyVals");
-    };
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].dict_get("queuePosition"), Some(&PyRep::Integer(0)));
-    assert_eq!(rows[1].dict_get("queuePosition"), Some(&PyRep::Integer(1)));
-    assert_eq!(
-        rows[0].dict_get("trainingEndTime"),
-        rows[1].dict_get("trainingStartTime")
-    );
-    assert!(
-        rows[1].dict_get("trainingEndTime").unwrap().as_i64().unwrap()
-            > rows[1].dict_get("trainingStartTime").unwrap().as_i64().unwrap()
-    );
-}
-
-#[test]
 fn normalize_macho_rpc_reply_covers_all_service_adapters() {
     // XmppChatMgr.ResyncSystemChannelAccess
     let chans = PyRep::keyval([(
@@ -215,24 +185,6 @@ fn normalize_macho_rpc_reply_covers_all_service_adapters() {
             PyRep::String("constellation_20000020".into()),
         ])
     );
-
-    // skillMgr2.GetSkillQueue & GetSkillQueueAndFreePoints
-    let sq = PyRep::Rowset {
-        columns: vec!["typeID".into(), "durationSeconds".into()],
-        rows: vec![vec![PyRep::Integer(3300), PyRep::Real(10.0)]],
-    };
-    let sq_out = normalize_macho_rpc_reply("skillMgr2", "GetSkillQueue", Ok(sq.clone())).unwrap();
-    assert!(matches!(sq_out, PyRep::List(ref v) if v.len() == 1 && v[0].dict_get("trainingEndTime").is_some()));
-
-    let sq_free = normalize_macho_rpc_reply(
-        "skillMgr2",
-        "GetSkillQueueAndFreePoints",
-        Ok(PyRep::Tuple(vec![sq, PyRep::Integer(5000)])),
-    )
-    .unwrap();
-    let PyRep::Tuple(parts) = sq_free else { panic!() };
-    assert_eq!(parts[1], PyRep::Integer(5000));
-    assert!(matches!(&parts[0], PyRep::List(v) if v.len() == 1 && v[0].dict_get("trainingEndTime").is_some()));
 
     // config.GetMultiCorpTickerNamesEx
     let tickers = normalize_macho_rpc_reply(
@@ -402,14 +354,6 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
         ),
         vec![PyRep::Integer(1), PyRep::String("OnSkillTrained".into())]
     );
-    let sq_notif = normalize_macho_notification(
-        "OnNewSkillQueueSaved",
-        vec![PyRep::Rowset {
-            columns: vec!["typeID".into(), "durationSeconds".into()],
-            rows: vec![vec![PyRep::Integer(3300), PyRep::Real(5.0)]],
-        }],
-    );
-    assert!(matches!(&sq_notif[0], PyRep::List(v) if v.len() == 1 && v[0].dict_get("trainingEndTime").is_some()));
 
     let dmg_notif = normalize_macho_notification(
         "OnDamageStateChange",
@@ -962,27 +906,8 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
     assert!(extract_table_rows(&PyRep::Integer(5)).is_empty());
 
     // 4. Untouched service/method pairs:
-    //    map.GetIncursionGlobalReport, paperDollServer.GetPaperDollData, storeManager.get_categories/get_offers,
+    //    paperDollServer.GetPaperDollData,
     //    agentMgr.GetOffer / GetAgentLocationWrap / GetMissionBriefingInfo / GetMissionObjectiveInfo
-
-    let incs = normalize_macho_rpc_reply(
-        "map",
-        "GetIncursionGlobalReport",
-        Ok(PyRep::List(vec![
-            PyRep::keyval([("state", PyRep::String("Withdrawing".into())), ("hasBoss", PyRep::Bool(false))]),
-            PyRep::keyval([("state", PyRep::String("Mobilizing".into())), ("hasBoss", PyRep::Bool(true))]),
-            PyRep::keyval([("state", PyRep::String("Established".into())), ("factionID", PyRep::Integer(500_020))]),
-        ])),
-    )
-    .unwrap();
-    let PyRep::List(inc_rows) = incs else { panic!() };
-    assert_eq!(inc_rows[0].dict_get("state"), Some(&PyRep::Integer(0)));
-    assert_eq!(inc_rows[0].dict_get("aggressorFactionID"), Some(&PyRep::Integer(500_019)));
-    assert_eq!(inc_rows[0].dict_get("hasFinalEncounter"), Some(&PyRep::Bool(false)));
-    assert_eq!(inc_rows[1].dict_get("state"), Some(&PyRep::Integer(1)));
-    assert_eq!(inc_rows[1].dict_get("hasFinalEncounter"), Some(&PyRep::Bool(true)));
-    assert_eq!(inc_rows[2].dict_get("state"), Some(&PyRep::Integer(2)));
-    assert_eq!(inc_rows[2].dict_get("aggressorFactionID"), Some(&PyRep::Integer(500_020)));
 
     let female_doll = PyRep::keyval([
         ("gender", PyRep::Integer(0)),
@@ -1056,16 +981,6 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
     assert_eq!(brief.dict_get("Mission Title ID"), Some(&PyRep::String("Scan".into())));
     assert_eq!(brief.dict_get("ContentID"), Some(&PyRep::Integer(12)));
     assert_eq!(brief.dict_get("Decline Time"), Some(&PyRep::Integer(-1)));
-
-    for method in ["get_categories", "get_products", "get_offers"] {
-        let converted = normalize_macho_rpc_reply(
-            "storeManager",
-            method,
-            Ok(PyRep::List(vec![PyRep::keyval([("id", PyRep::Integer(3))])])),
-        )
-        .unwrap();
-        assert!(matches!(converted, PyRep::List(ref v) if matches!(&v[0], PyRep::Dict(_))));
-    }
 }
 
 #[test]

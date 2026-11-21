@@ -92,13 +92,16 @@ async fn station_lookup_guests_and_standing_error_branches() {
         "SolarSystemNotFound"
     );
 
-    // GetSolarSystem: Upwell structure ID >= 60_000_000 resolves to solarSystemID integer
+    // GetSolarSystem: Upwell structure ID >= 60_000_000 resolves to KeyVal(solarSystemID, factionID)
     assert_eq!(
         handle(&ctx, &mut sess, "stationSvc", "GetSolarSystem", &[PyRep::Integer(st_id)], &kw)
             .await
             .unwrap()
             .unwrap(),
-        PyRep::Integer(jita_sys as i64)
+        PyRep::keyval([
+            ("solarSystemID", PyRep::Integer(jita_sys as i64)),
+            ("factionID", PyRep::None),
+        ])
     );
 
     // GetSolarSystem: fallback to session.solar_system_id

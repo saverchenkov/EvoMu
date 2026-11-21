@@ -207,9 +207,15 @@ async fn station_metadata_guests_standing_and_service_check() {
     let owned_st = call_station(&ctx, &mut sess, "stationSvc", "GetStationsForOwner", &[PyRep::Integer(corp_id)]).await.unwrap();
     assert!(matches!(&owned_st, PyRep::List(v) if v.len() == 1));
 
-    // GetSolarSystem: station ID -> integer solarSystemID, missing station -> err, sys ID -> KeyVal
+    // GetSolarSystem: station ID -> KeyVal(solarSystemID, factionID), missing station -> err, sys ID -> KeyVal
     let sol_from_st = call_station(&ctx, &mut sess, "stationSvc", "GetSolarSystem", &[PyRep::Integer(station_id)]).await.unwrap();
-    assert_eq!(sol_from_st, PyRep::Integer(sys_id as i64));
+    assert_eq!(
+        sol_from_st,
+        PyRep::keyval([
+            ("solarSystemID", PyRep::Integer(sys_id as i64)),
+            ("factionID", PyRep::None),
+        ])
+    );
     assert_eq!(
         call_station(&ctx, &mut sess, "stationSvc", "GetSolarSystem", &[PyRep::Integer(69_999_999)])
             .await

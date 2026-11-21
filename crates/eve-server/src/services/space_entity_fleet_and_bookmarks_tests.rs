@@ -347,8 +347,11 @@ async fn bookmarks_self_destruct_corp_transfer_turbo_dock_and_telemetry() {
     let xfer = handle(&ctx, &mut sess, None, "beyonce", "CmdTransferCorpAssetOwnership", &[PyRep::Integer(struct_id), PyRep::Integer(corp_b)], &HashMap::new()).await.unwrap().unwrap();
     assert_eq!(kv_field(&xfer, "ownerID").and_then(|v| v.as_i64()), Some(corp_b));
 
-    let ratio = handle(&ctx, &mut sess, None, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_id)], &HashMap::new()).await.unwrap().unwrap().as_f64().unwrap();
-    assert!((ratio - 0.05).abs() < 1e-6);
+    let siphon_rep = handle(&ctx, &mut sess, None, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_id)], &HashMap::new()).await.unwrap().unwrap();
+    let cap = kv_field(&siphon_rep, "capacity").and_then(|v| v.as_f64()).unwrap();
+    let used = kv_field(&siphon_rep, "used").and_then(|v| v.as_f64()).unwrap();
+    assert_eq!(cap, 1_000.0);
+    assert!((used / cap - 0.05).abs() < 1e-6);
     assert!(handle(&ctx, &mut sess, None, "beyonce", "GetContainerExpiryDate", &[PyRep::Integer(siphon_id)], &HashMap::new()).await.unwrap().unwrap().as_i64().unwrap() > 0);
     assert_eq!(
         handle(&ctx, &mut sess, None, "beyonce", "GetOperationSpawnpointPosition", &[PyRep::Integer(struct_id)], &HashMap::new()).await.unwrap().unwrap(),

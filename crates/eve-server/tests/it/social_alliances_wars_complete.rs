@@ -364,9 +364,12 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     let for_hq = call(&ctx, &mut sess2, "warsInfoMgr", "GetWarsForStructure", vec![PyRep::Integer(995_000_001)]).await.unwrap();
     assert!(war_field(&for_hq, war_id, "warID").is_some());
     ctx.advance_secs(86_401);
-    let public = call(&ctx, &mut sess3, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(war_id)]).await.unwrap();
-    assert_eq!(field(&public, "againstID"), PyRep::Integer(def));
-    assert_eq!(field(&public, "combatActive"), PyRep::Bool(true), "active after 24h");
+    let PyRep::List(public_list) = call(&ctx, &mut sess3, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(war_id)]).await.unwrap() else {
+        panic!("expected List from GetPublicWarInfo");
+    };
+    let public = &public_list[0];
+    assert_eq!(field(public, "againstID"), PyRep::Integer(def));
+    assert_eq!(field(public, "combatActive"), PyRep::Bool(true), "active after 24h");
 
     // corp-ally-cost: SDE baseDefenderAllyCost (attr 1820) reduced by Diplomatic Relations (attr 1821 per level).
     assert_eq!(call(&ctx, &mut sess2, "corpRegistry", "CharGetAllyBaseCost", vec![]).await.unwrap(), PyRep::Real(10_000_000.0));
@@ -402,11 +405,15 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     let km2 = eve_server::services::combat_crimewatch::process_ship_destruction_with_aggression(
         &ctx, 90_000_001, 100_000_001, 603, 90_000_002, 587, 30_000_142, glam::DVec3::ZERO, false,
     );
-    let base = call(&ctx, &mut sess1, "warStatisticMgr", "GetBaseInfo", vec![PyRep::Integer(war_id)]).await.unwrap();
-    assert_eq!(field(&base, "killsForAggressor"), PyRep::Integer(1));
-    assert_eq!(field(&base, "killsForDefender"), PyRep::Integer(1));
-    assert!(field(&base, "iskDestroyedByAggressor").as_f64().unwrap() > 0.0);
-    assert!(field(&base, "iskDestroyedByDefender").as_f64().unwrap() > 0.0);
+    let PyRep::Tuple(base_parts) = call(&ctx, &mut sess1, "warStatisticMgr", "GetBaseInfo", vec![PyRep::Integer(war_id)]).await.unwrap() else {
+        panic!("expected 4-tuple from GetBaseInfo");
+    };
+    assert_eq!(base_parts.len(), 4);
+    let base = &base_parts[0];
+    assert_eq!(field(base, "killsForAggressor"), PyRep::Integer(1));
+    assert_eq!(field(base, "killsForDefender"), PyRep::Integer(1));
+    assert!(field(base, "iskDestroyedByAggressor").as_f64().unwrap() > 0.0);
+    assert!(field(base, "iskDestroyedByDefender").as_f64().unwrap() > 0.0);
     let (_, krows) = rows(&call(&ctx, &mut sess1, "warStatisticMgr", "GetKills", vec![PyRep::Integer(war_id)]).await.unwrap());
     assert_eq!(krows.len(), 2);
     let frigate_group = ctx.sde.types[&587].group_id as i64;
@@ -426,9 +433,11 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     assert_eq!(field(&acc, "timeFinished"), PyRep::Integer(accepted_at + 86_400));
     assert_eq!(field(&acc, "peaceTreatyExpiry"), PyRep::Integer(accepted_at + 86_400 + 14 * 86_400));
     assert_eq!(corp_wallet(&ctx, agg), 950_000_000.0, "surrender ISK paid to the aggressor");
-    assert_eq!(field(&call(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(war_id)]).await.unwrap(), "active"), PyRep::Bool(true));
+    let PyRep::List(pre_war_end) = call(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(war_id)]).await.unwrap() else { panic!("expected List") };
+    assert_eq!(field(&pre_war_end[0], "active"), PyRep::Bool(true));
     ctx.advance_secs(86_401);
-    assert_eq!(field(&call(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(war_id)]).await.unwrap(), "active"), PyRep::Bool(false));
+    let PyRep::List(post_war_end) = call(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(war_id)]).await.unwrap() else { panic!("expected List") };
+    assert_eq!(field(&post_war_end[0], "active"), PyRep::Bool(false));
     let PyRep::Tuple(treaties_tuple) = call(&ctx, &mut sess1, "peaceTreatyMgr", "GetPeaceTreatiesForSession", vec![]).await.unwrap() else {
         panic!("expected (outgoing, incoming) tuple from GetPeaceTreatiesForSession");
     };
@@ -457,7 +466,8 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     });
     let war3 = field(&call(&ctx, &mut sess1, "corpRegistry", "DeclareWarAgainst", declare(995_000_001)).await.expect("third war"), "warID").as_i64().unwrap();
     ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&995_000_001).unwrap().state = "Destroyed".into());
-    assert_eq!(field(&call(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(war3)]).await.unwrap(), "active"), PyRep::Bool(false));
+    let PyRep::List(war3_info) = call(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(war3)]).await.unwrap() else { panic!("expected List") };
+    assert_eq!(field(&war3_info[0], "active"), PyRep::Bool(false));
 
     // mutual-war: invite, response requires a pending invite, accepted war is mutual.
     assert_eq!(call(&ctx, &mut sess3, "mutualWarInviteMgr", "RespondToInviteByPlayer", vec![PyRep::Integer(agg), PyRep::Bool(true)]).await.expect_err("no invite").code, "MutualWarInviteNotFound");
@@ -466,13 +476,15 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     assert_eq!(pend, vec![vec![PyRep::Integer(agg), PyRep::Integer(ally), PyRep::Integer(ctx.now_unix() as i64)]]);
     let resp = call(&ctx, &mut sess3, "mutualWarInviteMgr", "RespondToInviteByPlayer", vec![PyRep::Integer(agg), PyRep::Bool(true)]).await.unwrap();
     let mwar = field(&resp, "warID").as_i64().unwrap();
-    let minfo = call(&ctx, &mut sess3, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(mwar)]).await.unwrap();
-    assert_eq!(field(&minfo, "mutual"), PyRep::Bool(true));
-    assert_eq!(field(&minfo, "active"), PyRep::Bool(true));
+    let PyRep::List(minfo_list) = call(&ctx, &mut sess3, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(mwar)]).await.unwrap() else { panic!("expected List") };
+    let minfo = &minfo_list[0];
+    assert_eq!(field(minfo, "mutual"), PyRep::Bool(true));
+    assert_eq!(field(minfo, "active"), PyRep::Bool(true));
     let ret = call(&ctx, &mut sess3, "warsInfoMgr", "RetractMutualWar", vec![PyRep::Integer(mwar)]).await.unwrap();
     assert_eq!(field(&ret, "timeFinished"), PyRep::Integer(ctx.now_unix() as i64 + 86_400));
     ctx.advance_secs(86_401);
-    assert_eq!(field(&call(&ctx, &mut sess3, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(mwar)]).await.unwrap(), "active"), PyRep::Bool(false));
+    let PyRep::List(mwar_end) = call(&ctx, &mut sess3, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(mwar)]).await.unwrap() else { panic!("expected List") };
+    assert_eq!(field(&mwar_end[0], "active"), PyRep::Bool(false));
 }
 
 

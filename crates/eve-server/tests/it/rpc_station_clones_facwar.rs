@@ -175,7 +175,13 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     )
     .await
     .expect("stationSvc.GetSolarSystem by station ID");
-    assert_eq!(sys_for_st, PyRep::Integer(SYS_JITA as i64));
+    assert_eq!(
+        sys_for_st,
+        PyRep::keyval([
+            ("solarSystemID", PyRep::Integer(SYS_JITA as i64)),
+            ("factionID", PyRep::None),
+        ])
+    );
 
     let sys_info = rpc(
         &ctx,
@@ -191,6 +197,7 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     };
     assert_eq!(sys_kv.get("solarSystemID"), Some(&PyRep::Integer(SYS_JITA as i64)));
     assert_eq!(sys_kv.get("solarSystemName"), Some(&PyRep::String("Jita".into())));
+    assert_eq!(sys_kv.get("factionID"), Some(&PyRep::None));
 
     let err_sys = rpc(
         &ctx,

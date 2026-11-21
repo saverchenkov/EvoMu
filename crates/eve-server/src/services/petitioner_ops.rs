@@ -620,7 +620,7 @@ fn handle_petitioner(
             let mut parent_dict = Vec::new();
             let mut child_map: HashMap<i64, Vec<(PyRep, PyRep)>> = HashMap::new();
             let mut desc_dict = Vec::new();
-            let mut billing_list = Vec::new();
+            let mut billing_dict = Vec::new();
             for &(id, pid, name, desc, is_billing) in CANONICAL_PETITION_CATEGORIES {
                 let entry = PyRep::Tuple(vec![PyRep::String(name.into()), PyRep::String("EN".into())]);
                 if pid == 0 {
@@ -631,7 +631,10 @@ fn handle_petitioner(
                 }
                 desc_dict.push((PyRep::Integer(id), PyRep::String(desc.into())));
                 if is_billing {
-                    billing_list.push(PyRep::Integer(id));
+                    billing_dict.push((
+                        PyRep::Integer(id),
+                        PyRep::Tuple(vec![PyRep::String(String::new()), PyRep::String(format!("Category/{id}"))]),
+                    ));
                 }
             }
             let mut child_dict: Vec<(PyRep, PyRep)> = child_map
@@ -643,7 +646,7 @@ fn handle_petitioner(
                 PyRep::Dict(parent_dict),
                 PyRep::Dict(child_dict),
                 PyRep::Dict(desc_dict),
-                PyRep::List(billing_list),
+                PyRep::Dict(billing_dict),
             ])))
         }
         "GetCategoryProperties" => {

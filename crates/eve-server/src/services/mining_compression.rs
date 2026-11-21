@@ -970,7 +970,7 @@ pub fn handle_structure_compression_mgr(
                 }
             }
             let eff = compute_gas_decompression_efficiency(ctx, char_id, session.structure_id);
-            Some(Ok(PyRep::Real(eff)))
+            Some(Ok(PyRep::Tuple(vec![PyRep::Real(eff), PyRep::Real(eff)])))
         }
 
         _ => None,

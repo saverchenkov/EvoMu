@@ -3137,11 +3137,11 @@ async fn test_mobile_scan_inhibitor_and_mobile_siphon_unit_end_to_end() {
         .expect("Anchor Mobile Siphon Unit within 150 km of Starbase Silo");
 
     ctx.advance_secs(7_265);
-    let fill_ratio = rpc(&ctx, &mut looter_sess, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_id)])
+    let siphon_rep = rpc(&ctx, &mut looter_sess, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_id)])
         .await
-        .expect("GetCapacityOfSiphon")
-        .as_f64()
-        .unwrap();
+        .expect("GetCapacityOfSiphon");
+    let fill_ratio = siphon_rep.dict_get("used").and_then(|v| v.as_f64()).unwrap()
+        / siphon_rep.dict_get("capacity").and_then(|v| v.as_f64()).unwrap();
     assert!(fill_ratio > 0.0, "Siphon fill ratio must be > 0 after 2 cycles");
 
     let (rem_raw, rem_pro, athanor_personal, athanor_corp, stolen_items) = ctx.db.with_snapshot(|s| {

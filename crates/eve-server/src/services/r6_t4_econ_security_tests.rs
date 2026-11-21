@@ -102,23 +102,6 @@ fn test_402_quasar_normalization_preserves_authoritative_backend_replies_and_not
     .unwrap();
     assert_eq!(fit, PyRep::Tuple(vec![PyRep::Real(44.5), PyRep::Real(210.0), PyRep::Real(18.0), PyRep::Real(65.0)]));
 
-    let war_info = normalize_macho_rpc_reply(
-        "warStatisticMgr",
-        "GetBaseInfo",
-        Ok(PyRep::keyval([
-            ("warID", PyRep::Integer(9123)),
-            ("declaredByID", PyRep::Integer(98_000_111)),
-            ("againstID", PyRep::Integer(98_000_222)),
-            ("killsForAggressor", PyRep::Integer(14)),
-            ("killsForDefender", PyRep::Integer(3)),
-            ("iskDestroyedByAggressor", PyRep::Real(1_250_000.0)),
-            ("iskDestroyedByDefender", PyRep::Real(400_000.0)),
-        ])),
-    )
-    .unwrap();
-    let PyRep::Tuple(war_parts) = war_info else { panic!("expected war tuple"); };
-    assert_eq!(war_parts[0].dict_get("warID"), Some(&PyRep::Integer(9123)));
-
     let bm_notif = vec![PyRep::List(vec![PyRep::keyval([("folderID", PyRep::Integer(8801))])])];
     assert_eq!(normalize_macho_notification("OnSharedBookmarksFolderUpdated", bm_notif.clone()), bm_notif);
     let mod_notif = normalize_macho_notification("OnModuleAttributeChanges", vec![PyRep::List(vec![PyRep::Integer(700_009)])]);

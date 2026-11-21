@@ -983,7 +983,7 @@ pub(super) fn handle_wars(
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
             let row = war_row(&w, &meta, now);
-            Some(Ok(PyRep::keyval(WAR_COLUMNS.iter().copied().zip(row))))
+            Some(Ok(PyRep::List(vec![PyRep::keyval(WAR_COLUMNS.iter().copied().zip(row))])))
         }
 
         ("warsInfoMgr" | "warRegistry", "CreateSurrenderNegotiation" | "CreateWarAllyOffer") => {
@@ -1800,7 +1800,15 @@ pub(super) fn handle_wars(
                 ("iskDestroyedByAggressor", PyRep::Real(isk_agg)),
                 ("iskDestroyedByDefender", PyRep::Real(isk_def)),
             ]);
-            Some(Ok(war_kv))
+            let ships_killed = PyRep::Dict(vec![
+                (PyRep::Integer(agg_id), PyRep::Integer(k_agg)),
+                (PyRep::Integer(def_id), PyRep::Integer(k_def)),
+            ]);
+            let isk_killed = PyRep::Dict(vec![
+                (PyRep::Integer(agg_id), PyRep::Real(isk_agg)),
+                (PyRep::Integer(def_id), PyRep::Real(isk_def)),
+            ]);
+            Some(Ok(PyRep::Tuple(vec![war_kv, ships_killed, isk_killed, allies_dict])))
         }
 
         ("warStatisticMgr", "GetKills") | ("warStatisticMgr", "GetKillsByGroup") => {
