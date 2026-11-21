@@ -88,7 +88,7 @@ fn seed_pilot_and_structure(
     is_ceo: bool,
 ) {
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = CorporationRecord::default();
+        let corp = snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = CorporationRecord::default();
             __corp.corporation_id = corp_id;
             __corp.name = format!("Corp {corp_id}");
             __corp.ticker = "CTL".into();
@@ -98,6 +98,7 @@ fn seed_pilot_and_structure(
             __corp.members = std::collections::HashSet::from([char_id]);
             __corp.set_division_balance(1, IskCents(0));
             __corp });
+        corp.members.insert(char_id);
         let mut ch = snap.characters.values().next().cloned().expect("demo char");
         ch.character_id = char_id;
         ch.user_id = char_id as u64;

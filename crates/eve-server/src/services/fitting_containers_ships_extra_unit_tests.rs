@@ -1789,3 +1789,937 @@ async fn validate_item_can_be_opened_accepts_dbrow_keyval_and_rejects_out_of_ran
         "ItemNotFound"
     );
 }
+
+fn temp_1180_sqlite_path(tag: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let p = std::env::temp_dir().join(format!(
+        "evomu_1180_{tag}_{}_{}.sqlite",
+        std::process::id(),
+        nanos
+    ));
+    cleanup_sqlite_files(&p);
+    p
+}
+
+fn cleanup_sqlite_files(db_path: &std::path::Path) {
+    let _ = std::fs::remove_file(db_path);
+    let wal = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+    let shm = std::path::PathBuf::from(format!("{}-shm", db_path.display()));
+    let _ = std::fs::remove_file(wal);
+    let _ = std::fs::remove_file(shm);
+}
+
+fn make_station_session(ctx: &ServerContext, conn_id: u64, char_id: i64, ship_id: i64) -> SessionState {
+    let mut sess = SessionState::new(conn_id);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(98_000_001);
+    sess.station_id = Some(60_003_760);
+    sess.solar_system_id = Some(30_000_142);
+    sess.ship_id = Some(ship_id);
+    ctx.sync_session(&mut sess);
+    sess
+}
+
+fn seed_demo_char_into_repo(repo: &eve_db::WorldRepository, char_id: i64, station_id: i64, ship_id: i64) {
+    let seed = eve_db::WorldRepository::with_demo_seed();
+    let (mut ch, corp_opt) = seed.with_snapshot(|s| {
+        (
+            s.characters[&90_000_001].clone(),
+            s.corporations.get(&98_000_001).cloned(),
+        )
+    });
+    ch.character_id = char_id;
+    ch.user_id = 1;
+    ch.corporation_id = 98_000_001;
+    ch.station_id = Some(station_id);
+    ch.structure_id = None;
+    ch.solar_system_id = 30_000_142;
+    ch.balance = eve_db::IskCents::from_f64_isk(100_000_000.0);
+    ch.active_ship_id = ship_id;
+    repo.with_mut_snapshot(|snap| {
+        snap.characters.insert(char_id, ch);
+        if let Some(corp) = corp_opt {
+            snap.corporations.insert(corp.corporation_id, corp);
+        }
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn container_ship_per_entity_concurrent_ops_and_sqlite_reload_preserve_all_updates() {
+    let db_path = temp_1180_sqlite_path("concurrency");
+    let char_id = 90_000_001i64;
+    let station_id = 60_003_760i64;
+    let ship_a = 100_000_001i64;
+    let ship_b = 100_000_002i64;
+    let container_a = 950_100_001i64;
+    let container_b = 950_100_002i64;
+
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let repo1 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite repo1"));
+    seed_demo_char_into_repo(&repo1, char_id, station_id, ship_a);
+    let ctx1 = Arc::new(ServerContext::with_sde_and_repository(sde.clone(), repo1.clone()));
+    ctx1.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_a,
+            mk_item(ship_a, 587, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            ship_b,
+            mk_item(ship_b, 587, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            container_a,
+            mk_item(container_a, 17_366, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            container_b,
+            mk_item(container_b, 17_366, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        set_container_password_snap(snap, container_a, 1, "secret-a", 100).unwrap();
+        set_container_config_snap(
+            snap,
+            container_a,
+            &ContainerConfig {
+                lock_by_default: false,
+                password_per_action: true,
+                config_bitmask: 2,
+            },
+            100,
+        )
+        .unwrap();
+    });
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let mut sess_a = make_station_session(&ctx1, 91_601, char_id, ship_a);
+    let sess_b = make_station_session(&ctx1, 91_602, char_id, ship_a);
+    let mut sess_c = make_station_session(&ctx1, 91_603, char_id, ship_a);
+
+    let ctx_a = ctx1.clone();
+    let b_a = barrier.clone();
+    let task_a = tokio::spawn(async move {
+        let kw = HashMap::new();
+        b_a.wait().await;
+        let err = handle_containers_ships_and_fitting(
+            &ctx_a,
+            &mut sess_a,
+            None,
+            "invbroker",
+            "ALSCLogGet",
+            &[PyRep::Integer(container_a), PyRep::String("wrong-pw".into())],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect_err("wrong password must fail");
+        assert_eq!(err.code, "ALSCPasswordNeededToViewAuditLog");
+    });
+
+    let ctx_b = ctx1.clone();
+    let b_b = barrier.clone();
+    let task_b = tokio::spawn(async move {
+        let kw = HashMap::new();
+        b_b.wait().await;
+        super::notify_emitters_fleet_combat::handle_set_password(
+            &ctx_b,
+            &sess_b,
+            None,
+            "SetPassword",
+            &[
+                PyRep::Integer(container_b),
+                PyRep::Integer(1),
+                PyRep::String("pw-b".into()),
+            ],
+            &kw,
+        )
+        .await
+        .expect("SetPassword on container_b must succeed");
+    });
+
+    let ctx_c = ctx1.clone();
+    let b_c = barrier.clone();
+    let task_c = tokio::spawn(async move {
+        let kw = HashMap::new();
+        b_c.wait().await;
+        let res = crate::services::inventory_fitting::fitting_saved_multifit::handle_ships_and_services(
+            &ctx_c,
+            &mut sess_c,
+            None,
+            "insuranceSvc",
+            "InsureShip",
+            &[PyRep::Integer(ship_b), PyRep::Real(1.0)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("InsureShip on ship_b must succeed");
+        assert_ne!(res, PyRep::None);
+    });
+
+    let (ra, rb, rc) = tokio::join!(task_a, task_b, task_c);
+    ra.unwrap();
+    rb.unwrap();
+    rc.unwrap();
+
+    ctx1.db.with_snapshot(|snap| {
+        assert!(
+            container_alsc_logs_snap(snap, container_a)
+                .iter()
+                .any(|e| e.action == "ALSCActionPasswordFailure"),
+            "failed ALSCLogGet on container_a must persist failure log despite concurrent ops"
+        );
+        assert_eq!(container_password_snap(snap, container_b, 1).as_deref(), Some("pw-b"));
+        assert!(
+            container_alsc_logs_snap(snap, container_b)
+                .iter()
+                .any(|e| e.action == "ALSCActionSetPassword")
+        );
+        assert!(snap.insurance_contracts.contains_key(&ship_b));
+        assert!(!snap.owner_notes.contains_key(&-8_400_000_000_000));
+    });
+
+    drop(ctx1);
+    drop(repo1);
+
+    let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite repo2"));
+    let ctx2 = ServerContext::with_sde_and_repository(sde, repo2.clone());
+    ctx2.db.with_snapshot(|snap| {
+        assert!(
+            container_alsc_logs_snap(snap, container_a)
+                .iter()
+                .any(|e| e.action == "ALSCActionPasswordFailure")
+        );
+        assert_eq!(container_password_snap(snap, container_b, 1).as_deref(), Some("pw-b"));
+        assert!(snap.insurance_contracts.contains_key(&ship_b));
+    });
+
+    drop(ctx2);
+    drop(repo2);
+    cleanup_sqlite_files(&db_path);
+}
+
+#[tokio::test]
+async fn alsc_30000_failed_password_attempts_stay_bounded_without_row_limit() {
+    let db_path = temp_1180_sqlite_path("bounded_30k");
+    let char_id = 90_000_001i64;
+    let station_id = 60_003_760i64;
+    let ship_id = 100_000_001i64;
+    let container_a = 950_200_001i64;
+
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let repo1 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite repo1"));
+    seed_demo_char_into_repo(&repo1, char_id, station_id, ship_id);
+    let ctx1 = Arc::new(ServerContext::with_sde_and_repository(sde.clone(), repo1.clone()));
+    let mut sess = make_station_session(&ctx1, 91_610, char_id, ship_id);
+    let kw = HashMap::new();
+
+    ctx1.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            container_a,
+            mk_item(container_a, 17_366, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+    });
+    super::notify_emitters_fleet_combat::handle_set_password(
+        &ctx1,
+        &sess,
+        None,
+        "SetPassword",
+        &[
+            PyRep::Integer(container_a),
+            PyRep::Integer(1),
+            PyRep::String("secret-30k".into()),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap();
+    ctx1.db
+        .try_with_mut_snapshot(|snap| {
+            set_container_config_snap(
+                snap,
+                container_a,
+                &ContainerConfig {
+                    lock_by_default: false,
+                    password_per_action: true,
+                    config_bitmask: 2,
+                },
+                1_775_400_000,
+            )?;
+            for i in 0..29_900u64 {
+                append_alsc_log_snap(
+                    snap,
+                    container_a,
+                    AlscLogEntry {
+                        timestamp_unix: 1_775_400_000 + i,
+                        actor_id: char_id,
+                        action: "ALSCActionPasswordFailure".into(),
+                        item_id: container_a,
+                        item_type_id: 17_366,
+                        quantity: 1,
+                    },
+                    1_775_400_000 + i,
+                )?;
+            }
+            Ok::<_, eve_proto::BridgeRpcError>(())
+        })
+        .unwrap();
+
+    for _ in 0..100 {
+        let err = handle_containers_ships_and_fitting(
+            &ctx1,
+            &mut sess,
+            None,
+            "invbroker",
+            "ALSCLogGet",
+            &[PyRep::Integer(container_a), PyRep::String("wrong-pw".into())],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect_err("wrong password must return error without RowLimit");
+        assert_eq!(err.code, "ALSCPasswordNeededToViewAuditLog");
+    }
+
+    ctx1.db.with_snapshot(|snap| {
+        let logs = container_alsc_logs_snap(snap, container_a);
+        assert_eq!(logs.len(), MAX_ALSC_LOGS_PER_CONTAINER);
+        let raw_len = snap
+            .kv(eve_db::Ns::ContainerAlscLogs)
+            .get_raw(container_a, "")
+            .map(|r| r.len())
+            .expect("ContainerAlscLogs row present");
+        assert!(
+            raw_len <= eve_db::DEFAULT_ENTITY_KV_MAX_VALUE_BYTES,
+            "raw row len {raw_len} must stay within byte budget"
+        );
+    });
+
+    // Subsequent writes and authenticated reads succeed normally after 30,000 failed attempts.
+    super::notify_emitters_fleet_combat::handle_set_password(
+        &ctx1,
+        &sess,
+        None,
+        "SetPassword",
+        &[
+            PyRep::Integer(container_a),
+            PyRep::Integer(1),
+            PyRep::String("rotated-30k".into()),
+        ],
+        &serde_json::from_str::<HashMap<String, serde_json::Value>>(r#"{"oldPassword":"secret-30k"}"#)
+            .unwrap()
+            .into_iter()
+            .map(|(k, v)| (k, PyRep::String(v.as_str().unwrap().into())))
+            .collect(),
+    )
+    .await
+    .expect("password rotation after 30k failures must succeed");
+
+    let log_res = handle_containers_ships_and_fitting(
+        &ctx1,
+        &mut sess,
+        None,
+        "invbroker",
+        "ALSCLogGet",
+        &[PyRep::Integer(container_a), PyRep::String("rotated-30k".into())],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("authenticated ALSCLogGet must succeed");
+    assert_ne!(log_res, PyRep::None);
+
+    drop(ctx1);
+    drop(repo1);
+
+    let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    repo2.with_snapshot(|snap| {
+        assert_eq!(
+            container_alsc_logs_snap(snap, container_a).len(),
+            MAX_ALSC_LOGS_PER_CONTAINER
+        );
+        assert_eq!(
+            container_password_snap(snap, container_a, 1).as_deref(),
+            Some("rotated-30k")
+        );
+    });
+
+    drop(repo2);
+    cleanup_sqlite_files(&db_path);
+}
+
+#[tokio::test]
+async fn legacy_container_ship_owner_note_migrates_to_per_entity_kv_via_sqlite() {
+    let db_path = temp_1180_sqlite_path("legacy_migration");
+    let char_id = 90_000_001i64;
+    let station_id = 60_003_760i64;
+    let ship_id = 100_000_001i64;
+    let container_id = 950_300_001i64;
+    let locked_item_id = 950_300_002i64;
+
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let repo1 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite repo1"));
+    seed_demo_char_into_repo(&repo1, char_id, station_id, ship_id);
+    repo1.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            container_id,
+            mk_item(container_id, 17_366, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            locked_item_id,
+            mk_item(locked_item_id, 34, char_id, container_id, InventoryFlag::Cargo, 100, false),
+        );
+        let legacy_logs: Vec<AlscLogEntry> = (0..300u64)
+            .map(|idx| AlscLogEntry {
+                timestamp_unix: 1_700_000_000 + idx,
+                actor_id: char_id,
+                action: if idx == 299 {
+                    "ALSCActionLock".into()
+                } else {
+                    "ALSCActionOpen".into()
+                },
+                item_id: if idx == 299 { locked_item_id } else { container_id },
+                item_type_id: if idx == 299 { 34 } else { 17_366 },
+                quantity: if idx == 299 { 100 } else { 0 },
+            })
+            .collect();
+        let legacy_json = serde_json::json!({
+            "container_passwords": { container_id.to_string(): "legacy-pw" },
+            "unlocked_containers": [],
+            "alsc_locked_items": [locked_item_id],
+            "alsc_logs": { container_id.to_string(): legacy_logs },
+        });
+        snap.owner_notes.insert(
+            -8_400_000_000_000,
+            eve_db::OwnerNoteRecord {
+                note_id: -8_400_000_000_000,
+                character_id: 0,
+                item_id: 0,
+                label: "S:CONTAINER_SHIP_RUNTIME_STATE".into(),
+                note: legacy_json.to_string(),
+                timestamp_unix: 1_700_000_500,
+            },
+        );
+    });
+    drop(repo1);
+
+    let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite repo2"));
+    let ctx2 = Arc::new(ServerContext::with_sde_and_repository(sde, repo2.clone()));
+    ctx2.db.with_snapshot(|snap| {
+        assert!(
+            !snap.owner_notes.contains_key(&-8_400_000_000_000),
+            "legacy owner_notes[-8_400_000_000_000] must be removed on load"
+        );
+        assert!(snap.is_item_in_alsc_lock(locked_item_id));
+        assert_eq!(
+            container_password_snap(snap, container_id, 1).as_deref(),
+            Some("legacy-pw")
+        );
+        let logs = container_alsc_logs_snap(snap, container_id);
+        assert_eq!(logs.len(), MAX_ALSC_LOGS_PER_CONTAINER);
+        assert_eq!(logs.last().map(|e| e.action.as_str()), Some("ALSCActionLock"));
+    });
+
+    let mut sess = make_station_session(&ctx2, 91_620, char_id, ship_id);
+    let kw = HashMap::new();
+    let bad_err = handle_containers_ships_and_fitting(
+        &ctx2,
+        &mut sess,
+        None,
+        "invbroker",
+        "ALSCLogGet",
+        &[PyRep::Integer(container_id), PyRep::String("wrong".into())],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("migrated password must enforce ALSCLogGet");
+    assert_eq!(bad_err.code, "ALSCPasswordNeededToViewAuditLog");
+
+    let ok_logs = handle_containers_ships_and_fitting(
+        &ctx2,
+        &mut sess,
+        None,
+        "invbroker",
+        "ALSCLogGet",
+        &[PyRep::Integer(container_id), PyRep::String("legacy-pw".into())],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("migrated password must allow ALSCLogGet");
+    assert_ne!(ok_logs, PyRep::None);
+
+    let old_kw = HashMap::from([("oldPassword".to_string(), PyRep::String("legacy-pw".into()))]);
+    super::notify_emitters_fleet_combat::handle_set_password(
+        &ctx2,
+        &sess,
+        None,
+        "SetPassword",
+        &[
+            PyRep::Integer(container_id),
+            PyRep::Integer(1),
+            PyRep::String("new-pw".into()),
+        ],
+        &old_kw,
+    )
+    .await
+    .expect("SetPassword after migration must succeed");
+
+    ctx2.db.with_snapshot(|snap| {
+        assert_eq!(
+            container_password_snap(snap, container_id, 1).as_deref(),
+            Some("new-pw")
+        );
+    });
+
+    drop(ctx2);
+    drop(repo2);
+    cleanup_sqlite_files(&db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bl01_concurrent_set_password_rotation_rejects_stale_open_list_and_move_unlocks() {
+    let ctx = Arc::new(ServerContext::with_repository(Arc::new(
+        eve_db::WorldRepository::with_demo_seed(),
+    )));
+    let sys_id = 30_000_142u32;
+    let char_a = 90_000_001i64;
+    let char_b = 90_000_002i64;
+    let corp_id = 98_000_001i64;
+    let ship_a = 100_000_001i64;
+    let ship_b = 100_000_002i64;
+    let alsc_id = 950_400_001i64;
+    let inner_id = 950_400_002i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid) in [(char_a, ship_a), (char_b, ship_b)] {
+            let mut ch = snap
+                .characters
+                .get(&char_a)
+                .cloned()
+                .expect("demo char_a");
+            ch.character_id = cid;
+            ch.user_id = if cid == char_a { 1 } else { 2 };
+            ch.corporation_id = corp_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = sid;
+            snap.characters.insert(cid, ch);
+        }
+        snap.items.insert(
+            ship_a,
+            mk_item(ship_a, 587, char_a, i64::from(sys_id), InventoryFlag::None, 1, true),
+        );
+        snap.items.insert(
+            ship_b,
+            mk_item(ship_b, 587, char_b, i64::from(sys_id), InventoryFlag::None, 1, true),
+        );
+        snap.items.insert(
+            alsc_id,
+            mk_item(alsc_id, 17_366, char_b, i64::from(sys_id), InventoryFlag::None, 1, true),
+        );
+        snap.items.insert(
+            inner_id,
+            mk_item(inner_id, 34, char_a, alsc_id, InventoryFlag::Cargo, 50, false),
+        );
+        snap.fleets.insert(
+            777_101,
+            FleetRecord {
+                fleet_id: 777_101,
+                boss_id: char_b,
+                members: [char_a, char_b].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+    });
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.authorized_shipping_storage.insert((alsc_id, char_a));
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for (id, tid, pos) in [
+        (ship_a, 587u32, DVec3::ZERO),
+        (ship_b, 587u32, DVec3::new(100.0, 0.0, 0.0)),
+        (alsc_id, 17_366u32, DVec3::new(400.0, 0.0, 0.0)),
+    ] {
+        let _ = sys_h
+            .spawn_ball(Ball {
+                id,
+                type_id: tid,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 1.0e4,
+                radius: 25.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
+
+    let make_space_session = |sess_id: u64, cid: i64, sid: i64| {
+        let mut s = SessionState::new(sess_id);
+        s.user_id = Some(if cid == char_a { 1 } else { 2 });
+        s.character_id = Some(cid);
+        s.corporation_id = Some(corp_id);
+        s.solar_system_id = Some(sys_id);
+        s.ship_id = Some(sid);
+        ctx.sync_session(&mut s);
+        s
+    };
+
+    for round in 0..8 {
+        let old_pw = format!("old-pw-{round}");
+        let new_pw = format!("new-pw-{round}");
+        ctx.db.with_mut_snapshot(|snap| {
+            set_container_password_snap(snap, alsc_id, 1, &old_pw, 100).unwrap();
+            clear_container_unlocks_snap(snap, alsc_id);
+        });
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut sess_a = make_space_session(92_100 + round as u64 * 2, char_a, ship_a);
+        let mut sess_b = make_space_session(92_101 + round as u64 * 2, char_b, ship_b);
+        let ctx_a = ctx.clone();
+        let ctx_b = ctx.clone();
+        let b_a = barrier.clone();
+        let b_b = barrier.clone();
+        let old_a = old_pw.clone();
+        let old_b = old_pw.clone();
+        let new_b = new_pw.clone();
+
+        let task_open = tokio::spawn(async move {
+            let kw = HashMap::new();
+            b_a.wait().await;
+            super::inventory_fitting::handle(
+                &ctx_a,
+                &mut sess_a,
+                None,
+                "invbroker",
+                "GetContainerContents",
+                &[
+                    PyRep::Integer(alsc_id),
+                    PyRep::Integer(i64::from(sys_id)),
+                    PyRep::String(old_a),
+                ],
+                &kw,
+            )
+            .await
+        });
+        let task_rotate = tokio::spawn(async move {
+            let kw = HashMap::from([("oldPassword".to_string(), PyRep::String(old_b))]);
+            b_b.wait().await;
+            tokio::task::yield_now().await;
+            super::notify_emitters_fleet_combat::handle_set_password(
+                &ctx_b,
+                &mut sess_b,
+                None,
+                "SetPassword",
+                &[
+                    PyRep::Integer(alsc_id),
+                    PyRep::Integer(1),
+                    PyRep::String(new_b),
+                ],
+                &kw,
+            )
+            .await
+        });
+
+        let (open_res, rot_res) = tokio::join!(task_open, task_rotate);
+        rot_res.expect("rotate task join").expect("SetPassword ok");
+        if let Some(Err(err)) = open_res.expect("open task join") {
+            assert_eq!(err.code, "ALSCPasswordRequired");
+        }
+
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                container_password_snap(snap, alsc_id, 1).as_deref(),
+                Some(new_pw.as_str())
+            );
+            assert!(
+                !is_container_unlocked_snap(snap, alsc_id, char_a),
+                "round {round}: SetPassword rotation must never leave stale unlock on char_a"
+            );
+        });
+    }
+
+    // Stale password rejection across GetContainerContents, invbroker.List, and validate_container_and_bay_move
+    let mut sess_a = make_space_session(92_300, char_a, ship_a);
+    let mut sess_b = make_space_session(92_301, char_b, ship_b);
+    let stale_pw = "new-pw-7";
+    let fresh_pw = "rotated-final";
+    let rot_kw = HashMap::from([("oldPassword".to_string(), PyRep::String(stale_pw.into()))]);
+    super::notify_emitters_fleet_combat::handle_set_password(
+        &ctx,
+        &mut sess_b,
+        None,
+        "SetPassword",
+        &[
+            PyRep::Integer(alsc_id),
+            PyRep::Integer(1),
+            PyRep::String(fresh_pw.into()),
+        ],
+        &rot_kw,
+    )
+    .await
+    .expect("final rotation ok");
+
+    let stale_kw = HashMap::from([("password".to_string(), PyRep::String(stale_pw.into()))]);
+    let open_err = super::inventory_fitting::handle(
+        &ctx,
+        &mut sess_a,
+        None,
+        "invbroker",
+        "GetContainerContents",
+        &[
+            PyRep::Integer(alsc_id),
+            PyRep::Integer(i64::from(sys_id)),
+            PyRep::String(stale_pw.into()),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(open_err.code, "ALSCPasswordRequired");
+
+    let bound_alsc = BoundObjectEntry {
+        bound_id: 1,
+        session_id: sess_a.session_id,
+        user_id: 1,
+        character_id: char_a,
+        service: "invbroker".into(),
+        object_id: alsc_id,
+        oid_str: format!("N=invbroker:{alsc_id}"),
+        ref_id: 1,
+    };
+    let list_err = super::inventory_fitting::handle(
+        &ctx,
+        &mut sess_a,
+        Some(&bound_alsc),
+        "invbroker",
+        "List",
+        &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &stale_kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(list_err.code, "ALSCPasswordRequired");
+
+    let move_err = validate_container_and_bay_move(
+        &ctx,
+        char_a,
+        inner_id,
+        ship_a,
+        InventoryFlag::Cargo as u16,
+        &stale_kw,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(move_err.code, "ALSCPasswordNeededToOpen");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!is_container_unlocked_snap(snap, alsc_id, char_a));
+    });
+
+    // Valid rotated password unlocks cleanly
+    let fresh_kw = HashMap::from([("password".to_string(), PyRep::String(fresh_pw.into()))]);
+    validate_container_and_bay_move(
+        &ctx,
+        char_a,
+        inner_id,
+        ship_a,
+        InventoryFlag::Cargo as u16,
+        &fresh_kw,
+        None,
+    )
+    .expect("fresh rotated password succeeds");
+    ctx.db.with_snapshot(|snap| {
+        assert!(is_container_unlocked_snap(snap, alsc_id, char_a));
+    });
+}
+
+#[tokio::test]
+async fn bl02_invbroker_add_commits_alsc_take_custom_flag_and_ship_unlock_atomically() {
+    let db_path = temp_1180_sqlite_path("bl02_atomic_add");
+    let sys_id = 30_000_142u32;
+    let char_a = 90_000_001i64;
+    let char_b = 90_000_002i64;
+    let corp_id = 98_000_001i64;
+    let ship_a = 100_000_001i64;
+    let carrier_b = 950_500_001i64;
+    let alsc_b = 950_500_002i64;
+    let ore_id = 950_500_003i64;
+
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let carrier_tid = sde
+        .types
+        .values()
+        .find(|t| {
+            t.category_id == 6
+                && t.default_attributes.get(&912).copied().unwrap_or(0.0) > 0.0
+        })
+        .map(|t| t.type_id)
+        .expect("SDE must include a ship with Fleet Hangar");
+    let repo1 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    seed_demo_char_into_repo(&repo1, char_a, 60_003_760, ship_a);
+    let ctx1 = Arc::new(ServerContext::with_sde_and_repository(sde.clone(), repo1.clone()));
+    ctx1.db.with_mut_snapshot(|snap| {
+        for (cid, sid) in [(char_a, ship_a), (char_b, carrier_b)] {
+            let mut ch = snap.characters.get(&char_a).cloned().unwrap();
+            ch.character_id = cid;
+            ch.user_id = if cid == char_a { 1 } else { 2 };
+            ch.corporation_id = corp_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = sid;
+            snap.characters.insert(cid, ch);
+        }
+        snap.items.insert(
+            ship_a,
+            mk_item(ship_a, 587, char_a, i64::from(sys_id), InventoryFlag::None, 1, true),
+        );
+        snap.items.insert(
+            carrier_b,
+            mk_item(carrier_b, carrier_tid, char_b, i64::from(sys_id), InventoryFlag::None, 1, true),
+        );
+        snap.items.insert(
+            alsc_b,
+            mk_item(alsc_b, 17_366, char_b, i64::from(sys_id), InventoryFlag::None, 1, true),
+        );
+        snap.items.insert(
+            ore_id,
+            mk_item(ore_id, 34, char_b, alsc_b, InventoryFlag::Cargo, 50, false),
+        );
+        snap.fleets.insert(
+            777_102,
+            FleetRecord {
+                fleet_id: 777_102,
+                boss_id: char_b,
+                members: [char_a, char_b].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        set_ship_access_config_snap(
+            snap,
+            carrier_b,
+            &ShipAccessConfig {
+                allow_fleet_smb: false,
+                allow_corp_smb: false,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: Some("bay-pw".into()),
+            },
+            100,
+        )
+        .unwrap();
+    });
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx1, |rt| {
+        rt.authorized_shipping_storage.insert((alsc_b, char_a));
+    });
+
+    let sys_h = ctx1.systems.get_or_spawn(sys_id);
+    for (id, tid, pos) in [
+        (ship_a, 587u32, DVec3::ZERO),
+        (alsc_b, 17_366u32, DVec3::new(300.0, 0.0, 0.0)),
+        (carrier_b, carrier_tid, DVec3::new(500.0, 0.0, 0.0)),
+    ] {
+        let _ = sys_h
+            .spawn_ball(Ball {
+                id,
+                type_id: tid,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 1.0e4,
+                radius: 25.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
+
+    let mut sess_a = SessionState::new(92_400);
+    sess_a.user_id = Some(1);
+    sess_a.character_id = Some(char_a);
+    sess_a.corporation_id = Some(corp_id);
+    sess_a.solar_system_id = Some(sys_id);
+    sess_a.ship_id = Some(ship_a);
+    ctx1.sync_session(&mut sess_a);
+
+    let bay_kw = HashMap::from([("password".to_string(), PyRep::String("bay-pw".into()))]);
+    let commits_before_in = ctx1.db.tx_commit_count();
+    super::inventory_fitting::handle(
+        &ctx1,
+        &mut sess_a,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(ore_id),
+            PyRep::Integer(carrier_b),
+            PyRep::Integer(155),
+        ],
+        &bay_kw,
+    )
+    .await
+    .expect("handled")
+    .expect("Add from ALSC into foreign Fleet Hangar succeeds");
+
+    assert_eq!(
+        ctx1.db.tx_commit_count(),
+        commits_before_in + 1,
+        "item move, ALSCActionTake, CustomItemFlag(155), and ship-bay unlock must commit in 1 tx"
+    );
+    ctx1.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&ore_id).map(|i| i.location_id), Some(carrier_b));
+        assert_eq!(custom_item_flag_snap(snap, ore_id), Some(155));
+        assert!(is_container_unlocked_snap(snap, carrier_b, char_a));
+        let logs = container_alsc_logs_snap(snap, alsc_b);
+        assert_eq!(logs.last().map(|e| e.action.as_str()), Some("ALSCActionTake"));
+    });
+
+    // Moving back out of flag 155 clears CustomItemFlag atomically in the same single tx
+    let commits_before_out = ctx1.db.tx_commit_count();
+    super::inventory_fitting::handle(
+        &ctx1,
+        &mut sess_a,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(ore_id),
+            PyRep::Integer(ship_a),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("Add out of Fleet Hangar clears CustomItemFlag");
+
+    assert_eq!(ctx1.db.tx_commit_count(), commits_before_out + 1);
+    drop(ctx1);
+    drop(repo1);
+
+    let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    repo2.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&ore_id).map(|i| i.location_id), Some(ship_a));
+        assert_eq!(custom_item_flag_snap(snap, ore_id), None);
+        assert!(is_container_unlocked_snap(snap, carrier_b, char_a));
+        assert_eq!(
+            container_alsc_logs_snap(snap, alsc_b)
+                .last()
+                .map(|e| e.action.as_str()),
+            Some("ALSCActionTake")
+        );
+    });
+    drop(repo2);
+    cleanup_sqlite_files(&db_path);
+}

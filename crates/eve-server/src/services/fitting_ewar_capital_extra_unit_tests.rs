@@ -1134,17 +1134,9 @@ async fn weapon_autoload_emits_tombstones_subloc_conserves_bank_and_rejects_tomb
                 ..Default::default()
             },
         );
-        snap.owner_notes.insert(
-            -8_400_000_000_000,
-            eve_db::OwnerNoteRecord {
-                note_id: -8_400_000_000_000,
-                character_id: char_id,
-                item_id: ship_id,
-                label: String::new(),
-                note: format!("{{\"alsc_locked_items\":[{locked_cargo_ammo}]}}"),
-                timestamp_unix: 1,
-            },
-        );
+        snap.kv_mut(eve_db::Ns::AlscLockedItem)
+            .set_with_unix(locked_cargo_ammo, "", &true, 1)
+            .unwrap();
         snap.items.insert(
             singleton_cargo_ammo,
             InventoryItemRecord {

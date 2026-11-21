@@ -1145,10 +1145,12 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
     let scan_sys_id = 30_000_144u32;
     let scan_sys = ctx.systems.get_or_spawn(scan_sys_id);
     sess1.solar_system_id = Some(scan_sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = scan_sys_id; }
+    });
     let _ = scan_sys.spawn_ball(Ball { id: 800_000_001, type_id: 587, position: DVec3::new(0.0, 5.0e9, 0.0), velocity: DVec3::ZERO, max_velocity: 350.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
     let _ = ctx.dispatch_rpc(&mut sess1, "scanMgr", None, "GetSignatures", &[PyRep::Integer(i64::from(scan_sys_id))], &kw, None).await.unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = scan_sys_id; }
         snap.structures.insert(990_000_777, eve_db::UpwellStructureRecord {
             structure_id: 990_000_777, type_id: 35832, owner_corp_id: corp_id, solar_system_id: scan_sys_id,
             name: "Perimeter Trade Citadel".into(), state: "ShieldVulnerable".into(), position: [100_000.0, 0.0, 0.0],

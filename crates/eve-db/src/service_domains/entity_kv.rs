@@ -19,7 +19,86 @@ pub enum EntityKvScope {
     Corporation,
     Contract,
     Fleet,
+    Item,
     Global,
+}
+
+/// Maximum number of recent ALSC container audit log entries retained per container (`#1180`).
+pub const MAX_ALSC_LOGS_PER_CONTAINER: usize = 250;
+
+/// Single Audit Log Secure Container (ALSC) action log entry persisted per container (`#1180`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlscLogEntryRecord {
+    pub timestamp_unix: u64,
+    pub actor_id: i64,
+    pub action: String,
+    pub item_id: i64,
+    pub item_type_id: u32,
+    pub quantity: i32,
+}
+
+/// Per-container configuration flags persisted in `Ns::ContainerConfig` (`#1180`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ContainerConfigRecord {
+    #[serde(default)]
+    pub lock_by_default: bool,
+    #[serde(default)]
+    pub password_per_action: bool,
+    #[serde(default)]
+    pub config_bitmask: u32,
+}
+
+/// Per-ship SMA / Fleet Hangar / POS forcefield access configuration persisted in `Ns::ShipAccessConfig` (`#1180`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShipAccessConfigRecord {
+    pub allow_fleet_smb: bool,
+    pub allow_corp_smb: bool,
+    pub allow_fleet_hangar: bool,
+    pub allow_corp_hangar: bool,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+impl Default for ShipAccessConfigRecord {
+    fn default() -> Self {
+        Self {
+            allow_fleet_smb: true,
+            allow_corp_smb: true,
+            allow_fleet_hangar: true,
+            allow_corp_hangar: true,
+            password: None,
+        }
+    }
+}
+
+/// Bounds `logs` in-place to the newest [`MAX_ALSC_LOGS_PER_CONTAINER`] entries and ensures its
+/// serialized JSON fits within [`DEFAULT_ENTITY_KV_MAX_VALUE_BYTES`].
+pub fn trim_alsc_logs_to_budget(logs: &mut Vec<AlscLogEntryRecord>) {
+    if logs.len() > MAX_ALSC_LOGS_PER_CONTAINER {
+        let excess = logs.len() - MAX_ALSC_LOGS_PER_CONTAINER;
+        logs.drain(..excess);
+    }
+    while logs.len() > 1
+        && serde_json::to_string(logs).is_ok_and(|s| s.len() > DEFAULT_ENTITY_KV_MAX_VALUE_BYTES)
+    {
+        logs.remove(0);
+    }
+}
+
+/// Appends one `entry` to container `container_id`'s bounded ALSC audit log ring in `entity_kv`.
+pub fn push_alsc_log_in_kv(
+    snap: &mut WorldStateSnapshot,
+    container_id: i64,
+    entry: AlscLogEntryRecord,
+    updated_unix: u64,
+) -> Result<(), String> {
+    let mut logs = EntityKvReader::new(snap, Ns::ContainerAlscLogs)
+        .get::<Vec<AlscLogEntryRecord>>(container_id, "")
+        .unwrap_or_default();
+    logs.push(entry);
+    trim_alsc_logs_to_budget(&mut logs);
+    EntityKvWriter::new(snap, Ns::ContainerAlscLogs)
+        .set_with_unix(container_id, "", &logs, updated_unix)
 }
 
 /// Closed registry of `entity_kv` namespaces (`#913`).
@@ -51,6 +130,20 @@ pub enum Ns {
     CharTransferEvictSession,
     /// Per-character XMPP chat authentication token (`String`).
     XmppAuthToken,
+    /// Per-container password (`sub_key = "1"` open password | `"2"` config password, `String`, `#1180`).
+    ContainerPassword,
+    /// Per-container configuration (`ContainerConfigRecord`, `#1180`).
+    ContainerConfig,
+    /// Per-container/ship unlock state per character (`sub_key = char_id`, `bool`, `#1180`).
+    ContainerUnlockedChar,
+    /// Per-container bounded ALSC audit log ring (`Vec<AlscLogEntryRecord>`, `#1180`).
+    ContainerAlscLogs,
+    /// Per-item ALSC item lock flag (`bool`, `#1180`).
+    AlscLockedItem,
+    /// Per-ship SMA / Fleet Hangar / POS forcefield access config + password (`ShipAccessConfigRecord`, `#1180`).
+    ShipAccessConfig,
+    /// Per-item custom bay/inventory flag (`u16`, `#1180`).
+    CustomItemFlag,
     /// Global per-language (`sub_key = lang`) XMPP help channel name (`String`).
     XmppHelpChannel,
     /// Global XMPP server hostname (`String`).
@@ -87,6 +180,13 @@ impl Ns {
         Ns::CharTransferLastUnix,
         Ns::CharTransferEvictSession,
         Ns::XmppAuthToken,
+        Ns::ContainerPassword,
+        Ns::ContainerConfig,
+        Ns::ContainerUnlockedChar,
+        Ns::ContainerAlscLogs,
+        Ns::AlscLockedItem,
+        Ns::ShipAccessConfig,
+        Ns::CustomItemFlag,
         Ns::XmppHelpChannel,
         Ns::XmppHostname,
         Ns::CacheSetting,
@@ -114,6 +214,13 @@ impl Ns {
             Ns::CharTransferLastUnix => "character.transfer_last_unix",
             Ns::CharTransferEvictSession => "character.transfer_evict_session",
             Ns::XmppAuthToken => "character.xmpp_token",
+            Ns::ContainerPassword => "container.password",
+            Ns::ContainerConfig => "container.config",
+            Ns::ContainerUnlockedChar => "container.unlocked_char",
+            Ns::ContainerAlscLogs => "container.alsc_logs",
+            Ns::AlscLockedItem => "container.alsc_locked",
+            Ns::ShipAccessConfig => "ship.access_config",
+            Ns::CustomItemFlag => "item.custom_flag",
             Ns::XmppHelpChannel => "global.xmpp_help_channel",
             Ns::XmppHostname => "global.xmpp_hostname",
             Ns::CacheSetting => "global.cache_setting",
@@ -141,6 +248,13 @@ impl Ns {
             "character.transfer_last_unix" => Some(Ns::CharTransferLastUnix),
             "character.transfer_evict_session" => Some(Ns::CharTransferEvictSession),
             "character.xmpp_token" => Some(Ns::XmppAuthToken),
+            "container.password" => Some(Ns::ContainerPassword),
+            "container.config" => Some(Ns::ContainerConfig),
+            "container.unlocked_char" => Some(Ns::ContainerUnlockedChar),
+            "container.alsc_logs" => Some(Ns::ContainerAlscLogs),
+            "container.alsc_locked" => Some(Ns::AlscLockedItem),
+            "ship.access_config" => Some(Ns::ShipAccessConfig),
+            "item.custom_flag" => Some(Ns::CustomItemFlag),
             "global.xmpp_help_channel" => Some(Ns::XmppHelpChannel),
             "global.xmpp_hostname" => Some(Ns::XmppHostname),
             "global.cache_setting" => Some(Ns::CacheSetting),
@@ -170,6 +284,13 @@ impl Ns {
             Ns::ContractOrigFlag | Ns::ContractBidDiv | Ns::ContractDeposit => {
                 EntityKvScope::Contract
             }
+            Ns::ContainerPassword
+            | Ns::ContainerConfig
+            | Ns::ContainerUnlockedChar
+            | Ns::ContainerAlscLogs
+            | Ns::AlscLockedItem
+            | Ns::ShipAccessConfig
+            | Ns::CustomItemFlag => EntityKvScope::Item,
             Ns::XmppHelpChannel
             | Ns::XmppHostname
             | Ns::CacheSetting

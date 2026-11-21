@@ -1330,7 +1330,7 @@ pub async fn validate_and_advance_pve_site_room(
     .await?;
 
     if let Some(char_id) = session.character_id {
-        let info = crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
+        let info = crate::services::pve_exploration::read_pve_exploration_reg(ctx, |reg| {
             reg.sites_by_system
                 .get(&sys_id)
                 .and_then(|l| l.iter().find(|s| s.site_id == site_id))

@@ -26,6 +26,25 @@ use eve_db::lock_rank::AnyRwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+async fn cleanup_unclaimed_wh_balls(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    ids: &[i64],
+) {
+    if ids.is_empty() {
+        return;
+    }
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    for &bid in ids {
+        let _ = sys_handle.remove_ball(bid).await;
+    }
+    with_mut_combat_runtime(ctx, |rt| {
+        for bid in ids {
+            rt.npc_entities.remove(bid);
+        }
+    });
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActiveCapitalEscalationEntry {
     pub ship_id: i64,
@@ -730,21 +749,28 @@ pub async fn step_wormhole_pve_system(
             batch,
         )
         .await;
-        with_pve_exploration_reg(ctx, |reg| {
-            if let Some(site) = reg
+        let attached = with_pve_exploration_reg(ctx, |reg| {
+            let Some(site) = reg
                 .sites_by_system
                 .get_mut(&solar_system_id)
-                .and_then(|l| l.iter_mut().find(|s| s.site_id == site_id))
+                .and_then(|l| l.iter_mut().find(|s| !s.cleared && s.site_id == site_id))
+            else {
+                return false;
+            };
+            if let Some(entry) = site
+                .active_escalation_capitals
+                .iter_mut()
+                .find(|e| e.ship_id == ship_id)
             {
-                if let Some(entry) = site
-                    .active_escalation_capitals
-                    .iter_mut()
-                    .find(|e| e.ship_id == ship_id)
-                {
-                    entry.avenger_ball_ids = ids;
-                }
+                entry.avenger_ball_ids = ids.clone();
+                true
+            } else {
+                false
             }
         });
+        if !attached {
+            cleanup_unclaimed_wh_balls(ctx, solar_system_id, &ids).await;
+        }
     }
 
     for (site_id, wh_c, site_pos) in delayed_waves_to_spawn {
@@ -759,16 +785,22 @@ pub async fn step_wormhole_pve_system(
             DVec3::from_array(site_pos),
         )
         .await;
-        with_pve_exploration_reg(ctx, |reg| {
+        let attached = with_pve_exploration_reg(ctx, |reg| {
             if let Some(site) = reg
                 .sites_by_system
                 .get_mut(&solar_system_id)
-                .and_then(|l| l.iter_mut().find(|s| s.site_id == site_id))
+                .and_then(|l| l.iter_mut().find(|s| !s.cleared && s.site_id == site_id))
             {
-                site.active_npc_ball_ids = wave_ids;
+                site.active_npc_ball_ids = wave_ids.clone();
                 site.npc_guards_spawned = true;
+                true
+            } else {
+                false
             }
         });
+        if !attached {
+            cleanup_unclaimed_wh_balls(ctx, solar_system_id, &wave_ids).await;
+        }
     }
 
     for (site_id, site_pos) in relays_to_spawn {

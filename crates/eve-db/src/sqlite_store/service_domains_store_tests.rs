@@ -411,7 +411,7 @@ fn service_state_blobs_enforces_size_and_key_limits() {
 #[test]
 fn entity_kv_sqlite_roundtrip_per_row_diff_and_cascade() {
     // 1. Registry completeness & key serialization roundtrip
-    assert_eq!(Ns::ALL.len(), 21);
+    assert_eq!(Ns::ALL.len(), 28);
     for &ns in Ns::ALL {
         let name = ns.as_str();
         assert_eq!(Ns::from_str_name(name), Some(ns));
@@ -1107,5 +1107,1158 @@ fn load_service_domains_checked_fails_closed_without_mutating_snapshot() {
     assert_eq!(snap.node_graph_state.client_node_graph_seq, 77);
     assert_eq!(snap.fleet_and_social_ops.contract_deposits.get(&1), Some(&500));
 
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn legacy_container_ship_owner_note_migrates_to_per_entity_kv_and_caps_alsc_logs() {
+    use crate::service_domains::{
+        AlscLogEntryRecord, ContainerConfigRecord, ShipAccessConfigRecord,
+        MAX_ALSC_LOGS_PER_CONTAINER,
+    };
+
+    let path = temp_db_path("legacy_container_ship_migration");
+    let mut conn = Connection::open(&path).expect("open");
+    apply_migrations(&conn).expect("migrate");
+
+    let mut legacy_snap = WorldStateSnapshot::default();
+    let container_a = 800_001_i64;
+    let ship_b = 800_002_i64;
+    let locked_item = 800_003_i64;
+    let flagged_item = 800_004_i64;
+    let char_id = 90_000_001_i64;
+
+    let oversized_logs: Vec<serde_json::Value> = (0..(MAX_ALSC_LOGS_PER_CONTAINER + 60))
+        .map(|i| {
+            json!({
+                "timestamp_unix": 1_700_000_000_u64 + i as u64,
+                "actor_id": char_id,
+                "action": "ALSCActionPasswordFailure",
+                "item_id": container_a,
+                "item_type_id": 17_366_u32,
+                "quantity": 1_i32
+            })
+        })
+        .collect();
+
+    let legacy_json = json!({
+        "container_passwords": { container_a.to_string(): "open-pw" },
+        "container_config_passwords": { container_a.to_string(): "cfg-pw" },
+        "unlocked_containers": [[container_a, char_id], [char_id, ship_b]],
+        "alsc_locked_items": [locked_item],
+        "alsc_logs": { container_a.to_string(): oversized_logs },
+        "ship_configs": {
+            ship_b.to_string(): {
+                "allow_fleet_smb": false,
+                "allow_corp_smb": true,
+                "allow_fleet_hangar": true,
+                "allow_corp_hangar": false,
+                "password": null
+            }
+        },
+        "ship_passwords": { ship_b.to_string(): "ship-pw" },
+        "custom_item_flags": { flagged_item.to_string(): 155_u16 },
+        "container_configs": {
+            container_a.to_string(): {
+                "lock_by_default": true,
+                "password_per_action": true,
+                "config_bitmask": 3_u32
+            }
+        }
+    })
+    .to_string();
+
+    legacy_snap.owner_notes.insert(
+        -8_400_000_000_000,
+        OwnerNoteRecord {
+            note_id: -8_400_000_000_000,
+            character_id: -84,
+            item_id: 0,
+            label: "S:CONTAINER_SHIP_RUNTIME_STATE".into(),
+            note: legacy_json,
+            timestamp_unix: 1_700_001_000,
+        },
+    );
+    replace_sqlite_from_snapshot(&mut conn, &legacy_snap).expect("seed legacy sqlite");
+    drop(conn);
+
+    // Loading via WorldRepository::open_sqlite runs one-time migration and commits the
+    // migrated per-entity `entity_kv` rows while removing the legacy `-8_400_000_000_000` note.
+    let repo = crate::persistence::WorldRepository::open_sqlite(&path).expect("open_sqlite");
+    repo.with_snapshot(|snap| {
+        assert!(!snap.owner_notes.contains_key(&-8_400_000_000_000));
+        assert_eq!(
+            snap.kv(Ns::ContainerPassword).get::<String>(container_a, "1"),
+            Some("open-pw".into())
+        );
+        assert_eq!(
+            snap.kv(Ns::ContainerPassword).get::<String>(container_a, "2"),
+            Some("cfg-pw".into())
+        );
+        assert_eq!(
+            snap.kv(Ns::ContainerUnlockedChar)
+                .get::<bool>(container_a, &char_id.to_string()),
+            Some(true)
+        );
+        assert_eq!(
+            snap.kv(Ns::ContainerUnlockedChar)
+                .get::<bool>(ship_b, &char_id.to_string()),
+            Some(true)
+        );
+        assert!(snap.is_item_in_alsc_lock(locked_item));
+        assert_eq!(
+            snap.kv(Ns::CustomItemFlag).get::<u16>(flagged_item, ""),
+            Some(155)
+        );
+        assert_eq!(
+            snap.kv(Ns::ContainerConfig)
+                .get::<ContainerConfigRecord>(container_a, ""),
+            Some(ContainerConfigRecord {
+                lock_by_default: true,
+                password_per_action: true,
+                config_bitmask: 3,
+            })
+        );
+        assert_eq!(
+            snap.kv(Ns::ShipAccessConfig)
+                .get::<ShipAccessConfigRecord>(ship_b, ""),
+            Some(ShipAccessConfigRecord {
+                allow_fleet_smb: false,
+                allow_corp_smb: true,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: Some("ship-pw".into()),
+            })
+        );
+        let logs = snap
+            .kv(Ns::ContainerAlscLogs)
+            .get::<Vec<AlscLogEntryRecord>>(container_a, "")
+            .expect("migrated logs");
+        assert_eq!(logs.len(), MAX_ALSC_LOGS_PER_CONTAINER);
+        assert_eq!(logs.first().map(|e| e.timestamp_unix), Some(1_700_000_060));
+        assert_eq!(
+            logs.last().map(|e| e.timestamp_unix),
+            Some(1_700_000_000 + (MAX_ALSC_LOGS_PER_CONTAINER + 59) as u64)
+        );
+    });
+    drop(repo);
+
+    // Verify reopened DB still has migrated entity_kv and zero legacy note in SQLite.
+    let reloaded = load_snapshot_from_sqlite(&Connection::open(&path).expect("reopen")).expect("load");
+    assert!(!reloaded.owner_notes.contains_key(&-8_400_000_000_000));
+    assert_eq!(
+        reloaded
+            .kv(Ns::ContainerPassword)
+            .get::<String>(container_a, "1"),
+        Some("open-pw".into())
+    );
+    assert!(reloaded.is_item_in_alsc_lock(locked_item));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn all_17_service_domains_survive_tx_commit_restart_and_scalar_reset() {
+    use crate::persistence::WorldRepository;
+    use crate::service_domains::*;
+    use crate::tx_engine::TxError;
+    use crate::types::IskCents;
+    use eve_proto::PyRep;
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+    let path = temp_db_path("all_17_domains_roundtrip");
+    let _ = std::fs::remove_file(&path);
+    let repo = WorldRepository::open_sqlite(&path).expect("open_sqlite");
+
+    let expected_pve = PveSpecialSitesState {
+        initialized: true,
+        incursions: HashMap::from([(
+            20_000_001,
+            IncursionTaleRecord {
+                tale_id: 1,
+                constellation_id: 20_000_001,
+                constellation_name: "Kimotoro".into(),
+                staging_solar_system_id: 30_000_142,
+                ..Default::default()
+            },
+        )]),
+        incursion_lifecycle: HashMap::from([(
+            20_000_001,
+            IncursionLifecycleMeta {
+                spawned_at_sec: 1_700_000_000,
+                last_site_completed_sec: 1_700_000_100,
+                ..Default::default()
+            },
+        )]),
+        incursion_site_waves: HashMap::from([(
+            "site-1".into(),
+            IncursionSiteWaveMeta {
+                current_wave: 2,
+                total_waves: 4,
+            },
+        )]),
+        world_event_tales: HashMap::from([(
+            10,
+            WorldEventTaleRecord {
+                tale_id: 10,
+                template_class_id: "event".into(),
+                ..Default::default()
+            },
+        )]),
+        incursion_lp_logs: HashMap::from([(
+            90_000_001,
+            vec![IncursionLPLogEntry {
+                log_id: 1,
+                character_id: 90_000_001,
+                concord_lp_earned: 1_500,
+                ..Default::default()
+            }],
+        )]),
+        homefront_sites: HashMap::from([(
+            30_000_142,
+            vec![HomefrontSiteRecord {
+                instance_id: 20,
+                dungeon_name: "Raid".into(),
+                ..Default::default()
+            }],
+        )]),
+        roaming_storms: vec![RoamingStormRecord {
+            storm_id: 30,
+            center_solar_system_id: 30_000_142,
+            ..Default::default()
+        }],
+        drifter_hives: HashMap::from([(
+            30_000_143,
+            DrifterHiveRecord {
+                site_id: "hive-1".into(),
+                solar_system_id: 30_000_143,
+                ..Default::default()
+            },
+        )]),
+        triglavian_sites: HashMap::from([(
+            30_000_144,
+            vec![TriglavianSiteRecord {
+                instance_id: 40,
+                solar_system_id: 30_000_144,
+                ..Default::default()
+            }],
+        )]),
+        edencom_fortress_systems: vec![30_000_145],
+        edencom_minor_victory_systems: vec![30_000_146],
+        triglavian_minor_victory_systems: vec![30_000_147],
+        interference_by_system: HashMap::from([(
+            30_000_142,
+            SystemInterferenceRecord {
+                solar_system_id: 30_000_142,
+                interference_level: 0.4,
+                band: 1,
+                last_updated_sec: 1_700_000_200,
+            },
+        )]),
+        seasonal_event_sites: HashMap::from([(
+            30_000_142,
+            vec![SeasonalEventSiteRecord {
+                instance_id: 50,
+                season_id: 1,
+                ..Default::default()
+            }],
+        )]),
+        sim_clock_sec: 12_345,
+        next_seq: 99,
+    };
+
+    let expected_crab = CrabBeaconStore {
+        beacons: HashMap::from([(
+            801,
+            CrabBeaconRecord {
+                beacon_id: 801,
+                phase: CrabBeaconPhase::Scanning,
+                ..Default::default()
+            },
+        )]),
+    };
+
+    let expected_abyssal = AbyssalRuntimeStore {
+        pockets: HashMap::from([(
+            901,
+            AbyssalPocketSession {
+                pocket_id: 901,
+                character_id: 90_000_001,
+                ship_id: 100_000_001,
+                origin_solar_system_id: 30_000_142,
+                abyssal_solar_system_id: 32_000_001,
+                ..Default::default()
+            },
+        )]),
+        traces: HashMap::from([(
+            902,
+            AbyssalTraceRecord {
+                trace_ball_id: 902,
+                char_id: 90_000_001,
+                ..Default::default()
+            },
+        )]),
+        void_space_sessions: HashMap::from([(
+            90_000_002,
+            VoidSpaceSessionRecord {
+                char_id: 90_000_002,
+                ship_id: 100_000_002,
+                ..Default::default()
+            },
+        )]),
+        active_clouds: HashMap::from([(903, 50_001)]),
+        boundary_ticks: HashMap::from([(100_000_001, 4)]),
+        void_space_content: HashMap::from([(904, 7)]),
+        deathzone_active_ships: BTreeSet::from([100_000_001]),
+        next_seq: 55,
+    };
+
+    let expected_dungeon_rt = DungeonRuntimeStore {
+        instances: BTreeMap::from([(
+            1,
+            DungeonRuntimeInstance {
+                instance_id: 1,
+                dungeon_id: 100,
+                dungeon_name: "Deadspace".into(),
+                ..Default::default()
+            },
+        )]),
+        homefront_runtimes: BTreeMap::from([(
+            2,
+            HomefrontRuntimeRecord {
+                instance_id: 2,
+                solar_system_id: 30_000_142,
+                ..Default::default()
+            },
+        )]),
+        next_instance_id: 42,
+    };
+
+    let expected_dungeon_ed = DungeonEditorStore {
+        rooms_by_dungeon: BTreeMap::from([(
+            100,
+            vec![DungeonEditorRoom {
+                room_id: 1,
+                room_name: "Entry".into(),
+                dungeon_id: 100,
+                ..Default::default()
+            }],
+        )]),
+        dungeon_disallow_mwd: BTreeMap::from([(100, true)]),
+        active_editors: BTreeMap::from([(
+            90_000_001,
+            GmActiveEditorState {
+                dungeon_id: Some(100),
+                godmode: true,
+                ..Default::default()
+            },
+        )]),
+        next_custom_room_id: 15,
+        next_custom_object_id: 25,
+    };
+
+    let expected_fob = FobObservatoryStore {
+        observatory_sites: HashMap::from([(
+            701,
+            ObservatorySiteState {
+                site_id: 701,
+                solar_system_id: 30_000_142,
+                ..Default::default()
+            },
+        )]),
+        observatory_respawn_until: HashMap::from([(30_000_142, 1_700_005_000)]),
+        fob_combatants: HashMap::from([(702, BTreeSet::from([90_000_001]))]),
+        fob_factions: HashMap::from([(702, 500_010)]),
+        fob_respawn_until: HashMap::from([(30_000_143, 1_700_006_000)]),
+        fob_defense_triggered: BTreeSet::from([702]),
+    };
+
+    let expected_mining_ess = MiningAndEssRuntimeStore {
+        ess_reserve_pulses: HashMap::from([(
+            30_000_142,
+            EssReservePulseState {
+                pulses_total: 10,
+                pulses_remaining: 7,
+                ..Default::default()
+            },
+        )]),
+        phased_asteroid_fields: HashMap::from([(
+            30_000_143,
+            PhasedAsteroidFieldState {
+                signature_id: "SIG-001".into(),
+                solar_system_id: 30_000_143,
+                progress: 0.5,
+                phased_in: true,
+                ..Default::default()
+            },
+        )]),
+        phased_field_last_tick_unix: 1_700_000_500,
+        moon_fractured_fields: vec![(80_000_001, 30_000_142, 1_700_010_000, vec![90_000_001])],
+        mining_ledger_waste: BTreeMap::from([(0usize, 125)]),
+        metenox_last_tick_unix: 1_700_000_600,
+        belt_respawn_due_unix: HashMap::from([(40_000_001, 1_700_008_000)]),
+    };
+
+    let expected_pvp = PvpFilamentStore {
+        queue: HashMap::from([(
+            90_000_001,
+            PvpQueueCharacterEntry {
+                item_id: 100_000_001,
+                type_id: 587,
+                ..Default::default()
+            },
+        )]),
+        stats: HashMap::from([(90_000_001, (3, 1, 2, 0, 125_000.0))]),
+        event_stats: HashMap::from([(1, HashMap::from([(90_000_001, (1, 0, 1, 0, 50_000.0))]))]),
+        events: vec![PvpEventSchedule {
+            event_id: 1,
+            event_name: "Frigate 1v1".into(),
+            ..Default::default()
+        }],
+        seeded_default_events: true,
+        active_matches: HashMap::from([(
+            10,
+            PvpArenaMatchInstance {
+                match_id: 10,
+                event_id: 1,
+                active: true,
+                ..Default::default()
+            },
+        )]),
+        match_teams: HashMap::from([(10, vec![vec![90_000_001], vec![90_000_002]])]),
+        match_eliminated: HashMap::from([(10, HashSet::from([90_000_002]))]),
+        match_arena_offsets: HashMap::from([(10, [1000.0, 0.0, 0.0])]),
+        match_filament_types: HashMap::from([(10, 56_001)]),
+        hazard_ticks: HashMap::from([(10, 5)]),
+        queue_refund_targets: HashMap::from([(1, (90_000_001, 56_001))]),
+        queue_tickets: HashMap::from([(90_000_001, 1)]),
+        next_ticket_id: 2,
+        origin_positions: HashMap::from([(90_000_001, [10.0, 20.0, 30.0])]),
+        next_match_id: 11,
+    };
+
+    let expected_tourney = TourneyStore {
+        matches: HashMap::from([(
+            1,
+            TourneyMatch {
+                match_id: 1,
+                tourney_id: 20,
+                red_team_name: "Red".into(),
+                blue_team_name: "Blue".into(),
+                ..Default::default()
+            },
+        )]),
+        active_match_id: Some(1),
+        ban_sessions: HashMap::from([(1, vec![587, 588])]),
+        tournaments: BTreeMap::from([(20, "Alliance Tournament".into())]),
+        arena_systems: BTreeMap::from([(
+            30_000_142,
+            TourneyArenaSystem {
+                combat_beacons: vec![80_001],
+                warp_bubbles: vec![80_002],
+            },
+        )]),
+    };
+
+    let expected_deployable = MobileDeployableRuntimeState {
+        deployables: HashMap::from([(
+            100_000_050,
+            MobileDeployableRecord {
+                item_id: 100_000_050,
+                type_id: 33_474,
+                anchor_completed: true,
+                ..Default::default()
+            },
+        )]),
+        damaged_items: HashMap::from([(
+            100_000_050,
+            PersistedDamageRecord {
+                shield_hp: 500.0,
+                max_shield_hp: 1_000.0,
+                ..Default::default()
+            },
+        )]),
+        observatory_pings_done: HashMap::from([(100_000_050, 2)]),
+        cloak_activated_unix: HashMap::from([(100_000_051, 1_700_000_100)]),
+        mmju_spools: HashMap::from([(
+            100_000_052,
+            MmjuSpoolEntry {
+                ship_id: 100_000_001,
+                char_id: 90_000_001,
+                ..Default::default()
+            },
+        )]),
+        siphon_last_cycle_unix: HashMap::from([(100_000_053, 1_700_000_200)]),
+        pending_decloak_notifications: vec![PendingDecloakNotice {
+            char_id: 90_000_001,
+            ship_id: 100_000_001,
+            module_id: 200_000_001,
+        }],
+    };
+
+    let expected_superweapon = PersistedSuperweaponRuntime {
+        active_cycles: vec![PersistedSuperweaponCycle {
+            sys_id: 30_000_142,
+            char_id: 90_000_001,
+            ship_id: 100_000_001,
+            ship_type_id: 11_567,
+            mod_type_id: 24_550,
+            kind: SuperweaponCycleKind::SpatialGtfo {
+                center: [0.0, 0.0, 0.0],
+                sphere_radius_m: 15_000.0,
+            },
+            started_at_unix: 1_700_000_000,
+            warmup_secs: 5,
+            total_ticks: 10,
+            ticks_applied: 2,
+            immobilize_until_unix: 1_700_000_030,
+            orig_max_velocity: 120.0,
+            orig_warp_scramble_strength: 0,
+            orig_disallow_assistance: false,
+            mobility_restored: false,
+        }],
+        warp_suppressions: vec![PersistedWarpSuppression {
+            sys_id: 30_000_142,
+            ship_id: 100_000_002,
+            suppressed_until_unix: 1_700_000_060,
+            orig_warp_scramble_strength: 1,
+        }],
+    };
+
+    let expected_insurgency_ops = InsurgencyComplexOpsState {
+        outpost_raids: HashMap::from([(
+            501,
+            OutpostRaidInstance {
+                gate_id: 501,
+                campaign_id: 901,
+                ..Default::default()
+            },
+        )]),
+        mining_ambushes: HashMap::from([(
+            30_000_142,
+            MiningAmbushInstance {
+                campaign_id: 901,
+                solar_system_id: 30_000_142,
+                ..Default::default()
+            },
+        )]),
+        subpoint_remainders: HashMap::from([("corruption:30000142".into(), 3)]),
+        named_roamer_rolls: HashMap::from([("roamer:1".into(), true)]),
+        ice_heist_respawn_until: HashMap::from([(30_000_142, 1_700_007_000)]),
+    };
+
+    let expected_node_graph = NodeGraphAndProgressionStore {
+        air_npe_runners: HashMap::from([(
+            90_000_001,
+            AirNpeRunnerState {
+                char_id: 90_000_001,
+                state_id: 1,
+                completed: true,
+                ..Default::default()
+            },
+        )]),
+        client_node_graphs: HashMap::from([(
+            90_000_001,
+            BTreeMap::from([(
+                1,
+                ActiveClientNodeGraph {
+                    instance_id: 1,
+                    node_graph_id: 99,
+                    ..Default::default()
+                },
+            )]),
+        )]),
+        client_node_graph_seq: 17,
+        node_graph_blackboards: HashMap::from([(
+            (90_000_001, 1),
+            BTreeMap::from([("step".into(), "done".into())]),
+        )]),
+        expert_systems: HashMap::from([(
+            90_000_001,
+            BTreeMap::from([(
+                57_695,
+                ExpertSystemRecord {
+                    type_id: 57_695,
+                    expires_at_ft: 133_500_000_000,
+                    ..Default::default()
+                },
+            )]),
+        )]),
+        certificates: HashMap::from([(
+            90_000_001,
+            CharacterCertificateState {
+                certificates: HashMap::from([(12, 3)]),
+                flags: HashMap::from([(12, 1)]),
+            },
+        )]),
+    };
+
+    let sample_season = SeasonConfig {
+        season_id: 7,
+        template_id: 3,
+        max_active_challenges: 3,
+        max_season_points: 1_000,
+        season_name: "Winter Nexus".into(),
+        title_message_id: 100,
+        description_message_id: 101,
+        hint_message_id: 102,
+        large_selection_title_id: 103,
+        navigation_card_picture_path: "res:/ui/winter.png".into(),
+        background_no_logo: "res:/ui/bg.png".into(),
+        start_time_ft: 133_000_000_000,
+        end_time_ft: 133_100_000_000,
+        multiple_season_running: false,
+    };
+
+    let expected_seasons = SeasonsAndCampaignsStore {
+        season_states: HashMap::from([(
+            90_000_001,
+            CharacterSeasonState {
+                selected_season_id: 7,
+                season_points: 250,
+                challenges: HashMap::from([(
+                    1,
+                    CharacterChallenge {
+                        challenge_id: 1,
+                        season_id: 7,
+                        ..Default::default()
+                    },
+                )]),
+                claimed_challenges: HashMap::new(),
+                completed_once_per_season_ids: HashSet::from([1]),
+            },
+        )]),
+        active_seasons: HashMap::from([(7, 1)]),
+        season_configuration: Some(sample_season.clone()),
+        seasons_catalog: BTreeMap::from([(7, sample_season)]),
+        challenge_definitions: vec![SeasonalChallengeDef {
+            challenge_id: 1,
+            season_id: 7,
+            title: "Scan Sites".into(),
+            ..Default::default()
+        }],
+        season_loot_tables: HashMap::from([(1, vec![(34, 100, 0.5)])]),
+        announced_season_init: true,
+        announced_season_states: BTreeMap::from([(7, "active".into())]),
+        hacking_wins: HashMap::from([(90_000_001, 4)]),
+        milestone_playtime: HashMap::from([(
+            90_000_001,
+            CharacterMilestoneState {
+                first_logon_unix: 1_700_000_000,
+                last_activity_unix: 1_700_000_500,
+                accumulated_playtime_secs: 500,
+                active_session: true,
+            },
+        )]),
+        login_campaign_enrollments: HashMap::from([(90_000_001, 5)]),
+        daily_login_campaign_schedule: Some(ScheduledDailyCampaign {
+            campaign_id: 5,
+            start_unix: 1_700_000_000,
+            ..Default::default()
+        }),
+        seasonal_login_schedule: Some(SeasonalCampaignSchedule {
+            campaign_id: 6,
+            start_unix: 1_700_000_000,
+            end_unix: 1_700_500_000,
+            turnover_secs: 86_400,
+        }),
+        auto_injected_rewards: HashMap::from([(90_000_001, vec![34, 35])]),
+        login_reward_expiry: HashMap::from([(90_000_001, 1_700_086_400)]),
+        project_discovery_store: ProjectDiscoveryStore {
+            tasks: HashMap::from([(
+                1,
+                ProjectDiscoveryTaskData {
+                    task_id: "pd-1".into(),
+                    task_number: 1,
+                    ..Default::default()
+                },
+            )]),
+            mmos_configured: true,
+            ..Default::default()
+        },
+        project_discovery_players: HashMap::from([(
+            90_000_001,
+            PlayerProjectState {
+                rank: 5,
+                experience: 120.5,
+                accuracy: 0.92,
+                score: 88.0,
+                tasks_submitted: 10,
+                analysis_kredits: 500,
+                tutorial_level: 1,
+                tutorial_complete: true,
+                current_task_index: 2,
+                bonus_samples_left: 5,
+                tutorial_reward_claimed: true,
+                tutorial_skipped: false,
+                max_bonus_samples: 10,
+                project_id: "exoplanets".into(),
+                last_submitted_task_index: 1,
+                last_bonus_refill_unix: 1_700_000_000,
+                last_submission_unix: 1_700_000_100,
+            },
+        )]),
+        project_discovery_votes: HashMap::from([(
+            1,
+            TaskVoteBucket {
+                submissions: vec![(90_000_001, [0.5, 0.5], true)],
+                consensus_centroid: Some([0.5, 0.5]),
+            },
+        )]),
+        character_activities: HashMap::from([(
+            90_000_001,
+            CharacterActivityState {
+                seen_activities: vec![1, 2],
+                pop_state: vec![(PyRep::Integer(1), PyRep::Bool(true))],
+            },
+        )]),
+        fast_checkout_states: HashMap::from([(
+            1,
+            UserFastCheckoutState {
+                enabled: true,
+                cached_session_token: Some("tok-1".into()),
+                cached_offers: None,
+            },
+        )]),
+    };
+
+    let expected_quasar = QuasarCommerceStore {
+        payment_tokens: vec![PaymentTokenRecord {
+            id: 1,
+            user_id: 1,
+            token_str: "ptok".into(),
+            ..Default::default()
+        }],
+        payment_receipts: vec![PaymentReceiptRecord {
+            receipt_id: 2,
+            user_id: 1,
+            offer_id: "offer-1".into(),
+            ..Default::default()
+        }],
+        payment_schedules: vec![PaymentScheduleRecord {
+            id: 3,
+            user_id: 1,
+            offer_id: "sub-1".into(),
+            ..Default::default()
+        }],
+        plex_tx_logs: vec![PlexTransactionRecord {
+            id: 4,
+            user_id: 1,
+            amount: 500,
+            balance_after: 500,
+            ..Default::default()
+        }],
+        nes_store_catalog: Some(StoreCatalog {
+            categories: vec![StoreCategory {
+                id: 1,
+                name: "Skins".into(),
+                ..Default::default()
+            }],
+            products: vec![StoreProduct {
+                id: 2,
+                name: "Skin Pack".into(),
+                ..Default::default()
+            }],
+            offers: vec![StoreOffer {
+                id: 3,
+                name: "Offer".into(),
+                price_plex: 110,
+                ..Default::default()
+            }],
+        }),
+        nes_store_offer_tags: HashMap::from([(3, vec!["featured".into()])]),
+        plex_invoices: vec!["inv-1".into()],
+        cosmetics_market: Some(CosmeticsMarketData {
+            component_listings: BTreeMap::from([(
+                "comp-1".into(),
+                ComponentListingRecord {
+                    uuid: [1; 16],
+                    sale_end_unix: 1_700_050_000,
+                    ..Default::default()
+                },
+            )]),
+            skin_listings: BTreeMap::from([(
+                "skin-1".into(),
+                SkinListingRecord {
+                    uuid: [2; 16],
+                    target: ListingTargetRecord::Corporation(98_000_001),
+                    ..Default::default()
+                },
+            )]),
+            transactions: BTreeMap::from([(
+                "tx-1".into(),
+                CosmeticTransactionRecord {
+                    uuid: [3; 16],
+                    status: 1,
+                    ..Default::default()
+                },
+            )]),
+            next_seq: 12,
+        }),
+        orchestrator: OrchestratorState {
+            default_tenant_version: SemVerSpec {
+                major: 1,
+                minor: 2,
+                patch: 3,
+            },
+            tenant_version: Some(SemVerSpec {
+                major: 1,
+                minor: 3,
+                patch: 0,
+            }),
+            deployments: BTreeMap::from([(
+                1,
+                DeploymentRecord {
+                    id: 1,
+                    name: "dep-1".into(),
+                    ..Default::default()
+                },
+            )]),
+            content_groups: BTreeMap::from([(
+                2,
+                ContentGroupRecord {
+                    id: 2,
+                    name: "cg-1".into(),
+                    ..Default::default()
+                },
+            )]),
+            content_types: BTreeMap::from([(
+                3,
+                ContentTypeRecord {
+                    id: 3,
+                    name: "ct-1".into(),
+                    ..Default::default()
+                },
+            )]),
+            instances: vec![DeploymentInstanceRecord {
+                uuid: vec![9; 16],
+                deployment_id: 1,
+                ..Default::default()
+            }],
+        },
+        failed_fulfillments: vec![FailedFulfillmentRecord {
+            id: 1,
+            user_id: 1,
+            plex_units: 100,
+            ..Default::default()
+        }],
+        targeted_offers: BTreeMap::from([(
+            "target-1".into(),
+            TargetedOfferAdminRecord {
+                user_id: 1,
+                catalogue_entry_name: "entry-1".into(),
+                promoted: true,
+                ..Default::default()
+            },
+        )]),
+        acl_registry: Some(vec![QuasarAclRecord {
+            acl_id: 1,
+            name: "everyone".into(),
+            everyone: true,
+            ..Default::default()
+        }]),
+        lp_asset_ops_completed: HashSet::from(["op-1".into()]),
+    };
+
+    let expected_fleet_social = FleetAndSocialOpsStore {
+        fleet_saved_setups: HashMap::from([(
+            90_000_001,
+            HashMap::from([(
+                "Default".into(),
+                FleetSetupRecord {
+                    setup_name: "Default".into(),
+                    max_size: 256,
+                    ..Default::default()
+                },
+            )]),
+        )]),
+        fleet_stored_formations: HashMap::from([(1001, (1, 10_000.0, 2_500.0))]),
+        fleet_adverts: HashMap::from([(
+            1001,
+            FleetAdvertRecord {
+                fleet_id: 1001,
+                fleet_name: "Public Roam".into(),
+                ..Default::default()
+            },
+        )]),
+        fleet_join_requests: HashMap::from([(1001, HashSet::from([90_000_002]))]),
+        fleet_watchlist: HashMap::from([(90_000_001, HashSet::from([90_000_002]))]),
+        fleet_voice_enabled: HashMap::from([(1001, true)]),
+        fleet_loot_logging: HashMap::from([(1001, true)]),
+        corp_recruitment_ads: vec![CorpRecruitmentAd {
+            ad_id: 500,
+            corp_id: 98_000_001,
+            title: "Recruiting".into(),
+            ..Default::default()
+        }],
+        corp_allow_war: HashMap::from([(98_000_001, true)]),
+        hypernet_subs: BTreeMap::from([("node-1".into(), vec![90_000_001])]),
+        ingamereport_tickets: vec![InGameReportRecord {
+            report_id: 801,
+            reporter_char_id: 90_000_001,
+            reason: "bot".into(),
+            ..Default::default()
+        }],
+        contract_deposits: HashMap::from([(6001, 50_000)]),
+        lp_store_offers: Some(vec![LPOffer {
+            offer_id: 9001,
+            corp_id: 1_000_035,
+            type_id: 587,
+            isk_cost: IskCents(100_000),
+            ..Default::default()
+        }]),
+        delayed_rewards: HashMap::from([(
+            90_000_001,
+            HashMap::from([("reward-1".into(), vec![json!({"isk": 1000})])]),
+        )]),
+        mission_taxed_journal: HashSet::from([44_001]),
+        agent_global_disabled_missions: HashSet::from([77]),
+        agent_char_disabled_missions: HashMap::from([(90_000_001, HashSet::from([88]))]),
+        agent_replay_ts: HashMap::from([((90_000_001, 3_018_601), 1_700_000_123)]),
+        signal_tracker_subs: HashMap::from([(30_000_142, vec![90_000_001])]),
+        pending_probe_scans: vec![(
+            90_000_001,
+            vec![100_000_001],
+            vec![PyRep::Integer(1)],
+            vec![PyRep::String("sig".into())],
+            vec![PyRep::Bool(true)],
+            1_700_000_200,
+        )],
+        wh_local_witnesses: HashMap::from([("J100001".into(), HashSet::from([90_000_001]))]),
+    };
+
+    let expected_cluster = ClusterAndRuntimeStore {
+        cluster_misc_state: Some(PersistedClusterMiscState {
+            persisted_shipcaster_state: true,
+            char_settings: HashMap::from([(
+                90_000_001,
+                BTreeMap::from([("ui".into(), PyRep::Integer(1))]),
+            )]),
+            landing_pads: Vec::new(),
+            launchers: vec![PersistedLauncherRecord {
+                item_id: 7001,
+                type_id: 77_266,
+                solar_system_id: 30_000_142,
+                faction_id: 500_001,
+                linked_pad_ids: vec![7002],
+                position: [1.0, 2.0, 3.0],
+            }],
+            starter_launchers: Vec::new(),
+            used_starter_shipcaster_chars: BTreeSet::from([90_000_001]),
+            offered_load_slots: HashMap::from([(
+                7001,
+                OfferedLoadSlot {
+                    slot_key: "slot-1".into(),
+                    original_system_id: 30_000_142,
+                    offered_system_ids: vec![30_000_143],
+                    expires_unix: 1_700_005_000,
+                },
+            )]),
+            char_energy: HashMap::from([(
+                90_000_001,
+                CharacterEnergyState {
+                    current_energy: 50,
+                    max_energy: 100,
+                    last_update_time: 1_700_000_000,
+                    recharge_rate: 1.5,
+                    energy_rem: 0.25,
+                },
+            )]),
+            target_cooldowns: HashMap::from([(7002, 1_700_002_000)]),
+            target_charges: HashMap::from([(7002, 3)]),
+            zarzakh_toll_quotes: HashMap::from([(
+                100_000_001,
+                PendingZarzakhTollQuote {
+                    from_gate_id: 50_000_001,
+                    to_gate_id: 50_000_002,
+                    ship_id: 100_000_001,
+                    quoted_toll_cents: IskCents(1_000_000),
+                    expires_unix: 1_700_000_300,
+                },
+            )]),
+            zarzakh_horizon_siege: ZarzakhHorizonSiegeState {
+                phase: HorizonSiegePhase::Active,
+                phase_started_unix: 1_700_000_000,
+                active_start_unix: 1_700_000_100,
+                active_until_unix: 1_700_003_700,
+                cooldown_until_unix: 1_700_007_300,
+                instability_points: 25,
+                triggered_by_campaign_id: Some(901),
+                fulcrum_restricted_to_pirates: true,
+            },
+        }),
+        clone_vat_bay_state: CloneVatBayState {
+            active_by_ship: HashMap::from([(100_000_001, (30_000_142, 1_700_001_000))]),
+        },
+        structure_defense: HashMap::from([(
+            600_000_001,
+            StructureDefenseSettings {
+                structure_id: 600_000_001,
+                auto_defense_enabled: true,
+                auto_target_attackers: true,
+                auto_target_war_targets: false,
+                standing_threshold: -5.0,
+                target_blocked_acl: true,
+                known_attackers: vec![90_000_002],
+                known_attacker_timestamps: HashMap::from([(90_000_002, 1_700_000_500)]),
+            },
+        )]),
+        alliance_sov_cfg: HashMap::from([(
+            99_000_001,
+            AllianceSovConfig {
+                capital_system_id: Some(30_000_142),
+                pending_capital_system_id: Some(30_000_143),
+                capital_valid_after_unix: 1_700_100_000,
+                current_prime_hour: 18,
+                new_prime_hour: 20,
+                prime_valid_after_unix: 1_700_200_000,
+            },
+        )]),
+        load_service_state: LoadServiceState {
+            active: true,
+            config: BTreeMap::from([("mode".into(), PyRep::String("soak".into()))]),
+            runs_started: 3,
+            total_requests: 120,
+            systems_stepped: 10,
+            ticks_executed: 500,
+            sde_types_sampled: 20,
+            sde_solar_systems_sampled: 5,
+            world_items_sampled: 40,
+            world_characters_sampled: 8,
+            active_sessions_sampled: 2,
+            last_started_unix: 1_700_000_000,
+            last_stopped_unix: 1_700_000_500,
+        },
+        active_sessions: vec![1, 2, 3],
+        session_registry: HashMap::from([("sess-1".into(), json!({"char_id": 90_000_001}))]),
+        cluster_node_table: Some(BTreeMap::from([("node-1".into(), "127.0.0.1:26000".into())])),
+        cluster_admin_broadcasts: vec![json!({"msg": "reboot"})],
+        cluster_service_states: BTreeMap::from([("market".into(), true)]),
+        cluster_attacks: vec![json!({"kind": "probe"})],
+        external_queue_events: vec![json!({"topic": "login"})],
+        cluster_downtime_state: PersistedDowntimeState {
+            emitted_warnings_by_day: BTreeMap::from([(19_850, vec![300, 60])]),
+            last_shutdown_epoch_day: Some(19_849),
+            cluster_restart_epoch: 4,
+            last_maintenance_unix: 1_700_000_000,
+            downtime_until_unix: Some(1_700_000_900),
+        },
+        macho_client_code_hash: Some(json!({"v": "24.01"})),
+        macho_global_config: HashMap::from([("max_clients".into(), PyRep::Integer(500))]),
+        user_sessions: vec![json!({"user_id": 1})],
+        gm_audit_log: vec![json!({"gm": 90_000_001, "cmd": "/heal"})],
+        alert_bean_counts: HashMap::from([("warn".into(), 3)]),
+        alert_log_modes: HashMap::from([("client".into(), "full".into())]),
+        alert_client_traces: Some(json!(["trace-a"])),
+        alert_proxy_traces: Some(json!(["proxy-a"])),
+        alert_group_bean_bytes: Some(json!({"bytes": 256})),
+        browser_lockdown_policy: Some(BrowserLockdownPolicyState {
+            lockdown: true,
+            default_home_page: "https://eve.invalid".into(),
+            flagged_sites: vec![FlaggedSiteEntry {
+                site_url: "https://bad.invalid".into(),
+                site_flag: 2,
+            }],
+        }),
+        localization_qa_wrap_users: BTreeMap::from([(90_000_001, true)]),
+        client_stat_logger_strings: vec!["fps=60".into()],
+        blacklisted_planets: Some(vec![40_009_082]),
+        portraits: HashMap::from([("90000001".into(), "portrait.png".into())]),
+        paperdoll_states: HashMap::from([(90_000_001, "sculpted".into())]),
+        char_system_visits: HashMap::from([(
+            90_000_001,
+            HashMap::from([(
+                30_000_142,
+                SolarSystemVisitRecord {
+                    visits: 4,
+                    last_visited_ticks: 1_700_000_000,
+                },
+            )]),
+        )]),
+        module_reload_until_unix: HashMap::from([(200_000_001, 1_700_000_010)]),
+        auto_reloaded_event: HashMap::from([(200_000_001, (vec![200_000_002], 218, 12.5))]),
+        warp_vector_cooldown_until: HashMap::from([(100_000_001, 1_700_000_020)]),
+        ship_clone_offers: HashMap::from([(100_000_001, (90_000_002, 1_700_000_030))]),
+        mct_slots: HashMap::from([(1, vec![90_000_002])]),
+        account_resculpt_tokens: HashMap::from([("acct-1".into(), 2)]),
+        resculpt_pending: HashSet::from([90_000_001]),
+        char_cohorts: HashMap::from([(90_000_001, vec!["alpha".into()])]),
+        user_cohorts: HashMap::from([(1, vec!["beta".into()])]),
+        character_locks: HashMap::from([(90_000_001, "transfer".into())]),
+        omega_downgraded: HashSet::from([1]),
+        server_runtime_json: Some("{\"cluster_ok\":true}".into()),
+    };
+
+    repo.tx("seed_all_17_service_domains", |wtx| -> Result<(), TxError> {
+        wtx.snap.pve_special_sites = expected_pve.clone().into();
+        wtx.snap.crab_beacons = expected_crab.clone().into();
+        wtx.snap.abyssal_state = expected_abyssal.clone().into();
+        wtx.snap.dungeon_runtime = expected_dungeon_rt.clone().into();
+        wtx.snap.dungeon_editor = expected_dungeon_ed.clone().into();
+        wtx.snap.fob_observatory_state = expected_fob.clone().into();
+        wtx.snap.mining_and_ess_state = expected_mining_ess.clone().into();
+        wtx.snap.pvp_filament_state = expected_pvp.clone().into();
+        wtx.snap.tourney_state = expected_tourney.clone().into();
+        wtx.snap.deployable_state = expected_deployable.clone().into();
+        wtx.snap.superweapon_runtime = expected_superweapon.clone().into();
+        wtx.snap.insurgency_complex_ops = expected_insurgency_ops.clone().into();
+        wtx.snap.node_graph_state = expected_node_graph.clone().into();
+        wtx.snap.seasons_and_campaigns = expected_seasons.clone().into();
+        wtx.snap.quasar_commerce = expected_quasar.clone().into();
+        wtx.snap.fleet_and_social_ops = expected_fleet_social.clone().into();
+        wtx.snap.cluster_and_runtime = expected_cluster.clone().into();
+        Ok(())
+    })
+    .expect("commit all 17 service domains");
+    drop(repo);
+
+    let reopened = WorldRepository::open_sqlite(&path).expect("reopen sqlite");
+    reopened.with_snapshot(|snap| {
+        assert_eq!(&*snap.pve_special_sites, &expected_pve);
+        assert_eq!(&*snap.crab_beacons, &expected_crab);
+        assert_eq!(&*snap.abyssal_state, &expected_abyssal);
+        assert_eq!(&*snap.dungeon_runtime, &expected_dungeon_rt);
+        assert_eq!(&*snap.dungeon_editor, &expected_dungeon_ed);
+        assert_eq!(&*snap.fob_observatory_state, &expected_fob);
+        assert_eq!(&*snap.mining_and_ess_state, &expected_mining_ess);
+        assert_eq!(&*snap.pvp_filament_state, &expected_pvp);
+        assert_eq!(&*snap.tourney_state, &expected_tourney);
+        assert_eq!(&*snap.deployable_state, &expected_deployable);
+        assert_eq!(&*snap.superweapon_runtime, &expected_superweapon);
+        assert_eq!(&*snap.insurgency_complex_ops, &expected_insurgency_ops);
+        assert_eq!(&*snap.node_graph_state, &expected_node_graph);
+        assert_eq!(&*snap.seasons_and_campaigns, &expected_seasons);
+        assert_eq!(&*snap.quasar_commerce, &expected_quasar);
+        assert_eq!(&*snap.fleet_and_social_ops, &expected_fleet_social);
+        assert_eq!(&*snap.cluster_and_runtime, &expected_cluster);
+    });
+
+    // Reset scalar fields across service domains to Default and confirm deletes survive restart.
+    reopened
+        .tx("reset_service_domain_scalars", |wtx| -> Result<(), TxError> {
+            wtx.snap.pve_special_sites.initialized = false;
+            wtx.snap.pve_special_sites.sim_clock_sec = 0;
+            wtx.snap.tourney_state.active_match_id = None;
+            wtx.snap.seasons_and_campaigns.season_configuration = None;
+            wtx.snap.cluster_and_runtime.server_runtime_json = None;
+            wtx.snap.cluster_and_runtime.browser_lockdown_policy = None;
+            Ok(())
+        })
+        .expect("reset service scalars");
+    drop(reopened);
+
+    let reopened_reset = WorldRepository::open_sqlite(&path).expect("reopen after scalar reset");
+    reopened_reset.with_snapshot(|snap| {
+        assert!(!snap.pve_special_sites.initialized);
+        assert_eq!(snap.pve_special_sites.sim_clock_sec, 0);
+        assert_eq!(snap.tourney_state.active_match_id, None);
+        assert_eq!(snap.seasons_and_campaigns.season_configuration, None);
+        assert_eq!(snap.cluster_and_runtime.server_runtime_json, None);
+        assert_eq!(snap.cluster_and_runtime.browser_lockdown_policy, None);
+        assert_eq!(snap.pve_special_sites.next_seq, expected_pve.next_seq);
+        assert_eq!(snap.cluster_and_runtime.active_sessions, expected_cluster.active_sessions);
+    });
+
+    drop(reopened_reset);
     let _ = std::fs::remove_file(&path);
 }
