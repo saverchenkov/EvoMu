@@ -714,7 +714,7 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
         assert!(!s.sov_runtime.mercenary_dens.contains_key(&den_id));
     });
 
-    // handle_contract_delete_multiple for_corp restores escrow items to Deliveries & returns failed missing id
+    // handle_contract_delete_multiple for_corp restores escrow items to CorpDeliveries & returns failed missing id
     sess.corp_role = eve_db::corp_roles::ROLE_CONTRACT_MANAGER;
     let del_res = handle_contract_delete_multiple(
         &ctx,
@@ -726,9 +726,9 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
     assert_eq!(parts[0], PyRep::List(vec![PyRep::Integer(c_corp)]));
     assert_eq!(parts[1], PyRep::List(vec![PyRep::Integer(c_missing)]));
     ctx.db.with_snapshot(|s| {
-        assert_eq!(s.items[&corp_item_cid].flag, InventoryFlag::Deliveries);
+        assert_eq!(s.items[&corp_item_cid].flag, InventoryFlag::CorpDeliveries);
         assert_eq!(s.items[&corp_item_cid].owner_id, corp_id);
-        assert_eq!(s.items[&corp_item_locked].flag, InventoryFlag::Deliveries);
+        assert_eq!(s.items[&corp_item_locked].flag, InventoryFlag::CorpDeliveries);
         assert_eq!(s.items[&corp_item_locked].owner_id, corp_id);
     });
 

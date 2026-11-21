@@ -1231,15 +1231,17 @@ pub fn handle(
                     .map(|ch| ch.corporation_id)
                     .filter(|&id| id != 0)
                     .unwrap_or(caller_corp);
+                let is_corp_avail = ContractAvailability::parse(&c.availability)
+                    == Some(ContractAvailability::Corporation);
                 let is_corp_accept = accept_for_corp
                     || (c.assignee_id != 0
                         && c.assignee_id == effective_caller_corp
                         && c.assignee_id != char_id
-                        && !c.availability.eq_ignore_ascii_case("Corporation"));
+                        && !is_corp_avail);
                 let is_self_corp_contract = c.for_corp
                     && c.issuer_corp_id != 0
                     && c.issuer_corp_id == effective_caller_corp
-                    && (is_corp_accept || (c.assignee_id != char_id && c.assignee_id != effective_caller_corp && !c.availability.eq_ignore_ascii_case("Corporation")));
+                    && (is_corp_accept || (c.assignee_id != char_id && c.assignee_id != effective_caller_corp && !is_corp_avail));
                 if c.issuer_id == char_id || is_self_corp_contract {
                     return Err(rpc_err("CannotAcceptOwnContract", "Issuer cannot accept their own contract"));
                 }
@@ -1687,7 +1689,13 @@ pub fn handle(
                 let Some(c) = snap.contracts.get(&cid) else {
                     return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
                 };
-                if !check_contract_visibility_in_snap(snap, c, char_id, caller_corp, caller_alliance)
+                let effective_caller_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|ch| ch.corporation_id)
+                    .filter(|&id| id != 0)
+                    .unwrap_or(caller_corp);
+                if !check_contract_visibility_in_snap(snap, c, char_id, effective_caller_corp, caller_alliance)
                     && c.acceptor_id != Some(char_id)
                 {
                     return Err(rpc_err("ContractAccessDenied", format!("Character {char_id} cannot view private contract {cid}")));
@@ -1715,6 +1723,12 @@ pub fn handle(
 
             let _ = lazy_resolve_expired_and_notify(ctx, None, now_unix);
             let reply = ctx.db.with_snapshot(|snap| {
+                    let effective_caller_corp = snap
+                        .characters
+                        .get(&char_id)
+                        .map(|ch| ch.corporation_id)
+                        .filter(|&id| id != 0)
+                        .unwrap_or(caller_corp);
                     let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
                             let region_ok = filter_region.map(|reg| {
                                 let Ok(reg_id) = u32::try_from(reg) else {
@@ -1742,7 +1756,7 @@ pub fn handle(
                                     })
                                 }).unwrap_or(true);
                             c.status == "Outstanding"
-                                && check_contract_visibility_in_snap(snap, c, char_id, caller_corp, caller_alliance)
+                                && check_contract_visibility_in_snap(snap, c, char_id, effective_caller_corp, caller_alliance)
                                 && filter_type.map(|ft| c.contract_type == ft).unwrap_or(true)
                                 && filter_station.map(|st| c.start_station_id == st).unwrap_or(true)
                                 && min_price.map(|mp| c.price.0 >= mp.0).unwrap_or(true)

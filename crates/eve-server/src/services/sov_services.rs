@@ -1370,7 +1370,7 @@ pub fn handle_contract_delete_multiple(
     }
     let caller_corp = session.corporation_id.unwrap_or(0);
     let now_unix = ctx.now_unix();
-    let (deleted, failed, item_changes) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (deleted, failed, item_changes, transferred_ids) = ctx.db.try_with_mut_snapshot(|snap| {
         let corp_mgr = effective_contract_helper_corp_roles(
             snap,
             caller_corp,
@@ -1385,6 +1385,7 @@ pub fn handle_contract_delete_multiple(
         let mut del = Vec::new();
         let mut fail = Vec::new();
         let mut changes: Vec<(eve_db::InventoryItemRecord, i64, i64, eve_db::InventoryFlag)> = Vec::new();
+        let mut transferred_ids = Vec::new();
         let mut restored_ids = std::collections::HashSet::new();
         for cid in cids {
             let Some(c) = snap.contracts.get(&cid).cloned() else {
@@ -1399,43 +1400,57 @@ pub fn handle_contract_delete_multiple(
             let has_bids = c.contract_type == "Auction"
                 && (c.current_bidder_id.is_some() || !c.bid_history.is_empty());
             if c.status == "Outstanding" && owns && !has_bids {
-                snap.credit_contract_issuer(&c, c.reward);
-                let (restore_owner, restore_flag) = if c.for_corp {
-                    (c.issuer_corp_id, eve_db::InventoryFlag::Deliveries)
+                snap.credit_contract_issuer_with_journal(
+                    &c,
+                    c.reward,
+                    "ContractRewardRefund",
+                    eve_db::ledger::ref_types::CONTRACT_REWARD,
+                    cid,
+                    now_unix,
+                    format!("Reward refunded on deleted contract {cid}"),
+                );
+                snap.refund_contract_deposit(&c, now_unix, "deleted");
+                let restore_owner = if c.for_corp && c.issuer_corp_id != 0 {
+                    c.issuer_corp_id
                 } else {
-                    (c.issuer_id, eve_db::InventoryFlag::Hangar)
+                    c.issuer_id
                 };
-                for iid in &c.item_ids {
-                    if restored_ids.contains(iid) {
-                        continue;
-                    }
-                    if let Some(it) = snap.items.get_mut(iid) {
-                        let in_escrow = it.location_id == cid
-                            || (it.location_id == c.start_station_id
-                                && it.flag == eve_db::InventoryFlag::Locked
-                                && (it.owner_id == c.issuer_id
-                                    || (c.for_corp && it.owner_id == c.issuer_corp_id)
-                                    || it.owner_id == 0));
-                        if in_escrow {
-                            let (po, pl, pf) = (it.owner_id, it.location_id, it.flag);
-                            it.owner_id = restore_owner;
-                            it.location_id = c.start_station_id;
-                            it.flag = restore_flag;
-                            it.version += 1;
-                            restored_ids.insert(it.item_id);
-                            changes.push((it.clone(), po, pl, pf));
-                        }
+                let has_saved_item_flag = c
+                    .item_ids
+                    .iter()
+                    .any(|iid| snap.has_saved_contract_orig_flag(cid, *iid));
+                let restore_flag = (c.for_corp && !has_saved_item_flag)
+                    .then_some(eve_db::InventoryFlag::CorpDeliveries);
+                let mut prev_states: Vec<(i64, i64, i64, eve_db::InventoryFlag)> = c
+                    .item_ids
+                    .iter()
+                    .copied()
+                    .filter(|iid| !restored_ids.contains(iid))
+                    .filter_map(|iid| snap.items.get(&iid).map(|it| (iid, it.owner_id, it.location_id, it.flag)))
+                    .collect();
+                for it in snap.items.values() {
+                    if it.location_id == cid
+                        && !restored_ids.contains(&it.item_id)
+                        && !prev_states.iter().any(|(id, _, _, _)| *id == it.item_id)
+                    {
+                        prev_states.push((it.item_id, it.owner_id, it.location_id, it.flag));
                     }
                 }
-                for it in snap.items.values_mut() {
-                    if !restored_ids.contains(&it.item_id) && it.location_id == cid {
-                        let (po, pl, pf) = (it.owner_id, it.location_id, it.flag);
-                        it.owner_id = restore_owner;
-                        it.location_id = c.start_station_id;
-                        it.flag = restore_flag;
-                        it.version += 1;
-                        restored_ids.insert(it.item_id);
-                        changes.push((it.clone(), po, pl, pf));
+                transferred_ids.extend(snap.settle_contract_escrow_items(
+                    cid,
+                    &c.item_ids,
+                    restore_owner,
+                    c.start_station_id,
+                    restore_flag,
+                    true,
+                ));
+                snap.clear_contract_divisions(cid);
+                for (iid, po, pl, pf) in prev_states {
+                    if let Some(it) = snap.items.get(&iid) {
+                        if it.owner_id != po || it.location_id != pl || it.flag != pf {
+                            restored_ids.insert(iid);
+                            changes.push((it.clone(), po, pl, pf));
+                        }
                     }
                 }
                 if let Some(cm) = snap.contracts.get_mut(&cid) {
@@ -1446,8 +1461,11 @@ pub fn handle_contract_delete_multiple(
                 fail.push(PyRep::Integer(cid));
             }
         }
-        Ok::<_, BridgeRpcError>((del, fail, changes))
+        Ok::<_, BridgeRpcError>((del, fail, changes, transferred_ids))
     })?;
+    if !transferred_ids.is_empty() {
+        crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
+    }
     for (it, prev_owner, prev_loc, prev_flag) in item_changes {
         let (group_id, category_id) = ctx
             .sde

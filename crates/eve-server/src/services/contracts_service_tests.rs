@@ -2426,8 +2426,8 @@ fn eco_111_to_120_acl_alliance_corp_deliveries_journals_notifications_and_gm_rol
     assert_eq!(ctx.db.with_snapshot(|s| s.contracts[&ally_cid].assignee_id), alliance_id);
     assert!(contract_list_rows(&call(&mut ally_sess, "SearchContracts", &[]).unwrap()).iter().any(|r| r.dict_get("contract").and_then(|c| dict_i64(c, "contractID")) == Some(ally_cid)));
     assert!(!contract_list_rows(&call(&mut outsider_sess, "SearchContracts", &[]).unwrap()).iter().any(|r| r.dict_get("contract").and_then(|c| dict_i64(c, "contractID")) == Some(ally_cid)));
-    assert!(call(&mut ally_sess, "GetContractInfo", &[PyRep::Integer(ally_cid)]).is_ok()); // rpc-lint: allow test fixture
-    assert_eq!(call(&mut outsider_sess, "GetContractInfo", &[PyRep::Integer(ally_cid)]).unwrap_err().code, "ContractAccessDenied"); // rpc-lint: allow test fixture
+    assert!(call(&mut ally_sess, "GetContract", &[PyRep::Integer(ally_cid)]).is_ok());
+    assert_eq!(call(&mut outsider_sess, "GetContract", &[PyRep::Integer(ally_cid)]).unwrap_err().code, "ContractAccessDenied");
     ctx.db.with_snapshot(|s| {
         let mut legacy = s.contracts[&ally_cid].clone();
         legacy.assignee_id = 0;
@@ -2478,6 +2478,9 @@ fn eco_111_to_120_acl_alliance_corp_deliveries_journals_notifications_and_gm_rol
     let d3_pre_gm = ctx.db.with_snapshot(|s| s.corporations[&issuer_corp].division_balance(3));
     assert_eq!(dict_str(&call(&mut gm_sess, "GM_ExpireContract", &[PyRep::Integer(exp_gm)]).unwrap(), "status"), Some("Expired"));
     assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&issuer_corp].division_balance(3).0 - d3_pre_gm.0), IskCents::from_isk(100_000).0);
+    gm_sess.role = eve_machonet::service_roles::ROLE_GM_MASK;
+    ctx.db.with_mut_snapshot(|s| s.accounts.get_mut("player_777").unwrap().role = eve_db::service_roles::ROLE_PLAYER_DEFAULT);
+    assert_eq!(call(&mut gm_sess, "GM_ExpireContract", &[PyRep::Integer(exp_sw)]).unwrap_err().code, "GMRoleRequired");
 
     let (d1_sw, d3_sw, exp_sw_unix) = ctx.db.with_snapshot(|s| (s.corporations[&issuer_corp].division_balance(1), s.corporations[&issuer_corp].division_balance(3), s.contracts[&exp_sw].expiration_unix));
     let _ = ctx.drain_notifications_for_char(issuer_id);

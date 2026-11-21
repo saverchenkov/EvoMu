@@ -1760,6 +1760,12 @@ impl WorldStateSnapshot {
         transferred
     }
 
+    /// Returns true if a per-item `ContractOrigFlag` entry exists in KV or legacy `service_state_blobs`.
+    pub fn has_saved_contract_orig_flag(&self, contract_id: i64, item_id: i64) -> bool {
+        self.kv(crate::service_domains::Ns::ContractOrigFlag).get::<u16>(contract_id, &item_id.to_string()).is_some()
+            || self.service_state_blobs.contains_key(&format!("contract_orig_flag:{contract_id}:{item_id}"))
+    }
+
     /// Completes escrow settlement of `item_ids` (plus any orphaned items directly at
     /// `contract_id` when `include_contract_location_orphans` is true): moves top-level roots to
     /// `target_location_id` with `target_flag` (or restores each root's saved `ContractOrigFlag`

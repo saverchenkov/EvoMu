@@ -315,8 +315,42 @@ pub fn is_contract_visible_to_character(
     }
 }
 
-/// Snapshot-aware variant of [`is_contract_visible_to_character`] that also resolves
-/// alliance membership for legacy unassigned (`assignee_id == 0`) `"Alliance"` contracts.
+fn resolve_corp_and_alliance_in_snap(
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    fallback_corp_id: i64,
+    fallback_alliance_id: Option<i64>,
+) -> (i64, Option<i64>) {
+    if let Some(ch) = snap.characters.get(&char_id) {
+        let eff_corp = if ch.corporation_id != 0 {
+            ch.corporation_id
+        } else {
+            fallback_corp_id
+        };
+        let eff_alliance = if let Some(corp) = (eff_corp != 0)
+            .then(|| snap.corporations.get(&eff_corp))
+            .flatten()
+        {
+            corp.alliance_id.filter(|&a| a != 0)
+        } else {
+            ch.alliance_id.filter(|&a| a != 0)
+        };
+        return (eff_corp, eff_alliance);
+    }
+    let eff_alliance = if let Some(corp) = (fallback_corp_id != 0)
+        .then(|| snap.corporations.get(&fallback_corp_id))
+        .flatten()
+    {
+        corp.alliance_id.filter(|&a| a != 0)
+    } else {
+        fallback_alliance_id.filter(|&a| a != 0)
+    };
+    (fallback_corp_id, eff_alliance)
+}
+
+/// Snapshot-aware variant of [`is_contract_visible_to_character`] that resolves corp/alliance
+/// authoritatively from `snap` (falling back to caller parameters only when absent from `snap`),
+/// including legacy unassigned (`assignee_id == 0`) `"Alliance"` contracts.
 pub fn is_contract_visible_to_character_in_snap(
     snap: &WorldStateSnapshot,
     c: &ContractRecord,
@@ -324,21 +358,9 @@ pub fn is_contract_visible_to_character_in_snap(
     corp_id: i64,
     alliance_id: Option<i64>,
 ) -> bool {
-    let eff_alliance = alliance_id
-        .filter(|&a| a != 0)
-        .or_else(|| {
-            snap.characters
-                .get(&char_id)
-                .and_then(|ch| ch.alliance_id)
-                .filter(|&a| a != 0)
-        })
-        .or_else(|| {
-            (corp_id != 0)
-                .then(|| snap.corporations.get(&corp_id).and_then(|corp| corp.alliance_id))
-                .flatten()
-                .filter(|&a| a != 0)
-        });
-    if is_contract_visible_to_character(c, char_id, corp_id, eff_alliance) {
+    let (eff_corp, eff_alliance) =
+        resolve_corp_and_alliance_in_snap(snap, char_id, corp_id, alliance_id);
+    if is_contract_visible_to_character(c, char_id, eff_corp, eff_alliance) {
         return true;
     }
     if ContractAvailability::parse(&c.availability) == Some(ContractAvailability::Alliance)
@@ -366,12 +388,7 @@ pub fn is_character_party_to_contract(
         return true;
     }
     snap.characters.get(&char_id).is_some_and(|ch| {
-        let ch_alliance = ch.alliance_id.filter(|&a| a != 0).or_else(|| {
-            (ch.corporation_id != 0)
-                .then(|| snap.corporations.get(&ch.corporation_id).and_then(|corp| corp.alliance_id))
-                .flatten()
-                .filter(|&a| a != 0)
-        });
+        let (_, ch_alliance) = resolve_corp_and_alliance_in_snap(snap, char_id, 0, None);
         (ch.corporation_id != 0
             && (c.assignee_id == ch.corporation_id
                 || (ContractAvailability::parse(&c.availability)

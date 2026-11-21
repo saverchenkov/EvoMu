@@ -1871,7 +1871,13 @@ pub fn handle(
                 let Some(c) = snap.contracts.get(&cid).cloned() else { return Err(rpc_err("ContractNotFound", "Auction contract not found")); };
                 if c.contract_type != "Auction" { return Err(rpc_err("InvalidContractType", "Contract is not an Auction")); }
                 if c.status != "Outstanding" { return Err(rpc_err("InvalidContractState", "Auction is already settled or not Outstanding")); }
-                let caller_corp = session.corporation_id.or_else(|| snap.characters.get(&char_id).map(|ch| ch.corporation_id)).unwrap_or(0);
+                let caller_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|ch| ch.corporation_id)
+                    .filter(|&id| id != 0)
+                    .or(session.corporation_id)
+                    .unwrap_or(0);
                 let is_corp_issuer = c.for_corp && c.issuer_corp_id != 0 && caller_corp == c.issuer_corp_id;
                 let is_corp_winner = caller_corp != 0
                     && c.current_bidder_id == Some(caller_corp)
@@ -1910,20 +1916,19 @@ pub fn handle(
                     Some(target_flag),
                     false,
                 );
-                snap.kv_mut(eve_db::Ns::ContractBidDiv).clear_entity(cid);
-                if let Some(dep_raw) = snap.fleet_and_social_ops.contract_deposits.remove(&cid) {
-                    snap.credit_contract_issuer(&c, IskCents(dep_raw));
-                }
+                snap.refund_contract_deposit(&c, now_unix, "finished auction");
                 if has_winner && winner != c.issuer_id {
-                    snap.credit_contract_issuer(&c, c.current_bid);
-                    if c.for_corp {
-                        let bal = snap.corporations.get(&c.issuer_corp_id).map(|corp| corp.division_balance(1)).unwrap_or(IskCents(0));
-                        snap.append_journal(c.issuer_corp_id, "ContractAuctionSold", c.current_bid, bal, format!("Auction {cid} finished"));
-                    } else if let Some(iss) = snap.characters.get(&c.issuer_id) {
-                        let bal = iss.balance;
-                        snap.append_journal(c.issuer_id, "ContractAuctionSold", c.current_bid, bal, format!("Auction {cid} finished"));
-                    }
+                    snap.credit_contract_issuer_with_journal(
+                        &c,
+                        c.current_bid,
+                        "ContractAuctionSold",
+                        eve_db::ledger::ref_types::CONTRACT_PRICE,
+                        winner,
+                        now_unix,
+                        format!("Auction {cid} finished"),
+                    );
                 }
+                snap.clear_contract_divisions(cid);
                 if let Some(cm) = snap.contracts.get_mut(&cid) { cm.acceptor_id = Some(winner); cm.status = "Finished".to_string(); }
                 let notify_delta = finish_delta.finish(snap);
                 Ok((transferred_ids, notify_delta))

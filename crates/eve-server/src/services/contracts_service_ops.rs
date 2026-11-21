@@ -1041,10 +1041,13 @@ pub(crate) fn handle_gm_expire_contract(
     let cid = rpc.req_positive_i64(0, "contractID")?;
     let now_unix = ctx.now_unix();
     let (new_status, party_chars, notify_delta) = ctx.db.try_with_mut_snapshot(|snap| {
-        let has_gm_role = (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
-            || snap.accounts.values().any(|a| {
-                a.user_id == user_id && (a.role & eve_db::service_roles::ROLE_GM_MASK) != 0
-            });
+        let effective_role = snap
+            .accounts
+            .values()
+            .find(|a| a.user_id == user_id)
+            .map(|a| a.role)
+            .unwrap_or(session.role);
+        let has_gm_role = (effective_role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
         if !has_gm_role {
             return Err(rpc_err("GMRoleRequired", "GM_ExpireContract requires GM role"));
         }
