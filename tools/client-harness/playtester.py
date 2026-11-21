@@ -57,6 +57,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import queue
 import re
@@ -2929,7 +2930,7 @@ Choose your next action in the `action` object according to the required JSON sc
 10. `type_text` / `press_key` / `click_xy` / `drag_widget` / `wait`: Direct UI manipulation.
    - `type_text`: Targets widgets marked `"editable": true` in `clickable_widgets` (or focused field). Append `\n` at the end of `command`/`text` (e.g. `"Tritanium\n"`) to trigger Return/search submission automatically!
    - `press_key`: Supports `RETURN`/`ENTER`, `TAB`, `SHIFT+TAB`, `ESCAPE`, `CTRL+SPACE` (Stop Ship), `F1`–`F10`, and shortcuts (`ALT+P` Probe Scanner, `ALT+D` D-Scan, `ALT+W` Wallet, `ALT+N` Notepad, `ALT+F` Fitting, `ALT+C` Cargo, `ALT+R` Market, `ALT+G` Corp, `ALT+T` Assets, `ALT+M` Journal, `ALT+X` Skills).
-   - `drag_widget`: Drag source widget `target` (at `x`, `y`) to drop coordinates `dest_x`, `dest_y` (from the destination widget's `@(x,y)` in `clickable_widgets`, e.g. `ShipHangar` or a fitting slot, or desired window position). Always supply non-zero `dest_x` and `dest_y` (or `dest_target` in direct batch plans).
+   - `drag_widget`: Drag source widget `target` (at `x`, `y`) to drop coordinates `dest_x`, `dest_y` (from the destination widget's `@(x,y)` in `clickable_widgets`, e.g. `ShipHangar` or a fitting slot, or desired window position). Always supply non-zero `dest_x` and `dest_y` (or `action.dest_target` in direct batch plans).
 
 ### Bug Detection Rule (Exceptions AND Silent UI-State Desyncs!)
 1. First fill out `previous_action_verification`:
@@ -3034,7 +3035,7 @@ You are the **Strategic Parent Planner**. You audit prior outcomes and formulate
 2. **Delegate an Executable Tactical Plan (`delegated_plan`):**
    - **Step 1 executes immediately from your `delegated_plan.steps[0]` WITHOUT another LLM call** when `exec_mode = "direct"`, and every subsequent `"direct"` step executes at `~0.2s` in Python unless a selector misses or an anomaly triggers escalation.
    - **Choose `exec_mode` per step:**
-     - `"direct"` (`~75-85%` of steps): Provide `action_type_hint` AND a concrete `"action"` object (`type`, `target`/`command`, optional `wait_ms` `250`-`500`) for {planner_direct_actions_doc}, AND for `click_widget`/`type_text` when the widget name/path/label is known from `clickable_widgets` or predictable (`context_menu_*`, `yes_dialog_button`, `ok_dialog_button`, `cancelBtn`, `quickFilterInputBox`, `OverviewTab_*`), or `drag_widget` only when both source `target` AND drop `dest_x`/`dest_y` (or `dest_target`) are known upfront (use `"llm"` if drop coordinates are not yet visible).
+     - `"direct"` (`~75-85%` of steps): Provide `action_type_hint` AND a concrete `"action"` object (`type`, `target`/`command`, optional `wait_ms` `250`-`500`) for {planner_direct_actions_doc}, AND for `click_widget`/`type_text` when the widget name/path/label is known from `clickable_widgets` or predictable (`context_menu_*`, `yes_dialog_button`, `ok_dialog_button`, `cancelBtn`, `quickFilterInputBox`, `OverviewTab_*`), or `drag_widget` only when both source `target` AND drop `dest_x`/`dest_y` (or `action.dest_target`) are known upfront (use `"llm"` if drop coordinates are not yet visible).
      - `"llm"`: Provide `action_type_hint` (`"click_widget"`, etc.); use `"llm"` ONLY when a previous step in the same batch will open an unfamiliar window/dialog whose child widget names are not known yet (`action` may be omitted).
    - **Optional `"assertions"` (`expect_window_open`, `expect_window_closed`, `expect_modal_absent`, `expect_context_menu_item`, `expect_ball_present`, `expect_session_field`):** All keys are OPTIONAL — ONLY include `expect_modal_absent: true` when no confirmation popup (`Delete`, `Yes/No`) is expected! Keep `capture_screenshot: false` (default) on routine `"direct"` steps.
    - **Choose `max_batch_steps` (`6–10` steps strongly preferred for routine multi-step workflows!)** and explain briefly in `horizon_rationale`:
@@ -3202,6 +3203,7 @@ You are executing **Batch Step {batch_step_idx} of {max_steps}** of the delegate
      - Set `batch_status = "escalate"` and explain why in `escalation_reason` so the Parent Planner (`{DEFAULT_MODEL_CHAIN[0]}`) immediately takes over to diagnose and file the bug!
 2. **Otherwise (`expectation_met = true`):**
    - Execute Batch Step {batch_step_idx} (`{current_planned_step.get('instruction') or current_planned_step.get('intent', '')}`).
+   - For `drag_widget`, set `dest_x` and `dest_y` to the destination drop coordinates from `clickable_widgets`.
    - Set `batch_status = "completed"` if `{batch_step_idx} >= {max_steps}` or `success_criteria` is now fulfilled by this action; otherwise set `batch_status = "continue"`.
 {compact_contract}"""
 
@@ -4118,6 +4120,13 @@ def _normalize_action_defaults(raw_act: Optional[Dict[str, Any]]) -> Dict[str, A
     target = act.get("target") if act.get("target") not in ("",) else None
     command = _coerce_action_command(act)
     act_type = _canonicalize_action_type(str(act.get("type") or ""), bool(target))
+    extra_dest: Dict[str, str] = {}
+    for dest_key in ("dest_target", "dest_widget"):
+        raw_dest = act.get(dest_key)
+        if raw_dest is not None and not isinstance(raw_dest, bool):
+            dest_s = str(raw_dest).strip()
+            if dest_s:
+                extra_dest[dest_key] = dest_s
     return {
         "type": act_type,
         "target": target,
@@ -4126,6 +4135,7 @@ def _normalize_action_defaults(raw_act: Optional[Dict[str, Any]]) -> Dict[str, A
         "y": act.get("y"),
         "dest_x": act.get("dest_x"),
         "dest_y": act.get("dest_y"),
+        **extra_dest,
         "right_click": bool(act.get("right_click", False)),
         "double_click": bool(act.get("double_click", False)),
         "wait_ms": _resolve_wait_action_ms(
@@ -4417,6 +4427,26 @@ def _find_widget_in_pools(
     return None
 
 
+def _parse_coord_int(val: Any) -> Optional[int]:
+    """Parse a finite integer coordinate, rejecting None, bools, and non-numeric values."""
+    if isinstance(val, bool) or val is None:
+        return None
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        return int(val) if math.isfinite(val) else None
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        try:
+            num = float(s)
+        except ValueError:
+            return None
+        return int(num) if math.isfinite(num) else None
+    return None
+
+
 def _resolve_direct_action(
     step_spec: Dict[str, Any],
     ui_snapshot: Optional[Dict[str, Any]],
@@ -4527,28 +4557,31 @@ def _resolve_direct_action(
             act["y"] = matched["y"]
 
         if act_type == "drag_widget":
+            raw_dx = act.get("dest_x")
+            raw_dy = act.get("dest_y")
+            dx_val = _parse_coord_int(raw_dx) if raw_dx is not None else None
+            dy_val = _parse_coord_int(raw_dy) if raw_dy is not None else None
+            if (raw_dx is not None and dx_val is None) or (raw_dy is not None and dy_val is None):
+                return None, "drag_widget invalid dest_x/dest_y coordinates"
             dest_target = str(
                 raw_act.get("dest_target")
                 or raw_act.get("dest_widget")
-                or step_spec.get("dest_target")
-                or step_spec.get("dest_widget")
                 or ""
             ).strip()
-            if (act.get("dest_x") is None or act.get("dest_y") is None) and dest_target:
+            if (dx_val is None or dy_val is None or (dx_val <= 0 and dy_val <= 0)) and dest_target:
                 dest_matched = _find_widget_in_pools(dest_target, (widgets,))
-                if dest_matched is None or dest_matched.get("x") is None or dest_matched.get("y") is None:
+                if dest_matched is None:
                     return None, f"drag_widget destination widget {dest_target!r} not found in live scene graph"
-                act["dest_x"] = dest_matched["x"]
-                act["dest_y"] = dest_matched["y"]
-            if act.get("dest_x") is None or act.get("dest_y") is None:
+                dx_val = _parse_coord_int(dest_matched.get("x"))
+                dy_val = _parse_coord_int(dest_matched.get("y"))
+                if dx_val is None or dy_val is None:
+                    return None, f"drag_widget destination widget {dest_target!r} missing coordinates"
+            if dx_val is None or dy_val is None:
                 return None, "drag_widget missing dest_x/dest_y drop coordinates"
-            try:
-                dx_val = int(act["dest_x"])
-                dy_val = int(act["dest_y"])
-            except (TypeError, ValueError):
-                return None, "drag_widget invalid dest_x/dest_y coordinates"
-            if dx_val <= 0 and dy_val <= 0:
+            if dx_val < 0 or dy_val < 0 or (dx_val == 0 and dy_val == 0):
                 return None, "drag_widget missing positive dest_x/dest_y drop coordinates"
+            act["dest_x"] = dx_val
+            act["dest_y"] = dy_val
 
         return act, ""
 
