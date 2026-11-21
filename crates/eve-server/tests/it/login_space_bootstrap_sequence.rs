@@ -81,10 +81,17 @@ fn collect_remove_ball_ids(out: &ClientCallOutput) -> Vec<i64> {
             for item in items {
                 if let PyRep::Tuple(pair) = item {
                     if let Some(PyRep::Tuple(fa)) = pair.get(1) {
-                        if fa.first().and_then(|v| v.as_str()) == Some("RemoveBall") {
-                            if let Some(PyRep::Tuple(args)) = fa.get(1) {
+                        let action = fa.first().and_then(|v| v.as_str());
+                        if let Some(PyRep::Tuple(args) | PyRep::List(args)) = fa.get(1) {
+                            if action == Some("RemoveBall") {
                                 if let Some(id) = args.first().and_then(|v| v.as_i64()) {
                                     ids.push(id);
+                                }
+                            } else if action == Some("RemoveBalls") {
+                                if let Some(PyRep::List(ball_ids) | PyRep::Tuple(ball_ids)) =
+                                    args.first()
+                                {
+                                    ids.extend(ball_ids.iter().filter_map(|v| v.as_i64()));
                                 }
                             }
                         }

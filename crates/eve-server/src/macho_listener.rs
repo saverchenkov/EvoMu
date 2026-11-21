@@ -1184,6 +1184,96 @@ pub(crate) fn strip_self_non_dock_warp_stop_fx(
     })
 }
 
+fn rewrite_v24_remove_ball_action(action: &mut PyRep) {
+    let (PyRep::Tuple(action_items) | PyRep::List(action_items)) = action else {
+        return;
+    };
+    let [name_rep, args_rep] = action_items.as_mut_slice() else {
+        return;
+    };
+    if name_rep.as_str() != Some("RemoveBall") {
+        return;
+    }
+    let ball_id = match args_rep {
+        PyRep::Tuple(arg_items) | PyRep::List(arg_items) => match arg_items.as_slice() {
+            [first, ..] => first.as_i64(),
+            [] => None,
+        },
+        PyRep::Integer(id) => Some(*id),
+        _ => None,
+    };
+    let Some(ball_id) = ball_id else {
+        return;
+    };
+    *name_rep = PyRep::String("RemoveBalls".into());
+    *args_rep = PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(ball_id)])]);
+}
+
+fn rewrite_v24_remove_ball_entry(entry: &mut PyRep) {
+    let is_stamped_pair = matches!(
+        entry,
+        PyRep::Tuple(pair) | PyRep::List(pair)
+            if pair.len() == 2 && matches!(pair[0], PyRep::Integer(_))
+    );
+    if is_stamped_pair {
+        if let PyRep::Tuple(pair) | PyRep::List(pair) = entry {
+            rewrite_v24_remove_ball_action(&mut pair[1]);
+        }
+    } else {
+        rewrite_v24_remove_ball_action(entry);
+    }
+}
+
+fn normalize_v24_remove_ball_updates_in_place(updates: &mut PyRep) {
+    let (PyRep::List(entries) | PyRep::Tuple(entries)) = updates else {
+        return;
+    };
+    for entry in entries {
+        rewrite_v24_remove_ball_entry(entry);
+    }
+}
+
+/// Rewrites single-ball Destiny `RemoveBall(ballID)` actions to `RemoveBalls([ballID])` (`#1531`).
+///
+/// V24 `michelle.Park.RemoveBall` deletes the ball via `_parent_RemoveBall(ballID, 0)` before
+/// dispatching `DoBallRemove`, leaving `GetBall(ballID) == None` when
+/// `FxSequencer.RemoveActivationsForBallID` reads `ball.destructionEffectId` for any active FX
+/// targeting that ball (e.g. NPC/turret fire hitting a dying drone or ship). `RemoveBalls`
+/// dispatches `DoBallsRemove` before deleting from `park.balls` and safely ignores missing balls.
+fn normalize_v24_remove_ball_updates(mut updates: PyRep) -> PyRep {
+    normalize_v24_remove_ball_updates_in_place(&mut updates);
+    updates
+}
+
+fn normalize_v24_destiny_notification_args(event: &str, payload_args: &mut [PyRep]) {
+    if event == "DoDestinyUpdate" {
+        if let [updates, ..] = payload_args {
+            normalize_v24_remove_ball_updates_in_place(updates);
+        }
+    } else if event == "DoDestinyUpdates" {
+        let [batches, ..] = payload_args else {
+            return;
+        };
+        let (PyRep::List(items) | PyRep::Tuple(items)) = batches else {
+            return;
+        };
+        for item in items {
+            let is_sub_batch = matches!(
+                item,
+                PyRep::Tuple(pair) | PyRep::List(pair)
+                    if pair.len() == 2 && matches!(pair[0], PyRep::List(_) | PyRep::Tuple(_))
+            );
+            if is_sub_batch {
+                if let PyRep::Tuple(pair) | PyRep::List(pair) = item {
+                    normalize_v24_remove_ball_updates_in_place(&mut pair[0]);
+                }
+            } else {
+                rewrite_v24_remove_ball_entry(item);
+            }
+        }
+    }
+}
+
 fn build_destiny_batch(
     ctx: &ServerContext,
     epoch: u32,
@@ -1222,6 +1312,7 @@ fn build_destiny_batch(
     } else {
         norm_args.swap_remove(0)
     };
+    let updates = normalize_v24_remove_ball_updates(updates);
     let wait_for_bubble = norm_args
         .first()
         .and_then(|v| match v {
@@ -1275,11 +1366,12 @@ fn build_typed_notification(
     if crate::router::client_compat::should_suppress_macho_notification(&event, &args) {
         return None;
     }
-    let norm_args = crate::router::client_compat::normalize_macho_notification_with_sde(
+    let mut norm_args = crate::router::client_compat::normalize_macho_notification_with_sde(
         &event,
         args,
         Some(&ctx.sde),
     );
+    normalize_v24_destiny_notification_args(&event, &mut norm_args);
     Some(crate::outbound_sequencer::TypedNotification {
         event,
         args: norm_args,
