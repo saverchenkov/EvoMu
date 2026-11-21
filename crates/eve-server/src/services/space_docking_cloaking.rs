@@ -3,9 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::space_destiny::{
-    record_session_change_timer, wormhole_item_id_for_signature, AU_IN_METERS,
-};
+use crate::services::space_destiny::{record_session_change_timer, wormhole_item_id_for_signature};
 pub use crate::services::wormhole_lifecycle_ops::*;
 use eve_db::types::{CosmicAnomalyRecord, CosmicSignatureRecord};
 use eve_destiny::{Ball, MovementMode};
@@ -303,42 +301,20 @@ pub async fn ensure_system_signatures_and_anomalies(
                 }
             }
 
-            let anom_list = snap
-                .cosmic_anomalies
-                .entry(sys_id)
-                .or_insert_with(|| {
-                    if sys_wh_class == 0 {
-                        vec![CosmicAnomalyRecord {
-                            anomaly_id: format!("ANO-{}", 100 + (sys_id % 900)),
-                            solar_system_id: sys_id,
-                            name: "Dense Veldspar Deposit".into(),
-                            anomaly_type: "Ore".into(),
-                            position: [
-                                4.0 * AU_IN_METERS,
-                                3.0 * AU_IN_METERS,
-                                -2.0 * AU_IN_METERS,
-                            ],
-                            signal_strength: 1.0,
-                            ore_types: vec![1230, 1228],
-                            remaining_volume: 50_000.0,
-                            created_unix: now_unix,
-                            lifetime_seconds: 86_400,
-                            cleared: false,
-                        }]
-                    } else {
-                        Vec::new()
+            let anoms = if let Some(anom_list) = snap.cosmic_anomalies.get_mut(&sys_id) {
+                for anom in anom_list.iter_mut() {
+                    if !anom.cleared
+                        && anom.lifetime_seconds > 0
+                        && now_unix >= anom.created_unix.saturating_add(anom.lifetime_seconds)
+                    {
+                        anom.cleared = true;
+                        expired_anom_ids.push(anom.anomaly_id.clone());
                     }
-                });
-            for anom in anom_list.iter_mut() {
-                if !anom.cleared
-                    && anom.lifetime_seconds > 0
-                    && now_unix >= anom.created_unix.saturating_add(anom.lifetime_seconds)
-                {
-                    anom.cleared = true;
-                    expired_anom_ids.push(anom.anomaly_id.clone());
                 }
-            }
-            let anoms = anom_list.clone();
+                anom_list.clone()
+            } else {
+                Vec::new()
+            };
             Ok::<_, std::convert::Infallible>((sigs_clone, anoms, mat_exits))
         })
         .unwrap();

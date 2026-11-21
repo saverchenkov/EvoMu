@@ -309,6 +309,61 @@ impl SdeRegistry {
         Ok(out)
     }
 
+    /// Loads `res:/staticdata/dungeons.fsdbinary` (`dungeonID` -> localized `dungeonNameID`, stride `120`).
+    pub fn load_dungeon_name_ids(&self) -> Result<HashMap<u32, u32>, SdeError> {
+        let (raw, recs) = self.read_cfsd_bytes("res:/staticdata/dungeons.fsdbinary", 120)?;
+        let mut out = HashMap::with_capacity(recs.len());
+        for rec in recs {
+            let did = u32_le(&raw, rec);
+            let name_id = u32_le(&raw, rec + 80);
+            if did > 0 && name_id > 0 {
+                out.insert(did, name_id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Resolves the localized `dungeonNameID` message ID for `dungeon_id` from `dungeons.fsdbinary`,
+    /// caching the loaded map by resolved file path and metadata. Returns `None` if unavailable.
+    pub fn dungeon_name_id(&self, dungeon_id: u32) -> Option<u32> {
+        if dungeon_id == 0 {
+            return None;
+        }
+        let path = self
+            .cdn_resource_path("res:/staticdata/dungeons.fsdbinary")
+            .ok()?;
+        let meta = std::fs::metadata(&path).ok()?;
+        let len = meta.len();
+        let modified_nanos = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let key = (path, len, modified_nanos);
+
+        type DungeonNameCache =
+            std::sync::Mutex<HashMap<(PathBuf, u64, u128), std::sync::Arc<HashMap<u32, u32>>>>;
+        static CACHE: std::sync::OnceLock<DungeonNameCache> = std::sync::OnceLock::new();
+        let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        if let Some(existing) = cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return existing.get(&dungeon_id).copied();
+        }
+        let loaded = std::sync::Arc::new(self.load_dungeon_name_ids().ok()?);
+        let out = loaded.get(&dungeon_id).copied();
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.len() >= 16 {
+            guard.clear();
+        }
+        guard.insert(key, loaded);
+        out
+    }
+
     /// Loads `res:/staticdata/npccharacters.fsdbinary` (`11,424` NPC characters, stride `136`).
     pub fn load_npc_characters(&self) -> Result<HashMap<i64, NpcCharacterRecord>, SdeError> {
         let (raw, recs) = self.read_cfsd_bytes("res:/staticdata/npccharacters.fsdbinary", 136)?;
@@ -1079,4 +1134,66 @@ pub struct RawCfsdTypeRecord {
 #[path = "cfsd_domain_loaders_edges_tests.rs"]
 mod cfsd_domain_loaders_edges_tests;
 
+#[cfg(test)]
+mod dungeon_name_id_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn dungeon_name_id_parses_cfsd_table_and_handles_missing_resources() {
+        let mut sde = SdeRegistry::default();
+        assert_eq!(sde.dungeon_name_id(5498), None);
+        assert_eq!(sde.dungeon_name_id(0), None);
+        assert!(sde.load_dungeon_name_ids().is_err());
+
+        // Build a synthetic cfsd buffer with 1 bucket of 3 records (stride 120):
+        // (5498 -> 288491), (1344 -> 112326), (999 -> 0 ignored).
+        let mut buf = vec![0u8; 64];
+        buf[40..48].copy_from_slice(&1u64.to_le_bytes());
+        buf[48..56].copy_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&3u64.to_le_bytes());
+        let rec_base = buf.len();
+        buf[56..64].copy_from_slice(&((rec_base - 32) as u64).to_le_bytes());
+        buf.extend_from_slice(&[0u8; 3 * 120]);
+        for (i, (did, nid)) in [(5498u32, 288_491u32), (1344, 112_326), (999, 0)]
+            .into_iter()
+            .enumerate()
+        {
+            let off = rec_base + i * 120;
+            buf[off..off + 4].copy_from_slice(&did.to_le_bytes());
+            buf[off + 80..off + 84].copy_from_slice(&nid.to_le_bytes());
+        }
+        let path = std::env::temp_dir().join(format!(
+            "evomu_dng_names_{}_{}.fsdbinary",
+            std::process::id(),
+            NEXT_TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, &buf).expect("write temp dungeons.fsdbinary");
+        sde.resources.insert(
+            "res:/staticdata/dungeons.fsdbinary".to_string(),
+            SdeResourceInfo {
+                res_path: "res:/staticdata/dungeons.fsdbinary".to_string(),
+                cdn_relative_path: path.display().to_string(),
+                md5: String::new(),
+                byte_size: buf.len() as u64,
+                format: "cfsd".to_string(),
+                record_count: 3,
+                spot: String::new(),
+            },
+        );
+
+        let table = sde.load_dungeon_name_ids().expect("load_dungeon_name_ids");
+        assert_eq!(table.get(&5498), Some(&288_491));
+        assert_eq!(table.get(&1344), Some(&112_326));
+        assert!(!table.contains_key(&999));
+
+        assert_eq!(sde.dungeon_name_id(5498), Some(288_491));
+        assert_eq!(sde.dungeon_name_id(1344), Some(112_326));
+        assert_eq!(sde.dungeon_name_id(999), None);
+        assert_eq!(sde.dungeon_name_id(0), None);
+        let _ = std::fs::remove_file(&path);
+    }
+}
 

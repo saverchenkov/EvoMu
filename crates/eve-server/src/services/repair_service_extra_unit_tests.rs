@@ -978,13 +978,6 @@ async fn mutants_cov_ship_combat_damage_tether_acl_and_structure_tax() {
     sess.structure_id = None;
     sess.corporation_id = Some(corp_a);
 
-    let quote_row_val = |rep: &PyRep, target_id: i64, field: &str| -> f64 {
-        let PyRep::Dict(entries) = rep else { panic!("expected quote dict, got {rep:?}") };
-        let (_, list_rep) = entries.iter().find(|(k, _)| k.as_i64() == Some(target_id)).unwrap();
-        let PyRep::List(rows) = list_rep else { panic!("expected quote rows") };
-        rows[0].dict_get(field).and_then(|v| v.as_f64()).unwrap()
-    };
-
     let q_rep = call_quotes(
         &ctx,
         &sess,
@@ -1203,24 +1196,86 @@ async fn setup_tethered_ship_repair_fixture(
     (ctx, sess, char_id, ship_id, sys_id, struct_id)
 }
 
+fn quote_row_val(rep: &PyRep, target_id: i64, field: &str) -> f64 {
+    let PyRep::Dict(entries) = rep else {
+        panic!("expected quote dict, got {rep:?}")
+    };
+    let (_, list_rep) = entries.iter().find(|(k, _)| k.as_i64() == Some(target_id)).unwrap();
+    let PyRep::List(rows) = list_rep else {
+        panic!("expected quote rows")
+    };
+    rows[0].dict_get(field).and_then(|v| v.as_f64()).unwrap()
+}
+
+/// RAII guard holding `ballpark.write()` on a helper thread while guaranteeing release/join on unwind.
+struct BallparkWriteHoldGuard {
+    release_tx: Option<std::sync::mpsc::Sender<()>>,
+    bg: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BallparkWriteHoldGuard {
+    fn acquire(sys: &crate::system_actor::SystemHandle) -> Self {
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let sys_bg = sys.clone();
+        let bg = std::thread::spawn(move || {
+            let _bp = sys_bg.ballpark.write().unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().unwrap();
+        Self {
+            release_tx: Some(release_tx),
+            bg: Some(bg),
+        }
+    }
+
+    fn release(mut self) {
+        if let Some(tx) = self.release_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(bg) = self.bg.take() {
+            bg.join().unwrap();
+        }
+    }
+}
+
+impl Drop for BallparkWriteHoldGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.release_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(bg) = self.bg.take() {
+            let _ = bg.join();
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tethered_repair_completes_without_blocking_while_ballpark_write_locked() {
     let (ctx, sess, _char_id, ship_id, sys_id, struct_id) =
         setup_tethered_ship_repair_fixture(20.0, 30.0).await;
     let sys = ctx.systems.get_or_spawn(sys_id);
-    // Live-only unsampled shield damage must not be healed for free when `WouldBlock` prevents
-    // sampling live ballpark combat state.
-    assert!(sys.try_update_combat_state(ship_id, |cs| cs.shield_hp = 400.0));
 
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let sys_bg = sys.clone();
-    let bg = std::thread::spawn(move || {
-        let _bp = sys_bg.ballpark.write().unwrap();
-        held_tx.send(()).unwrap();
-        release_rx.recv().unwrap();
-    });
-    held_rx.recv().unwrap();
+    let q_hull_armor = call_quotes(&ctx, &sess, &[PyRep::Integer(ship_id)]).unwrap();
+    let hull_armor_cost = quote_row_val(&q_hull_armor, ship_id, "totalRepairCost");
+
+    // Publish live shield damage into `SystemView` before holding `ballpark.write()`.
+    sys.modify_combat_state(ship_id, |cs| cs.shield_hp = 400.0)
+        .await
+        .expect("system actor alive")
+        .expect("ship combat state present");
+
+    let hold = BallparkWriteHoldGuard::acquire(&sys);
+
+    // `handle_get_damage_reports` and `handle_repair_items_in_location` both sample live HP
+    // lock-free from `SystemView` even while `ballpark.write()` is held, pricing all 3 layers.
+    let q_live = call_quotes(&ctx, &sess, &[PyRep::Integer(ship_id)]).unwrap();
+    let live_cost = quote_row_val(&q_live, ship_id, "totalRepairCost");
+    assert!(
+        live_cost > hull_armor_cost,
+        "SystemView sampling must quote live shield+armor+hull ({live_cost}) > hull+armor ({hull_armor_cost})"
+    );
 
     let ctx_rep = ctx.clone();
     let sess_rep = sess.clone();
@@ -1228,7 +1283,7 @@ async fn tethered_repair_completes_without_blocking_while_ballpark_write_locked(
         call_repair(&ctx_rep, &sess_rep, true, &[PyRep::Integer(ship_id)]).await
     });
 
-    // Must complete while `ballpark.write()` is still held by `bg`.
+    // Must complete without blocking while `ballpark.write()` is still held (`QueuedAsync`).
     let rep = tokio::time::timeout(std::time::Duration::from_secs(2), repair_task)
         .await
         .expect("handle_repair_items_in_location blocked on ballpark.write()")
@@ -1238,18 +1293,18 @@ async fn tethered_repair_completes_without_blocking_while_ballpark_write_locked(
         rep.dict_get("locationID").and_then(|v| v.as_i64()),
         Some(struct_id)
     );
+    let rep_cost = rep
+        .dict_get("totalCostISK")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
     assert!(
-        rep.dict_get("totalCostISK")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0)
-            > 0.0
+        (rep_cost - live_cost).abs() < 1e-6,
+        "expected paid repair fee {live_cost} to cover all 3 sampled layers, got {rep_cost}"
     );
 
-    release_tx.send(()).unwrap();
-    bg.join().unwrap();
+    hold.release();
 
-    // Non-blocking fallback queued exact priced hull/armor deltas onto SystemActor without healing
-    // unsampled live shield damage for free.
+    // Once actor drains `QueuedAsync`, all 3 sampled layers (hull, armor, shield) are healed.
     let cs = sys
         .get_combat_state(ship_id)
         .await
@@ -1257,23 +1312,20 @@ async fn tethered_repair_completes_without_blocking_while_ballpark_write_locked(
         .expect("tethered ship combat state remains present");
     assert!((cs.structure_hp - cs.max_structure_hp).abs() < 1e-6);
     assert!((cs.armor_hp - cs.max_armor_hp).abs() < 1e-6);
-    assert!((cs.shield_hp - 400.0).abs() < 1e-6);
+    assert!((cs.shield_hp - cs.max_shield_hp).abs() < 1e-6);
 
-    // Subsequent uncontended repair samples and restores the live shield damage cleanly.
-    let rep_live = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).await.unwrap();
+    // Follow-up repair has zero remaining unpaid damage.
+    let rep_after = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)])
+        .await
+        .unwrap();
     assert!(
-        rep_live
+        rep_after
             .dict_get("totalCostISK")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0)
-            > 0.0
+            .unwrap_or(-1.0)
+            .abs()
+            < 1e-6
     );
-    let cs_after = sys
-        .get_combat_state(ship_id)
-        .await
-        .expect("system actor alive")
-        .expect("tethered ship combat state after live repair");
-    assert!((cs_after.shield_hp - cs_after.max_shield_hp).abs() < 1e-6);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1331,19 +1383,14 @@ async fn read_unified_ship_damage_state_skips_ballpark_inside_mut_snapshot() {
     let (ctx, _sess, _char_id, ship_id, sys_id, _struct_id) =
         setup_tethered_ship_repair_fixture(15.0, 25.0).await;
     let sys = ctx.systems.get_or_spawn(sys_id);
-    assert!(sys.try_update_combat_state(ship_id, |cs| cs.shield_hp = 400.0));
+    sys.modify_combat_state(ship_id, |cs| cs.shield_hp = 400.0)
+        .await
+        .expect("system actor alive")
+        .expect("ship combat state present");
 
     // Hold `ballpark.write()` across `with_mut_snapshot` to prove `read_unified_ship_damage_state`
     // skips rank-20 ballpark acquisition when `RANK_WORLD_INNER` (40) is held.
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let sys_bg = sys.clone();
-    let bg = std::thread::spawn(move || {
-        let _bp = sys_bg.ballpark.write().unwrap();
-        held_tx.send(()).unwrap();
-        release_rx.recv().unwrap();
-    });
-    held_rx.recv().unwrap();
+    let hold = BallparkWriteHoldGuard::acquire(&sys);
 
     let (hull_dmg, armor_dmg, shield_dmg_in_tx) = ctx.db.with_mut_snapshot(|snap| {
         let u = crate::sp6_lifecycle::read_unified_ship_damage_state(
@@ -1358,10 +1405,9 @@ async fn read_unified_ship_damage_state_skips_ballpark_inside_mut_snapshot() {
         "live shield damage must be skipped inside RANK_WORLD_INNER, got {shield_dmg_in_tx}"
     );
 
-    release_tx.send(()).unwrap();
-    bg.join().unwrap();
+    hold.release();
 
-    // Outside `writer` (rank 40 not held), `with_snapshot` reads live ballpark shield damage normally.
+    // Outside `writer` (rank 40 not held), `with_snapshot` reads live `SystemView` shield damage normally.
     let shield_dmg_after = ctx.db.with_snapshot(|snap| {
         crate::sp6_lifecycle::read_unified_ship_damage_state(&ctx, snap, ship_id, 23_915, None)
             .shield_damage
@@ -1407,15 +1453,7 @@ async fn add_target_lock_immediately_denies_tether_repair_while_ballpark_write_l
     .unwrap();
     assert!(!sys.is_ball_tethered_sync(ship_id));
 
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let sys_bg = sys.clone();
-    let bg = std::thread::spawn(move || {
-        let _bp = sys_bg.ballpark.write().unwrap();
-        held_tx.send(()).unwrap();
-        release_rx.recv().unwrap();
-    });
-    held_rx.recv().unwrap();
+    let hold = BallparkWriteHoldGuard::acquire(&sys);
 
     let ctx_rep = ctx.clone();
     let sess_rep = sess.clone();
@@ -1428,17 +1466,16 @@ async fn add_target_lock_immediately_denies_tether_repair_while_ballpark_write_l
     .unwrap_err();
     assert_eq!(err.code, "NotInStructure");
 
-    release_tx.send(()).unwrap();
-    bg.join().unwrap();
+    hold.release();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn would_block_unsampled_persisted_repair_preserves_unpaid_extender_hp_and_emits_damage_event() {
-    let (ctx, sess, _char_id, ship_id, sys_id, _struct_id) =
+    let (ctx, mut sess, char_id, ship_id, sys_id, struct_id) =
         setup_tethered_ship_repair_fixture(20.0, 30.0).await;
     let sys = ctx.systems.get_or_spawn(sys_id);
 
-    // Partial persisted delta subtraction preserves remaining unpaid damage rather than wiping to zero.
+    // 1. Partial persisted delta subtraction preserves remaining unpaid damage rather than wiping to zero.
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(it) = snap.items.get_mut(&ship_id) {
             it.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 50.0);
@@ -1470,9 +1507,20 @@ async fn would_block_unsampled_persisted_repair_preserves_unpaid_extender_hp_and
                 shield_hp: 900.0,
             })
         );
-        // Reset cleanly for end-to-end WouldBlock test with a Shield Extender (1500 max shield, 900 current).
-        it.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE);
+    });
+
+    // 2. End-to-end unsampled persisted repair (`live_hp == None`, e.g. ship docked without a live
+    // Ball): unpaid Shield Extender `shield_hp=900` is preserved while persisted hull/armor clear.
+    sys.remove_ball(ship_id).await;
+    assert!(!sys.view().contains_ball(ship_id));
+    sess.structure_id = Some(struct_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.structure_id = Some(struct_id);
+        }
         if let Some(m) = snap.items.get_mut(&ship_id) {
+            m.location_id = struct_id;
+            m.flag = InventoryFlag::Hangar;
             m.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 20.0);
             m.dynamic_attributes.insert(eve_sde::attr_ids::ARMOR_DAMAGE, 30.0);
         }
@@ -1485,31 +1533,9 @@ async fn would_block_unsampled_persisted_repair_preserves_unpaid_extender_hp_and
             },
         );
     });
-    assert!(sys.try_update_combat_state(ship_id, |cs| {
-        cs.max_shield_hp = 1_500.0;
-        cs.shield_hp = 900.0;
-    }));
-
-    // Hold `ballpark.write()` so `handle_repair_items_in_location` hits `WouldBlock` on pre-sampling.
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let sys_bg = sys.clone();
-    let bg = std::thread::spawn(move || {
-        let _bp = sys_bg.ballpark.write().unwrap();
-        held_tx.send(()).unwrap();
-        release_rx.recv().unwrap();
-    });
-    held_rx.recv().unwrap();
-
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]),
-    )
-    .await
-    .expect("WouldBlock repair timed out")
-    .expect("WouldBlock repair failed");
-
-    // Inside DB right after tx, paid hull/armor damage is subtracted while unpaid extender shield_hp=900 persists.
+    call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)])
+        .await
+        .expect("unsampled docked persisted repair failed");
     ctx.db.with_snapshot(|snap| {
         let it = &snap.items[&ship_id];
         assert!(!it.dynamic_attributes.contains_key(&eve_sde::attr_ids::DAMAGE));
@@ -1524,24 +1550,84 @@ async fn would_block_unsampled_persisted_repair_preserves_unpaid_extender_hp_and
         );
     });
 
-    release_tx.send(()).unwrap();
-    bg.join().unwrap();
+    // 3. Undock tethered ball back into space and hold `ballpark.write()` to trigger `WouldBlock`
+    // (`QueuedAsync`) in `try_repair_combat_state_sync` while `SystemView` samples live HP lock-free.
+    sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.structure_id = None;
+        }
+        if let Some(m) = snap.items.get_mut(&ship_id) {
+            m.location_id = sys_id as i64;
+            m.flag = InventoryFlag::None;
+            m.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 20.0);
+            m.dynamic_attributes.insert(eve_sde::attr_ids::ARMOR_DAMAGE, 30.0);
+        }
+        snap.sp6_lifecycle.ship_combat_hp.insert(
+            ship_id,
+            eve_db::PersistedCombatHp {
+                hull_hp: 480.0,
+                armor_hp: 470.0,
+                shield_hp: 900.0,
+            },
+        );
+    });
+    sys.spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: 23_915,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            is_tethered: true,
+            max_structure_hp: 500.0,
+            structure_hp: 480.0,
+            max_armor_hp: 500.0,
+            armor_hp: 470.0,
+            max_shield_hp: 1_500.0,
+            shield_hp: 900.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("respawn tethered ship ball");
+    assert!(sys.is_ball_tethered_sync(ship_id));
 
-    // Once actor drains `QueuedAsync` command, live hull & armor are restored while unpaid 900/1500 shield stays untouched.
+    let hold = BallparkWriteHoldGuard::acquire(&sys);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]),
+    )
+    .await
+    .expect("WouldBlock repair timed out")
+    .expect("WouldBlock repair failed");
+    hold.release();
+
+    // Once actor drains `QueuedAsync`, all 3 live-sampled layers (including 1500 shield) are restored.
     let cs_mid = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!((cs_mid.structure_hp - 500.0).abs() < 1e-6);
     assert!((cs_mid.armor_hp - 500.0).abs() < 1e-6);
-    assert!((cs_mid.shield_hp - 900.0).abs() < 1e-6);
+    assert!((cs_mid.shield_hp - 1_500.0).abs() < 1e-6);
 
-    // Now test uncontended `Ok(mut bp)` repair emits `DestinyEvent::OnDamageStateChange` and clears DB damage.
+    // 4. Now test uncontended `Ok(mut bp)` repair emits `DestinyEvent::OnDamageStateChange` and clears DB damage.
     let _ = sys.push_set_state(ship_id).await.unwrap();
     let _ = sys.drain_observer_updates(ship_id).await.unwrap();
-    assert!(sys.try_update_combat_state(ship_id, |cs| {
+    sys.modify_combat_state(ship_id, |cs| {
         cs.max_shield_hp = 500.0;
         cs.shield_hp = 350.0;
         cs.armor_hp = 425.0;
         cs.structure_hp = 475.0;
-    }));
+    })
+    .await
+    .expect("system actor alive")
+    .expect("ship combat state present");
     call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)])
         .await
         .expect("uncontended live repair should succeed");

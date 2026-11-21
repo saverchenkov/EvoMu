@@ -276,14 +276,31 @@ async fn test_dungeon_instance_cache_returns_current_per_system_instances() {
         assert!(ctx.sde.dungeons.contains_key(did));
     }
 
-    // --- Ice belts: archetype-28 SDE dungeons whose every ice type is allowed at the system's band.
-    let mut checked_bands = Vec::new();
+    // --- Ice belts: non-designated systems expose zero placeholder belts; designated ice systems
+    // seed one asteroid-backed regional archetype-28 dungeon whose every ice type matches its band.
     for (sid, sys, ship) in [(9602u64, HEK, 760_000_002i64), (9603, TAMA, 760_000_003), (9604, VFK, 760_000_004)] {
+        let mut s = in_space(&ctx, sid, sys, ship).await;
+        let ice = instances(&ctx, &mut s, "GetIceBeltInstances").await;
+        assert!(
+            ice.get(&sys).is_none_or(BTreeMap::is_empty),
+            "non-designated system {sys} must not expose synthetic/placeholder ice belts: {ice:?}"
+        );
+        assert!(expected_anomalies(&ctx, sys, "IceBelt").is_empty());
+    }
+    const OSMON: u32 = 30_000_180;
+    const RENS: u32 = 30_002_510;
+    const DODIXIE: u32 = 30_002_659;
+    let mut checked_bands = Vec::new();
+    for (sid, sys, ship) in [
+        (9612u64, OSMON, 760_000_012i64),
+        (9613, RENS, 760_000_013),
+        (9614, DODIXIE, 760_000_014),
+    ] {
         let mut s = in_space(&ctx, sid, sys, ship).await;
         let ice = instances(&ctx, &mut s, "GetIceBeltInstances").await;
         assert_eq!(ice.keys().copied().collect::<Vec<_>>(), vec![sys]);
         let belts = &ice[&sys];
-        assert_eq!(belts.len(), 1, "one seeded ice belt per known-space system: {belts:?}");
+        assert_eq!(belts.len(), 1, "one seeded regional ice belt in designated system {sys}: {belts:?}");
         assert_eq!(belts, &expected_anomalies(&ctx, sys, "IceBelt"));
         let did = *belts.keys().next().unwrap();
         assert_eq!(archetype(&ctx, did), Some(ARCHETYPE_ICE_BELT), "ice dungeon {did}");
@@ -299,8 +316,7 @@ async fn test_dungeon_instance_cache_returns_current_per_system_instances() {
         let again = instances(&ctx, &mut s, "GetIceBeltInstances").await;
         assert_eq!(again, ice);
     }
-    // High-sec belts carry only 1.0-ceiling ice, low-sec reaches 0.4 ice, null-sec 0.0 ice.
-    assert_eq!(checked_bands, vec![(HEK, 1.0), (TAMA, 0.4), (VFK, 0.0)]);
+    assert_eq!(checked_bands, vec![(OSMON, 1.0), (RENS, 1.0), (DODIXIE, 1.0)]);
 
     // Per-system: a Tama session sees Tama's instances, not Hek's.
     let mut tama = in_space(&ctx, 9605, TAMA, 760_000_005).await;

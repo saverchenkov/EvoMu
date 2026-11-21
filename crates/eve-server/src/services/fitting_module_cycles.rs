@@ -1578,7 +1578,7 @@ fn prepare_cycle_params_sync(
     let overload_mult = crate::services::fitting_cycles_overheat::compute_overload_multiplier(is_overloaded, mod_type, &ctx.sde);
     let shield_boost_amount = if matches!(mod_type.group_id, 41 | 1697) { 0.0 } else { mod_state.get_attribute(68, &ctx.sde) * overload_mult };
     let duration_s = if shield_boost_amount > 0.0 {
-        let boost_mult = sys.ballpark.read().ok().and_then(|bp| bp.combat_states.get(&ship_id).map(|cs| cs.shield_boost_multiplier)).filter(|&m| m > 0.0).unwrap_or(1.0);
+        let boost_mult = sys.view().combat_state(ship_id).map(|cs| cs.shield_boost_multiplier).filter(|&m| m > 0.0).unwrap_or(1.0);
         duration_s * boost_mult
     } else {
         duration_s

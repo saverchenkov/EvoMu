@@ -1114,12 +1114,12 @@ impl LiveShipCombatHp {
     }
 }
 
-/// Non-blocking sample of `ship_id`'s live combat HP via `ballpark.try_read()`.
+/// Non-blocking sample of `ship_id`'s live combat HP via `handle.view()`.
 ///
 /// Looks up `ship_id`'s solar system via [`SystemRegistry::find_ball_system_sync`] and falls back
 /// to an already-loaded `fallback_sys_id` handle when tests insert directly into `Ballpark` without
-/// refreshing `ball_positions`. Returns `None` if no live combat state exists, `ballpark` is
-/// write-locked by another thread, or the caller already holds a lock at rank `>= RANK_BALLPARK` (`#1167`).
+/// refreshing `ball_positions`. Returns `None` if no live combat state exists or the caller already
+/// holds a lock at rank `>= RANK_BALLPARK` (`#1167`, `#1342`).
 pub fn sample_live_ship_combat_hp(
     ctx: &ServerContext,
     ship_id: i64,
@@ -1136,8 +1136,8 @@ pub fn sample_live_ship_combat_hp(
         .find_ball_system_sync(ship_id)
         .map(|sys_id| ctx.systems.get_or_spawn(sys_id))
         .or_else(|| fallback_sys_id.and_then(|sys_id| ctx.systems.get_handle(sys_id)))?;
-    let bp = handle.ballpark.try_read().ok()?;
-    let cs = bp.combat_states.get(&ship_id)?;
+    let view = handle.view();
+    let cs = view.combat_state(ship_id)?;
     Some(LiveShipCombatHp::from_combat_state(cs))
 }
 
@@ -1156,8 +1156,8 @@ pub fn read_unified_ship_damage_state(
     } else {
         ctx.systems.find_ball_system_sync(ship_id).and_then(|sys_id| {
             let handle = ctx.systems.get_or_spawn(sys_id);
-            let bp = handle.ballpark.read().ok()?;
-            let cs = bp.combat_states.get(&ship_id)?;
+            let view = handle.view();
+            let cs = view.combat_state(ship_id)?;
             Some(LiveShipCombatHp::from_combat_state(cs))
         })
     };
@@ -1460,38 +1460,35 @@ pub fn require_ship_ready_for_filament_jump(
             client_error: None,
         });
     }
-    if let Ok(bp) = sys_handle.ballpark.read() {
-        if let Some(ball) = bp.balls.get(&ship_id) {
-            if matches!(ball.mode, MovementMode::Warp { .. }) {
-                return Err(BridgeRpcError {
-                    code: "ShipInWarp".into(),
-                    message: "Cannot activate filament while ship is mid-warp".into(),
-                    client_error: None,
-                });
-            }
+    let view = sys_handle.view();
+    if let Some(MovementMode::Warp { .. }) = view.movement_mode(ship_id) {
+        return Err(BridgeRpcError {
+            code: "ShipInWarp".into(),
+            message: "Cannot activate filament while ship is mid-warp".into(),
+            client_error: None,
+        });
+    }
+    if let Some(cs) = view.combat_state(ship_id) {
+        if cs.lance_disrupted_remaining_s > 0.0 {
+            return Err(BridgeRpcError {
+                code: "DisruptiveLanceDebuffActive".into(),
+                message: "Cannot activate filament while disrupted by a Superweapon Lance".into(),
+                client_error: None,
+            });
         }
-        if let Some(cs) = bp.combat_states.get(&ship_id) {
-            if cs.lance_disrupted_remaining_s > 0.0 {
-                return Err(BridgeRpcError {
-                    code: "DisruptiveLanceDebuffActive".into(),
-                    message: "Cannot activate filament while disrupted by a Superweapon Lance".into(),
-                    client_error: None,
-                });
-            }
-            if cs.warp_scramble_strength > 0 {
-                return Err(BridgeRpcError {
-                    code: "WarpScrambled".into(),
-                    message: "Cannot activate filament while warp scrambled".into(),
-                    client_error: None,
-                });
-            }
-            if cs.is_warp_exit_invulnerable() || (cs.gate_cloak_remaining_ticks > 0 && cs.is_invulnerable()) {
-                return Err(BridgeRpcError {
-                    code: "ShipInvulnerable".into(),
-                    message: "Cannot activate filament while session-change or warp-exit invulnerability is active".into(),
-                    client_error: None,
-                });
-            }
+        if cs.warp_scramble_strength > 0 {
+            return Err(BridgeRpcError {
+                code: "WarpScrambled".into(),
+                message: "Cannot activate filament while warp scrambled".into(),
+                client_error: None,
+            });
+        }
+        if cs.is_warp_exit_invulnerable() || (cs.gate_cloak_remaining_ticks > 0 && cs.is_invulnerable()) {
+            return Err(BridgeRpcError {
+                code: "ShipInvulnerable".into(),
+                message: "Cannot activate filament while session-change or warp-exit invulnerability is active".into(),
+                client_error: None,
+            });
         }
     }
     Ok(())
@@ -1608,16 +1605,10 @@ pub fn safe_logoff_blocking_space_conditions(
         conds.push("SAFE_LOGOFF_ACTIVE_MODULES");
     }
 
-    let in_warp = ctx
-        .systems
-        .get_or_spawn(sys_id)
-        .ballpark
-        .read()
-        .is_ok_and(|bp| {
-            bp.balls
-                .get(&ship_id)
-                .is_some_and(|b| matches!(b.mode, MovementMode::Warp { .. }))
-        });
+    let in_warp = matches!(
+        ctx.systems.get_or_spawn(sys_id).view().movement_mode(ship_id),
+        Some(MovementMode::Warp { .. })
+    );
     if in_warp {
         conds.push("SAFE_LOGOFF_IN_WARP");
     }
@@ -1902,12 +1893,7 @@ pub fn handle_character_logoff_or_disconnect_sync(
     };
     let (_, _, _, _, _, _, warp_speed_au_s) = sde_ship_physics(&ctx.sde, ship_type_id);
 
-    if let Some(cs) = sys_handle_opt.as_ref().and_then(|h| {
-        h.ballpark
-            .read()
-            .ok()
-            .and_then(|bp| bp.combat_states.get(&ship_id).cloned())
-    }) {
+    if let Some(cs) = sys_handle_opt.as_ref().and_then(|h| h.view().combat_state(ship_id).cloned()) {
         persist_ship_combat_hp_in_db(&ctx.db, ship_id, &cs);
     }
     abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);

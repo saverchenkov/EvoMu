@@ -689,9 +689,18 @@ class _FakeIPC:
                 self.state.sim_now += float(payload.get("secs", 0))
                 if self.state.sim_now >= self.state.session_change_until:
                     self.state.sess.nextSessionChange = None
-            return {"ok": True, "time": True}
+            return {"ok": True, "time": True, "via": "gm_bridge"}
+        if cmd == "clear_session_timer":
+            if self.state is not None:
+                self.state.handle_rpc("timeControl", "ClearSessionTimer")
+            return {"ok": True, "via": "gm_bridge"}
         if cmd == "c2_check_ball_and_dock":
             return {"ok": True, "saw_ship": True, "updates": 2}
+        if cmd == "slash_cmd":
+            if self.state is not None:
+                res = self.state.handle_rpc("slash", "SlashCmd", str(payload.get("command") or ""))
+                return {"ok": True, "handled": True, "via": "gm_bridge", "result": res}
+            return {"ok": True, "handled": True}
         return {"ok": True}
 
     def notify(self, payload):
@@ -951,7 +960,9 @@ class RunJourneysIsolationTests(unittest.TestCase):
         try:
             self.assertEqual(ipc._handle_cmd({"cmd": "client1_authenticated"}), {"ok": True})
             self.assertEqual(ipc._handle_cmd({"cmd": "journey_start", "id": "station_ui"}), {"ok": True})
-            self.assertEqual(ipc._handle_cmd({"cmd": "advance_clock", "secs": 12}), {"ok": False, "reason": "c2_not_connected"})
+            adv_res = ipc._handle_cmd({"cmd": "advance_clock", "secs": 12})
+            self.assertFalse(adv_res.get("ok"))
+            self.assertEqual(adv_res.get("via"), "gm_bridge")
             self.assertEqual(ipc._handle_cmd({"cmd": "journey_end", "id": "station_ui", "passed": True}), {"ok": True})
             self.assertTrue(ipc.c1_authenticated)
             self.assertFalse(ipc.c2_authenticated)
@@ -1748,6 +1759,140 @@ class RunJourneysIsolationTests(unittest.TestCase):
 
         stacked_id, _ = drv._find_hangar_item(fake_sm, 60003760, 34, min_qty=50, reverse=True)
         self.assertEqual(stacked_id, 200023590)
+
+    def test_ipc_coordinator_routes_gm_ops_and_records_dedup_sim_time(self):
+        rj = _load_run_journeys()
+        gm_calls = []
+
+        class _FakeGmSm:
+            class _Svc:
+                def __init__(self, svc_name):
+                    self.svc_name = svc_name
+
+                def AdvanceClock(self, secs, tgt=0):
+                    gm_calls.append(("timeControl.AdvanceClock", int(secs), int(tgt)))
+                    return 133000000000000000 + int(secs) * 10000000
+
+                def ClearSessionTimer(self, tgt=0):
+                    gm_calls.append(("timeControl.ClearSessionTimer", int(tgt)))
+                    return True
+
+                def SlashCmd(self, cmd):
+                    gm_calls.append(("slash.SlashCmd", str(cmd)))
+                    return {"ok": True}
+
+                def Dock(self, station_id):
+                    gm_calls.append(("stationSvc.Dock", int(station_id)))
+                    return {"ok": True}
+
+            def RemoteSvc(self, name):
+                return self._Svc(name)
+
+        ipc = rj.IpcCoordinator("127.0.0.1", 26000, os.path.join(self.tmp, "c2.log"), {})
+        try:
+            ipc.sm_gm = _FakeGmSm()
+            ipc.gm_char_id = 90000003
+            ipc.b_gm = types.SimpleNamespace(connected=True, close=lambda: None)
+
+            adv = ipc._handle_cmd({"cmd": "advance_clock", "secs": 24, "target_char_id": 90000001})
+            self.assertTrue(adv["ok"])
+            self.assertEqual(adv["via"], "gm_bridge")
+            self.assertEqual(adv["target_char_id"], 90000001)
+            self.assertTrue(adv["injection_id"])
+
+            clr = ipc._handle_cmd({"cmd": "clear_session_timer", "target_char_id": 90000001})
+            self.assertTrue(clr["ok"])
+            self.assertEqual(clr["via"], "gm_bridge")
+
+            sl_skills = ipc._handle_cmd({"cmd": "slash_cmd", "command": "/completeskills all", "target_char_id": 90000001})
+            self.assertTrue(sl_skills["ok"])
+            self.assertTrue(sl_skills["handled"])
+
+            sl_upwell = ipc._handle_cmd({"cmd": "slash_cmd", "command": "/upwelltimer 1000000999", "target_char_id": 90000001})
+            self.assertTrue(sl_upwell["ok"])
+
+            # Off-Jita /despawn (e.g. Abyssal 32000001) translocates GM to target system, runs /despawn, and restores Jita dock
+            sl_despawn_aby = ipc._handle_cmd({
+                "cmd": "slash_cmd",
+                "command": "/despawn 77001",
+                "target_char_id": 90000001,
+                "target_solar_system_id": 32000001,
+            })
+            self.assertTrue(sl_despawn_aby["ok"])
+
+            # Same-system (Jita 30000142) /despawn runs directly without /tr
+            sl_despawn_jita = ipc._handle_cmd({
+                "cmd": "slash_cmd",
+                "command": "/despawn 77002",
+                "target_char_id": 90000001,
+                "target_solar_system_id": 30000142,
+            })
+            self.assertTrue(sl_despawn_jita["ok"])
+
+            # /advancetime 300 via GM bridge records deduplicated sim-time injection
+            sl_adv = ipc._handle_cmd({"cmd": "slash_cmd", "command": "/advancetime 300", "target_char_id": 90000001})
+            self.assertTrue(sl_adv["ok"])
+            self.assertEqual(sl_adv["sim_time_injected_sec"], 300.0)
+            self.assertTrue(sl_adv["injection_id"])
+
+            self.assertEqual(
+                gm_calls,
+                [
+                    ("timeControl.AdvanceClock", 24, 90000001),
+                    ("timeControl.ClearSessionTimer", 90000001),
+                    ("slash.SlashCmd", "/completeskills 90000001 all"),
+                    ("slash.SlashCmd", "/upwelltimer 90000001 1000000999"),
+                    ("slash.SlashCmd", "/tr me 32000001 noblock"),
+                    ("slash.SlashCmd", "/despawn 77001"),
+                    ("slash.SlashCmd", "/tr me 60003760 noblock"),
+                    ("timeControl.ClearSessionTimer", 90000003),
+                    ("stationSvc.Dock", 60003760),
+                    ("slash.SlashCmd", "/despawn 77002"),
+                    ("slash.SlashCmd", "/advancetime 90000001 300"),
+                ],
+            )
+
+            # Server RPC error (EvoMu RPC Error) does NOT reconnect/retry GM bridge, whereas EOFError reconnects once.
+            connects = [0]
+            class _ErrGmSm:
+                def __init__(self, fail_mode):
+                    self._fail_mode = fail_mode
+                def RemoteSvc(self, name):
+                    class _S:
+                        def SlashCmd(_s, c):
+                            if self._fail_mode == "rpc_err":
+                                raise RuntimeError("EvoMu RPC Error [EntityNotFound]: missing")
+                            if self._fail_mode == "eof_once" and connects[0] == 1:
+                                raise EOFError("Connection closed")
+                            return {"ok": True}
+                    return _S()
+            def _fake_ensure(force=False):
+                if force or ipc.sm_gm is None:
+                    connects[0] += 1
+                    if isinstance(ipc.sm_gm, _ErrGmSm) and ipc.sm_gm._fail_mode == "eof_once":
+                        ipc.sm_gm = _ErrGmSm("ok")
+                return ipc.sm_gm
+            ipc._ensure_gm = _fake_ensure
+            ipc.sm_gm = _ErrGmSm("rpc_err")
+            with self.assertRaises(RuntimeError):
+                ipc._gm_slash_cmd("/despawn 99999")
+            self.assertEqual(connects[0], 0)
+            ipc.sm_gm = _ErrGmSm("eof_once")
+            connects[0] = 1
+            eof_ok = ipc._gm_slash_cmd("/heal")
+            self.assertTrue(eof_ok["ok"])
+            self.assertEqual(connects[0], 2)
+
+            # Deduplication across host coordinator + in-client journey telemetry
+            deduped = rj._dedup_sim_time_injections(
+                list(ipc._gm_sim_injections),
+                [{"injection_id": adv["injection_id"], "seconds": 24, "target_char_id": 90000001}],
+                [{"injection_id": "rj-extra-1", "seconds": 6, "target_char_id": 90000001}],
+            )
+            self.assertEqual(len(deduped), 3)
+            self.assertEqual(sum(float(x["seconds"]) for x in deduped), 330.0)
+        finally:
+            ipc.close()
 
 
 if __name__ == "__main__":
