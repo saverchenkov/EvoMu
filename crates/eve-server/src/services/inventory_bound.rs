@@ -77,11 +77,13 @@ pub fn handle(
     // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
     if service == "i2" {
         if !session.has_gm_role() {
-            return Some(Err(BridgeRpcError {
-                code: "GMRoleRequired".into(),
-                message: "i2 requires GM role".into(),
-                client_error: None,
-            }));
+            return Some(Err(BridgeRpcError::insufficient_role_with_code(
+                "GMRoleRequired",
+                eve_machonet::service_roles::ROLE_GM_MASK,
+                session.role,
+                format!("i2.{method}"),
+                "i2 requires GM role",
+            )));
         }
         let _ = match ServerContext::require_character(session) {
             Ok(v) => v,
@@ -339,10 +341,12 @@ pub fn handle(
                     })
                 });
             if !accessible {
-                return err(
-                    "InventoryNotAccessible",
+                return Some(Err(BridgeRpcError::inventory_not_accessible(
+                    Some(item_id),
+                    Some(char_id),
+                    Some(location_id),
                     format!("item {item_id} is not an inventory reachable by character {char_id} at {location_id}"),
-                );
+                )));
             }
             Some(ctx.bind_verified_sub_object(session, "invbroker", item_id).map(|bid| ctx.bound_object_rep(bid, caller_trace)))
         }
@@ -393,17 +397,21 @@ pub fn handle(
                     .unwrap_or(0);
                 let requested_owner = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0);
                 if container_id == CONTAINER_CAPSULEER_DELIVERIES && caller_corp_id <= 0 {
-                    return err(
-                        "InventoryNotAccessible",
+                    return Some(Err(BridgeRpcError::inventory_not_accessible(
+                        Some(container_id),
+                        Some(char_id),
+                        Some(target_loc_id),
                         format!("character {char_id} has no corporation for capsuleer deliveries"),
-                    );
+                    )));
                 }
                 if let Some(req_corp_id) = requested_owner {
                     if req_corp_id != caller_corp_id && !session.has_gm_role() {
-                        return err(
-                            "InventoryNotAccessible",
+                        return Some(Err(BridgeRpcError::inventory_not_accessible(
+                            Some(container_id),
+                            Some(char_id),
+                            Some(target_loc_id),
                             format!("character {char_id} cannot access deliveries for corporation {req_corp_id}"),
-                        );
+                        )));
                     }
                 }
             }
@@ -838,11 +846,13 @@ pub fn handle_i2_is_primed(
     target_id: Option<i64>,
 ) -> Result<PyRep, BridgeRpcError> {
     if !session.has_gm_role() {
-        return Err(BridgeRpcError {
-            code: "GMRoleRequired".into(),
-            message: "i2.IsPrimed requires GM role".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role_with_code(
+            "GMRoleRequired",
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            "i2.IsPrimed",
+            "i2.IsPrimed requires GM role",
+        ));
     }
     let Some(item_id) = target_id.filter(|&id| id > 0) else {
         return Err(BridgeRpcError {
@@ -871,11 +881,13 @@ pub fn handle_i2_get_item(
     target_id: Option<i64>,
 ) -> Result<PyRep, BridgeRpcError> {
     if !session.has_gm_role() {
-        return Err(BridgeRpcError {
-            code: "GMRoleRequired".into(),
-            message: "i2.GetItem requires GM role".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role_with_code(
+            "GMRoleRequired",
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            "i2.GetItem",
+            "i2.GetItem requires GM role",
+        ));
     }
     let Some(item_id) = target_id.filter(|&id| id > 0) else {
         return Err(BridgeRpcError {

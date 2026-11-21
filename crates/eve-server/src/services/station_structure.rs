@@ -831,11 +831,13 @@ pub async fn handle(
                 let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(cw_state) = cw.states.get(&char_id) {
                     if cw_state.is_weapon_timer_active(now_unix) {
-                        return Some(Err(BridgeRpcError {
-                            code: "WeaponsTimerActive".into(),
-                            message: "Cannot dock while a 60s Weapons Timer is active".into(),
-                            client_error: None,
-                        }));
+                        return Some(Err(BridgeRpcError::weapons_timer_active(
+                            char_id,
+                            "dock",
+                            "weapons",
+                            false,
+                            "Cannot dock while a 60s Weapons Timer is active",
+                        )));
                     }
                     if sys_sec >= 0.45 && cw_state.is_criminal(now_unix) && !is_capsule {
                         return Some(Err(BridgeRpcError {

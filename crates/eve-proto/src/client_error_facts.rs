@@ -377,8 +377,21 @@ impl BridgeRpcError {
     pub fn insufficient_role(
         required_role_mask: u64, actual_role_mask: u64, action: impl Into<String>, message: impl Into<String>,
     ) -> Self {
-        Self::reject("InsufficientRole", message, UserErrorKey::InsufficientRoles, RejectionFacts::InsufficientRole {
-            required_role_mask, actual_role_mask, action: action.into(),
-        })
+        Self::insufficient_role_with_code("InsufficientRole", required_role_mask, actual_role_mask, action, message)
+    }
+
+    /// Constructs a typed role-rejection error carrying a legacy RPC error `code`
+    /// (`"GMRoleRequired"`, `"GmRoleRequired"`, `"InsufficientRoles"`) and `InsufficientRoles` dialog facts.
+    pub fn insufficient_role_with_code(
+        code: impl Into<String>, required_role_mask: u64, actual_role_mask: u64,
+        action: impl Into<String>, message: impl Into<String>,
+    ) -> Self {
+        Self::with_client_error(
+            code,
+            message,
+            ClientError::rejected(UserErrorKey::InsufficientRoles, RejectionFacts::InsufficientRole {
+                required_role_mask, actual_role_mask, action: action.into(),
+            }),
+        )
     }
 }
