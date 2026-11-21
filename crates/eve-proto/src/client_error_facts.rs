@@ -238,6 +238,26 @@ impl BridgeRpcError {
         )
     }
 
+    /// Constructs a non-module navigation `InvalidTarget` (`WarpDestinationGone` V24 dialog 1679) error.
+    pub fn invalid_navigation_target(
+        target_id: Option<i64>, reason: impl Into<String>, message: impl Into<String>,
+    ) -> Self {
+        Self::reject("InvalidTarget", message, UserErrorKey::WarpDestinationGone, RejectionFacts::InvalidTarget {
+            target_id, module_id: None, reason: reason.into(),
+        })
+    }
+
+    /// Constructs a non-module `InvalidTarget` (`InvalidTargetGroup` V24 dialog 987) error with SDE group name.
+    pub fn invalid_target_group(
+        target_id: Option<i64>, group_name: impl Into<String>, reason: impl Into<String>, message: impl Into<String>,
+    ) -> Self {
+        let group = non_empty_label(group_name.into(), || "Unknown".to_owned());
+        Self::with_rejection(
+            "InvalidTarget", message, UserErrorKey::InvalidTargetGroup, [("groupName", UserErrorArg::Str(group))],
+            RejectionFacts::InvalidTarget { target_id, module_id: None, reason: reason.into() },
+        )
+    }
+
     /// Constructs a typed self-target `InvalidTarget` (`DeniedTargetSelf` V24 dialog 788) error.
     pub fn invalid_target_self(target_id: i64, reason: impl Into<String>, message: impl Into<String>) -> Self {
         Self::reject("InvalidTarget", message, UserErrorKey::DeniedTargetSelf, RejectionFacts::InvalidTarget {
@@ -319,6 +339,15 @@ impl BridgeRpcError {
         let key = pick_contract_state_key(&expected, &actual);
         Self::reject("InvalidContractState", message, key, RejectionFacts::InvalidContractState {
             contract_id, expected_state: expected, actual_state: actual,
+        })
+    }
+
+    /// Constructs a typed `ContractOwnershipViolation` (`AccessDenied` V24 dialog 7256) error.
+    pub fn contract_ownership_violation(
+        contract_id: i64, caller_id: i64, required_owner_id: Option<i64>, message: impl Into<String>,
+    ) -> Self {
+        Self::reject("ContractOwnershipViolation", message, UserErrorKey::AccessDenied, RejectionFacts::OwnershipOrLocationViolation {
+            item_id: contract_id, owner_id: Some(caller_id), location_id: None, required_owner_id, required_location_id: None,
         })
     }
 

@@ -382,10 +382,8 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if bm.solar_system_id != sys_id {
-                return Some(Err(BridgeRpcError::invalid_target(
+                return Some(Err(BridgeRpcError::invalid_navigation_target(
                     Some(bm_id),
-                    None,
-                    "WarpToBookmark",
                     "bookmark_wrong_solar_system",
                     format!("Bookmark {bm_id} is in another solar system"),
                 )));
@@ -404,12 +402,11 @@ pub async fn handle(
                     )));
                 }
             };
-            if matches!(ball.mode, MovementMode::Warp { .. }) {
-                return Some(Err(BridgeRpcError::ship_not_in_space(
-                    ship_id,
-                    Some(char_id),
-                    Some(sys_id),
-                    "warp_to_bookmark_already_in_warp",
+            if let MovementMode::Warp { phase, .. } = ball.mode {
+                return Some(Err(BridgeRpcError::ship_already_in_warp(
+                    Some(ship_id),
+                    "CmdGotoBookmark",
+                    Some(format!("{phase:?}")),
                     "Active ship is already in warp",
                 )));
             }
@@ -1361,10 +1358,13 @@ async fn handle_open_shipping_unit_storage(
         .map(|t| matches!(t.group_id, 12 | 340 | 448 | 649) || t.category_id == 22)
         .unwrap_or(false);
     if !is_shipping_or_container {
-        return Err(BridgeRpcError::invalid_target(
+        let unit_group_name = unit_type
+            .and_then(|t| ctx.sde.groups.get(&t.group_id))
+            .map(|g| g.name.as_str())
+            .unwrap_or("Unknown");
+        return Err(BridgeRpcError::invalid_target_group(
             Some(unit_id),
-            None,
-            unit_type.map(|t| t.name.as_str()).unwrap_or("target"),
+            unit_group_name,
             "not_shipping_unit_or_container",
             format!("Target entity {unit_id} is not a shipping unit or deployable container"),
         ));

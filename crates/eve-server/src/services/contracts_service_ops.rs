@@ -1320,15 +1320,21 @@ pub(crate) fn handle_reject_delete_fail(
         if let Some(new_state) = snap.resolve_expired_contract(cid, now_unix) {
             return Ok((new_state, party_chars, resolve_delta.finish(snap)));
         }
-        if method == "DeleteContract"
-            && (c.status == "Outstanding" || c.status == "Expired")
-            && can_manage_as_issuer
-        {
-            if c.status == "Outstanding" && c.contract_type == "Auction" && c.current_bidder_id.is_some() {
-                return Err(rpc_err(
-                    "CannotDeleteAuctionWithBids",
-                    format!("Auction contract {cid} already has active bids and cannot be deleted"),
+        if method == "DeleteContract" {
+            if !can_manage_as_issuer {
+                return Err(eve_proto::BridgeRpcError::contract_ownership_violation(
+                    cid, char_id, Some(issuer_entity_id),
+                    format!("Character {char_id} cannot delete contract {cid}; only the issuer may delete it"),
                 ));
+            }
+            if c.status != "Outstanding" && c.status != "Expired" {
+                return Err(eve_proto::BridgeRpcError::invalid_contract_state(
+                    cid, "Outstanding", &c.status,
+                    format!("Contract {cid} in state '{}' cannot be deleted", c.status),
+                ));
+            }
+            if c.status == "Outstanding" && c.contract_type == "Auction" && c.current_bidder_id.is_some() {
+                return Err(rpc_err("CannotDeleteAuctionWithBids", format!("Auction contract {cid} already has active bids and cannot be deleted")));
             }
             let root_ids: &[i64] = if c.status == "Outstanding" {
                 snap.credit_contract_issuer_with_journal(
@@ -1340,37 +1346,33 @@ pub(crate) fn handle_reject_delete_fail(
             } else {
                 &[]
             };
-            let _ = snap.settle_contract_escrow_items(
-                cid, root_ids, issuer_entity_id, c.start_station_id, None, true,
-            );
+            let _ = snap.settle_contract_escrow_items(cid, root_ids, issuer_entity_id, c.start_station_id, None, true);
             snap.clear_contract_divisions(cid);
             if let Some(c_mut) = snap.contracts.get_mut(&cid) {
                 c_mut.status = "Deleted".into();
             }
             return Ok(("Deleted", Vec::new(), resolve_delta.finish(snap)));
         }
-        if method == "FailContract"
-            && c.status == "InProgress"
-            && c.contract_type == "Courier"
-            && (c.acceptor_id == Some(char_id) || is_corp_acceptor)
-        {
-            snap.fail_courier_contract(cid, now_unix);
-            return Ok(("Failed", party_chars, resolve_delta.finish(snap)));
-        }
-        if method == "FailContract"
-            && c.status == "Failed"
-            && c.contract_type == "Courier"
-            && c.expiration_unix > 0
-            && c.expiration_unix <= now_unix
-        {
+        if c.status == "Failed" && c.contract_type == "Courier" && c.expiration_unix > 0 && c.expiration_unix <= now_unix {
             return Ok(("Failed", Vec::new(), resolve_delta.finish(snap)));
         }
-        Err(eve_proto::BridgeRpcError::invalid_contract_state(
-            cid,
-            "Outstanding",
-            &c.status,
-            format!("Contract {cid} in state '{}' cannot be resolved via {method}", c.status),
-        ))
+        if c.status != "InProgress" {
+            return Err(eve_proto::BridgeRpcError::invalid_contract_state(
+                cid, "InProgress", &c.status,
+                format!("Contract {cid} in state '{}' cannot be resolved via {method}", c.status),
+            ));
+        }
+        if c.contract_type != "Courier" {
+            return Err(rpc_err("InvalidContractType", format!("Contract {cid} is not a Courier contract")));
+        }
+        if c.acceptor_id != Some(char_id) && !is_corp_acceptor {
+            return Err(eve_proto::BridgeRpcError::contract_ownership_violation(
+                cid, char_id, c.acceptor_id,
+                format!("Character {char_id} is not the acceptor of contract {cid}"),
+            ));
+        }
+        snap.fail_courier_contract(cid, now_unix);
+        Ok(("Failed", party_chars, resolve_delta.finish(snap)))
     })?;
 
     notify_delta.emit(ctx);

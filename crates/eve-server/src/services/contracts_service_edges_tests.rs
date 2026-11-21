@@ -845,4 +845,31 @@ fn gh1195_contract_rejections_preserve_typed_errors_and_facts() {
         contract_id: cid, expected_state: "Outstanding".to_owned(), actual_state: "Rejected".to_owned(),
     }));
     assert_eq!(state_err.to_client_error("contractProxy", "AcceptContract").as_user_error().map(|(k, _)| k), Some(eve_proto::UserErrorKey::ConContractNotOutstanding));
+
+    let cid_cour = created_cid(&call_contract(&ctx, &mut issuer_sess, "CreateContract", vec![PyRep::keyval([
+        ("contractType", PyRep::Integer(3)), ("startStationID", PyRep::Integer(station_id)),
+        ("endStationID", PyRep::Integer(dest_station_id)), ("reward", PyRep::Real(50_000.0)),
+        ("collateral", PyRep::Real(100_000.0)), ("itemList", PyRep::List(vec![PyRep::Integer(item_id)])),
+    ])], &kw).unwrap()).unwrap();
+    let fail_out = call_contract(&ctx, &mut issuer_sess, "FailContract", vec![PyRep::Integer(cid_cour)], &kw).unwrap_err();
+    assert_eq!(fail_out.code, "InvalidContractState");
+    assert_eq!(fail_out.rejection_facts(), Some(&eve_proto::RejectionFacts::InvalidContractState {
+        contract_id: cid_cour, expected_state: "InProgress".into(), actual_state: "Outstanding".into(),
+    }));
+    assert_eq!(fail_out.to_client_error("contractProxy", "FailContract").as_user_error().map(|(k, _)| k), Some(eve_proto::UserErrorKey::ConContractNotInProgress));
+
+    call_contract(&ctx, &mut acceptor_sess, "AcceptContract", vec![PyRep::Integer(cid_cour)], &kw).unwrap();
+    for method in ["CompleteContract", "FailContract"] {
+        let non_acc = call_contract(&ctx, &mut issuer_sess, method, vec![PyRep::Integer(cid_cour)], &kw).unwrap_err();
+        assert_eq!(non_acc.code, "ContractOwnershipViolation");
+        assert_eq!(non_acc.rejection_facts(), Some(&eve_proto::RejectionFacts::OwnershipOrLocationViolation {
+            item_id: cid_cour, owner_id: Some(issuer_id), location_id: None, required_owner_id: Some(acceptor_id), required_location_id: None,
+        }));
+        assert_eq!(non_acc.to_client_error("contractProxy", method).as_user_error().map(|(k, _)| k), Some(eve_proto::UserErrorKey::AccessDenied));
+    }
+    let del_acc = call_contract(&ctx, &mut acceptor_sess, "DeleteContract", vec![PyRep::Integer(cid_cour)], &kw).unwrap_err();
+    assert_eq!(del_acc.code, "ContractOwnershipViolation");
+    assert_eq!(del_acc.rejection_facts(), Some(&eve_proto::RejectionFacts::OwnershipOrLocationViolation {
+        item_id: cid_cour, owner_id: Some(acceptor_id), location_id: None, required_owner_id: Some(issuer_id), required_location_id: None,
+    }));
 }

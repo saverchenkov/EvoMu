@@ -202,316 +202,118 @@ fn client_error_variants_map_totally_without_string_scraping() {
             }
         );
     }
-    assert_eq!(
-        UserErrorKey::NotEnoughChargeSpace.default_args(),
-        vec![
-            ("capacity".into(), PyRep::Real(0.0)),
-            ("volume".into(), PyRep::Real(0.0)),
-        ]
-    );
-    assert_eq!(
-        UserErrorKey::NoSpaceForThat.default_args(),
-        vec![
-            ("itemTypeName".into(), PyRep::Integer(0)),
-            ("itemVolume".into(), PyRep::Real(0.0)),
-            ("volumeAvailable".into(), PyRep::Real(0.0)),
-        ]
-    );
-    assert_eq!(
-        UserErrorKey::NoSpaceForThatOverload.default_args(),
-        vec![
-            ("item".into(), PyRep::Integer(0)),
-            ("maximum".into(), PyRep::Real(0.0)),
-            ("used".into(), PyRep::Real(0.0)),
-        ]
-    );
-    assert_eq!(
-        UserErrorKey::NotEnoughCargoSpaceOverload.default_args(),
-        vec![
-            ("item".into(), PyRep::ascii_bytes("")),
-            ("maximum".into(), PyRep::Real(0.0)),
-            ("used".into(), PyRep::Real(0.0)),
-        ]
-    );
+    assert_eq!(UserErrorKey::NotEnoughChargeSpace.default_args(), vec![("capacity".into(), PyRep::Real(0.0)), ("volume".into(), PyRep::Real(0.0))]);
+    assert_eq!(UserErrorKey::NoSpaceForThat.default_args(), vec![("itemTypeName".into(), PyRep::Integer(0)), ("itemVolume".into(), PyRep::Real(0.0)), ("volumeAvailable".into(), PyRep::Real(0.0))]);
+    assert_eq!(UserErrorKey::NoSpaceForThatOverload.default_args(), vec![("item".into(), PyRep::Integer(0)), ("maximum".into(), PyRep::Real(0.0)), ("used".into(), PyRep::Real(0.0))]);
+    assert_eq!(UserErrorKey::NotEnoughCargoSpaceOverload.default_args(), vec![("item".into(), PyRep::ascii_bytes("")), ("maximum".into(), PyRep::Real(0.0)), ("used".into(), PyRep::Real(0.0))]);
 
     let no_charges = BridgeRpcError::no_charges_loaded(2410, "Empty weapon");
     assert_eq!(no_charges.code, "NoChargesLoaded");
-    let (nc_key, nc_dict) =
-        decode_wrapped_user_error(&no_charges.to_client_error("dogmaIM", "Activate").to_macho_error_body(6));
-    assert_eq!(nc_key, "NoCharges");
-    assert_eq!(
-        nc_dict,
-        vec![(
-            PyRep::ascii_bytes("launcher"),
-            PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(2410)]),
-        )]
-    );
+    let (nc_key, nc_dict) = decode_wrapped_user_error(&no_charges.to_client_error("dogmaIM", "Activate").to_macho_error_body(6));
+    assert_eq!((nc_key.as_str(), nc_dict), ("NoCharges", vec![(PyRep::ascii_bytes("launcher"), PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(2410)]))]));
 
-    let docking_denied =
-        BridgeRpcError::docking_request_denied(UI_LABEL_SHIP_TOO_LARGE, "Too big");
-    let (dd_key, dd_dict) = decode_wrapped_user_error(
-        &docking_denied
-            .to_client_error("station", "Dock")
-            .to_macho_error_body(6),
-    );
-    assert_eq!(dd_key, "DockingRequestDenied");
-    assert_eq!(
-        dd_dict,
-        vec![(
-            PyRep::ascii_bytes("reason"),
-            PyRep::Tuple(vec![
-                PyRep::Integer(101),
-                PyRep::String(UI_LABEL_SHIP_TOO_LARGE.into()),
-            ]),
-        )]
-    );
+    let docking_denied = BridgeRpcError::docking_request_denied(UI_LABEL_SHIP_TOO_LARGE, "Too big");
+    let (dd_key, dd_dict) = decode_wrapped_user_error(&docking_denied.to_client_error("station", "Dock").to_macho_error_body(6));
+    assert_eq!((dd_key.as_str(), dd_dict), ("DockingRequestDenied", vec![(PyRep::ascii_bytes("reason"), PyRep::Tuple(vec![PyRep::Integer(101), PyRep::String(UI_LABEL_SHIP_TOO_LARGE.into())]))]));
 
     let closed_gate = BridgeRpcError::gate_closed(50001234);
-    assert_eq!(
-        closed_gate.client_presentation("beyonce", "CmdStargateJump"),
-        UserErrorPresentation::Modal
-    );
-    let (gc_key, gc_dict) = decode_wrapped_user_error(
-        &closed_gate
-            .to_client_error("beyonce", "CmdStargateJump")
-            .to_macho_error_body(6),
-    );
-    assert_eq!(gc_key, "CustomInfo");
-    assert_eq!(
-        gc_dict,
-        vec![(
-            PyRep::ascii_bytes("info"),
-            PyRep::Tuple(vec![
-                PyRep::Integer(101),
-                PyRep::String(UI_LABEL_GATE_CLOSED.into()),
-            ]),
-        )]
-    );
+    assert_eq!(closed_gate.client_presentation("beyonce", "CmdStargateJump"), UserErrorPresentation::Modal);
+    let (gc_key, gc_dict) = decode_wrapped_user_error(&closed_gate.to_client_error("beyonce", "CmdStargateJump").to_macho_error_body(6));
+    assert_eq!((gc_key.as_str(), gc_dict), ("CustomInfo", vec![(PyRep::ascii_bytes("info"), PyRep::Tuple(vec![PyRep::Integer(101), PyRep::String(UI_LABEL_GATE_CLOSED.into())]))]));
 
-    assert_eq!(
-        UserErrorKey::NotCloseEnoughToJump.presentation(),
-        UserErrorPresentation::Notify
-    );
+    assert_eq!(UserErrorKey::NotCloseEnoughToJump.presentation(), UserErrorPresentation::Notify);
     let not_close = BridgeRpcError::not_close_enough_to_jump(2_600.0, 16_691.0, 16_591.0, 2_500.0);
-    assert_eq!(
-        not_close.client_presentation("beyonce", "CmdStargateJump"),
-        UserErrorPresentation::Notify
-    );
-    let (ncj_key, ncj_dict) = decode_wrapped_user_error(
-        &not_close
-            .to_client_error("beyonce", "CmdStargateJump")
-            .to_macho_error_body(6),
-    );
-    assert_eq!(ncj_key, "NotCloseEnoughToJump");
-    assert_eq!(
-        ncj_dict,
-        vec![(PyRep::ascii_bytes("maxdist"), PyRep::Integer(2_500))]
-    );
+    assert_eq!(not_close.client_presentation("beyonce", "CmdStargateJump"), UserErrorPresentation::Notify);
+    let (ncj_key, ncj_dict) = decode_wrapped_user_error(&not_close.to_client_error("beyonce", "CmdStargateJump").to_macho_error_body(6));
+    assert_eq!((ncj_key.as_str(), ncj_dict), ("NotCloseEnoughToJump", vec![(PyRep::ascii_bytes("maxdist"), PyRep::Integer(2_500))]));
 
     let too_far = BridgeRpcError::target_out_of_range("Guristas Scout", 484, 42_500.5, "Too far");
     assert_eq!(too_far.code, "TargetOutOfRange");
-    let (tf_key, tf_dict) = decode_wrapped_user_error(
-        &too_far
-            .to_client_error("dogmaIM", "Activate")
-            .to_macho_error_body(6),
-    );
+    let (tf_key, tf_dict) = decode_wrapped_user_error(&too_far.to_client_error("dogmaIM", "Activate").to_macho_error_body(6));
     assert_eq!(tf_key, "TargetTooFar");
     assert!(tf_dict.contains(&(PyRep::ascii_bytes("targetname"), PyRep::ascii_bytes("Guristas Scout"))));
     assert!(tf_dict.contains(&(PyRep::ascii_bytes("module"), PyRep::Integer(484))));
     assert!(tf_dict.contains(&(PyRep::ascii_bytes("distance"), PyRep::Real(42_500.5))));
     let orders = BridgeRpcError::max_open_orders_reached(5, 5);
     assert_eq!(orders.code, "MaxOpenOrdersReached");
-    assert_eq!(
-        orders.to_client_error("marketProxy", "PlaceBuyOrder"),
-        ClientError::User {
-            key: UserErrorKey::MarketExceededOrderCount,
-            args: vec![
-                ("curCnt".into(), PyRep::Integer(5)),
-                ("maxCnt".into(), PyRep::Integer(5)),
-            ],
-        }
-    );
+    assert_eq!(orders.to_client_error("marketProxy", "PlaceBuyOrder"), ClientError::User {
+        key: UserErrorKey::MarketExceededOrderCount,
+        args: vec![("curCnt".into(), PyRep::Integer(5)), ("maxCnt".into(), PyRep::Integer(5))],
+    });
 
     let custom = BridgeRpcError::custom_info("Info message");
-    assert_eq!(
-        custom.to_client_error("svc", "m"),
-        ClientError::CustomInfo("Info message".into())
-    );
+    assert_eq!(custom.to_client_error("svc", "m"), ClientError::CustomInfo("Info message".into()));
 
-    let unimpl = ClientError::Unimplemented {
-        service: "insuranceSvc".into(),
-        method: "InsureShip".into(),
-    };
-    let body = unimpl.to_macho_error_body(6);
-    let PyRep::Tuple(parts) = body else { panic!() };
+    let unimpl = ClientError::Unimplemented { service: "insuranceSvc".into(), method: "InsureShip".into() };
+    let PyRep::Tuple(parts) = unimpl.to_macho_error_body(6) else { panic!() };
     let PyRep::Tuple(inner) = &parts[2] else { panic!() };
     let PyRep::Bytes(raw) = &inner[0] else { panic!() };
-    let PyRep::ObjectEx { header, .. } = marshal::decode(raw).unwrap() else {
-        panic!()
-    };
+    let PyRep::ObjectEx { header, .. } = marshal::decode(raw).unwrap() else { panic!() };
     let PyRep::Tuple(h) = *header else { panic!() };
     assert_eq!(h[0], PyRep::Token("exceptions.RuntimeError".into()));
 }
 
 #[test]
 fn bridge_rpc_error_carries_client_error_by_value_across_serde_without_collisions() {
-    let skill_a = BridgeRpcError::user_error_with_args(
-        UserErrorKey::SkillMissing,
-        [("typeID", UserErrorArg::Int(3300))],
-    );
-    let skill_b = BridgeRpcError::user_error_with_args(
-        UserErrorKey::SkillMissing,
-        [("typeID", UserErrorArg::Int(3436))],
-    );
+    let skill_a = BridgeRpcError::user_error_with_args(UserErrorKey::SkillMissing, [("typeID", UserErrorArg::Int(3300))]);
+    let skill_b = BridgeRpcError::user_error_with_args(UserErrorKey::SkillMissing, [("typeID", UserErrorArg::Int(3436))]);
     let skill_empty = BridgeRpcError::from_user_key(UserErrorKey::SkillMissing);
-    assert_eq!(
-        skill_a.to_client_error("skillMgr2", "InjectSkillpoints"),
-        ClientError::User {
-            key: UserErrorKey::SkillMissing,
-            args: vec![("typeID".into(), PyRep::Integer(3300))],
-        }
-    );
-    assert_eq!(
-        skill_b.to_client_error("skillMgr2", "InjectSkillpoints"),
-        ClientError::User {
-            key: UserErrorKey::SkillMissing,
-            args: vec![("typeID".into(), PyRep::Integer(3436))],
-        }
-    );
-    assert_eq!(
-        skill_empty.to_client_error("skillMgr2", "InjectSkillpoints"),
-        ClientError::User {
-            key: UserErrorKey::SkillMissing,
-            args: Vec::new(),
-        }
-    );
+    assert_eq!(skill_a.to_client_error("skillMgr2", "InjectSkillpoints"), ClientError::User { key: UserErrorKey::SkillMissing, args: vec![("typeID".into(), PyRep::Integer(3300))] });
+    assert_eq!(skill_b.to_client_error("skillMgr2", "InjectSkillpoints"), ClientError::User { key: UserErrorKey::SkillMissing, args: vec![("typeID".into(), PyRep::Integer(3436))] });
+    assert_eq!(skill_empty.to_client_error("skillMgr2", "InjectSkillpoints"), ClientError::User { key: UserErrorKey::SkillMissing, args: Vec::new() });
 
-    let env = crate::BridgeEnvelope::RpcResponse {
-        req_id: 42,
-        result: Err(skill_a.clone()),
-    };
+    let env = crate::BridgeEnvelope::RpcResponse { req_id: 42, result: Err(skill_a.clone()) };
     let wire = env.to_wire_bytes().expect("wire encode");
-    let decoded = crate::BridgeEnvelope::from_wire_bytes(&wire).expect("wire decode");
-    assert_eq!(decoded, env);
+    assert_eq!(crate::BridgeEnvelope::from_wire_bytes(&wire).expect("wire decode"), env);
 
     let untyped = BridgeRpcError::user_error("CustomLegacyCode");
     let json = serde_json::to_string(&untyped).expect("json encode");
-    assert!(
-        !json.contains("client_error"),
-        "None client_error must be omitted from JSON: {json}"
-    );
-    let parsed: BridgeRpcError =
-        serde_json::from_str(r#"{"code":"CustomLegacyCode","message":"CustomLegacyCode"}"#)
-            .expect("legacy json decode");
+    assert!(!json.contains("client_error"), "None client_error must be omitted from JSON: {json}");
+    let parsed: BridgeRpcError = serde_json::from_str(r#"{"code":"CustomLegacyCode","message":"CustomLegacyCode"}"#).expect("legacy json decode");
     assert_eq!(parsed, untyped);
-
-    assert!(
-        UserErrorKey::InsureShipFailedSingleContract
-            .default_args()
-            .is_empty(),
-        "InsureShipFailedSingleContract default_args must not emit a hardcoded character ID"
-    );
+    assert!(UserErrorKey::InsureShipFailedSingleContract.default_args().is_empty(), "InsureShipFailedSingleContract default_args must not emit a hardcoded character ID");
 }
 
 #[test]
 fn gh1082_targeting_and_module_activation_user_error_keys_have_v24_dialog_ids() {
-    let expected = [
+    for (key, key_str, dialog_id) in [
         (UserErrorKey::TargetNotLocked, "TargetNotLocked", 1627),
-        (
-            UserErrorKey::TargetingAptitudeAlreadyFullyUtilized,
-            "TargetingAptitudeAlreadyFullyUtilized",
-            1634,
-        ),
-        (
-            UserErrorKey::TargetingSystemsAlreadyFullyUtilized,
-            "TargetingSystemsAlreadyFullyUtilized",
-            1636,
-        ),
-        (
-            UserErrorKey::TargetingSystemsBeingJammed,
-            "TargetingSystemsBeingJammed",
-            1637,
-        ),
+        (UserErrorKey::TargetingAptitudeAlreadyFullyUtilized, "TargetingAptitudeAlreadyFullyUtilized", 1634),
+        (UserErrorKey::TargetingSystemsAlreadyFullyUtilized, "TargetingSystemsAlreadyFullyUtilized", 1636),
+        (UserErrorKey::TargetingSystemsBeingJammed, "TargetingSystemsBeingJammed", 1637),
         (UserErrorKey::EffectAlreadyActive2, "EffectAlreadyActive2", 3252),
-    ];
-    for (key, key_str, dialog_id) in expected {
-        assert_eq!(key.as_str(), key_str);
-        assert_eq!(UserErrorKey::from_code(key_str), Some(key));
-        assert_eq!(key.v24_dialog_id(), Some(dialog_id));
-        let err = BridgeRpcError::from_user_key(key);
-        assert_eq!(
-            err.to_client_error("dogmaIM", "Activate"),
-            ClientError::User {
-                key,
-                args: Vec::new(),
-            }
-        );
+    ] {
+        assert_eq!((key.as_str(), UserErrorKey::from_code(key_str), key.v24_dialog_id()), (key_str, Some(key), Some(dialog_id)));
+        assert_eq!(BridgeRpcError::from_user_key(key).to_client_error("dogmaIM", "Activate"), ClientError::User { key, args: Vec::new() });
     }
 }
 
 #[test]
 fn warp_too_short_and_destination_gone_decode_as_v24_notify_errors() {
     assert_eq!(UserErrorKey::ALL.len(), 118);
-    let expected = [
-        (UserErrorKey::WarpTooShort, "WarpTooShort", 3435),
-        (UserErrorKey::WarpDestinationGone, "WarpDestinationGone", 1679),
-    ];
-    for (key, wire_name, dialog_id) in expected {
-        assert_eq!(key.as_str(), wire_name);
-        assert_eq!(UserErrorKey::from_code(wire_name), Some(key));
-        assert_eq!(key.v24_dialog_id(), Some(dialog_id));
-        assert_eq!(key.v24_dialog_type(), Some(3));
-        assert_eq!(key.presentation(), UserErrorPresentation::Notify);
+    for (key, wire_name, dialog_id) in [(UserErrorKey::WarpTooShort, "WarpTooShort", 3435), (UserErrorKey::WarpDestinationGone, "WarpDestinationGone", 1679)] {
+        assert_eq!((key.as_str(), UserErrorKey::from_code(wire_name), key.v24_dialog_id(), key.v24_dialog_type(), key.presentation()), (wire_name, Some(key), Some(dialog_id), Some(3), UserErrorPresentation::Notify));
         assert!(key.default_args().is_empty());
-
         let client_err = ClientError::user(key);
         assert_eq!(client_err.presentation(), UserErrorPresentation::Notify);
-        let (decoded_key, decoded_dict) =
-            decode_wrapped_user_error(&client_err.to_macho_error_body(6));
+        let (decoded_key, decoded_dict) = decode_wrapped_user_error(&client_err.to_macho_error_body(6));
         assert_eq!(decoded_key, wire_name);
         assert!(decoded_dict.is_empty());
     }
-
-    let warp_short_helper = BridgeRpcError::warp_distance_too_short(
-        "Warp vector distance 1000.0 m is below minimum 150,000 m",
-    );
-    assert_eq!(warp_short_helper.code, "WarpDistanceTooShort");
-    assert_eq!(
-        warp_short_helper.client_presentation("beyonce", "CmdWarpToStuff"),
-        UserErrorPresentation::Notify
-    );
-    assert_eq!(
-        warp_short_helper.to_client_error("beyonce", "CmdWarpToStuff"),
-        ClientError::user(UserErrorKey::WarpTooShort)
-    );
-
+    let warp_short_helper = BridgeRpcError::warp_distance_too_short("Warp vector distance 1000.0 m is below minimum 150,000 m");
+    assert_eq!((warp_short_helper.code.as_str(), warp_short_helper.client_presentation("beyonce", "CmdWarpToStuff")), ("WarpDistanceTooShort", UserErrorPresentation::Notify));
+    assert_eq!(warp_short_helper.to_client_error("beyonce", "CmdWarpToStuff"), ClientError::user(UserErrorKey::WarpTooShort));
     for (code, expected_key, expected_wire) in [
         ("WarpDistanceTooShort", UserErrorKey::WarpTooShort, "WarpTooShort"),
         ("WarpTooShort", UserErrorKey::WarpTooShort, "WarpTooShort"),
-        (
-            "InvalidWarpDestination",
-            UserErrorKey::WarpDestinationGone,
-            "WarpDestinationGone",
-        ),
-        (
-            "WarpDestinationGone",
-            UserErrorKey::WarpDestinationGone,
-            "WarpDestinationGone",
-        ),
+        ("InvalidWarpDestination", UserErrorKey::WarpDestinationGone, "WarpDestinationGone"),
+        ("WarpDestinationGone", UserErrorKey::WarpDestinationGone, "WarpDestinationGone"),
     ] {
-        let err = BridgeRpcError {
-            code: code.into(),
-            message: "cannot warp".into(),
-            client_error: None,
-        };
-        assert_eq!(
-            err.client_presentation("beyonce", "CmdWarpToStuff"),
-            UserErrorPresentation::Notify
-        );
+        let err = BridgeRpcError { code: code.into(), message: "cannot warp".into(), client_error: None };
+        assert_eq!(err.client_presentation("beyonce", "CmdWarpToStuff"), UserErrorPresentation::Notify);
         let client_err = err.to_client_error("beyonce", "CmdWarpToStuff");
         assert_eq!(client_err, ClientError::user(expected_key));
-        let (decoded_key, decoded_dict) =
-            decode_wrapped_user_error(&client_err.to_macho_error_body(6));
+        let (decoded_key, decoded_dict) = decode_wrapped_user_error(&client_err.to_macho_error_body(6));
         assert_eq!(decoded_key, expected_wire);
         assert!(decoded_dict.is_empty());
     }
@@ -520,111 +322,51 @@ fn warp_too_short_and_destination_gone_decode_as_v24_notify_errors() {
 #[test]
 fn bound_ownership_and_auth_denied_encode_as_unmacho_destination() {
     for code in ["BoundObjectOwnershipViolation", "BindAuthorizationDenied"] {
-        let err = BridgeRpcError {
-            code: code.into(),
-            message: "stale station ship moniker".into(),
-            client_error: None,
-        };
+        let err = BridgeRpcError { code: code.into(), message: "stale station ship moniker".into(), client_error: None };
         assert_eq!(err.code, code);
         let client_err = err.to_client_error("ship", "MachoBindObject");
-        assert_eq!(
-            client_err,
-            ClientError::SessionMismatch(format!("{code}: stale station ship moniker"))
-        );
+        assert_eq!(client_err, ClientError::SessionMismatch(format!("{code}: stale station ship moniker")));
         assert_eq!(client_err.presentation(), UserErrorPresentation::Modal);
-        let (decoded_key, decoded_dict) =
-            decode_wrapped_user_error(&client_err.to_macho_error_body(6));
+        let (decoded_key, decoded_dict) = decode_wrapped_user_error(&client_err.to_macho_error_body(6));
         assert_eq!(decoded_key, "UnMachoDestination");
         assert_ne!(decoded_key, "CustomInfo");
-        assert_eq!(decoded_dict[0].0.as_str(), Some("info"));
-        assert_eq!(
-            decoded_dict[0].1.as_str(),
-            Some(format!("{code}: stale station ship moniker").as_str())
-        );
+        assert_eq!((decoded_dict[0].0.as_str(), decoded_dict[0].1.as_str()), (Some("info"), Some(format!("{code}: stale station ship moniker").as_str())));
     }
 }
 
 #[test]
 fn item_qty_checked_construction_arithmetic_narrowing_and_serde() {
-    assert_eq!(ItemQty::MIN.get(), 1);
-    assert_eq!(ItemQty::ONE.as_i64(), 1);
-    assert_eq!(ItemQty::STACK_MAX.get(), i64::from(i32::MAX));
-    assert_eq!(ItemQty::MAX.get(), i64::MAX);
-
+    assert_eq!((ItemQty::MIN.get(), ItemQty::ONE.as_i64(), ItemQty::STACK_MAX.get(), ItemQty::MAX.get()), (1, 1, i64::from(i32::MAX), i64::MAX));
     assert_eq!(ItemQty::try_from_i64(0), Err(ItemQtyError::NonPositive(0)));
     assert_eq!(ItemQty::try_from_i64(-7), Err(ItemQtyError::NonPositive(-7)));
-    assert_eq!(
-        ItemQty::try_from_i64(i64::MIN),
-        Err(ItemQtyError::NonPositive(i64::MIN))
-    );
+    assert_eq!(ItemQty::try_from_i64(i64::MIN), Err(ItemQtyError::NonPositive(i64::MIN)));
     assert_eq!(ItemQty::try_from_u64(0), Err(ItemQtyError::Zero));
     let over_signed = u64::try_from(i64::MAX).unwrap() + 1;
-    assert_eq!(
-        ItemQty::try_from_u64(over_signed),
-        Err(ItemQtyError::ExceedsMax(over_signed))
-    );
-    assert_eq!(ItemQty::try_from_i32(0), Err(ItemQtyError::NonPositive(0)));
-    assert_eq!(ItemQty::try_from_u32(0), Err(ItemQtyError::Zero));
-    assert_eq!(ItemQty::try_from_usize(0), Err(ItemQtyError::Zero));
-
+    assert_eq!(ItemQty::try_from_u64(over_signed), Err(ItemQtyError::ExceedsMax(over_signed)));
+    assert_eq!((ItemQty::try_from_i32(0), ItemQty::try_from_u32(0), ItemQty::try_from_usize(0)), (Err(ItemQtyError::NonPositive(0)), Err(ItemQtyError::Zero), Err(ItemQtyError::Zero)));
     let stack_max = ItemQty::try_from_i32(i32::MAX).expect("i32::MAX valid");
-    assert_eq!(stack_max, ItemQty::STACK_MAX);
-    assert_eq!(stack_max.try_into_stack_i32(), Ok(i32::MAX));
-    assert_eq!(i32::try_from(stack_max), Ok(i32::MAX));
-
+    assert_eq!((stack_max, stack_max.try_into_stack_i32(), i32::try_from(stack_max)), (ItemQty::STACK_MAX, Ok(i32::MAX), Ok(i32::MAX)));
     let above_stack = stack_max.checked_add(ItemQty::ONE).expect("i32::MAX + 1 fits i64");
-    assert_eq!(
-        above_stack.try_into_stack_i32(),
-        Err(ItemQtyError::ExceedsStackMax(i64::from(i32::MAX) + 1))
-    );
-
+    assert_eq!(above_stack.try_into_stack_i32(), Err(ItemQtyError::ExceedsStackMax(i64::from(i32::MAX) + 1)));
     let u32_max_qty = ItemQty::try_from_u32(u32::MAX).expect("u32::MAX fits i64");
     assert_eq!(u32_max_qty.try_into_u32(), Ok(u32::MAX));
-    let above_u32 = u32_max_qty.checked_add(ItemQty::ONE).unwrap();
-    assert_eq!(above_u32.try_into_u32(), Err(ItemQtyError::Overflow));
-
-    assert_eq!(
-        ItemQty::MAX.checked_add(ItemQty::ONE),
-        Err(ItemQtyError::Overflow)
-    );
+    assert_eq!(u32_max_qty.checked_add(ItemQty::ONE).unwrap().try_into_u32(), Err(ItemQtyError::Overflow));
+    assert_eq!(ItemQty::MAX.checked_add(ItemQty::ONE), Err(ItemQtyError::Overflow));
     let five = ItemQty::try_from(5_i64).unwrap();
     let two = ItemQty::try_from(2_u64).unwrap();
-    assert_eq!(five.checked_sub(two), Some(ItemQty::try_from(3_i32).unwrap()));
-    assert_eq!(two.checked_sub(two), None);
-    assert_eq!(two.checked_sub(five), None);
-
-    assert_eq!(five.checked_mul(two), Ok(ItemQty::try_from(10_u32).unwrap()));
-    assert_eq!(
-        ItemQty::MAX.checked_mul(two),
-        Err(ItemQtyError::Overflow)
-    );
-    assert_eq!(five.checked_mul_u64(0), Err(ItemQtyError::Zero));
-    assert_eq!(five.checked_mul_u64(4), Ok(ItemQty::try_from(20_i64).unwrap()));
-    assert_eq!(u64::from(five), 5_u64);
-    assert_eq!(i64::from(five), 5_i64);
-    assert_eq!(five.to_string(), "5");
-    assert_eq!(UserErrorArg::from(five), UserErrorArg::Int(5));
-
+    assert_eq!((five.checked_sub(two), two.checked_sub(two), two.checked_sub(five)), (Some(ItemQty::try_from(3_i32).unwrap()), None, None));
+    assert_eq!((five.checked_mul(two), ItemQty::MAX.checked_mul(two), five.checked_mul_u64(0), five.checked_mul_u64(4)), (Ok(ItemQty::try_from(10_u32).unwrap()), Err(ItemQtyError::Overflow), Err(ItemQtyError::Zero), Ok(ItemQty::try_from(20_i64).unwrap())));
+    assert_eq!((u64::from(five), i64::from(five), five.to_string(), UserErrorArg::from(five)), (5, 5, "5".to_owned(), UserErrorArg::Int(5)));
     let json = serde_json::to_string(&five).expect("serialize ItemQty");
     assert_eq!(json, "5");
-    let rt: ItemQty = serde_json::from_str(&json).expect("deserialize ItemQty");
-    assert_eq!(rt, five);
-    assert!(serde_json::from_str::<ItemQty>("0").is_err());
-    assert!(serde_json::from_str::<ItemQty>("-3").is_err());
-
-    let custom_err = ItemQtyError::ExceedsStackMax(i64::from(i32::MAX) + 1)
-        .into_rpc_error("InvalidCommodityQuantity");
+    assert_eq!(serde_json::from_str::<ItemQty>(&json).expect("deserialize ItemQty"), five);
+    assert!(serde_json::from_str::<ItemQty>("0").is_err() && serde_json::from_str::<ItemQty>("-3").is_err());
+    let custom_err = ItemQtyError::ExceedsStackMax(i64::from(i32::MAX) + 1).into_rpc_error("InvalidCommodityQuantity");
     assert_eq!(custom_err.code, "InvalidCommodityQuantity");
-    assert!(matches!(
-        custom_err.client_error.as_deref(),
-        Some(ClientError::CustomInfo(_))
-    ));
-
+    assert!(matches!(custom_err.client_error.as_deref(), Some(ClientError::CustomInfo(_))));
     let default_rpc = ItemQtyError::Zero.into_rpc_error("InvalidQuantity");
-    assert_eq!(default_rpc.code, "InvalidQuantity");
     let helper_rpc = BridgeRpcError::invalid_quantity("bad qty");
-    assert_eq!(helper_rpc.code, "InvalidQuantity");
-    assert_eq!(helper_rpc.message, "bad qty");
+    assert_eq!((default_rpc.code.as_str(), helper_rpc.code.as_str(), helper_rpc.message.as_str()), ("InvalidQuantity", "InvalidQuantity", "bad qty"));
 }
 
 fn dict_has_key(entries: &[(PyRep, PyRep)], key: &str) -> bool {
@@ -735,6 +477,8 @@ fn gh1195_typed_rejection_constructors_preserve_facts_and_wire_payloads_across_s
         (E::fitting_validation_failed(Some(501), Some(701), Some(2048), "Damage Control II", "Only one Damage Control may be fitted"), "FittingValidationFailed", K::ModuleFitFailed, F::FittingValidationFailed { ship_id: Some(501), item_id: Some(701), module_type_id: Some(2048), reason: "Only one Damage Control may be fitted".into() }),
         (E::cannot_fit_stacked_module(Some(501), Some(702), 5, "stacked"), "CannotFitStackedModule", K::CannotPerformOnMultipleItems, F::CannotFitStackedModule { ship_id: Some(501), item_id: Some(702), quantity: 5 }),
         (E::invalid_target(Some(888), Some(901), "Stasis Webifier II", "out of system", "bad target"), "InvalidTarget", K::InvalidTargetForModule, F::InvalidTarget { target_id: Some(888), module_id: Some(901), reason: "out of system".into() }),
+        (E::invalid_navigation_target(Some(889), "bookmark_wrong_solar_system", "wrong sys"), "InvalidTarget", K::WarpDestinationGone, F::InvalidTarget { target_id: Some(889), module_id: None, reason: "bookmark_wrong_solar_system".into() }),
+        (E::invalid_target_group(Some(890), "Frigate", "not_shipping_unit_or_container", "bad group"), "InvalidTarget", K::InvalidTargetGroup, F::InvalidTarget { target_id: Some(890), module_id: None, reason: "not_shipping_unit_or_container".into() }),
         (E::invalid_target_self(501, "self_orbit", "cannot orbit own ship"), "InvalidTarget", K::DeniedTargetSelf, F::InvalidTarget { target_id: Some(501), module_id: None, reason: "self_orbit".into() }),
         (E::inventory_not_accessible(Some(703), Some(9001), Some(60003760), "acl denied"), "InventoryNotAccessible", K::AccessDenied, F::InventoryNotAccessible { item_id: Some(703), char_id: Some(9001), location_id: Some(60003760) }),
         (E::must_be_docked_at_start_station(Some(4001), 60003760, Some(60008494), "wrong station"), "MustBeDockedAtStartStation", K::MustBeDocked, F::MustBeDockedAtStartStation { contract_id: Some(4001), required_station_id: 60003760, caller_station_id: Some(60008494) }),
@@ -746,6 +490,7 @@ fn gh1195_typed_rejection_constructors_preserve_facts_and_wire_payloads_across_s
         (E::invalid_contract_state(4001, "Outstanding", "Finished", "wrong state"), "InvalidContractState", K::ConContractNotOutstanding, F::InvalidContractState { contract_id: 4001, expected_state: "Outstanding".into(), actual_state: "Finished".into() }),
         (E::invalid_contract_state(4002, "InProgress", "Outstanding", "not in progress"), "InvalidContractState", K::ConContractNotInProgress, F::InvalidContractState { contract_id: 4002, expected_state: "InProgress".into(), actual_state: "Outstanding".into() }),
         (E::invalid_contract_state(4003, "NoBids", "HasBids", "auction has bids"), "InvalidContractState", K::ConAuctionHasBids, F::InvalidContractState { contract_id: 4003, expected_state: "NoBids".into(), actual_state: "HasBids".into() }),
+        (E::contract_ownership_violation(4004, 9002, Some(9001), "not party"), "ContractOwnershipViolation", K::AccessDenied, F::OwnershipOrLocationViolation { item_id: 4004, owner_id: Some(9002), location_id: None, required_owner_id: Some(9001), required_location_id: None }),
         (E::module_not_found(901, Some(501), Some(3170), false, "missing"), "ModuleNotFound", K::ItemNotFound, F::ModuleNotFound { module_id: 901, owner_entity_id: Some(501), type_id: Some(3170) }),
         (E::ownership_or_location_violation(705, Some(9002), Some(60003760), Some(9001), Some(501), "not owner"), "OwnershipOrLocationViolation", K::CantDoThatWithSomeoneElsesStuff, F::OwnershipOrLocationViolation { item_id: 705, owner_id: Some(9002), location_id: Some(60003760), required_owner_id: Some(9001), required_location_id: Some(501) }),
         (E::insufficient_role(0x0100_0000_0000_0000, 0x6000_0000_0000_0000, "machoNet.GetMetrics", "gm role required"), "InsufficientRole", K::InsufficientRoles, F::InsufficientRole { required_role_mask: 0x0100_0000_0000_0000, actual_role_mask: 0x6000_0000_0000_0000, action: "machoNet.GetMetrics".into() }),
@@ -776,6 +521,10 @@ fn gh1195_typed_rejection_constructors_preserve_facts_and_wire_payloads_across_s
     assert_eq!(dict_get(&cap_dict, "effectname").and_then(PyRep::as_str), Some("Microwarpdrive"));
     assert_eq!(dict_get(&cap_dict, "need"), Some(&PyRep::Real(150.0)));
     assert_eq!(dict_get(&cap_dict, "got"), Some(&PyRep::Real(22.5)));
+
+    let grp_err = E::invalid_target_group(Some(890), "Frigate", "not_shipping_unit_or_container", "bad group");
+    let (_, grp_dict) = decode_wrapped_user_error(&grp_err.to_client_error("entity", "OpenShippingUnitStorage").to_macho_error_body(6));
+    assert_eq!(dict_get(&grp_dict, "groupName").and_then(PyRep::as_str), Some("Frigate"));
 
     let slash_denied = E::insufficient_role(0x1, 0, "slash.SlashCmd", "GM required");
     assert_eq!(slash_denied.rejection_facts(), Some(&F::InsufficientRole { required_role_mask: 1, actual_role_mask: 0, action: "slash.SlashCmd".into() }));
