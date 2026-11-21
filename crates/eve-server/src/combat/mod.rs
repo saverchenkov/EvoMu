@@ -6,6 +6,7 @@ pub mod crimewatch;
 pub mod death_pipeline;
 pub mod drones_salvage_tractor;
 pub mod npc_ai;
+pub(crate) mod npc_ai_weapons_loot;
 
 pub use crimewatch::{
     compute_sec_status_loss, AggressionEvaluation, AggressionManager, AggressionRecord,
@@ -31,5 +32,7 @@ mod salvage_ai_death_tests;
 mod npc_ai_and_self_destruct_tests;
 #[cfg(test)]
 mod combat_weapons_deep_extra_unit_tests;
+#[cfg(test)]
+mod npc_ai_weapons_loot_tests;
 
 

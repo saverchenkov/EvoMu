@@ -1624,3 +1624,575 @@ async fn khanid_500008_sentry_classification_and_non_empire_group_99_exclusions(
         assert_eq!(ed.target_id, Some(ship_id));
     });
 }
+
+fn make_isolated_extended_npc_ctx(
+    sde: std::sync::Arc<eve_sde::SdeRegistry>,
+) -> (ServerContext, i64, i64, u32) {
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db)
+        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    let char_id = 90_000_001_i64;
+    let ship_id = 200_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item(
+                ship_id,
+                587,
+                char_id,
+                sys_id as i64,
+                eve_db::InventoryFlag::None,
+                1,
+            ),
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    (ctx, char_id, ship_id, sys_id)
+}
+
+async fn spawn_extended_test_ship(
+    ctx: &ServerContext,
+    sys_id: u32,
+    ship_id: i64,
+    pos: DVec3,
+    vel: DVec3,
+    sig_radius: f64,
+    shield_hp: f64,
+) {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: pos,
+                velocity: vel,
+                max_velocity: 1_500.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: if vel.length_squared() > 0.0 { 1.0 } else { 0.0 },
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp,
+                max_shield_hp: shield_hp,
+                armor_hp: 1_000_000.0,
+                max_armor_hp: 1_000_000.0,
+                structure_hp: 1_000_000.0,
+                max_structure_hp: 1_000_000.0,
+                shield_resonance: [1.0; 4],
+                armor_resonance: [1.0; 4],
+                structure_resonance: [1.0; 4],
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                signature_radius: sig_radius,
+                base_signature_radius: Some(sig_radius),
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn extended_npc_ai_sde_dps_within_one_percent_five_types_and_zero_neut() {
+    let (base_ctx, _, _, _, _) = make_fighter_ctx_and_session();
+    let cases = [
+        (2_382_u32, 500_010_u32, 4_000_usize, "Guristas Arrogator (Frigate Hybrid)"),
+        (13_032, 500_011, 4_000, "Arch Angel Rogue (Frigate Projectile)"),
+        (2_381, 500_020, 4_000, "Serpentis Chief Spy (Cruiser Hybrid)"),
+        (10_281, 500_012, 4_000, "Blood Arch Reaver (Cruiser Laser)"),
+        (17_641, 500_011, 6_000, "Arch Angel Raelek (Battleship Projectile+Missile)"),
+    ];
+    let initial_shield = 1e12_f64;
+
+    for &(npc_tid, faction_id, n_ticks, label) in &cases {
+        let (ctx, _char_id, ship_id, sys_id) =
+            make_isolated_extended_npc_ctx(std::sync::Arc::clone(&base_ctx.sde));
+        spawn_extended_test_ship(
+            &ctx,
+            sys_id,
+            ship_id,
+            DVec3::new(300.0, 0.0, 0.0),
+            DVec3::ZERO,
+            2_000.0,
+            initial_shield,
+        )
+        .await;
+
+        let _npc_id = spawn_specialized_npc_entity(
+            &ctx,
+            sys_id,
+            npc_tid,
+            "Pirate",
+            faction_id,
+            DVec3::ZERO,
+        )
+        .await;
+
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        for tick in 0..n_ticks {
+            step_extended_npc_ai_sync(&ctx, sys_id);
+            if (tick + 1) % 250 == 0 {
+                let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+                bp.pending_events.clear();
+                bp.observer_events.clear();
+            }
+        }
+
+        let ship_cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        let empirical_dps = (initial_shield - ship_cs.shield_hp) / (n_ticks as f64);
+
+        let (profile, fallbacks) = crate::combat::npc_ai_weapons_loot::inspect_npc_sde_profile(
+            &ctx.sde,
+            npc_tid,
+            None,
+            faction_id,
+        );
+        assert!(
+            fallbacks.is_empty(),
+            "{label} ({npc_tid}) must resolve from SDE without fallbacks, got {fallbacks:?}"
+        );
+        let turret_exp = profile
+            .turret
+            .as_ref()
+            .map(|t| (t.shot_damage.total() / t.cycle_duration_s) * 1.01505)
+            .unwrap_or(0.0);
+        let missile_exp = profile
+            .missile
+            .as_ref()
+            .map(|m| m.volley_damage.total() / m.cycle_duration_s)
+            .unwrap_or(0.0);
+        let expected_dps = turret_exp + missile_exp;
+        let rel_err = (empirical_dps - expected_dps).abs() / expected_dps.max(1e-9);
+        assert!(
+            rel_err <= 0.01,
+            "{label}: empirical DPS {empirical_dps:.4} vs expected {expected_dps:.4} (rel_err={:.3}%)",
+            rel_err * 100.0
+        );
+
+        if matches!(npc_tid, 2_382 | 13_032) {
+            assert_eq!(
+                ship_cs.capacitor, 1_000.0,
+                "{label} ({npc_tid}) must drain 0.0 GJ capacitor from target"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn extended_npc_ai_turret_and_missile_hit_rules_reduce_damage_on_fast_frigate() {
+    let (base_ctx, _, _, _, _) = make_fighter_ctx_and_session();
+
+    // 1. Turret angular-velocity & signature rule: Serpentis Chief Spy (2381) vs stationary vs orbiting frigate
+    let run_turret_case = |sig: f64, vel: DVec3| {
+        let sde = std::sync::Arc::clone(&base_ctx.sde);
+        async move {
+            let (ctx, _char_id, ship_id, sys_id) = make_isolated_extended_npc_ctx(sde);
+            let initial_shield = 1_000_000.0;
+            spawn_extended_test_ship(
+                &ctx,
+                sys_id,
+                ship_id,
+                DVec3::new(2_000.0, 0.0, 0.0),
+                vel,
+                sig,
+                initial_shield,
+            )
+            .await;
+            let _npc = spawn_specialized_npc_entity(&ctx, sys_id, 2_381, "Pirate", 500_020, DVec3::ZERO).await;
+            for _ in 0..250 {
+                step_extended_npc_ai_sync(&ctx, sys_id);
+            }
+            let cs = ctx
+                .systems
+                .get_or_spawn(sys_id)
+                .get_combat_state(ship_id)
+                .await
+                .unwrap()
+                .unwrap();
+            initial_shield - cs.shield_hp
+        }
+    };
+    let turret_stationary = run_turret_case(400.0, DVec3::ZERO).await;
+    let turret_fast_frigate = run_turret_case(35.0, DVec3::new(0.0, 150.0, 0.0)).await;
+    assert!(turret_stationary > 5_000.0, "expected substantial stationary turret dmg, got {turret_stationary}");
+    assert!(
+        turret_fast_frigate > 0.0 && turret_fast_frigate < turret_stationary * 0.25,
+        "fast small frigate ({turret_fast_frigate}) must take <25% of stationary turret dmg ({turret_stationary})"
+    );
+
+    // 2. Missile explosion radius/velocity rule: Guristas Plunderer (2386, Scourge Rocket 266, 66 dmg)
+    let run_missile_case = |sig: f64, vel: DVec3| {
+        let sde = std::sync::Arc::clone(&base_ctx.sde);
+        async move {
+            let (ctx, _char_id, ship_id, sys_id) = make_isolated_extended_npc_ctx(sde);
+            let initial_shield = 10_000.0;
+            spawn_extended_test_ship(
+                &ctx,
+                sys_id,
+                ship_id,
+                DVec3::new(1_000.0, 0.0, 0.0),
+                vel,
+                sig,
+                initial_shield,
+            )
+            .await;
+            let _npc = spawn_specialized_npc_entity(&ctx, sys_id, 2_386, "Pirate", 500_010, DVec3::ZERO).await;
+            step_extended_npc_ai_sync(&ctx, sys_id);
+            let cs = ctx
+                .systems
+                .get_or_spawn(sys_id)
+                .get_combat_state(ship_id)
+                .await
+                .unwrap()
+                .unwrap();
+            initial_shield - cs.shield_hp
+        }
+    };
+    let missile_stationary = run_missile_case(40.0, DVec3::ZERO).await;
+    let missile_fast_frigate = run_missile_case(35.0, DVec3::new(0.0, 500.0, 0.0)).await;
+    assert!((missile_stationary - 66.0).abs() < 1e-6);
+    assert!(
+        missile_fast_frigate > 35.0 && missile_fast_frigate < 50.0,
+        "fast 500m/s frigate ({missile_fast_frigate}) must take reduced missile damage vs stationary ({missile_stationary})"
+    );
+}
+
+#[tokio::test]
+async fn extended_npc_ai_emits_weapon_matched_special_fx_and_wire_meta() {
+    let (base_ctx, _, _, _, _) = make_fighter_ctx_and_session();
+    let cases = [
+        (13_032_u32, "Pirate", 500_011_u32, "effects.ProjectileFired", Some(484_u32), None),
+        (2_382, "Pirate", 500_010, "effects.HybridFired", Some(562), None),
+        (10_281, "Pirate", 500_012, "effects.Laser", Some(455), None),
+        (2_386, "Pirate", 500_010, "effects.MissileDeployment", None, Some(266_u32)),
+        (52_206, "Triglavian", 500_026, "effects.TriglavianBeam", Some(47_914), None),
+    ];
+
+    for &(npc_tid, arch, faction_id, expected_guid, expected_mod_tid, expected_other_tid) in &cases {
+        let (ctx, _char_id, ship_id, sys_id) =
+            make_isolated_extended_npc_ctx(std::sync::Arc::clone(&base_ctx.sde));
+        spawn_extended_test_ship(
+            &ctx,
+            sys_id,
+            ship_id,
+            DVec3::new(300.0, 0.0, 0.0),
+            DVec3::ZERO,
+            1_000.0,
+            100_000.0,
+        )
+        .await;
+        let npc_id =
+            spawn_specialized_npc_entity(&ctx, sys_id, npc_tid, arch, faction_id, DVec3::ZERO).await;
+
+        step_extended_npc_ai_sync(&ctx, sys_id);
+
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let has_fx = bp.pending_events.iter().any(|ev| {
+            matches!(
+                ev,
+                eve_destiny::DestinyEvent::OnSpecialFX { ball_id, module_id: None, guid, is_active: true }
+                if *ball_id == npc_id && guid == expected_guid
+            )
+        });
+        assert!(
+            has_fx,
+            "NPC {npc_tid} must emit OnSpecialFX {expected_guid}, events={:?}",
+            bp.pending_events
+        );
+        let meta = bp
+            .special_fx_meta
+            .get(&(npc_id, None, expected_guid.to_string()))
+            .expect("SpecialFxWireMeta recorded for NPC attack");
+        assert_eq!(meta.target_id, Some(ship_id));
+        assert!(meta.is_offensive);
+        assert_eq!(meta.module_type_id, expected_mod_tid);
+        assert_eq!(meta.other_type_id, expected_other_tid);
+    }
+}
+
+#[tokio::test]
+async fn extended_npc_ai_destroys_with_sde_wreck_scaled_loot_and_clears_runtime() {
+    let (base_ctx, _, _, _, _) = make_fighter_ctx_and_session();
+
+    for &(npc_tid, arch, faction_id, expected_wreck, expected_ammo_tid, expected_ammo_qty, expect_zero_bounty) in &[
+        (2_382_u32, "Pirate", 500_010_u32, 26_573_u32, 222_u32, 25_i32, false),
+        (2_381, "Pirate", 500_020, 26_586, 230, 60, false),
+        (17_641, "Pirate", 500_011, 26_563, 199, 120, false),
+        (30_201, "Sleeper", 500_021, 30_492, 254, 1, true),
+    ] {
+        let (ctx, char_id, ship_id, sys_id) =
+            make_isolated_extended_npc_ctx(std::sync::Arc::clone(&base_ctx.sde));
+        spawn_extended_test_ship(
+            &ctx,
+            sys_id,
+            ship_id,
+            DVec3::new(300.0, 0.0, 0.0),
+            DVec3::ZERO,
+            1_000.0,
+            100_000.0,
+        )
+        .await;
+        let npc_id =
+            spawn_specialized_npc_entity(&ctx, sys_id, npc_tid, arch, faction_id, DVec3::ZERO).await;
+        step_extended_npc_ai_sync(&ctx, sys_id);
+
+        let (wreck_id, bounty, dropped_types) =
+            destroy_specialized_npc_with_hint(&ctx, sys_id, npc_id, char_id, None).await;
+        assert!(wreck_id > 0);
+        if expect_zero_bounty {
+            assert_eq!(bounty, 0.0);
+        } else {
+            assert!(bounty > 0.0);
+        }
+        assert!(dropped_types.contains(&expected_ammo_tid));
+
+        ctx.db.with_snapshot(|snap| {
+            let wreck = snap.items.get(&wreck_id).expect("SDE wreck spawned");
+            assert_eq!(wreck.type_id, expected_wreck);
+            assert_eq!(wreck.location_id, sys_id as i64);
+            assert!(snap.items.values().any(|i| {
+                i.location_id == wreck_id
+                    && i.type_id == expected_ammo_tid
+                    && i.quantity == expected_ammo_qty
+                    && i.owner_id == char_id
+            }));
+        });
+    }
+
+    // Verify per-entity weapon runtime cooldown is cleared when an NPC is destroyed.
+    let (ctx, char_id, ship_id, sys_id) =
+        make_isolated_extended_npc_ctx(std::sync::Arc::clone(&base_ctx.sde));
+    spawn_extended_test_ship(
+        &ctx,
+        sys_id,
+        ship_id,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        DVec3::ZERO,
+        40.0,
+        10_000.0,
+    )
+    .await;
+    let reused_id = spawn_specialized_npc_entity(&ctx, sys_id, 2_386, "Pirate", 500_010, DVec3::ZERO).await;
+    step_extended_npc_ai_sync(&ctx, sys_id);
+    let _ = destroy_specialized_npc_with_hint(&ctx, sys_id, reused_id, char_id, None).await;
+
+    // Reinsert a new NPC with the same ball ID; its missile must fire immediately at t=0 (not inherit cooldown).
+    let (ball, cs, ent) = crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+        &ctx,
+        sys_id,
+        reused_id,
+        2_386,
+        "Pirate",
+        500_010,
+        DVec3::ZERO,
+    );
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.spawn_ball_with_combat(ball, cs).await.unwrap();
+    with_mut_combat_ephemeral(&ctx, |rt| {
+        rt.npc_entities.insert(reused_id, ent);
+    });
+    let shield_before = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp;
+    step_extended_npc_ai_sync(&ctx, sys_id);
+    let shield_after = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp;
+    assert!(
+        shield_before - shield_after >= 65.0,
+        "respawned NPC reusing ball_id must have fresh weapon cooldown (lost {} HP)",
+        shield_before - shield_after
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn step_extended_npc_ai_sync_never_holds_db_lock_under_ballpark_write_and_is_deadlock_free() {
+    // 1. Structural source-audit lock-ordering invariant.
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let weapons_loot_src = std::fs::read_to_string(manifest_dir.join("src/combat/npc_ai_weapons_loot.rs"))
+        .expect("read npc_ai_weapons_loot.rs");
+    assert!(
+        !weapons_loot_src.contains(".ballpark."),
+        "npc_ai_weapons_loot.rs must never acquire sys_handle.ballpark locks directly"
+    );
+
+    let combat_npc_ai_src = std::fs::read_to_string(manifest_dir.join("src/services/combat_npc_ai.rs"))
+        .expect("read combat_npc_ai.rs");
+    let fn_start = combat_npc_ai_src
+        .find("pub fn step_extended_npc_ai_sync(")
+        .expect("step_extended_npc_ai_sync start");
+    let fn_end = combat_npc_ai_src[fn_start..]
+        .find("pub async fn step_extended_npc_ai(")
+        .map(|off| fn_start + off)
+        .expect("step_extended_npc_ai_sync end");
+    let sync_body = &combat_npc_ai_src[fn_start..fn_end];
+
+    let mut search_from = 0_usize;
+    let mut bp_write_scopes = 0_usize;
+    let next_brace_offsets = |slice: &str| -> Vec<(usize, char)> {
+        let mut out = Vec::new();
+        let bytes = slice.as_bytes();
+        let mut i = 0;
+        let mut in_str = false;
+        let mut in_line_comment = false;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if in_line_comment {
+                if b == b'\n' {
+                    in_line_comment = false;
+                }
+                i += 1;
+                continue;
+            }
+            if in_str {
+                if b == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    in_str = false;
+                }
+                i += 1;
+                continue;
+            }
+            if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                in_line_comment = true;
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_str = true;
+                i += 1;
+                continue;
+            }
+            if b == b'{' || b == b'}' {
+                out.push((i, b as char));
+            }
+            i += 1;
+        }
+        out
+    };
+    let all_braces = next_brace_offsets(sync_body);
+    while let Some(rel) = sync_body[search_from..].find("ballpark.write()") {
+        let hit = search_from + rel;
+        let mut stack: Vec<usize> = Vec::new();
+        for &(pos, ch) in &all_braces {
+            if pos >= hit {
+                break;
+            }
+            if ch == '{' {
+                stack.push(pos);
+            } else {
+                stack.pop();
+            }
+        }
+        let scope_start = *stack.last().expect("enclosing `{` before ballpark.write()");
+        let target_depth = stack.len() - 1;
+        let mut depth = stack.len();
+        let mut scope_end = sync_body.len();
+        for &(pos, ch) in &all_braces {
+            if pos <= hit {
+                continue;
+            }
+            if ch == '{' {
+                depth += 1;
+            } else {
+                depth -= 1;
+                if depth == target_depth {
+                    scope_end = pos;
+                    break;
+                }
+            }
+        }
+        let locked_slice = &sync_body[scope_start..scope_end];
+        for forbidden in [
+            "ctx.db.",
+            "with_snapshot",
+            "with_mut_snapshot",
+            "with_combat_ephemeral",
+            "with_mut_combat_ephemeral",
+            "combat_ephemeral.read",
+            "combat_ephemeral.write",
+        ] {
+            assert!(
+                !locked_slice.contains(forbidden),
+                "step_extended_npc_ai_sync ballpark.write() scope contains forbidden `{forbidden}`:\n{locked_slice}"
+            );
+        }
+        bp_write_scopes += 1;
+        search_from = scope_end;
+    }
+    assert!(
+        bp_write_scopes >= 2,
+        "expected ballpark.write() scopes in step_extended_npc_ai_sync"
+    );
+
+    // 2. Multi-thread concurrency stress test (Sleeper + EDENCOM + Pirate scram/web under concurrent DB locks).
+    let (base_ctx, _, _, _, _) = make_fighter_ctx_and_session();
+    let (ctx, char_id, ship_id, sys_id) =
+        make_isolated_extended_npc_ctx(std::sync::Arc::clone(&base_ctx.sde));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.standings.insert(500_027, -1.0);
+        }
+    });
+    spawn_extended_test_ship(
+        &ctx,
+        sys_id,
+        ship_id,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        DVec3::ZERO,
+        1_000.0,
+        10_000_000.0,
+    )
+    .await;
+    let _sleeper = spawn_specialized_npc_entity(&ctx, sys_id, 30_201, "Sleeper", 500_021, DVec3::ZERO).await;
+    let _edencom = spawn_specialized_npc_entity(&ctx, sys_id, 56_188, "EDENCOM", 500_027, DVec3::ZERO).await;
+    let _pirate = spawn_specialized_npc_entity(&ctx, sys_id, 13_032, "Pirate", 500_011, DVec3::ZERO).await;
+
+    let ctx_arc = std::sync::Arc::new(ctx);
+    let c_ai = std::sync::Arc::clone(&ctx_arc);
+    let c_db1 = std::sync::Arc::clone(&ctx_arc);
+    let c_db2 = std::sync::Arc::clone(&ctx_arc);
+
+    let ai_task = tokio::task::spawn_blocking(move || {
+        for _ in 0..80 {
+            step_extended_npc_ai_sync(&c_ai, sys_id);
+        }
+    });
+    let db_reader = tokio::task::spawn_blocking(move || {
+        for _ in 0..400 {
+            let _ = c_db1.db.with_snapshot(|s| s.items.len());
+        }
+    });
+    let db_writer = tokio::task::spawn_blocking(move || {
+        for _ in 0..200 {
+            c_db2.db.with_mut_snapshot(|s| {
+                let _ = s.characters.len();
+            });
+        }
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        ai_task.await.unwrap();
+        db_reader.await.unwrap();
+        db_writer.await.unwrap();
+    })
+    .await
+    .expect("concurrent step_extended_npc_ai_sync and DB snapshot locks must never deadlock");
+
+    let ship_cs = ctx_arc
+        .systems
+        .get_or_spawn(sys_id)
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(ship_cs.shield_hp < 10_000_000.0);
+}

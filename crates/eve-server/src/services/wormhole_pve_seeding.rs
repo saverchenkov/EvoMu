@@ -849,260 +849,45 @@ pub fn build_specialized_npc_components(
     spawn_group_id: u32,
     pos: DVec3,
 ) -> (Ball, CombatState, ExtendedNpcEntity) {
-    let sde_type = ctx.sde.types.get(&npc_type_id);
-    let attr = |aid: u16| -> Option<f64> {
-        sde_type.and_then(|t| t.default_attributes.get(&aid).copied())
-    };
-    let is_static_structure = matches!(archetype, "SleeperSentry" | "EmpireSentry" | "TransmissionRelay");
-    let max_vel = if is_static_structure { 0.0 } else { attr(37).unwrap_or(350.0) };
-    let opt_range = match archetype {
-        "TransmissionRelay" => 0.0,
-        "SleeperSentry" => attr(54).unwrap_or(250_000.0),
-        "EmpireSentry" => attr(54).unwrap_or(500_000.0),
-        _ => attr(54).unwrap_or(15_000.0).max(5_000.0),
-    };
-    let orb_range = if is_static_structure {
-        0.0
-    } else {
-        (opt_range * 0.6).clamp(2_500.0, 20_000.0)
-    };
-    let bounty = if matches!(archetype, "Sleeper" | "SleeperSentry" | "EmpireSentry" | "TransmissionRelay") {
-        0.0
-    } else {
-        attr(481).unwrap_or(0.0)
-    };
-    let is_navy_or_police = matches!(
-        archetype,
-        "Navy"
-            | "FactionPolice"
-            | "Police"
-            | "CaldariNavy"
-            | "MinmatarNavy"
-            | "AmarrNavy"
-            | "GallenteNavy"
-    );
-    let resolved_faction_id = if is_navy_or_police && (500_001..=500_030).contains(&spawn_group_id) {
-        spawn_group_id
-    } else {
-        let type_name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
-        sde_type
-            .and_then(|t| t.faction_id)
-            .filter(|&f| !(is_navy_or_police && f == 500_027))
-            .unwrap_or_else(|| match archetype {
-                "Navy"
-                | "FactionPolice"
-                | "Police"
-                | "CaldariNavy"
-                | "MinmatarNavy"
-                | "AmarrNavy"
-                | "GallenteNavy" => {
-                    resolve_empire_faction_from_name(type_name, archetype).unwrap_or(500_001)
-                }
-                // Gate/station sentry types in EVE SDE omit `faction_id`; resolve empire sovereignty
-                // rather than falling back to regional pirate factions.
-                "EmpireSentry" => resolve_empire_faction_from_name(type_name, archetype)
-                    .unwrap_or_else(|| {
-                        if is_empire_sentry_faction(spawn_group_id) {
-                            spawn_group_id
-                        } else {
-                            resolve_system_empire_faction(ctx, solar_system_id)
-                        }
-                    }),
-                "Sleeper" | "PochvenHypnosianSleeper" => 500_021,
-                "RogueDrone" => 500_025,
-                "EDENCOM" => 500_027,
-                "Drifter" => 500_024,
-                "Triglavian" => 500_026,
-                _ => {
-                    if (500_001..=500_030).contains(&spawn_group_id) {
-                        spawn_group_id
-                    } else {
-                        crate::combat::npc_ai::regional_pirate_faction_id(ctx, solar_system_id)
-                    }
-                }
-            })
-    };
-    let dmg_mult = attr(64).unwrap_or(2.0).max(1.0);
-    let (raw_em, raw_exp, raw_kin, raw_thm) = (
-        attr(114).unwrap_or(0.0),
-        attr(116).unwrap_or(0.0),
-        attr(117).unwrap_or(0.0),
-        attr(118).unwrap_or(0.0),
-    );
-    let damage_vector = if archetype == "TransmissionRelay" {
-        DamageVector::default()
-    } else if raw_em + raw_exp + raw_kin + raw_thm > 0.0 {
-        DamageVector {
-            em: raw_em * dmg_mult,
-            explosive: raw_exp * dmg_mult,
-            kinetic: raw_kin * dmg_mult,
-            thermal: raw_thm * dmg_mult,
-        }
-    } else {
-        match archetype {
-            "Triglavian" => DamageVector::new(0.0, 75.0, 0.0, 75.0),
-            "EDENCOM" => DamageVector::new(60.0, 0.0, 60.0, 0.0),
-            "Drifter" | "Sleeper" | "IncursionSansha" => DamageVector::new(50.0, 50.0, 50.0, 50.0),
-            "CloneSoldier" | "Pirate" | "BeltRat" | "Officer" => {
-                crate::combat::npc_ai::faction_damage_vector(resolved_faction_id, 100.0)
-            }
-            _ => DamageVector::new(25.0, 25.0, 25.0, 25.0),
-        }
-    };
-    let tag_drop = if archetype == "CloneSoldier" {
-        let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
-        let tier_str = if name.contains("Trainer") {
-            "Trainer"
-        } else if name.contains("Recruiter") {
-            "Recruiter"
-        } else if name.contains("Transporter") {
-            "Transporter"
-        } else {
-            "Negotiator"
-        };
-        ctx.sde
-            .types
-            .values()
-            .find(|t| t.group_id == 1206 && t.name.contains("Clone Soldier") && t.name.contains(tier_str))
-            .map(|t| t.type_id)
-    } else {
-        None
-    };
-    // Resolve EWAR from SDE dogma attributes (`20`=speedFactor, `514`=modifyTargetSpeedRange,
-    // `105`=warpScrambleStrength, `103`=warpScrambleRange). Only Sleeper archetypes and named
-    // Clone Soldier tiers fall back to synthetic defaults when SDE dogma is omitted; regular
-    // Pirate/mission/belt/other NPCs without explicit EWAR attributes default to 0.0 (no EWAR).
-    let resolve_web = |default_factor: f64| -> (f64, f64) {
-        let factor = attr(20).filter(|&v| v < 0.0).unwrap_or(default_factor);
-        if factor < 0.0 {
-            let range = attr(514).or_else(|| attr(580)).unwrap_or(10_000.0);
-            if range > 0.0 { (factor, range) } else { (0.0, 0.0) }
-        } else {
-            (0.0, 0.0)
-        }
-    };
-    let resolve_scram = |default_strength: f64| -> (f64, f64) {
-        let strength = attr(105).filter(|&v| v > 0.0).unwrap_or(default_strength);
-        if strength > 0.0 {
-            let range = attr(103).or_else(|| attr(582)).unwrap_or(20_000.0);
-            if range > 0.0 { (strength, range) } else { (0.0, 0.0) }
-        } else {
-            (0.0, 0.0)
-        }
-    };
-    let (web_factor, web_range, scram_str, scram_range) =
-        if is_static_structure || npc_type_id == 79_507 {
-            (0.0, 0.0, 0.0, 0.0)
-        } else if archetype == "CloneSoldier" {
-            let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
-            if name.contains("Transporter") {
-                let (wf, wr) = resolve_web(-60.0);
-                (wf, wr, 0.0, 0.0)
-            } else if name.contains("Negotiator") {
-                let ss = attr(105).filter(|&v| v > 0.0).unwrap_or(2.0).max(2.0);
-                let sr = attr(103).filter(|&v| v > 0.0).unwrap_or(24_000.0);
-                (0.0, 0.0, ss, sr)
-            } else {
-                let (wf, wr) = resolve_web(0.0);
-                (wf, wr, 0.0, 0.0)
-            }
-        } else if archetype == "Sleeper" {
-            let (wf, wr) = resolve_web(-50.0);
-            let (ss, sr) = resolve_scram(2.0);
-            (wf, wr, ss, sr)
-        } else {
-            let (wf, wr) = resolve_web(0.0);
-            let (ss, sr) = resolve_scram(0.0);
-            (wf, wr, ss, sr)
-        };
-    let mut cs = ctx.build_type_combat_state(npc_type_id);
-    if cs.max_structure_hp <= 0.0 {
-        cs.max_shield_hp = 2_000.0;
-        cs.shield_hp = 2_000.0;
-        cs.max_armor_hp = 2_000.0;
-        cs.armor_hp = 2_000.0;
-        cs.max_structure_hp = 2_000.0;
-        cs.structure_hp = 2_000.0;
-    }
-    if archetype == "SleeperSentry" {
-        cs.signature_radius = attr(552).unwrap_or(50.0);
-    }
-    if archetype == "PochvenHypnosianSleeper" {
-        let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
-        if name.contains("Aroused") || npc_type_id == 56680 || (56319..=56327).contains(&npc_type_id) {
-            cs.max_shield_hp = 5_000.0;
-            cs.shield_hp = 5_000.0;
-        }
-    }
-    let ball = Ball {
-        id: ball_id,
-        type_id: npc_type_id,
-        position: pos,
-        velocity: DVec3::ZERO,
-        max_velocity: max_vel,
-        inertia: 2.0,
-        mass: 1_500_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: MovementMode::Stop,
-    };
-    let wh_class = ctx
+    let type_name = ctx
         .sde
-        .solar_systems
-        .get(&solar_system_id)
-        .and_then(|s| {
-            ctx.sde
-                .constellations
-                .get(&s.constellation_id)
-                .and_then(|c| c.wormhole_class_id)
-                .or_else(|| ctx.sde.regions.get(&s.region_id).and_then(|r| r.wormhole_class_id))
-        })
-        // Known-space (and unclassified) systems carry no wormhole class: never default Sleepers to C3 behaviour.
-        .unwrap_or(0) as u8;
-    let entity = ExtendedNpcEntity {
-        ball_id,
-        type_id: npc_type_id,
-        faction_id: resolved_faction_id,
-        archetype: archetype.to_string(),
-        solar_system_id,
-        spawn_group_id,
-        target_id: None,
-        aggression_threat: HashMap::new(),
-        threat_table: HashMap::new(),
-        bounty_isk: bounty,
-        optimal_range: opt_range,
-        orbit_range: orb_range,
-        damage_vector,
-        entropic_cycles: 0,
-        drifter_overshield_hp: if archetype == "Drifter" && sde_type.is_none_or(|t| t.group_id != 1956) {
-            4_000.0
-        } else {
-            0.0
-        },
-        drifter_doomsday_fired: false,
-        web_speed_factor: web_factor,
-        web_range,
-        scram_strength: scram_str,
-        scram_range,
-        neut_amount: if is_static_structure || npc_type_id == 79_507 {
-            0.0
-        } else if archetype == "Sleeper" {
-            attr(97).filter(|&v| v >= 0.0).unwrap_or(120.0)
-        } else {
-            attr(97).filter(|&v| v > 0.0).unwrap_or(0.0)
-        },
-        ecm_jammed: false,
-        // Remote shield / armor repair amounts come from NPC SDE attributes 1460 / 1455 (with
-        // fallback to module attributes 68 / 84) and assistance range from attr 1464.
-        remote_shield_rep: if is_static_structure { 0.0 } else { attr(1460).or_else(|| attr(68)).unwrap_or(0.0) },
-        remote_armor_rep: if is_static_structure { 0.0 } else { attr(1455).or_else(|| attr(84)).unwrap_or(0.0) },
-        remote_rep_range: attr(1464).unwrap_or(25_000.0),
-        tag_drop_type_id: tag_drop,
-        spawn_position: pos,
-        sleeper_wh_class: wh_class,
-        custom_cargo_loot: None,
+        .types
+        .get(&npc_type_id)
+        .map(|t| t.name.as_str())
+        .unwrap_or("");
+    let empire_faction_override = match archetype {
+        "Navy"
+        | "FactionPolice"
+        | "Police"
+        | "CaldariNavy"
+        | "MinmatarNavy"
+        | "AmarrNavy"
+        | "GallenteNavy" => Some(
+            resolve_empire_faction_from_name(type_name, archetype).unwrap_or(500_001),
+        ),
+        // Gate/station sentry types in EVE SDE omit `faction_id`; resolve empire sovereignty
+        // rather than falling back to regional pirate factions.
+        "EmpireSentry" => Some(
+            resolve_empire_faction_from_name(type_name, archetype).unwrap_or_else(|| {
+                if is_empire_sentry_faction(spawn_group_id) {
+                    spawn_group_id
+                } else {
+                    resolve_system_empire_faction(ctx, solar_system_id)
+                }
+            }),
+        ),
+        _ => None,
     };
-    (ball, cs, entity)
+    crate::combat::npc_ai_weapons_loot::build_specialized_npc_components_with_empire_hint(
+        ctx,
+        solar_system_id,
+        ball_id,
+        npc_type_id,
+        archetype,
+        spawn_group_id,
+        pos,
+        empire_faction_override,
+    )
 }
 
 #[cfg(test)]
