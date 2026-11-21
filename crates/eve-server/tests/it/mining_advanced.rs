@@ -1393,7 +1393,7 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
         .dispatch_rpc(&mut sess, "structureCompressionMgr", None, "GetMyGasDecompressionEfficiency", &[PyRep::Integer(structure_id)], &kw, None)
         .await
         .expect("GetMyGasDecompressionEfficiency untrained RPC");
-    assert_eq!(eff_untrained.as_f64(), Some(0.84));
+    assert_eq!(eff_untrained, PyRep::Tuple(vec![PyRep::Real(0.84), PyRep::Real(0.84)]));
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(
@@ -1406,7 +1406,7 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
         .dispatch_rpc(&mut sess, "structureCompressionMgr", None, "GetMyGasDecompressionEfficiency", &[PyRep::Integer(structure_id)], &kw, None)
         .await
         .expect("GetMyGasDecompressionEfficiency RPC");
-    assert_eq!(eff_res.as_f64(), Some(0.89));
+    assert_eq!(eff_res, PyRep::Tuple(vec![PyRep::Real(0.89), PyRep::Real(0.89)]));
 
     let non_gas_err = ctx
         .dispatch_rpc(&mut sess, "structureCompressionMgr", None, "DecompressGasInStructure", &[PyRep::Integer(structure_id), PyRep::Integer(item_in_struct)], &kw, None)

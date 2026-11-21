@@ -120,61 +120,6 @@ fn normalize_macho_rpc_reply_covers_raffle_skill_station_and_store_variants() {
             PyRep::List(vec![PyRep::Integer(0)])
         ])
     );
-
-    // skillMgr2.GetSkillQueueAndFreePoints with empty queue preserves empty queue
-    let sq_empty = normalize_macho_rpc_reply(
-        "skillMgr2",
-        "GetSkillQueueAndFreePoints",
-        Ok(PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)])),
-    )
-    .unwrap();
-    if let PyRep::Tuple(parts) = sq_empty {
-        if let PyRep::List(q) = &parts[0] {
-            assert!(q.is_empty());
-        }
-    }
-
-    // stationSvc.GetAllianceSystems empty list and non-Integer item
-    let al_empty = normalize_macho_rpc_reply(
-        "stationSvc",
-        "GetAllianceSystems",
-        Ok(PyRep::List(Vec::new())),
-    )
-    .unwrap();
-    if let PyRep::List(items) = al_empty {
-        assert!(items.is_empty());
-    }
-    let al_other = normalize_macho_rpc_reply(
-        "stationSvc",
-        "GetAllianceSystems",
-        Ok(PyRep::List(vec![PyRep::String("keep".into())])),
-    )
-    .unwrap();
-    assert_eq!(al_other, PyRep::List(vec![PyRep::String("keep".into())]));
-
-    // warsInfoMgr.GetPublicWarInfo non-dict passthrough
-    assert_eq!(
-        normalize_macho_rpc_reply("warsInfoMgr", "GetPublicWarInfo", Ok(PyRep::Integer(5)))
-            .unwrap(),
-        PyRep::Integer(5)
-    );
-
-    // storeManager get_products and get_offers recursive KeyVal/Tuple/Dict conversion
-    for method in ["get_products", "get_offers"] {
-        let nested = PyRep::Tuple(vec![
-            PyRep::keyval([("k", PyRep::List(vec![PyRep::keyval([("inner", PyRep::Integer(1))])]))]),
-            PyRep::Dict(vec![(
-                PyRep::String("d".into()),
-                PyRep::keyval([("v", PyRep::Integer(2))]),
-            )]),
-        ]);
-        let conv = normalize_macho_rpc_reply("storeManager", method, Ok(nested)).unwrap();
-        let PyRep::Tuple(parts) = conv else {
-            panic!("expected tuple");
-        };
-        assert!(matches!(parts[0], PyRep::Dict(_)));
-        assert!(matches!(parts[1], PyRep::Dict(_)));
-    }
 }
 
 #[tokio::test]

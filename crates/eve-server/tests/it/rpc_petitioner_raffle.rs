@@ -211,14 +211,14 @@ async fn test_petitioner_meta_and_client_configuration() {
     assert!(cat_list.iter().any(|c| matches!(c, PyRep::KeyVal(kv) if kv.get("categoryID") == Some(&PyRep::Integer(2)) && kv.get("categoryName") == Some(&PyRep::String("Billing & Account".into())))));
     assert!(cat_list.iter().any(|c| matches!(c, PyRep::KeyVal(kv) if kv.get("categoryID") == Some(&PyRep::Integer(102)) && kv.get("categoryName") == Some(&PyRep::String("Reimbursement".into())))));
 
-    // 2. GetCategoryHierarchicalInfo returns 4-tuple (parentDict, childDict, descDict, billingList)
+    // 2. GetCategoryHierarchicalInfo returns 4-tuple (parentDict, childDict, descDict, billingDict)
     let hier = rpc(&ctx, &mut p1, "petitioner", "GetCategoryHierarchicalInfo", &[]).await.expect("GetCategoryHierarchicalInfo");
     let PyRep::Tuple(hier_tuple) = hier else { panic!("expected 4-tuple from GetCategoryHierarchicalInfo"); };
     assert_eq!(hier_tuple.len(), 4);
     let PyRep::Dict(parent_dict) = &hier_tuple[0] else { panic!("expected parent Dict"); };
     let PyRep::Dict(child_dict) = &hier_tuple[1] else { panic!("expected child Dict"); };
     let PyRep::Dict(desc_dict) = &hier_tuple[2] else { panic!("expected desc Dict"); };
-    let PyRep::List(billing_list) = &hier_tuple[3] else { panic!("expected billing List"); };
+    let PyRep::Dict(billing_dict) = &hier_tuple[3] else { panic!("expected billing Dict"); };
     assert_eq!(
         parent_dict.iter().find(|(k, _)| k == &PyRep::Integer(1)).map(|(_, v)| v),
         Some(&PyRep::Tuple(vec![PyRep::String("Game Play Support".into()), PyRep::String("EN".into())]))
@@ -226,7 +226,8 @@ async fn test_petitioner_meta_and_client_configuration() {
     let PyRep::Dict(cat1_children) = child_dict.iter().find(|(k, _)| k == &PyRep::Integer(1)).map(|(_, v)| v).expect("cat 1 children") else { panic!("expected child dict for cat 1"); };
     assert!(cat1_children.iter().any(|(k, v)| k == &PyRep::Integer(101) && v == &PyRep::Tuple(vec![PyRep::String("Missions & Exploration".into()), PyRep::String("EN".into())])));
     assert!(desc_dict.iter().any(|(k, v)| k == &PyRep::Integer(102) && v.as_str() == Some("Ship and module loss reimbursement requests")));
-    assert!(billing_list.contains(&PyRep::Integer(2)) && billing_list.contains(&PyRep::Integer(201)));
+    assert!(billing_dict.iter().any(|(k, v)| k == &PyRep::Integer(2) && matches!(v, PyRep::Tuple(t) if t.len() == 2)));
+    assert!(billing_dict.iter().any(|(k, v)| k == &PyRep::Integer(201) && matches!(v, PyRep::Tuple(t) if t.len() == 2)));
 
     // 3. GetCategoryProperties returns empty list matching V24 client bytecode
     let props = rpc(&ctx, &mut p1, "petitioner", "GetCategoryProperties", &[]).await.expect("GetCategoryProperties");

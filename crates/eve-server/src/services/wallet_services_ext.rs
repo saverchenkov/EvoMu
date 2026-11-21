@@ -157,6 +157,16 @@ pub(super) fn save_json_note<T: serde::Serialize>(
     }
 }
 
+/// Builds a string-keyed `PyRep::Dict` matching the VGS `storeManager` JSON wire contract.
+fn store_kv_dict<'a>(entries: impl IntoIterator<Item = (&'a str, PyRep)>) -> PyRep {
+    PyRep::Dict(
+        entries
+            .into_iter()
+            .map(|(k, v)| (PyRep::String(k.to_string()), v))
+            .collect(),
+    )
+}
+
 fn handle_store_get_categories(
     ctx: &ServerContext,
     _session: &SessionState,
@@ -168,7 +178,7 @@ fn handle_store_get_categories(
     for c in catalog.categories {
         let root_id = c.id as i64;
         let sub_id = root_id * 100 + 1;
-        items.push(PyRep::keyval([
+        items.push(store_kv_dict([
             ("id", PyRep::Integer(root_id)),
             ("name", PyRep::String(c.name.clone())),
             ("description", PyRep::String(c.description.clone())),
@@ -176,12 +186,12 @@ fn handle_store_get_categories(
             ("parent", PyRep::None),
             ("tags", PyRep::List(Vec::new())),
         ]));
-        items.push(PyRep::keyval([
+        items.push(store_kv_dict([
             ("id", PyRep::Integer(sub_id)),
             ("name", PyRep::String(c.name)),
             ("description", PyRep::String(c.description)),
             ("href", PyRep::String(String::new())),
-            ("parent", PyRep::keyval([("id", PyRep::Integer(root_id))])),
+            ("parent", store_kv_dict([("id", PyRep::Integer(root_id))])),
             ("tags", PyRep::List(Vec::new())),
         ]));
     }
@@ -199,7 +209,7 @@ fn handle_store_get_products(
         .products
         .into_iter()
         .map(|p| {
-            PyRep::keyval([
+            store_kv_dict([
                 ("id", PyRep::Integer(p.id as i64)),
                 ("productID", PyRep::Integer(p.id as i64)),
                 ("name", PyRep::String(p.name.clone())),
@@ -239,7 +249,7 @@ fn handle_store_get_offers(
                 .iter()
                 .map(|pid| {
                     if let Some(p) = products_by_id.get(pid) {
-                        PyRep::keyval([
+                        store_kv_dict([
                             ("id", PyRep::Integer(p.id as i64)),
                             ("productID", PyRep::Integer(p.id as i64)),
                             ("typeID", PyRep::Integer(p.type_id as i64)),
@@ -250,7 +260,7 @@ fn handle_store_get_offers(
                             ("imageUrl", PyRep::String(String::new())),
                         ])
                     } else {
-                        PyRep::keyval([
+                        store_kv_dict([
                             ("id", PyRep::Integer(*pid as i64)),
                             ("productID", PyRep::Integer(*pid as i64)),
                             ("typeID", PyRep::Integer(*pid as i64)),
@@ -265,7 +275,7 @@ fn handle_store_get_offers(
                 .collect();
             let root_cat_id = o.category_id as i64;
             let sub_cat_id = root_cat_id * 100 + 1;
-            PyRep::keyval([
+            store_kv_dict([
                 ("id", PyRep::Integer(o.id as i64)),
                 ("offerID", PyRep::Integer(o.id as i64)),
                 ("name", PyRep::String(o.name)),
@@ -279,8 +289,8 @@ fn handle_store_get_offers(
                 (
                     "categories",
                     PyRep::List(vec![
-                        PyRep::keyval([("id", PyRep::Integer(root_cat_id))]),
-                        PyRep::keyval([("id", PyRep::Integer(sub_cat_id))]),
+                        store_kv_dict([("id", PyRep::Integer(root_cat_id))]),
+                        store_kv_dict([("id", PyRep::Integer(sub_cat_id))]),
                     ]),
                 ),
                 ("currency", PyRep::String("PLX".into())),
@@ -288,7 +298,7 @@ fn handle_store_get_offers(
                 ("plexPrice", PyRep::Integer(o.price_plex)),
                 (
                     "offerPricings",
-                    PyRep::List(vec![PyRep::keyval([
+                    PyRep::List(vec![store_kv_dict([
                         ("currency", PyRep::String("PLX".into())),
                         ("price", PyRep::Integer(o.price_plex)),
                         ("basePrice", PyRep::Integer(o.price_plex)),

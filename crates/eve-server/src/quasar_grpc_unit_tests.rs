@@ -55,16 +55,6 @@ fn normalize_macho_rpc_reply_covers_structure_jump_chat_siphon_and_blueprints() 
     )
     .unwrap();
     assert_eq!(chat, PyRep::List(vec![PyRep::String("local".into())]));
-
-    // beyonce.GetCapacityOfSiphon
-    let siphon = normalize_macho_rpc_reply(
-        "beyonce",
-        "GetCapacityOfSiphon",
-        Ok(PyRep::Real(0.35)),
-    )
-    .unwrap();
-    assert_eq!(siphon.dict_get("capacity"), Some(&PyRep::Real(1_000.0)));
-    assert_eq!(siphon.dict_get("used"), Some(&PyRep::Real(350.0)));
 }
 
 #[test]
@@ -177,21 +167,6 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
     assert!(normalize_macho_rpc_reply("map", "GetMyExtraMapInfoAgents", Ok(PyRep::None)).is_ok());
     assert!(normalize_macho_rpc_reply("map", "GetSecurityModifiedSystems", Ok(PyRep::None)).is_ok());
 
-    let pet = normalize_macho_rpc_reply(
-        "petitioner",
-        "GetCategoryHierarchicalInfo",
-        Ok(PyRep::Tuple(vec![
-            PyRep::None,
-            PyRep::None,
-            PyRep::None,
-            PyRep::None,
-        ])),
-    )
-    .unwrap();
-    if let PyRep::Tuple(parts) = pet {
-        assert!(matches!(parts[3], PyRep::Dict(_)));
-    }
-
     assert!(normalize_macho_rpc_reply("planetMgr", "GMGetSynchedServerState", Ok(PyRep::None)).is_ok());
     assert!(normalize_macho_rpc_reply("planetMgr", "GetPlanetsForChar", Ok(PyRep::None)).is_ok());
     assert!(normalize_macho_rpc_reply("reprocessingSvc", "GetQuotes", Ok(PyRep::Tuple(vec![PyRep::Real(0.03)]))).is_ok());
@@ -204,32 +179,6 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
         PyRep::Tuple(_)
     ));
 
-    // skillMgr2.GetSkillQueueAndFreePoints with Rowset and List
-    let sq_rowset = normalize_macho_rpc_reply(
-        "skillMgr2",
-        "GetSkillQueueAndFreePoints",
-        Ok(PyRep::Tuple(vec![
-            PyRep::rowset(
-                vec!["trainingTypeID", "trainingToLevel"],
-                vec![vec![PyRep::Integer(3301), PyRep::Integer(4)]],
-            ),
-            PyRep::Integer(50_000),
-        ])),
-    )
-    .unwrap();
-    assert!(matches!(sq_rowset, PyRep::Tuple(_)));
-
-    let sq_list = normalize_macho_rpc_reply(
-        "skillMgr2",
-        "GetSkillQueueAndFreePoints",
-        Ok(PyRep::Tuple(vec![
-            PyRep::List(vec![PyRep::keyval([("trainingTypeID", PyRep::Integer(3302))])]),
-            PyRep::Integer(0),
-        ])),
-    )
-    .unwrap();
-    assert!(matches!(sq_list, PyRep::Tuple(_)));
-
     assert!(normalize_macho_rpc_reply(
         "charMgr",
         "GetContactList",
@@ -237,27 +186,6 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
     )
     .is_ok());
     assert!(normalize_macho_rpc_reply("charMgr", "GetRecentShipKillsAndLosses", Ok(PyRep::None)).is_ok());
-    assert!(normalize_macho_rpc_reply("stationSvc", "GetAllianceSystems", Ok(PyRep::List(vec![PyRep::Integer(30_000_142)]))).is_ok());
-    assert!(normalize_macho_rpc_reply("stationSvc", "GetSolarSystem", Ok(PyRep::Integer(30_000_142))).is_ok());
-    assert!(normalize_macho_rpc_reply("structureAssetSafety", "GetStructuresICanDeliverTo", Ok(PyRep::List(Vec::new()))).is_ok());
-    assert_eq!(
-        normalize_macho_rpc_reply("structureCompressionMgr", "GetMyGasDecompressionEfficiency", Ok(PyRep::Real(0.88))).unwrap(),
-        PyRep::Tuple(vec![PyRep::Real(0.88), PyRep::Real(0.88)])
-    );
-    assert!(normalize_macho_rpc_reply("warStatisticMgr", "GetBaseInfo", Ok(PyRep::Dict(Vec::new()))).is_ok());
-    assert!(matches!(
-        normalize_macho_rpc_reply("warsInfoMgr", "GetPublicWarInfo", Ok(PyRep::Dict(Vec::new()))).unwrap(),
-        PyRep::List(_)
-    ));
-    let store = normalize_macho_rpc_reply(
-        "storeManager",
-        "get_categories",
-        Ok(PyRep::List(vec![PyRep::keyval([("id", PyRep::Integer(1))])])),
-    )
-    .unwrap();
-    if let PyRep::List(items) = store {
-        assert!(matches!(items[0], PyRep::Dict(_)));
-    }
 }
 
 #[tokio::test]

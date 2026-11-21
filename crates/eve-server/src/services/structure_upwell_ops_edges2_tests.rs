@@ -536,7 +536,7 @@ async fn asset_safety_guards_move_wrap_cooldown_destination_and_gm_eject_edges()
     .await
     .unwrap()
     .unwrap();
-    assert!(matches!(deliv_list, PyRep::List(_)));
+    assert!(matches!(&deliv_list, PyRep::Tuple(t) if t.len() == 2 && matches!(t[0], PyRep::List(_))));
 
     assert_eq!(
         handle(

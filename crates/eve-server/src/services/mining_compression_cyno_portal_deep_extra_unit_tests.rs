@@ -339,7 +339,7 @@ async fn deep_compression_decompression_rig_yields_and_compressor_burst() {
 
     assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "GetMyGasDecompressionEfficiency", &[PyRep::Integer(sid_tatara_null)]).unwrap().unwrap_err().code, "InvalidStructure");
     let eff_rep = handle_structure_compression_mgr(&ctx, &mut sess, "GetMyGasDecompressionEfficiency", &[PyRep::Integer(sid_athanor)]).unwrap().unwrap();
-    assert!(matches!(eff_rep, PyRep::Real(r) if (r - eff_athanor).abs() < 1e-4));
+    assert!(matches!(&eff_rep, PyRep::Tuple(t) if t.len() == 2 && matches!((&t[0], &t[1]), (PyRep::Real(a), PyRep::Real(b)) if (*a - eff_athanor).abs() < 1e-4 && (*b - eff_athanor).abs() < 1e-4)));
 
     let comp_res = handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(sid_athanor), PyRep::Integer(ore_hangar_id)]).unwrap().unwrap();
     assert_eq!(kv_i64(&comp_res, "compressedTypeID"), Some(comp_ore_tid as i64));

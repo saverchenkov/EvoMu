@@ -387,7 +387,7 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
         .dispatch_rpc(&mut session, "structureCompressionMgr", None, "GetMyGasDecompressionEfficiency", &[PyRep::Integer(structure_id)], &kw, None)
         .await
         .expect("GetMyGasDecompressionEfficiency");
-    assert_eq!(eff_res.as_f64(), Some(0.89));
+    assert_eq!(eff_res, PyRep::Tuple(vec![PyRep::Real(0.89), PyRep::Real(0.89)]));
 
     let decomp_res = ctx
         .dispatch_rpc(&mut session, "structureCompressionMgr", None, "DecompressGasInStructure", &[PyRep::Integer(gas_item_id)], &kw, None)
