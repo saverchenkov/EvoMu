@@ -2929,6 +2929,7 @@ Choose your next action in the `action` object according to the required JSON sc
 10. `type_text` / `press_key` / `click_xy` / `drag_widget` / `wait`: Direct UI manipulation.
    - `type_text`: Targets widgets marked `"editable": true` in `clickable_widgets` (or focused field). Append `\n` at the end of `command`/`text` (e.g. `"Tritanium\n"`) to trigger Return/search submission automatically!
    - `press_key`: Supports `RETURN`/`ENTER`, `TAB`, `SHIFT+TAB`, `ESCAPE`, `CTRL+SPACE` (Stop Ship), `F1`–`F10`, and shortcuts (`ALT+P` Probe Scanner, `ALT+D` D-Scan, `ALT+W` Wallet, `ALT+N` Notepad, `ALT+F` Fitting, `ALT+C` Cargo, `ALT+R` Market, `ALT+G` Corp, `ALT+T` Assets, `ALT+M` Journal, `ALT+X` Skills).
+   - `drag_widget`: Drag source widget `target` (at `x`, `y`) to drop coordinates `dest_x`, `dest_y` (from the destination widget's `@(x,y)` in `clickable_widgets`, e.g. `ShipHangar` or a fitting slot, or desired window position). Always supply non-zero `dest_x` and `dest_y` (or `dest_target` in direct batch plans).
 
 ### Bug Detection Rule (Exceptions AND Silent UI-State Desyncs!)
 1. First fill out `previous_action_verification`:
@@ -3033,7 +3034,7 @@ You are the **Strategic Parent Planner**. You audit prior outcomes and formulate
 2. **Delegate an Executable Tactical Plan (`delegated_plan`):**
    - **Step 1 executes immediately from your `delegated_plan.steps[0]` WITHOUT another LLM call** when `exec_mode = "direct"`, and every subsequent `"direct"` step executes at `~0.2s` in Python unless a selector misses or an anomaly triggers escalation.
    - **Choose `exec_mode` per step:**
-     - `"direct"` (`~75-85%` of steps): Provide `action_type_hint` AND a concrete `"action"` object (`type`, `target`/`command`, optional `wait_ms` `250`-`500`) for {planner_direct_actions_doc}, AND for `click_widget`/`type_text`/`drag_widget` when the widget name/path/label is known from `clickable_widgets` or predictable (`context_menu_*`, `yes_dialog_button`, `ok_dialog_button`, `cancelBtn`, `quickFilterInputBox`, `OverviewTab_*`).
+     - `"direct"` (`~75-85%` of steps): Provide `action_type_hint` AND a concrete `"action"` object (`type`, `target`/`command`, optional `wait_ms` `250`-`500`) for {planner_direct_actions_doc}, AND for `click_widget`/`type_text` when the widget name/path/label is known from `clickable_widgets` or predictable (`context_menu_*`, `yes_dialog_button`, `ok_dialog_button`, `cancelBtn`, `quickFilterInputBox`, `OverviewTab_*`), or `drag_widget` only when both source `target` AND drop `dest_x`/`dest_y` (or `dest_target`) are known upfront (use `"llm"` if drop coordinates are not yet visible).
      - `"llm"`: Provide `action_type_hint` (`"click_widget"`, etc.); use `"llm"` ONLY when a previous step in the same batch will open an unfamiliar window/dialog whose child widget names are not known yet (`action` may be omitted).
    - **Optional `"assertions"` (`expect_window_open`, `expect_window_closed`, `expect_modal_absent`, `expect_context_menu_item`, `expect_ball_present`, `expect_session_field`):** All keys are OPTIONAL — ONLY include `expect_modal_absent: true` when no confirmation popup (`Delete`, `Yes/No`) is expected! Keep `capture_screenshot: false` (default) on routine `"direct"` steps.
    - **Choose `max_batch_steps` (`6–10` steps strongly preferred for routine multi-step workflows!)** and explain briefly in `horizon_rationale`:
@@ -3153,7 +3154,7 @@ You are executing **Batch #{batch_id} (Step {batch_step_idx} of {max_steps})** d
 2. **Map the Planned Step to a Concrete Action:**
    - Match `target_or_command_hint` (or `action.target`) from Batch Step {batch_step_idx} against live `clickable_widgets`, `open_windows`, `context_menu`, `modals`, or `space.nearby_balls`.
    - Valid `action.type` values: {exec_actions_doc}.
-   - Note: `type_text` MUST set `target` to the editable widget path (or `""` if already focused) AND `command` to the non-empty text string to type (append `\n` to submit); `press_key` supports `RETURN`, `ENTER`, `TAB`, `SHIFT+TAB`, `ESCAPE`, `CTRL+SPACE`, `F1`–`F10`, and `ALT+P/D/W/N/F/C/R/G/T/M/X`; `click_widget` with `"double_click": true` works on both `eveui` cards and legacy rows.
+   - Note: `type_text` MUST set `target` to the editable widget path (or `""` if already focused) AND `command` to the non-empty text string to type (append `\n` to submit); `press_key` supports `RETURN`, `ENTER`, `TAB`, `SHIFT+TAB`, `ESCAPE`, `CTRL+SPACE`, `F1`–`F10`, and `ALT+P/D/W/N/F/C/R/G/T/M/X`; `click_widget` with `"double_click": true` works on both `eveui` cards and legacy rows; `drag_widget` MUST set `dest_x` and `dest_y` to the destination drop coordinates from `clickable_widgets`.
 3. **Choosing `batch_status`:**
    - Set `batch_status = "completed"` if `max_batch_steps == 1` OR this action completes the final step of `delegated_plan`.
    - Set `batch_status = "continue"` if more planned steps remain after this action (`batch_step_idx < {max_steps}`).
@@ -4387,6 +4388,35 @@ _DIRECT_NON_WIDGET_ACTIONS = frozenset({
 })
 
 
+def _find_widget_in_pools(
+    target: str,
+    search_pools: Tuple[List[Dict[str, Any]], ...],
+    allow_multi_sub: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Match a widget target string against candidate `clickable_widgets` pools."""
+    t_low = target.lower()
+    for pool in search_pools:
+        for key in ("path", "name", "label", "text"):
+            for w in pool:
+                if str(w.get(key) or "") == target:
+                    return w
+        for w in pool:
+            p = str(w.get("path") or "")
+            n = str(w.get("name") or "")
+            if p.lower() == t_low or n.lower() == t_low or p.lower().endswith("/" + t_low):
+                return w
+        sub_hits = [
+            w
+            for w in pool
+            if t_low in str(w.get("path") or "").lower()
+            or t_low in str(w.get("name") or "").lower()
+            or t_low in str(w.get("label") or w.get("text") or "").lower()
+        ]
+        if len(sub_hits) == 1 or (sub_hits and allow_multi_sub):
+            return sub_hits[0]
+    return None
+
+
 def _resolve_direct_action(
     step_spec: Dict[str, Any],
     ui_snapshot: Optional[Dict[str, Any]],
@@ -4453,67 +4483,38 @@ def _resolve_direct_action(
             return None, f"{act_type} missing widget target"
         ui_sub = (ui_snapshot or {}).get("ui") or {}
         menu_items = list(ui_sub.get("context_menu") or (ui_snapshot or {}).get("context_menu") or [])
-        widgets = list(ui_sub.get("clickable_widgets") or [])
+        widgets = [w for w in (ui_sub.get("clickable_widgets") or []) if isinstance(w, dict)]
         t_low = target.lower()
 
         # Context-menu entries take priority when menu is open or target uses context_menu_ prefix
-        for entry in menu_items:
-            if not isinstance(entry, dict):
-                continue
-            ename = str(entry.get("name") or "")
-            elabel = str(entry.get("label") or entry.get("text") or "")
-            if ename == target or elabel == target or ename.lower() == t_low or elabel.lower() == t_low or (
-                len(t_low) >= 4 and (t_low in ename.lower() or t_low in elabel.lower())
-            ):
-                if ename:
-                    act["target"] = ename
-                if entry.get("x") is not None and entry.get("y") is not None:
-                    act["x"] = entry["x"]
-                    act["y"] = entry["y"]
-                return act, ""
+        if act_type != "drag_widget":
+            for entry in menu_items:
+                if not isinstance(entry, dict):
+                    continue
+                ename = str(entry.get("name") or "")
+                elabel = str(entry.get("label") or entry.get("text") or "")
+                if ename == target or elabel == target or ename.lower() == t_low or elabel.lower() == t_low or (
+                    len(t_low) >= 4 and (t_low in ename.lower() or t_low in elabel.lower())
+                ):
+                    if ename:
+                        act["target"] = ename
+                    if entry.get("x") is not None and entry.get("y") is not None:
+                        act["x"] = entry["x"]
+                        act["y"] = entry["y"]
+                    return act, ""
 
         # Strict match cascade on live clickable_widgets
         if act_type == "type_text":
-            search_pools = (
-                [w for w in widgets if isinstance(w, dict) and w.get("editable")],
-                [w for w in widgets if isinstance(w, dict)],
+            search_pools: Tuple[List[Dict[str, Any]], ...] = (
+                [w for w in widgets if w.get("editable")],
+                widgets,
             )
         else:
-            search_pools = ([w for w in widgets if isinstance(w, dict)],)
+            search_pools = (widgets,)
 
-        matched: Optional[Dict[str, Any]] = None
-        for pool in search_pools:
-            for key in ("path", "name", "label", "text"):
-                for w in pool:
-                    if str(w.get(key) or "") == target:
-                        matched = w
-                        break
-                if matched:
-                    break
-            if matched:
-                break
-            for w in pool:
-                p = str(w.get("path") or "")
-                n = str(w.get("name") or "")
-                if p.lower() == t_low or n.lower() == t_low or p.lower().endswith("/" + t_low):
-                    matched = w
-                    break
-            if matched:
-                break
-            sub_hits = [
-                w
-                for w in pool
-                if t_low in str(w.get("path") or "").lower()
-                or t_low in str(w.get("name") or "").lower()
-                or t_low in str(w.get("label") or w.get("text") or "").lower()
-            ]
-            if len(sub_hits) == 1:
-                matched = sub_hits[0]
-            elif sub_hits and act_type == "type_text":
-                matched = sub_hits[0]
-            if matched:
-                break
-
+        matched = _find_widget_in_pools(
+            target, search_pools, allow_multi_sub=(act_type == "type_text")
+        )
         if matched is None:
             return None, f"widget {target!r} not found in live scene graph"
 
@@ -4524,6 +4525,31 @@ def _resolve_direct_action(
         if matched.get("x") is not None and matched.get("y") is not None:
             act["x"] = matched["x"]
             act["y"] = matched["y"]
+
+        if act_type == "drag_widget":
+            dest_target = str(
+                raw_act.get("dest_target")
+                or raw_act.get("dest_widget")
+                or step_spec.get("dest_target")
+                or step_spec.get("dest_widget")
+                or ""
+            ).strip()
+            if (act.get("dest_x") is None or act.get("dest_y") is None) and dest_target:
+                dest_matched = _find_widget_in_pools(dest_target, (widgets,))
+                if dest_matched is None or dest_matched.get("x") is None or dest_matched.get("y") is None:
+                    return None, f"drag_widget destination widget {dest_target!r} not found in live scene graph"
+                act["dest_x"] = dest_matched["x"]
+                act["dest_y"] = dest_matched["y"]
+            if act.get("dest_x") is None or act.get("dest_y") is None:
+                return None, "drag_widget missing dest_x/dest_y drop coordinates"
+            try:
+                dx_val = int(act["dest_x"])
+                dy_val = int(act["dest_y"])
+            except (TypeError, ValueError):
+                return None, "drag_widget invalid dest_x/dest_y coordinates"
+            if dx_val <= 0 and dy_val <= 0:
+                return None, "drag_widget missing positive dest_x/dest_y drop coordinates"
+
         return act, ""
 
     return None, f"unsupported direct action type {act_type!r}"

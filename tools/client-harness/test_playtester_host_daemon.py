@@ -1524,6 +1524,66 @@ class TestSpeedupOptimizations(unittest.TestCase):
         self.assertIsNone(act_miss)
         self.assertIn("not found", err_miss)
 
+        drag_snap = {
+            "ui": {
+                "context_menu": [
+                    {"name": "context_menu_clathrates", "label": "Strontium Clathrates", "x": 10, "y": 10}
+                ],
+                "clickable_widgets": [
+                    {
+                        "name": "ItemEntry_16275",
+                        "path": "InventoryStation/entry_0/ItemEntry_16275",
+                        "label": "Strontium Clathrates",
+                        "x": 300,
+                        "y": 651,
+                    },
+                    {
+                        "name": "ShipHangar",
+                        "path": "InventoryStation/tree/ShipHangar",
+                        "label": "Ship hangar",
+                        "x": 172,
+                        "y": 365,
+                    },
+                ],
+            }
+        }
+        act_drag_missing, err_drag_missing = playtester._resolve_direct_action(
+            {"action": {"type": "drag_widget", "target": "ItemEntry_16275"}},
+            drag_snap,
+        )
+        self.assertIsNone(act_drag_missing)
+        self.assertIn("dest_x/dest_y", err_drag_missing)
+
+        act_drag_zero, err_drag_zero = playtester._resolve_direct_action(
+            {"action": {"type": "drag_widget", "target": "ItemEntry_16275", "dest_x": 0, "dest_y": 0}},
+            drag_snap,
+        )
+        self.assertIsNone(act_drag_zero)
+        self.assertIn("positive dest_x/dest_y", err_drag_zero)
+
+        act_drag_dest_target, err_drag_dest_target = playtester._resolve_direct_action(
+            {"action": {"type": "drag_widget", "target": "Strontium Clathrates", "dest_target": "ShipHangar"}},
+            drag_snap,
+        )
+        self.assertEqual(err_drag_dest_target, "")
+        self.assertEqual(act_drag_dest_target["target"], "InventoryStation/entry_0/ItemEntry_16275")
+        self.assertEqual((act_drag_dest_target["x"], act_drag_dest_target["y"]), (300, 651))
+        self.assertEqual((act_drag_dest_target["dest_x"], act_drag_dest_target["dest_y"]), (172, 365))
+
+        act_drag_bad_dest, err_drag_bad_dest = playtester._resolve_direct_action(
+            {"action": {"type": "drag_widget", "target": "ItemEntry_16275", "dest_target": "NoSuchHangar"}},
+            drag_snap,
+        )
+        self.assertIsNone(act_drag_bad_dest)
+        self.assertIn("destination widget", err_drag_bad_dest)
+
+        act_drag_ok, err_drag_ok = playtester._resolve_direct_action(
+            {"action": {"type": "drag_widget", "target": "ItemEntry_16275", "dest_x": 172, "dest_y": 365}},
+            drag_snap,
+        )
+        self.assertEqual(err_drag_ok, "")
+        self.assertEqual((act_drag_ok["dest_x"], act_drag_ok["dest_y"]), (172, 365))
+
         ok1, msg1 = playtester._evaluate_step_assertions(
             {
                 "expect_window_open": "MarketWindow",
