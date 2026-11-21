@@ -1762,7 +1762,7 @@ async fn item_compare_tracks_dispatch_tick_and_neither_scopes() {
 fn item_compare_attributes_guided_missile_deployable_kill_to_tick_scope() {
     use crate::router::delta_item_compare::{enter_compare_tick_sync_scope, flush_item_compare_summary, set_item_compare_override_for_test};
     use crate::services::mobile_deployables::TYPE_MTU_STANDARD;
-    use crate::system_actor::{missiles::step_guided_missiles_in_actor, ActiveGuidedMissile};
+    use crate::system_actor::{step_guided_missiles_in_actor, ActiveGuidedMissile};
     use eve_db::{InventoryFlag, InventoryItemRecord};
     use eve_destiny::{Ball, Ballpark, CombatState, DamageVector, MovementMode};
     use glam::DVec3;
