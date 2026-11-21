@@ -5,7 +5,7 @@ Usage:
   tighten_ratchets.py [--root DIR] --check              # exit 0 if tight, 1 if slack exists, 2 on regression
   tighten_ratchets.py [--root DIR] --write              # strictly lower v2 baselines in place (never raises!)
   tighten_ratchets.py [--root DIR] --dump-counts-json   # print exact per-file scanner counts for Rust parity test
-  tighten_ratchets.py [--root DIR] --migrate-v2 [--only arch_debt,client_compat,untyped_user_error,stringly_error_bypass]
+  tighten_ratchets.py [--root DIR] --migrate-v2 [--only arch_debt,client_compat,untyped_user_error,stringly_error_bypass,test_fixture]
 """
 import argparse
 import json
@@ -22,8 +22,9 @@ ARCH_DEBT_REL = "crates/eve-testkit/ratchets/arch_debt_ratchet.json"
 CLIENT_COMPAT_REL = "crates/eve-testkit/ratchets/client_compat_ratchet.json"
 UNTYPED_UE_REL = rc.UNTYPED_USER_ERROR_REL
 STRINGLY_BYPASS_REL = rc.STRINGLY_ERR_BYPASS_REL
+TEST_FIXTURE_REL = rc.TEST_FIXTURE_REL
 
-ALL_TARGETS = ("arch_debt", "client_compat", "untyped_user_error", "stringly_error_bypass")
+ALL_TARGETS = ("arch_debt", "client_compat", "untyped_user_error", "stringly_error_bypass", "test_fixture")
 
 
 def _dump_json(obj):
@@ -90,7 +91,7 @@ def _tighten_subset_list(label, allowed_list, observed_set):
 
 
 def collect_all_counts(root):
-    """Scan the workspace once and return canonical per-file counts for all 4 ratchet families."""
+    """Scan the workspace once and return canonical per-file counts for all 5 ratchet families."""
     arch_path = os.path.join(root, ARCH_DEBT_REL)
     arch_counts = {}
     if os.path.isfile(arch_path):
@@ -100,7 +101,9 @@ def collect_all_counts(root):
             raise ValueError("arch_debt scan errors: %s" % (viols,))
         arch_counts = {k: dict(sorted(v.items())) for k, v in sorted(pf.items())}
 
-    compat_rep = rc.scan_client_compat_per_file(root)
+    shared_it_cache = {}
+    shared_stat_it = {}
+    compat_rep = rc.scan_client_compat_per_file(root, it_cache=shared_it_cache, stat_it=shared_stat_it)
     client_compat_counts = {
         "counters": compat_rep["counters"],
         "known_rules": compat_rep["known_rules"],
@@ -110,12 +113,15 @@ def collect_all_counts(root):
     untyped_ue_counts = dict(sorted(rc.scan_untyped_user_error_per_file(root).items()))
     bypass_pf, _, _ = rc.scan_stringly_error_bypass_per_file(root)
     bypass_counts = {k: dict(sorted(v.items())) for k, v in sorted(bypass_pf.items())}
+    test_fixture_pf = rc.scan_test_fixture_per_file(root, it_cache=shared_it_cache, stat_it=shared_stat_it)
+    test_fixture_counts = {k: dict(sorted(test_fixture_pf.get(k, {}).items())) for k in rc.TEST_FIXTURE_PATTERNS}
 
     return {
         "arch_debt": arch_counts,
         "client_compat": client_compat_counts,
         "untyped_user_error": untyped_ue_counts,
         "stringly_error_bypass": bypass_counts,
+        "test_fixture": test_fixture_counts,
     }
 
 
@@ -186,6 +192,47 @@ def _build_stringly_bypass_v2(old_doc, bypass_counts):
             "Missing file = 0; tightened mechanically after landing."
         ),
         "rules": new_rules,
+    }
+
+
+def _build_test_fixture_v2(old_doc, tf_counts):
+    old_patterns = old_doc.get("patterns") if isinstance(old_doc, dict) else {}
+    default_rules = {
+        "hand_built_sessions": (
+            "No new hand-built SessionState { ... } struct literals in crates/eve-server/tests/it/; "
+            "use ScenarioBuilder or login flows"
+        ),
+        "discarded_rpc_results": (
+            "No new let _ = / let _name = RPC calls discarding results in crates/eve-server/tests/it/; "
+            "handle or assert RPC outcomes explicitly"
+        ),
+    }
+    new_patterns = {}
+    for pat in rc.TEST_FIXTURE_PATTERNS:
+        spec = old_patterns.get(pat, {}) if isinstance(old_patterns, dict) else {}
+        zero_req = bool(isinstance(spec, dict) and spec.get("zero_required") is True)
+        obs_pf = tf_counts.get(pat, {})
+        if zero_req and obs_pf:
+            raise ValueError(
+                "Cannot migrate zero_required test_fixture pattern '%s' with non-zero occurrences: %s" % (pat, obs_pf)
+            )
+        new_patterns[pat] = {
+            "rule": spec.get("rule", default_rules[pat]) if isinstance(spec, dict) else default_rules[pat],
+            "zero_required": zero_req,
+            "files": {} if zero_req else dict(sorted(obs_pf.items())),
+        }
+    return {
+        "version": 2,
+        "owning_issue": (old_doc or {}).get("owning_issue", "#1540") if isinstance(old_doc, dict) else "#1540",
+        "description": (
+            (old_doc or {}).get("description")
+            if isinstance(old_doc, dict) and (old_doc or {}).get("description")
+            else (
+                "Per-file integration test hygiene baselines (#1540): block new hand-built "
+                "SessionState { ... } structs and discarded let _ = RPC results in crates/eve-server/tests/it/."
+            )
+        ),
+        "patterns": new_patterns,
     }
 
 
@@ -327,6 +374,45 @@ def tighten_ratchets(root, write=False, targets=ALL_TARGETS):
                     elif not write:
                         changed_files.append(STRINGLY_BYPASS_REL)
 
+    if "test_fixture" in targets:
+        p = os.path.join(root, TEST_FIXTURE_REL)
+        if os.path.isfile(p):
+            doc = rc._read_json(p)
+            if isinstance(doc, dict) and int(doc.get("version", 0) or 0) == 2 and isinstance(doc.get("patterns"), dict):
+                new_doc = dict(doc)
+                new_patterns = {}
+                file_slack = 0
+                for name, spec in doc["patterns"].items():
+                    if (
+                        name not in rc.TEST_FIXTURE_PATTERNS
+                        or not isinstance(spec, dict)
+                        or not isinstance(spec.get("files"), dict)
+                    ):
+                        new_patterns[name] = spec
+                        continue
+                    tight_pf, sl, regs = _tighten_file_map(
+                        "test_fixture.%s" % name,
+                        spec["files"],
+                        counts["test_fixture"].get(name, {}),
+                        zero_required=bool(spec.get("zero_required") is True),
+                    )
+                    file_slack += sl
+                    regressions.extend(regs)
+                    nspec = dict(spec)
+                    nspec["files"] = tight_pf
+                    new_patterns[name] = nspec
+                for name in rc.TEST_FIXTURE_PATTERNS:
+                    if name not in doc["patterns"]:
+                        regressions.append("test_fixture: missing required pattern `%s`" % name)
+                new_doc["patterns"] = new_patterns
+                slack_total += file_slack
+                if file_slack > 0:
+                    if write and not regressions:
+                        if _write_if_changed(p, new_doc):
+                            changed_files.append(TEST_FIXTURE_REL)
+                    elif not write:
+                        changed_files.append(TEST_FIXTURE_REL)
+
     return changed_files, slack_total, regressions
 
 
@@ -357,6 +443,12 @@ def migrate_v2(root, targets=ALL_TARGETS):
         doc = _build_stringly_bypass_v2(old_doc, counts["stringly_error_bypass"])
         if _write_if_changed(p, doc):
             written.append(STRINGLY_BYPASS_REL)
+    if "test_fixture" in targets:
+        p = os.path.join(root, TEST_FIXTURE_REL)
+        if os.path.isfile(p):
+            doc = _build_test_fixture_v2(rc._read_json(p), counts["test_fixture"])
+            if _write_if_changed(p, doc):
+                written.append(TEST_FIXTURE_REL)
     return written
 
 
