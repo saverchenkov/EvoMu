@@ -29,11 +29,11 @@ impl<'c> ServerScenarioBackend<'c> {
         Self::new(test_ctx.server())
     }
 
-    /// Creates a backend with RPC rate-budget enforcement disabled via `disable_rpc_rate_budget_for_test`
+    /// Creates a backend with RPC rate-budget enforcement disabled via [`TestContext::disable_rpc_rate_budget`]
     /// for multi-actor sweeps exceeding per-session burst limits.
-    pub fn with_rpc_rate_budget_disabled(ctx: &'c ServerContext) -> Self {
-        ctx.disable_rpc_rate_budget_for_test();
-        Self::new(ctx)
+    pub fn with_rpc_rate_budget_disabled(test_ctx: &'c eve_server::router::TestContext) -> Self {
+        test_ctx.disable_rpc_rate_budget();
+        Self::from_test_ctx(test_ctx)
     }
 }
 
@@ -84,6 +84,7 @@ impl<'c> ScenarioWorldBackend for ServerScenarioBackend<'c> {
             corp_role: s.corp_role,
             fleet_id: s.fleet_id,
             role: s.role,
+            now_unix: Some(self.ctx.now_unix()),
         }
     }
 
@@ -110,7 +111,7 @@ impl<'c> ScenarioWorldBackend for ServerScenarioBackend<'c> {
         let uid = transport.inner.session.user_id.expect("authenticated session for omega upgrade");
         Box::pin(async move {
             let mut gm = login_gm_treasury(ctx, gm_sid).await;
-            let until = ctx.now_unix().saturating_add(30 * 86_400);
+            let until = ctx.now_unix().saturating_add(36_500 * 86_400);
             gm.call_wire("slash", None, "SlashCmd", &[PyRep::String(format!("/setomega {uid} {until}"))], &HashMap::new())
                 .await.rpc_result.expect("GM /setomega");
             ctx.sync_session(&mut transport.inner.session);
@@ -167,7 +168,9 @@ impl<'c> ScenarioWorldBackend for ServerScenarioBackend<'c> {
     fn ship_in_space_ballpark<'a>(&'a mut self, solar_system_id: u32, ship_id: i64) -> Pin<Box<dyn Future<Output = Option<bool>> + Send + 'a>> {
         let ctx = self.ctx;
         Box::pin(async move {
-            let handle = ctx.systems.get_handle(solar_system_id)?;
+            let Some(handle) = ctx.systems.get_handle(solar_system_id) else {
+                return Some(false);
+            };
             Some(handle.get_ball_snapshot(ship_id).await.ok().flatten().is_some())
         })
     }

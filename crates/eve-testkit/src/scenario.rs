@@ -359,6 +359,7 @@ impl ScenarioBuilder {
             if let Some(ship) = &spec.ship {
                 skill_source_types.push(ship.hull_type_id);
                 skill_source_types.extend(ship.modules.iter().map(|&(_, mid)| mid));
+                skill_source_types.extend(ship.charges.iter().map(|&(_, cid, _)| cid));
             }
             let view = backend.actor_session_view(harness.transport());
             let station_id = view.station_id.expect("new character must spawn docked");
@@ -371,6 +372,14 @@ impl ScenarioBuilder {
                 solar_system_id, ship_id: view.ship_id, module_item_ids: Vec::new(), fleet_id: None,
                 hangar_item_ids: BTreeMap::new(), harness, expectation: LegalFixtureExpectation::default(),
             });
+        }
+
+        // Refresh Omega after all Step 1 training clock advances so earlier Omega actors cannot lapse.
+        for (idx, actor) in built.iter_mut().enumerate() {
+            if self.actors[idx].require_omega {
+                backend.upgrade_actor_to_omega(actor.harness.transport_mut()).await;
+                actor.expectation.expect_omega = true;
+            }
         }
 
         // Step 2: Found and join player corporations while docked.
@@ -407,7 +416,25 @@ impl ScenarioBuilder {
                         PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(base_station), PyRep::Integer(0),
                     ]).await;
                 }
-                backend.advance_secs(12);
+                let has_pending_grant = backend.db().with_snapshot(|snap| {
+                    snap.corp_governance
+                        .get(&corp_id)
+                        .is_some_and(|gov| gov.pending_role_grants.contains_key(&char_id))
+                });
+                let delayed_mask = eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK
+                    | eve_db::corp_roles::ROLE_DIRECTOR
+                    | (0x7Fu64 << 42);
+                if has_pending_grant || (required_roles & delayed_mask) != 0 {
+                    backend.advance_secs(86_401);
+                    rpc_ok(&mut built[founder_actor_index].harness, "corpRegistry", "GetMembers", &[]).await;
+                    for (o_idx, actor) in built.iter_mut().enumerate() {
+                        if self.actors[o_idx].require_omega {
+                            backend.upgrade_actor_to_omega(actor.harness.transport_mut()).await;
+                        }
+                    }
+                } else {
+                    backend.advance_secs(12);
+                }
                 backend.sync_actor_session(built[idx].harness.transport_mut());
                 built[idx].corporation_id = corp_id;
                 built[idx].expectation.require_player_corp = true;

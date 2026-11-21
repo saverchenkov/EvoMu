@@ -80,7 +80,15 @@ pub fn count_hand_built_sessions(src: &str) -> usize {
 }
 
 fn stmt_has_rpc_call(stmt: &[u8]) -> bool {
-    const PLAIN_RPCS: &[&[u8]] = &[b"dispatch_rpc", b"call_rpc", b"rpc", b"rpc_res", b"call_exchange"];
+    const PLAIN_RPCS: &[&[u8]] = &[
+        b"dispatch_rpc",
+        b"call_rpc",
+        b"rpc",
+        b"rpc_res",
+        b"call_exchange",
+        b"call_wire",
+        b"wire_session_call_ok",
+    ];
     let (n, mut i) = (stmt.len(), 0usize);
     while i < n {
         if !is_ident_byte(stmt[i]) { i += 1; continue; }
@@ -90,7 +98,7 @@ fn stmt_has_rpc_call(stmt: &[u8]) -> bool {
         let j = skip_ascii_ws(stmt, i);
         if j < n && stmt[j] == b'(' {
             if PLAIN_RPCS.contains(&ident) { return true; }
-            if ident == b"call" {
+            if ident == b"call" || ident == b"call_ok" {
                 let mut p = start;
                 while p > 0 && stmt[p - 1].is_ascii_whitespace() { p -= 1; }
                 if p > 0 && stmt[p - 1] == b'.' { return true; }
@@ -100,15 +108,17 @@ fn stmt_has_rpc_call(stmt: &[u8]) -> bool {
     false
 }
 
-/// Counts `let _ = <expr>;` statements whose initializer invokes an RPC call in stripped Rust source.
+/// Counts `let _ = <expr>;` and `let _name = <expr>;` statements whose initializer invokes an RPC call in stripped Rust source.
 pub fn count_discarded_rpc_results(src: &str) -> usize {
     let clean = strip_rust_comments_and_literals(src);
     let (b, n, mut count, mut i) = (clean.as_bytes(), clean.len(), 0usize, 0usize);
     while i + 3 <= n {
         if &b[i..i + 3] == b"let" && ident_boundary(b, i, i + 3) {
             let j = skip_ascii_ws(b, i + 3);
-            if j < n && b[j] == b'_' && (j + 1 >= n || !is_ident_byte(b[j + 1])) {
-                let j = skip_ascii_ws(b, j + 1);
+            if j < n && b[j] == b'_' {
+                let mut name_end = j + 1;
+                while name_end < n && is_ident_byte(b[name_end]) { name_end += 1; }
+                let j = skip_ascii_ws(b, name_end);
                 if j < n && b[j] == b'=' && (j + 1 >= n || (b[j + 1] != b'=' && b[j + 1] != b'>')) {
                     let (mut k, mut pd, mut bd, mut cd) = (j + 1, 0usize, 0usize, 0usize);
                     while k < n {
@@ -197,8 +207,11 @@ mod tests {
             let _ = ctx.dispatch_rpc(&mut sess, "a", None, "C", &[], &kw, None).await.expect("C");
             let _ = harness.call("a", None, "D", &[], &kw).await;
             let _ = call_rpc(&ctx, &mut sess, "a", "E", &[]).await;
+            let _ = gm.call_wire("a", None, "F", &[], &kw).await;
+            let _act_rep = harness.call_ok("dogmaIM", None, "Activate", &[], &kw).await;
+            let _lock_rep = wire_session_call_ok(&mut s, "target", "AddTarget", &[]).await;
         "#;
-        assert_eq!(scan_test_fixture_source(dirty_src), TestFixtureCounts { hand_built_sessions: 2, discarded_rpc_results: 4 });
+        assert_eq!(scan_test_fixture_source(dirty_src), TestFixtureCounts { hand_built_sessions: 2, discarded_rpc_results: 7 });
     }
 
     #[test]

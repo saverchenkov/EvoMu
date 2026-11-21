@@ -34,6 +34,7 @@ pub struct FixtureSessionView {
     pub corp_role: u64,
     pub fleet_id: Option<i64>,
     pub role: u64,
+    pub now_unix: Option<u64>,
 }
 
 /// Caller expectations enforced on top of baseline legal-fixture consistency.
@@ -51,6 +52,8 @@ pub struct LegalFixtureExpectation {
     pub ship_in_space_ballpark: Option<bool>,
     /// Require the actor to be an active member of `session.fleet_id` in `snap.fleets`.
     pub require_fleet_membership: bool,
+    /// Require the character to currently hold Omega clone grade (`clone_grade >= 2`).
+    pub expect_omega: bool,
 }
 
 /// Specific invariant violation detected by [`check_legal_fixture`].
@@ -60,6 +63,7 @@ pub enum LegalFixtureViolation {
     MissingOrBannedAccount { user_id: u64 },
     MissingCharacter { character_id: i64 },
     CharacterAccountMismatch { character_id: i64, session_user_id: u64, owner_user_id: u64 },
+    NonOmegaCharacter { character_id: i64, clone_grade: u32 },
     MissingCorporationId { character_id: i64 },
     CharacterCorporationMismatch { character_id: i64, session_corp_id: i64, character_corp_id: i64 },
     NpcCorpUsedAsPlayerCorp { character_id: i64, corporation_id: i64 },
@@ -76,10 +80,14 @@ pub enum LegalFixtureViolation {
     InvalidActiveShip { character_id: i64, ship_id: i64, reason: String },
     ShipLocationMismatch { ship_id: i64, expected_location_id: i64, actual_location_id: i64, expected_flag: InventoryFlag, actual_flag: InventoryFlag },
     ShipMissingFromSpaceBallpark { ship_id: i64, solar_system_id: u32 },
+    UnownedFittedItem { ship_id: i64, item_id: i64, type_id: TypeId, expected_owner_id: i64, actual_owner_id: i64 },
+    DuplicateSlotModule { ship_id: i64, slot_flag: u16, first_item_id: i64, duplicate_item_id: i64, type_id: TypeId },
     InvalidFittedModule { ship_id: i64, item_id: i64, type_id: TypeId, reason: String },
     MissingRequiredSkill { character_id: i64, for_item_id: i64, for_type_id: TypeId, skill_type_id: TypeId, required_level: u8, actual_level: u8 },
     OrphanLoadedCharge { ship_id: i64, charge_item_id: i64, charge_type_id: TypeId, slot_flag: u16 },
     IncompatibleLoadedCharge { ship_id: i64, slot_flag: u16, module_item_id: i64, module_type_id: TypeId, charge_item_id: i64, charge_type_id: TypeId },
+    InvalidLoadedChargeQuantity { ship_id: i64, slot_flag: u16, charge_item_id: i64, charge_type_id: TypeId, quantity: i32 },
+    ChargeExceedsModuleCapacity { ship_id: i64, slot_flag: u16, module_item_id: i64, module_type_id: TypeId, charge_item_id: i64, charge_type_id: TypeId, quantity: i32, total_volume_milli: i64, module_capacity_milli: i64 },
     FleetMembershipMismatch { character_id: i64, fleet_id: Option<i64>, reason: String },
 }
 
@@ -436,6 +444,15 @@ fn validate_ship_skills_and_fitting(
     let mut charges: Vec<(&InventoryItemRecord, &InvType)> = Vec::new();
 
     for it in ship_slot_items {
+        if it.owner_id != char_id {
+            violations.push(LegalFixtureViolation::UnownedFittedItem {
+                ship_id,
+                item_id: it.item_id,
+                type_id: it.type_id,
+                expected_owner_id: char_id,
+                actual_owner_id: it.owner_id,
+            });
+        }
         let Some(inv_type) = sde.types.get(&it.type_id) else {
             violations.push(LegalFixtureViolation::InvalidFittedModule {
                 ship_id,
@@ -474,11 +491,31 @@ fn validate_ship_skills_and_fitting(
             });
         }
         check_skills(it.item_id, it.type_id, violations);
-        modules_by_flag.insert(flag_u16, (it, inv_type));
+        if let Some(&(first_item, _)) = modules_by_flag.get(&flag_u16) {
+            violations.push(LegalFixtureViolation::DuplicateSlotModule {
+                ship_id,
+                slot_flag: flag_u16,
+                first_item_id: first_item.item_id,
+                duplicate_item_id: it.item_id,
+                type_id: it.type_id,
+            });
+        } else {
+            modules_by_flag.insert(flag_u16, (it, inv_type));
+        }
     }
 
     for (charge_item, charge_type) in charges {
         let flag_u16 = charge_item.flag as u16;
+        if charge_item.quantity <= 0 {
+            violations.push(LegalFixtureViolation::InvalidLoadedChargeQuantity {
+                ship_id,
+                slot_flag: flag_u16,
+                charge_item_id: charge_item.item_id,
+                charge_type_id: charge_type.type_id,
+                quantity: charge_item.quantity,
+            });
+        }
+        check_skills(charge_item.item_id, charge_type.type_id, violations);
         let Some(&(mod_item, mod_type)) = modules_by_flag.get(&flag_u16) else {
             violations.push(LegalFixtureViolation::OrphanLoadedCharge {
                 ship_id,
@@ -497,6 +534,37 @@ fn validate_ship_skills_and_fitting(
                 charge_item_id: charge_item.item_id,
                 charge_type_id: charge_type.type_id,
             });
+        }
+        if charge_item.quantity > 0 {
+            let mod_cap = if mod_type.capacity > 0.0 {
+                mod_type.capacity
+            } else {
+                mod_type.default_attributes.get(&38).copied().unwrap_or(0.0)
+            };
+            let charge_vol = if charge_type.volume > 0.0 {
+                charge_type.volume
+            } else {
+                charge_type.default_attributes.get(&161).copied().unwrap_or(0.0)
+            };
+            let total_vol = f64::from(charge_item.quantity) * charge_vol;
+            let exceeds = if mod_cap > 0.0 && charge_vol > 0.0 {
+                total_vol > mod_cap + 1e-9
+            } else {
+                mod_cap <= 0.0 && charge_item.quantity > 1
+            };
+            if exceeds {
+                violations.push(LegalFixtureViolation::ChargeExceedsModuleCapacity {
+                    ship_id,
+                    slot_flag: flag_u16,
+                    module_item_id: mod_item.item_id,
+                    module_type_id: mod_type.type_id,
+                    charge_item_id: charge_item.item_id,
+                    charge_type_id: charge_type.type_id,
+                    quantity: charge_item.quantity,
+                    total_volume_milli: (total_vol * 1000.0).round() as i64,
+                    module_capacity_milli: (mod_cap * 1000.0).round() as i64,
+                });
+            }
         }
     }
 }
@@ -517,7 +585,11 @@ pub fn check_legal_fixture(
         return Err(violations);
     };
     let account = snap.accounts.values().find(|a| a.user_id == user_id);
-    if account.is_none_or(|a| a.banned_until_unix.is_some()) {
+    if account.is_none_or(|a| match (a.banned_until_unix, session.now_unix) {
+        (Some(until), Some(now)) => now < until,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }) {
         violations.push(LegalFixtureViolation::MissingOrBannedAccount { user_id });
     }
 
@@ -538,6 +610,12 @@ pub fn check_legal_fixture(
             character_id: char_id,
             session_user_id: user_id,
             owner_user_id: ch.user_id,
+        });
+    }
+    if expectation.expect_omega && ch.clone_grade < 2 {
+        violations.push(LegalFixtureViolation::NonOmegaCharacter {
+            character_id: char_id,
+            clone_grade: ch.clone_grade,
         });
     }
 
@@ -607,7 +685,7 @@ mod tests {
     fn mk_type(type_id: TypeId, group_id: GroupId, category_id: CategoryId, name: &str, attrs: &[(u16, f64)]) -> InvType {
         InvType {
             type_id, group_id, category_id, name: name.to_string(),
-            mass: 1.0, volume: 1.0, capacity: 5.0, radius: 1.0, base_price: 100.0,
+            mass: 1.0, volume: if category_id == 8 { 0.01 } else { 1.0 }, capacity: 5.0, radius: 1.0, base_price: 100.0,
             published: true, portion_size: 1, market_group_id: None, race_id: None,
             faction_id: None, variation_parent_type_id: None, description_id: None,
             icon_id: None, graphic_id: None, sound_id: None, meta_group_id: None,
@@ -696,5 +774,94 @@ mod tests {
         unauth.user_id = None;
         let errs = check_legal_fixture(&snap, &sde, &unauth, &exp).unwrap_err();
         assert!(errs.iter().any(|v| matches!(v, LegalFixtureViolation::UnauthenticatedSession { .. })), "{errs:?}");
+    }
+
+    #[test]
+    fn legal_fixture_rejects_charge_capacity_skills_ownership_duplicate_slots_bans_and_alpha_omega() {
+        let (mut snap, mut sde, mut sess) = base_valid_world();
+        sess.now_unix = Some(1_000_000);
+        snap.characters.get_mut(&90_000_001).unwrap().clone_grade = 2;
+        let exp = LegalFixtureExpectation {
+            require_player_corp: true,
+            expected_corp_roles: corp_roles::ROLE_DIRECTOR,
+            expect_in_space: Some(true),
+            ship_in_space_ballpark: Some(true),
+            expect_omega: true,
+            ..Default::default()
+        };
+        assert_legal_fixture("valid-omega-with-now", &snap, &sde, &sess, &exp);
+
+        // Charge quantity <= 0
+        for bad_qty in [0_i32, -3_i32] {
+            let mut bad = snap.clone();
+            bad.items.get_mut(&500_003).unwrap().quantity = bad_qty;
+            let errs = check_legal_fixture(&bad, &sde, &sess, &exp).unwrap_err();
+            assert!(errs.iter().any(|v| matches!(v, LegalFixtureViolation::InvalidLoadedChargeQuantity { quantity, .. } if *quantity == bad_qty)), "{errs:?}");
+        }
+
+        // Charge total volume exceeds InvType.capacity (501 * 0.01 = 5.01 > 5.0)
+        let mut overcap = snap.clone();
+        overcap.items.get_mut(&500_003).unwrap().quantity = 501;
+        let errs = check_legal_fixture(&overcap, &sde, &sess, &exp).unwrap_err();
+        assert!(errs.iter().any(|v| matches!(v, LegalFixtureViolation::ChargeExceedsModuleCapacity { quantity: 501, .. })), "{errs:?}");
+
+        // Attribute fallback check when InvType.capacity == 0.0 and InvType.volume == 0.0 (attrs 38 & 161)
+        let mut attr_sde = sde.clone();
+        let mod_t = attr_sde.types.get_mut(&484).unwrap();
+        mod_t.capacity = 0.0;
+        mod_t.default_attributes.insert(38, 0.25);
+        let chg_t = attr_sde.types.get_mut(&178).unwrap();
+        chg_t.volume = 0.0;
+        chg_t.default_attributes.insert(161, 0.01);
+        let errs = check_legal_fixture(&snap, &attr_sde, &sess, &exp).unwrap_err(); // 40 * 0.01 = 0.40 > 0.25
+        assert!(errs.iter().any(|v| matches!(v, LegalFixtureViolation::ChargeExceedsModuleCapacity { module_capacity_milli: 250, .. })), "{errs:?}");
+
+        // Loaded charge prerequisite skills (attr 182 = 3302 at level 3 vs trained level 1)
+        let mut skill_sde = sde.clone();
+        skill_sde.types.get_mut(&178).unwrap().default_attributes.insert(182, 3302.0);
+        skill_sde.types.get_mut(&178).unwrap().default_attributes.insert(277, 3.0);
+        let errs = check_legal_fixture(&snap, &skill_sde, &sess, &exp).unwrap_err();
+        assert!(errs.iter().any(|v| matches!(v, LegalFixtureViolation::MissingRequiredSkill { for_item_id: 500_003, for_type_id: 178, skill_type_id: 3302, required_level: 3, actual_level: 1, .. })), "{errs:?}");
+
+        // Non-owner fitted module & non-owner loaded charge
+        for item_id in [500_002_i64, 500_003_i64] {
+            let mut wrong_owner = snap.clone();
+            wrong_owner.items.get_mut(&item_id).unwrap().owner_id = 90_000_999;
+            let errs = check_legal_fixture(&wrong_owner, &sde, &sess, &exp).unwrap_err();
+            assert!(errs.iter().any(|v| matches!(v, LegalFixtureViolation::UnownedFittedItem { item_id: id, actual_owner_id: 90_000_999, .. } if *id == item_id)), "{errs:?}");
+        }
+
+        // Duplicate fitted module sharing the same slot flag
+        let mut dup_slot = snap.clone();
+        dup_slot.items.insert(500_004, InventoryItemRecord {
+            item_id: 500_004, type_id: 484, owner_id: 90_000_001, location_id: 500_001,
+            flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default()
+        });
+        let errs = check_legal_fixture(&dup_slot, &sde, &sess, &exp).unwrap_err();
+        assert!(errs.iter().any(|v| matches!(v, LegalFixtureViolation::DuplicateSlotModule { slot_flag: 27, first_item_id: 500_002, duplicate_item_id: 500_004, .. })), "{errs:?}");
+
+        // Active account ban rejected vs expired ban timestamp accepted
+        let mut active_ban = snap.clone();
+        active_ban.accounts.get_mut("pilot").unwrap().banned_until_unix = Some(1_000_060);
+        let errs = check_legal_fixture(&active_ban, &sde, &sess, &exp).unwrap_err();
+        assert!(errs.iter().any(|v| matches!(v, LegalFixtureViolation::MissingOrBannedAccount { user_id: 10 })), "{errs:?}");
+
+        let mut expired_ban = snap.clone();
+        expired_ban.accounts.get_mut("pilot").unwrap().banned_until_unix = Some(999_999);
+        assert_legal_fixture("expired-ban-accepted", &expired_ban, &sde, &sess, &exp);
+
+        // Omega clone_grade requirement
+        let mut alpha = snap.clone();
+        alpha.characters.get_mut(&90_000_001).unwrap().clone_grade = 1;
+        let errs = check_legal_fixture(&alpha, &sde, &sess, &exp).unwrap_err();
+        assert!(errs.iter().any(|v| matches!(v, LegalFixtureViolation::NonOmegaCharacter { character_id: 90_000_001, clone_grade: 1 })), "{errs:?}");
+
+        // Capacity-less module (capacity == 0.0, no attr 38) permits qty 1 and rejects qty > 1
+        sde.types.get_mut(&484).unwrap().capacity = 0.0;
+        let mut capless_ok = snap.clone();
+        capless_ok.items.get_mut(&500_003).unwrap().quantity = 1;
+        assert_legal_fixture("capless-single-charge", &capless_ok, &sde, &sess, &exp);
+        let errs = check_legal_fixture(&snap, &sde, &sess, &exp).unwrap_err(); // qty 40 > 1
+        assert!(errs.iter().any(|v| matches!(v, LegalFixtureViolation::ChargeExceedsModuleCapacity { quantity: 40, .. })), "{errs:?}");
     }
 }
