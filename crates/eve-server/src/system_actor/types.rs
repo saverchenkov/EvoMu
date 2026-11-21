@@ -710,6 +710,8 @@ pub struct ProtectionBreakEvents {
     pub non_gate_cloak_broken: bool,
     /// `true` if an active Covert Ops cloak (`!gate && covert`) broke.
     pub covert_cloak_broken: bool,
+    /// `true` if ship-side `undock_invulnerable_remaining_ticks` cancelled.
+    pub undock_invuln_cancelled: bool,
     /// `true` if either `undock_invulnerable_remaining_ticks` or `location_change_invuln` cancelled
     /// (`OnInvulnCancelled` must emit at most once when `true`).
     pub invuln_cancelled: bool,
@@ -808,6 +810,7 @@ pub struct LocationInvulnToken {
 pub struct LocationInvulnLedger {
     pub next_seq: u64,
     pub by_char: HashMap<CharacterId, LocationInvulnToken>,
+    pub notified_seq_by_char: HashMap<CharacterId, u64>,
 }
 
 /// Actor mirror sync operation for `location_change_invuln` (`#1486`).

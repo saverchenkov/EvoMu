@@ -526,6 +526,7 @@ fn break_protection_in_actor_impl(
             }
             if cs_undock_broken || had_undock_invuln {
                 events.invuln_cancelled = true;
+                events.undock_invuln_cancelled = true;
             }
             if matches!(reason, ProtectionBreakReason::Manual | ProtectionBreakReason::TargetLock)
                 && cs.is_tethered
@@ -535,6 +536,7 @@ fn break_protection_in_actor_impl(
             }
         } else if had_undock_invuln {
             events.invuln_cancelled = true;
+            events.undock_invuln_cancelled = true;
         }
         if had_warp_exit_invuln {
             events.warp_exit_invuln_cancelled = true;

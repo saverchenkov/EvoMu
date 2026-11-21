@@ -1858,34 +1858,15 @@ async fn break_ship_protection_with_location_invuln_emits_single_invuln_cancelle
     assert_eq!(mirrored.location_change_invuln_until_unix, Some(now_unix + 60));
     let _ = ctx.drain_notifications_for_char(char_id);
 
-    let events = break_ship_protection_with_location_invuln(
-        &ctx,
-        &sys,
-        char_id,
-        ship_id,
-        crate::system_actor::ProtectionBreakReason::ModuleActivation,
-    )
-    .await;
-    assert!(events.gate_cloak_broken);
-    assert!(events.invuln_cancelled);
-    assert!(!is_location_change_invulnerable(&ctx, char_id, now_unix));
-
+    let events = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, crate::system_actor::ProtectionBreakReason::ModuleActivation).await;
+    assert!(events.gate_cloak_broken && events.invuln_cancelled && !is_location_change_invulnerable(&ctx, char_id, now_unix));
     let notes = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), 1);
     assert_eq!(notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
 
     // Second invocation emits no duplicate notifications.
-    let events_again = break_ship_protection_with_location_invuln(
-        &ctx,
-        &sys,
-        char_id,
-        ship_id,
-        crate::system_actor::ProtectionBreakReason::ModuleActivation,
-    )
-    .await;
-    assert!(!events_again.invuln_cancelled);
-    assert!(!events_again.any_cloak_broken());
-    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    let events_again = break_ship_protection_with_location_invuln(&ctx, &sys, char_id, ship_id, crate::system_actor::ProtectionBreakReason::ModuleActivation).await;
+    assert!(!events_again.invuln_cancelled && !events_again.any_cloak_broken() && ctx.drain_notifications_for_char(char_id).is_empty());
 
     // Racing `break_location_change_invulnerability` against an in-flight `BreakProtection(Some(t1))` emits `OnInvulnCancelled` once.
     let t_race = now_unix + 75;
@@ -1900,6 +1881,23 @@ async fn break_ship_protection_with_location_invuln_emits_single_invuln_cancelle
     assert!(!ev_race.invuln_cancelled && ev_race.location_invuln_already_consumed);
     assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+
+    // Reverse interleaving (`F1486-R6-01`): actor consumes `tok1` before `break_location_change_invulnerability` pops it,
+    // followed by a newer `tok2` grant that stays notify-eligible, plus `undock_invuln` preservation.
+    let mod_act = crate::system_actor::ProtectionBreakReason::ModuleActivation;
+    grant_location_change_invulnerability(&ctx, char_id, now_unix + 80);
+    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
+    let peek_rev = peek_active_location_change_invuln(&ctx, char_id);
+    let mut ev_rev = sys.break_protection(ship_id, Some(char_id), mod_act, peek_rev, now_unix).await.unwrap();
+    assert!(ev_rev.invuln_cancelled && !ev_rev.location_invuln_already_consumed && !ev_rev.undock_invuln_cancelled);
+    break_location_change_invulnerability(&ctx, char_id);
+    grant_location_change_invulnerability(&ctx, char_id, now_unix + 90);
+    finalize_committed_location_change_invuln(&ctx, char_id, peek_rev, now_unix, &mut ev_rev);
+    emit_protection_break_notifications(&ctx, char_id, ship_id, &ev_rev);
+    assert!(!ev_rev.invuln_cancelled);
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    break_location_change_invulnerability(&ctx, char_id);
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
 }
 
 #[tokio::test]
@@ -1978,6 +1976,13 @@ async fn break_ship_protection_with_location_invuln_ess_gate_entry_preserves_loc
         Some(now_unix + 60)
     );
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // Reverse interleaving (`F1486-R6-01`): ship undock_invuln remains preserved when location_change_invuln was already popped.
+    let peek_undock = peek_active_location_change_invuln(&ctx, char_id);
+    let mut ev_undock = sys.break_protection(ship_id, Some(char_id), crate::system_actor::ProtectionBreakReason::ModuleActivation, peek_undock, now_unix).await.unwrap();
+    break_location_change_invulnerability(&ctx, char_id);
+    finalize_committed_location_change_invuln(&ctx, char_id, peek_undock, now_unix, &mut ev_undock);
+    assert!(ev_undock.undock_invuln_cancelled && ev_undock.invuln_cancelled);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
