@@ -502,7 +502,7 @@ pub fn ship_configuration(
     };
     if method == "GetShipConfiguration" {
         return ctx.db.with_snapshot(|snap| {
-            let _ = require_ship_in_snap(ctx, snap, ship_id)?;
+            require_owned_ship_in_snap(ctx, snap, ship_id, char_id)?;
             let cfg = fitting_containers_ships::ship_access_config_snap(snap, ship_id);
             Ok(config_rep(&cfg))
         });
@@ -527,8 +527,21 @@ pub fn ship_configuration(
         let mut cfg = fitting_containers_ships::ship_access_config_snap(snap, ship_id);
         if let Some(entries) = dict_entries {
             for (k, v) in entries {
-                let (Some(key), Some(val)) = (k.as_str(), v.as_bool().or_else(|| v.as_i64().map(|i| i != 0))) else {
-                    continue;
+                let Some(key) = k.as_str() else {
+                    let msg = "Ship configuration keys must be strings".to_string();
+                    return Err(BridgeRpcError::with_client_error(
+                        "InvalidArgument",
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
+                    ));
+                };
+                let Some(val) = v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)) else {
+                    let msg = format!("Ship configuration value for {key} must be bool or int");
+                    return Err(BridgeRpcError::with_client_error(
+                        "InvalidArgument",
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
+                    ));
                 };
                 match key {
                     CFG_FLEET_HANGAR_FLEET => cfg.allow_fleet_hangar = val,

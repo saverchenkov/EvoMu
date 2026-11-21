@@ -5017,3 +5017,267 @@ async fn multi_add_and_auto_fit_enforce_alsc_lock_and_commit_logs_atomically() {
     });
 }
 
+
+#[test]
+fn bf_1180_list_nested_ship_bay_unlock_and_concurrent_acl_revocation_fail_closed() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        verify_nested_unit_list_in_snap, ContainerConfig, ShipAccessConfig,
+    };
+
+    let ctx = test_ctx();
+    let owner_id = 92_880_001_i64;
+    let mate_id = 92_880_002_i64;
+    let corp_id = 98_880_001_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let owner_ship = 1_880_100_001_i64;
+    let mate_ship = 1_880_100_002_i64;
+    let nest_box = 1_880_100_010_i64;
+    let nest_item = 1_880_100_020_i64;
+    let sma_item = 1_880_100_030_i64;
+
+    ensure_char(&ctx, owner_id, corp_id, Some(station_id), sys_id, owner_ship);
+    ensure_char(&ctx, mate_id, corp_id, Some(station_id), sys_id, mate_ship);
+    insert_item(&ctx, owner_ship, 587, owner_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, mate_ship, 587, mate_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, nest_box, 17_366, owner_id, owner_ship, InventoryFlag::ShipHangar, 1, true);
+    insert_item(&ctx, nest_item, 34, owner_id, nest_box, InventoryFlag::Cargo, 42, false);
+    insert_item(&ctx, sma_item, 587, owner_id, owner_ship, InventoryFlag::ShipHangar, 1, true);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
+            owner_ship,
+            &ShipAccessConfig {
+                allow_fleet_smb: false,
+                allow_corp_smb: true,
+                allow_fleet_hangar: false,
+                allow_corp_hangar: false,
+                password: Some("host-pw".into()),
+            },
+            0,
+        )
+        .unwrap();
+        set_container_config_snap(
+            snap,
+            nest_box,
+            &ContainerConfig {
+                lock_by_default: false,
+                password_per_action: false,
+                config_bitmask: 0,
+            },
+            0,
+        )
+        .unwrap();
+    });
+
+    let mate_sess = make_session(mate_id, corp_id, Some(station_id), Some(sys_id), Some(mate_ship));
+    let bound_nest = make_bound(nest_box, mate_id);
+    let mut kw_pw = HashMap::new();
+    kw_pw.insert("password".into(), PyRep::String("host-pw".into()));
+    let extract_ids = |rep: PyRep| -> Vec<i64> {
+        let PyRep::ObjectEx { list, .. } = rep else {
+            panic!("expected ObjectEx rowset, got {rep:?}");
+        };
+        list.iter().filter_map(|r| dbrow_col_i64(r, "itemID")).collect()
+    };
+
+    assert!(!ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, owner_ship, mate_id)));
+    let ids = extract_ids(
+        handle_list(&ctx, &mate_sess, Some(&bound_nest), &[], &kw_pw)
+            .expect("nested container List with valid host ship password must succeed"),
+    );
+    assert_eq!(ids, vec![nest_item]);
+    assert!(
+        ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, owner_ship, mate_id)),
+        "nested container List must persist unlock on foreign host ship"
+    );
+
+    // Concurrent ACL revocation / missing ship in snapshot must fail closed in both helpers
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
+            owner_ship,
+            &ShipAccessConfig {
+                allow_fleet_smb: false,
+                allow_corp_smb: false,
+                allow_fleet_hangar: false,
+                allow_corp_hangar: false,
+                password: None,
+            },
+            0,
+        )
+        .unwrap();
+    });
+    assert_eq!(
+        handle_list(&ctx, &mate_sess, Some(&bound_nest), &[], &kw_pw).unwrap_err().code,
+        "SMAAccessDenied"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            verify_nested_unit_list_in_snap(&ctx, snap, &mate_sess, mate_id, nest_box, Some("host-pw"))
+                .unwrap_err()
+                .code,
+            "SMAAccessDenied"
+        );
+        assert_eq!(
+            super::verify_and_collect_foreign_ship_rows(
+                &ctx, snap, &mate_sess, mate_id, owner_ship, true, false, None, Some("host-pw"),
+            )
+            .unwrap_err()
+            .code,
+            "SMAAccessDenied"
+        );
+        assert_eq!(
+            super::verify_and_collect_foreign_ship_rows(
+                &ctx, snap, &mate_sess, mate_id, 1_880_999_999, true, false, Some(&[90]), None,
+            )
+            .unwrap_err()
+            .code,
+            "SMAAccessDenied"
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1180_multi_add_and_move_enforce_foreign_corp_and_password_per_action() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        validate_container_and_bay_move, ContainerConfig,
+    };
+
+    let ctx = test_ctx();
+    let owner_id = 92_881_001_i64;
+    let stranger_id = 92_881_002_i64;
+    let corp_a = 98_881_001_i64;
+    let corp_b = 98_881_002_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let owner_ship = 1_881_100_001_i64;
+    let stranger_ship = 1_881_100_002_i64;
+    let owner_alsc = 1_881_100_010_i64;
+    let alsc_item = 1_881_100_020_i64;
+    let foreign_box = 1_881_100_030_i64;
+    let foreign_item = 1_881_100_040_i64;
+    let foreign_jetcan = 1_881_100_050_i64;
+    let jetcan_loot = 1_881_100_060_i64;
+
+    ensure_char(&ctx, owner_id, corp_a, Some(station_id), sys_id, owner_ship);
+    ensure_char(&ctx, stranger_id, corp_b, Some(station_id), sys_id, stranger_ship);
+    insert_item(&ctx, owner_ship, 587, owner_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, stranger_ship, 587, stranger_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, owner_alsc, 17_366, owner_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, alsc_item, 34, owner_id, owner_alsc, InventoryFlag::Cargo, 20, false);
+    insert_item(&ctx, foreign_box, 17_366, corp_a, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, foreign_item, 34, stranger_id, foreign_box, InventoryFlag::Cargo, 15, false);
+    insert_item(&ctx, foreign_jetcan, 23, owner_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, jetcan_loot, 34, owner_id, foreign_jetcan, InventoryFlag::Cargo, 10, false);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut c_rec = eve_db::CorporationRecord::default();
+        c_rec.corporation_id = corp_a;
+        c_rec.name = "Foreign Container Corp".into();
+        c_rec.ticker = "FCC".into();
+        c_rec.ceo_id = owner_id;
+        c_rec.members.insert(owner_id);
+        snap.corporations.insert(corp_a, c_rec);
+        snap.item_positions.insert(stranger_ship, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(foreign_jetcan, [200.0, 0.0, 0.0]);
+        set_container_password_snap(snap, owner_alsc, 1, "peract", 0).unwrap();
+        set_container_config_snap(
+            snap,
+            owner_alsc,
+            &ContainerConfig {
+                lock_by_default: false,
+                password_per_action: true,
+                config_bitmask: 0,
+            },
+            0,
+        )
+        .unwrap();
+        // Pre-seed cached unlock; password_per_action must still demand password on takes
+        set_container_unlocked_snap(snap, owner_alsc, owner_id, true, 0).unwrap();
+    });
+
+    let mut owner_sess = make_session(owner_id, corp_a, Some(station_id), Some(sys_id), Some(owner_ship));
+    let mut stranger_docked = make_session(stranger_id, corp_b, Some(station_id), Some(sys_id), Some(stranger_ship));
+    let mut stranger_space = make_session(stranger_id, corp_b, None, Some(sys_id), Some(stranger_ship));
+
+    let kw_empty = HashMap::new();
+    let mut kw_pw = HashMap::new();
+    kw_pw.insert("password".into(), PyRep::String("peract".into()));
+
+    // password_per_action rejects MultiAdd and validate_container_and_bay_move without password even when unlocked
+    let station_bound_owner = make_bound(station_id, owner_id);
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut owner_sess,
+            Some(&station_bound_owner),
+            &[
+                PyRep::List(vec![PyRep::Integer(alsc_item)]),
+                PyRep::Integer(owner_alsc),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw_empty,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ALSCPasswordNeededToOpen"
+    );
+    assert_eq!(
+        validate_container_and_bay_move(
+            &ctx, owner_id, alsc_item, station_id, InventoryFlag::Hangar as u16, &kw_empty, None,
+        )
+        .unwrap_err()
+        .code,
+        "ALSCPasswordNeededToOpen"
+    );
+    handle_multi_add(
+        &ctx,
+        &mut owner_sess,
+        Some(&station_bound_owner),
+        &[
+            PyRep::List(vec![PyRep::Integer(alsc_item)]),
+            PyRep::Integer(owner_alsc),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &kw_pw,
+    )
+    .await
+    .expect("MultiAdd with password_per_action secret succeeds");
+
+    // Foreign-corp container take rejects with CorpRoleDenied, while jetcan (type_id=23) remains lootable
+    let station_bound_stranger = make_bound(station_id, stranger_id);
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut stranger_docked,
+            Some(&station_bound_stranger),
+            &[
+                PyRep::List(vec![PyRep::Integer(foreign_item)]),
+                PyRep::Integer(foreign_box),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw_empty,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    let ship_bound_stranger = make_bound(stranger_ship, stranger_id);
+    handle_multi_add(
+        &ctx,
+        &mut stranger_space,
+        Some(&ship_bound_stranger),
+        &[
+            PyRep::List(vec![PyRep::Integer(jetcan_loot)]),
+            PyRep::Integer(foreign_jetcan),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw_empty,
+    )
+    .await
+    .expect("jetcan take by foreign corp remains allowed");
+}

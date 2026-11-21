@@ -10,10 +10,12 @@ use std::collections::HashSet;
 pub(crate) use super::fitting_containers_ships_ops::{
     append_alsc_log_snap, apply_add_move_kv_side_effects_in_snap, clear_container_unlocks_snap,
     container_alsc_logs_snap, container_config_snap, container_password_snap,
-    custom_item_flag_snap, is_container_unlocked_snap, set_alsc_item_locked_snap,
+    custom_item_flag_snap, edge_distance_in_space_snap, foreign_ship_deny_err,
+    is_container_unlocked_snap, list_with_optional_ship_unlock, set_alsc_item_locked_snap,
     set_container_config_snap, set_container_password_snap, set_container_unlocked_snap,
     set_custom_item_flag_snap, set_ship_access_config_snap, ship_access_config_snap,
-    ship_password_snap, AlscLogEntry, ContainerConfig, ShipAccessConfig,
+    ship_password_snap, verify_nested_unit_list_in_snap, AlscLogEntry, ContainerConfig,
+    ShipAccessConfig,
 };
 #[cfg(test)]
 pub(crate) use super::fitting_containers_ships_ops::{
@@ -461,11 +463,17 @@ pub(crate) fn validate_src_container_access_in_snap(
     if src_grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT
         && src_cont.owner_id != char_id
     {
-        return Err(BridgeRpcError::user_error("OwnershipViolation"));
+        return Err(BridgeRpcError::with_client_error(
+            "OwnershipViolation",
+            "Only the owner may take items from this Mobile Depot",
+            eve_proto::ClientError::CustomInfo(
+                "Only the owner may take items from this Mobile Depot".into(),
+            ),
+        ));
     }
     if matches!(src_grp, 340 | 448) || container_password_snap(snap, src_cont.item_id, 1).is_some()
     {
-        validate_container_password_in_snap(snap, src_cont.item_id, char_id, supplied_pw, false)?;
+        validate_container_password_in_snap(snap, src_cont.item_id, char_id, supplied_pw, true)?;
     }
     let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
     let cont_corp = if snap.corporations.contains_key(&src_cont.owner_id) {
@@ -478,7 +486,24 @@ pub(crate) fn validate_src_container_access_in_snap(
     } else {
         0
     };
-    if cont_corp > 0 && cont_corp == char_corp {
+    let is_auth_space_storage = (30_000_000..=39_999_999).contains(&src_cont.location_id)
+        && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.authorized_shipping_storage
+                .contains(&(src_cont.item_id, char_id))
+        });
+    if cont_corp > 0 && cont_corp != char_corp {
+        if src_cont.type_id != 23 && !is_auth_space_storage {
+            let msg = format!(
+                "Character {char_id} is not in corporation {cont_corp} owning container {}",
+                src_cont.item_id
+            );
+            return Err(BridgeRpcError::with_client_error(
+                "CorpRoleDenied",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        }
+    } else if cont_corp > 0 && cont_corp == char_corp {
         let (is_ceo, roles) = crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
             snap,
             cont_corp,
@@ -494,7 +519,15 @@ pub(crate) fn validate_src_container_access_in_snap(
         };
         let req_role = eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx.min(6)];
         if !is_ceo && (roles & (eve_db::corp_roles::ROLE_DIRECTOR | req_role)) == 0 {
-            return Err(BridgeRpcError::user_error("CorpRoleDenied"));
+            let msg = format!(
+                "Corporation container take role denied for division {}",
+                div_idx + 1
+            );
+            return Err(BridgeRpcError::with_client_error(
+                "CorpRoleDenied",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
         }
     }
     Ok(())
@@ -512,7 +545,12 @@ pub(crate) fn validate_container_password_in_snap(
             && container_config_snap(snap, container_id).password_per_action)
             || !is_container_unlocked_snap(snap, container_id, char_id);
         if !req_pw.is_empty() && need_check && supplied_pw != Some(req_pw.as_str()) {
-            return Err(BridgeRpcError::user_error("ALSCPasswordNeededToOpen"));
+            let msg = format!("Password required to access secure container {container_id}");
+            return Err(BridgeRpcError::with_client_error(
+                "ALSCPasswordNeededToOpen",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
         }
     }
     Ok(())
@@ -526,7 +564,8 @@ pub(crate) fn finalize_add_move_side_effects_in_snap(
     pending_alsc_take: Option<&(i64, AlscLogEntry)>,
     custom_flag_ids: &[i64],
     custom_flag_opt: Option<u16>,
-    moved_item_id: i64,
+    add_item_id: i64,
+    take_item_id: i64,
     moved_tid: u32,
     moved_qty: i32,
     src_loc: i64,
@@ -547,7 +586,8 @@ pub(crate) fn finalize_add_move_side_effects_in_snap(
         &ctx.sde,
         snap,
         char_id,
-        moved_item_id,
+        add_item_id,
+        take_item_id,
         moved_tid,
         moved_qty,
         src_loc,
@@ -567,11 +607,13 @@ pub(crate) fn finalize_add_move_side_effects_in_snap(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_inv_move_logs_in_snap(
     sde: &eve_sde::SdeRegistry,
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
-    item_id: i64,
+    add_item_id: i64,
+    take_item_id: i64,
     moved_tid: u32,
     moved_qty: i32,
     old_loc: i64,
@@ -580,11 +622,11 @@ pub(crate) fn record_inv_move_logs_in_snap(
     now_unix: u64,
 ) -> Result<(), BridgeRpcError> {
     record_container_add_log_in_snap(
-        sde, snap, char_id, item_id, moved_tid, moved_qty, new_loc, now_unix,
+        sde, snap, char_id, add_item_id, moved_tid, moved_qty, new_loc, now_unix,
     )?;
     if record_take && old_loc != new_loc && old_loc > 0 {
         record_container_take_log_in_snap(
-            sde, snap, char_id, item_id, moved_tid, moved_qty, old_loc, now_unix,
+            sde, snap, char_id, take_item_id, moved_tid, moved_qty, old_loc, now_unix,
         )?;
     }
     Ok(())
@@ -1227,7 +1269,10 @@ fn validate_container_and_bay_move_impl(
             let now_unix = ctx.now_unix_secs();
             ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 if let Some(req_pw) = container_password_snap(snap, src_loc, 1) {
-                    if !is_container_unlocked_snap(snap, src_loc, char_id) {
+                    let per_action = container_config_snap(snap, src_loc).password_per_action;
+                    if !req_pw.is_empty()
+                        && (per_action || !is_container_unlocked_snap(snap, src_loc, char_id))
+                    {
                         let provided = supplied_pw.unwrap_or("");
                         if provided != req_pw {
                             return Err(BridgeRpcError {

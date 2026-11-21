@@ -2066,6 +2066,101 @@ pub(crate) mod legacy_container_ship_test_shim {
     }
 }
 
+pub(crate) fn edge_distance_in_space_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+    ship_id: i64,
+    target_id: i64,
+    target_type_id: u32,
+) -> Option<f64> {
+    let sys_h = ctx.systems.get_or_spawn_if_runtime(sys_id);
+    let pos = |id: i64| {
+        sys_h
+            .as_ref()
+            .and_then(|h| h.get_ball_position_sync(id))
+            .or_else(|| snap.item_positions.get(&id).copied().map(glam::DVec3::from))
+    };
+    let (s, u) = pos(ship_id).zip(pos(target_id))?;
+    let ship_r = snap
+        .items
+        .get(&ship_id)
+        .and_then(|si| ctx.sde.types.get(&si.type_id))
+        .map(|t| t.radius)
+        .unwrap_or(0.0);
+    let target_r = ctx.sde.types.get(&target_type_id).map(|t| t.radius).unwrap_or(0.0);
+    Some((s.distance(u) - ship_r - target_r).max(0.0))
+}
+
+pub(crate) fn list_with_optional_ship_unlock<F>(
+    ctx: &ServerContext,
+    char_id: i64,
+    try_unlock: bool,
+    f: F,
+) -> Result<Vec<Vec<PyRep>>, BridgeRpcError>
+where
+    F: Fn(&eve_db::WorldStateSnapshot) -> Result<(Option<i64>, Vec<Vec<PyRep>>), BridgeRpcError>,
+{
+    if try_unlock {
+        let now_unix = ctx.now_unix_secs();
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let (unlock_ship_id, rows) = f(snap)?;
+            if let Some(sid) = unlock_ship_id {
+                set_container_unlocked_snap(snap, sid, char_id, true, now_unix)?;
+            }
+            Ok(rows)
+        })
+    } else {
+        ctx.db.with_snapshot(|snap| Ok(f(snap)?.1))
+    }
+}
+
+pub(crate) fn verify_nested_unit_list_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    bound_loc_id: i64,
+    supplied_pw_opt: Option<&str>,
+) -> Result<Option<i64>, BridgeRpcError> {
+    let Some(it) = snap.items.get(&bound_loc_id) else {
+        let msg = format!("Container {bound_loc_id} no longer exists");
+        return Err(BridgeRpcError::with_client_error(
+            "BoundObjectOwnershipViolation",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        ));
+    };
+    if it.owner_id == char_id || it.owner_id == 0 || session.has_gm_role() {
+        return Ok(None);
+    }
+    let live_host_id = crate::services::inventory_bound::check_foreign_ship_bay_ancestor_chain_in_snap(
+        ctx, snap, session, char_id, it.location_id, it.flag as u16, supplied_pw_opt, false,
+    )?;
+    if live_host_id.is_none()
+        && !crate::services::inventory_bound::find_ship_bay_ancestor_in_snap(
+            ctx, snap, it.location_id, it.flag as u16,
+        )
+        .is_some_and(|(host, _)| host.owner_id == char_id)
+    {
+        let msg = format!("Character {char_id} lacks access to container {bound_loc_id}");
+        return Err(BridgeRpcError::with_client_error(
+            "BoundObjectOwnershipViolation",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        ));
+    }
+    Ok(live_host_id)
+}
+
+pub(crate) fn foreign_ship_deny_err(deny_sma: bool, msg: String) -> BridgeRpcError {
+    if deny_sma {
+        BridgeRpcError::with_client_error("SMAAccessDenied", msg.clone(), eve_proto::ClientError::CustomInfo(msg))
+    } else {
+        BridgeRpcError::with_client_error("FleetHangarAccessDenied", msg.clone(), eve_proto::ClientError::CustomInfo(msg))
+    }
+}
+
 #[cfg(test)]
 #[path = "fitting_containers_ships_ops_cov_unit_tests.rs"]
 mod fitting_containers_ships_ops_cov_unit_tests;

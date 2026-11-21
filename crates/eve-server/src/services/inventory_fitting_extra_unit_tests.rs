@@ -3389,3 +3389,274 @@ async fn bf_1290_r3_split_stack_and_multiadd_recursive_owner_invariants() {
 }
 
 
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1180_invbroker_add_to_alsc_cargo_and_omitted_flag_enforces_rules_pw_cap() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        set_container_config_snap, set_container_password_snap, ContainerConfig,
+    };
+
+    let (mut ctx, mut session, char_id, _corp_id, station_id, _ship_id) = setup_inv_ctx();
+    let alsc_tid = 999_448u32;
+    let freight_box_tid = 999_340u32;
+    let freighter_tid = 999_513u32;
+    let ore_tid = 999_449u32;
+
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        let mut alsc = sde.types[&587].clone();
+        alsc.type_id = alsc_tid;
+        alsc.group_id = 448;
+        alsc.category_id = 2;
+        alsc.capacity = 50.0;
+        alsc.volume = 1_000.0;
+        sde.types.insert(alsc_tid, alsc);
+
+        let mut sec_box = sde.types[&587].clone();
+        sec_box.type_id = freight_box_tid;
+        sec_box.group_id = 340;
+        sec_box.category_id = 2;
+        sec_box.capacity = 100.0;
+        sec_box.volume = 100.0;
+        sde.types.insert(freight_box_tid, sec_box);
+
+        let mut freighter = sde.types[&587].clone();
+        freighter.type_id = freighter_tid;
+        freighter.group_id = 513;
+        freighter.category_id = 6;
+        freighter.capacity = 5_000.0;
+        freighter.volume = 100_000.0;
+        sde.types.insert(freighter_tid, freighter);
+
+        let mut ore = sde.types[&34].clone();
+        ore.type_id = ore_tid;
+        ore.volume = 0.01;
+        sde.types.insert(ore_tid, ore);
+    }
+
+    let alsc_id = 96_691_001i64;
+    let freighter_id = 96_691_002i64;
+    let nested_alsc_id = 96_691_003i64;
+    let nested_sec_id = 96_691_004i64;
+    let trit_over = 96_691_005i64;
+    let trit_ok_flag = 96_691_006i64;
+    let ore_ok_omit = 96_691_007i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(alsc_id, mk_item(alsc_id, alsc_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(freighter_id, mk_item(freighter_id, freighter_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(nested_alsc_id, mk_item(nested_alsc_id, alsc_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(nested_sec_id, mk_item(nested_sec_id, freight_box_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(trit_over, mk_item(trit_over, 34, char_id, station_id, InventoryFlag::Hangar, 6_000, false));
+        snap.items.insert(trit_ok_flag, mk_item(trit_ok_flag, 34, char_id, station_id, InventoryFlag::Hangar, 100, false));
+        snap.items.insert(ore_ok_omit, mk_item(ore_ok_omit, ore_tid, char_id, station_id, InventoryFlag::Hangar, 100, false));
+        set_container_password_snap(snap, alsc_id, 1, "alsc-pw", 0).unwrap();
+        set_container_config_snap(
+            snap,
+            alsc_id,
+            &ContainerConfig {
+                lock_by_default: false,
+                password_per_action: true,
+                config_bitmask: 0,
+            },
+            0,
+        )
+        .unwrap();
+    });
+
+    let alsc_bound = BoundObjectEntry {
+        bound_id: 11,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: alsc_id,
+        oid_str: "N=11:1".into(),
+        ref_id: 11,
+    };
+    let freighter_bound = BoundObjectEntry {
+        bound_id: 12,
+        object_id: freighter_id,
+        oid_str: "N=12:1".into(),
+        ref_id: 12,
+        ..alsc_bound.clone()
+    };
+    let kw_empty = HashMap::new();
+    let mut kw_pw = HashMap::new();
+    kw_pw.insert("password".into(), PyRep::String("alsc-pw".into()));
+
+    // Missing password on ALSC must reject both explicit flag=5 and omitted flag
+    for args in [
+        vec![PyRep::Integer(trit_ok_flag), PyRep::Integer(station_id), PyRep::Integer(5)],
+        vec![PyRep::Integer(ore_ok_omit), PyRep::Integer(station_id)],
+    ] {
+        assert_eq!(
+            handle(&ctx, &mut session, Some(&alsc_bound), "invbroker", "Add", &args, &kw_empty)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "ALSCPasswordNeededToOpen"
+        );
+    }
+
+    // Over-capacity stack into ALSC with flag=5 must reject
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut session,
+            Some(&alsc_bound),
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(trit_over), PyRep::Integer(station_id), PyRep::Integer(5)],
+            &kw_pw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CapacityExceeded"
+    );
+
+    // Assembled 448 & non-649 secure containers into freighter with flag=5 & omitted flag must reject
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut session,
+            Some(&freighter_bound),
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(nested_alsc_id), PyRep::Integer(station_id), PyRep::Integer(5)],
+            &kw_empty,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CapacityExceeded"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut session,
+            Some(&freighter_bound),
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(nested_sec_id), PyRep::Integer(station_id)],
+            &kw_empty,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OnlyFreightContainersAllowedInFreighters"
+    );
+
+    // Valid password + capacity succeeds for both explicit flag=5 and omitted flag
+    handle(
+        &ctx,
+        &mut session,
+        Some(&alsc_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(trit_ok_flag), PyRep::Integer(station_id), PyRep::Integer(5)],
+        &kw_pw,
+    )
+    .await
+    .unwrap()
+    .expect("Add with flag=5 and valid password must succeed");
+    handle(
+        &ctx,
+        &mut session,
+        Some(&alsc_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(ore_ok_omit), PyRep::Integer(station_id)],
+        &kw_pw,
+    )
+    .await
+    .unwrap()
+    .expect("Add with omitted flag and valid password must succeed");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&trit_ok_flag].location_id, alsc_id);
+        assert_eq!(snap.items[&trit_ok_flag].flag, InventoryFlag::Cargo);
+        assert_eq!(snap.items[&ore_ok_omit].location_id, alsc_id);
+        assert_eq!(snap.items[&ore_ok_omit].flag, InventoryFlag::Cargo);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1180_invbroker_add_merge_into_lock_by_default_alsc_locks_target() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        container_alsc_logs_snap, set_container_config_snap, ContainerConfig,
+    };
+
+    let (mut ctx, mut session, char_id, _corp_id, station_id, _ship_id) = setup_inv_ctx();
+    let alsc_tid = 999_447u32;
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        let mut alsc = sde.types[&587].clone();
+        alsc.type_id = alsc_tid;
+        alsc.group_id = 448;
+        alsc.category_id = 2;
+        alsc.capacity = 500.0;
+        alsc.volume = 1_000.0;
+        sde.types.insert(alsc_tid, alsc);
+    }
+
+    let alsc_id = 96_692_001i64;
+    let target_iid = 96_692_002i64;
+    let src_iid = 96_692_003i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(alsc_id, mk_item(alsc_id, alsc_tid, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(target_iid, mk_item(target_iid, 34, char_id, alsc_id, InventoryFlag::Cargo, 10, false));
+        snap.items.insert(src_iid, mk_item(src_iid, 34, char_id, station_id, InventoryFlag::Hangar, 5, false));
+        set_container_config_snap(
+            snap,
+            alsc_id,
+            &ContainerConfig {
+                lock_by_default: true,
+                password_per_action: false,
+                config_bitmask: 0,
+            },
+            0,
+        )
+        .unwrap();
+    });
+
+    let alsc_bound = BoundObjectEntry {
+        bound_id: 21,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: alsc_id,
+        oid_str: "N=21:1".into(),
+        ref_id: 21,
+    };
+    handle(
+        &ctx,
+        &mut session,
+        Some(&alsc_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(src_iid), PyRep::Integer(station_id), PyRep::Integer(5)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect("merge Add into lock_by_default ALSC must succeed");
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.items.get(&src_iid).is_none(), "source stack must be deleted on merge");
+        assert_eq!(snap.items.get(&target_iid).map(|i| i.quantity), Some(15));
+        assert!(snap.is_item_in_alsc_lock(target_iid), "surviving merged stack must be locked");
+        assert!(!snap.is_item_in_alsc_lock(src_iid), "deleted source stack must NOT retain orphaned lock");
+        let logs = container_alsc_logs_snap(snap, alsc_id);
+        assert!(logs.iter().any(|l| l.action == "ALSCActionAdd" && l.item_id == target_iid), "ALSCActionAdd must reference surviving target_iid");
+        assert!(logs.iter().any(|l| l.action == "ALSCActionLock" && l.item_id == target_iid), "ALSCActionLock must reference surviving target_iid");
+        assert!(!logs.iter().any(|l| l.item_id == src_iid), "ALSC logs must not reference deleted src_iid");
+    });
+}
