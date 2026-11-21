@@ -2601,115 +2601,8 @@ fn clear_safe_logoff_teardown_grace(
 ) {
     if let Some(prev) = grace.take() {
         if prev.temp_bindings_created {
-            if let Ok(mut bound) = ctx.bound_objects.write() {
-                bound.retain(|_, e| {
-                    !(e.session_id == session_id
-                        && e.character_id == prev.char_id
-                        && e.service == "skillMgr2")
-                });
-            }
+            ctx.clear_safe_logoff_temp_bindings(session_id, prev.char_id);
         }
-    }
-}
-
-fn is_personal_cash_balance_args(
-    call_args: &[PyRep],
-    call_kwargs: &HashMap<String, PyRep>,
-) -> bool {
-    let parse_corp_flag = |rep: &PyRep| -> bool {
-        match rep {
-            PyRep::Bool(b) => *b,
-            PyRep::Integer(n) => *n != 0,
-            PyRep::Real(r) => *r != 0.0,
-            PyRep::String(s) | PyRep::Token(s) => s.starts_with("cash"),
-            PyRep::Tuple(items) | PyRep::List(items) => items.first().is_some_and(|v| {
-                v.as_bool() == Some(true)
-                    || v.as_i64().unwrap_or(0) != 0
-                    || v.as_str().is_some_and(|s| s.starts_with("cash"))
-            }),
-            _ => false,
-        }
-    };
-    let is_corp = call_args
-        .first()
-        .map(&parse_corp_flag)
-        .or_else(|| call_kwargs.get("isCorpWallet").map(&parse_corp_flag))
-        .or_else(|| {
-            (call_args.is_empty()
-                && call_kwargs
-                    .get("accountKey")
-                    .and_then(|v| v.as_i64())
-                    .is_some_and(|k| (1000..=1006).contains(&k)))
-            .then_some(true)
-        })
-        .unwrap_or(false);
-    !is_corp
-}
-
-#[allow(clippy::too_many_arguments)]
-fn is_safe_logoff_teardown_readonly_rpc(
-    ctx: &ServerContext,
-    session: &SessionState,
-    grace_char_id: i64,
-    service: &str,
-    bound_id: Option<u64>,
-    method: &str,
-    call_args: &[PyRep],
-    call_kwargs: &HashMap<String, PyRep>,
-) -> Option<bool> {
-    if let Some(bid) = bound_id {
-        let is_grace_skill_mgr = ctx.bound_objects.read().ok().is_some_and(|m| {
-            m.get(&bid).is_some_and(|e| {
-                e.session_id == session.session_id
-                    && Some(e.user_id) == session.user_id
-                    && e.character_id == grace_char_id
-                    && e.service == "skillMgr2"
-            })
-        });
-        if is_grace_skill_mgr
-            && matches!(
-                method,
-                "GetSkills"
-                    | "GetSkillQueue"
-                    | "GetSkillQueueAndFreePoints"
-                    | "GetEndOfTraining"
-                    | "GetAttributes"
-                    | "GetFreeSkillPoints"
-                    | "GetImplants"
-                    | "GetBoosters"
-                    | "GetSkillHistory"
-                    | "GetRespecInfo"
-                    | "GetCharacterAttributeModifiers"
-                    | "GetSkillRequirements"
-            )
-        {
-            return Some(false);
-        }
-        return None;
-    }
-    match (service, method) {
-        ("skillMgr2", "GetMySkillHandler") => Some(true),
-        (
-            "skillMgr2",
-            "GetSkills"
-            | "GetSkillQueue"
-            | "GetSkillQueueAndFreePoints"
-            | "GetEndOfTraining"
-            | "GetAttributes"
-            | "GetFreeSkillPoints"
-            | "GetImplants"
-            | "GetBoosters"
-            | "GetSkillHistory"
-            | "GetRespecInfo"
-            | "GetCharacterAttributeModifiers"
-            | "GetSkillRequirements",
-        ) => Some(false),
-        ("account", "GetCashBalance") if is_personal_cash_balance_args(call_args, call_kwargs) => {
-            Some(false)
-        }
-        ("accessGroupBookmarkMgr", "GetMyActiveBookmarks")
-        | ("bookmark", "GetMyActiveBookmarks" | "GetBookmarks") => Some(false),
-        _ => None,
     }
 }
 
@@ -2753,8 +2646,7 @@ fn resolve_safe_logoff_teardown_grace(
         clear_safe_logoff_teardown_grace(ctx, session.session_id, grace);
         return None;
     }
-    let creates_temp_binding = is_safe_logoff_teardown_readonly_rpc(
-        ctx,
+    let creates_temp_binding = ctx.evaluate_safe_logoff_teardown_late_call(
         session,
         g.char_id,
         service,
