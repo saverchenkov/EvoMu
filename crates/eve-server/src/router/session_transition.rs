@@ -17,6 +17,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SdeRegistry;
 use glam::DVec3;
 
+use super::binding::AtomicSceneTransitionRecord;
 use super::notify_registry::{push_typed_session_notification, OnSessionChanged, OnTradeCancel};
 use super::{NotificationTarget, ServerContext};
 
@@ -73,6 +74,22 @@ pub enum TransitionKind {
 }
 
 impl TransitionKind {
+    /// Canonical variant label for scene-epoch transition tracking (`#1190`).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Dock { .. } => "Dock",
+            Self::Undock { .. } => "Undock",
+            Self::JumpSystem { .. } => "JumpSystem",
+            Self::BoardShip { .. } => "BoardShip",
+            Self::EjectToPod { .. } => "EjectToPod",
+            Self::CloneJump { .. } => "CloneJump",
+            Self::DeathRespawn { .. } => "DeathRespawn",
+            Self::Teleport { .. } => "Teleport",
+            Self::CharacterLogin { .. } => "CharacterLogin",
+            Self::Logout => "Logout",
+        }
+    }
+
     pub fn destination_location(self) -> TransitionLocation {
         match self {
             Self::Dock {
@@ -422,6 +439,7 @@ pub struct SessionTransitionResult {
     pub diff: HashMap<String, (PyRep, PyRep)>,
     pub removed_departing_ball: Option<Ball>,
     pub arrival_tick: Option<u64>,
+    pub scene_epoch: u64,
 }
 
 fn db_err_to_rpc(err: DbError) -> BridgeRpcError {
@@ -1146,6 +1164,84 @@ fn apply_spec_destination_to_character_copy(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn finalize_transition_session_and_epoch(
+    ctx: &ServerContext,
+    mut session: Option<&mut SessionState>,
+    prev_session: &SessionState,
+    updated_ch: Option<&CharacterRecord>,
+    spec: &SessionTransitionSpec,
+    fallback_old_sys: u32,
+    fallback_old_dock: Option<i64>,
+) -> (HashMap<String, (PyRep, PyRep)>, u64) {
+    let override_ship = (spec.preserve_session_ship && prev_session.ship_id.is_some())
+        .then_some(prev_session.ship_id);
+    let next_snapshot = if let Some(sess) = session.as_deref_mut() {
+        match updated_ch {
+            Some(ch) => apply_session_from_character(sess, ch, override_ship, Some(&ctx.sde)),
+            None => clear_session_character_state(sess),
+        }
+        sess.clone()
+    } else {
+        let mut synth = prev_session.clone();
+        match updated_ch {
+            Some(ch) => apply_session_from_character(&mut synth, ch, override_ship, Some(&ctx.sde)),
+            None => clear_session_character_state(&mut synth),
+        }
+        synth
+    };
+    let (target_sid, target_uid) = if session.is_some() {
+        (next_snapshot.session_id, next_snapshot.user_id)
+    } else {
+        ctx.online_session_id_and_user_for_char(spec.char_id)
+            .map(|(sid, uid)| (sid, Some(uid)))
+            .unwrap_or_else(|| (0, next_snapshot.user_id.or(prev_session.user_id)))
+    };
+    let removed = if spec.invalidate_bounds {
+        let eff_sys = next_snapshot.solar_system_id.or(prev_session.solar_system_id).unwrap_or(0);
+        let active_dock = next_snapshot.station_id.or(next_snapshot.structure_id);
+        ctx.collect_invalidated_bound_objects_for_session_transition(spec.char_id, eff_sys, active_dock, spec.reason)
+    } else {
+        Vec::new()
+    };
+    let is_logout = matches!(spec.kind, TransitionKind::Logout) || spec.reason == "logout";
+    let is_login = matches!(spec.kind, TransitionKind::CharacterLogin { .. }) || spec.reason == "login";
+    let can_record_departed = !is_logout && !is_login && target_sid != 0
+        && target_uid.is_some_and(|uid| ctx.has_matching_online_session_ids(target_sid, uid, spec.char_id));
+    let scene_epoch = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: target_sid,
+        user_id: target_uid,
+        char_id: spec.char_id,
+        kind_label: spec.kind.label(),
+        reason: spec.reason,
+        is_logout,
+        is_login,
+        prev_sys: prev_session.solar_system_id.or((fallback_old_sys != 0).then_some(fallback_old_sys)),
+        prev_dock: prev_session.station_id.or(prev_session.structure_id).or(fallback_old_dock),
+        next_sys: next_snapshot.solar_system_id,
+        next_dock: next_snapshot.station_id.or(next_snapshot.structure_id),
+        can_record_departed,
+        removed_bindings: removed.clone(),
+    });
+    for entry in &removed {
+        ctx.emit_macho_object_disconnect(entry);
+    }
+    if spec.sync_quasar_gateway {
+        ctx.quasar_gateway.on_session_changed(&next_snapshot, ctx.now_unix());
+    }
+    let diff = prev_session.compute_diff(&next_snapshot);
+    if spec.emit_on_session_changed && !diff.is_empty() {
+        if let Some(sess) = session {
+            if let Some(cid) = sess.character_id.or_else(|| updated_ch.map(|c| c.character_id)) {
+                emit_on_session_changed(ctx, Some(sess), &next_snapshot, cid, &diff);
+            }
+        } else {
+            emit_on_session_changed(ctx, None, &next_snapshot, spec.char_id, &diff);
+        }
+    }
+    (diff, scene_epoch)
+}
+
 impl ServerContext {
     /// Executes the atomic `SessionTransition` pipeline synchronously (for sync RPC handlers,
     /// combat ticks, login/logout, and unit tests without async runtime overhead).
@@ -1248,59 +1344,22 @@ impl ServerContext {
             }
         }
 
-        let override_ship = if spec.preserve_session_ship && prev_session.ship_id.is_some() {
-            Some(prev_session.ship_id)
-        } else {
-            None
-        };
-        let diff = if let Some(sess) = session.as_deref_mut() {
-            sync_session_from_character_with_override(
-                self,
-                sess,
-                Some(&prev_session),
-                updated_ch.as_ref(),
-                override_ship,
-                spec.reason,
-                spec.invalidate_bounds,
-                spec.sync_quasar_gateway,
-                spec.emit_on_session_changed,
-            )
-        } else {
-            let mut next_synth = prev_session.clone();
-            if let Some(ref ch) = updated_ch {
-                apply_session_from_character(&mut next_synth, ch, override_ship, Some(&self.sde));
-            } else {
-                clear_session_character_state(&mut next_synth);
-            }
-            if spec.invalidate_bounds {
-                let eff_sys = next_synth
-                    .solar_system_id
-                    .or(prev_session.solar_system_id)
-                    .unwrap_or(0);
-                let active_dock = next_synth.station_id.or(next_synth.structure_id);
-                self.invalidate_bound_objects_for_session_transition(
-                    spec.char_id,
-                    eff_sys,
-                    active_dock,
-                    spec.reason,
-                );
-            }
-            if spec.sync_quasar_gateway {
-                self.quasar_gateway
-                    .on_session_changed(&next_synth, self.now_unix());
-            }
-            let diff = prev_session.compute_diff(&next_synth);
-            if spec.emit_on_session_changed && !diff.is_empty() {
-                emit_on_session_changed(self, None, &next_synth, spec.char_id, &diff);
-            }
-            diff
-        };
+        let (diff, scene_epoch) = finalize_transition_session_and_epoch(
+            self,
+            session.as_deref_mut(),
+            &prev_session,
+            updated_ch.as_ref(),
+            &spec,
+            old_sys,
+            old_dock,
+        );
 
         Ok(SessionTransitionResult {
             updated_character: updated_ch,
             diff,
             removed_departing_ball: None,
             arrival_tick: None,
+            scene_epoch,
         })
     }
 
@@ -1475,59 +1534,22 @@ impl ServerContext {
             }
         }
 
-        let override_ship = if spec.preserve_session_ship && prev_session.ship_id.is_some() {
-            Some(prev_session.ship_id)
-        } else {
-            None
-        };
-        let diff = if let Some(sess) = session.as_deref_mut() {
-            sync_session_from_character_with_override(
-                self,
-                sess,
-                Some(&prev_session),
-                updated_ch.as_ref(),
-                override_ship,
-                spec.reason,
-                spec.invalidate_bounds,
-                spec.sync_quasar_gateway,
-                spec.emit_on_session_changed,
-            )
-        } else {
-            let mut next_synth = prev_session.clone();
-            if let Some(ref ch) = updated_ch {
-                apply_session_from_character(&mut next_synth, ch, override_ship, Some(&self.sde));
-            } else {
-                clear_session_character_state(&mut next_synth);
-            }
-            if spec.invalidate_bounds {
-                let eff_sys = next_synth
-                    .solar_system_id
-                    .or(prev_session.solar_system_id)
-                    .unwrap_or(0);
-                let active_dock = next_synth.station_id.or(next_synth.structure_id);
-                self.invalidate_bound_objects_for_session_transition(
-                    spec.char_id,
-                    eff_sys,
-                    active_dock,
-                    spec.reason,
-                );
-            }
-            if spec.sync_quasar_gateway {
-                self.quasar_gateway
-                    .on_session_changed(&next_synth, self.now_unix());
-            }
-            let diff = prev_session.compute_diff(&next_synth);
-            if spec.emit_on_session_changed && !diff.is_empty() {
-                emit_on_session_changed(self, None, &next_synth, spec.char_id, &diff);
-            }
-            diff
-        };
+        let (diff, scene_epoch) = finalize_transition_session_and_epoch(
+            self,
+            session.as_deref_mut(),
+            &prev_session,
+            updated_ch.as_ref(),
+            &spec,
+            old_sys,
+            old_dock,
+        );
 
         Ok(SessionTransitionResult {
             updated_character: updated_ch,
             diff,
             removed_departing_ball: removed_ball,
             arrival_tick,
+            scene_epoch,
         })
     }
 }
