@@ -606,14 +606,13 @@ async fn goto_bookmark_acl_corp_errors_and_warp_state() {
             .code,
         "AccessDenied"
     );
-    assert_eq!(
-        handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(66_003)], &kw)
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
-        "InvalidTarget"
-    );
+    let wrong_sys_err = handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(66_003)], &kw)
+        .await.unwrap().unwrap_err();
+    assert_eq!(wrong_sys_err.code, "InvalidTarget");
+    assert_eq!(wrong_sys_err.to_client_error("beyonce", "CmdGotoBookmark").as_user_error().map(|(k, _)| k), Some(eve_proto::UserErrorKey::WarpDestinationGone));
+    assert_eq!(wrong_sys_err.rejection_facts(), Some(&eve_proto::RejectionFacts::InvalidTarget {
+        target_id: Some(66_003), module_id: None, reason: "bookmark_wrong_solar_system".into(),
+    }));
     // Missing ship ball -> ShipNotInSpace
     assert_eq!(
         handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(66_002)], &kw)
@@ -634,7 +633,7 @@ async fn goto_bookmark_acl_corp_errors_and_warp_state() {
         .unwrap();
     assert!(matches!(res, PyRep::None));
 
-    // Put ship in Warp -> ShipNotInSpace
+    // Put ship in Warp -> ShipAlreadyInWarp (UserErrorKey::ShipInWarp)
     let warp_mode = MovementMode::Warp {
         origin: DVec3::ZERO,
         destination: DVec3::new(1_000_000.0, 0.0, 0.0),
@@ -644,14 +643,13 @@ async fn goto_bookmark_acl_corp_errors_and_warp_state() {
         elapsed_warp_time: 1.0,
     };
     sys_h.set_movement_mode(ship_id, warp_mode).await.unwrap();
-    assert_eq!(
-        handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(66_002)], &kw)
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
-        "ShipNotInSpace"
-    );
+    let in_warp_err = handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(66_002)], &kw)
+        .await.unwrap().unwrap_err();
+    assert_eq!(in_warp_err.code, "ShipAlreadyInWarp");
+    assert_eq!(in_warp_err.to_client_error("beyonce", "CmdGotoBookmark").as_user_error().map(|(k, _)| k), Some(eve_proto::UserErrorKey::ShipInWarp));
+    assert_eq!(in_warp_err.rejection_facts(), Some(&eve_proto::RejectionFacts::ShipInWarp {
+        ship_id: Some(ship_id), action: "CmdGotoBookmark".into(), warp_phase: Some("Cruising".into()),
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -945,18 +943,14 @@ async fn self_destruct_transfer_corp_asset_turbo_dock_unanchor_shipping_and_gett
             },
         );
     });
-    assert!(handle(
-        &ctx,
-        &mut gm_sess,
-        None,
-        "entity",
-        "OpenShippingUnitStorage",
-        &[PyRep::Integer(shipping_id)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .is_ok());
+    assert!(handle(&ctx, &mut gm_sess, None, "entity", "OpenShippingUnitStorage", &[PyRep::Integer(shipping_id)], &kw).await.unwrap().is_ok());
+    sys_h.spawn_ball(make_ball(empty_cap_siphon, 587, DVec3::new(1_000.0, 0.0, 0.0))).await.unwrap();
+    let bad_group = handle(&ctx, &mut gm_sess, None, "entity", "OpenShippingUnitStorage", &[PyRep::Integer(empty_cap_siphon)], &kw).await.unwrap().unwrap_err();
+    assert_eq!(bad_group.code, "InvalidTarget");
+    let bad_ce = bad_group.to_client_error("entity", "OpenShippingUnitStorage");
+    let (bad_key, bad_args) = bad_ce.as_user_error().unwrap();
+    assert_eq!(bad_key, eve_proto::UserErrorKey::InvalidTargetGroup);
+    assert!(bad_args.iter().any(|(k, v)| k == "groupName" && v.as_str() == Some("Frigate")));
 
     // GetCapacityOfSiphon, GetContainerExpiryDate, GetFleetLocationAndInfo, GetFleetState, GetOperationSpawnpointPosition, GetRelativity
     let siphon_full = handle(

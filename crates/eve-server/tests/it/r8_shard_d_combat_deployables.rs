@@ -393,7 +393,7 @@ async fn test_r8_511_mobile_depot_anchoring_cleanup_shield_resists_and_mmju_rest
     assert!(destroyed);
     assert!(!bp.balls.contains_key(&anch_depot_id));
     assert!(!bp.combat_states.contains_key(&anch_depot_id));
-    assert!(bp.drain_observer_events(obs_id).iter().any(|ev| matches!(ev, DestinyEvent::RemoveBall { ball_id } if *ball_id == anch_depot_id)));
+    assert!(bp.drain_observer_events(obs_id).iter().any(|ev| matches!(ev, DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[anch_depot_id])));
     assert!(ctx.db.get_item(anch_depot_id).is_none(), "destroyed anchoring depot must be removed from DB");
     assert!(!read_deployable_state(&ctx).deployables.contains_key(&anch_depot_id));
     check_mobile_deployment_restrictions(

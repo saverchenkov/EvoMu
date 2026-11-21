@@ -1137,8 +1137,8 @@ fn mutant_killers_remove_static_recompute_eps_and_true_damage_ratios() {
         rpark
             .drain_observer_events(1)
             .iter()
-            .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id: 2 })),
-        "non-grid Rigid ball must emit RemoveBall to all grid observers"
+            .any(|e| matches!(e, DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[2])),
+        "non-grid Rigid ball must emit RemoveBalls([2]) to all grid observers"
     );
 
     // Non-Rigid ball IN static_ball_ids and NOT in ball_grid_ids
@@ -1163,8 +1163,8 @@ fn mutant_killers_remove_static_recompute_eps_and_true_damage_ratios() {
         rpark
             .drain_observer_events(1)
             .iter()
-            .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id: 3 })),
-        "non-grid static_ball_ids entry must emit RemoveBall even if mode != Rigid"
+            .any(|e| matches!(e, DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[3])),
+        "non-grid static_ball_ids entry must emit RemoveBalls([3]) even if mode != Rigid"
     );
 
     // 2. Exact 1e-6 boundary in recompute_ball_attributes_quiet and set_ball_max_velocity_cap (`> 1e-6` vs `>= 1e-6`)
@@ -1344,10 +1344,11 @@ fn in_space_ship_handoff_queues_incremental_events_without_set_state() {
         "in-system handoff must not emit SetState (#970)"
     );
     assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, DestinyEvent::RemoveBall { .. })),
-        "in-system handoff must defer RemoveBall out of the immediate AddBalls2 batch (#1018)"
+        !events.iter().any(|e| matches!(
+            e,
+            DestinyEvent::RemoveBall { .. } | DestinyEvent::RemoveBalls { .. }
+        )),
+        "in-system handoff must defer RemoveBalls out of the immediate AddBalls2 batch (#1018)"
     );
     assert!(events.iter().any(|e| match e {
         DestinyEvent::AddBalls2 { balls } => {
@@ -1357,24 +1358,25 @@ fn in_space_ship_handoff_queues_incremental_events_without_set_state() {
         _ => false,
     }));
 
-    // Tick +1: RemoveBall(500) must remain deferred past godma.Prime/OnSessionChanged window (#1018).
+    // Tick +1: RemoveBalls([500]) must remain deferred past godma.Prime/OnSessionChanged window (#1018).
     let _ = bp.step(1.0);
     let tick1_events = bp.drain_observer_events(502);
     assert!(
-        !tick1_events
-            .iter()
-            .any(|e| matches!(e, DestinyEvent::RemoveBall { .. })),
-        "RemoveBall(500) must stay deferred on tick +1 (#1018)"
+        !tick1_events.iter().any(|e| matches!(
+            e,
+            DestinyEvent::RemoveBall { .. } | DestinyEvent::RemoveBalls { .. }
+        )),
+        "RemoveBalls([500]) must stay deferred on tick +1 (#1018)"
     );
 
-    // Tick +2: RemoveBall(500) is delivered cleanly once client ego has flipped to capsule 502.
+    // Tick +2: RemoveBalls([500]) is delivered cleanly once client ego has flipped to capsule 502.
     let _ = bp.step(1.0);
     let tick2_events = bp.drain_observer_events(502);
     assert!(
         tick2_events
             .iter()
-            .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id: 500 })),
-        "RemoveBall(500) must be delivered on tick +2 (#1018)"
+            .any(|e| matches!(e, DestinyEvent::RemoveBalls { ball_ids } if ball_ids == &[500])),
+        "RemoveBalls([500]) must be delivered on tick +2 (#1018)"
     );
     assert!(
         bp.scheduled_observer_events.is_empty(),

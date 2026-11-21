@@ -1700,3 +1700,95 @@ fn item_compare_handles_on_multiple_item_change_without_double_counting_and_writ
     );
     let _ = std::fs::remove_file(&report_path);
 }
+
+#[tokio::test]
+async fn item_compare_tracks_dispatch_tick_and_neither_scopes() {
+    use crate::router::delta_item_compare::*;
+    let report_path = std::env::temp_dir().join(format!("evomu_scope_{}_{:?}.ndjson", std::process::id(), std::thread::current().id()));
+    let _ = std::fs::remove_file(&report_path);
+    let ctx = test_ctx();
+    set_item_compare_override_for_test(&ctx, Some(true), Some(Some(report_path.clone())));
+    let (pilot_id, station_id) = (90_000_001_i64, 60_003_760_i64);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+    ctx.db.acquire_online_lock(uid, 9_305, Some(pilot_id), true, 1_700_000_500).expect("lock");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    let mk = |item_id, type_id, bp| eve_db::InventoryItemRecord {
+        item_id, type_id, owner_id: pilot_id, location_id: station_id, quantity: 1, version: 1,
+        flag: eve_db::InventoryFlag::Hangar, singleton: bp, is_blueprint_copy: bp,
+        blueprint_runs_remaining: bp.then_some(5), ..Default::default()
+    };
+    let chg = || vec![(3, PyRep::Integer(0))];
+    ctx.db.with_mut_snapshot(|s| { s.items.insert(991_500_001, mk(991_500_001, 34, false)); });
+    ctx.emit_item_change_routed(pilot_id, &mk(991_500_002, 34, false), chg());
+    with_compare_tick_scope(async {
+        let bp = mk(991_500_003, *ctx.sde.blueprints.keys().next().expect("bp"), true);
+        ctx.db.with_mut_snapshot(|s| { s.items.insert(bp.item_id, bp.clone()); });
+        ctx.notify_item_mutation(pilot_id, None, Some(&bp));
+    }).await;
+    {
+        let _g = enter_compare_tick_sync_scope(Some(&ctx.db));
+        let fx = mk(991_500_004, 34, false);
+        let row = crate::router::delta_projection::build_inv_item_dbrow(&fx, &ctx.sde, "");
+        ctx.db.tx("tick_fx", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(991_500_008, mk(991_500_008, 34, false));
+            tx.snap.items.insert(fx.item_id, fx.clone());
+            tx.effects.notify_character(pilot_id, "OnItemChange", "charid", vec![row.clone(), PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])]);
+            Ok(())
+        }).expect("tx");
+    }
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        with_compare_tick_scope(async {
+            let d1 = mk(991_500_005, 34, false);
+            ctx.db.with_mut_snapshot(|s| { s.items.insert(d1.item_id, d1.clone()); });
+            ctx.emit_item_change_routed(pilot_id, &d1, chg());
+            ctx.db.with_mut_snapshot(|s| { s.items.insert(991_500_006, mk(991_500_006, 34, false)); });
+            ctx.emit_item_change_routed(pilot_id, &mk(991_500_007, 34, false), chg());
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        }).await;
+    }).await;
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    log_item_compare_summary(&ctx);
+    let sum = flush_item_compare_summary(&ctx);
+    let s = &sum.item_change.by_scope;
+    assert_eq!(((s.dispatch.matched, s.dispatch.projected_only, s.dispatch.hand_written_only), (s.tick.matched, s.tick.projected_only, s.tick.hand_written_only), (s.neither.matched, s.neither.projected_only, s.neither.hand_written_only)), ((1, 1, 1), (1, 1, 0), (0, 1, 1)));
+    assert_eq!((sum.blueprints_updated.by_scope.tick.matched, sum.explicit_in_tx_effects_by_scope.tick), (1, 1));
+    let p: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&report_path).expect("ndjson").lines().next().expect("line")).expect("json");
+    let _ = std::fs::remove_file(&report_path);
+    let nd = &p["item_change"]["by_scope"];
+    assert_eq!((nd["dispatch"]["matched"].as_u64(), nd["tick"]["projected_only"].as_u64(), nd["neither"]["hand_written_only"].as_u64(), p["explicit_in_tx_effects_by_scope"]["tick"].as_u64()), (Some(1), Some(1), Some(1), Some(1)));
+}
+
+#[test]
+fn item_compare_attributes_guided_missile_deployable_kill_to_tick_scope() {
+    use crate::router::delta_item_compare::{enter_compare_tick_sync_scope, flush_item_compare_summary, set_item_compare_override_for_test};
+    use crate::services::mobile_deployables::TYPE_MTU_STANDARD;
+    use crate::system_actor::{step_guided_missiles_in_actor, ActiveGuidedMissile};
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+    use eve_destiny::{Ball, Ballpark, CombatState, DamageVector, MovementMode};
+    use glam::DVec3;
+
+    let ctx = test_ctx();
+    set_item_compare_override_for_test(&ctx, Some(false), Some(None));
+    let (pilot_id, sys_id, mtu_id, missile_id) = (90_000_001_i64, 30_000_142_u32, 991_600_001_i64, 9_950_000_001_i64);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+    ctx.db.acquire_online_lock(uid, 9_306, Some(pilot_id), true, 1_700_000_500).expect("lock");
+    {
+        let _disabled_tick = enter_compare_tick_sync_scope(Some(&ctx.db));
+        ctx.db.with_mut_snapshot(|s| {
+            s.items.insert(mtu_id, InventoryItemRecord { item_id: mtu_id, type_id: TYPE_MTU_STANDARD, owner_id: pilot_id, location_id: sys_id as i64, quantity: 1, version: 1, flag: InventoryFlag::None, singleton: true, ..Default::default() });
+        });
+    }
+    set_item_compare_override_for_test(&ctx, Some(true), Some(None));
+    let mut bp = Ballpark::new(sys_id);
+    bp.current_tick = 5;
+    for (id, ty, r) in [(mtu_id, TYPE_MTU_STANDARD, 100.0), (missile_id, 209, 5.0)] {
+        bp.add_ball(Ball { id, type_id: ty, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 100.0, radius: r, speed_fraction: 0.0, mode: MovementMode::Stop });
+    }
+    bp.combat_states.insert(mtu_id, CombatState { structure_hp: 1.0, max_structure_hp: 100.0, signature_radius: 100.0, ..Default::default() });
+    let mut missiles = vec![ActiveGuidedMissile { ball_id: missile_id, spawn_tick: 1, char_id: pilot_id, attacker_ship_id: 991_600_000, target_ball_id: mtu_id, module_id: 991_600_002, module_type_id: 2410, ammo_type_id: 209, max_velocity_ms: 1000.0, flight_time_s: 10.0, elapsed_sim_s: 1.0, min_visual_sim_s: 1.0, impacted: true, explosion_radius_m: 100.0, explosion_velocity_ms: 100.0, drf: 1.0, damage_vector: DamageVector::new(1000.0, 0.0, 0.0, 0.0) }];
+    let (mut rah, mut actions, mut destroyed) = (std::collections::HashMap::new(), Vec::new(), Vec::new());
+    step_guided_missiles_in_actor(&mut bp, &mut missiles, &std::collections::HashMap::new(), &mut rah, &Some(Arc::clone(&ctx.sde)), &Some(Arc::clone(&ctx.db)), &mut actions, &mut destroyed, None, 1.0);
+    assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&mtu_id)), "missile kill removes MTU from snap.items");
+    let s = &flush_item_compare_summary(&ctx).item_change.by_scope;
+    assert!(s.tick.projected_only > 0 && s.neither.projected_only == 0 && s.dispatch.projected_only == 0, "expected tick-only attribution, got {s:?}");
+}

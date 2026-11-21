@@ -868,12 +868,15 @@ async fn fx_stamps_never_backstep_under_tidi() {
             DestinyEvent::OnSpecialFX { ball_id, is_active: false, .. } if *ball_id == pilot.ship_id
         )
     });
-    let remove_idx = all_evs.iter().position(|e| {
-        matches!(
-            e,
-            DestinyEvent::RemoveBall { ball_id } if *ball_id == pilot.ship_id
-        )
+    let remove_idx = all_evs.iter().position(|e| match e {
+        DestinyEvent::RemoveBall { ball_id } => *ball_id == pilot.ship_id,
+        DestinyEvent::RemoveBalls { ball_ids } => ball_ids.contains(&pilot.ship_id),
+        _ => false,
     });
+    assert!(
+        remove_idx.is_some(),
+        "Docking must emit RemoveBalls for departing ship on grid; events={all_evs:?}"
+    );
     assert!(
         stop_fx_idx.is_some(),
         "Docking must emit propulsion OnSpecialFX stop on grid; events={all_evs:?}"

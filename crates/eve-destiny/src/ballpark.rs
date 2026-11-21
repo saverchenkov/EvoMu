@@ -773,16 +773,18 @@ impl Ballpark {
     }
 
     /// Queues an incremental same-system ship-handoff (`AddBalls2` for `added_ball_ids`
-    /// immediately on `new_ball_id`, and `RemoveBall` for `old_ball_id` deferred by 2 ticks)
-    /// without issuing `SetState` (`#970`, `#1018`).
+    /// immediately on `new_ball_id`, and `RemoveBalls([old_ball_id])` deferred by 2 ticks)
+    /// without issuing `SetState` (`#970`, `#1018`, `#1531`).
     ///
     /// Keeping `SetState` out of in-system ship swaps preserves the client ballpark's celestial
     /// `RealBall` weakrefs (otherwise V24 `Park.SetState` triggers `DoBallClear` and resets overview
-    /// celestial distances to `0 m`). Deferring `RemoveBall(old_ball_id)` past the initial
+    /// celestial distances to `0 m`). Deferring `RemoveBalls([old_ball_id])` past the initial
     /// `AddBalls2` + `SessionChangeNotification` handshake keeps `old_ball_id` alive in client
     /// `bp.balls` until `gameui._HandleSessionChangeInSpace` (which waits on `godma.Prime`)
     /// switches `bp.ego` to `new_ball_id`, preventing `egoBall=None` crashes in
-    /// `OverviewWindow._DoBallsAdded` (`#1018`).
+    /// `OverviewWindow._DoBallsAdded` (`#1018`). Also uses `RemoveBalls` rather than 1-arg
+    /// `RemoveBall` so V24 `Park` dispatches `DoBallsRemove` before deleting from `self.balls`,
+    /// avoiding `None.destructionEffectId` in `FxSequencer.RemoveActivationsForBallID` (`#1531`).
     pub fn queue_in_space_ship_handoff(
         &mut self,
         old_ball_id: BallId,
@@ -810,8 +812,8 @@ impl Ballpark {
             self.scheduled_observer_events.push((
                 self.current_tick.saturating_add(2),
                 new_ball_id,
-                DestinyEvent::RemoveBall {
-                    ball_id: old_ball_id,
+                DestinyEvent::RemoveBalls {
+                    ball_ids: vec![old_ball_id],
                 },
             ));
         }
@@ -1020,21 +1022,21 @@ impl Ballpark {
         let (removed, old_grid_id, was_static) = self.remove_ball_state_only(ball_id)?;
         self.pending_events
             .push(DestinyEvent::RemoveBall { ball_id });
+        // Emit `RemoveBalls([ball_id])` to wire observers instead of 1-arg `RemoveBall`: V24
+        // `michelle.Park.RemoveBall` deletes from `self.balls` before dispatching `DoBallRemove`,
+        // causing `None.destructionEffectId` in `FxSequencer.RemoveActivationsForBallID` whenever
+        // an active `OnSpecialFX` targets the ball (`#1531`).
+        let observer_ev = DestinyEvent::RemoveBalls {
+            ball_ids: vec![ball_id],
+        };
         if let Some(gid) = old_grid_id {
             if let Some(g) = self.grids.get_mut(&gid) {
                 g.members.remove(&ball_id);
             }
-            self.queue_event_for_grid_observers(
-                gid,
-                Some(ball_id),
-                &DestinyEvent::RemoveBall { ball_id },
-            );
+            self.queue_event_for_grid_observers(gid, Some(ball_id), &observer_ev);
             self.contract_or_delete_grid(gid);
         } else if was_static {
-            self.queue_event_for_all_grid_observers(
-                Some(ball_id),
-                &DestinyEvent::RemoveBall { ball_id },
-            );
+            self.queue_event_for_all_grid_observers(Some(ball_id), &observer_ev);
         }
         Some(removed)
     }

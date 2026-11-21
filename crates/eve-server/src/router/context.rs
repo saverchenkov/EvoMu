@@ -1971,6 +1971,7 @@ impl ServerContext {
         if secs == 0 {
             return;
         }
+        let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(Some(&self.db));
         crate::sp6_lifecycle::on_advance_secs_internal(
             self,
             prev_unix,
