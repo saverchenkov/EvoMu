@@ -10,7 +10,7 @@ use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::combat::crimewatch::credit_specialized_npc_bounty_and_sec_status;
-use eve_server::router::ServerContext;
+use eve_server::router::TestContext;
 use eve_server::services::combat_npc_encounters::flush_npc_bounty_tick;
 use eve_server::system_actor::ActiveModuleCycle;
 use glam::DVec3;
@@ -18,16 +18,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-fn new_perf_ctx() -> ServerContext {
+fn new_perf_ctx() -> TestContext {
     let sde = Arc::new(
         eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("sde"),
     );
     let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let ctx = TestContext::with_sde_and_repository(sde, db).with_rpc_rate_budget_disabled();
     common::pin_clock(&ctx);
     // Bypass per-session RPC token buckets so multi-thousand-call latency benchmarks
     // neither trip `RateLimited` nor pay `rpc_rate_buckets` mutex overhead.
-    ctx.disable_rpc_rate_budget_for_test();
     ctx
 }
 

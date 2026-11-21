@@ -368,8 +368,8 @@ async fn test_p0_1176_bp_37030_multirun_overflow_rejected_and_unlocked() {
 
 #[tokio::test]
 async fn test_p0_1176_sde_blueprints_property_sweep_no_u64_wrap_or_skip() {
-    let ctx = fast_full_market_ctx();
-    ctx.disable_rpc_rate_budget_for_test();
+    let ctx = eve_server::router::TestContext::from_server(fast_full_market_ctx())
+        .with_rpc_rate_budget_disabled();
     fund_pilots(&ctx, &[(PILOT_1, 500_000_000_000.0)]).await;
     let mut s1 = login(&ctx, 9202, "demo", PILOT_1).await;
     train_skills(

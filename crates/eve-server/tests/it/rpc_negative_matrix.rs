@@ -2511,8 +2511,11 @@ async fn bind_service_for_session(
 
 async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
     let db = Arc::new(WorldRepository::with_demo_seed());
-    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
-    ctx.disable_rpc_rate_budget_for_test();
+    let ctx = Arc::new(
+        eve_server::router::TestContext::with_sde_and_repository(sde, db)
+            .with_rpc_rate_budget_disabled()
+            .into_server(),
+    );
     common::pin_clock(&ctx);
     let bug_dir = TempDirGuard::new("evomu_neg_matrix_bugs");
     ctx.bug_reporting
