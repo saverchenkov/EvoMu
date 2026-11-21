@@ -5,37 +5,20 @@
 
 use super::*;
 // structureAssetSafety is implemented once, in `station_structure::structure_upwell_ops`.
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-const CONTAINER_SHIP_NOTE_ID: i64 = -8_400_000_000_000;
-const CONTAINER_SHIP_NOTE_OWNER_ID: i64 = -84;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AlscLogEntry {
-    pub timestamp_unix: u64, pub actor_id: i64, pub action: String,
-    pub item_id: i64, pub item_type_id: u32, pub quantity: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ShipAccessConfig {
-    pub allow_fleet_smb: bool, pub allow_corp_smb: bool,
-    pub allow_fleet_hangar: bool, pub allow_corp_hangar: bool,
-    pub password: Option<String>,
-}
-
-impl Default for ShipAccessConfig {
-    fn default() -> Self {
-        Self { allow_fleet_smb: true, allow_corp_smb: true, allow_fleet_hangar: true, allow_corp_hangar: true, password: None }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct ContainerConfig {
-    pub lock_by_default: bool,
-    pub password_per_action: bool,
-    pub config_bitmask: u32,
-}
+pub(crate) use super::fitting_containers_ships_ops::{
+    append_alsc_log_snap, apply_add_move_kv_side_effects_in_snap, clear_container_unlocks_snap,
+    container_alsc_logs_snap, container_config_snap, container_password_snap,
+    custom_item_flag_snap, is_container_unlocked_snap, set_alsc_item_locked_snap,
+    set_container_config_snap, set_container_password_snap, set_container_unlocked_snap,
+    set_custom_item_flag_snap, set_ship_access_config_snap, ship_access_config_snap,
+    ship_password_snap, AlscLogEntry, ShipAccessConfig,
+};
+#[cfg(test)]
+pub(crate) use super::fitting_containers_ships_ops::{
+    legacy_container_ship_test_shim::*, ContainerConfig, MAX_ALSC_LOGS_PER_CONTAINER,
+};
 
 /// Resolves a fallback ship `type_id` (from the character's most recent killmail or `670` Capsule)
 /// when an authenticated session queries `invbroker.GetInventoryFromId` / `GetSelfInvItem` for a
@@ -66,83 +49,6 @@ pub(crate) fn resolve_missing_dynamic_ship_stub_type_id(
             .max_by_key(|km| (km.killed_unix, km.kill_id))
             .map(|km| km.ship_type_id)
             .or(Some(670))
-    })
-}
-
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub(crate) struct ContainerShipRuntimeState {
-    pub container_passwords: HashMap<i64, String>,
-    #[serde(default)]
-    pub container_config_passwords: HashMap<i64, String>,
-    pub unlocked_containers: HashSet<(i64, i64)>,
-    pub alsc_locked_items: HashSet<i64>,
-    pub alsc_logs: HashMap<i64, Vec<AlscLogEntry>>,
-    pub ship_configs: HashMap<i64, ShipAccessConfig>,
-    pub custom_item_flags: HashMap<i64, u16>,
-    #[serde(default)]
-    pub ship_passwords: HashMap<i64, String>,
-    #[serde(default)]
-    pub container_configs: HashMap<i64, ContainerConfig>,
-}
-
-impl ContainerShipRuntimeState {
-    pub fn get_container_password(&self, cid: i64, which: i64) -> Option<&str> {
-        (if which == 2 { &self.container_config_passwords } else { &self.container_passwords }).get(&cid).map(String::as_str)
-    }
-    pub fn set_container_password(&mut self, cid: i64, which: i64, pw: String) {
-        let map = if which == 2 { &mut self.container_config_passwords } else { &mut self.container_passwords };
-        if pw.is_empty() { map.remove(&cid); } else { map.insert(cid, pw); }
-    }
-}
-
-pub(crate) fn read_container_ship_state_snap(snap: &eve_db::WorldStateSnapshot) -> ContainerShipRuntimeState {
-    snap.owner_notes.get(&CONTAINER_SHIP_NOTE_ID).and_then(|n| serde_json::from_str::<ContainerShipRuntimeState>(&n.note).ok()).unwrap_or_default()
-}
-
-pub(crate) fn read_container_ship_state(ctx: &ServerContext) -> ContainerShipRuntimeState {
-    ctx.db.with_snapshot(read_container_ship_state_snap)
-}
-
-pub(crate) fn write_container_ship_state_snap<R>(snap: &mut eve_db::WorldStateSnapshot, f: impl FnOnce(&mut ContainerShipRuntimeState) -> R) -> R {
-    let mut state = read_container_ship_state_snap(snap);
-    let out = f(&mut state);
-    if let Ok(json) = serde_json::to_string(&state) {
-        let ts = snap.owner_notes.get(&CONTAINER_SHIP_NOTE_ID).map(|n| n.timestamp_unix).unwrap_or(0);
-        snap.owner_notes.insert(CONTAINER_SHIP_NOTE_ID, eve_db::OwnerNoteRecord {
-            note_id: CONTAINER_SHIP_NOTE_ID, character_id: CONTAINER_SHIP_NOTE_OWNER_ID, item_id: 0,
-            label: "S:CONTAINER_SHIP_RUNTIME_STATE".to_string(), note: json, timestamp_unix: ts,
-        });
-    }
-    out
-}
-
-pub(crate) fn save_container_ship_state_snap(snap: &mut eve_db::WorldStateSnapshot, now_unix: u64, state: &ContainerShipRuntimeState) {
-    if let Ok(json) = serde_json::to_string(state) {
-        snap.owner_notes.insert(CONTAINER_SHIP_NOTE_ID, eve_db::OwnerNoteRecord {
-            note_id: CONTAINER_SHIP_NOTE_ID, character_id: CONTAINER_SHIP_NOTE_OWNER_ID, item_id: 0,
-            label: "S:CONTAINER_SHIP_RUNTIME_STATE".to_string(), note: json, timestamp_unix: now_unix,
-        });
-    }
-}
-
-pub(crate) fn save_container_ship_state(ctx: &ServerContext, state: &ContainerShipRuntimeState) {
-    let now_unix = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        save_container_ship_state_snap(snap, now_unix, state);
-    });
-}
-
-pub(crate) fn write_container_ship_state<R>(
-    ctx: &ServerContext,
-    f: impl FnOnce(&mut ContainerShipRuntimeState) -> R,
-) -> R {
-    let now_unix = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        let out = write_container_ship_state_snap(snap, f);
-        if let Some(note) = snap.owner_notes.get_mut(&CONTAINER_SHIP_NOTE_ID) {
-            note.timestamp_unix = now_unix;
-        }
-        out
     })
 }
 
@@ -268,8 +174,7 @@ pub(crate) fn can_character_access_ship_bay_with_password_snap(
     if char_id == host_owner_id {
         return true;
     }
-    let st = read_container_ship_state_snap(snap);
-    let cfg = st.ship_configs.get(&host_ship_id).cloned().unwrap_or_default();
+    let cfg = ship_access_config_snap(snap, host_ship_id);
     let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
     let c2 = snap
         .characters
@@ -298,8 +203,7 @@ pub(crate) fn can_character_access_ship_bay_with_password_snap(
         .as_deref()
         .filter(|s| !s.is_empty());
     if let Some(req) = req_pw {
-        let already_unlocked = st.unlocked_containers.contains(&(char_id, host_ship_id))
-            || st.unlocked_containers.contains(&(host_ship_id, char_id));
+        let already_unlocked = is_container_unlocked_snap(snap, host_ship_id, char_id);
         if !already_unlocked && _supplied_password != Some(req) {
             return false;
         }
@@ -362,6 +266,75 @@ pub(crate) fn resolve_corp_container_log_target(
     Some((corp_id, c_item.type_id as i32, c_item.location_id, flag_str))
 }
 
+fn record_container_add_log_in_snap(
+    sde: &eve_sde::SdeRegistry,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    item_id: i64,
+    moved_tid: u32,
+    moved_qty: i32,
+    container_id: i64,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    let is_alsc = snap.items.get(&container_id).is_some_and(|i| {
+        let grp = sde.types.get(&i.type_id).map(|t| t.group_id).unwrap_or(0);
+        matches!(grp, 340 | 448)
+    });
+    if !is_alsc {
+        return Ok(());
+    }
+    if container_config_snap(snap, container_id).lock_by_default {
+        set_alsc_item_locked_snap(snap, item_id, true, now_unix)?;
+        append_alsc_log_snap(
+            snap,
+            container_id,
+            AlscLogEntry {
+                timestamp_unix: now_unix,
+                actor_id: char_id,
+                action: "ALSCActionLock".into(),
+                item_id,
+                item_type_id: moved_tid,
+                quantity: moved_qty,
+            },
+            now_unix,
+        )?;
+    }
+    append_alsc_log_snap(
+        snap,
+        container_id,
+        AlscLogEntry {
+            timestamp_unix: now_unix,
+            actor_id: char_id,
+            action: "ALSCActionAdd".into(),
+            item_id,
+            item_type_id: moved_tid,
+            quantity: moved_qty,
+        },
+        now_unix,
+    )?;
+    if let Some((corp_id, c_tid, c_loc, loc_flag)) =
+        resolve_corp_container_log_target(snap, container_id)
+    {
+        snap.corp_container_logs.entry(corp_id).or_default().push(
+            eve_db::CorpContainerLogEntry {
+                logged_at_unix: now_unix,
+                container_id,
+                container_type_id: c_tid,
+                character_id: char_id,
+                location_id: c_loc,
+                location_flag: loc_flag,
+                action: "add".into(),
+                password_type: None,
+                type_id: Some(moved_tid as i32),
+                quantity: Some(moved_qty),
+                old_config_bitmask: None,
+                new_config_bitmask: None,
+            },
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn record_container_add_log(
     ctx: &ServerContext,
     char_id: i64,
@@ -371,53 +344,73 @@ pub(crate) fn record_container_add_log(
     container_id: i64,
 ) {
     let now_unix = ctx.now_unix_secs();
-    let is_alsc = ctx.db.with_snapshot(|snap| {
-        snap.items.get(&container_id).map(|i| {
-            let grp = ctx.sde.types.get(&i.type_id).map(|t| t.group_id).unwrap_or(0);
-            matches!(grp, 340 | 448)
-        }).unwrap_or(false)
+    if let Err(err) = ctx.db.try_with_mut_snapshot(|snap| {
+        record_container_add_log_in_snap(
+            &ctx.sde,
+            snap,
+            char_id,
+            item_id,
+            moved_tid,
+            moved_qty,
+            container_id,
+            now_unix,
+        )
+    }) {
+        tracing::error!(error = %err.message, container_id, "record_container_add_log failed");
+    }
+}
+
+fn record_container_take_log_in_snap(
+    sde: &eve_sde::SdeRegistry,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    item_id: i64,
+    moved_tid: u32,
+    moved_qty: i32,
+    container_id: i64,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    let is_alsc = snap.items.get(&container_id).is_some_and(|i| {
+        let grp = sde.types.get(&i.type_id).map(|t| t.group_id).unwrap_or(0);
+        matches!(grp, 340 | 448)
     });
     if !is_alsc {
-        return;
+        return Ok(());
     }
-    write_container_ship_state(ctx, |st| {
-        if st.container_configs.get(&container_id).is_some_and(|c| c.lock_by_default) {
-            st.alsc_locked_items.insert(item_id);
-            st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
-                timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionLock".into(), item_id, item_type_id: moved_tid, quantity: moved_qty,
-            });
-        }
-        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
+    append_alsc_log_snap(
+        snap,
+        container_id,
+        AlscLogEntry {
             timestamp_unix: now_unix,
             actor_id: char_id,
-            action: "ALSCActionAdd".into(),
+            action: "ALSCActionTake".into(),
             item_id,
             item_type_id: moved_tid,
             quantity: moved_qty,
-        });
-    });
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some((corp_id, c_tid, c_loc, loc_flag)) =
-            resolve_corp_container_log_target(snap, container_id)
-        {
-            snap.corp_container_logs.entry(corp_id).or_default().push(
-                eve_db::CorpContainerLogEntry {
-                    logged_at_unix: now_unix,
-                    container_id,
-                    container_type_id: c_tid,
-                    character_id: char_id,
-                    location_id: c_loc,
-                    location_flag: loc_flag,
-                    action: "add".into(),
-                    password_type: None,
-                    type_id: Some(moved_tid as i32),
-                    quantity: Some(moved_qty),
-                    old_config_bitmask: None,
-                    new_config_bitmask: None,
-                },
-            );
-        }
-    });
+        },
+        now_unix,
+    )?;
+    if let Some((corp_id, c_tid, c_loc, loc_flag)) =
+        resolve_corp_container_log_target(snap, container_id)
+    {
+        snap.corp_container_logs.entry(corp_id).or_default().push(
+            eve_db::CorpContainerLogEntry {
+                logged_at_unix: now_unix,
+                container_id,
+                container_type_id: c_tid,
+                character_id: char_id,
+                location_id: c_loc,
+                location_flag: loc_flag,
+                action: "take".into(),
+                password_type: None,
+                type_id: Some(moved_tid as i32),
+                quantity: Some(moved_qty),
+                old_config_bitmask: None,
+                new_config_bitmask: None,
+            },
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn record_container_take_log(
@@ -429,63 +422,56 @@ pub(crate) fn record_container_take_log(
     container_id: i64,
 ) {
     let now_unix = ctx.now_unix_secs();
-    let is_alsc = ctx.db.with_snapshot(|snap| {
-        snap.items
-            .get(&container_id)
-            .map(|i| {
-                let grp = ctx.sde.types.get(&i.type_id).map(|t| t.group_id).unwrap_or(0);
-                matches!(grp, 340 | 448)
-            })
-            .unwrap_or(false)
-    });
-    if !is_alsc {
-        return;
-    }
-    write_container_ship_state(ctx, |st| {
-        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
-            timestamp_unix: now_unix,
-            actor_id: char_id,
-            action: "ALSCActionTake".into(),
+    if let Err(err) = ctx.db.try_with_mut_snapshot(|snap| {
+        record_container_take_log_in_snap(
+            &ctx.sde,
+            snap,
+            char_id,
             item_id,
-            item_type_id: moved_tid,
-            quantity: moved_qty,
-        });
-    });
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some((corp_id, c_tid, c_loc, loc_flag)) =
-            resolve_corp_container_log_target(snap, container_id)
-        {
-            snap.corp_container_logs.entry(corp_id).or_default().push(
-                eve_db::CorpContainerLogEntry {
-                    logged_at_unix: now_unix,
-                    container_id,
-                    container_type_id: c_tid,
-                    character_id: char_id,
-                    location_id: c_loc,
-                    location_flag: loc_flag,
-                    action: "take".into(),
-                    password_type: None,
-                    type_id: Some(moved_tid as i32),
-                    quantity: Some(moved_qty),
-                    old_config_bitmask: None,
-                    new_config_bitmask: None,
-                },
-            );
-        }
-    });
+            moved_tid,
+            moved_qty,
+            container_id,
+            now_unix,
+        )
+    }) {
+        tracing::error!(error = %err.message, container_id, "record_container_take_log failed");
+    }
 }
 
-pub(crate) fn record_container_rename_log(ctx: &ServerContext, char_id: i64, container_id: i64, tid: u32) {
+pub(crate) fn record_container_rename_log(
+    ctx: &ServerContext,
+    char_id: i64,
+    container_id: i64,
+    tid: u32,
+) {
     let now_unix = ctx.now_unix_secs();
-    write_container_ship_state(ctx, |st| {
-        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
-            timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionRename".into(), item_id: container_id, item_type_id: tid, quantity: 1,
-        });
-    });
+    if let Err(err) = ctx.db.try_with_mut_snapshot(|snap| {
+        append_alsc_log_snap(
+            snap,
+            container_id,
+            AlscLogEntry {
+                timestamp_unix: now_unix,
+                actor_id: char_id,
+                action: "ALSCActionRename".into(),
+                item_id: container_id,
+                item_type_id: tid,
+                quantity: 1,
+            },
+            now_unix,
+        )
+    }) {
+        tracing::error!(error = %err.message, container_id, "record_container_rename_log failed");
+    }
 }
 
-pub(crate) fn container_has_active_audit_log_snap(snap: &eve_db::WorldStateSnapshot, container_id: i64, now_unix: u64) -> bool {
-    read_container_ship_state_snap(snap).alsc_logs.get(&container_id).map_or(false, |logs| logs.iter().any(|e| now_unix.saturating_sub(e.timestamp_unix) < 21 * 86_400))
+pub(crate) fn container_has_active_audit_log_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    container_id: i64,
+    now_unix: u64,
+) -> bool {
+    container_alsc_logs_snap(snap, container_id)
+        .iter()
+        .any(|e| now_unix.saturating_sub(e.timestamp_unix) < 21 * 86_400)
 }
 
 /// Hard-refuses moves/takes/strips involving `Impounded` (72), `Locked` (63), contract/job-locked,
@@ -796,9 +782,9 @@ pub(crate) fn record_ship_bay_unlock_for_ancestors_snap(
     src_loc: i64,
     src_flag_u16: u16,
     supplied_pw: Option<&str>,
-) {
+) -> Result<(), BridgeRpcError> {
     let Some(pw) = supplied_pw else {
-        return;
+        return Ok(());
     };
     let mut ship_ids = Vec::new();
     for (start, flag0) in [(dest_loc, dest_flag_u16), (src_loc, src_flag_u16)] {
@@ -817,15 +803,15 @@ pub(crate) fn record_ship_bay_unlock_for_ancestors_snap(
         }
     }
     if ship_ids.is_empty() {
-        return;
+        return Ok(());
     }
-    write_container_ship_state_snap(snap, |st| {
-        for sid in ship_ids {
-            if st.ship_configs.get(&sid).and_then(|c| c.password.as_deref()) == Some(pw) {
-                st.unlocked_containers.insert((char_id, sid));
-            }
+    let now_unix = ctx.now_unix_secs();
+    for sid in ship_ids {
+        if ship_password_snap(snap, sid).as_deref() == Some(pw) {
+            set_container_unlocked_snap(snap, sid, char_id, true, now_unix)?;
         }
-    });
+    }
+    Ok(())
 }
 
 /// Validates container rules, ALSC locks/passwords, SMA (`flag 90`), and Fleet Hangar (`flag 155`) on item move.
@@ -911,18 +897,15 @@ fn validate_container_and_bay_move_impl(
             client_error: None,
         });
     }
-    ctx.db.with_snapshot(|snap| {
+    let alsc_locked = ctx.db.with_snapshot(|snap| -> Result<bool, BridgeRpcError> {
         if let Some(moving_item) = snap.items.get(&item_id) {
             check_item_lock_impound_asset_safety_in_snap(snap, moving_item)?;
         }
         if let Some(dest_item) = snap.items.get(&new_loc) {
             check_item_lock_impound_asset_safety_in_snap(snap, dest_item)?;
         }
-        Ok(())
+        Ok(snap.is_item_in_alsc_lock(item_id))
     })?;
-    let alsc_locked = read_container_ship_state(ctx)
-        .alsc_locked_items
-        .contains(&item_id);
     if alsc_locked {
         return Err(BridgeRpcError {
             code: "ALSCItemLocked".into(),
@@ -951,9 +934,10 @@ fn validate_container_and_bay_move_impl(
         } else {
             0
         };
-        Some((src_loc, src_cont.flag as i64, src_cont.location_id, cont_corp, char_corp, src_grp, src_cont.owner_id))
+        let src_has_pw = container_password_snap(snap, src_loc, 1).is_some();
+        Some((src_loc, src_cont.flag as i64, src_cont.location_id, cont_corp, char_corp, src_grp, src_cont.owner_id, src_has_pw))
     });
-    if let Some((src_loc, src_cont_flag, src_cont_station, cont_corp, char_corp, src_grp, src_cont_owner)) = src_cont_info {
+    if let Some((src_loc, src_cont_flag, src_cont_station, cont_corp, char_corp, src_grp, src_cont_owner, src_has_pw)) = src_cont_info {
         if src_grp == crate::services::mobile_deployables::GROUP_CRAB_BEACON {
             crate::services::pve_crab_beacons::check_crab_loot_access(ctx, src_loc, char_id, false)?;
         }
@@ -962,23 +946,24 @@ fn validate_container_and_bay_move_impl(
                 return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may take items from this Mobile Depot".into(), client_error: None });
             }
         }
-        let mut st = read_container_ship_state(ctx);
-        if let Some(req_pw) = st.container_passwords.get(&src_loc).cloned() {
-            if !req_pw.is_empty()
-                && !st.unlocked_containers.contains(&(src_loc, char_id))
-                && !st.unlocked_containers.contains(&(char_id, src_loc))
-            {
-                let provided = supplied_pw.unwrap_or("");
-                if provided != req_pw {
-                    return Err(BridgeRpcError {
-                        code: "ALSCPasswordNeededToOpen".into(),
-                        message: format!("Password required to take items from secure container {src_loc}"),
-                        client_error: None,
-                    });
+        if matches!(src_grp, 340 | 448) || src_has_pw {
+            let now_unix = ctx.now_unix_secs();
+            ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                if let Some(req_pw) = container_password_snap(snap, src_loc, 1) {
+                    if !is_container_unlocked_snap(snap, src_loc, char_id) {
+                        let provided = supplied_pw.unwrap_or("");
+                        if provided != req_pw {
+                            return Err(BridgeRpcError {
+                                code: "ALSCPasswordNeededToOpen".into(),
+                                message: format!("Password required to take items from secure container {src_loc}"),
+                                client_error: None,
+                            });
+                        }
+                        set_container_unlocked_snap(snap, src_loc, char_id, true, now_unix)?;
+                    }
                 }
-                st.unlocked_containers.insert((src_loc, char_id));
-                save_container_ship_state(ctx, &st);
-            }
+                Ok(())
+            })?;
         }
         if src_grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
             crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, src_loc);
@@ -1149,25 +1134,52 @@ fn validate_container_and_bay_move_impl(
         Ok(None)
     })?;
 
-    if let Some((grp, _, _)) = snap_check {
-        let mut st = read_container_ship_state(ctx);
-        let cfg = st.container_configs.get(&new_loc).cloned().unwrap_or_default();
-        let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(new_loc, char_id));
-        if let Some(req_pw) = st.container_passwords.get(&new_loc).cloned() {
+    if snap_check.is_some() {
+        let now_unix = ctx.now_unix_secs();
+        ctx.db.try_with_mut_snapshot(|snap| -> Result<Result<(), BridgeRpcError>, BridgeRpcError> {
+            let Some(req_pw) = container_password_snap(snap, new_loc, 1) else {
+                return Ok(Ok(()));
+            };
+            let cfg = container_config_snap(snap, new_loc);
+            let need_check = cfg.password_per_action || !is_container_unlocked_snap(snap, new_loc, char_id);
             if !req_pw.is_empty() && need_check {
                 let provided = supplied_pw.unwrap_or("");
-                let now_unix = ctx.now_unix_secs();
-                let tid = ctx.db.with_snapshot(|s| s.items.get(&new_loc).map(|i| i.type_id)).unwrap_or(0);
+                let tid = snap.items.get(&new_loc).map(|i| i.type_id).unwrap_or(0);
                 if provided != req_pw {
-                    st.alsc_logs.entry(new_loc).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: new_loc, item_type_id: tid, quantity: 1 });
-                    save_container_ship_state(ctx, &st);
-                    return Err(BridgeRpcError { code: "ALSCPasswordNeededToOpen".into(), message: format!("Password required to access secure container {new_loc}"), client_error: None });
+                    append_alsc_log_snap(
+                        snap,
+                        new_loc,
+                        AlscLogEntry {
+                            timestamp_unix: now_unix,
+                            actor_id: char_id,
+                            action: "ALSCActionPasswordFailure".into(),
+                            item_id: new_loc,
+                            item_type_id: tid,
+                            quantity: 1,
+                        },
+                        now_unix,
+                    )?;
+                    return Ok(Err(BridgeRpcError { code: "ALSCPasswordNeededToOpen".into(), message: format!("Password required to access secure container {new_loc}"), client_error: None }));
                 }
-                st.alsc_logs.entry(new_loc).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: new_loc, item_type_id: tid, quantity: 1 });
-                st.unlocked_containers.insert((new_loc, char_id));
-                save_container_ship_state(ctx, &st);
+                append_alsc_log_snap(
+                    snap,
+                    new_loc,
+                    AlscLogEntry {
+                        timestamp_unix: now_unix,
+                        actor_id: char_id,
+                        action: "ALSCActionPasswordSuccess".into(),
+                        item_id: new_loc,
+                        item_type_id: tid,
+                        quantity: 1,
+                    },
+                    now_unix,
+                )?;
+                set_container_unlocked_snap(snap, new_loc, char_id, true, now_unix)?;
             }
-        }
+            Ok(Ok(()))
+        })??;
+    }
+    if let Some((grp, _, _)) = snap_check {
         if grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
             crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, new_loc);
         }
@@ -1221,10 +1233,11 @@ pub async fn validate_single_item_can_be_opened(
         crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, item_id);
     }
     crate::services::character_skill_ops::verify_in_space_container_proximity(ctx, char_id, location_id, item_id).await?;
-    let st = read_container_ship_state(ctx);
-    if st.container_passwords.get(&item_id).is_some_and(|p| !p.is_empty())
-        && !st.unlocked_containers.contains(&(item_id, char_id))
-    {
+    let pw_locked = ctx.db.with_snapshot(|snap| {
+        container_password_snap(snap, item_id, 1).is_some()
+            && !is_container_unlocked_snap(snap, item_id, char_id)
+    });
+    if pw_locked {
         return Err(BridgeRpcError {
             code: "ContainerIsLocked".into(),
             message: format!("Container {item_id} is password-locked. Enter password to unlock."),
@@ -1267,8 +1280,11 @@ fn handle_alsc_lock_unlock(
             corp_for_promote,
         );
     }
-    ctx.db.with_snapshot(|snap| {
-        let cont = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError { code: "ContainerNotFound".into(), message: format!("Container {container_id} not found"), client_error: None })?;
+    let supplied_pw = rpc.opt_str(2, "password")?.map(str::to_string);
+    let notifications = ctx.db.try_with_mut_snapshot(|snap| -> Result<Result<Vec<(i64, i64, i64)>, BridgeRpcError>, BridgeRpcError> {
+        let Some(cont) = snap.items.get(&container_id).cloned() else {
+            return Ok(Err(BridgeRpcError { code: "ContainerNotFound".into(), message: format!("Container {container_id} not found"), client_error: None }));
+        };
         let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
         let ch_loc = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id).or(Some(c.solar_system_id as i64))).unwrap_or(0);
         let ch_ship = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0);
@@ -1292,7 +1308,7 @@ fn handle_alsc_lock_unlock(
             root_flag = parent.flag;
         }
         if cont.location_id != ch_loc && cont.location_id != ch_ship && root_loc != ch_loc {
-            return Err(BridgeRpcError { code: "ColocationRequired".into(), message: format!("Must be co-located with container {container_id} to lock/unlock items"), client_error: None });
+            return Ok(Err(BridgeRpcError { code: "ColocationRequired".into(), message: format!("Must be co-located with container {container_id} to lock/unlock items"), client_error: None }));
         }
         let is_authorized = if cont.owner_id == char_id {
             true
@@ -1318,40 +1334,76 @@ fn handle_alsc_lock_unlock(
             false
         };
         if !is_authorized {
-            return Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to lock/unlock items in container {container_id}"), client_error: None });
+            return Ok(Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to lock/unlock items in container {container_id}"), client_error: None }));
         }
         for &iid in &item_ids {
-            let it = snap.items.get(&iid).ok_or_else(|| BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found"), client_error: None })?;
+            let Some(it) = snap.items.get(&iid) else {
+                return Ok(Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found"), client_error: None }));
+            };
             if it.location_id != container_id {
-                return Err(BridgeRpcError { code: "ItemNotInContainer".into(), message: format!("Item {iid} is not located inside container {container_id}"), client_error: None });
+                return Ok(Err(BridgeRpcError { code: "ItemNotInContainer".into(), message: format!("Item {iid} is not located inside container {container_id}"), client_error: None }));
             }
         }
-        Ok(())
-    })?;
-    let mut st = read_container_ship_state(ctx);
-    let req_pw = st.container_passwords.get(&container_id).cloned().unwrap_or_default();
-    if !req_pw.is_empty() {
-        let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
-        let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(container_id, char_id));
-        if need_check {
-            let provided = rpc.opt_str(2, "password")?.unwrap_or("");
-            let tid = ctx.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.type_id)).unwrap_or(0);
-            if provided != req_pw {
-                st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
-                save_container_ship_state(ctx, &st);
-                return Err(BridgeRpcError { code: if is_lock { "ALSCPasswordNeededToLock".into() } else { "ALSCPasswordNeededToUnlock".into() }, message: "Container password required".into(), client_error: None });
+
+        if let Some(req_pw) = container_password_snap(snap, container_id, 1) {
+            let cfg = container_config_snap(snap, container_id);
+            let need_check = cfg.password_per_action || !is_container_unlocked_snap(snap, container_id, char_id);
+            if need_check {
+                let provided = supplied_pw.as_deref().unwrap_or("");
+                if provided != req_pw {
+                    append_alsc_log_snap(
+                        snap,
+                        container_id,
+                        AlscLogEntry {
+                            timestamp_unix: now_unix,
+                            actor_id: char_id,
+                            action: "ALSCActionPasswordFailure".into(),
+                            item_id: container_id,
+                            item_type_id: cont.type_id,
+                            quantity: 1,
+                        },
+                        now_unix,
+                    )?;
+                    return Ok(Err(BridgeRpcError { code: if is_lock { "ALSCPasswordNeededToLock".into() } else { "ALSCPasswordNeededToUnlock".into() }, message: "Container password required".into(), client_error: None }));
+                }
+                append_alsc_log_snap(
+                    snap,
+                    container_id,
+                    AlscLogEntry {
+                        timestamp_unix: now_unix,
+                        actor_id: char_id,
+                        action: "ALSCActionPasswordSuccess".into(),
+                        item_id: container_id,
+                        item_type_id: cont.type_id,
+                        quantity: 1,
+                    },
+                    now_unix,
+                )?;
+                set_container_unlocked_snap(snap, container_id, char_id, true, now_unix)?;
             }
-            st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
-            st.unlocked_containers.insert((container_id, char_id));
         }
-    }
-    for &iid in &item_ids {
-        if is_lock { st.alsc_locked_items.insert(iid); } else { st.alsc_locked_items.remove(&iid); }
-        let (tid, qty, owner_id, loc_id) = ctx.db.with_snapshot(|s| s.items.get(&iid).map(|i| (i.type_id, i.quantity, i.owner_id, i.location_id))).unwrap_or((0, 1, char_id, container_id));
-        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
-            timestamp_unix: now_unix, actor_id: char_id, action: if is_lock { "ALSCActionLock".into() } else { "ALSCActionUnlock".into() }, item_id: iid, item_type_id: tid, quantity: qty,
-        });
-        ctx.db.with_mut_snapshot(|snap| {
+
+        let mut notifications = Vec::with_capacity(item_ids.len());
+        for &iid in &item_ids {
+            set_alsc_item_locked_snap(snap, iid, is_lock, now_unix)?;
+            let (tid, qty, owner_id, loc_id) = snap
+                .items
+                .get(&iid)
+                .map(|i| (i.type_id, i.quantity, i.owner_id, i.location_id))
+                .unwrap_or((0, 1, char_id, container_id));
+            append_alsc_log_snap(
+                snap,
+                container_id,
+                AlscLogEntry {
+                    timestamp_unix: now_unix,
+                    actor_id: char_id,
+                    action: if is_lock { "ALSCActionLock".into() } else { "ALSCActionUnlock".into() },
+                    item_id: iid,
+                    item_type_id: tid,
+                    quantity: qty,
+                },
+                now_unix,
+            )?;
             if let Some((corp_id, c_tid, c_loc, loc_flag)) = resolve_corp_container_log_target(snap, container_id) {
                 snap.corp_container_logs.entry(corp_id).or_default().push(eve_db::CorpContainerLogEntry {
                     logged_at_unix: now_unix, container_id, container_type_id: c_tid, character_id: char_id,
@@ -1359,7 +1411,11 @@ fn handle_alsc_lock_unlock(
                     password_type: None, type_id: Some(tid as i32), quantity: Some(qty), old_config_bitmask: None, new_config_bitmask: None,
                 });
             }
-        });
+            notifications.push((iid, owner_id, loc_id));
+        }
+        Ok(Ok(notifications))
+    })??;
+    for (iid, owner_id, loc_id) in notifications {
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
             crate::router::notify_registry::OnLockedItemChange {
@@ -1370,7 +1426,6 @@ fn handle_alsc_lock_unlock(
             },
         );
     }
-    save_container_ship_state(ctx, &st);
     Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("locked", PyRep::Bool(is_lock)), ("count", PyRep::Integer(item_ids.len() as i64))]))
 }
 
@@ -1445,6 +1500,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             let Some(item_id) = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "AssembleCargoContainer requires container itemID".into(), client_error: None }));
             };
+            let now_unix = ctx.now_unix_secs();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(item) = snap.items.get(&item_id).cloned() else {
                     return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Container {item_id} not found"), client_error: None });
@@ -1470,7 +1526,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 if item.flag == InventoryFlag::Locked || snap.is_item_or_ancestor_locked_or_impounded(item_id) {
                     return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by contract or job"), client_error: None });
                 }
-                if !item.singleton && item.quantity > 1 {
+                let (cid, tid, ver) = if !item.singleton && item.quantity > 1 {
                     if let Some(orig) = snap.items.get_mut(&item_id) {
                         orig.quantity -= 1;
                         orig.version += 1;
@@ -1481,31 +1537,37 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                         item_id: new_id, type_id: item.type_id, owner_id: item.owner_id, location_id: item.location_id,
                         flag: item.flag, quantity: 1, singleton: true, version: 1, ..Default::default()
                     });
-                    Ok((new_id, item.type_id, 1_u64))
+                    (new_id, item.type_id, 1_u64)
                 } else {
                     let it = snap.items.get_mut(&item_id).unwrap();
                     it.singleton = true;
                     it.version += 1;
-                    Ok((item_id, it.type_id, it.version))
+                    (item_id, it.type_id, it.version)
+                };
+                append_alsc_log_snap(
+                    snap,
+                    cid,
+                    AlscLogEntry {
+                        timestamp_unix: now_unix,
+                        actor_id: char_id,
+                        action: "ALSCActionAssemble".into(),
+                        item_id: cid,
+                        item_type_id: tid,
+                        quantity: 1,
+                    },
+                    now_unix,
+                )?;
+                if let Some((corp_id, _, loc_id, loc_flag)) = resolve_corp_container_log_target(snap, cid) {
+                    snap.corp_container_logs.entry(corp_id).or_default().push(eve_db::CorpContainerLogEntry {
+                        logged_at_unix: now_unix, container_id: cid, container_type_id: tid as i32, character_id: char_id,
+                        location_id: loc_id, location_flag: loc_flag, action: "assemble".into(), password_type: None,
+                        type_id: None, quantity: None, old_config_bitmask: None, new_config_bitmask: None,
+                    });
                 }
+                Ok((cid, tid, ver))
             });
             match res {
                 Ok((cid, tid, ver)) => {
-                    let now_unix = ctx.now_unix_secs();
-                    write_container_ship_state(ctx, |st| {
-                        st.alsc_logs.entry(cid).or_default().push(AlscLogEntry {
-                            timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionAssemble".into(), item_id: cid, item_type_id: tid, quantity: 1,
-                        });
-                    });
-                    ctx.db.with_mut_snapshot(|snap| {
-                        if let Some((corp_id, _, loc_id, loc_flag)) = resolve_corp_container_log_target(snap, cid) {
-                            snap.corp_container_logs.entry(corp_id).or_default().push(eve_db::CorpContainerLogEntry {
-                                logged_at_unix: now_unix, container_id: cid, container_type_id: tid as i32, character_id: char_id,
-                                location_id: loc_id, location_flag: loc_flag, action: "assemble".into(), password_type: None,
-                                type_id: None, quantity: None, old_config_bitmask: None, new_config_bitmask: None,
-                            });
-                        }
-                    });
                     Some(Ok(PyRep::keyval([("itemID", PyRep::Integer(cid)), ("typeID", PyRep::Integer(tid as i64)), ("singleton", PyRep::Bool(true)), ("version", PyRep::Integer(ver as i64))])))
                 }
                 Err(e) => Some(Err(e)),
@@ -1526,9 +1588,12 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             if let Err(e) = authorize_container_inspect(ctx, session, char_id, container_id, false) {
                 return Some(Err(e));
             }
-            let st = read_container_ship_state(ctx);
-            let has_pw = st.get_container_password(container_id, 1).is_some() || st.get_container_password(container_id, 2).is_some();
-            let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
+            let (has_pw, cfg) = ctx.db.with_snapshot(|snap| {
+                let has_pw = container_password_snap(snap, container_id, 1).is_some()
+                    || container_password_snap(snap, container_id, 2).is_some();
+                let cfg = container_config_snap(snap, container_id);
+                (has_pw, cfg)
+            });
             Some(Ok(PyRep::keyval([
                 ("containerID", PyRep::Integer(container_id)), ("passwordRequired", PyRep::Bool(has_pw)),
                 ("hasPassword", PyRep::Bool(has_pw)), ("lockByDefault", PyRep::Bool(cfg.lock_by_default)),
@@ -1648,50 +1713,54 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 .unwrap_or("");
             let now_unix = ctx.now_unix_secs();
             const ALSC_PAGE_LIMIT: usize = 50;
-            let raw_logs = match write_container_ship_state(ctx, |st| {
-                let cfg = st
-                    .container_configs
-                    .get(&container_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let need_check = cfg.password_per_action
-                    || !st.unlocked_containers.contains(&(container_id, char_id));
-                if let Some(req_pw) = st
-                    .container_passwords
-                    .get(&container_id)
-                    .filter(|p| !p.is_empty())
-                    .cloned()
-                {
-                    if need_check {
-                        if provided != req_pw {
-                            st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
-                                timestamp_unix: now_unix,
-                                actor_id: char_id,
-                                action: "ALSCActionPasswordFailure".into(),
-                                item_id: container_id,
-                                item_type_id: container_type_id,
-                                quantity: 1,
-                            });
-                            return Err(BridgeRpcError {
-                                code: "ALSCPasswordNeededToViewAuditLog".into(),
-                                message: "Container password required to view audit log".into(),
-                                client_error: None,
-                            });
+            let raw_logs = match ctx.db.try_with_mut_snapshot(
+                |snap| -> Result<Result<Vec<AlscLogEntry>, BridgeRpcError>, BridgeRpcError> {
+                    let cfg = container_config_snap(snap, container_id);
+                    let need_check = cfg.password_per_action
+                        || !is_container_unlocked_snap(snap, container_id, char_id);
+                    if let Some(req_pw) = container_password_snap(snap, container_id, 1) {
+                        if need_check {
+                            if provided != req_pw {
+                                append_alsc_log_snap(
+                                    snap,
+                                    container_id,
+                                    AlscLogEntry {
+                                        timestamp_unix: now_unix,
+                                        actor_id: char_id,
+                                        action: "ALSCActionPasswordFailure".into(),
+                                        item_id: container_id,
+                                        item_type_id: container_type_id,
+                                        quantity: 1,
+                                    },
+                                    now_unix,
+                                )?;
+                                return Ok(Err(BridgeRpcError {
+                                    code: "ALSCPasswordNeededToViewAuditLog".into(),
+                                    message: "Container password required to view audit log".into(),
+                                    client_error: None,
+                                }));
+                            }
+                            append_alsc_log_snap(
+                                snap,
+                                container_id,
+                                AlscLogEntry {
+                                    timestamp_unix: now_unix,
+                                    actor_id: char_id,
+                                    action: "ALSCActionPasswordSuccess".into(),
+                                    item_id: container_id,
+                                    item_type_id: container_type_id,
+                                    quantity: 1,
+                                },
+                                now_unix,
+                            )?;
+                            set_container_unlocked_snap(snap, container_id, char_id, true, now_unix)?;
                         }
-                        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
-                            timestamp_unix: now_unix,
-                            actor_id: char_id,
-                            action: "ALSCActionPasswordSuccess".into(),
-                            item_id: container_id,
-                            item_type_id: container_type_id,
-                            quantity: 1,
-                        });
-                        st.unlocked_containers.insert((container_id, char_id));
                     }
-                }
-                Ok(st.alsc_logs.get(&container_id).cloned().unwrap_or_default())
-            }) {
-                Ok(logs) => logs,
+                    Ok(Ok(container_alsc_logs_snap(snap, container_id)))
+                },
+            ) {
+                Ok(Ok(logs)) => logs,
+                Ok(Err(e)) => return Some(Err(e)),
                 Err(e) => return Some(Err(e)),
             };
             let mut filtered: Vec<(i64, i64, AlscLogEntry)> = raw_logs

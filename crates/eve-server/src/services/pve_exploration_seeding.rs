@@ -4,8 +4,8 @@
 
 use crate::router::ServerContext;
 use crate::services::pve_exploration::{
-    wormhole_class_for_system, with_pve_exploration_reg,
-    ItemId, PveSiteInstance,
+    read_pve_exploration_reg, with_pve_exploration_reg, wormhole_class_for_system, ItemId,
+    PveSiteInstance,
 };
 use eve_db::{CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
@@ -243,13 +243,43 @@ fn make_can_record(can_id: ItemId, type_id: TypeId, solar_system_id: SolarSystem
     }
 }
 
+fn system_seeding_lock(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    type SeedingLocks = Mutex<HashMap<(usize, SolarSystemId), Weak<tokio::sync::Mutex<()>>>>;
+    static LOCKS: OnceLock<SeedingLocks> = OnceLock::new();
+    let map_mutex = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (crate::services::pve_exploration::ctx_pve_key(ctx), solar_system_id);
+    let mut map = map_mutex.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(arc) = map.get(&key).and_then(Weak::upgrade) {
+        return arc;
+    }
+    if map.len() > 256 {
+        map.retain(|_, v| v.strong_count() > 0);
+    }
+    let arc = Arc::new(tokio::sync::Mutex::new(()));
+    map.insert(key, Arc::downgrade(&arc));
+    arc
+}
+
 // parity: feat:pve.combat-anomalies, feat:pve.combat-signatures, feat:pve.ded-complexes
 // parity: feat:pve.data-sites, feat:pve.relic-sites, feat:pve.ghost-sites, feat:pve.sleeper-caches, feat:pve.wormhole-sites
 pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id: SolarSystemId) {
-    let already_seeded = with_pve_exploration_reg(ctx, |reg| {
+    let already_seeded = read_pve_exploration_reg(ctx, |reg| {
         reg.seeded_systems.get(&solar_system_id).copied().unwrap_or(false)
     });
     if already_seeded {
+        return;
+    }
+    let seeding_lock = system_seeding_lock(ctx, solar_system_id);
+    let _seed_guard = seeding_lock.lock().await;
+    let already_seeded_locked = read_pve_exploration_reg(ctx, |reg| {
+        reg.seeded_systems.get(&solar_system_id).copied().unwrap_or(false)
+    });
+    if already_seeded_locked {
         return;
     }
     if crate::services::wormhole_pve_escalations::seed_special_wormhole_pve_sites(ctx, solar_system_id).await {

@@ -71,13 +71,8 @@ pub fn can_enter_forcefield_in_snap_at(
     }
     if let Some(ref pw) = settings.password {
         if !pw.is_empty() {
-            let cs = fitting_containers_ships::read_container_ship_state_snap(snap);
-            let ship_pw = cs
-                .ship_passwords
-                .get(&ship_id)
-                .map(|s| s.as_str())
-                .or_else(|| cs.ship_configs.get(&ship_id).and_then(|c| c.password.as_deref()));
-            return ship_pw == Some(pw.as_str());
+            let ship_pw = fitting_containers_ships::ship_password_snap(snap, ship_id);
+            return ship_pw.as_deref() == Some(pw.as_str());
         }
     }
     false
@@ -487,46 +482,47 @@ pub fn ship_configuration(
         return Err(err("ShipNotFound", format!("Ship {ship_id} not found")));
     };
     if method == "GetShipConfiguration" {
-        let st = fitting_containers_ships::read_container_ship_state(ctx);
-        return Ok(config_rep(&st.ship_configs.get(&ship_id).cloned().unwrap_or_default()));
+        let cfg = ctx
+            .db
+            .with_snapshot(|snap| fitting_containers_ships::ship_access_config_snap(snap, ship_id));
+        return Ok(config_rep(&cfg));
     }
     if owner != char_id || cat_id != 6 {
         return Err(err("OwnershipViolation", format!("Ship {ship_id} is not owned by character {char_id}")));
     }
-    let mut st = fitting_containers_ships::read_container_ship_state(ctx);
-    let cfg = st.ship_configs.entry(ship_id).or_default();
+    let now_unix = ctx.now_unix_secs();
     if method == "SetShipPassword" {
         let pw_opt = password_arg.and_then(|a| a.as_str()).filter(|p| !p.is_empty()).map(str::to_string);
-        cfg.password = pw_opt.clone();
-        if let Some(ref pw) = pw_opt {
-            st.ship_passwords.insert(ship_id, pw.clone());
-        } else {
-            st.ship_passwords.remove(&ship_id);
-        }
-        fitting_containers_ships::save_container_ship_state(ctx, &st);
-        return Ok(eve_proto::PyRep::None);
+        return ctx.db.try_with_mut_snapshot(|snap| -> Result<eve_proto::PyRep, BridgeRpcError> {
+            let mut cfg = fitting_containers_ships::ship_access_config_snap(snap, ship_id);
+            cfg.password = pw_opt;
+            fitting_containers_ships::set_ship_access_config_snap(snap, ship_id, &cfg, now_unix)?;
+            Ok(eve_proto::PyRep::None)
+        });
     }
     let dict_entries = args.get(1).or_else(|| args.first()).and_then(|a| match a {
         eve_proto::PyRep::Dict(entries) => Some(entries),
         _ => None,
     });
-    if let Some(entries) = dict_entries {
-        for (k, v) in entries {
-            let (Some(key), Some(val)) = (k.as_str(), v.as_bool().or_else(|| v.as_i64().map(|i| i != 0))) else {
-                continue;
-            };
-            match key {
-                CFG_FLEET_HANGAR_FLEET => cfg.allow_fleet_hangar = val,
-                CFG_FLEET_HANGAR_CORP => cfg.allow_corp_hangar = val,
-                CFG_SMB_FLEET => cfg.allow_fleet_smb = val,
-                CFG_SMB_CORP => cfg.allow_corp_smb = val,
-                other => return Err(err("InvalidArgument", format!("Unknown ship configuration key {other}"))),
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<eve_proto::PyRep, BridgeRpcError> {
+        let mut cfg = fitting_containers_ships::ship_access_config_snap(snap, ship_id);
+        if let Some(entries) = dict_entries {
+            for (k, v) in entries {
+                let (Some(key), Some(val)) = (k.as_str(), v.as_bool().or_else(|| v.as_i64().map(|i| i != 0))) else {
+                    continue;
+                };
+                match key {
+                    CFG_FLEET_HANGAR_FLEET => cfg.allow_fleet_hangar = val,
+                    CFG_FLEET_HANGAR_CORP => cfg.allow_corp_hangar = val,
+                    CFG_SMB_FLEET => cfg.allow_fleet_smb = val,
+                    CFG_SMB_CORP => cfg.allow_corp_smb = val,
+                    other => return Err(err("InvalidArgument", format!("Unknown ship configuration key {other}"))),
+                }
             }
         }
-    }
-    let rep = config_rep(cfg);
-    fitting_containers_ships::save_container_ship_state(ctx, &st);
-    Ok(rep)
+        fitting_containers_ships::set_ship_access_config_snap(snap, ship_id, &cfg, now_unix)?;
+        Ok(config_rep(&cfg))
+    })
 }
 
 #[cfg(test)]

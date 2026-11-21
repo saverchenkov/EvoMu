@@ -35,7 +35,7 @@ pub(crate) async fn board_stored_ship(
         (0, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
     };
     let dock_id = session.station_id.or(session.structure_id);
-    let custom_flag = read_container_ship_state(ctx).custom_item_flags.get(&stored_id).copied();
+    let custom_flag = ctx.db.with_snapshot(|snap| fitting_containers_ships::custom_item_flag_snap(snap, stored_id));
     let (stored, host_type, host_loc, host_owner, host_flag, entry_db_ship_id, entry_db_dock) = ctx.db.with_snapshot(|snap| {
         let stored = snap.items.get(&stored_id).cloned();
         let host = stored.as_ref().and_then(|s| snap.items.get(&s.location_id).cloned());
@@ -256,10 +256,7 @@ pub(crate) async fn board_stored_ship(
                 format!("Ship {stored_id} is no longer stored in bay host {host_id}"),
             ));
         }
-        let custom_snap = fitting_containers_ships::read_container_ship_state_snap(snap)
-            .custom_item_flags
-            .get(&stored_id)
-            .copied();
+        let custom_snap = fitting_containers_ships::custom_item_flag_snap(snap, stored_id);
         let in_bay_snap = is_ship_bay_flag(s.flag as u16)
             || custom_snap.is_some_and(is_ship_bay_flag)
             || matches!(s.flag as u16, 177 | 179)
@@ -334,12 +331,10 @@ pub(crate) async fn board_stored_ship(
         } else {
             None
         };
+        fitting_containers_ships::set_custom_item_flag_snap(snap, stored_id, None, ctx.now_unix_secs())?;
         Ok((rem, is_cap))
     })?;
     let removed_capsule_id = removed_capsule.as_ref().map(|r| r.item_id);
-    write_container_ship_state(ctx, |st| {
-        st.custom_item_flags.remove(&stored_id);
-    });
     ctx.invalidate_ship_fitting(stored_id);
     if let Some(prev) = prev_ship_id {
         crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, prev);
@@ -1227,9 +1222,9 @@ pub(crate) async fn ship_scoop_and_store(
         store_ops::cleanup_ship_leaving_space(ctx, sys_id, &sys, char_id, item_id).await;
     }
     let _ = sys.remove_ball(item_id).await;
-    write_container_ship_state(ctx, |st| {
-        st.custom_item_flags.insert(item_id, target_flag_u16);
-    });
+    ctx.db.try_with_mut_snapshot(|snap| {
+        set_custom_item_flag_snap(snap, item_id, Some(target_flag_u16), ctx.now_unix_secs())
+    })?;
     Ok(PyRep::keyval([
         ("itemID", PyRep::Integer(item_id)),
         ("hostShipID", PyRep::Integer(host_ship_id)),

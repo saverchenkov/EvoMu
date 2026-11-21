@@ -1544,12 +1544,8 @@ async fn gh_1307_1311_wire_harness_station_inv_and_remote_container_contents() {
     // Clear the session unlock recorded by SetPassword so this connection exercises full
     // password-prompt -> wrong-password -> 3-arg V24.02 password unlock over the wire.
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(note) = snap.owner_notes.get_mut(&-8_400_000_000_000) {
-            if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&note.note) {
-                val["unlocked_containers"] = serde_json::json!([]);
-                note.note = val.to_string();
-            }
-        }
+        snap.kv_mut(eve_db::Ns::ContainerUnlockedChar)
+            .clear_entity(local_jita_alsc);
     });
     assert_eq!(
         h_jita

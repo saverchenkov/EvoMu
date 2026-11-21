@@ -329,7 +329,7 @@ pub(crate) async fn handle_set_password(
     let now_unix = ctx.now_unix_secs();
     let pw_type_str = if which == 2 { "config" } else { "general" };
 
-    let tid = ctx.db.try_with_mut_snapshot(|snap| -> Result<u32, BridgeRpcError> {
+    let tid = ctx.db.try_with_mut_snapshot(|snap| -> Result<Result<u32, BridgeRpcError>, BridgeRpcError> {
         let item = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError {
             code: "ItemNotFound".into(),
             message: format!("Secure container {container_id} not found or not owned"),
@@ -409,33 +409,41 @@ pub(crate) async fn handle_set_password(
             });
         }
 
-        let mut st = fitting_containers_ships::read_container_ship_state_snap(snap);
-        if let Some(existing_pw) = st.get_container_password(container_id, which).filter(|p| !p.is_empty()) {
-            if old_password.as_deref() != Some(existing_pw) {
-                st.alsc_logs.entry(container_id).or_default().push(fitting_containers_ships::AlscLogEntry {
-                    timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: container_id, item_type_id: item_tid, quantity: 1,
-                });
-                fitting_containers_ships::save_container_ship_state_snap(snap, now_unix, &st);
-                return Err(BridgeRpcError {
+        if let Some(existing_pw) = fitting_containers_ships::container_password_snap(snap, container_id, which) {
+            if old_password.as_deref() != Some(existing_pw.as_str()) {
+                fitting_containers_ships::append_alsc_log_snap(
+                    snap,
+                    container_id,
+                    fitting_containers_ships::AlscLogEntry {
+                        timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: container_id, item_type_id: item_tid, quantity: 1,
+                    },
+                    now_unix,
+                )?;
+                return Ok(Err(BridgeRpcError {
                     code: "InvalidPassword".into(),
                     message: "Incorrect old container password".into(),
                     client_error: None,
-                });
+                }));
             }
-            st.alsc_logs.entry(container_id).or_default().push(fitting_containers_ships::AlscLogEntry {
-                timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: container_id, item_type_id: item_tid, quantity: 1,
-            });
+            fitting_containers_ships::append_alsc_log_snap(
+                snap,
+                container_id,
+                fitting_containers_ships::AlscLogEntry {
+                    timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: container_id, item_type_id: item_tid, quantity: 1,
+                },
+                now_unix,
+            )?;
         }
-        st.set_container_password(container_id, which, password.clone());
+        fitting_containers_ships::set_container_password_snap(snap, container_id, which, &password, now_unix)?;
         if which != 2 {
-            st.unlocked_containers.retain(|&(a, b)| a != container_id && b != container_id);
+            fitting_containers_ships::clear_container_unlocks_snap(snap, container_id);
             if !password.is_empty() {
-                st.unlocked_containers.insert((container_id, char_id));
+                fitting_containers_ships::set_container_unlocked_snap(snap, container_id, char_id, true, now_unix)?;
             }
         }
         let is_cfg_method = method == "ALSCConfigSet" || method == "ConfigureALSC";
         if is_cfg_method {
-            let mut cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
+            let mut cfg = fitting_containers_ships::container_config_snap(snap, container_id);
             if let Some(v) = kwargs.get("lockByDefault").or_else(|| kwargs.get("lock_by_default")).and_then(|v| v.as_bool()) { cfg.lock_by_default = v; }
             if let Some(v) = kwargs.get("passwordPerAction").or_else(|| kwargs.get("password_per_action")).and_then(|v| v.as_bool()) { cfg.password_per_action = v; }
             if let Some(bm) = kwargs.get("configBitmask").or_else(|| kwargs.get("bitmask")).and_then(|v| v.as_i64()) {
@@ -443,16 +451,25 @@ pub(crate) async fn handle_set_password(
                 if (bm & 1) != 0 { cfg.lock_by_default = true; }
                 if (bm & 2) != 0 { cfg.password_per_action = true; }
             }
-            st.container_configs.insert(container_id, cfg);
-            st.alsc_logs.entry(container_id).or_default().push(fitting_containers_ships::AlscLogEntry {
-                timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionConfigChange".into(), item_id: container_id, item_type_id: item_tid, quantity: 1,
-            });
+            fitting_containers_ships::set_container_config_snap(snap, container_id, &cfg, now_unix)?;
+            fitting_containers_ships::append_alsc_log_snap(
+                snap,
+                container_id,
+                fitting_containers_ships::AlscLogEntry {
+                    timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionConfigChange".into(), item_id: container_id, item_type_id: item_tid, quantity: 1,
+                },
+                now_unix,
+            )?;
         } else {
-            st.alsc_logs.entry(container_id).or_default().push(fitting_containers_ships::AlscLogEntry {
-                timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionSetPassword".into(), item_id: container_id, item_type_id: item_tid, quantity: 1,
-            });
+            fitting_containers_ships::append_alsc_log_snap(
+                snap,
+                container_id,
+                fitting_containers_ships::AlscLogEntry {
+                    timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionSetPassword".into(), item_id: container_id, item_type_id: item_tid, quantity: 1,
+                },
+                now_unix,
+            )?;
         }
-        fitting_containers_ships::save_container_ship_state_snap(snap, now_unix, &st);
         if let Some((log_corp_id, _, loc_id, loc_flag)) =
             fitting_containers_ships::resolve_corp_container_log_target(snap, container_id)
         {
@@ -471,8 +488,8 @@ pub(crate) async fn handle_set_password(
                 new_config_bitmask: None,
             });
         }
-        Ok(item_tid)
-    })?;
+        Ok(Ok(item_tid))
+    })??;
 
     if method == "SetPassword" {
         emit_password_changed(ctx, char_id, which, container_id, tid);

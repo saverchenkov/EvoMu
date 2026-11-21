@@ -447,8 +447,8 @@ fn is_foreign_ship_bay_reachable(
                     snap, char_id, host_ship.item_id, host_ship.owner_id, false, None,
                 ))
             || (it.item_id == host_ship.item_id && {
-                let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
-                st.ship_configs.get(&host_ship.item_id).is_some_and(|cfg| {
+                let cfg = crate::services::fitting_containers_ships::ship_access_config_snap(snap, host_ship.item_id);
+                cfg.password.as_deref().is_some_and(|p| !p.is_empty()) && {
                     let in_same_fleet = snap
                         .fleets
                         .values()
@@ -461,14 +461,13 @@ fn is_foreign_ship_bay_reachable(
                     });
                     let same_corp =
                         c1.is_some_and(|cid| cid > 0 && (cid == host_ship.owner_id || c2 == Some(cid)));
-                    cfg.password.as_deref().is_some_and(|p| !p.is_empty())
-                        && ((check_sma
-                            && ((in_same_fleet && cfg.allow_fleet_smb)
-                                || (same_corp && cfg.allow_corp_smb)))
-                            || (check_fh
-                                && ((in_same_fleet && cfg.allow_fleet_hangar)
-                                    || (same_corp && cfg.allow_corp_hangar))))
-                })
+                    (check_sma
+                        && ((in_same_fleet && cfg.allow_fleet_smb)
+                            || (same_corp && cfg.allow_corp_smb)))
+                        || (check_fh
+                            && ((in_same_fleet && cfg.allow_fleet_hangar)
+                                || (same_corp && cfg.allow_corp_hangar)))
+                }
             });
         if !acl_ok {
             return false;
@@ -595,15 +594,8 @@ fn authorize_invbroker_item_in_snap(
             .get(&it.type_id)
             .is_some_and(|t| crate::services::fitting_containers_ships::is_container_group(t.group_id, it.type_id))
     {
-        let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
-        return st
-            .container_passwords
-            .get(&it.item_id)
-            .is_some_and(|p| !p.is_empty())
-            || st
-                .container_config_passwords
-                .get(&it.item_id)
-                .is_some_and(|p| !p.is_empty());
+        return crate::services::fitting_containers_ships::container_password_snap(snap, it.item_id, 1).is_some()
+            || crate::services::fitting_containers_ships::container_password_snap(snap, it.item_id, 2).is_some();
     }
     false
 }

@@ -2324,31 +2324,14 @@ pub(crate) mod planet_bpc_laundering_1177 {
                 }
                 match lock_kind {
                     "alsc_item" => {
-                        snap.owner_notes.insert(
-                            -8_400_000_000_000,
-                            eve_db::OwnerNoteRecord {
-                                note_id: -8_400_000_000_000,
-                                character_id: 0,
-                                item_id: 0,
-                                label: "S:CONTAINER_SHIP_RUNTIME_STATE".into(),
-                                note: serde_json::json!({ "alsc_locked_items": [iid] }).to_string(),
-                                timestamp_unix: 100,
-                            },
-                        );
+                        snap.kv_mut(eve_db::Ns::AlscLockedItem)
+                            .set_with_unix(iid, "", &true, 100)
+                            .unwrap();
                     }
                     "alsc_ancestor_ship" => {
-                        snap.owner_notes.insert(
-                            -8_400_000_000_000,
-                            eve_db::OwnerNoteRecord {
-                                note_id: -8_400_000_000_000,
-                                character_id: 0,
-                                item_id: 0,
-                                label: "S:CONTAINER_SHIP_RUNTIME_STATE".into(),
-                                note: serde_json::json!({ "alsc_locked_items": [ship_id] })
-                                    .to_string(),
-                                timestamp_unix: 100,
-                            },
-                        );
+                        snap.kv_mut(eve_db::Ns::AlscLockedItem)
+                            .set_with_unix(ship_id, "", &true, 100)
+                            .unwrap();
                     }
                     "asset_safety_wrap" => {
                         let wrap_id = 77_000_117_i64;
@@ -2419,7 +2402,7 @@ pub(crate) mod planet_bpc_laundering_1177 {
 
             ctx.db.with_mut_snapshot(|snap| {
                 assert_eq!(snap.items.remove(&item_id).map(|it| it.quantity), Some(25));
-                snap.owner_notes.remove(&-8_400_000_000_000);
+                snap.kv_mut(eve_db::Ns::AlscLockedItem).clear_ns();
                 snap.item_custom_names.remove(&-7_700_001);
                 snap.contracts.remove(&88_000_117_i64);
                 let net = load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
