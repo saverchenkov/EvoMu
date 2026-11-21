@@ -4891,5 +4891,171 @@ class TestBugOracleSessionTelemetryAndArgs(unittest.TestCase):
                 runner.oracle.flush()
 
 
+class TestClusterDowntimeHandling1190(unittest.TestCase):
+    def test_cluster_downtime_window_and_remaining_seconds(self):
+        from datetime import datetime, timezone
+
+        before = datetime(2026, 11, 21, 10, 59, 59, tzinfo=timezone.utc).timestamp()
+        inside = datetime(2026, 11, 21, 11, 2, 0, tzinfo=timezone.utc).timestamp()
+        at_end = datetime(2026, 11, 21, 11, 15, 0, tzinfo=timezone.utc).timestamp()
+
+        self.assertFalse(playtester._is_cluster_downtime_window(now_unix=before))
+        self.assertEqual(playtester._seconds_until_downtime_ends(now_unix=before), 0.0)
+
+        self.assertTrue(playtester._is_cluster_downtime_window(now_unix=inside))
+        self.assertAlmostEqual(playtester._seconds_until_downtime_ends(now_unix=inside), 785.0, places=3)
+
+        self.assertFalse(playtester._is_cluster_downtime_window(now_unix=at_end))
+        self.assertEqual(playtester._seconds_until_downtime_ends(now_unix=at_end), 0.0)
+
+        # Midnight wrap-around edge case (23:55 -> 00:10 UTC)
+        wrap_now = datetime(2026, 11, 21, 23, 58, 0, tzinfo=timezone.utc).timestamp()
+        self.assertTrue(playtester._is_cluster_downtime_window(now_unix=wrap_now, downtime_utc_secs=86100, window_secs=900))
+        self.assertAlmostEqual(
+            playtester._seconds_until_downtime_ends(now_unix=wrap_now, downtime_utc_secs=86100, window_secs=900, buffer_secs=5.0),
+            725.0,
+            places=3,
+        )
+
+    def test_wait_out_cluster_downtime_sleeps_in_chunks_and_advances_offsets(self):
+        from datetime import datetime, timezone
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged_eve"
+            staged.mkdir(parents=True)
+            args = playtester.parse_args(["--no-github-sync", "--continuous"])
+            args.worktree = str(root)
+            args.staged_app = str(staged)
+            runner = playtester.PlaytesterRunner(args)
+            try:
+                runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+                tb_log = runner.current_run_dir / "client_tracebacks.log"
+                srv_log = runner.current_run_dir / "server.log"
+                tb_log.write_text("GPSTransportClosed: Daily cluster downtime\n", encoding="utf-8")
+                srv_log.write_text("INFO server starting scheduled downtime\n", encoding="utf-8")
+
+                inside = datetime(2026, 11, 21, 11, 14, 50, tzinfo=timezone.utc).timestamp()
+                outside = datetime(2026, 11, 21, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+
+                self.assertTrue(
+                    runner._is_cluster_downtime_active(
+                        exec_res={"action_error": "UserError(GPSTransportClosed)"},
+                        now_unix=inside,
+                    )
+                )
+                # Generic GPSTransportClosed outside 11:00-11:15 UTC without downtime message is still treated as a bug.
+                tb_log.write_text("GPSTransportClosed: connection dropped\n", encoding="utf-8")
+                self.assertFalse(
+                    runner._is_cluster_downtime_active(
+                        exec_res={"action_error": "UserError(GPSTransportClosed)"},
+                        now_unix=outside,
+                    )
+                )
+                # Explicit ClusterShuttingDown message always triggers cleanly regardless of clock skew.
+                self.assertTrue(
+                    runner._is_cluster_downtime_active(
+                        exc=RuntimeError("UserError(ClusterShuttingDown): Cluster shutdown in progress"),
+                        now_unix=outside,
+                    )
+                )
+
+                clock = [inside]
+                sleeps = []
+
+                def fake_sleep(secs):
+                    sleeps.append(secs)
+                    clock[0] += secs
+
+                with mock.patch.object(runner, "stop_client") as stop_mock:
+                    slept = runner._wait_out_cluster_downtime(
+                        reason="test daily downtime",
+                        now_unix=inside,
+                        sleep_fn=fake_sleep,
+                        time_fn=lambda: clock[0],
+                        chunk_secs=5.0,
+                    )
+                stop_mock.assert_called_once()
+                # From 11:14:50 to 11:15:05 is 15.0s -> three 5.0s chunks.
+                self.assertAlmostEqual(slept, 15.0, places=3)
+                self.assertEqual(len(sleeps), 3)
+                self.assertEqual(runner.oracle._traceback_offset, tb_log.stat().st_size)
+                self.assertEqual(runner.oracle._server_log_offset, srv_log.stat().st_size)
+            finally:
+                runner.oracle.flush()
+
+    def test_start_client_downtime_login_rejection_waits_and_retries_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged_eve"
+            (staged / "bin64").mkdir(parents=True)
+            (staged / "bin64" / "exefile").write_text("", encoding="utf-8")
+            args = playtester.parse_args(["--no-github-sync", "--continuous"])
+            args.worktree = str(root)
+            args.staged_app = str(staged)
+            runner = playtester.PlaytesterRunner(args)
+            try:
+                fake_proc = mock.MagicMock()
+                fake_proc.pid = 42424
+                fake_proc.poll.return_value = None
+                bootstrap_attempts = {"n": 0}
+
+                def fake_rpc_call(method, params=None, timeout=None):
+                    if method == "bootstrap_session":
+                        bootstrap_attempts["n"] += 1
+                        if bootstrap_attempts["n"] == 1:
+                            raise RuntimeError("ClusterShuttingDown: Cluster shutdown in progress")
+                        return {"session": {"charid": 90000001}, "active_view": "hangar"}
+                    return {}
+
+                wait_calls = []
+                with mock.patch.object(runner, "stop_client"), \
+                     mock.patch.object(runner, "_host_gm_port_for_client", return_value=0), \
+                     mock.patch("playtester.stage_playtester_client", return_value=staged), \
+                     mock.patch("playtester.subprocess.Popen", return_value=fake_proc), \
+                     mock.patch.object(runner.rpc, "ping", return_value=True), \
+                     mock.patch.object(runner.rpc, "call", side_effect=fake_rpc_call), \
+                     mock.patch.object(runner, "_wait_out_cluster_downtime", side_effect=lambda **kw: wait_calls.append(kw) or 10.0):
+                    ok = runner.start_client()
+
+                self.assertTrue(ok)
+                self.assertEqual(bootstrap_attempts["n"], 2)
+                self.assertEqual(len(wait_calls), 1)
+            finally:
+                runner.oracle.flush()
+
+    def test_window_assertions_ignore_chat_channels_unless_targeted(self):
+        chat_only_state = {
+            "open_windows": [
+                {"window_id": "ChatWindowStack", "name": "ChatWindowStack", "caption": "Corp", "cls": "ChatWindowStack", "populated_count": 3},
+                {"window_id": "chatchannel_corp", "name": "chatchannel_corp", "caption": "Corp", "cls": "ChannelWindow", "populated_count": 3},
+            ],
+            "ui": {"open_windows": [], "modals": []},
+        }
+        # Closing the Corporation window must pass when only Corp Chat remains open.
+        ok, err = playtester._evaluate_step_assertions({"expect_window_closed": "corp"}, {}, chat_only_state)
+        self.assertTrue(ok, err)
+        # Opening / populating "corp" must NOT falsely match chatchannel_corp.
+        ok_open, _ = playtester._evaluate_step_assertions({"expect_window_open": "corp"}, {}, chat_only_state)
+        self.assertFalse(ok_open)
+        pop_err = playtester._check_window_populated({"window": "corp", "min_populated": 1, "require_rpc_or_data": False}, chat_only_state["open_windows"], [])
+        self.assertIsNotNone(pop_err)
+        # Explicit chat assertions still match chat windows normally.
+        ok_chat, err_chat = playtester._evaluate_step_assertions({"expect_window_open": "chatchannel_corp"}, {}, chat_only_state)
+        self.assertTrue(ok_chat, err_chat)
+        # V24.02 Contacts (`addressbook`) & NES (`virtual_goods_store`) aliases match `people` & `store`.
+        alias_state = {
+            "open_windows": [
+                {"window_id": "addressbook", "name": "addressbook", "caption": "Contacts", "cls": "AddressBookWindow", "populated_count": 5},
+                {"window_id": "virtual_goods_store", "name": "virtual_goods_store", "caption": "New Eden Store", "cls": "virtual_goods_store", "populated_count": 5},
+            ],
+            "ui": {"open_windows": [], "modals": []},
+        }
+        self.assertIsNone(playtester._check_window_populated({"window": "people", "min_populated": 1, "require_rpc_or_data": False}, alias_state["open_windows"], []))
+        self.assertIsNone(playtester._check_window_populated({"window": "store", "min_populated": 1, "require_rpc_or_data": False}, alias_state["open_windows"], []))
+        ok_p_closed, _ = playtester._evaluate_step_assertions({"expect_window_closed": "people"}, {}, alias_state)
+        self.assertFalse(ok_p_closed)
+
+
 if __name__ == "__main__":
     unittest.main()

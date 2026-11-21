@@ -6700,5 +6700,221 @@ class TestIssue1539HostGmTimeControlRouting(unittest.TestCase):
         self.assertEqual(client_slash_calls, [])
 
 
+class TestHarnessSettleAndDeepWindowInspect1190(unittest.TestCase):
+    def test_inspect_window_content_handles_deep_skillplanner_hierarchy(self):
+        hook = _load_hook_with_py2_stubs()
+
+        class _Node(object):
+            def __init__(self, name="Container", text=None, children=None):
+                self.name = name
+                self.display = True
+                self.state = 0
+                self.destroyed = False
+                self.text = text
+                self.children = list(children or [])
+
+        # Populate >120 leading sibling containers and place SkillPlanner tabs/labels at index 30, depth 11.
+        leading = [_Node(name=f"filler_{i}") for i in range(135)]
+        deep_leaf = _Node(name="SkillEntry", text="Spaceship Command")
+        cur = deep_leaf
+        for lvl in range(10):
+            cur = _Node(name=f"skill_nested_{lvl}", children=[cur])
+        wide_siblings = [_Node(name=f"slot_{i}") for i in range(32)]
+        wide_siblings[30] = cur
+        root = _Node(name="SkillWindow", children=leading[:35] + [_Node(name="mainCont", children=wide_siblings)])
+        root.caption = "Skills"
+        root.loading = False
+
+        summary = hook._inspect_window_content(root)
+        self.assertGreaterEqual(summary["populated_count"], 1, summary)
+        self.assertGreaterEqual(summary["text_count"], 1, summary)
+        self.assertIn("Spaceship Command", summary["sample_texts"])
+
+    def test_space_command_maneuver_honors_explicit_wait_ms_over_600(self):
+        hook = _load_hook_with_py2_stubs()
+        import builtins
+
+        sess = types.SimpleNamespace(
+            solarsystemid=30000142,
+            solarsystemid2=30000142,
+            stationid=None,
+            structureid=None,
+            shipid=90010001,
+        )
+        beyonce = mock.MagicMock()
+        ballpark = types.SimpleNamespace(balls={60003760: object(), 90010001: object()})
+        michelle = types.SimpleNamespace(GetBallpark=lambda: ballpark)
+        view_state = types.SimpleNamespace(secondaryInfo=None)
+        fake_sm = mock.MagicMock()
+        fake_sm.GetService.side_effect = lambda name: {
+            "viewState": view_state,
+            "michelle": michelle,
+        }.get(name, mock.MagicMock())
+        fake_uicore = types.SimpleNamespace(cmd=None, registry=None, layer=None, desktop=None)
+        sleep_calls = []
+        settle_calls = []
+
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(builtins, "session", sess, create=True), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess)), \
+             mock.patch.object(hook.H, "_get_beyonce", create=True, return_value=beyonce), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda ms: sleep_calls.append(ms)), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_wait_session_settled"), \
+             mock.patch.object(hook, "_sample_ego_warp_state", return_value={"mode": 1, "speed_mps": 45.0}), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {"ego": {"mode": 1, "speed_mps": 45.0}}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}), \
+             mock.patch.object(hook, "_settle_after_action", side_effect=lambda *a, **kw: settle_calls.append(kw) or 100):
+            res = hook._execute_action(
+                fake_sm,
+                {"type": "approach", "target": "60003760", "item_id": 60003760, "wait_ms": 3500},
+            )
+
+        self.assertTrue(res.get("ok"), res)
+        beyonce.CmdFollowBall.assert_called_once_with(60003760, 50.0)
+        self.assertIn(3500, sleep_calls)
+        self.assertEqual(res.get("waited_ms"), 3500)
+        self.assertEqual(settle_calls, [])
+
+    def test_ui_click_under_5000ms_keeps_adaptive_600ms_settle(self):
+        hook = _load_hook_with_py2_stubs()
+
+        class _Btn(object):
+            name = "closeBtn"
+            def OnClick(self, *args):
+                return None
+
+        fake_uicore = types.SimpleNamespace(cmd=None, registry=None, layer=None, desktop=None)
+        fake_sm = mock.MagicMock()
+        captured_settle = []
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_find_widget", return_value=_Btn()), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}), \
+             mock.patch.object(hook, "_settle_after_action", side_effect=lambda *a, **kw: captured_settle.append(kw) or 150):
+            res = hook._execute_action(
+                fake_sm,
+                {"type": "click_widget", "target": "closeBtn", "wait_ms": 3500},
+            )
+
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(len(captured_settle), 1)
+        self.assertEqual(captured_settle[0]["max_ms"], 600)
+
+    def test_save_location_writes_v24_descendant_textfield_or_falls_back_cleanly(self):
+        hook = _load_hook_with_py2_stubs()
+        import builtins
+
+        replaced = []
+        cleared = []
+        confirmed = []
+        closed = []
+        fallback_calls = []
+
+        class _Controller(object):
+            text = "spot in Jita solar system"
+            def clear_text(self):
+                cleared.append(True)
+            def replace_text(self, txt):
+                replaced.append(txt)
+
+        class _V24TextField(object):
+            name = "label_input"
+            display = True
+            state = 0
+            destroyed = False
+            children = []
+            def __init__(self):
+                self.controller = _Controller()
+            def insert_text(self, txt):
+                replaced.append(txt)
+
+        class BookmarkLocationWindow(object):
+            name = "BookmarkLocationWindow"
+            display = True
+            state = 0
+            destroyed = False
+            def __init__(self, include_field=True):
+                self.children = [_V24TextField()] if include_field else []
+            def Confirm(self):
+                confirmed.append(replaced[-1] if replaced else "default")
+            def Close(self):
+                closed.append(True)
+
+        active_bw = [None]
+        sess = types.SimpleNamespace(solarsystemid=30000142, shipid=90010001)
+        cmd_svc = types.SimpleNamespace(CmdCreateBookmark=lambda: None)
+        reg = types.SimpleNamespace(GetWindows=lambda: [active_bw[0]] if active_bw[0] else [])
+        bm_svc = types.SimpleNamespace(
+            BookmarkLocation=lambda loc_id, sub_id, name, note: fallback_calls.append((loc_id, name, note))
+        )
+        fake_uicore = types.SimpleNamespace(cmd=cmd_svc, registry=reg, layer=None, desktop=None)
+        fake_sm = mock.MagicMock()
+        fake_sm.GetService.side_effect = lambda n: {"bookmarkSvc": bm_svc}.get(n, mock.MagicMock())
+
+        active_bw[0] = BookmarkLocationWindow(include_field=True)
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(builtins, "session", sess, create=True), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess)), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_wait_session_settled"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}), \
+             mock.patch.object(hook, "_settle_after_action", return_value=50):
+            res1 = hook._execute_action(fake_sm, {"type": "save_location", "target": "Scenario Planet Spot"})
+            self.assertTrue(res1.get("ok"), res1)
+            self.assertTrue(cleared)
+            self.assertEqual(confirmed, ["Scenario Planet Spot"])
+            self.assertEqual(fallback_calls, [])
+
+            # If BookmarkLocationWindow lacks any writable field, close modal instead of confirming default name.
+            active_bw[0] = BookmarkLocationWindow(include_field=False)
+            res2 = hook._execute_action(fake_sm, {"type": "save_location", "target": "Fallback Spot"})
+            self.assertTrue(res2.get("ok"), res2)
+            self.assertEqual(confirmed, ["Scenario Planet Spot"])
+            self.assertEqual(closed, [True])
+            self.assertEqual(fallback_calls, [(90010001, "Fallback Spot", "")])
+
+    def test_resolve_secondary_view_surface_and_people_window_aliases(self):
+        hook = _load_hook_with_py2_stubs()
+        class _Dummy(object):
+            destroyed = False
+            display = True
+            state = 0
+
+        lbl = _Dummy()
+        lbl.name = "offer_title"
+        lbl.text = "30 Days Omega Clone State"
+        lbl.children = []
+        vgs_layer = _Dummy()
+        vgs_layer.name = "l_virtual_goods_store"
+        vgs_layer.children = [lbl]
+        vs_layer = _Dummy()
+        vs_layer.children = [vgs_layer]
+        layers = _Dummy()
+        layers.viewstate = vs_layer
+        uic = _Dummy()
+        uic.layer = layers
+
+        sec_vi = _Dummy()
+        sec_vi.name = "virtual_goods_store"
+        vs = _Dummy()
+        vs.activeView = None
+        vs.secondaryView = None
+
+        view_obj, layer = hook._resolve_secondary_view_surface(vs, sec_vi, uicore=uic)
+        self.assertIsNone(view_obj)
+        self.assertIs(layer, vgs_layer)
+        inspected = hook._inspect_window_content(layer)
+        self.assertGreaterEqual(inspected["populated_count"], 1)
+        self.assertTrue(hook._target_matches_window("people", "addressbook", "Contacts", "AddressBookWindow"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -488,6 +488,89 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+DEFAULT_DOWNTIME_UTC_SECS_OF_DAY = 39600  # 11:00:00 UTC (matches ServerConfig default)
+DEFAULT_DOWNTIME_WINDOW_SECS = 900       # 15m window (11:00:00 - 11:15:00 UTC)
+DEFAULT_DOWNTIME_RESUME_BUFFER_SECS = 5.0
+
+_DOWNTIME_EXPLICIT_MARKERS = (
+    "clustershuttingdown",
+    "daily cluster downtime",
+    "cluster shutdown in progress",
+    "reason=clustershutdown",
+    "\"reason\": \"clustershutdown\"",
+)
+
+_DOWNTIME_DISCONNECT_MARKERS = (
+    "gpstransportclosed",
+    "performsessioncheck",
+    "connection reset",
+    "connection refused",
+    "connection closed",
+    "transport closed",
+    "bootstrap_session",
+    "not connected",
+    "timed out",
+    "rpc",
+)
+
+
+def _utc_secs_of_day(now_unix: Optional[float] = None) -> float:
+    ts = float(time.time() if now_unix is None else now_unix)
+    return ts % 86400.0
+
+
+def _is_cluster_downtime_window(
+    now_unix: Optional[float] = None,
+    downtime_utc_secs: int = DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
+    window_secs: int = DEFAULT_DOWNTIME_WINDOW_SECS,
+) -> bool:
+    if window_secs <= 0:
+        return False
+    start = int(downtime_utc_secs) % 86400
+    end = start + int(window_secs)
+    sod = _utc_secs_of_day(now_unix)
+    if end <= 86400:
+        return start <= sod < end
+    return sod >= start or sod < (end % 86400)
+
+
+def _seconds_until_downtime_ends(
+    now_unix: Optional[float] = None,
+    downtime_utc_secs: int = DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
+    window_secs: int = DEFAULT_DOWNTIME_WINDOW_SECS,
+    buffer_secs: float = DEFAULT_DOWNTIME_RESUME_BUFFER_SECS,
+) -> float:
+    if not _is_cluster_downtime_window(
+        now_unix=now_unix,
+        downtime_utc_secs=downtime_utc_secs,
+        window_secs=window_secs,
+    ):
+        return 0.0
+    start = int(downtime_utc_secs) % 86400
+    end = (start + int(window_secs)) % 86400
+    sod = _utc_secs_of_day(now_unix)
+    rem = end - sod
+    if rem <= 0.0:
+        rem += 86400.0
+    return max(0.0, rem + max(0.0, float(buffer_secs)))
+
+
+def _text_mentions_cluster_downtime(text: Any) -> bool:
+    if text is None:
+        return False
+    raw = text if isinstance(text, str) else json.dumps(text, default=str)
+    low = raw.lower()
+    return any(marker in low for marker in _DOWNTIME_EXPLICIT_MARKERS)
+
+
+def _text_mentions_disconnect(text: Any) -> bool:
+    if text is None:
+        return False
+    raw = text if isinstance(text, str) else json.dumps(text, default=str)
+    low = raw.lower()
+    return any(marker in low for marker in _DOWNTIME_DISCONNECT_MARKERS)
+
+
 # ---------------------------------------------------------------------------
 # ANSI Color Coding & Structured Trace Logging
 # ---------------------------------------------------------------------------
@@ -4889,6 +4972,47 @@ def _resolve_direct_action(
     return None, f"unsupported direct action type {act_type!r}"
 
 
+_CHAT_WIN_MARKERS = ("chatwindowstack", "chatchannel", "xmppchat", "lscchannel", "channelwindow")
+
+_WINDOW_ASSERTION_ALIASES = {
+    "people": ("people", "peopleandplaces", "addressbook", "contacts"),
+    "peopleandplaces": ("peopleandplaces", "people", "addressbook", "contacts"),
+    "addressbook": ("addressbook", "contacts", "peopleandplaces", "people"),
+    "contacts": ("contacts", "addressbook", "peopleandplaces", "people"),
+    "store": ("store", "newedenstore", "aurumstore", "virtualgoodsstore"),
+    "nes": ("newedenstore", "aurumstore", "virtualgoodsstore", "store"),
+    "newedenstore": ("newedenstore", "aurumstore", "virtualgoodsstore", "store"),
+}
+
+
+def _target_requests_chat_window(target: str) -> bool:
+    tl = str(target or "").strip().lower()
+    return any(tok in tl for tok in ("chat", "chatchannel", "lsc", "channel"))
+
+
+def _is_chat_window_hay(hay: str) -> bool:
+    hl = str(hay or "").lower()
+    return any(tok in hl for tok in _CHAT_WIN_MARKERS)
+
+
+def _window_hay_matches_target(target: str, hay: str) -> bool:
+    """Return True if window descriptor `hay` matches `target` (ignoring chat unless targeted)."""
+    tl = str(target or "").strip().lower()
+    if not tl:
+        return True
+    if not _target_requests_chat_window(tl) and _is_chat_window_hay(hay):
+        return False
+    t_norm = tl.replace("_", "").replace("-", "").replace(" ", "")
+    hay_l = str(hay or "").lower()
+    hay_norm = hay_l.replace("_", "").replace("-", "").replace(" ", "")
+    tokens = _WINDOW_ASSERTION_ALIASES.get(t_norm, (tl,))
+    for tok in tokens:
+        tok_norm = tok.replace("_", "").replace("-", "").replace(" ", "")
+        if tok in hay_l or (tok_norm and tok_norm in hay_norm):
+            return True
+    return False
+
+
 def _evaluate_step_assertions(
     assertions: Optional[Dict[str, Any]],
     exec_res: Dict[str, Any],
@@ -4927,15 +5051,19 @@ def _evaluate_step_assertions(
 
     want_open = assertions.get("expect_window_open")
     if want_open:
-        wl = str(want_open).strip().lower()
-        found = any(wl in hay for _, hay in win_entries) or any(wl in s.lower() for s in opened_strs)
+        found = any(_window_hay_matches_target(str(want_open), hay) for _, hay in win_entries) or any(
+            _window_hay_matches_target(str(want_open), s) for s in opened_strs
+        )
         if not found:
             return False, f"assertion expect_window_open={want_open!r} failed (open_windows={win_strs})"
 
     want_closed = assertions.get("expect_window_closed")
     if want_closed:
-        cl = str(want_closed).strip().lower()
-        still_open = [lbl for lbl, hay in win_entries if cl in hay]
+        still_open = [
+            lbl
+            for lbl, hay in win_entries
+            if _window_hay_matches_target(str(want_closed), hay)
+        ]
         if still_open:
             return False, f"assertion expect_window_closed={want_closed!r} failed (still open: {still_open})"
 
@@ -6830,6 +6958,7 @@ class PlaytesterRunner:
         self.staged_app = Path(args.staged_app).resolve()
         self.ports = dict(DEFAULT_Ports)
         self.ports["macho"] = args.macho_port
+        self.ports["bridge"] = getattr(args, "bridge_port", DEFAULT_Ports["bridge"])
         self.ports["http"] = args.http_port
         self.ports["gateway"] = args.gateway_port
         self.ports["xmpp"] = args.xmpp_port
@@ -6923,6 +7052,7 @@ class PlaytesterRunner:
         self._force_next_screenshot: bool = True
         self._escalate_to_diagnostic_planner: bool = False
         self._pending_assertion_escalation: Optional[Dict[str, Any]] = None
+        self._downtime_pause_requested: bool = False
         self.agy_pool: Optional[AgyStreamWorkerPool] = None
 
         self.bug_queue_dir = self.worktree_dir / ".evomu-bugs" / "queue"
@@ -6936,6 +7066,108 @@ class PlaytesterRunner:
         self._refresh_oracle_handshake_builds()
         self._guard_tracker = _GuardHitTracker(retain_all=False, max_recent=100)
         self._sim_time_tracker = _SimTimeTracker(retain_events=False, max_recent=200)
+
+    def _peek_new_log_text(self, path: Optional[Path], offset_attr: str) -> str:
+        if path is None or not path.exists():
+            return ""
+        oracle = getattr(self, "oracle", None)
+        offset = int(getattr(oracle, offset_attr, 0) or 0) if oracle is not None else 0
+        try:
+            data = path.read_bytes()
+        except Exception:
+            return ""
+        if offset < 0 or offset > len(data):
+            offset = 0
+        return data[offset:].decode("utf-8", errors="replace")
+
+    def _advance_oracle_log_offsets(self) -> None:
+        oracle = getattr(self, "oracle", None)
+        run_dir = getattr(self, "current_run_dir", None)
+        if oracle is None or run_dir is None:
+            return
+        for fname, offset_attr in (
+            ("client_tracebacks.log", "_traceback_offset"),
+            ("server.log", "_server_log_offset"),
+        ):
+            fpath = run_dir / fname
+            try:
+                if fpath.exists():
+                    setattr(oracle, offset_attr, fpath.stat().st_size)
+            except Exception:
+                pass
+
+    def _is_cluster_downtime_active(
+        self,
+        *,
+        exc: Any = None,
+        exec_res: Any = None,
+        ui_snapshot: Any = None,
+        last_flight_recorder: Any = None,
+        now_unix: Optional[float] = None,
+    ) -> bool:
+        run_dir = getattr(self, "current_run_dir", None)
+        new_tb = self._peek_new_log_text(
+            (run_dir / "client_tracebacks.log") if run_dir is not None else None,
+            "_traceback_offset",
+        )
+        new_srv = self._peek_new_log_text(
+            (run_dir / "server.log") if run_dir is not None else None,
+            "_server_log_offset",
+        )
+        candidates = (exc, exec_res, ui_snapshot, last_flight_recorder, new_tb, new_srv)
+        if any(_text_mentions_cluster_downtime(item) for item in candidates):
+            return True
+        if not _is_cluster_downtime_window(now_unix=now_unix):
+            return False
+        if any(_text_mentions_disconnect(item) for item in candidates):
+            return True
+        client_proc = getattr(self, "client_proc", None)
+        if client_proc is not None and client_proc.poll() is not None:
+            return True
+        return False
+
+    def _wait_out_cluster_downtime(
+        self,
+        reason: str = "",
+        *,
+        now_unix: Optional[float] = None,
+        sleep_fn: Any = time.sleep,
+        time_fn: Any = time.time,
+        chunk_secs: float = 5.0,
+    ) -> float:
+        """Pause continuous playtester cleanly across daily cluster downtime (~11:00-11:15 UTC)."""
+        now_ts = float(time_fn() if now_unix is None else now_unix)
+        wait_secs = _seconds_until_downtime_ends(now_unix=now_ts)
+        if wait_secs <= 0.0:
+            # Server reported ClusterShuttingDown right near window boundary; back off briefly without spinning.
+            wait_secs = 15.0
+        target_end = now_ts + min(wait_secs, float(DEFAULT_DOWNTIME_WINDOW_SECS) + 15.0)
+        log_warn(
+            f"Daily cluster downtime active ({reason or 'ClusterShuttingDown'}); "
+            f"stopping client and sleeping {wait_secs:.1f}s until ~11:15 UTC..."
+        )
+        self._downtime_pause_requested = False
+        self._escalate_to_diagnostic_planner = False
+        self._pending_assertion_escalation = None
+        self.reset_batch_state()
+        self.stop_client()
+        self._advance_oracle_log_offsets()
+
+        slept_total = 0.0
+        last_log_at = now_ts
+        step_chunk = max(0.05, float(chunk_secs))
+        while not getattr(self, "stop_requested", False) and not getattr(self, "reload_requested", False):
+            cur_ts = float(time_fn())
+            remaining = target_end - cur_ts
+            if remaining <= 0.0:
+                break
+            chunk = min(step_chunk, remaining)
+            sleep_fn(chunk)
+            slept_total += chunk
+            if (cur_ts - last_log_at) >= 60.0 and remaining > 10.0:
+                log_info(f"Waiting for daily cluster downtime to end (~{remaining:.0f}s remaining)...")
+                last_log_at = cur_ts
+        return slept_total
 
     def _ensure_run_guard_state(self) -> _GuardHitTracker:
         tracker = getattr(self, "_guard_tracker", None)
@@ -8163,7 +8395,7 @@ class PlaytesterRunner:
         except Exception:
             return set()
 
-    def start_client(self) -> bool:
+    def start_client(self, _retry_after_downtime: bool = True) -> bool:
         self.stop_client()
         host_gm_port = self._host_gm_port_for_client(ensure=True)
         inclient_cfg = self.write_inclient_cfg()
@@ -8255,7 +8487,12 @@ class PlaytesterRunner:
             return True
         except Exception as exc:
             log_err(f"bootstrap_session failed: {exc}")
+            is_downtime = bool(getattr(self.args, "continuous", False)) and self._is_cluster_downtime_active(exc=exc)
             self.stop_client()
+            if is_downtime:
+                self._wait_out_cluster_downtime(reason=f"bootstrap_session rejected: {exc}")
+                if _retry_after_downtime and not getattr(self, "stop_requested", False):
+                    return self.start_client(_retry_after_downtime=False)
             return False
 
     def stop_client(self) -> None:
@@ -9030,36 +9267,50 @@ class PlaytesterRunner:
         )
         if not assert_ok and not benign_reject:
             log_warn(f"Step {step_num}: post-action assertion failed -> {assert_err}")
-        if post_hard_error or (not assert_ok and not benign_reject):
-            self._escalate_to_diagnostic_planner = True
-            self._force_next_screenshot = True
-            if self.hybrid_mode:
+        is_downtime_disconnect = bool(getattr(self.args, "continuous", False)) and self._is_cluster_downtime_active(
+            exec_res=exec_res,
+            ui_snapshot=ui_snapshot,
+            last_flight_recorder=last_flight_recorder,
+        )
+        if is_downtime_disconnect:
+            self._downtime_pause_requested = True
+            self._escalate_to_diagnostic_planner = False
+            self._pending_assertion_escalation = None
+            log_warn(
+                f"Step {step_num}: daily cluster downtime disconnect detected; "
+                "suppressing downtime bug bundle and scheduling clean pause."
+            )
+        else:
+            if post_hard_error or (not assert_ok and not benign_reject):
+                self._escalate_to_diagnostic_planner = True
+                self._force_next_screenshot = True
+                if self.hybrid_mode:
+                    self.batch_completed_flag = True
+                    self._pending_assertion_escalation = {
+                        "trigger": "post_action_assertion_or_exception",
+                        "batch_id": self.batch_id,
+                        "batch_step_index": self.batch_step_index,
+                        "action": action,
+                        "action_ok": exec_res.get("action_ok", True),
+                        "action_error": step_act_err,
+                        "assertion_failure": "" if assert_ok else assert_err,
+                        "log_exceptions": post_non_benign_logs,
+                        "quasar_errors": post_fr.get("quasar_errors"),
+                        "macho_exceptions": post_non_benign_macho,
+                    }
+                if not screenshot_path.exists():
+                    _ensure_screenshot_captured()
+            elif isinstance(exec_res, dict) and not exec_res.get("action_ok", True) and not benign_reject and self.hybrid_mode:
+                # Soft execution failure on a direct step -> wake Planner next turn with failure context
+                self._force_next_screenshot = True
                 self.batch_completed_flag = True
                 self._pending_assertion_escalation = {
-                    "trigger": "post_action_assertion_or_exception",
+                    "trigger": "direct_action_failed",
                     "batch_id": self.batch_id,
                     "batch_step_index": self.batch_step_index,
                     "action": action,
-                    "action_ok": exec_res.get("action_ok", True),
                     "action_error": step_act_err,
-                    "assertion_failure": "" if assert_ok else assert_err,
-                    "log_exceptions": post_non_benign_logs,
-                    "quasar_errors": post_fr.get("quasar_errors"),
-                    "macho_exceptions": post_non_benign_macho,
                 }
-            if not screenshot_path.exists():
-                _ensure_screenshot_captured()
-        elif isinstance(exec_res, dict) and not exec_res.get("action_ok", True) and not benign_reject and self.hybrid_mode:
-            # Soft execution failure on a direct step -> wake Planner next turn with failure context
-            self._force_next_screenshot = True
-            self.batch_completed_flag = True
-            self._pending_assertion_escalation = {
-                "trigger": "direct_action_failed",
-                "batch_id": self.batch_id,
-                "batch_step_index": self.batch_step_index,
-                "action": action,
-                "action_error": step_act_err,
-            }
 
         # Update Hybrid Executor batch history and completion flag
         if self.hybrid_mode:
@@ -9091,20 +9342,23 @@ class PlaytesterRunner:
             self.last_active_persona_id = new_persona_id
             self.reset_batch_state()
             self.pending_persona_cleanup = True
-        self.oracle.evaluate_step(
-            step_num=step_num,
-            git_head=git_head,
-            decision=decision,
-            exec_res=exec_res,
-            ui_snapshot=ui_snapshot,
-            screenshot_path=screenshot_path,
-            burst_paths=burst_paths,
-            traceback_log=self.current_run_dir / "client_tracebacks.log",
-            server_log=self.current_run_dir / "server.log",
-            step_dir=step_dir,
-            last_flight_recorder=last_flight_recorder,
-            lazy_screenshot_fn=_ensure_screenshot_captured,
-        )
+        if getattr(self, "_downtime_pause_requested", False):
+            self._advance_oracle_log_offsets()
+        else:
+            self.oracle.evaluate_step(
+                step_num=step_num,
+                git_head=git_head,
+                decision=decision,
+                exec_res=exec_res,
+                ui_snapshot=ui_snapshot,
+                screenshot_path=screenshot_path,
+                burst_paths=burst_paths,
+                traceback_log=self.current_run_dir / "client_tracebacks.log",
+                server_log=self.current_run_dir / "server.log",
+                step_dir=step_dir,
+                last_flight_recorder=last_flight_recorder,
+                lazy_screenshot_fn=_ensure_screenshot_captured,
+            )
 
         fr_delta = dict((exec_res.get("flight_recorder") or {}) if isinstance(exec_res, dict) else {})
         if self.oracle.last_unseen_tracebacks and not fr_delta.get("log_exceptions"):
@@ -9241,10 +9495,20 @@ class PlaytesterRunner:
                 try:
                     last_fr, last_burst = self.execute_step(step_num, last_fr, last_burst)
                 except Exception as exc:
-                    log_err(f"Step {step_num} raised exception: {exc}")
-                    self.reset_batch_state()
-                    time.sleep(2.0)
+                    if getattr(self.args, "continuous", False) and self._is_cluster_downtime_active(exc=exc):
+                        self._wait_out_cluster_downtime(reason=f"step {step_num} exception: {exc}")
+                        last_fr = {"client_restarted_for_downtime": utc_now_iso()}
+                        last_burst = []
+                    else:
+                        log_err(f"Step {step_num} raised exception: {exc}")
+                        self.reset_batch_state()
+                        time.sleep(2.0)
                 else:
+                    if getattr(self, "_downtime_pause_requested", False):
+                        self._wait_out_cluster_downtime(reason=f"step {step_num} cluster downtime disconnect")
+                        last_fr = {"client_restarted_for_downtime": utc_now_iso()}
+                        last_burst = []
+                        continue
                     recovery_reason = self.maybe_recover_corrupted_viewstate(self.last_ui_snapshot)
                     if recovery_reason:
                         last_fr = {"client_restarted_for_desync": recovery_reason}
@@ -10044,7 +10308,7 @@ def _check_window_populated(
             str(w.get("cls") or ""),
             str(w.get("caption") or ""),
         ]).lower()
-        if target_w in hay or target_w.replace("_", "") in hay.replace("_", ""):
+        if _window_hay_matches_target(target_w, hay):
             matches.append(w)
     if not matches:
         open_names = [str(w.get("window_id") or w.get("name") or w.get("cls") or "") for w in open_windows if isinstance(w, dict)]
@@ -11098,7 +11362,7 @@ class ScenarioRunner(PlaytesterRunner):
             log_warn(f"Scenario OAuth PKCE mint failed ({exc}); falling back to offline JWT")
             return mint_sso_jwt(account_id=1, character_id=char_id)
 
-    def start_client(self) -> bool:
+    def start_client(self, _retry_after_downtime: bool = True) -> bool:
         self.stop_client()
         host_gm_port = self._host_gm_port_for_client(ensure=True)
         inclient_cfg = self.write_inclient_cfg()
@@ -12220,6 +12484,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Timeout in seconds per agy CLI model call before falling back to the next model",
     )
     p.add_argument("--macho-port", type=int, default=DEFAULT_Ports["macho"])
+    p.add_argument("--bridge-port", type=int, default=DEFAULT_Ports["bridge"])
     p.add_argument("--http-port", type=int, default=DEFAULT_Ports["http"])
     p.add_argument("--gateway-port", type=int, default=DEFAULT_Ports["gateway"])
     p.add_argument("--xmpp-port", type=int, default=DEFAULT_Ports["xmpp"])

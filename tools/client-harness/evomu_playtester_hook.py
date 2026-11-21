@@ -1578,7 +1578,7 @@ def _inspect_window_content(w):
     queue = [(w, 0)]
     visited = 0
     skip_chrome = ("DefaultWindowHeader", "WindowUnderlay", "WindowControlButton", "StretchSpriteHorizontal", "StretchSpriteVertical")
-    while queue and visited < 110:
+    while queue and visited < 400:
         node, depth = queue.pop(0)
         if node is None or id(node) in seen or getattr(node, "destroyed", False):
             continue
@@ -1625,8 +1625,8 @@ def _inspect_window_content(w):
                     text_count += 1
                     if clean_txt not in samples and len(samples) < 10:
                         samples.append(clean_txt[:60])
-        if depth < 8:
-            for ch in list(getattr(node, "children", []) or [])[:25]:
+        if depth < 16:
+            for ch in list(getattr(node, "children", []) or [])[:50]:
                 if id(ch) not in seen:
                     queue.append((ch, depth + 1))
     summary["tab_count"] = int(tab_count)
@@ -1635,6 +1635,46 @@ def _inspect_window_content(w):
     summary["populated_count"] = int(tab_count + row_count + text_count)
     summary["sample_texts"] = samples
     return summary
+
+
+def _resolve_secondary_view_surface(vs, sec_vi, uicore=None, sec_name_hint=""):
+    """Resolve `(sec_view_obj, sec_layer)` for an active ViewState secondary view."""
+    sec_name = sec_name_hint or (_safe_str(getattr(sec_vi, "name", "") or "", 48) if sec_vi is not None else "")
+    sec_view_obj = getattr(sec_vi, "view", None) if sec_vi is not None else None
+    if sec_view_obj is None and vs is not None and sec_name and hasattr(vs, "GetView"):
+        try:
+            sec_view_obj = vs.GetView(sec_name)
+        except Exception:
+            sec_view_obj = None
+    if sec_view_obj is None and vs is not None:
+        sec_view_obj = getattr(vs, "secondaryView", None)
+    sec_layer = getattr(sec_view_obj, "layer", None) if sec_view_obj is not None else None
+    if sec_layer is None and sec_vi is not None:
+        sec_layer = getattr(sec_vi, "layer", None)
+    if sec_layer is None and sec_name:
+        uc = uicore if uicore is not None else _get_uicore()
+        layers = getattr(uc, "layer", None) if uc is not None else None
+        if layers is not None:
+            cand = getattr(layers, sec_name, None)
+            if cand is not None and not getattr(cand, "destroyed", False):
+                sec_layer = cand
+            if sec_layer is None:
+                vs_lyr = getattr(layers, "viewstate", None)
+                if vs_lyr is not None:
+                    sec_tok = _normalize_window_tok(sec_name)
+                    for ch in list(getattr(vs_lyr, "children", []) or []):
+                        if ch is None or getattr(ch, "destroyed", False):
+                            continue
+                        cname = _safe_str(getattr(ch, "name", "") or "", 64)
+                        ctok = _normalize_window_tok(cname[2:] if cname.startswith("l_") else cname)
+                        if ctok == sec_tok or (sec_tok and sec_tok in ctok):
+                            sec_layer = ch
+                            break
+    if sec_view_obj is None and vs is not None:
+        sec_view_obj = getattr(vs, "activeView", None)
+    if sec_layer is None and sec_view_obj is not None:
+        sec_layer = getattr(sec_view_obj, "layer", None)
+    return sec_view_obj, sec_layer
 
 
 def _inspect_charsel_state(sm):
@@ -2056,8 +2096,7 @@ def _inspect_uicore_tree():
                 if sec_vi is not None and getattr(sec_vi, "name", None):
                     sec_name = _safe_str(getattr(sec_vi, "name", ""), 48)
                     if not any(sec_name.lower() in (o.get("window_id", "").lower(), o.get("cls", "").lower()) for o in open_windows):
-                        sec_view_obj = getattr(vs, "activeView", None)
-                        sec_layer = getattr(sec_view_obj, "layer", None) if sec_view_obj is not None else None
+                        sec_view_obj, sec_layer = _resolve_secondary_view_surface(vs, sec_vi, uicore=uicore, sec_name_hint=sec_name)
                         sec_c = _inspect_window_content(sec_layer)
                         open_windows.append({
                             "window_id": sec_name,
@@ -2496,6 +2535,80 @@ def _get_editable_value_preview(n):
             except Exception:
                 pass
     return _strip_tags(_safe_str(getattr(n, "text", ""), 40))
+
+
+def _find_first_descendant_editable(root, max_depth=16):
+    if root is None:
+        return None
+    queue = [(root, 0)]
+    seen = set()
+    visited = 0
+    while queue and visited < 300:
+        node, depth = queue.pop(0)
+        if node is None or id(node) in seen or getattr(node, "destroyed", False):
+            continue
+        seen.add(id(node))
+        if node is not root and not _is_visible(node):
+            continue
+        visited += 1
+        if node is not root and _is_editable_input_node(node):
+            return node
+        if depth < max_depth:
+            for ch in list(getattr(node, "children", []) or [])[:50]:
+                if id(ch) not in seen:
+                    queue.append((ch, depth + 1))
+    return None
+
+
+def _write_editable_widget_text(edit_node, u_txt, reg=None):
+    if edit_node is None:
+        return False, "missing edit widget"
+    if _is_eveui_text_field(edit_node):
+        try:
+            if reg is not None and hasattr(reg, "SetFocus"):
+                reg.SetFocus(edit_node)
+        except Exception:
+            pass
+        ctrl = edit_node.controller
+        try:
+            ctrl.clear_text()
+        except Exception:
+            pass
+        if u_txt:
+            if hasattr(edit_node, "insert_text"):
+                edit_node.insert_text(u_txt)
+            elif hasattr(ctrl, "replace_text"):
+                ctrl.replace_text(u_txt)
+            else:
+                ctrl.insert_text(u_txt)
+        return True, None
+    if hasattr(edit_node, "SetValue") or hasattr(edit_node, "SetText"):
+        try:
+            if reg is not None and hasattr(reg, "SetFocus"):
+                reg.SetFocus(edit_node)
+        except Exception:
+            pass
+        prefix_val = getattr(edit_node, "prefix", None)
+        if prefix_val and type(prefix_val).__name__ in ("str", "unicode") and not u_txt.startswith(prefix_val):
+            u_txt = prefix_val + u_txt
+        if hasattr(edit_node, "SetValue"):
+            try:
+                edit_node.SetValue(u_txt)
+            except (ValueError, TypeError) as val_exc:
+                return False, "numeric/value input %r rejected %r: %s" % (
+                    _safe_str(getattr(edit_node, "name", edit_node.__class__.__name__), 48),
+                    _safe_str(u_txt, 48),
+                    val_exc,
+                )
+        else:
+            edit_node.SetText(u_txt)
+        if hasattr(edit_node, "OnChange"):
+            try:
+                edit_node.OnChange(u_txt)
+            except Exception:
+                pass
+        return True, None
+    return False, "widget lacks text input interface"
 
 
 def _resolve_editable_widget(node):
@@ -4756,6 +4869,9 @@ cmd_map = {
     "aircareerprogram": "OpenAchievementsWindow",
     "acp": "OpenAchievementsWindow",
     "peopleandplaces": "OpenPeopleAndPlaces",
+    "people": "OpenPeopleAndPlaces",
+    "addressbook": "OpenPeopleAndPlaces",
+    "contacts": "OpenPeopleAndPlaces",
     "locations": "OpenLocations",
     "bookmarks": "OpenLocations",
     "compare": "OpenCompare",
@@ -4865,7 +4981,10 @@ _WINDOW_TARGET_ALIASES = {
     "isis": ("shiptree", "isis"),
     "aircareerprogram": ("aircareerprogram", "career_portal", "careerportal", "achievements", "achievement"),
     "acp": ("aircareerprogram", "career_portal", "careerportal", "achievements", "achievement"),
-    "peopleandplaces": ("peopleandplaces", "addressbook"),
+    "peopleandplaces": ("peopleandplaces", "people", "addressbook", "contacts"),
+    "people": ("people", "peopleandplaces", "addressbook", "contacts"),
+    "addressbook": ("addressbook", "contacts", "peopleandplaces", "people"),
+    "contacts": ("contacts", "addressbook", "peopleandplaces", "people"),
     "locations": ("locations", "bookmarks"),
     "bookmarks": ("locations", "bookmarks"),
     "compare": ("compare", "typecompare"),
@@ -4976,8 +5095,8 @@ def _find_matching_secondary_or_drawer_container(sm, t_norm):
                 vs = None
         if vs is not None:
             try:
-                sec_view = getattr(vs, "activeView", None)
-                sec_layer = getattr(sec_view, "layer", None) if sec_view is not None else None
+                sec_vi = getattr(vs, "secondaryInfo", None)
+                sec_view, sec_layer = _resolve_secondary_view_surface(vs, sec_vi, sec_name_hint=sec_name)
                 return (sec_layer or sec_view), sec_name, "secondary_view"
             except Exception:
                 pass
@@ -7787,18 +7906,34 @@ def _execute_action(sm, action):
                         H._sleep_ms(300)
                         reg_bm = getattr(uicore, "registry", None)
                         for bw in list(reg_bm.GetWindows() or []) if reg_bm is not None else []:
-                            if "Bookmark" in bw.__class__.__name__ and _is_visible(bw):
-                                for fld in ("locationName", "nameEdit", "name"):
-                                    ed = getattr(bw, fld, None)
-                                    if ed is not None and hasattr(ed, "SetValue"):
-                                        ed.SetValue(bm_name)
+                            if "bookmark" in bw.__class__.__name__.lower() and _is_visible(bw):
+                                ed = None
+                                for fld in ("locationName", "nameEdit", "labelEdit", "nameField", "edit", "name", "label"):
+                                    cand = getattr(bw, fld, None)
+                                    if cand is not None and (
+                                        _is_editable_input_node(cand)
+                                        or hasattr(cand, "SetValue")
+                                        or hasattr(cand, "SetText")
+                                    ):
+                                        ed = cand
                                         break
-                                for cbtn in ("Confirm", "Submit", "OnConfirm"):
-                                    fn_bm = getattr(bw, cbtn, None)
-                                    if callable(fn_bm):
-                                        fn_bm()
-                                        created_bm = True
-                                        break
+                                if ed is None:
+                                    ed = _find_first_descendant_editable(bw, max_depth=16)
+                                wrote_name, _ = _write_editable_widget_text(
+                                    ed, _to_unicode(bm_name), reg=reg_bm
+                                )
+                                if wrote_name:
+                                    for cbtn in ("Confirm", "Submit", "OnConfirm"):
+                                        fn_bm = getattr(bw, cbtn, None)
+                                        if callable(fn_bm):
+                                            fn_bm()
+                                            created_bm = True
+                                            break
+                                if not created_bm and hasattr(bw, "Close"):
+                                    try:
+                                        bw.Close()
+                                    except Exception:
+                                        pass
                                 break
                     except Exception:
                         created_bm = False
@@ -8081,9 +8216,19 @@ def _execute_action(sm, action):
                 result["wait_early_exit"] = early_reason
     elif result.get("blocked_by_modal"):
         H._sleep_ms(25)
-    elif explicit_wait_raw is not None and (int(explicit_wait_raw or 0) >= 5000 or action.get("settle_mode") == "fixed"):
+    elif explicit_wait_raw is not None and (
+        int(explicit_wait_raw or 0) >= 5000
+        or action.get("settle_mode") == "fixed"
+        or (
+            result.get("ok", True)
+            and atype == "space_command"
+            and target in ("approach", "orbit", "keep_at_range", "align_to", "stop")
+            and int(explicit_wait_raw or 0) > 600
+        )
+    ):
         if effective_wait_ms > 0:
             H._sleep_ms(effective_wait_ms)
+            result["waited_ms"] = effective_wait_ms
     else:
         _min_s = int(action.get("min_settle_ms") or 0)
         if atype == "type_text":
