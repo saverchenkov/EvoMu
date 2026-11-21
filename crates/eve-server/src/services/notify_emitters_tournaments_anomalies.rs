@@ -121,11 +121,16 @@ pub fn emit_cosmic_anomaly_added_for_system(
     dungeon_id: i64,
     dungeon_name: &str,
 ) {
+    let dungeon_name_id = u32::try_from(dungeon_id)
+        .ok()
+        .and_then(|did| ctx.sde.dungeon_name_id(did))
+        .map_or(PyRep::None, |id| PyRep::Integer(i64::from(id)));
     let anomaly = PyRep::keyval([
         ("targetID", PyRep::String(anomaly_id.into())),
         ("instanceID", PyRep::Integer(instance_id)),
         ("dungeonID", PyRep::Integer(dungeon_id)),
         ("dungeonName", PyRep::String(dungeon_name.into())),
+        ("dungeonNameID", dungeon_name_id),
         ("solarSystemID", PyRep::Integer(i64::from(solar_system_id))),
     ]);
     ctx.emit_typed(
@@ -216,7 +221,11 @@ pub fn emit_signal_tracker_full_state_for_system(
                                 ("targetID", PyRep::String(a.anomaly_id.clone())),
                                 ("dungeonID", PyRep::Integer(i64::from(meta.dungeon_id))),
                                 ("dungeonName", PyRep::String(a.name.clone())),
-                                ("dungeonNameID", PyRep::None),
+                                (
+                                    "dungeonNameID",
+                                    meta.dungeon_name_id
+                                        .map_or(PyRep::None, |id| PyRep::Integer(i64::from(id))),
+                                ),
                                 ("anomalyType", PyRep::String(a.anomaly_type.clone())),
                                 ("archetypeID", PyRep::Integer(i64::from(meta.archetype_id))),
                                 ("difficulty", PyRep::Integer(i64::from(meta.difficulty))),
