@@ -18,9 +18,7 @@ pub(crate) use super::fitting_containers_ships_ops::{
     AlscLogEntry, ContainerConfig, ShipAccessConfig,
 };
 #[cfg(test)]
-pub(crate) use super::fitting_containers_ships_ops::{
-    legacy_container_ship_test_shim::*, MAX_ALSC_LOGS_PER_CONTAINER,
-};
+pub(crate) use super::fitting_containers_ships_ops::MAX_ALSC_LOGS_PER_CONTAINER;
 
 /// Resolves a fallback ship `type_id` (from the character's most recent killmail or `670` Capsule)
 /// when an authenticated session queries `invbroker.GetInventoryFromId` / `GetSelfInvItem` for a
