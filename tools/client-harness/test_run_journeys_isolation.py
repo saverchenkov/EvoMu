@@ -1715,6 +1715,40 @@ class RunJourneysIsolationTests(unittest.TestCase):
         self.assertFalse(outcomes_both["structures"]["bridge_verified"])
         self.assertIn("control denied", outcomes_both["structures"]["traceback"])
 
+    def test_find_hangar_item_matches_eve_singleton_negative_one_quantity(self):
+        import evomu_inclient_driver as drv
+
+        items = [
+            _FakeItem(200000001, 587, -1, flag_id=4, singleton=1, location_id=60003760),
+            _FakeItem(200023579, 587, -1, flag_id=4, singleton=1, location_id=60003760),
+            types.SimpleNamespace(itemID=200023580, typeID=587, quantity=-1, stacksize=0, singleton=0),
+            types.SimpleNamespace(itemID=200023581, typeID=587, quantity=0, singleton=0),
+            _FakeItem(200023590, 34, 100, flag_id=4, singleton=0, location_id=60003760),
+        ]
+        # Attach stacksize=1 like inventory_bound.rs::item_to_packed_cells for EVE singletons.
+        items[0].stacksize = 1
+        items[1].stacksize = 1
+
+        inv_svc = types.SimpleNamespace(MachoBindObject=lambda _loc, _call: (None, items))
+        fake_sm = types.SimpleNamespace(RemoteSvc=lambda name: inv_svc if name == "invbroker" else None)
+
+        found_id, _ = drv._find_hangar_item(fake_sm, 60003760, 587, exclude_id=200000001, reverse=True)
+        self.assertEqual(found_id, 200023579)
+
+        not_a_stack, _ = drv._find_hangar_item(fake_sm, 60003760, 587, min_qty=50, reverse=True)
+        self.assertEqual(not_a_stack, 0)
+
+        non_singleton_zero, _ = drv._find_hangar_item(
+            types.SimpleNamespace(RemoteSvc=lambda _n: types.SimpleNamespace(MachoBindObject=lambda _l, _c: (None, items[2:4]))),
+            60003760,
+            587,
+            reverse=False,
+        )
+        self.assertEqual(non_singleton_zero, 0)
+
+        stacked_id, _ = drv._find_hangar_item(fake_sm, 60003760, 34, min_qty=50, reverse=True)
+        self.assertEqual(stacked_id, 200023590)
+
 
 if __name__ == "__main__":
     unittest.main()
