@@ -7426,6 +7426,8 @@ def _execute_action(sm, action):
                                 except Exception:
                                     surf_j = None
                             warp_too_short_j = False
+                            warp_adv_ok_j = bool(allow_time_control)
+                            did_warp_j = False
                             if (bp_j is not None and target_ball_j is None) or (surf_j is not None and surf_j >= 150000.0):
                                 try:
                                     beyonce.CmdWarpToStuff("item", gate_id, 0.0)
@@ -7434,6 +7436,7 @@ def _execute_action(sm, action):
                                         raise
                                     warp_too_short_j = True
                                 if not warp_too_short_j:
+                                    did_warp_j = True
                                     warp_adv_ok_j = (
                                         bool(H._advance_clock(sm, None, 180, raise_on_error=False))
                                         if allow_time_control
@@ -7460,7 +7463,7 @@ def _execute_action(sm, action):
                                     warp_adv_ok_j = False
                             if warp_too_short_j or surf_j is None or surf_j > 2400.0:
                                 beyonce.CmdFollowBall(gate_id, 0.0)
-                                approach_tc_ok = bool(warp_adv_ok_j) if not warp_too_short_j else bool(allow_time_control)
+                                approach_tc_ok = bool(warp_adv_ok_j) if did_warp_j else bool(allow_time_control)
                                 gate_started_at = time.time()
                                 gate_step = 0
                                 while gate_step < (14 if approach_tc_ok else 50):

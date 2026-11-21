@@ -874,7 +874,7 @@ def _journey_wormholes_filaments(ctx):
         target_aby_sys = int(_get_field(enter_rep, "solarSystemID", 32000001) or 32000001)
         room_npcs = list(_get_field(enter_rep, "npcBallIDs", []) or [])
         for npc_bid in room_npcs:
-            _try_slash(sm, "/despawn %d" % int(npc_bid))
+            _try_slash(sm, "/despawn %d" % int(npc_bid), target_solar_system_id=target_aby_sys)
         room_npcs = []
         _trace(cfg, "j15 waiting abyss session %d" % target_aby_sys)
         _wait_session_attr("solarsystemid2", target_aby_sys, timeout_sec=5.0, raise_on_timeout=True)
@@ -885,7 +885,7 @@ def _journey_wormholes_filaments(ctx):
         beyonce_rm = _get_beyonce(sm, target_aby_sys)
         for rm in (1, 2, 3):
             for npc_bid in room_npcs:
-                _try_slash(sm, "/despawn %d" % int(npc_bid))
+                _try_slash(sm, "/despawn %d" % int(npc_bid), target_solar_system_id=target_aby_sys)
             _try_slash(sm, "/heal")
             gate_id = 1895000000 + pocket_id * 10 + rm
             for _ in range(3):
@@ -1575,7 +1575,7 @@ def _journey_titans(ctx):
                 dd_res = dogma_tit.Activate(dd_mod_id, "superWeapon", cap_tgt_id, 0)
                 dd_ok = dd_res is not None
                 _advance_clock(sm, ipc, 310)
-                _try_slash(sm, "/despawn %d" % cap_tgt_id)
+                _try_slash(sm, "/despawn %d" % cap_tgt_id, target_solar_system_id=30004759)
     except Exception:
         body_failed = True
         raise

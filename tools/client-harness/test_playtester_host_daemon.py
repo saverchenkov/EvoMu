@@ -4772,9 +4772,23 @@ class TestBugOracleSessionTelemetryAndArgs(unittest.TestCase):
                         gm_calls.append(("ClearSessionTimer", int(tgt)))
                         return True
 
+                class _Slash:
+                    def SlashCmd(self, cmd):
+                        gm_calls.append(("SlashCmd", str(cmd)))
+                        return {"ok": True}
+
+                class _StationSvc:
+                    def Dock(self, station_id):
+                        gm_calls.append(("Dock", int(station_id)))
+                        return {"ok": True}
+
                 def RemoteSvc(self, name):
                     if name == "timeControl":
                         return self._TimeControl()
+                    if name == "slash":
+                        return self._Slash()
+                    if name == "stationSvc":
+                        return self._StationSvc()
                     raise AssertionError(f"unexpected service {name}")
 
             try:
@@ -4789,15 +4803,35 @@ class TestBugOracleSessionTelemetryAndArgs(unittest.TestCase):
                     try:
                         clr_resp = ipc.request({"cmd": "clear_session_timer", "target_char_id": 90000001})
                         adv_resp = ipc.request({"cmd": "advance_clock", "secs": 15, "target_char_id": 90000001})
+                        sl_resp = ipc.request({"cmd": "slash_cmd", "command": "/heal", "target_char_id": 90000001})
+                        desp_resp = ipc.request({
+                            "cmd": "slash_cmd",
+                            "command": "/despawn 88001",
+                            "target_char_id": 90000001,
+                            "target_solar_system_id": 30004759,
+                        })
                     finally:
                         ipc.close()
 
                 self.assertTrue(clr_resp["ok"])
                 self.assertTrue(adv_resp["ok"])
+                self.assertTrue(sl_resp["ok"])
+                self.assertTrue(sl_resp["handled"])
+                self.assertTrue(desp_resp["ok"])
+                self.assertTrue(desp_resp["handled"])
                 inj_id = adv_resp["injection_id"]
                 self.assertEqual(
                     gm_calls,
-                    [("ClearSessionTimer", 90000001), ("AdvanceClock", 15, 90000001)],
+                    [
+                        ("ClearSessionTimer", 90000001),
+                        ("AdvanceClock", 15, 90000001),
+                        ("SlashCmd", "/heal 90000001"),
+                        ("SlashCmd", "/tr me 30004759 noblock"),
+                        ("SlashCmd", "/despawn 88001"),
+                        ("SlashCmd", "/tr me 60003760 noblock"),
+                        ("ClearSessionTimer", 90000003),
+                        ("Dock", 60003760),
+                    ],
                 )
 
                 # Simulate exec_res returning the same injection_id already buffered host-side

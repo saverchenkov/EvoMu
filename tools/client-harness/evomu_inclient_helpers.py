@@ -123,6 +123,17 @@ def _resolve_target_char_id(target_char_id=0):
     return int(_HOST_GM_STATE.get("target_char_id") or 0)
 
 
+def _resolve_target_solar_system_id(target_solar_system_id=0):
+    if target_solar_system_id:
+        return int(target_solar_system_id)
+    sess = getattr(__builtin__, "session", None)
+    if sess is not None:
+        live = int(getattr(sess, "solarsystemid", 0) or getattr(sess, "solarsystemid2", 0) or 0)
+        if live:
+            return live
+    return 0
+
+
 def _configure_host_gm_bridge(cfg=None, ipc=None, target_char_id=0, port=0):
     cfg_dict = cfg if isinstance(cfg, dict) else {}
     if port:
@@ -795,10 +806,14 @@ def _wait_session_attr(attr, expected, timeout_sec=5.0, raise_on_timeout=True):
     return cur
 
 
-def _try_slash(sm, cmd, ipc=None, target_char_id=0, raise_on_error=False):
+def _try_slash(sm, cmd, ipc=None, target_char_id=0, raise_on_error=False, target_solar_system_id=0):
     tgt = _resolve_target_char_id(target_char_id)
+    tgt_sys = _resolve_target_solar_system_id(target_solar_system_id)
+    payload = {"cmd": "slash_cmd", "command": cmd, "target_char_id": tgt}
+    if tgt_sys:
+        payload["target_solar_system_id"] = tgt_sys
     res = _gm_ipc_request(
-        {"cmd": "slash_cmd", "command": cmd, "target_char_id": tgt},
+        payload,
         ipc=ipc,
     )
     if isinstance(res, dict) and res.get("handled"):
@@ -1035,7 +1050,7 @@ def _warp_full(sm, b_obj, tid, stuff_type="item", distance=0.0, ipc=None):
                 continue
             raise
         _sleep_ms(30)
-        adv_ok = bool(_advance_clock(sm, ipc, 240))
+        adv_ok = bool(_advance_clock(sm, ipc, 240, raise_on_error=False))
         _sleep_sim_ms(400)
         _wait_warp_fx_settled(sm, timeout_sec=(4.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok))
         break
@@ -1119,7 +1134,7 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
             if saw_active_stamp and mode != 3:
                 break
 
-    adv_finish_ok = bool(_advance_clock(sm, ipc, 120))
+    adv_finish_ok = bool(_advance_clock(sm, ipc, 120, raise_on_error=False))
     _sleep_sim_ms(400)
     _wait_warp_fx_settled(sm, timeout_sec=(8.0 if adv_finish_ok else 35.0), min_finished=finish_before + 1, allow_time_control=bool(adv_finish_ok))
     _wait_view_settled(sm)
@@ -1217,7 +1232,14 @@ def _dock_station(sm, station_id=60003760, allow_time_control=True, ipc=None):
     bp = michelle.GetBallpark() if (sid and michelle is not None) else None
     ball = bp.GetBall(sid) if (bp is not None and sid) else None
     if ball is not None and int(getattr(ball, "mode", 0) or 0) == 3:
-        _wait_warp_fx_settled(sm, timeout_sec=(6.0 if allow_time_control else 35.0), allow_time_control=allow_time_control)
+        warp_adv_ok = bool(
+            _advance_clock(sm, ipc, 120, allow_time_control=allow_time_control, raise_on_error=False)
+        )
+        _wait_warp_fx_settled(
+            sm,
+            timeout_sec=(6.0 if warp_adv_ok else 35.0),
+            allow_time_control=bool(warp_adv_ok),
+        )
     _wait_view_settled(sm)
     clear_ok = bool(
         _clear_session_timer(
@@ -1277,7 +1299,7 @@ def _advance_clock(sm, ipc, secs, target_char_id=0, allow_time_control=True, rai
             method="AdvanceClock",
         )
         tval = res.get("time")
-        return True if tval is None else tval
+        return True if (tval is None or (isinstance(tval, (int, float)) and tval == 0)) else tval
     if raise_on_error:
         if res is None:
             raise RuntimeError("Host GM bridge unavailable for AdvanceClock(%d, target_char_id=%d)" % (secs_i, tgt))
@@ -1316,14 +1338,14 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
     adv_ok = bool(_advance_clock(sm, ipc, 12, raise_on_error=False))
     _sleep_sim_ms(1200)
     _sleep_ms(1200 if adv_ok else 2000)
-    _wait_warp_fx_settled(sm, timeout_sec=(5.0 if adv_ok else 35.0))
+    _wait_warp_fx_settled(sm, timeout_sec=(5.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok))
     try:
         sm.RemoteSvc("stationSvc").Dock(target_station)
     except Exception:
         _try_slash(sm, "/tr %d" % target_station, ipc=ipc, raise_on_error=True)
         _wait_session_attr("solarsystemid2", target_system, timeout_sec=3.0, raise_on_timeout=True)
         _wait_view_settled(sm)
-        _advance_clock(sm, ipc, 12, raise_on_error=False)
+        adv_ok = bool(_advance_clock(sm, ipc, 12, raise_on_error=False))
         sm.RemoteSvc("stationSvc").Dock(target_station)
     docked_ok = False
     deadline = time.time() + (10.0 if adv_ok else 16.0)

@@ -6139,24 +6139,172 @@ class TestIssue1539HostGmTimeControlRouting(unittest.TestCase):
             RemoteSvc=lambda n: fake_sm.services[n],
         )
 
-        # Case 1: _warp_full uses 4.0s vs 35.0s wait budget on GM success vs failure (e.g. ShipInWarp recovery).
+        # Case 1: _warp_full & _warp_animated drive real _advance_clock through a failing vs succeeding IPC mock
+        # (including time=0 truthiness and retry recovery in _ensure_docked_jita / _dock_station ball.mode==3).
+        class _GmIpcStub:
+            def __init__(self, fail_once=False, ok=True):
+                self.ok = ok
+                self.fail_once = fail_once
+                self.calls = 0
+
+            def request(self, payload, timeout=None):
+                self.calls += 1
+                cmd = payload.get("cmd")
+                if cmd == "advance_clock":
+                    if self.fail_once and self.calls == 1:
+                        return {"ok": False, "error": "gm_unavailable"}
+                    if self.ok:
+                        return {"ok": True, "via": "gm_bridge", "target_char_id": payload.get("target_char_id"), "injection_id": f"inj-{self.calls}", "time": 0}
+                    return {"ok": False, "error": "gm_unavailable"}
+                if cmd == "clear_session_timer":
+                    return {"ok": self.ok, "via": "gm_bridge"}
+                return {"ok": False, "handled": False}
+
         for gm_ok, expected_wait in ((True, 4.0), (False, 35.0)):
             waited_timeouts = []
+            waited_tcs = []
             warp_calls = [0]
             def _warp_cmd(*_a):
                 warp_calls[0] += 1
                 if warp_calls[0] == 1:
                     raise RuntimeError("ShipInWarp")
             fake_beyonce.CmdWarpToStuff = _warp_cmd
+            ipc_stub = _GmIpcStub(ok=gm_ok)
             with mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
                  mock.patch.object(helpers, "_try_slash", return_value=None), \
                  mock.patch.object(helpers, "_sleep_ms"), \
                  mock.patch.object(helpers, "_sleep_sim_ms"), \
                  mock.patch.object(helpers, "_wait_view_settled"), \
-                 mock.patch.object(helpers, "_advance_clock", return_value=gm_ok), \
-                 mock.patch.object(helpers, "_wait_warp_fx_settled", side_effect=lambda *_a, **kw: waited_timeouts.append(kw.get("timeout_sec"))):
-                helpers._warp_full(fake_sm, fake_beyonce, 40009076)
+                 mock.patch.object(helpers, "_wait_warp_fx_settled", side_effect=lambda *_a, **kw: (waited_timeouts.append(kw.get("timeout_sec")), waited_tcs.append(kw.get("allow_time_control")))):
+                helpers._warp_full(fake_sm, fake_beyonce, 40009076, ipc=ipc_stub)
             self.assertEqual(waited_timeouts, [expected_wait, expected_wait])
+            self.assertEqual(waited_tcs, [gm_ok, gm_ok])
+
+        # _warp_animated fallback wait on GM failure vs success (driving real _advance_clock)
+        for gm_ok, expected_anim_wait in ((True, 8.0), (False, 35.0)):
+            anim_timeouts = []
+            anim_tcs = []
+            fake_beyonce.CmdWarpToStuff = lambda *_a: None
+            ipc_stub = _GmIpcStub(ok=gm_ok)
+            sess_a = types.SimpleNamespace(
+                userid=1, charid=90000001, solarsystemid=30000142, solarsystemid2=30000142,
+                stationid=None, structureid=None, shipid=1001, mutating=0, changing=None,
+            )
+            fast_ball = types.SimpleNamespace(mode=3, effectStamp=10, vx=3.0e9, vy=0.0, vz=0.0, surfaceDist=1000.0)
+            fast_bp = types.SimpleNamespace(GetBall=lambda _bid: fast_ball, GetSurfaceDist=lambda _a, _b: 1000.0, slimItems={})
+            fast_fx = types.SimpleNamespace(balls={1001: {1: types.SimpleNamespace(hasExploded=True, gfx=types.SimpleNamespace(display=True))}})
+            fast_sm = types.SimpleNamespace(
+                services={"michelle": types.SimpleNamespace(GetBallpark=lambda: fast_bp), "FxSequencer": fast_fx, "beyonce": fake_beyonce},
+                GetService=lambda n: fast_sm.services.get(n),
+                RemoteSvc=lambda n: fast_sm.services[n],
+            )
+            with mock.patch.dict(builtins.__dict__, {"session": sess_a, "sm": fast_sm}), \
+                 mock.patch.object(helpers, "_try_slash", return_value=None), \
+                 mock.patch.object(helpers, "_ensure_warp_signal_tracker"), \
+                 mock.patch.object(helpers, "_sleep_ms"), \
+                 mock.patch.object(helpers, "_sleep_sim_ms"), \
+                 mock.patch.object(helpers, "_wait_view_settled"), \
+                 mock.patch.dict(helpers._WARP_SIGNAL_STATE, {"hooked": False, "started": 0, "finished": 0}), \
+                 mock.patch.object(helpers, "_wait_warp_fx_settled", side_effect=lambda *_a, **kw: (anim_timeouts.append(kw.get("timeout_sec")), anim_tcs.append(kw.get("allow_time_control")))):
+                helpers._warp_animated(fast_sm, fake_beyonce, 40009076, max_ticks=1, ipc=ipc_stub)
+            self.assertEqual(anim_timeouts, [expected_anim_wait])
+            self.assertEqual(anim_tcs, [gm_ok])
+
+        # _dock_station with active warp (ball.mode == 3) waits for GM AdvanceClock instead of blindly using 6.0s
+        for gm_ok, expected_pre_wait in ((True, 6.0), (False, 35.0)):
+            pre_dock_waits = []
+            pre_dock_tcs = []
+            ipc_stub = _GmIpcStub(ok=gm_ok)
+            warping_bp_d = types.SimpleNamespace(GetBall=lambda _bid: types.SimpleNamespace(mode=3, surfaceDist=1000.0))
+            sess.stationid = None
+            sess.solarsystemid = 30000142
+            fake_sm_w_d = types.SimpleNamespace(
+                services={
+                    "michelle": types.SimpleNamespace(GetBallpark=lambda: warping_bp_d),
+                    "stationSvc": types.SimpleNamespace(Dock=lambda sid: (setattr(sess, "stationid", sid), setattr(sess, "solarsystemid", None))),
+                    "beyonce": fake_beyonce,
+                },
+                GetService=lambda n: fake_sm_w_d.services.get(n),
+                RemoteSvc=lambda n: fake_sm_w_d.services[n],
+            )
+            with mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm_w_d}), \
+                 mock.patch.object(helpers, "_wait_session_timer_clear"), \
+                 mock.patch.object(helpers, "_wait_view_settled"), \
+                 mock.patch.object(helpers, "_ensure_view"), \
+                 mock.patch.object(helpers, "_wait_warp_fx_settled", side_effect=lambda *_a, **kw: (pre_dock_waits.append(kw.get("timeout_sec")), pre_dock_tcs.append(kw.get("allow_time_control")))):
+                helpers._dock_station(fake_sm_w_d, 60003760, ipc=ipc_stub, allow_time_control=True)
+            self.assertEqual(pre_dock_waits, [expected_pre_wait])
+            self.assertEqual(pre_dock_tcs, [gm_ok])
+
+        # _ensure_docked_jita propagates allow_time_control=bool(adv_ok) and refreshes adv_ok on retry
+        sess_j = types.SimpleNamespace(
+            userid=1, charid=90000001, solarsystemid=30000142, solarsystemid2=30000142,
+            stationid=None, structureid=None, shipid=1001, mutating=0, changing=None,
+        )
+        dock_tries = [0]
+        def _retry_dock(sid):
+            dock_tries[0] += 1
+            if dock_tries[0] == 1:
+                raise RuntimeError("OutsideDockingPerimeter")
+            sess_j.stationid = sid
+            sess_j.solarsystemid = None
+        seen_jita_tcs = []
+        ipc_retry = _GmIpcStub(fail_once=True, ok=True)
+        fake_sm_j = types.SimpleNamespace(
+            services={
+                "michelle": fake_mich,
+                "stationSvc": types.SimpleNamespace(Dock=_retry_dock),
+                "beyonce": types.SimpleNamespace(MachoBindObject=lambda *_a: (types.SimpleNamespace(CmdStop=lambda: None), None)),
+            },
+            GetService=lambda n: fake_sm_j.services.get(n),
+            RemoteSvc=lambda n: fake_sm_j.services[n],
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": sess_j, "sm": fake_sm_j}), \
+             mock.patch.object(helpers, "_try_slash", return_value=None), \
+             mock.patch.object(helpers, "_wait_session_attr"), \
+             mock.patch.object(helpers, "_wait_view_settled"), \
+             mock.patch.object(helpers, "_ensure_view"), \
+             mock.patch.object(helpers, "_sleep_ms"), \
+             mock.patch.object(helpers, "_sleep_sim_ms"), \
+             mock.patch.object(helpers, "_wait_warp_fx_settled", side_effect=lambda *_a, **kw: seen_jita_tcs.append(kw.get("allow_time_control"))):
+            helpers._ensure_docked_jita(fake_sm_j, ipc_retry, station_id=60003760, system_id=30000142)
+        self.assertEqual(dock_tries[0], 2)
+        self.assertEqual(ipc_retry.calls, 3)
+        self.assertEqual(seen_jita_tcs, [None, False])
+
+        sess_j_ok = types.SimpleNamespace(
+            userid=1, charid=90000001, solarsystemid=30000142, solarsystemid2=30000142,
+            stationid=None, structureid=None, shipid=1001, mutating=0, changing=None,
+        )
+        dock_tries_ok = [0]
+        def _retry_dock_ok(sid):
+            dock_tries_ok[0] += 1
+            if dock_tries_ok[0] == 1:
+                raise RuntimeError("OutsideDockingPerimeter")
+            sess_j_ok.stationid = sid
+            sess_j_ok.solarsystemid = None
+        seen_jita_ok_tcs = []
+        ipc_ok = _GmIpcStub(fail_once=False, ok=True)
+        fake_sm_j_ok = types.SimpleNamespace(
+            services={
+                "michelle": fake_mich,
+                "stationSvc": types.SimpleNamespace(Dock=_retry_dock_ok),
+                "beyonce": types.SimpleNamespace(MachoBindObject=lambda *_a: (types.SimpleNamespace(CmdStop=lambda: None), None)),
+            },
+            GetService=lambda n: fake_sm_j_ok.services.get(n),
+            RemoteSvc=lambda n: fake_sm_j_ok.services[n],
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": sess_j_ok, "sm": fake_sm_j_ok}), \
+             mock.patch.object(helpers, "_try_slash", return_value=None), \
+             mock.patch.object(helpers, "_wait_session_attr"), \
+             mock.patch.object(helpers, "_wait_view_settled"), \
+             mock.patch.object(helpers, "_ensure_view"), \
+             mock.patch.object(helpers, "_sleep_ms"), \
+             mock.patch.object(helpers, "_sleep_sim_ms"), \
+             mock.patch.object(helpers, "_wait_warp_fx_settled", side_effect=lambda *_a, **kw: seen_jita_ok_tcs.append(kw.get("allow_time_control"))):
+            helpers._ensure_docked_jita(fake_sm_j_ok, ipc_ok, station_id=60003760, system_id=30000142)
+        self.assertEqual(dock_tries_ok[0], 2)
+        self.assertEqual(seen_jita_ok_tcs, [None, True])
 
         # Check direct fallback timeout scaling inside _wait_warp_fx_settled when warp is active.
         warp_clock = {"t": 100.0}
@@ -6168,6 +6316,10 @@ class TestIssue1539HostGmTimeControlRouting(unittest.TestCase):
         for gm_ok in (True, False):
             warp_clock["t"] = 100.0
             seen_balls = []
+            sess_w = types.SimpleNamespace(
+                userid=1, charid=90000001, solarsystemid=30000142, solarsystemid2=30000142,
+                stationid=None, structureid=None, shipid=1001, mutating=0, changing=None,
+            )
             warping_bp = types.SimpleNamespace(
                 GetBall=lambda _bid: (seen_balls.append(warp_clock["t"]), types.SimpleNamespace(mode=3))[1]
             )
@@ -6177,7 +6329,7 @@ class TestIssue1539HostGmTimeControlRouting(unittest.TestCase):
                 GetService=lambda n: fake_sm_w.services.get(n),
                 RemoteSvc=lambda n: fake_sm_w.services[n],
             )
-            with mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm_w}), \
+            with mock.patch.dict(builtins.__dict__, {"session": sess_w, "sm": fake_sm_w}), \
                  mock.patch.object(helpers, "_advance_clock", return_value=gm_ok), \
                  mock.patch.object(helpers, "_ensure_warp_signal_tracker", return_value=None), \
                  mock.patch.object(helpers, "_sleep_sim_ms"), \
@@ -6374,6 +6526,76 @@ class TestIssue1539HostGmTimeControlRouting(unittest.TestCase):
         self.assertEqual(seen_settle_timeouts["jump_false"], [35.0])
         self.assertLess(dock_wait_spans[True], dock_wait_spans[False])
         self.assertLess(jump_wait_spans[True], jump_wait_spans[False])
+
+    def test_hook_jump_gate_within_150km_no_unbound_local_error(self):
+        hook = _load_hook_with_py2_stubs()
+        real_helpers = _load_helpers_with_py2_stubs()
+        hook.H = real_helpers
+        real_helpers._reset_sim_time_telemetry()
+
+        for allow_tc in (True, False):
+            sess = types.SimpleNamespace(
+                userid=1, charid=90000001, solarsystemid=30000142, solarsystemid2=30000142,
+                stationid=None, structureid=None, shipid=2001, mutating=0, changing=None,
+            )
+            dist = {"sd": 10000.0}
+            follow_calls = []
+            warp_calls = []
+            jump_calls = []
+            fake_bp = types.SimpleNamespace(
+                slimItems={50001234: types.SimpleNamespace(groupID=10, name="Stargate (Perimeter)")},
+                GetBall=lambda _bid: types.SimpleNamespace(mode=2, surfaceDist=dist["sd"]),
+                GetSurfaceDist=lambda _a, _b: dist["sd"],
+            )
+            def _on_follow(_gid, _range):
+                follow_calls.append(_gid)
+                dist["sd"] = 1000.0
+            fake_beyonce = types.SimpleNamespace(
+                CmdWarpToStuff=lambda *_a: warp_calls.append(_a),
+                CmdFollowBall=_on_follow,
+                CmdStargateJump=lambda gate_id: (jump_calls.append(gate_id), setattr(sess, "solarsystemid2", 30000144)),
+            )
+            fake_map = types.SimpleNamespace(GetSolarsystemItems=lambda _s, *_a: [], GetDestinationPath=lambda *_a: [])
+            fake_sm = types.SimpleNamespace(
+                services={
+                    "michelle": types.SimpleNamespace(GetBallpark=lambda: fake_bp),
+                    "map": fake_map,
+                    "beyonce": fake_beyonce,
+                },
+                GetService=lambda n: fake_sm.services.get(n),
+                RemoteSvc=lambda n: fake_sm.services[n],
+            )
+            ipc_stub = types.SimpleNamespace(
+                request=lambda payload, timeout=None: (
+                    {"ok": True, "via": "gm_bridge", "target_char_id": 90000001, "injection_id": "inj-10km", "time": 133000000}
+                    if allow_tc
+                    else {"ok": False, "reason": "host_time_control_disabled"}
+                )
+            )
+            fake_es = types.SimpleNamespace(_read_guard_hits=lambda: [], _wrap_macho_rpc_hooks=lambda *_a: None)
+            t_clock = {"t": 3000.0}
+            with mock.patch.dict(sys.modules, {"evomu_site": fake_es}), \
+                 mock.patch.object(real_helpers, "_HOST_GM_STATE", {"port": 0, "client": ipc_stub, "target_char_id": 90000001, "sim_seq": 0, "sim_events": []}), \
+                 mock.patch.object(builtins, "session", sess, create=True), \
+                 mock.patch.object(real_helpers.__builtin__, "session", sess, create=True), \
+                 mock.patch.object(hook.time, "time", side_effect=lambda: (t_clock.__setitem__("t", t_clock["t"] + 0.1), t_clock["t"])[1]), \
+                 mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+                 mock.patch.object(hook, "_install_warp_telemetry"), \
+                 mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}), \
+                 mock.patch.object(real_helpers, "_get_beyonce", return_value=fake_beyonce), \
+                 mock.patch.object(real_helpers, "_wait_session_timer_clear", return_value=None), \
+                 mock.patch.object(real_helpers, "_wait_view_settled"), \
+                 mock.patch.object(real_helpers, "_ensure_view"), \
+                 mock.patch.object(real_helpers, "_sleep_ms"), \
+                 mock.patch.object(real_helpers, "_sleep_sim_ms"):
+                res_jump = hook._execute_action(
+                    fake_sm,
+                    {"type": "jump_gate", "target": "50001234", "item_id": 50001234, "allow_time_control": allow_tc},
+                )
+            self.assertEqual(warp_calls, [])
+            self.assertEqual(follow_calls, [50001234])
+            self.assertTrue(len(jump_calls) == 1)
+            self.assertTrue(res_jump.get("ok"), res_jump)
 
 
 if __name__ == "__main__":

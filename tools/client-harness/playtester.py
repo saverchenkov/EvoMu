@@ -7438,6 +7438,9 @@ class PlaytesterRunner:
             return bool(explicit)
         return True
 
+    def _gm_slash_requests_allowed(self) -> bool:
+        return True
+
     def _ensure_host_gm_bridge_server(self) -> int:
         srv = getattr(self, "_host_gm_server", None)
         if srv is not None and int(getattr(srv, "port", 0) or 0) > 0:
@@ -7477,6 +7480,46 @@ class PlaytesterRunner:
             log_warn(f"GM bridge ClearSessionTimer(target={tgt}) failed: {exc}")
             return False
 
+    def _execute_gm_slash_with_system_context(
+        self,
+        gm_sm: Any,
+        rewritten: str,
+        target_solar_system_id: int = 0,
+    ) -> Any:
+        slash_svc = gm_sm.RemoteSvc("slash")
+        verb = rewritten.split()[0].lower() if str(rewritten).startswith("/") else ""
+        try:
+            target_sys = int(target_solar_system_id or 0)
+        except Exception:
+            target_sys = 0
+        home_sys = 30000142
+        home_dock = 60003760
+        if verb in ("/despawn", "/unspawn") and target_sys > 0 and target_sys != home_sys:
+            slash_svc.SlashCmd(f"/tr me {target_sys} noblock")
+            try:
+                return slash_svc.SlashCmd(rewritten)
+            finally:
+                try:
+                    slash_svc.SlashCmd(f"/tr me {home_dock} noblock")
+                except Exception:
+                    try:
+                        slash_svc.SlashCmd(f"/tr me {home_sys} noblock")
+                    except Exception:
+                        pass
+                try:
+                    gm_cid = int(self._gm_bridge_credentials()[2] or 0)
+                    if gm_cid > 0:
+                        gm_sm.RemoteSvc("timeControl").ClearSessionTimer(gm_cid)
+                    else:
+                        gm_sm.RemoteSvc("timeControl").ClearSessionTimer()
+                except Exception:
+                    pass
+                try:
+                    gm_sm.RemoteSvc("stationSvc").Dock(home_dock)
+                except Exception:
+                    pass
+        return slash_svc.SlashCmd(rewritten)
+
     def _handle_host_gm_rpc_request(self, req: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(req, dict):
             return {"ok": False, "error": "invalid_request"}
@@ -7515,6 +7558,44 @@ class PlaytesterRunner:
             if not ok:
                 return {"ok": False, "error": f"gm_bridge ClearSessionTimer({tgt}) failed"}
             return {"ok": True, "via": "gm_bridge", "target_char_id": tgt}
+        if cmd == "slash_cmd":
+            if not self._gm_slash_requests_allowed():
+                return {"ok": False, "handled": False, "reason": "host_gm_slash_disabled"}
+            raw_cmd = str(req.get("command") or "").strip()
+            if not raw_cmd.startswith("/"):
+                return {"ok": False, "handled": True, "error": f"invalid_slash_cmd:{raw_cmd}"}
+            rewritten = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
+            try:
+                tgt_sys = int(req.get("target_solar_system_id") or 0)
+            except Exception:
+                tgt_sys = 0
+            try:
+                with self._get_gm_bridge_lock():
+                    gm_sm = self._ensure_gm_bridge()
+                    res = self._execute_gm_slash_with_system_context(
+                        gm_sm,
+                        rewritten,
+                        target_solar_system_id=tgt_sys,
+                    )
+                return {
+                    "ok": True,
+                    "handled": True,
+                    "via": "gm_bridge",
+                    "command": rewritten,
+                    "target_char_id": tgt,
+                    "target_solar_system_id": tgt_sys,
+                    "result": res,
+                }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "handled": True,
+                    "via": "gm_bridge",
+                    "command": rewritten,
+                    "target_char_id": tgt,
+                    "target_solar_system_id": tgt_sys,
+                    "error": repr(exc),
+                }
         return {"ok": False, "handled": False, "error": f"unsupported_cmd:{cmd}"}
 
     @staticmethod
@@ -7855,7 +7936,15 @@ class PlaytesterRunner:
                     arg = str(act.get("target") or act.get("command") or default_arg).strip()
                     raw_cmd = arg if arg.startswith("/") else f"{base_cmd} {arg}".strip()
                     cmd = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
-                    gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                    try:
+                        act_sys = int(act.get("target_solar_system_id") or 0)
+                    except Exception:
+                        act_sys = 0
+                    gm_res = self._execute_gm_slash_with_system_context(
+                        gm_sm,
+                        cmd,
+                        target_solar_system_id=act_sys,
+                    )
                     calls_recorded.append({
                         "seq": 0,
                         "service": "slash",
@@ -7899,7 +7988,15 @@ class PlaytesterRunner:
                         or str(act.get("slash_cmd") or act.get("target") or act.get("text") or act.get("input") or "").strip()
                     )
                     cmd = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
-                    gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                    try:
+                        act_sys = int(act.get("target_solar_system_id") or 0)
+                    except Exception:
+                        act_sys = 0
+                    gm_res = self._execute_gm_slash_with_system_context(
+                        gm_sm,
+                        cmd,
+                        target_solar_system_id=act_sys,
+                    )
                     calls_recorded.append({
                         "seq": 0,
                         "service": "slash",
@@ -10931,6 +11028,9 @@ class ScenarioRunner(PlaytesterRunner):
             self._scenario_requires_gm()
             and getattr(self, "_active_step_allows_host_time_control", False)
         )
+
+    def _gm_slash_requests_allowed(self) -> bool:
+        return self._scenario_requires_gm()
 
     def _host_gm_port_for_client(self, ensure: bool = False) -> int:
         if not self._scenario_requires_gm():

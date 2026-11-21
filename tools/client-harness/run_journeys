@@ -847,14 +847,53 @@ class IpcCoordinator(object):
                     raise
         raise RuntimeError(str(last_exc) if last_exc is not None else "GM ClearSessionTimer failed")
 
-    def _gm_slash_cmd(self, command, target_char_id=0):
+    def _execute_gm_slash_with_system_context(self, sm_gm, rewritten, target_solar_system_id=0):
+        slash_svc = sm_gm.RemoteSvc("slash")
+        verb = rewritten.split()[0].lower() if str(rewritten).startswith("/") else ""
+        try:
+            target_sys = int(target_solar_system_id or 0)
+        except Exception:
+            target_sys = 0
+        home_sys = 30000142
+        home_dock = 60003760
+        if verb in ("/despawn", "/unspawn") and target_sys > 0 and target_sys != home_sys:
+            slash_svc.SlashCmd("/tr me %d noblock" % target_sys)
+            try:
+                return slash_svc.SlashCmd(rewritten)
+            finally:
+                try:
+                    slash_svc.SlashCmd("/tr me %d noblock" % home_dock)
+                except Exception:
+                    try:
+                        slash_svc.SlashCmd("/tr me %d noblock" % home_sys)
+                    except Exception:
+                        pass
+                try:
+                    gm_cid = int(getattr(self, "gm_char_id", 0) or 0)
+                    if gm_cid > 0:
+                        sm_gm.RemoteSvc("timeControl").ClearSessionTimer(gm_cid)
+                    else:
+                        sm_gm.RemoteSvc("timeControl").ClearSessionTimer()
+                except Exception:
+                    pass
+                try:
+                    sm_gm.RemoteSvc("stationSvc").Dock(home_dock)
+                except Exception:
+                    pass
+        return slash_svc.SlashCmd(rewritten)
+
+    def _gm_slash_cmd(self, command, target_char_id=0, target_solar_system_id=0):
         tgt = int(target_char_id or self.default_target_char_id or 90000001)
         rewritten = _rewrite_gm_slash_for_target(command, tgt)
         last_exc = None
         for attempt in range(2):
             try:
                 sm_gm = self._ensure_gm(force=(attempt > 0))
-                res = sm_gm.RemoteSvc("slash").SlashCmd(rewritten)
+                res = self._execute_gm_slash_with_system_context(
+                    sm_gm,
+                    rewritten,
+                    target_solar_system_id=target_solar_system_id,
+                )
                 return {
                     "ok": True,
                     "handled": True,
@@ -862,6 +901,7 @@ class IpcCoordinator(object):
                     "command": rewritten,
                     "via": "gm_bridge",
                     "target_char_id": tgt,
+                    "target_solar_system_id": int(target_solar_system_id or 0),
                 }
             except (OSError, EOFError, RuntimeError) as exc:
                 last_exc = exc
@@ -872,20 +912,6 @@ class IpcCoordinator(object):
     def _run_c2_cmd(self, cmd, req):
         if cmd == "ensure_client2_ready":
             return {"ok": True, "char2_id": self.char2_id}
-        if cmd == "advance_clock":
-            return self._gm_advance_clock(
-                int(req.get("secs", 12)),
-                target_char_id=int(req.get("target_char_id") or 0),
-            )
-        if cmd == "clear_session_timer":
-            return self._gm_clear_session_timer(
-                target_char_id=int(req.get("target_char_id") or 0),
-            )
-        if cmd == "slash_cmd":
-            return self._gm_slash_cmd(
-                str(req.get("command") or ""),
-                target_char_id=int(req.get("target_char_id") or 0),
-            )
         if cmd == "test_chat_with_c2":
             self.sm2.RemoteSvc("XmppChatMgr").ResyncSystemChannelAccess(30000142)
             return {"ok": True}
@@ -1016,6 +1042,7 @@ class IpcCoordinator(object):
                     return self._gm_slash_cmd(
                         str(req.get("command") or ""),
                         target_char_id=int(req.get("target_char_id") or 0),
+                        target_solar_system_id=int(req.get("target_solar_system_id") or 0),
                     )
                 except Exception as exc:
                     return {"ok": False, "handled": True, "via": "gm_bridge", "error": repr(exc)}

@@ -1776,12 +1776,17 @@ class RunJourneysIsolationTests(unittest.TestCase):
                     gm_calls.append(("slash.SlashCmd", str(cmd)))
                     return {"ok": True}
 
+                def Dock(self, station_id):
+                    gm_calls.append(("stationSvc.Dock", int(station_id)))
+                    return {"ok": True}
+
             def RemoteSvc(self, name):
                 return self._Svc(name)
 
         ipc = rj.IpcCoordinator("127.0.0.1", 26000, os.path.join(self.tmp, "c2.log"), {})
         try:
             ipc.sm_gm = _FakeGmSm()
+            ipc.gm_char_id = 90000003
             ipc.b_gm = types.SimpleNamespace(connected=True, close=lambda: None)
 
             adv = ipc._handle_cmd({"cmd": "advance_clock", "secs": 24, "target_char_id": 90000001})
@@ -1801,6 +1806,24 @@ class RunJourneysIsolationTests(unittest.TestCase):
             sl_upwell = ipc._handle_cmd({"cmd": "slash_cmd", "command": "/upwelltimer 1000000999", "target_char_id": 90000001})
             self.assertTrue(sl_upwell["ok"])
 
+            # Off-Jita /despawn (e.g. Abyssal 32000001) translocates GM to target system, runs /despawn, and restores Jita dock
+            sl_despawn_aby = ipc._handle_cmd({
+                "cmd": "slash_cmd",
+                "command": "/despawn 77001",
+                "target_char_id": 90000001,
+                "target_solar_system_id": 32000001,
+            })
+            self.assertTrue(sl_despawn_aby["ok"])
+
+            # Same-system (Jita 30000142) /despawn runs directly without /tr
+            sl_despawn_jita = ipc._handle_cmd({
+                "cmd": "slash_cmd",
+                "command": "/despawn 77002",
+                "target_char_id": 90000001,
+                "target_solar_system_id": 30000142,
+            })
+            self.assertTrue(sl_despawn_jita["ok"])
+
             self.assertEqual(
                 gm_calls,
                 [
@@ -1808,6 +1831,12 @@ class RunJourneysIsolationTests(unittest.TestCase):
                     ("timeControl.ClearSessionTimer", 90000001),
                     ("slash.SlashCmd", "/completeskills 90000001 all"),
                     ("slash.SlashCmd", "/upwelltimer 1000000999"),
+                    ("slash.SlashCmd", "/tr me 32000001 noblock"),
+                    ("slash.SlashCmd", "/despawn 77001"),
+                    ("slash.SlashCmd", "/tr me 60003760 noblock"),
+                    ("timeControl.ClearSessionTimer", 90000003),
+                    ("stationSvc.Dock", 60003760),
+                    ("slash.SlashCmd", "/despawn 77002"),
                 ],
             )
 
