@@ -17,6 +17,7 @@
 //! - **Expectations version & SHA-256 hash lock:** Verifies `client_expectations.json` version and
 //!   SHA-256 digest against [`ClientContractRatchet`].
 
+use crate::arch_debt_ratchet::{validate_per_file_baseline, validate_per_file_counts};
 use eve_db::WorldRepository;
 use eve_proto::quasar::sha256_hex;
 use eve_proto::PyRep;
@@ -2057,10 +2058,6 @@ pub fn validate_notification_for_event(
     validate_notification_contract(lookup, notify_map, event, nargs)
 }
 
-/// Ratchet ceiling on non-test `BridgeRpcError::user_error(` call sites in `crates/eve-server/src`
-/// (`C-5`, `#929`; reduced from `319` on `main` to `242`).
-pub const UNTYPED_USER_ERROR_RATCHET_CEILING: usize = 242;
-
 /// Validates every [`eve_proto::UserErrorKey`] variant against V24.01 `res:/staticdata/dialogs.static`
 /// (`SdeRegistry::load_dialogs`) or [`eve_proto::V24_PROGRAMMATIC_USER_ERROR_KEYS`] (`C-5`, `#929`).
 pub fn validate_user_error_catalogue(sde: &SdeRegistry) -> Result<usize, String> {
@@ -2206,16 +2203,90 @@ pub fn validate_user_error_labels(sde: &SdeRegistry, crates_dir: &Path) -> Resul
     Ok(checked)
 }
 
-/// Counts non-test `BridgeRpcError::user_error(` call sites under `eve_server_src_dir`.
-pub fn count_untyped_user_error_call_sites(eve_server_src_dir: &Path) -> Result<usize, String> {
-    fn walk_dir(dir: &Path, total: &mut usize) -> Result<(), String> {
+/// Per-file v2 falling ratchet loaded from
+/// `crates/eve-testkit/ratchets/untyped_user_error_ratchet.json` (`C-5`, `#929`, `#1538`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UntypedUserErrorRatchet {
+    pub version: u32,
+    #[serde(default)]
+    pub owning_issue: Option<u64>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub files: BTreeMap<String, usize>,
+}
+
+impl UntypedUserErrorRatchet {
+    /// Returns the repository path to
+    /// `crates/eve-testkit/ratchets/untyped_user_error_ratchet.json`.
+    pub fn default_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("ratchets")
+            .join("untyped_user_error_ratchet.json")
+    }
+
+    /// Loads `untyped_user_error_ratchet.json` from its default repository path.
+    pub fn load_default() -> Result<Self, String> {
+        Self::load_from_path(&Self::default_path())
+    }
+
+    /// Loads an [`UntypedUserErrorRatchet`] from `path` and validates v2 baseline invariants.
+    pub fn load_from_path(path: &Path) -> Result<Self, String> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        let parsed: Self = serde_json::from_str(&raw)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+        parsed.validate_schema()?;
+        Ok(parsed)
+    }
+
+    fn validate_schema(&self) -> Result<(), String> {
+        if self.version != 2 {
+            return Err(format!(
+                "Unsupported untyped_user_error_ratchet version {} (expected 2)",
+                self.version
+            ));
+        }
+        validate_per_file_baseline("untyped_user_error", false, &self.files)
+    }
+
+    /// Enforces `observed[file] <= self.files.get(file).unwrap_or(0)` across all files.
+    pub fn assert_ratchet(&self, observed: &BTreeMap<String, usize>) -> Result<(), String> {
+        self.validate_schema()?;
+        validate_per_file_counts(
+            "untyped_user_error (BridgeRpcError::user_error; use ClientError::User / from_user_key / user_error_with_args, #929)",
+            false,
+            &self.files,
+            observed,
+        )
+    }
+
+    /// Scans `eve_server_src_dir`, validates per-file ceilings, and returns total remaining sites.
+    pub fn verify_dir(&self, eve_server_src_dir: &Path) -> Result<usize, String> {
+        let observed = scan_untyped_user_error_per_file(eve_server_src_dir)?;
+        self.assert_ratchet(&observed)?;
+        Ok(observed.values().sum())
+    }
+}
+
+/// Scans non-test `.rs` files under `eve_server_src_dir` for raw `BridgeRpcError::user_error(`
+/// call sites and returns positive per-file counts keyed relative to `eve_server_src_dir` with `/`
+/// separators.
+pub fn scan_untyped_user_error_per_file(
+    eve_server_src_dir: &Path,
+) -> Result<BTreeMap<String, usize>, String> {
+    fn walk_dir(
+        base: &Path,
+        dir: &Path,
+        out: &mut BTreeMap<String, usize>,
+    ) -> Result<(), String> {
         let entries =
             std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
         for entry in entries {
             let entry = entry.map_err(|e| format!("dir entry in {}: {e}", dir.display()))?;
             let path = entry.path();
             if path.is_dir() {
-                walk_dir(&path, total)?;
+                walk_dir(base, &path, out)?;
             } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
                 let fname = path
                     .file_name()
@@ -2226,25 +2297,33 @@ pub fn count_untyped_user_error_call_sites(eve_server_src_dir: &Path) -> Result<
                 }
                 let src = std::fs::read_to_string(&path)
                     .map_err(|e| format!("read {}: {e}", path.display()))?;
-                *total += src.matches("BridgeRpcError::user_error(").count();
+                let count = src.matches("BridgeRpcError::user_error(").count();
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(base)
+                        .map_err(|e| format!("strip_prefix {}: {e}", path.display()))?;
+                    out.insert(rel.to_string_lossy().replace('\\', "/"), count);
+                }
             }
         }
         Ok(())
     }
-    let mut total = 0;
-    walk_dir(eve_server_src_dir, &mut total)?;
-    Ok(total)
+    let mut per_file = BTreeMap::new();
+    walk_dir(eve_server_src_dir, eve_server_src_dir, &mut per_file)?;
+    Ok(per_file)
 }
 
-/// Enforces the falling ratchet on raw `BridgeRpcError::user_error(` call sites (`C-5`, `#929`).
+/// Counts non-test `BridgeRpcError::user_error(` call sites under `eve_server_src_dir`.
+pub fn count_untyped_user_error_call_sites(eve_server_src_dir: &Path) -> Result<usize, String> {
+    Ok(scan_untyped_user_error_per_file(eve_server_src_dir)?
+        .values()
+        .sum())
+}
+
+/// Enforces the v2 per-file falling ratchet on raw `BridgeRpcError::user_error(` call sites
+/// (`C-5`, `#929`, `#1538`).
 pub fn check_untyped_user_error_ratchet(eve_server_src_dir: &Path) -> Result<usize, String> {
-    let count = count_untyped_user_error_call_sites(eve_server_src_dir)?;
-    if count > UNTYPED_USER_ERROR_RATCHET_CEILING {
-        return Err(format!(
-            "Untyped `BridgeRpcError::user_error(` call-site count {count} exceeds ratchet ceiling {UNTYPED_USER_ERROR_RATCHET_CEILING}; use `ClientError::User` / `BridgeRpcError::from_user_key` / `BridgeRpcError::user_error_with_args` instead (#929)"
-        ));
-    }
-    Ok(count)
+    UntypedUserErrorRatchet::load_default()?.verify_dir(eve_server_src_dir)
 }
 
 #[cfg(test)]
@@ -2696,12 +2775,100 @@ mod tests {
         assert!(labels_checked >= 1, "expected at least one validated localization label");
 
         let server_src = crates_dir.join("eve-server/src");
-        let count = check_untyped_user_error_ratchet(&server_src)
-            .expect("untyped BridgeRpcError::user_error ratchet must hold");
+        let ratchet = UntypedUserErrorRatchet::load_default()
+            .expect("load untyped_user_error_ratchet.json");
+        assert_eq!(ratchet.version, 2);
+        let count = ratchet
+            .verify_dir(&server_src)
+            .expect("untyped BridgeRpcError::user_error per-file ratchet must hold");
         assert_eq!(
-            count, UNTYPED_USER_ERROR_RATCHET_CEILING,
-            "if you migrated more BridgeRpcError::user_error call sites, lower UNTYPED_USER_ERROR_RATCHET_CEILING to {count}"
+            count,
+            count_untyped_user_error_call_sites(&server_src).expect("count sites")
         );
+        assert_eq!(
+            count,
+            check_untyped_user_error_ratchet(&server_src).expect("default ratchet check")
+        );
+    }
+
+    #[test]
+    fn untyped_user_error_per_file_ratchet_enforces_ceilings_and_allows_decreases() {
+        let tmp = std::env::temp_dir().join(format!(
+            "evomu_untyped_ue_ratchet_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("services")).expect("mkdir services");
+        std::fs::write(
+            tmp.join("services/alpha.rs"),
+            "fn a() { let _ = BridgeRpcError::user_error(\"a\"); let _ = BridgeRpcError::user_error(\"b\"); }\n",
+        )
+        .expect("write alpha");
+        std::fs::write(
+            tmp.join("services/beta.rs"),
+            "fn b() { let _ = BridgeRpcError::user_error(\"c\"); }\n",
+        )
+        .expect("write beta");
+        // Files with `test` in filename remain excluded from untyped_user_error scans.
+        std::fs::write(
+            tmp.join("services/beta_tests.rs"),
+            "fn t() { let _ = BridgeRpcError::user_error(\"t\"); }\n",
+        )
+        .expect("write beta_tests");
+
+        let ratchet = UntypedUserErrorRatchet {
+            version: 2,
+            owning_issue: Some(929),
+            description: None,
+            files: BTreeMap::from([
+                ("services/alpha.rs".to_string(), 2),
+                ("services/beta.rs".to_string(), 1),
+            ]),
+        };
+        assert_eq!(ratchet.verify_dir(&tmp).expect("baseline passes"), 3);
+
+        // Decreasing one file and clearing another passes without updating baseline.
+        std::fs::write(
+            tmp.join("services/alpha.rs"),
+            "fn a() { let _ = BridgeRpcError::user_error(\"a\"); }\n",
+        )
+        .expect("lower alpha");
+        std::fs::write(tmp.join("services/beta.rs"), "fn b() {}\n").expect("clear beta");
+        assert_eq!(ratchet.verify_dir(&tmp).expect("decrease passes"), 1);
+
+        // Bumping an already-baselined file fails even when global count <= baseline sum.
+        std::fs::write(
+            tmp.join("services/beta.rs"),
+            "fn b() { let _ = (BridgeRpcError::user_error(\"1\"), BridgeRpcError::user_error(\"2\")); }\n",
+        )
+        .expect("bump beta");
+        let bump_err = ratchet.verify_dir(&tmp).unwrap_err();
+        assert!(bump_err.contains("services/beta.rs: observed 2 > max 1"), "{bump_err}");
+        std::fs::write(tmp.join("services/beta.rs"), "fn b() {}\n").expect("restore beta");
+
+        // Adding a call site in an unlisted file fails.
+        std::fs::write(
+            tmp.join("services/gamma.rs"),
+            "fn g() { let _ = BridgeRpcError::user_error(\"g\"); }\n",
+        )
+        .expect("write gamma");
+        let unlisted_err = ratchet.verify_dir(&tmp).unwrap_err();
+        assert!(
+            unlisted_err.contains("services/gamma.rs: observed 1 > max 0"),
+            "{unlisted_err}"
+        );
+        std::fs::remove_file(tmp.join("services/gamma.rs")).expect("rm gamma");
+
+        // Explicit 0 entry in baseline fails schema check.
+        let bad_zero = UntypedUserErrorRatchet {
+            version: 2,
+            owning_issue: Some(929),
+            description: None,
+            files: BTreeMap::from([("services/alpha.rs".to_string(), 0)]),
+        };
+        assert!(bad_zero.verify_dir(&tmp).is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
