@@ -2592,6 +2592,13 @@ def _write_editable_widget_text(edit_node, u_txt, reg=None):
         if prefix_val and type(prefix_val).__name__ in ("str", "unicode") and not u_txt.startswith(prefix_val):
             u_txt = prefix_val + u_txt
         if hasattr(edit_node, "SetValue"):
+            if hasattr(edit_node, "GetSmartCaretIndex") and hasattr(edit_node, "SetText"):
+                # CCP assetsSearch.SearchBox.SetValue calls GetSmartCaretIndex(oldText, newText),
+                # which raises IndexError when newText is a shorter suffix of oldText (or empty).
+                try:
+                    edit_node.SetText(u"")
+                except Exception:
+                    pass
             try:
                 edit_node.SetValue(u_txt)
             except (ValueError, TypeError) as val_exc:
