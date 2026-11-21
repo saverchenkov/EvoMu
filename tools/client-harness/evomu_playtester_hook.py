@@ -5586,9 +5586,18 @@ def _execute_action(sm, action):
             since_exc_seq = int(since_exc_seq or 0)
             if cur_exc_seq < since_exc_seq:
                 since_exc_seq = 0
+        cur_guard_seq = int(getattr(_es, "_GUARD_HIT_SEQ", 0) or 0)
+        since_guard_seq = getattr(_es, "_PT_CONSUMED_GUARD_SEQ", None)
+        if since_guard_seq is None:
+            since_guard_seq = 0
+        else:
+            since_guard_seq = int(since_guard_seq or 0)
+            if cur_guard_seq < since_guard_seq:
+                since_guard_seq = 0
     except Exception:
         _es = None
         since_exc_seq = 0
+        since_guard_seq = 0
 
     raw_atype = _to_utf8(action.get("type", "") or "").strip()
     raw_target = _to_utf8(action.get("target") or "").strip()
@@ -8100,10 +8109,49 @@ def _execute_action(sm, action):
             new_log_excs = []
             suppressed_log_excs = []
 
+    action_guard_hits = []
+    guard_summary = {
+        "client_guards_off": False,
+        "guard_hits_count": 0,
+        "guard_hits_by_guard": {},
+        "client_only_guard_hits": 0,
+        "client_only_guard_hits_by_guard": {},
+        "server_caused_guard_hits": 0,
+    }
+    if _es is not None:
+        try:
+            get_hits_fn = getattr(_es, "get_guard_hits", None)
+            if callable(get_hits_fn):
+                action_guard_hits = list(get_hits_fn(since_seq=since_guard_seq))
+            else:
+                raw_ghits = list(getattr(_es, "_GUARD_HITS", []) or [])
+                action_guard_hits = [
+                    dict(gh)
+                    for gh in raw_ghits
+                    if int(gh.get("seq", 0) or 0) > since_guard_seq
+                ]
+            max_gseq = since_guard_seq
+            for gh in action_guard_hits:
+                gseq = int(gh.get("seq", 0) or 0)
+                if gseq > max_gseq:
+                    max_gseq = gseq
+            cur_gseq = int(getattr(_es, "_GUARD_HIT_SEQ", 0) or 0)
+            setattr(_es, "_PT_CONSUMED_GUARD_SEQ", max(max_gseq, cur_gseq))
+            sum_fn = getattr(_es, "get_guard_hit_summary", None)
+            if callable(sum_fn):
+                guard_summary = dict(sum_fn(since_seq=since_guard_seq))
+            else:
+                guard_summary["guard_hits_count"] = len(action_guard_hits)
+        except Exception:
+            action_guard_hits = []
+
     macho_excs = [e for e in err_flights if e.get("status") == "ERR" and e.get("kind") == "macho"]
     quasar_errs = [e for e in err_flights if e.get("status") == "ERR" and e.get("kind") == "quasar"]
     _tgt_id = action.get("item_id") or (raw_target if raw_target.isdigit() else None)
     result["state_diff"] = _compute_state_diff(pre_state, post_state, new_scatters, target_item_id=_tgt_id)
+    result["guard_hits"] = action_guard_hits
+    result["guard_hit_count"] = len(action_guard_hits)
+    result["guard_summary"] = guard_summary
     result["flight_recorder"] = {
         "macho_calls": new_flights[-80:],
         "macho_exceptions": macho_excs,
@@ -8112,8 +8160,53 @@ def _execute_action(sm, action):
         "suppressed_log_exceptions": suppressed_log_excs[-5:],
         "scatters_observed": [s.get("event") for s in new_scatters],
         "modals_opened": new_modals,
+        "guard_hits": action_guard_hits,
+        "guard_summary": guard_summary,
     }
     return result
+
+
+def _collect_hook_guard_telemetry(since_seq=0, advance_cursor=False):
+    hits = []
+    summary = {
+        "client_guards_off": False,
+        "guard_hits_count": 0,
+        "guard_hits_by_guard": {},
+        "client_only_guard_hits": 0,
+        "client_only_guard_hits_by_guard": {},
+        "server_caused_guard_hits": 0,
+    }
+    cumulative = dict(summary)
+    try:
+        import evomu_site as _es
+        hits_fn = getattr(_es, "get_guard_hits", None)
+        if callable(hits_fn):
+            hits = list(hits_fn(since_seq=since_seq))
+        else:
+            raw_hits = list(getattr(_es, "_GUARD_HITS", []) or [])
+            hits = [dict(h) for h in raw_hits if int(h.get("seq", 0) or 0) > int(since_seq or 0)]
+        sum_fn = getattr(_es, "get_guard_hit_summary", None)
+        if callable(sum_fn):
+            summary = dict(sum_fn(since_seq=since_seq))
+            cumulative = dict(sum_fn())
+        else:
+            summary["guard_hits_count"] = len(hits)
+            cumulative = dict(summary)
+        if advance_cursor:
+            max_gseq = int(getattr(_es, "_PT_CONSUMED_GUARD_SEQ", 0) or 0)
+            for gh in hits:
+                gseq = int(gh.get("seq", 0) or 0)
+                if gseq > max_gseq:
+                    max_gseq = gseq
+            cur_gseq = int(getattr(_es, "_GUARD_HIT_SEQ", 0) or 0)
+            setattr(_es, "_PT_CONSUMED_GUARD_SEQ", max(max_gseq, cur_gseq))
+    except Exception:
+        pass
+    return {
+        "guard_hits": hits,
+        "guard_summary": summary,
+        "cumulative_summary": cumulative,
+    }
 
 
 class PlaytesterRpcServer(object):
@@ -8137,6 +8230,8 @@ class PlaytesterRpcServer(object):
             import evomu_site as _es
             if not hasattr(_es, "_PT_CONSUMED_EXC_SEQ"):
                 setattr(_es, "_PT_CONSUMED_EXC_SEQ", int(getattr(_es, "_EXC_SEQ", 0) or 0))
+            if not hasattr(_es, "_PT_CONSUMED_GUARD_SEQ"):
+                setattr(_es, "_PT_CONSUMED_GUARD_SEQ", int(getattr(_es, "_GUARD_HIT_SEQ", 0) or 0))
         except Exception:
             pass
 
@@ -8251,27 +8346,54 @@ class PlaytesterRpcServer(object):
             globals()["_LAST_SNAPSHOT"] = st
             globals()["_LAST_SNAPSHOT_SM"] = self.sm
             globals()["_LAST_SNAPSHOT_TS"] = time.time()
+            gt = _collect_hook_guard_telemetry(0, advance_cursor=True)
+            boot_fr = {
+                "macho_calls": list(_FLIGHT_RECORDER[-80:]),
+                "scatters_observed": [s.get("event") for s in _RECENT_SCATTERS[-60:]],
+                "guard_hits": gt["guard_hits"],
+                "guard_summary": gt["cumulative_summary"],
+            }
+            boot_result = dict(st) if isinstance(st, dict) else {}
+            boot_result["char_id"] = int(cid or 0)
+            boot_result["guard_hits"] = gt["guard_hits"]
+            boot_result["guard_summary"] = gt["cumulative_summary"]
+            boot_result["flight_recorder"] = boot_fr
             return {
                 "ok": True,
-                "result": st,
+                "result": boot_result,
                 "char_id": int(cid or 0),
                 "state": st,
-                "flight_recorder": {
-                    "macho_calls": list(_FLIGHT_RECORDER[-80:]),
-                    "scatters_observed": [s.get("event") for s in _RECENT_SCATTERS[-60:]],
-                },
+                "guard_hits": gt["guard_hits"],
+                "guard_summary": gt["cumulative_summary"],
+                "flight_recorder": dict(boot_fr),
+            }
+        if cmd == "get_guard_hits":
+            since_seq = int(params.get("since_seq", 0) or 0)
+            gt = _collect_hook_guard_telemetry(since_seq)
+            return {
+                "ok": True,
+                "result": gt,
+                "guard_hits": gt["guard_hits"],
+                "guard_summary": gt["guard_summary"],
+                "cumulative_summary": gt["cumulative_summary"],
             }
         if cmd == "get_flight_recorder":
             since_seq = int(params.get("since_seq", 0) or 0)
+            since_guard_seq = int(params.get("since_guard_seq", 0) or 0)
+            gt = _collect_hook_guard_telemetry(since_guard_seq)
             fr_payload = {
                 "macho_calls": [e for e in _FLIGHT_RECORDER if int(e.get("seq", 0) or 0) > since_seq][-120:],
                 "scatters_observed": [s.get("event") for s in _RECENT_SCATTERS[-60:]],
+                "guard_hits": gt["guard_hits"],
+                "guard_summary": gt["guard_summary"],
             }
             return {
                 "ok": True,
                 "result": fr_payload,
                 "macho_calls": fr_payload["macho_calls"],
                 "scatters_observed": fr_payload["scatters_observed"],
+                "guard_hits": gt["guard_hits"],
+                "guard_summary": gt["guard_summary"],
             }
         if cmd in ("get_state", "observe"):
             st = _get_state_snapshot(self.sm)

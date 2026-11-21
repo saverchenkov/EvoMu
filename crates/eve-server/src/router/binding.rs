@@ -1,5 +1,12 @@
 //! Stateful object binding and moniker handles (`MachoBindObject`).
 
+#[path = "binding_transition_policy.rs"]
+mod binding_transition_policy;
+
+pub(crate) use binding_transition_policy::{
+    AtomicSceneTransitionRecord, LateCallResolution, ReconnectHoldGuard,
+};
+
 use crate::router::context::{BoundObjectEntry, ServerContext, NEXT_BOUND_ID};
 use crate::router::notify_registry::{
     emit_typed_target_to_char_capped, OnChargeBeingLoadedToModule, OnGodmaShipEffect,
@@ -91,91 +98,6 @@ fn notification_bound_ids(
     NOTIFICATION_BOUND_IDS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Retention window (`30s`, matching V24 `basesession.pyj::ObjectConnection.__del__ ->
-/// DisconnectObject(30)`) for in-flight read-only metadata calls (`invbroker`, owned
-/// `ship.GetDirtTimestamp`, and `crimewatch.GetClientStates`) arriving during/right after a
-/// session transition (`#1146`, `#1150`, `#1209`, `#1211`).
-const TRANSITION_DISCONNECT_GRACE_TICKS: i64 = 30 * 10_000_000;
-
-/// Maximum transition-disconnected grace entries retained per session.
-const MAX_TRANSITION_GRACE_PER_SESSION: usize = 256;
-
-#[derive(Clone)]
-struct TransitionDisconnectedBinding {
-    entry: BoundObjectEntry,
-    disconnected_ticks: i64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum DepartedLocationKind {
-    Dock,
-    SolarSystem,
-}
-
-#[derive(Clone)]
-struct TransitionDepartedLocation {
-    session_id: u64,
-    user_id: u64,
-    character_id: i64,
-    kind: DepartedLocationKind,
-    location_id: i64,
-    departed_ticks: i64,
-}
-
-struct ContextGraceStore {
-    owner: Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
-    entries: HashMap<u64, TransitionDisconnectedBinding>,
-    departed_locations: HashMap<(u64, DepartedLocationKind, i64), TransitionDepartedLocation>,
-    pending_displaced_logoffs: HashMap<u64, (u64, i64)>,
-    prelogoff_hold_sessions: HashMap<i64, (u64, u64)>,
-    reconnect_hold_sessions: HashMap<i64, u64>,
-}
-
-/// RAII guard preserving an in-progress character reconnect against premature `on_advance_secs(0)`
-/// disconnect-hold pruning while the replacement session already holds the online lock (`#1171`).
-pub(crate) struct ReconnectHoldGuard<'a> {
-    ctx: &'a ServerContext,
-    char_id: i64,
-    session_id: u64,
-}
-
-impl<'a> ReconnectHoldGuard<'a> {
-    pub(crate) fn acquire(ctx: &'a ServerContext, char_id: i64, session_id: u64) -> Self {
-        ctx.with_context_grace_store_mut(|store| {
-            store.reconnect_hold_sessions.insert(char_id, session_id);
-        });
-        Self {
-            ctx,
-            char_id,
-            session_id,
-        }
-    }
-}
-
-impl Drop for ReconnectHoldGuard<'_> {
-    fn drop(&mut self) {
-        let matches = self.ctx.read_context_grace_store(|s| {
-            s.is_some_and(|st| {
-                st.reconnect_hold_sessions.get(&self.char_id) == Some(&self.session_id)
-            })
-        });
-        if matches {
-            self.ctx.with_existing_grace_store_mut_and_prune(|store| {
-                if store.reconnect_hold_sessions.get(&self.char_id) == Some(&self.session_id) {
-                    store.reconnect_hold_sessions.remove(&self.char_id);
-                }
-            });
-        }
-    }
-}
-
-static TRANSITION_DISCONNECT_GRACE: OnceLock<RwLock<HashMap<u64, ContextGraceStore>>> =
-    OnceLock::new();
-
-fn transition_disconnect_grace() -> &'static RwLock<HashMap<u64, ContextGraceStore>> {
-    TRANSITION_DISCONNECT_GRACE.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
 /// RAII guard for TCP client connection tasks (`machoNet` and Python Client Bridge) ensuring
 /// synchronous session state (`session_closers`, `bound_objects`, and `PublicGatewayRouter`
 /// notice subscribers/receivers), online lock release, and in-space logoff handling are always
@@ -234,6 +156,7 @@ impl Drop for SessionCleanupGuard {
                 }
             }
         }
+        self.ctx.clear_session_scene_epoch(self.session_id);
     }
 }
 
@@ -291,6 +214,7 @@ impl ServerContext {
                     }
                 }
             }
+            self.clear_session_scene_epoch(session_id);
         }
         sent_to_live
     }
@@ -431,6 +355,7 @@ impl ServerContext {
         } else {
             self.release_session_bindings(session_id);
         }
+        self.clear_session_scene_epoch(session_id);
         self.quasar_gateway.unsubscribe_session(session_id);
         if let Some(uid) = session.user_id {
             // Capture revocation BEFORE `release_online_lock`, because `release_online_lock`
@@ -546,17 +471,29 @@ impl ServerContext {
         Ok(bound_id)
     }
 
-    fn make_bound_object_entry(
+    pub(super) fn retain_bound_objects(
         &self,
+        pred: impl FnMut(&u64, &mut BoundObjectEntry) -> bool,
+    ) {
+        let mut map = self
+            .bound_objects
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        map.retain(pred);
+        self.prune_notification_bound_ids_locked(&map);
+    }
+
+    pub(super) fn make_bound_object_entry_at(
         session_id: u64,
         bound_id: u64,
         user_id: u64,
         char_id: i64,
         service: &str,
         object_id: i64,
+        now_unix: u64,
     ) -> BoundObjectEntry {
         let oid_str = format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID);
-        let ref_id = (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000);
+        let ref_id = (now_unix as i64 + 11_644_473_600).saturating_mul(10_000_000);
         BoundObjectEntry {
             bound_id,
             session_id,
@@ -567,6 +504,26 @@ impl ServerContext {
             oid_str,
             ref_id,
         }
+    }
+
+    pub(super) fn make_bound_object_entry(
+        &self,
+        session_id: u64,
+        bound_id: u64,
+        user_id: u64,
+        char_id: i64,
+        service: &str,
+        object_id: i64,
+    ) -> BoundObjectEntry {
+        Self::make_bound_object_entry_at(
+            session_id,
+            bound_id,
+            user_id,
+            char_id,
+            service,
+            object_id,
+            self.now_unix(),
+        )
     }
 
     fn notification_bound_ids_snapshot(&self) -> HashSet<u64> {
@@ -838,7 +795,7 @@ impl ServerContext {
             count
         };
         self.purge_transition_grace_with(
-            |bid, v| v.entry.session_id == session_id && target_bids.contains(bid),
+            |bid, e| e.session_id == session_id && target_bids.contains(bid),
             |_, _| false,
         );
         removed
@@ -998,7 +955,7 @@ impl ServerContext {
         Ok(entry)
     }
 
-    fn emit_macho_object_disconnect(&self, entry: &BoundObjectEntry) {
+    pub(super) fn emit_macho_object_disconnect(&self, entry: &BoundObjectEntry) {
         if entry.character_id <= 0 {
             return;
         }
@@ -1014,691 +971,15 @@ impl ServerContext {
         );
     }
 
-    fn is_grace_ticks_active(recorded_ticks: i64, now_ticks: i64) -> bool {
-        now_ticks >= recorded_ticks
-            && now_ticks.saturating_sub(recorded_ticks) <= TRANSITION_DISCONNECT_GRACE_TICKS
-    }
-
-    fn is_grace_entry_active(binding: &TransitionDisconnectedBinding, now_ticks: i64) -> bool {
-        Self::is_grace_ticks_active(binding.disconnected_ticks, now_ticks)
-    }
-
-    fn has_matching_online_session(&self, session: &SessionState, uid: u64, cid: i64) -> bool {
-        self.db.get_online_session(uid).is_none_or(|online| {
-            online.session_id == session.session_id && online.character_id == Some(cid)
-        })
-    }
-
-    fn is_station_or_structure_id(&self, object_id: i64) -> bool {
-        object_id > 0
-            && (self.sde.stations.contains_key(&object_id)
-                || self
-                    .db
-                    .with_snapshot(|snap| snap.structures.contains_key(&object_id)))
-    }
-
-    fn is_owned_ship_dirt_target(
-        &self,
-        session: &SessionState,
-        char_id: i64,
-        args: &[PyRep],
-    ) -> bool {
-        let Some(target_ship_id) = args
-            .first()
-            .and_then(|a| a.as_i64())
-            .or(session.ship_id)
-        else {
-            return false;
-        };
-        if target_ship_id <= 0 {
-            return false;
-        }
-        if session.ship_id == Some(target_ship_id) {
-            return true;
-        }
-        self.db.with_snapshot(|snap| {
-            snap.items.get(&target_ship_id).is_some_and(|item| {
-                item.owner_id == char_id
-                    && self
-                        .sde
-                        .types
-                        .get(&item.type_id)
-                        .is_none_or(|t| t.category_id == 6)
-            })
-        })
-    }
-
-    fn excess_session_grace_keys<K: Ord>(mut keyed_ticks: Vec<(i64, K)>) -> Vec<K> {
-        if keyed_ticks.len() <= MAX_TRANSITION_GRACE_PER_SESSION {
-            return Vec::new();
-        }
-        keyed_ticks.sort_unstable();
-        let excess = keyed_ticks.len() - MAX_TRANSITION_GRACE_PER_SESSION;
-        keyed_ticks.into_iter().take(excess).map(|(_, k)| k).collect()
-    }
-
-    fn trim_store_session_caps(store: &mut ContextGraceStore, touched_sessions: &[u64]) {
-        for &sid in touched_sessions {
-            let excess_bids = Self::excess_session_grace_keys(
-                store
-                    .entries
-                    .iter()
-                    .filter(|(_, v)| v.entry.session_id == sid)
-                    .map(|(&bid, v)| (v.disconnected_ticks, bid))
-                    .collect(),
-            );
-            for bid in excess_bids {
-                store.entries.remove(&bid);
-            }
-            let excess_locations = Self::excess_session_grace_keys(
-                store
-                    .departed_locations
-                    .iter()
-                    .filter(|((s, _, _), v)| *s == sid || v.session_id == sid)
-                    .map(|(&key, v)| (v.departed_ticks, key))
-                    .collect(),
-            );
-            for key in excess_locations {
-                store.departed_locations.remove(&key);
-            }
-        }
-    }
-
-    fn read_context_grace_store<R>(&self, f: impl FnOnce(Option<&ContextGraceStore>) -> R) -> R {
-        let outer = transition_disconnect_grace()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        f(outer.get(&self.instance_id))
-    }
-
-    fn is_grace_store_empty(store: &ContextGraceStore) -> bool {
-        store.entries.is_empty()
-            && store.departed_locations.is_empty()
-            && store.pending_displaced_logoffs.is_empty()
-            && store.prelogoff_hold_sessions.is_empty()
-            && store.reconnect_hold_sessions.is_empty()
-    }
-
-    fn with_existing_grace_store_mut_and_prune<R>(
-        &self,
-        f: impl FnOnce(&mut ContextGraceStore) -> R,
-    ) -> Option<R> {
-        let lock = TRANSITION_DISCONNECT_GRACE.get()?;
-        let mut outer = lock.write().unwrap_or_else(|e| e.into_inner());
-        outer.retain(|_, store| store.owner.strong_count() > 0);
-        let res = outer.get_mut(&self.instance_id).map(f);
-        if outer
-            .get(&self.instance_id)
-            .is_some_and(Self::is_grace_store_empty)
-        {
-            outer.remove(&self.instance_id);
-        }
-        res
-    }
-
-    fn with_context_grace_store_mut<R>(&self, f: impl FnOnce(&mut ContextGraceStore) -> R) -> R {
-        let owner = Arc::downgrade(&self.bound_objects);
-        let mut outer = transition_disconnect_grace()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        outer.retain(|_, store| store.owner.strong_count() > 0);
-        let store = outer.entry(self.instance_id).or_insert_with(|| ContextGraceStore {
-            owner,
-            entries: HashMap::new(),
-            departed_locations: HashMap::new(),
-            pending_displaced_logoffs: HashMap::new(),
-            prelogoff_hold_sessions: HashMap::new(),
-            reconnect_hold_sessions: HashMap::new(),
-        });
-        f(store)
-    }
-
-    fn record_pending_displaced_logoff(&self, session_id: u64, user_id: u64, char_id: i64) {
-        self.with_context_grace_store_mut(|store| {
-            store
-                .pending_displaced_logoffs
-                .insert(session_id, (user_id, char_id));
-        });
-    }
-
-    pub(crate) fn take_pending_displaced_logoff(&self, session_id: u64) -> Option<(u64, i64)> {
-        let has_entry = self.read_context_grace_store(|s| {
-            s.is_some_and(|st| st.pending_displaced_logoffs.contains_key(&session_id))
-        });
-        if !has_entry {
-            return None;
-        }
-        self.with_existing_grace_store_mut_and_prune(|store| {
-            store.pending_displaced_logoffs.remove(&session_id)
-        })
-        .flatten()
-    }
-
-    pub(crate) fn clear_pending_displaced_logoffs_for_char(&self, user_id: u64, char_id: i64) {
-        let has_match = self.read_context_grace_store(|s| {
-            s.is_some_and(|st| {
-                st.pending_displaced_logoffs
-                    .values()
-                    .any(|&(uid, cid)| uid == user_id && cid == char_id)
-            })
-        });
-        if !has_match {
-            return;
-        }
-        self.with_existing_grace_store_mut_and_prune(|store| {
-            store
-                .pending_displaced_logoffs
-                .retain(|_, &mut (uid, cid)| !(uid == user_id && cid == char_id));
-        });
-    }
-
-    pub(crate) fn record_prelogoff_hold_session(
-        &self,
-        char_id: i64,
-        session: Option<(u64, u64)>,
-    ) {
-        match session {
-            Some(pair) => {
-                self.with_context_grace_store_mut(|store| {
-                    store.prelogoff_hold_sessions.insert(char_id, pair);
-                });
-            }
-            None => {
-                let has_entry = self.read_context_grace_store(|s| {
-                    s.is_some_and(|st| st.prelogoff_hold_sessions.contains_key(&char_id))
-                });
-                if has_entry {
-                    self.with_existing_grace_store_mut_and_prune(|store| {
-                        store.prelogoff_hold_sessions.remove(&char_id);
-                    });
-                }
-            }
-        }
-    }
-
-    pub(crate) fn prelogoff_hold_session(&self, char_id: i64) -> Option<(u64, u64)> {
-        self.read_context_grace_store(|s| {
-            s.and_then(|st| st.prelogoff_hold_sessions.get(&char_id).copied())
-        })
-    }
-
-    pub(crate) fn clear_prelogoff_hold_session_if_matches(
-        &self,
-        char_id: i64,
-        expected: (u64, u64),
-    ) {
-        let matches = self.read_context_grace_store(|s| {
-            s.is_some_and(|st| st.prelogoff_hold_sessions.get(&char_id) == Some(&expected))
-        });
-        if matches {
-            self.with_existing_grace_store_mut_and_prune(|store| {
-                if store.prelogoff_hold_sessions.get(&char_id) == Some(&expected) {
-                    store.prelogoff_hold_sessions.remove(&char_id);
-                }
-            });
-        }
-    }
-
-    pub(crate) fn snapshot_prelogoff_hold_sessions(&self) -> HashMap<i64, (u64, u64)> {
-        self.read_context_grace_store(|s| {
-            s.map(|st| st.prelogoff_hold_sessions.clone())
-                .unwrap_or_default()
-        })
-    }
-
-    pub(crate) fn reconnect_hold_session(&self, char_id: i64) -> Option<u64> {
-        self.read_context_grace_store(|s| {
-            s.and_then(|st| st.reconnect_hold_sessions.get(&char_id).copied())
-        })
-    }
-
-    fn with_grace_store_mut<R>(&self, now_ticks: i64, f: impl FnOnce(&mut ContextGraceStore) -> R) -> R {
-        self.with_context_grace_store_mut(|store| {
-            store
-                .entries
-                .retain(|_, v| Self::is_grace_entry_active(v, now_ticks));
-            store
-                .departed_locations
-                .retain(|_, v| Self::is_grace_ticks_active(v.departed_ticks, now_ticks));
-            f(store)
-        })
-    }
-
-    fn departed_location_kind_for_entry(
-        &self,
-        entry: &BoundObjectEntry,
-    ) -> Option<DepartedLocationKind> {
-        if entry.object_id <= 0 || entry.user_id == 0 || entry.character_id <= 0 {
-            return None;
-        }
-        if matches!(
-            entry.service.as_str(),
-            "station"
-                | "stationSvc"
-                | "corpStationMgr"
-                | "repairSvc"
-                | "reprocessingSvc"
-                | "insuranceSvc"
-        ) || self.is_station_or_structure_id(entry.object_id)
-        {
-            return Some(DepartedLocationKind::Dock);
-        }
-        let is_sys_service = matches!(
-            entry.service.as_str(),
-            "beyonce" | "scanMgr" | "entity" | "crimewatch" | "planetOrbitalRegistryBroker"
-        ) || (matches!(
-            entry.service.as_str(),
-            "keeper" | "posMgr" | "devIndexManager"
-        ) && (30_000_000..=39_999_999).contains(&entry.object_id));
-        if is_sys_service && crate::router::binding_auth::is_solar_system_id(self, entry.object_id) {
-            return Some(DepartedLocationKind::SolarSystem);
-        }
-        None
-    }
-
-    fn record_transition_grace_bindings(&self, entries: &[BoundObjectEntry]) {
-        let grace_entries: Vec<&BoundObjectEntry> = entries
-            .iter()
-            .filter(|e| matches!(e.service.as_str(), "invbroker" | "ship" | "crimewatch"))
-            .collect();
-        let location_departures: Vec<(DepartedLocationKind, &BoundObjectEntry)> = entries
-            .iter()
-            .filter_map(|e| self.departed_location_kind_for_entry(e).map(|kind| (kind, e)))
-            .collect();
-        if grace_entries.is_empty() && location_departures.is_empty() {
-            return;
-        }
-        let now_ticks = self.now_machonet_wallclock_filetime_ticks();
-        self.with_grace_store_mut(now_ticks, |store| {
-            let mut touched_sessions = Vec::new();
-            for entry in grace_entries {
-                if !touched_sessions.contains(&entry.session_id) {
-                    touched_sessions.push(entry.session_id);
-                }
-                store.entries.insert(
-                    entry.bound_id,
-                    TransitionDisconnectedBinding {
-                        entry: entry.clone(),
-                        disconnected_ticks: now_ticks,
-                    },
-                );
-            }
-            for (kind, entry) in location_departures {
-                if !touched_sessions.contains(&entry.session_id) {
-                    touched_sessions.push(entry.session_id);
-                }
-                store.departed_locations.insert(
-                    (entry.session_id, kind, entry.object_id),
-                    TransitionDepartedLocation {
-                        session_id: entry.session_id,
-                        user_id: entry.user_id,
-                        character_id: entry.character_id,
-                        kind,
-                        location_id: entry.object_id,
-                        departed_ticks: now_ticks,
-                    },
-                );
-            }
-            Self::trim_store_session_caps(store, &touched_sessions);
-        });
-    }
-
-    fn purge_transition_grace_with<FE, FL>(&self, mut entry_pred: FE, mut loc_pred: FL)
-    where
-        FE: FnMut(&u64, &TransitionDisconnectedBinding) -> bool,
-        FL: FnMut(&(u64, DepartedLocationKind, i64), &TransitionDepartedLocation) -> bool,
-    {
-        self.with_existing_grace_store_mut_and_prune(|store| {
-            store.entries.retain(|bid, v| !entry_pred(bid, v));
-            store.departed_locations.retain(|k, v| !loc_pred(k, v));
-        });
-    }
-
-    pub(crate) fn purge_transition_grace_for_session(&self, session_id: u64) {
-        self.purge_transition_grace_with(
-            |_, v| v.entry.session_id == session_id,
-            |&(sid, _, _), v| sid == session_id || v.session_id == session_id,
-        );
-    }
-
-    fn purge_transition_grace_for_user(&self, user_id: u64) {
-        self.purge_transition_grace_with(
-            |_, v| v.entry.user_id == user_id,
-            |_, v| v.user_id == user_id,
-        );
-    }
-
-    pub(crate) fn purge_transition_grace_entry(&self, session_id: u64, bound_id: u64) {
-        self.purge_transition_grace_with(
-            |&bid, v| bid == bound_id && v.entry.session_id == session_id,
-            |_, _| false,
-        );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn update_transition_departed_dock(
-        &self,
-        session: &SessionState,
-        prev_dock: Option<i64>,
-        next_dock: Option<i64>,
-    ) {
-        self.update_transition_departed_locations(session, None, prev_dock, None, next_dock);
-    }
-
-    pub(crate) fn update_transition_departed_locations(
-        &self,
-        session: &SessionState,
-        prev_sys: Option<u32>,
-        prev_dock: Option<i64>,
-        next_sys: Option<u32>,
-        next_dock: Option<i64>,
-    ) {
-        let mut record = Vec::new();
-        let mut purge = Vec::new();
-        let prev_sys_id = prev_sys.map(i64::from);
-        let next_sys_id = next_sys.map(i64::from);
-        if prev_sys_id != next_sys_id {
-            if let Some(old_sys) = prev_sys_id.filter(|&id| id > 0) {
-                record.push((DepartedLocationKind::SolarSystem, old_sys));
-            }
-            if let Some(new_sys) = next_sys_id.filter(|&id| id > 0) {
-                purge.push((DepartedLocationKind::SolarSystem, new_sys));
-            }
-        }
-        if prev_dock != next_dock {
-            if let Some(old_dock) = prev_dock.filter(|&id| id > 0) {
-                record.push((DepartedLocationKind::Dock, old_dock));
-            }
-            if let Some(new_dock) = next_dock.filter(|&id| id > 0) {
-                purge.push((DepartedLocationKind::Dock, new_dock));
-            }
-        }
-        self.apply_departed_location_deltas(session, &record, &purge);
-    }
-
-    pub(crate) fn sync_transition_grace_on_session_change(
-        &self,
-        prev: &SessionState,
-        next: &SessionState,
-    ) {
-        if prev.character_id.is_some() && next.character_id != prev.character_id {
-            self.purge_transition_grace_for_session(next.session_id);
-        } else if prev.character_id == next.character_id
-            && next.character_id.is_some()
-            && next.session_id != 0
-        {
-            self.update_transition_departed_locations(
-                next,
-                prev.solar_system_id,
-                prev.station_id.or(prev.structure_id),
-                next.solar_system_id,
-                next.station_id.or(next.structure_id),
-            );
-        }
-    }
-
-    fn apply_departed_location_deltas(
-        &self,
-        session: &SessionState,
-        record: &[(DepartedLocationKind, i64)],
-        purge: &[(DepartedLocationKind, i64)],
-    ) {
-        if record.is_empty() && purge.is_empty() {
-            return;
-        }
-        if record.is_empty() {
-            self.purge_transition_grace_with(
-                |_, _| false,
-                |&(sid, kind, lid), _| {
-                    sid == session.session_id && purge.contains(&(kind, lid))
-                },
-            );
-            return;
-        }
-        let can_record = session
-            .user_id
-            .zip(session.character_id)
-            .filter(|&(uid, cid)| self.has_matching_online_session(session, uid, cid));
-        let Some((uid, cid)) = can_record else {
-            if !purge.is_empty() {
-                self.purge_transition_grace_with(
-                    |_, _| false,
-                    |&(sid, kind, lid), _| {
-                        sid == session.session_id && purge.contains(&(kind, lid))
-                    },
-                );
-            }
-            return;
-        };
-        let now_ticks = self.now_machonet_wallclock_filetime_ticks();
-        self.with_grace_store_mut(now_ticks, |store| {
-            for &(kind, lid) in purge {
-                store
-                    .departed_locations
-                    .remove(&(session.session_id, kind, lid));
-            }
-            for &(kind, lid) in record {
-                store.departed_locations.insert(
-                    (session.session_id, kind, lid),
-                    TransitionDepartedLocation {
-                        session_id: session.session_id,
-                        user_id: uid,
-                        character_id: cid,
-                        kind,
-                        location_id: lid,
-                        departed_ticks: now_ticks,
-                    },
-                );
-            }
-            Self::trim_store_session_caps(store, &[session.session_id]);
-        });
-    }
-
-    fn allocate_transition_grace_binding_for_departed_kinds(
-        &self,
-        session: &SessionState,
-        service: &str,
-        object_id: i64,
-        allowed_kinds: &[DepartedLocationKind],
-    ) -> Option<u64> {
-        if object_id <= 0 || allowed_kinds.is_empty() {
-            return None;
-        }
-        let uid = session.user_id?;
-        let cid = session.character_id?;
-        if !self.has_matching_online_session(session, uid, cid) {
-            return None;
-        }
-        let now_ticks = self.now_machonet_wallclock_filetime_ticks();
-        self.with_grace_store_mut(now_ticks, |store| {
-            let active_departed = allowed_kinds.iter().any(|&kind| {
-                store
-                    .departed_locations
-                    .get(&(session.session_id, kind, object_id))
-                    .is_some_and(|departed| {
-                        Self::is_grace_ticks_active(departed.departed_ticks, now_ticks)
-                            && departed.session_id == session.session_id
-                            && departed.user_id == uid
-                            && departed.character_id == cid
-                            && departed.kind == kind
-                            && departed.location_id == object_id
-                    })
-            });
-            if !active_departed {
-                return None;
-            }
-            let bound_id = NEXT_BOUND_ID.fetch_add(1, Ordering::Relaxed);
-            let entry = self.make_bound_object_entry(
-                session.session_id,
-                bound_id,
-                uid,
-                cid,
-                service,
-                object_id,
-            );
-            store.entries.insert(
-                bound_id,
-                TransitionDisconnectedBinding {
-                    entry,
-                    disconnected_ticks: now_ticks,
-                },
-            );
-            Self::trim_store_session_caps(store, &[session.session_id]);
-            Some(bound_id)
-        })
-    }
-
-    /// Allocates a temporary transition-grace binding (kept out of active `bound_objects`) for an
-    /// in-flight `ship.MachoBindObject((departed_dock_id, ...), ("GetDirtTimestamp", (ship_id,), {}))`
-    /// racing immediately after `Undock` or `/moveme` (`#1150`, `#1152`, `#1153`).
-    pub(crate) fn allocate_transition_grace_ship_dirt_binding(
-        &self,
-        session: &SessionState,
-        object_id: i64,
-        sub_args: &[PyRep],
-    ) -> Option<u64> {
-        let cid = session.character_id?;
-        if !self.is_owned_ship_dirt_target(session, cid, sub_args) {
-            return None;
-        }
-        self.allocate_transition_grace_binding_for_departed_kinds(
-            session,
-            "ship",
-            object_id,
-            &[DepartedLocationKind::Dock],
-        )
-    }
-
-    /// Allocates a temporary transition-grace binding (kept out of active `bound_objects`) for an
-    /// in-flight `crimewatch.MachoBindObject((departed_loc_id, ...), ("GetClientStates", (), {}))`
-    /// racing during overlapping session transitions such as back-to-back `/tr` (`#1209`, `#1211`).
-    pub(crate) fn allocate_transition_grace_crimewatch_binding(
-        &self,
-        session: &SessionState,
-        object_id: i64,
-        sub_args: &[PyRep],
-    ) -> Option<u64> {
-        if !sub_args.is_empty() {
-            return None;
-        }
-        self.allocate_transition_grace_binding_for_departed_kinds(
-            session,
-            "crimewatch",
-            object_id,
-            &[DepartedLocationKind::SolarSystem, DepartedLocationKind::Dock],
-        )
-    }
-
-    fn lookup_transition_grace_entry(
-        &self,
-        session: &SessionState,
-        bound_id: u64,
-        expected_services: Option<&[&str]>,
-    ) -> Option<BoundObjectEntry> {
-        let uid = session.user_id?;
-        let cid = session.character_id?;
-        let now_ticks = self.now_machonet_wallclock_filetime_ticks();
-        let entry = {
-            let outer = TRANSITION_DISCONNECT_GRACE
-                .get()?
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            let store = outer.get(&self.instance_id)?;
-            let binding = store.entries.get(&bound_id)?;
-            let service_matches = expected_services
-                .is_none_or(|expected| expected.contains(&binding.entry.service.as_str()));
-            if !Self::is_grace_entry_active(binding, now_ticks)
-                || !service_matches
-                || binding.entry.session_id != session.session_id
-                || binding.entry.user_id != uid
-                || binding.entry.character_id != cid
-            {
-                return None;
-            }
-            binding.entry.clone()
-        };
-        if !self.has_matching_online_session(session, uid, cid) {
-            return None;
-        }
-        Some(entry)
-    }
-
-    pub(crate) fn transition_grace_service_for_bound_id(
-        &self,
-        session: &SessionState,
-        bound_id: u64,
-    ) -> Option<String> {
-        self.lookup_transition_grace_entry(session, bound_id, None)
-            .map(|entry| entry.service)
-    }
-
-    /// Returns a recently transition-disconnected `invbroker` binding when an already-in-flight
-    /// read-only metadata RPC (`GetSelfInvItem` / `GetAvailableTurretSlots`) arrives within the
-    /// 30s transition grace window for the owning live session (`#1146`).
-    pub(crate) fn grace_bound_object_for_inflight_invbroker(
-        &self,
-        session: &SessionState,
-        bound_id: u64,
-        method: &str,
-    ) -> Option<BoundObjectEntry> {
-        if !matches!(method, "GetSelfInvItem" | "GetAvailableTurretSlots") {
-            return None;
-        }
-        self.lookup_transition_grace_entry(session, bound_id, Some(&["invbroker"]))
-    }
-
-    /// Returns a recently transition-disconnected read-only binding (`invbroker` metadata, owned
-    /// `ship.GetDirtTimestamp`, or `crimewatch.GetClientStates`) arriving within the 30s
-    /// transition grace window (`#1146`, `#1150`, `#1209`, `#1211`).
-    pub(crate) fn grace_bound_object_for_inflight_transition(
-        &self,
-        session: &SessionState,
-        bound_id: u64,
-        method: &str,
-        args: &[PyRep],
-    ) -> Option<BoundObjectEntry> {
-        if let Some(entry) =
-            self.grace_bound_object_for_inflight_invbroker(session, bound_id, method)
-        {
-            return Some(entry);
-        }
-        if method == "GetClientStates" && args.is_empty() {
-            return self.lookup_transition_grace_entry(session, bound_id, Some(&["crimewatch"]));
-        }
-        if method != "GetDirtTimestamp" {
-            return None;
-        }
-        let entry = self.lookup_transition_grace_entry(session, bound_id, Some(&["ship"]))?;
-        let cid = session.character_id?;
-        if !self.is_owned_ship_dirt_target(session, cid, args) {
-            return None;
-        }
-        Some(entry)
-    }
-
-    /// Returns whether `bound_id` is currently authorized via the transition-disconnect grace
-    /// cache for `session` and `object_id` (`#1146`).
-    pub(crate) fn has_transition_grace_invbroker_binding(
-        &self,
-        session: &SessionState,
-        bound_id: u64,
-        object_id: i64,
-    ) -> bool {
-        self.lookup_transition_grace_entry(session, bound_id, Some(&["invbroker"]))
-            .is_some_and(|entry| entry.object_id == object_id)
-    }
-
-    /// Invalidates solar-system-scoped and station/structure-scoped bound objects for `char_id`
-    /// across location transitions (`stargate_jump`, `dock`, `undock`, `podding`, `wormhole_jump`,
-    /// `jump_drive`, `cyno_jump`, `filamentJump`, `jump_bridge`, `shipcaster`, `clone_jump`, etc.)
-    /// and emits `OnMachoObjectDisconnect(oid_str, macho_client_id, ref_id)` for each removed binding.
-    pub fn invalidate_bound_objects_for_session_transition(
+    /// Clears transition-related ballpark/brain state and removes invalidated bound objects for
+    /// `char_id` from `bound_objects` without yet recording grace or emitting notifications.
+    pub(crate) fn collect_invalidated_bound_objects_for_session_transition(
         &self,
         char_id: i64,
         system_id: u32,
         active_dock_id: Option<i64>,
         reason: &str,
-    ) {
+    ) -> Vec<BoundObjectEntry> {
         if !matches!(reason, "set_account_key")
             && !reason.starts_with("board")
             && !reason.starts_with("eject")
@@ -1709,13 +990,7 @@ impl ServerContext {
             self.clear_brain_primed_for_char(char_id);
         }
         if matches!(reason, "set_account_key" | "login") {
-            return;
-        }
-        if reason == "logout" {
-            self.purge_transition_grace_with(
-                |_, v| v.entry.character_id == char_id,
-                |_, v| v.character_id == char_id,
-            );
+            return Vec::new();
         }
         let candidates: Vec<(u64, BoundObjectEntry)> = self
             .bound_objects
@@ -1726,7 +1001,7 @@ impl ServerContext {
             .map(|(&bid, b)| (bid, b.clone()))
             .collect();
         if candidates.is_empty() {
-            return;
+            return Vec::new();
         }
         let mut to_remove_ids = Vec::new();
         for (bid, b) in &candidates {
@@ -1741,23 +1016,56 @@ impl ServerContext {
             }
         }
         if to_remove_ids.is_empty() {
-            return;
+            return Vec::new();
         }
         let mut removed = Vec::with_capacity(to_remove_ids.len());
-        {
-            let mut map = self
-                .bound_objects
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for bid in to_remove_ids {
-                if let Some(entry) = map.remove(&bid) {
-                    removed.push(entry);
-                }
+        let mut map = self
+            .bound_objects
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        for bid in to_remove_ids {
+            if let Some(entry) = map.remove(&bid) {
+                removed.push(entry);
             }
-            self.prune_notification_bound_ids_locked(&map);
         }
+        self.prune_notification_bound_ids_locked(&map);
+        removed
+    }
+
+    /// Invalidates solar-system-scoped and station/structure-scoped bound objects for `char_id`
+    /// across location transitions (`stargate_jump`, `dock`, `undock`, `podding`, `wormhole_jump`,
+    /// `jump_drive`, `cyno_jump`, `filamentJump`, `jump_bridge`, `shipcaster`, `clone_jump`, etc.)
+    /// and emits `OnMachoObjectDisconnect(oid_str, macho_client_id, ref_id)` for each removed binding.
+    pub fn invalidate_bound_objects_for_session_transition(
+        &self,
+        char_id: i64,
+        system_id: u32,
+        active_dock_id: Option<i64>,
+        reason: &str,
+    ) {
+        if matches!(reason, "set_account_key" | "login") {
+            let _ = self.collect_invalidated_bound_objects_for_session_transition(
+                char_id,
+                system_id,
+                active_dock_id,
+                reason,
+            );
+            return;
+        }
+        if reason == "logout" {
+            self.purge_transition_grace_with(
+                |_, e| e.character_id == char_id,
+                |_, cid| cid == char_id,
+            );
+        }
+        let removed = self.collect_invalidated_bound_objects_for_session_transition(
+            char_id,
+            system_id,
+            active_dock_id,
+            reason,
+        );
         if reason != "logout" {
-            self.record_transition_grace_bindings(&removed);
+            self.record_transition_grace_bindings(&removed, Some(system_id), active_dock_id);
         }
         for entry in &removed {
             self.emit_macho_object_disconnect(entry);
@@ -1799,7 +1107,7 @@ impl ServerContext {
             target_bids.len()
         };
         self.purge_transition_grace_with(
-            |_, v| v.entry.service == service && v.entry.object_id == object_id,
+            |_, e| e.service == service && e.object_id == object_id,
             |_, _| false,
         );
         removed_count
