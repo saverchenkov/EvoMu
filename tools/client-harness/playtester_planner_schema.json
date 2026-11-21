@@ -153,6 +153,8 @@
                   "y": { "type": ["integer", "null"] },
                   "dest_x": { "type": ["integer", "null"] },
                   "dest_y": { "type": ["integer", "null"] },
+                  "dest_target": { "type": ["string", "null"] },
+                  "dest_widget": { "type": ["string", "null"] },
                   "right_click": { "type": "boolean" },
                   "double_click": { "type": "boolean" },
                   "wait_ms": { "type": "integer" },

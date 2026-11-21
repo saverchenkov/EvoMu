@@ -1524,6 +1524,172 @@ class TestSpeedupOptimizations(unittest.TestCase):
         self.assertIsNone(act_miss)
         self.assertIn("not found", err_miss)
 
+        drag_snap = {
+            "ui": {
+                "context_menu": [
+                    {"name": "context_menu_clathrates", "label": "Strontium Clathrates", "x": 10, "y": 10}
+                ],
+                "clickable_widgets": [
+                    {
+                        "name": "ItemEntry_16275",
+                        "path": "InventoryStation/entry_0/ItemEntry_16275",
+                        "label": "Strontium Clathrates",
+                        "x": 300,
+                        "y": 651,
+                    },
+                    {
+                        "name": "ShipHangar",
+                        "path": "InventoryStation/tree/ShipHangar",
+                        "label": "Ship hangar",
+                        "x": 172,
+                        "y": 365,
+                    },
+                ],
+            }
+        }
+        act_drag_missing, err_drag_missing = playtester._resolve_direct_action(
+            {"action": {"type": "drag_widget", "target": "ItemEntry_16275"}},
+            drag_snap,
+        )
+        self.assertIsNone(act_drag_missing)
+        self.assertIn("dest_x/dest_y", err_drag_missing)
+
+        act_drag_zero, err_drag_zero = playtester._resolve_direct_action(
+            {"action": {"type": "drag_widget", "target": "ItemEntry_16275", "dest_x": 0, "dest_y": 0}},
+            drag_snap,
+        )
+        self.assertIsNone(act_drag_zero)
+        self.assertIn("positive dest_x/dest_y", err_drag_zero)
+
+        act_drag_dest_target, err_drag_dest_target = playtester._resolve_direct_action(
+            {"action": {"type": "drag_widget", "target": "Strontium Clathrates", "dest_target": "ShipHangar"}},
+            drag_snap,
+        )
+        self.assertEqual(err_drag_dest_target, "")
+        self.assertEqual(act_drag_dest_target["target"], "InventoryStation/entry_0/ItemEntry_16275")
+        self.assertEqual((act_drag_dest_target["x"], act_drag_dest_target["y"]), (300, 651))
+        self.assertEqual((act_drag_dest_target["dest_x"], act_drag_dest_target["dest_y"]), (172, 365))
+
+        act_drag_bad_dest, err_drag_bad_dest = playtester._resolve_direct_action(
+            {"action": {"type": "drag_widget", "target": "ItemEntry_16275", "dest_target": "NoSuchHangar"}},
+            drag_snap,
+        )
+        self.assertIsNone(act_drag_bad_dest)
+        self.assertIn("destination widget", err_drag_bad_dest)
+
+        act_drag_ok, err_drag_ok = playtester._resolve_direct_action(
+            {"action": {"type": "drag_widget", "target": "ItemEntry_16275", "dest_x": 172, "dest_y": 365}},
+            drag_snap,
+        )
+        self.assertEqual(err_drag_ok, "")
+        self.assertEqual((act_drag_ok["dest_x"], act_drag_ok["dest_y"]), (172, 365))
+
+        for bad_coords in (
+            {"dest_x": -50, "dest_y": 365},
+            {"dest_x": 172, "dest_y": -10},
+        ):
+            act_neg, err_neg = playtester._resolve_direct_action(
+                {"action": {"type": "drag_widget", "target": "ItemEntry_16275", **bad_coords}},
+                drag_snap,
+            )
+            self.assertIsNone(act_neg)
+            self.assertIn("positive dest_x/dest_y", err_neg)
+
+        for bool_coords in (
+            {"dest_x": True, "dest_y": 365},
+            {"dest_x": 172, "dest_y": False},
+        ):
+            act_bool, err_bool = playtester._resolve_direct_action(
+                {"action": {"type": "drag_widget", "target": "ItemEntry_16275", **bool_coords}},
+                drag_snap,
+            )
+            self.assertIsNone(act_bool)
+            self.assertIn("invalid dest_x/dest_y", err_bool)
+
+        act_zero_with_target, err_zero_with_target = playtester._resolve_direct_action(
+            {
+                "action": {
+                    "type": "drag_widget",
+                    "target": "ItemEntry_16275",
+                    "dest_x": 0,
+                    "dest_y": 0,
+                    "dest_target": "ShipHangar",
+                }
+            },
+            drag_snap,
+        )
+        self.assertEqual(err_zero_with_target, "")
+        self.assertEqual((act_zero_with_target["dest_x"], act_zero_with_target["dest_y"]), (172, 365))
+
+        act_float_coords, err_float_coords = playtester._resolve_direct_action(
+            {"action": {"type": "drag_widget", "target": "ItemEntry_16275", "dest_x": 172.0, "dest_y": "365"}},
+            drag_snap,
+        )
+        self.assertEqual(err_float_coords, "")
+        self.assertIs(type(act_float_coords["dest_x"]), int)
+        self.assertIs(type(act_float_coords["dest_y"]), int)
+        self.assertEqual((act_float_coords["dest_x"], act_float_coords["dest_y"]), (172, 365))
+
+        planner_schema = json.loads((HARNESS_DIR / "playtester_planner_schema.json").read_text(encoding="utf-8"))
+        plan_act_props = (
+            planner_schema["properties"]["delegated_plan"]["properties"]["steps"]["items"]["properties"]["action"]["properties"]
+        )
+        self.assertEqual(plan_act_props["dest_target"], {"type": ["string", "null"]})
+        self.assertEqual(plan_act_props["dest_widget"], {"type": ["string", "null"]})
+
+        for dest_field in ("dest_target", "dest_widget"):
+            raw_plan_dec = {
+                "observation": "Inventory open",
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "reasoning": "Drag clathrates",
+                "current_goal": "Move cargo",
+                "delegated_plan": {
+                    "plan_goal": "Move cargo",
+                    "horizon_rationale": "Single direct drag",
+                    "max_batch_steps": 1,
+                    "steps": [
+                        {
+                            "step_number": 1,
+                            "exec_mode": "direct",
+                            "action": {
+                                "type": "drag_widget",
+                                "target": "Strontium Clathrates",
+                                dest_field: "ShipHangar",
+                            },
+                        }
+                    ],
+                    "success_criteria": "Item moved",
+                    "abort_conditions": "Error modal",
+                },
+                "memory_update": {},
+                "bug_report": {"should_file": False},
+            }
+            norm_plan_dec = playtester._normalize_planner_decision(raw_plan_dec)
+            norm_step = norm_plan_dec["delegated_plan"]["steps"][0]
+            self.assertEqual(norm_step["action"].get(dest_field), "ShipHangar")
+            act_roundtrip, err_roundtrip = playtester._resolve_direct_action(norm_step, drag_snap)
+            self.assertEqual(err_roundtrip, "")
+            self.assertEqual((act_roundtrip["dest_x"], act_roundtrip["dest_y"]), (172, 365))
+
+        with tempfile.TemporaryDirectory() as td:
+            exec_mem = playtester.PlaytesterMemory(Path(td), git_head="deadbeef")
+            cont_prompt = playtester.build_executor_prompt(
+                step_num=2,
+                batch_id=1,
+                batch_step_idx=2,
+                delegated_plan=raw_plan_dec["delegated_plan"],
+                screenshot_path=None,
+                burst_paths=[],
+                ui_snapshot=drag_snap,
+                last_flight_recorder={},
+                memory=exec_mem,
+                batch_history=[{"step": 1, "ok": True}],
+                use_compact_json_contract=True,
+            )
+            self.assertIn("drag_widget", cont_prompt)
+            self.assertIn("dest_x", cont_prompt)
+            self.assertIn("dest_y", cont_prompt)
+
         ok1, msg1 = playtester._evaluate_step_assertions(
             {
                 "expect_window_open": "MarketWindow",
