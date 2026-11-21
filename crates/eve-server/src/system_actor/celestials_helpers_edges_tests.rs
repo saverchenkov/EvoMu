@@ -791,8 +791,7 @@ fn fast_forward_clock_passively_recharges_stationary_ship_past_300s_cap_without_
 
 #[test]
 fn clear_landed_warp_tracking_from_events_emits_warp_finished_for_return_warps_but_not_emergency() {
-    use crate::system_actor::types::{SharedWarpTracking, WarpProvenance};
-    use eve_db::lock_rank::RankedMutex;
+    use crate::system_actor::types::{ActorWarpState, WarpProvenance};
     use std::collections::HashMap;
 
     let mut ballpark = Ballpark::new(30_000_142);
@@ -820,27 +819,20 @@ fn clear_landed_warp_tracking_from_events_emits_warp_finished_for_return_warps_b
     ));
     ballpark.add_ball(make_ship_ball(ship_player_warp, DVec3::ZERO, MovementMode::Stop));
 
-    let active_warps = Arc::new(RankedMutex::new(HashMap::from([
-        (ship_still_warping, 90_000_001_i64),
-        (ship_player_warp, 90_000_002_i64),
-    ])));
-    let return_warps = Arc::new(RankedMutex::new(HashSet::from([
-        ship_return_prov,
-        ship_return_set_only,
-    ])));
-    let pending_warp_finished = Arc::new(RankedMutex::new(HashSet::new()));
-    let warp_tracking = SharedWarpTracking {
-        active_warps: Some(Arc::clone(&active_warps)),
-        return_warps: Some(Arc::clone(&return_warps)),
-        pending_warp_finished: Some(Arc::clone(&pending_warp_finished)),
+    let mut warp_state = ActorWarpState {
+        provenance: HashMap::from([
+            (ship_return_prov, WarpProvenance::ReconnectReturnWarp),
+            (ship_emergency, WarpProvenance::DisconnectedEmergencyWarp),
+            (ship_still_warping, WarpProvenance::PlayerOrFleetWarp),
+            (ship_player_warp, WarpProvenance::PlayerOrFleetWarp),
+        ]),
+        active_warps: HashMap::from([
+            (ship_still_warping, 90_000_001_i64),
+            (ship_player_warp, 90_000_002_i64),
+        ]),
+        return_warps: HashSet::from([ship_return_prov, ship_return_set_only]),
+        pending_warp_finished: HashSet::new(),
     };
-
-    let mut warp_provenance = HashMap::from([
-        (ship_return_prov, WarpProvenance::ReconnectReturnWarp),
-        (ship_emergency, WarpProvenance::DisconnectedEmergencyWarp),
-        (ship_still_warping, WarpProvenance::PlayerOrFleetWarp),
-        (ship_player_warp, WarpProvenance::PlayerOrFleetWarp),
-    ]);
 
     let events = vec![
         DestinyEvent::Stop {
@@ -873,26 +865,21 @@ fn clear_landed_warp_tracking_from_events_emits_warp_finished_for_return_warps_b
         },
     ];
 
-    clear_landed_warp_tracking_from_events(
-        &ballpark,
-        &events,
-        &mut warp_provenance,
-        &warp_tracking,
-    );
+    clear_landed_warp_tracking_from_events(&ballpark, &events, &mut warp_state);
 
-    assert!(!warp_provenance.contains_key(&ship_return_prov));
-    assert!(!warp_provenance.contains_key(&ship_emergency));
-    assert!(!warp_provenance.contains_key(&ship_player_warp));
+    assert!(!warp_state.provenance.contains_key(&ship_return_prov));
+    assert!(!warp_state.provenance.contains_key(&ship_emergency));
+    assert!(!warp_state.provenance.contains_key(&ship_player_warp));
     assert_eq!(
-        warp_provenance.get(&ship_still_warping),
+        warp_state.provenance.get(&ship_still_warping),
         Some(&WarpProvenance::PlayerOrFleetWarp)
     );
 
-    assert!(return_warps.lock().unwrap().is_empty());
-    assert!(active_warps.lock().unwrap().contains_key(&ship_still_warping));
-    assert!(!active_warps.lock().unwrap().contains_key(&ship_player_warp));
+    assert!(warp_state.return_warps.is_empty());
+    assert!(warp_state.active_warps.contains_key(&ship_still_warping));
+    assert!(!warp_state.active_warps.contains_key(&ship_player_warp));
 
-    let pending = pending_warp_finished.lock().unwrap().clone();
+    let pending = &warp_state.pending_warp_finished;
     assert!(
         pending.contains(&ship_return_prov),
         "ReconnectReturnWarp landing must defer OnWarpFinished via pending_warp_finished (#1454)"

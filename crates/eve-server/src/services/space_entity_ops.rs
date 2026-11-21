@@ -663,8 +663,7 @@ pub async fn handle(
                     if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }) {
                         let _ = handle.force_stop_warp(ship_id);
                         crate::services::space_destiny::clear_warp_tracking(
-                            ctx,
-                            Some(&handle),
+                            &handle,
                             ship_id,
                         );
                     }

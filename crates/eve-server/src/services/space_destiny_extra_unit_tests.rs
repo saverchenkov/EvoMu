@@ -404,17 +404,17 @@ async fn update_state_request_and_admin_get_bubble_id_edge_branches() {
         put_item(snap, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
         snap.item_positions.insert(ship_id, [15_000.0, 0.0, 0.0]);
     });
-    ctx.active_warps.lock().unwrap().insert(ship_id, 100);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h.insert_active_warp_for_test(ship_id, 100);
     assert_eq!(
         handle_update_state_request(&ctx, &sess, Some(&bound))
             .await
             .unwrap(),
         PyRep::None
     );
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!sys_h.is_active_warp(ship_id));
 
     // 5. Emergency warp without active_warps entry -> resets ship mode to Stop
-    let sys_h = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_h
         .set_movement_mode(
             ship_id,

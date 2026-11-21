@@ -470,6 +470,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::SetMovementModeBreakingProtection { .. } => "SetMovementModeBreakingProtection",
             SystemCommand::SetWarpMovementModeBreakingProtection { .. } => "SetWarpMovementModeBreakingProtection",
             SystemCommand::GotoPointBreakingProtection { .. } => "GotoPointBreakingProtection",
+            SystemCommand::ShutdownActor { .. } => "ShutdownActor",
         }
     }
 
@@ -604,9 +605,12 @@ fn system_command_all_variants_construct_and_match() {
             observer_ball_id: 1,
             reply: oneshot::channel().0,
         },
+        SystemCommand::ShutdownActor {
+            reply: oneshot::channel().0,
+        },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 77);
+    assert_eq!(tags.len(), 78);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");

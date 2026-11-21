@@ -27,12 +27,50 @@ pub enum WarpProvenance {
     ReconnectReturnWarp,
 }
 
-/// Shared `ServerContext` warp-tracking tables wired into spawned solar systems (`#1175`).
-#[derive(Clone, Default)]
-pub(crate) struct SharedWarpTracking {
-    pub active_warps: Option<Arc<RankedMutex<HashMap<i64, i64>, RANK_LEAF>>>,
-    pub return_warps: Option<Arc<RankedMutex<HashSet<i64>, RANK_LEAF>>>,
-    pub pending_warp_finished: Option<Arc<RankedMutex<HashSet<i64>, RANK_LEAF>>>,
+/// Per-system authoritative ship warp tracking owned by `SystemActorState` (`#1541`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActorWarpState {
+    pub provenance: HashMap<BallId, WarpProvenance>,
+    pub active_warps: HashMap<BallId, CharacterId>,
+    pub return_warps: HashSet<BallId>,
+    pub pending_warp_finished: HashSet<BallId>,
+}
+
+impl ActorWarpState {
+    /// Records an active player or fleet warp for `ball_id` and `char_id` (`#1175`, `#1541`).
+    pub fn track_player_or_fleet_warp(&mut self, ball_id: BallId, char_id: CharacterId) {
+        self.provenance.insert(ball_id, WarpProvenance::PlayerOrFleetWarp);
+        self.pending_warp_finished.remove(&ball_id);
+        self.return_warps.remove(&ball_id);
+        self.active_warps.insert(ball_id, char_id);
+    }
+
+    /// Records an SP-6 reconnect return warp for `ball_id` (`#1454`, `#1541`).
+    pub fn track_return_warp(&mut self, ball_id: BallId) {
+        self.provenance.insert(ball_id, WarpProvenance::ReconnectReturnWarp);
+        self.active_warps.remove(&ball_id);
+        self.pending_warp_finished.remove(&ball_id);
+        self.return_warps.insert(ball_id);
+    }
+
+    /// Clears all actor warp tracking state for `ball_id`.
+    pub fn clear_ball(&mut self, ball_id: BallId, clear_pending_finished: bool) {
+        self.provenance.remove(&ball_id);
+        self.active_warps.remove(&ball_id);
+        self.return_warps.remove(&ball_id);
+        if clear_pending_finished {
+            self.pending_warp_finished.remove(&ball_id);
+        }
+    }
+
+    /// Consumes a landed warp notification token for `ball_id` once upon client poll (`#1175`, `#1454`).
+    pub fn consume_warp_finished(&mut self, ball_id: BallId) -> bool {
+        self.provenance.remove(&ball_id);
+        self.return_warps.remove(&ball_id);
+        let removed_active = self.active_warps.remove(&ball_id).is_some();
+        let removed_pending = self.pending_warp_finished.remove(&ball_id);
+        removed_active || removed_pending
+    }
 }
 
 /// State of an individual harvestable asteroid entity in space (`SP-4`, `MN-01`, `MN-02`).
@@ -865,8 +903,7 @@ pub(crate) struct SystemActorState {
     pub active_guided_missiles: Vec<ActiveGuidedMissile>,
     pub next_missile_ball_id: i64,
     pub(crate) pending_destroyed_balls: PendingDestroyedOutbox,
-    pub(crate) warp_provenance: HashMap<BallId, WarpProvenance>,
-    pub(crate) warp_tracking: SharedWarpTracking,
+    pub(crate) warp_state: ActorWarpState,
     /// Serializes monotonic `TickBroadcast.broadcast_seq` assignment with `event_tx.send` (`GH #1172`).
     pub(crate) broadcast_seq_gate: Arc<std::sync::Mutex<u64>>,
 }
@@ -1391,6 +1428,9 @@ pub enum SystemCommand {
         real_now_unix: u64,
         reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
     },
+    ShutdownActor {
+        reply: oneshot::Sender<()>,
+    },
 }
 
 pub type CharacterId = i64;
@@ -1518,6 +1558,10 @@ pub struct SystemView {
     pub active_siege_ships: HashSet<BallId>,
     pub active_industrial_core_ships: HashSet<BallId>,
     pub active_microjump_ships: HashSet<BallId>,
+    pub warp_provenance: HashMap<BallId, WarpProvenance>,
+    pub active_warps: HashMap<BallId, CharacterId>,
+    pub return_warps: HashSet<BallId>,
+    pub pending_warp_finished: HashSet<BallId>,
 }
 
 impl Default for SystemView {
@@ -1548,6 +1592,10 @@ impl Default for SystemView {
             active_siege_ships: HashSet::new(),
             active_industrial_core_ships: HashSet::new(),
             active_microjump_ships: HashSet::new(),
+            warp_provenance: HashMap::new(),
+            active_warps: HashMap::new(),
+            return_warps: HashSet::new(),
+            pending_warp_finished: HashSet::new(),
         }
     }
 }
@@ -1606,6 +1654,10 @@ impl SystemView {
             active_siege_ships,
             active_industrial_core_ships,
             active_microjump_ships,
+            warp_provenance,
+            active_warps,
+            return_warps,
+            pending_warp_finished,
         ) = if let Some(st) = actor_state {
             let mut mods = HashSet::new();
             let mut bastion = HashSet::new();
@@ -1642,6 +1694,10 @@ impl SystemView {
                 siege,
                 ind_core,
                 microjump,
+                st.warp_state.provenance.clone(),
+                st.warp_state.active_warps.clone(),
+                st.warp_state.return_warps.clone(),
+                st.warp_state.pending_warp_finished.clone(),
             )
         } else if let Some(prev) = previous {
             (
@@ -1652,6 +1708,10 @@ impl SystemView {
                 prev.active_siege_ships.clone(),
                 prev.active_industrial_core_ships.clone(),
                 prev.active_microjump_ships.clone(),
+                prev.warp_provenance.clone(),
+                prev.active_warps.clone(),
+                prev.return_warps.clone(),
+                prev.pending_warp_finished.clone(),
             )
         } else {
             (
@@ -1660,6 +1720,10 @@ impl SystemView {
                 HashSet::new(),
                 HashSet::new(),
                 HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+                HashMap::new(),
+                HashMap::new(),
                 HashSet::new(),
                 HashSet::new(),
             )
@@ -1699,6 +1763,10 @@ impl SystemView {
             active_siege_ships,
             active_industrial_core_ships,
             active_microjump_ships,
+            warp_provenance,
+            active_warps,
+            return_warps,
+            pending_warp_finished,
         }
     }
 
@@ -1812,6 +1880,26 @@ impl SystemView {
 
     pub fn has_active_microjump(&self, ball_id: BallId) -> bool {
         self.active_microjump_ships.contains(&ball_id)
+    }
+
+    pub fn warp_provenance(&self, ball_id: BallId) -> Option<WarpProvenance> {
+        self.warp_provenance.get(&ball_id).copied()
+    }
+
+    pub fn active_warp_char(&self, ball_id: BallId) -> Option<CharacterId> {
+        self.active_warps.get(&ball_id).copied()
+    }
+
+    pub fn is_active_warp(&self, ball_id: BallId) -> bool {
+        self.active_warps.contains_key(&ball_id)
+    }
+
+    pub fn is_return_warp(&self, ball_id: BallId) -> bool {
+        self.return_warps.contains(&ball_id)
+    }
+
+    pub fn is_pending_warp_finished(&self, ball_id: BallId) -> bool {
+        self.pending_warp_finished.contains(&ball_id)
     }
 
     /// Yields every ball ID currently holding a lock (locking or locked) on `target_id`.

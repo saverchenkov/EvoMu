@@ -647,7 +647,7 @@ async fn cmd_dock_warp_deceleration_1s_tolerance_and_mid_warp_rejection() {
         },
         CombatState::default(),
     );
-    ctx.active_warps.lock().unwrap().insert(ship_id, char_id);
+    sys_handle.insert_active_warp_for_test(ship_id, char_id);
 
     let mut sess = SessionState {
         session_id: 51,
@@ -676,7 +676,7 @@ async fn cmd_dock_warp_deceleration_1s_tolerance_and_mid_warp_rejection() {
         "ShipInWarp"
     );
     assert_eq!(sess.station_id, None);
-    assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(sys_handle.is_active_warp(ship_id));
 
     // #1001: Autopilot RealDock -> CmdDock while client exited DSTBALL_WARP ~2.8s ahead of 5.0 AU/s server decel
     let mut venture_probe = probe.clone();
@@ -712,7 +712,7 @@ async fn cmd_dock_warp_deceleration_1s_tolerance_and_mid_warp_rejection() {
     .expect("CmdDock within <= 1.0s warp deceleration must succeed");
     assert_eq!(dock_ok.dict_get("locationID"), Some(&PyRep::Integer(st_id)));
     assert_eq!(sess.station_id, Some(st_id));
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!sys_handle.is_active_warp(ship_id));
     assert!(sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
 }
 
@@ -1360,10 +1360,7 @@ async fn dock_warp_settle_plan_handles_arriving_warp_post_exit_race_and_rejectio
         elapsed_warp_time: 5.0,
     };
     sys_handle.spawn_ball(ball.clone()).await.unwrap();
-    ctx.active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(ship_id, st_id);
+    sys_handle.insert_active_warp_for_test(ship_id, st_id);
     assert_eq!(evaluate_dock_perimeter(&ball, st_pos, st_radius).unwrap(), true);
 
     let plan = prepare_dock_warp_settle(
@@ -1380,10 +1377,7 @@ async fn dock_warp_settle_plan_handles_arriving_warp_post_exit_race_and_rejectio
     assert_eq!(plan.ship_id, ship_id);
     assert!(plan.settle_deadline > tokio::time::Instant::now());
     assert!(
-        !ctx.active_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&ship_id),
+        !sys_handle.is_active_warp(ship_id),
         "stop_arriving_warp_for_dock must clear active_warps"
     );
 
@@ -1683,10 +1677,7 @@ async fn supercapital_dock_and_gate_perimeters_include_ship_ball_radius() {
         true
     );
     sys_handle.spawn_ball(titan.clone()).await.unwrap();
-    ctx.active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(ship_id, char_id);
+    sys_handle.insert_active_warp_for_test(ship_id, char_id);
     stop_arriving_warp_for_dock(&ctx, &sys_handle, &titan, keepstar_pos, keepstar_radius);
     let after_inside_stop = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
     assert_eq!(after_inside_stop.mode, MovementMode::Stop);
@@ -1694,11 +1685,7 @@ async fn supercapital_dock_and_gate_perimeters_include_ship_ball_radius() {
         after_inside_stop.position.distance(inside_warp_pos) < 1e-6,
         "stop_arriving_warp_for_dock must not snap when Titan is already inside max_dock_dist"
     );
-    assert!(!ctx
-        .active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains_key(&ship_id));
+    assert!(!sys_handle.is_active_warp(ship_id));
     assert_eq!(
         evaluate_dock_perimeter(&after_inside_stop, keepstar_pos, keepstar_radius).unwrap(),
         false

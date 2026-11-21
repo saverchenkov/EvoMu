@@ -410,8 +410,7 @@ pub(super) async fn handle_fleet_ops(
                 .is_ok()
             {
                 crate::services::space_destiny::track_player_or_fleet_warp(
-                    ctx,
-                    None,
+                    &sys,
                     caller_ship_id,
                     char_id,
                 );
@@ -1593,8 +1592,7 @@ pub(crate) async fn handle_fleet_warp(
                     );
                 }
                 crate::services::space_destiny::track_player_or_fleet_warp(
-                    ctx,
-                    None,
+                    &sys,
                     ship_id,
                     member_char_id,
                 );

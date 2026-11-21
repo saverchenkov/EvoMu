@@ -832,7 +832,7 @@ async fn test_sp6_bonused_venture_hp_and_mid_warp_restart_recovery_across_sqlite
     .await
     .expect("SelectCharacterID after mid-warp restart");
     assert_eq!(sess2.ship_id, Some(ship_id));
-    assert!(ctx2.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(sys_handle2.is_active_warp(ship_id));
 
     let beyonce_oid2 = ctx2.bind_object(&sess2, "beyonce", sys_id as i64).unwrap();
     let _ = ctx2.drain_notifications_for_char(char_id);
@@ -849,7 +849,7 @@ async fn test_sp6_bonused_venture_hp_and_mid_warp_restart_recovery_across_sqlite
     .expect("UpdateStateRequest on reconnect");
 
     assert_warp_lands_with_ccp_coast(&sys_handle2, ship_id, "resumed mid-warp").await;
-    assert!(ctx2.pending_warp_finished.lock().unwrap().contains(&ship_id));
+    assert!(sys_handle2.is_pending_warp_finished(ship_id));
 
     ctx2.dispatch_rpc(
         &mut sess2,
@@ -953,7 +953,7 @@ async fn test_sp6_emergency_warp_cruising_redirect_on_warp_finished_and_cold_sol
     assert!(set_state_ball
         .warp_destination
         .is_some_and(|d| d.distance(orig_pos) < 1.0));
-    assert!(ctx.return_warps.lock().unwrap().contains(&ship_id));
+    assert!(sys_handle.is_return_warp(ship_id));
 
     let beyonce_oid = ctx.bind_object(&sess_re, "beyonce", sys_id as i64).unwrap();
     let _ = ctx.drain_notifications_for_char(char_id);
@@ -1059,7 +1059,7 @@ async fn test_sp6_emergency_warp_cruising_redirect_on_warp_finished_and_cold_sol
         "cold solo reconnect mid-warp must resume Cruising warp (#1454): {:?}",
         cold_ball.mode
     );
-    assert!(ctx_cold.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(sys_cold.is_active_warp(ship_id));
     let beyonce_cold = ctx_cold.bind_object(&sess_cold, "beyonce", sys_id as i64).unwrap();
     let _ = ctx_cold.drain_notifications_for_char(char_id);
     assert_warp_lands_with_ccp_coast(&sys_cold, ship_id, "cold-reopened mid-warp").await;
@@ -1081,6 +1081,192 @@ async fn test_sp6_emergency_warp_cruising_redirect_on_warp_finished_and_cold_sol
             .iter()
             .any(|n| n.event == "OnWarpFinished"),
         "cold solo reconnect warp landing must emit OnWarpFinished (#1454)"
+    );
+}
+
+#[tokio::test]
+async fn test_sp6_system_actor_stop_and_restart_mid_warp_preserves_single_record_and_emits_warp_finished_once() {
+    let ctx = ServerContext::new();
+    pin_clock(&ctx);
+    let char_id = 90_000_001_i64;
+    let empty = HashMap::new();
+
+    let (mut sess, sys_id, ship_id) = setup_pilot_in_space(&ctx, char_id).await;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let origin_pos = sys_handle.get_ball_position_sync(ship_id).unwrap();
+    let target_cel = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .filter(|c| c.position.distance(origin_pos) > 5.0 * eve_destiny::AU_METERS)
+        .min_by_key(|c| c.position.distance(origin_pos) as i64)
+        .expect("system must have a celestial > 5 AU away");
+
+    let beyonce_oid = ctx.bind_object(&sess, "beyonce", sys_id as i64).unwrap();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_oid),
+        "CmdWarpToStuff",
+        &[
+            PyRep::String("item".into()),
+            PyRep::Integer(target_cel.celestial_id),
+        ],
+        &empty,
+        None,
+    )
+    .await
+    .expect("CmdWarpToStuff");
+
+    let mut entered_cruising = false;
+    let mut warp_dest = origin_pos;
+    for _ in 0..60 {
+        let _ = sys_handle.step_manual(1.0).await;
+        let (_, b) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if let MovementMode::Warp {
+            phase: eve_destiny::WarpPhase::Cruising,
+            destination,
+            ..
+        } = b.mode
+        {
+            entered_cruising = true;
+            warp_dest = destination;
+            break;
+        }
+    }
+    assert!(entered_cruising, "ship must enter WarpPhase::Cruising");
+    assert_eq!(sys_handle.view().active_warps.len(), 1);
+    assert_eq!(sys_handle.active_warp_char(ship_id), Some(char_id));
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "userSvc",
+        None,
+        "UserLogOffCharacter",
+        &[PyRep::Integer(char_id)],
+        &empty,
+        None,
+    )
+    .await
+    .expect("UserLogOffCharacter mid-warp");
+    ctx.dispatch_rpc(&mut sess, "authentication", None, "Logout", &[], &empty, None)
+        .await
+        .expect("Logout after UserLogOffCharacter");
+
+    drop(sys_handle);
+    assert!(
+        ctx.systems.stop_system(sys_id).await,
+        "stop_system must stop the active system actor mid-warp"
+    );
+    assert!(!ctx.systems.is_system_loaded(sys_id));
+
+    let restarted_handle = ctx.systems.get_or_spawn(sys_id);
+    let restarted_view = restarted_handle.view();
+    assert_eq!(
+        restarted_view.active_warps.len(),
+        1,
+        "restarted system actor must retain exactly one active_warps record"
+    );
+    assert_eq!(restarted_view.active_warp_char(ship_id), Some(char_id));
+    assert_eq!(
+        restarted_view.warp_provenance(ship_id),
+        Some(eve_server::system_actor::WarpProvenance::PlayerOrFleetWarp)
+    );
+    assert!(!restarted_view.is_pending_warp_finished(ship_id));
+    let (_, restarted_ball) = restarted_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("mid-warp ship reconstructed on system actor restart");
+    assert!(matches!(
+        restarted_ball.mode,
+        MovementMode::Warp { destination, .. } if destination.distance(warp_dest) < 1.0
+    ));
+
+    let mut sess_re = SessionState::default();
+    login_pilot(&ctx, &mut sess_re, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess_re,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &empty,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID after system actor restart mid-warp");
+    assert_eq!(sess_re.ship_id, Some(ship_id));
+    assert_eq!(restarted_handle.view().active_warps.len(), 1);
+    assert_eq!(restarted_handle.active_warp_char(ship_id), Some(char_id));
+
+    let beyonce_re = ctx.bind_object(&sess_re, "beyonce", sys_id as i64).unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.dispatch_rpc(
+        &mut sess_re,
+        "beyonce",
+        Some(beyonce_re),
+        "UpdateStateRequest",
+        &[],
+        &empty,
+        None,
+    )
+    .await
+    .expect("UpdateStateRequest while still mid-warp after actor restart");
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .filter(|n| n.event == "OnWarpFinished")
+            .count(),
+        0,
+        "OnWarpFinished must not fire before landing"
+    );
+
+    assert_warp_lands_with_ccp_coast(&restarted_handle, ship_id, "actor stop/restart mid-warp").await;
+    assert!(restarted_handle.view().active_warps.is_empty());
+    assert_eq!(restarted_handle.warp_provenance(ship_id), None);
+    assert!(restarted_handle.is_pending_warp_finished(ship_id));
+
+    ctx.dispatch_rpc(
+        &mut sess_re,
+        "beyonce",
+        Some(beyonce_re),
+        "UpdateStateRequest",
+        &[],
+        &empty,
+        None,
+    )
+    .await
+    .expect("UpdateStateRequest on landing after actor restart");
+    let landed_notes = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        landed_notes
+            .iter()
+            .filter(|n| n.event == "OnWarpFinished")
+            .count(),
+        1,
+        "OnWarpFinished must be sent exactly once after actor stop/restart mid-warp"
+    );
+    assert!(!restarted_handle.is_pending_warp_finished(ship_id));
+
+    ctx.dispatch_rpc(
+        &mut sess_re,
+        "beyonce",
+        Some(beyonce_re),
+        "UpdateStateRequest",
+        &[],
+        &empty,
+        None,
+    )
+    .await
+    .expect("follow-up UpdateStateRequest after OnWarpFinished delivery");
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .filter(|n| n.event == "OnWarpFinished")
+            .count(),
+        0,
+        "follow-up UpdateStateRequest must not re-send OnWarpFinished"
     );
 }
 

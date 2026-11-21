@@ -793,7 +793,7 @@ async fn bf04_reconnect_stops_outbound_emergency_warp_and_delivers_set_state() {
     // stop the outbound emergency warp and NEVER insert `ship_id` into `ctx.active_warps` (#843).
     reconnect_character_in_space_sync(&ctx, char_id).expect("reconnect");
     assert!(
-        !ctx.active_warps.lock().unwrap().contains_key(&ship_id),
+        !sys_handle.is_active_warp(ship_id),
         "emergency warp must not be tracked in active_warps (#843)"
     );
     let (_, stop_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
@@ -811,7 +811,7 @@ async fn bf04_reconnect_stops_outbound_emergency_warp_and_delivers_set_state() {
         }
     }
     reconnect_character_in_space_sync(&ctx, char_id).expect("reconnect return warp");
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!sys_handle.is_active_warp(ship_id));
     let _ = sys_handle.drain_observer_updates(ship_id).await;
 
     let mut sess = SessionState::new(991_001);
@@ -841,7 +841,7 @@ async fn bf04_reconnect_stops_outbound_emergency_warp_and_delivers_set_state() {
     );
     let (_, post_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!(
-        ctx.return_warps.lock().unwrap().contains(&ship_id),
+        sys_handle.is_return_warp(ship_id),
         "SP-6 reconnect return-warp must remain tracked in return_warps across UpdateStateRequest (#843)"
     );
     assert!(
@@ -975,7 +975,7 @@ async fn reconnect_mid_outbound_warp_redirects_cleanly_and_encodes_return_warp_s
         "SetState return warp must target orig_pos, got {:?}",
         wire_ball.warp_destination
     );
-    assert!(ctx.return_warps.lock().unwrap().contains(&ship_id));
+    assert!(sys_handle.is_return_warp(ship_id));
     assert_eq!(
         sys_handle.warp_provenance(ship_id),
         Some(crate::system_actor::WarpProvenance::ReconnectReturnWarp)
@@ -1060,7 +1060,7 @@ async fn reconnect_without_existing_ball_queues_set_state_after_return_warp_mode
     assert!(wire_ball
         .warp_destination
         .is_some_and(|dest| dest.distance(orig_pos) < 1.0));
-    assert!(ctx.return_warps.lock().unwrap().contains(&ship_id));
+    assert!(sys_handle.is_return_warp(ship_id));
     assert_eq!(
         sys_handle.warp_provenance(ship_id),
         Some(crate::system_actor::WarpProvenance::ReconnectReturnWarp)

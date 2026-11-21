@@ -496,7 +496,8 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
         }
         active_ship_id
     });
-    ctx.active_warps.lock().unwrap().insert(ship_id, 60_003_760);
+    let sys_handle = ctx.systems.get_or_spawn(30_000_142);
+    sys_handle.insert_active_warp_for_test(ship_id, 60_003_760);
 
     let err_empty_tuple = ctx
         .dispatch_rpc(
@@ -584,7 +585,7 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
         .await
         .expect("beyonce bind in space");
     assert!(matches!(beyonce_ok, PyRep::Tuple(_)));
-    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!sys_handle.is_active_warp(ship_id));
 
     // 3. SQLite commit failure inside real `dispatch_rpc` rolls back the snapshot cleanly via CoW tx engine.
     let wal_db = std::env::temp_dir().join(format!(
