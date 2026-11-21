@@ -4,7 +4,9 @@ use super::*;
 use crate::router::{context::BoundObjectEntry, ServerContext};
 use crate::services::combat_crimewatch::{self, SafetyLevel};
 use crate::services::inventory_fitting::fitting_containers_ships::{
-    read_container_ship_state, save_container_ship_state,
+    clear_container_unlocks_snap, container_alsc_logs_snap, is_container_unlocked_snap,
+    set_alsc_item_locked_snap, set_container_config_snap, set_container_password_snap,
+    set_container_unlocked_snap, set_ship_access_config_snap, ship_access_config_snap,
 };
 use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord, VirtualServerClock, WorldRepository};
 use eve_machonet::SessionState;
@@ -177,11 +179,9 @@ fn split_stack_multi_merge_and_stack_all_happy_and_error_paths() {
     assert_eq!(merge_rep.dict_get("quantity").and_then(|v| v.as_i64()), Some(600));
 
     // ALSC locked stack rejected in MultiMerge
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.alsc_locked_items.insert(locked_stack);
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, locked_stack, true, 0).unwrap();
+    });
     let alsc_err = handle_stack_ops(
         &ctx,
         &mut sess,
@@ -197,11 +197,9 @@ fn split_stack_multi_merge_and_stack_all_happy_and_error_paths() {
     .expect("matched")
     .unwrap_err();
     assert_eq!(alsc_err.code, "ALSCItemLocked");
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.alsc_locked_items.remove(&locked_stack);
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, locked_stack, false, 0).unwrap();
+    });
 
     // 3. StackAll merges remaining Tritanium stacks in station hangar
     let stack_rep = handle_stack_ops(&ctx, &mut sess, Some(&bound), "invbroker", "StackAll", &[], &kw)
@@ -352,11 +350,9 @@ async fn get_container_contents_alsc_password_list_and_empty_jetcan_despawn() {
     insert_item(&ctx, inner_item_id, 34, char_id, alsc_id, InventoryFlag::Cargo, 42, false);
     insert_item(&ctx, empty_jetcan_id, 23, char_id, sys_id as i64, InventoryFlag::None, 1, true);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.container_passwords.insert(alsc_id, "secret123".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, alsc_id, 1, "secret123", 0).unwrap();
+    });
 
     let mut sess = make_session(char_id, corp_id, Some(station_id), None, None);
     let mut kw = HashMap::new();
@@ -374,9 +370,10 @@ async fn get_container_contents_alsc_password_list_and_empty_jetcan_despawn() {
             .await
             .is_ok()
     );
-    let st_after = read_container_ship_state(&ctx);
-    assert!(st_after.unlocked_containers.contains(&(alsc_id, char_id)));
-    assert_eq!(st_after.alsc_logs.get(&alsc_id).map(|v| v.len()), Some(1));
+    ctx.db.with_snapshot(|snap| {
+        assert!(is_container_unlocked_snap(snap, alsc_id, char_id));
+        assert_eq!(container_alsc_logs_snap(snap, alsc_id).len(), 1);
+    });
 
     // List & ListByFlags on station hangar
     let empty_kw = HashMap::new();
@@ -1399,11 +1396,9 @@ async fn group_2b_container_contents_list_alsc_password_corp_role_and_space_rang
     insert_item(&ctx, corp_loot_id, 34, corp_id, station_id, InventoryFlag::CorpSAG1, 100, false);
     insert_item(&ctx, space_cont_id, 999_110, char_id, sys_id as i64, InventoryFlag::None, 1, true);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.container_passwords.insert(docked_alsc_id, "pw448".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, docked_alsc_id, 1, "pw448", 0).unwrap();
+    });
 
     let kw = HashMap::new();
     let sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
@@ -1439,12 +1434,12 @@ async fn group_2b_container_contents_list_alsc_password_corp_role_and_space_rang
             .await
             .is_ok()
     );
-    let st_after = read_container_ship_state(&ctx);
-    assert!(st_after.unlocked_containers.contains(&(docked_alsc_id, char_id)));
-    assert!(st_after
-        .alsc_logs
-        .get(&docked_alsc_id)
-        .is_some_and(|logs| logs.iter().any(|l| l.action == "ALSCActionOpen")));
+    ctx.db.with_snapshot(|snap| {
+        assert!(is_container_unlocked_snap(snap, docked_alsc_id, char_id));
+        assert!(container_alsc_logs_snap(snap, docked_alsc_id)
+            .iter()
+            .any(|l| l.action == "ALSCActionOpen"));
+    });
 
     // handle_list: no location -> InvalidLocation
     assert_eq!(handle_list(&ctx, &unloc_sess, None, &[], &kw).unwrap_err().code, "InvalidLocation");
@@ -1584,11 +1579,9 @@ fn issue_888_partial_multimerge_is_atomic_on_destination_failure() {
     insert_item(&ctx, cont_id, 17366, char_id, station_id, InventoryFlag::Hangar, 1, true);
     insert_item(&ctx, cont_src, 34, char_id, cont_id, InventoryFlag::Cargo, 40, false);
     insert_item(&ctx, cont_dst, 34, char_id, cont_id, InventoryFlag::Cargo, 25, false);
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.container_passwords.insert(cont_id, "vaultpw".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, cont_id, 1, "vaultpw", 0).unwrap();
+    });
     let _ = ctx.drain_notifications_for_char(char_id);
     let pw_err = handle_stack_ops(
         &ctx,
@@ -1609,11 +1602,9 @@ fn issue_888_partial_multimerge_is_atomic_on_destination_failure() {
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 
     // ALSC-locked ancestor container rejects with ALSCItemLocked even when password is provided
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.alsc_locked_items.insert(cont_id);
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, cont_id, true, 0).unwrap();
+    });
     let mut pw_kw = HashMap::new();
     pw_kw.insert("password".into(), PyRep::String("vaultpw".into()));
     let alsc_err = handle_stack_ops(
@@ -1635,11 +1626,9 @@ fn issue_888_partial_multimerge_is_atomic_on_destination_failure() {
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 
     // Unlock ALSC lock and supply password -> partial MultiMerge succeeds cleanly
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.alsc_locked_items.remove(&cont_id);
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, cont_id, false, 0).unwrap();
+    });
     let ok_merge = handle_stack_ops(
         &ctx,
         &mut sess,
@@ -1799,12 +1788,10 @@ fn stack_all_preserves_all_eligibility_rules_tiebreak_notifs_and_reply() {
             },
         );
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.alsc_locked_items.insert(id_alsc);
-        st.alsc_locked_items.insert(cont_locked);
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, id_alsc, true, 0).unwrap();
+        set_alsc_item_locked_snap(snap, cont_locked, true, 0).unwrap();
+    });
     ctx.fighter_tube_loads
         .write()
         .unwrap()
@@ -2430,12 +2417,10 @@ fn stack_all_enforces_secure_container_passwords_direct_and_ancestor() {
     insert_item(&ctx, i2, 35, char_id, inner_cont, InventoryFlag::Cargo, 7, false);
     insert_item(&ctx, i3, 35, char_id, inner_cont, InventoryFlag::Cargo, 9, false);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.container_passwords.insert(outer_cont, "outerpw".into());
-        st.container_passwords.insert(inner_cont, "innerpw".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, outer_cont, 1, "outerpw", 0).unwrap();
+        set_container_password_snap(snap, inner_cont, 1, "innerpw", 0).unwrap();
+    });
 
     let mut sess = make_session(char_id, corp_id, Some(station_id), Some(sys_id), Some(ship_id));
     let kw = HashMap::new();
@@ -2513,11 +2498,9 @@ fn stack_all_enforces_secure_container_passwords_direct_and_ancestor() {
     );
 
     // Lock outer again; supplying innerpw when outer is still locked must reject on ancestor container
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.unlocked_containers.remove(&(outer_cont, char_id));
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_unlocked_snap(snap, outer_cont, char_id, false, 0).unwrap();
+    });
     let mut inner_pw = HashMap::new();
     inner_pw.insert("password".into(), PyRep::String("innerpw".into()));
     assert_eq!(
@@ -2536,12 +2519,10 @@ fn stack_all_enforces_secure_container_passwords_direct_and_ancestor() {
         "ALSCPasswordRequired"
     );
 
-    // Unlock outer via unlocked_containers and supply innerpw -> succeeds and records inner_cont unlock
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.unlocked_containers.insert((outer_cont, char_id));
-        save_container_ship_state(&ctx, &st);
-    }
+    // Unlock outer via ContainerUnlockedChar and supply innerpw -> succeeds and records inner_cont unlock
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_unlocked_snap(snap, outer_cont, char_id, true, 0).unwrap();
+    });
     let inner_res = handle_stack_ops(
         &ctx,
         &mut sess,
@@ -2613,13 +2594,11 @@ fn stack_ops_reject_auth_colocation_acl_before_password_oracle_and_run_atomicall
     insert_item(&ctx, c_1, 34, corp_mate_id, corp_cont, InventoryFlag::Cargo, 10, false);
     insert_item(&ctx, c_2, 34, corp_mate_id, corp_cont, InventoryFlag::Cargo, 12, false);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.container_passwords.insert(cont_owner, "topsecret".into());
-        st.container_passwords.insert(cont_remote, "remotepw".into());
-        st.container_passwords.insert(corp_cont, "corppw".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, cont_owner, 1, "topsecret", 0).unwrap();
+        set_container_password_snap(snap, cont_remote, 1, "remotepw", 0).unwrap();
+        set_container_password_snap(snap, corp_cont, 1, "corppw", 0).unwrap();
+    });
 
     let mut owner_sess = make_session(owner_id, corp_owner, Some(station_a), Some(sys_id), Some(ship_owner));
     let mut attacker_sess =
@@ -2775,19 +2754,14 @@ fn stack_ops_reject_auth_colocation_acl_before_password_oracle_and_run_atomicall
             "CorpRoleDenied"
         );
     }
-    let st_after_corp_denied = read_container_ship_state(&ctx);
-    assert!(!st_after_corp_denied
-        .unlocked_containers
-        .contains(&(corp_cont, corp_mate_id)));
-    assert!(!st_after_corp_denied
-        .unlocked_containers
-        .contains(&(corp_mate_id, corp_cont)));
     ctx.db.with_snapshot(|snap| {
+        assert!(!is_container_unlocked_snap(snap, corp_cont, corp_mate_id));
+        assert!(!is_container_unlocked_snap(snap, corp_mate_id, corp_cont));
         assert_eq!(snap.items.get(&c_1).map(|i| i.quantity), Some(10));
         assert_eq!(snap.items.get(&c_2).map(|i| i.quantity), Some(12));
     });
 
-    // 5. Failed SplitStack with matching password MUST NOT persist unlocked_containers
+    // 5. Failed SplitStack with matching password MUST NOT persist ContainerUnlockedChar
     let commits_before_fail_split = ctx.db.tx_commit_count();
     let mut owner_pw = HashMap::new();
     owner_pw.insert("password".into(), PyRep::String("topsecret".into()));
@@ -2811,8 +2785,7 @@ fn stack_ops_reject_auth_colocation_acl_before_password_oracle_and_run_atomicall
         "SplitFailed"
     );
     assert_eq!(ctx.db.tx_commit_count(), commits_before_fail_split);
-    let st_after_fail = read_container_ship_state(&ctx);
-    assert!(!st_after_fail.unlocked_containers.contains(&(cont_owner, owner_id)));
+    assert!(!ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, cont_owner, owner_id)));
 
     // 6. StackAll unlocking container + merging executes in exactly 1 commit, and no-op repeat does 0
     assert_eq!(
@@ -2845,8 +2818,7 @@ fn stack_ops_reject_auth_colocation_acl_before_password_oracle_and_run_atomicall
     assert_eq!(stack_res.dict_get("mergedCount"), Some(&PyRep::Integer(1)));
     assert_eq!(ctx.db.tx_commit_count(), commits_before_stack + 1);
 
-    let st_after_ok = read_container_ship_state(&ctx);
-    assert!(st_after_ok.unlocked_containers.contains(&(cont_owner, owner_id)));
+    assert!(ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, cont_owner, owner_id)));
 
     let commits_before_noop = ctx.db.tx_commit_count();
     let noop_res = handle_stack_ops(
@@ -2900,11 +2872,9 @@ fn get_inventory_mgr_bound_split_stack_works_when_docked_in_upwell_structure() {
     insert_item(&ctx, hangar_stack, 34, char_id, struct_id, InventoryFlag::Hangar, 40, false);
     insert_item(&ctx, cont_stack, 34, char_id, cont_id, InventoryFlag::Cargo, 60, false);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.container_passwords.insert(cont_id, "structpw".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, cont_id, 1, "structpw", 0).unwrap();
+    });
 
     let mut sess = make_session(char_id, corp_id, None, Some(sys_id), Some(ship_id));
     sess.structure_id = Some(struct_id);
@@ -3070,11 +3040,9 @@ fn corp_container_stack_ops_evaluate_due_pending_role_grants_without_reentrant_l
         snap.item_custom_names.insert(g_3, "Old Stack Label 3".into());
         snap.item_positions.insert(g_3, [4.0, 5.0, 6.0]);
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.container_passwords.insert(corp_cont, "grantpw".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, corp_cont, 1, "grantpw", 0).unwrap();
+    });
 
     let mut grantee_sess =
         make_session(grantee_id, corp_id, Some(station_id), Some(sys_id), Some(ship_a));
@@ -3159,9 +3127,9 @@ fn corp_container_stack_ops_evaluate_due_pending_role_grants_without_reentrant_l
     .expect("due pending role grant must allow SplitStack without re-entrant lock panic");
     assert_eq!(split_res.dict_get("originalQuantity"), Some(&PyRep::Integer(15)));
 
-    let mut st = read_container_ship_state(&ctx);
-    st.unlocked_containers.clear();
-    save_container_ship_state(&ctx, &st);
+    ctx.db.with_mut_snapshot(|snap| {
+        clear_container_unlocks_snap(snap, corp_cont);
+    });
 
     let merge_g = PyRep::List(vec![PyRep::Tuple(vec![
         PyRep::Integer(g_2),
@@ -3180,9 +3148,9 @@ fn corp_container_stack_ops_evaluate_due_pending_role_grants_without_reentrant_l
     .unwrap()
     .expect("due pending role grant must allow MultiMerge without re-entrant lock panic");
 
-    let mut st2 = read_container_ship_state(&ctx);
-    st2.unlocked_containers.clear();
-    save_container_ship_state(&ctx, &st2);
+    ctx.db.with_mut_snapshot(|snap| {
+        clear_container_unlocks_snap(snap, corp_cont);
+    });
 
     let stack_res = handle_stack_ops(
         &ctx,
@@ -3229,11 +3197,9 @@ fn in_space_foreign_ship_nested_container_rejects_before_password_oracle() {
         snap.item_positions.insert(attacker_ship, [0.0, 0.0, 0.0]);
         snap.item_positions.insert(victim_ship, [500.0, 0.0, 0.0]);
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.container_passwords.insert(nested_cont, "shippw".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, nested_cont, 1, "shippw", 0).unwrap();
+    });
 
     let mut attacker_sess =
         make_session(attacker_id, corp_a, None, Some(sys_id), Some(attacker_ship));
@@ -3384,12 +3350,10 @@ fn undocked_structure_and_missing_pos_fail_closed_before_password_oracle() {
     insert_item(&ctx, sp_1, 34, char_id, space_cont, InventoryFlag::Cargo, 25, false);
     insert_item(&ctx, sp_2, 34, char_id, space_cont, InventoryFlag::Cargo, 35, false);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.container_passwords.insert(struct_cont, "structcontpw".into());
-        st.container_passwords.insert(space_cont, "spacecontpw".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, struct_cont, 1, "structcontpw", 0).unwrap();
+        set_container_password_snap(snap, space_cont, 1, "spacecontpw", 0).unwrap();
+    });
 
     // 1. Undocked pilot tethered within 5,000m of ACL-owned structure MUST be rejected for internal hangars/containers
     ctx.db.with_mut_snapshot(|snap| {
@@ -3465,9 +3429,7 @@ fn undocked_structure_and_missing_pos_fail_closed_before_password_oracle() {
         );
         assert_eq!(ctx.db.tx_commit_count(), commits_before);
     }
-    assert!(!read_container_ship_state(&ctx)
-        .unlocked_containers
-        .contains(&(struct_cont, char_id)));
+    assert!(!ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, struct_cont, char_id)));
 
     // 2. In-space container with missing ship or container position MUST fail closed before password oracle
     for (ship_pos_opt, cont_pos_opt, pw) in [
@@ -3805,31 +3767,35 @@ fn foreign_ship_bay_password_and_alsc_password_per_action_enforced() {
         snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
         snap.item_positions.insert(owner_ship, [10_000.0, 0.0, 0.0]);
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_ship,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: Some("bay-secret".into()),
             },
-        );
-        st.container_passwords.insert(alsc_cont, "peract".into());
-        st.container_configs.insert(
+            0,
+        )
+        .unwrap();
+        set_container_password_snap(snap, alsc_cont, 1, "peract", 0).unwrap();
+        set_container_config_snap(
+            snap,
             alsc_cont,
-            ContainerConfig {
+            &ContainerConfig {
                 lock_by_default: false,
                 password_per_action: true,
                 config_bitmask: 0,
             },
-        );
-        // Pre-seed unlocked_containers to ensure password_per_action ignores cached unlocks
-        st.unlocked_containers.insert((alsc_cont, owner_id));
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+        // Pre-seed ContainerUnlockedChar to ensure password_per_action ignores cached unlocks
+        set_container_unlocked_snap(snap, alsc_cont, owner_id, true, 0).unwrap();
+    });
 
     let mut mate_sess = make_session(mate_id, corp_id, None, Some(sys_id), Some(mate_ship));
     let bound_owner_ship = make_bound(owner_ship, mate_id);
@@ -3868,9 +3834,7 @@ fn foreign_ship_bay_password_and_alsc_password_per_action_enforced() {
             "SplitFailed"
         );
     }
-    assert!(!read_container_ship_state(&ctx)
-        .unlocked_containers
-        .contains(&(mate_id, owner_ship)));
+    assert!(!ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, owner_ship, mate_id)));
 
     // 2. Move within 2,500m: missing/wrong bay password denies FleetHangarAccessDenied & SMAAccessDenied
     ctx.db.with_mut_snapshot(|snap| {
@@ -3922,11 +3886,9 @@ fn foreign_ship_bay_password_and_alsc_password_per_action_enforced() {
         .code,
         "SplitFailed"
     );
-    assert!(!read_container_ship_state(&ctx)
-        .unlocked_containers
-        .contains(&(mate_id, owner_ship)));
+    assert!(!ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, owner_ship, mate_id)));
 
-    // Valid SplitStack with bay password succeeds AND records (mate_id, owner_ship)
+    // Valid SplitStack with bay password succeeds AND records ContainerUnlockedChar(owner_ship, mate_id)
     let ok_fh_split = handle_stack_ops(
         &ctx,
         &mut mate_sess,
@@ -3939,9 +3901,7 @@ fn foreign_ship_bay_password_and_alsc_password_per_action_enforced() {
     .unwrap()
     .expect("in-range FleetHangar SplitStack with bay password must succeed");
     assert_eq!(ok_fh_split.dict_get("originalQuantity"), Some(&PyRep::Integer(20)));
-    assert!(read_container_ship_state(&ctx)
-        .unlocked_containers
-        .contains(&(mate_id, owner_ship)));
+    assert!(ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, owner_ship, mate_id)));
 
     // Subsequent MultiMerge without re-sending bay password succeeds via persisted unlock
     let split_fh_id = ok_fh_split.dict_get("newItemID").and_then(|v| v.as_i64()).unwrap();
@@ -3955,17 +3915,13 @@ fn foreign_ship_bay_password_and_alsc_password_per_action_enforced() {
         .expect("subsequent MultiMerge on unlocked ship bay must succeed");
 
     // Clear ship unlock and confirm SMA container requires bay password then unlocks on commit
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.unlocked_containers.remove(&(mate_id, owner_ship));
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_unlocked_snap(snap, owner_ship, mate_id, false, 0).unwrap();
+    });
     handle_stack_ops(&ctx, &mut mate_sess, Some(&bound_sma_cont), "invbroker", "MultiMerge", &[merge_sma], &kw_bay)
         .unwrap()
         .expect("ShipHangar MultiMerge with bay password must succeed");
-    assert!(read_container_ship_state(&ctx)
-        .unlocked_containers
-        .contains(&(mate_id, owner_ship)));
+    assert!(ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, owner_ship, mate_id)));
 
     // 3. ALSC password_per_action requires password on every SplitStack / MultiMerge / StackAll invocation
     ctx.db.with_mut_snapshot(|snap| {
@@ -4097,20 +4053,21 @@ async fn foreign_ship_bay_list_visibility_and_multiadd_owner_transfer() {
             },
         );
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_ship,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: None,
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let owner_sess = make_session(owner_id, owner_corp, Some(station_id), Some(sys_id), Some(owner_ship));
     let mut mate_sess = make_session(mate_id, mate_corp, Some(station_id), Some(sys_id), Some(mate_ship));
@@ -4168,11 +4125,11 @@ async fn foreign_ship_bay_list_visibility_and_multiadd_owner_transfer() {
     assert!(owner_notifs.iter().any(|n| n.event == "ProcessInventoryChange"));
 
     // 3. Disabling allow_fleet_hangar hides flag 155 and rejects ListByFlags([155]), while SMA flag 90 remains readable.
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.get_mut(&owner_ship).unwrap().allow_fleet_hangar = false;
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cfg = ship_access_config_snap(snap, owner_ship);
+        cfg.allow_fleet_hangar = false;
+        set_ship_access_config_snap(snap, owner_ship, &cfg, 0).unwrap();
+    });
     assert_eq!(
         handle_list_by_flags(
             &ctx,
@@ -4341,12 +4298,10 @@ async fn gh_1311_get_container_contents_remote_docked_assets_and_3arg_password()
         true,
     );
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.container_passwords.insert(remote_alsc, "pw-remote".into());
-        st.container_passwords.insert(jita_alsc, "pw-jita".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, remote_alsc, 1, "pw-remote", 0).unwrap();
+        set_container_password_snap(snap, jita_alsc, 1, "pw-jita", 0).unwrap();
+    });
 
     let jita_sess = make_session(char_id, corp_id, Some(jita_station), Some(jita_sys), Some(active_jita_ship));
     let jita_bound = make_bound(jita_station, char_id);
@@ -4464,10 +4419,13 @@ async fn gh_1311_get_container_contents_remote_docked_assets_and_3arg_password()
         .expect("3-arg password unlocks remote Keepstar ALSC"),
     );
     assert_eq!(remote_alsc_ids, vec![remote_alsc_trit]);
-    let st_after = read_container_ship_state(&ctx);
-    assert!(st_after.unlocked_containers.contains(&(remote_alsc, char_id)));
-    assert!(st_after.unlocked_containers.contains(&(jita_alsc, char_id)));
-    assert!(st_after.alsc_logs.get(&jita_alsc).is_some_and(|v| v.iter().any(|e| e.action == "ALSCActionOpen")));
+    ctx.db.with_snapshot(|snap| {
+        assert!(is_container_unlocked_snap(snap, remote_alsc, char_id));
+        assert!(is_container_unlocked_snap(snap, jita_alsc, char_id));
+        assert!(container_alsc_logs_snap(snap, jita_alsc)
+            .iter()
+            .any(|e| e.action == "ALSCActionOpen"));
+    });
 
     // 4. Negative security checks:
     //    - Foreign remote Avatar -> CantDoThatWithSomeoneElsesStuff
@@ -4854,8 +4812,8 @@ async fn get_container_contents_rejected_open_does_not_forge_alsc_log_or_unlock(
             },
         );
     });
-    crate::services::inventory_fitting::write_container_ship_state(&ctx, |st| {
-        st.container_passwords.insert(alsc_id, "vault-pw".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, alsc_id, 1, "vault-pw", 0).unwrap();
     });
 
     let mut owner_sess = make_session(owner_id, 98_000_001, Some(station_id), Some(30_000_142), Some(owner_ship));
@@ -4878,15 +4836,16 @@ async fn get_container_contents_rejected_open_does_not_forge_alsc_log_or_unlock(
     .unwrap_err();
     assert!(!err.code.is_empty());
 
-    let st_after_reject = read_container_ship_state(&ctx);
-    assert!(
-        !st_after_reject.unlocked_containers.contains(&(alsc_id, intruder_id)),
-        "rejected GetContainerContents must not mark container unlocked"
-    );
-    assert!(
-        st_after_reject.alsc_logs.get(&alsc_id).is_none_or(|v| v.is_empty()),
-        "rejected GetContainerContents must not append ALSCActionOpen log"
-    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !is_container_unlocked_snap(snap, alsc_id, intruder_id),
+            "rejected GetContainerContents must not mark container unlocked"
+        );
+        assert!(
+            container_alsc_logs_snap(snap, alsc_id).is_empty(),
+            "rejected GetContainerContents must not append ALSCActionOpen log"
+        );
+    });
 
     // Owner opening with valid password succeeds and appends ALSCActionOpen.
     crate::services::inventory_fitting::handle(
@@ -4901,15 +4860,576 @@ async fn get_container_contents_rejected_open_does_not_forge_alsc_log_or_unlock(
     .await
     .unwrap()
     .expect("owner GetContainerContents with valid password succeeds");
-    let st_after_ok = read_container_ship_state(&ctx);
-    assert!(st_after_ok.unlocked_containers.contains(&(alsc_id, owner_id)));
-    assert_eq!(
-        st_after_ok
-            .alsc_logs
-            .get(&alsc_id)
-            .and_then(|v| v.last())
-            .map(|e| e.action.as_str()),
-        Some("ALSCActionOpen")
-    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(is_container_unlocked_snap(snap, alsc_id, owner_id));
+        assert_eq!(
+            container_alsc_logs_snap(snap, alsc_id)
+                .last()
+                .map(|e| e.action.as_str()),
+            Some("ALSCActionOpen")
+        );
+    });
 }
 
+#[tokio::test]
+async fn multi_add_and_auto_fit_enforce_alsc_lock_and_commit_logs_atomically() {
+    let ctx = test_ctx();
+    let char_id = 92_000_260_i64;
+    let corp_id = 98_000_002_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 1_000_265_001_i64;
+    let alsc_id = 1_000_265_002_i64;
+    let locked_ore = 1_000_265_003_i64;
+    let locked_gun = 1_000_265_004_i64;
+    let unlocked_guns = 1_000_265_005_i64;
+    let hangar_ice = 1_000_265_006_i64;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), 30_000_142, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, alsc_id, 17366, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, locked_ore, 34, char_id, alsc_id, InventoryFlag::Cargo, 10, false);
+    insert_item(&ctx, locked_gun, 484, char_id, alsc_id, InventoryFlag::Cargo, 1, false);
+    insert_item(&ctx, unlocked_guns, 484, char_id, alsc_id, InventoryFlag::Cargo, 2, false);
+    insert_item(&ctx, hangar_ice, 17888, char_id, station_id, InventoryFlag::Hangar, 5, false);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for &sk in &[3300u32, 3302, 3318, 3392, 3426] {
+            snap.skills.entry(char_id).or_default().insert(
+                sk,
+                eve_db::TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        set_container_config_snap(
+            snap,
+            alsc_id,
+            &crate::services::inventory_fitting::fitting_containers_ships::ContainerConfig {
+                lock_by_default: true,
+                password_per_action: false,
+                config_bitmask: 0,
+            },
+            0,
+        )
+        .unwrap();
+        set_alsc_item_locked_snap(snap, locked_ore, true, 0).unwrap();
+        set_alsc_item_locked_snap(snap, locked_gun, true, 0).unwrap();
+    });
+
+    let kw = HashMap::new();
+    let mut sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
+    let ship_bound = make_bound(ship_id, char_id);
+    let alsc_bound = make_bound(alsc_id, char_id);
+
+    let commits_before = ctx.db.tx_commit_count();
+    let ore_err = handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(locked_ore)]),
+            PyRep::Integer(alsc_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(ore_err.code, "ALSCItemLocked");
+
+    let gun_err = handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(locked_gun)]),
+            PyRep::Integer(alsc_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(gun_err.code, "ALSCItemLocked");
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    ctx.db.with_snapshot(|snap| {
+        assert!(container_alsc_logs_snap(snap, alsc_id).is_empty());
+        assert_eq!(snap.items[&locked_ore].location_id, alsc_id);
+        assert_eq!(snap.items[&locked_gun].location_id, alsc_id);
+    });
+
+    // Moving item into ALSC with lock_by_default commits move + lock + ALSC logs in 1 atomic tx.
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&alsc_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(hangar_ice)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("MultiAdd into lock_by_default ALSC succeeds");
+    assert_eq!(ctx.db.tx_commit_count(), commits_before + 1);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&hangar_ice].location_id, alsc_id);
+        assert!(snap.is_item_in_alsc_lock(hangar_ice));
+        let actions: Vec<String> = container_alsc_logs_snap(snap, alsc_id)
+            .into_iter()
+            .map(|e| e.action)
+            .collect();
+        assert_eq!(actions, vec!["ALSCActionLock", "ALSCActionAdd"]);
+    });
+
+    // Auto-fit from ALSC splits stack, fits into HiSlot0, and logs ALSCActionTake in 1 tx.
+    let fit_rep = handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(unlocked_guns)]),
+            PyRep::Integer(alsc_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .await
+    .expect("auto-fit from ALSC succeeds");
+    let PyRep::List(fitted_items) = fit_rep.dict_get("items").unwrap() else {
+        panic!("expected fitted items list");
+    };
+    let fitted_id = fitted_items[0].as_i64().unwrap();
+    assert_eq!(ctx.db.tx_commit_count(), commits_before + 2);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&unlocked_guns].location_id, alsc_id);
+        assert_eq!(snap.items[&unlocked_guns].quantity, 1);
+        assert_eq!(snap.items[&fitted_id].location_id, ship_id);
+        assert_eq!(snap.items[&fitted_id].flag, InventoryFlag::HiSlot0);
+        let logs = container_alsc_logs_snap(snap, alsc_id);
+        let actions: Vec<String> = logs.iter().map(|e| e.action.clone()).collect();
+        assert_eq!(actions, vec!["ALSCActionLock", "ALSCActionAdd", "ALSCActionTake"]);
+        assert_eq!(
+            logs.last().unwrap().item_id,
+            unlocked_guns,
+            "auto-fit split-take ALSCActionTake must record original source stack item_id"
+        );
+    });
+}
+
+
+#[test]
+fn bf_1180_list_nested_ship_bay_unlock_and_concurrent_acl_revocation_fail_closed() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        verify_nested_unit_list_in_snap, ContainerConfig, ShipAccessConfig,
+    };
+
+    let ctx = test_ctx();
+    let owner_id = 92_880_001_i64;
+    let mate_id = 92_880_002_i64;
+    let corp_id = 98_880_001_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let owner_ship = 1_880_100_001_i64;
+    let mate_ship = 1_880_100_002_i64;
+    let nest_box = 1_880_100_010_i64;
+    let nest_item = 1_880_100_020_i64;
+    let sma_item = 1_880_100_030_i64;
+
+    ensure_char(&ctx, owner_id, corp_id, Some(station_id), sys_id, owner_ship);
+    ensure_char(&ctx, mate_id, corp_id, Some(station_id), sys_id, mate_ship);
+    insert_item(&ctx, owner_ship, 587, owner_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, mate_ship, 587, mate_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, nest_box, 17_366, owner_id, owner_ship, InventoryFlag::ShipHangar, 1, true);
+    insert_item(&ctx, nest_item, 34, owner_id, nest_box, InventoryFlag::Cargo, 42, false);
+    insert_item(&ctx, sma_item, 587, owner_id, owner_ship, InventoryFlag::ShipHangar, 1, true);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
+            owner_ship,
+            &ShipAccessConfig {
+                allow_fleet_smb: false,
+                allow_corp_smb: true,
+                allow_fleet_hangar: false,
+                allow_corp_hangar: false,
+                password: Some("host-pw".into()),
+            },
+            0,
+        )
+        .unwrap();
+        set_container_config_snap(
+            snap,
+            nest_box,
+            &ContainerConfig {
+                lock_by_default: false,
+                password_per_action: false,
+                config_bitmask: 0,
+            },
+            0,
+        )
+        .unwrap();
+    });
+
+    let mate_sess = make_session(mate_id, corp_id, Some(station_id), Some(sys_id), Some(mate_ship));
+    let bound_nest = make_bound(nest_box, mate_id);
+    let mut kw_pw = HashMap::new();
+    kw_pw.insert("password".into(), PyRep::String("host-pw".into()));
+    let extract_ids = |rep: PyRep| -> Vec<i64> {
+        let PyRep::ObjectEx { list, .. } = rep else {
+            panic!("expected ObjectEx rowset, got {rep:?}");
+        };
+        list.iter().filter_map(|r| dbrow_col_i64(r, "itemID")).collect()
+    };
+
+    assert!(!ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, owner_ship, mate_id)));
+    let ids = extract_ids(
+        handle_list(&ctx, &mate_sess, Some(&bound_nest), &[], &kw_pw)
+            .expect("nested container List with valid host ship password must succeed"),
+    );
+    assert_eq!(ids, vec![nest_item]);
+    assert!(
+        ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, owner_ship, mate_id)),
+        "nested container List must persist unlock on foreign host ship"
+    );
+
+    // Concurrent ACL revocation / missing ship in snapshot must fail closed in both helpers
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
+            owner_ship,
+            &ShipAccessConfig {
+                allow_fleet_smb: false,
+                allow_corp_smb: false,
+                allow_fleet_hangar: false,
+                allow_corp_hangar: false,
+                password: None,
+            },
+            0,
+        )
+        .unwrap();
+    });
+    assert_eq!(
+        handle_list(&ctx, &mate_sess, Some(&bound_nest), &[], &kw_pw).unwrap_err().code,
+        "SMAAccessDenied"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            verify_nested_unit_list_in_snap(&ctx, snap, &mate_sess, mate_id, nest_box, Some("host-pw"))
+                .unwrap_err()
+                .code,
+            "SMAAccessDenied"
+        );
+        assert_eq!(
+            super::verify_and_collect_foreign_ship_rows(
+                &ctx, snap, &mate_sess, mate_id, owner_ship, true, false, None, Some("host-pw"),
+            )
+            .unwrap_err()
+            .code,
+            "SMAAccessDenied"
+        );
+        assert_eq!(
+            super::verify_and_collect_foreign_ship_rows(
+                &ctx, snap, &mate_sess, mate_id, 1_880_999_999, true, false, Some(&[90]), None,
+            )
+            .unwrap_err()
+            .code,
+            "SMAAccessDenied"
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1180_multi_add_and_move_enforce_foreign_corp_and_password_per_action() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        validate_container_and_bay_move, ContainerConfig,
+    };
+
+    let ctx = test_ctx();
+    let owner_id = 92_881_001_i64;
+    let stranger_id = 92_881_002_i64;
+    let corp_a = 98_881_001_i64;
+    let corp_b = 98_881_002_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let owner_ship = 1_881_100_001_i64;
+    let stranger_ship = 1_881_100_002_i64;
+    let owner_alsc = 1_881_100_010_i64;
+    let alsc_item = 1_881_100_020_i64;
+    let foreign_box = 1_881_100_030_i64;
+    let foreign_item = 1_881_100_040_i64;
+    let foreign_jetcan = 1_881_100_050_i64;
+    let jetcan_loot = 1_881_100_060_i64;
+
+    ensure_char(&ctx, owner_id, corp_a, Some(station_id), sys_id, owner_ship);
+    ensure_char(&ctx, stranger_id, corp_b, Some(station_id), sys_id, stranger_ship);
+    insert_item(&ctx, owner_ship, 587, owner_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, stranger_ship, 587, stranger_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, owner_alsc, 17_366, owner_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, alsc_item, 34, owner_id, owner_alsc, InventoryFlag::Cargo, 20, false);
+    insert_item(&ctx, foreign_box, 17_366, corp_a, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, foreign_item, 34, stranger_id, foreign_box, InventoryFlag::Cargo, 15, false);
+    insert_item(&ctx, foreign_jetcan, 23, owner_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, jetcan_loot, 34, owner_id, foreign_jetcan, InventoryFlag::Cargo, 10, false);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut c_rec = eve_db::CorporationRecord::default();
+        c_rec.corporation_id = corp_a;
+        c_rec.name = "Foreign Container Corp".into();
+        c_rec.ticker = "FCC".into();
+        c_rec.ceo_id = owner_id;
+        c_rec.members.insert(owner_id);
+        snap.corporations.insert(corp_a, c_rec);
+        snap.item_positions.insert(stranger_ship, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(foreign_jetcan, [200.0, 0.0, 0.0]);
+        set_container_password_snap(snap, owner_alsc, 1, "peract", 0).unwrap();
+        set_container_config_snap(
+            snap,
+            owner_alsc,
+            &ContainerConfig {
+                lock_by_default: false,
+                password_per_action: true,
+                config_bitmask: 0,
+            },
+            0,
+        )
+        .unwrap();
+        // Pre-seed cached unlock; password_per_action must still demand password on takes
+        set_container_unlocked_snap(snap, owner_alsc, owner_id, true, 0).unwrap();
+    });
+
+    let mut owner_sess = make_session(owner_id, corp_a, Some(station_id), Some(sys_id), Some(owner_ship));
+    let mut stranger_docked = make_session(stranger_id, corp_b, Some(station_id), Some(sys_id), Some(stranger_ship));
+    let mut stranger_space = make_session(stranger_id, corp_b, None, Some(sys_id), Some(stranger_ship));
+
+    let kw_empty = HashMap::new();
+    let mut kw_pw = HashMap::new();
+    kw_pw.insert("password".into(), PyRep::String("peract".into()));
+
+    // password_per_action rejects MultiAdd and validate_container_and_bay_move without password even when unlocked
+    let station_bound_owner = make_bound(station_id, owner_id);
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut owner_sess,
+            Some(&station_bound_owner),
+            &[
+                PyRep::List(vec![PyRep::Integer(alsc_item)]),
+                PyRep::Integer(owner_alsc),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw_empty,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ALSCPasswordNeededToOpen"
+    );
+    assert_eq!(
+        validate_container_and_bay_move(
+            &ctx, owner_id, alsc_item, station_id, InventoryFlag::Hangar as u16, &kw_empty, None,
+        )
+        .unwrap_err()
+        .code,
+        "ALSCPasswordNeededToOpen"
+    );
+    handle_multi_add(
+        &ctx,
+        &mut owner_sess,
+        Some(&station_bound_owner),
+        &[
+            PyRep::List(vec![PyRep::Integer(alsc_item)]),
+            PyRep::Integer(owner_alsc),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &kw_pw,
+    )
+    .await
+    .expect("MultiAdd with password_per_action secret succeeds");
+
+    // Foreign-corp container take rejects with CorpRoleDenied, while jetcan (type_id=23) remains lootable
+    let station_bound_stranger = make_bound(station_id, stranger_id);
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut stranger_docked,
+            Some(&station_bound_stranger),
+            &[
+                PyRep::List(vec![PyRep::Integer(foreign_item)]),
+                PyRep::Integer(foreign_box),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw_empty,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    let ship_bound_stranger = make_bound(stranger_ship, stranger_id);
+    handle_multi_add(
+        &ctx,
+        &mut stranger_space,
+        Some(&ship_bound_stranger),
+        &[
+            PyRep::List(vec![PyRep::Integer(jetcan_loot)]),
+            PyRep::Integer(foreign_jetcan),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw_empty,
+    )
+    .await
+    .expect("jetcan take by foreign corp remains allowed");
+}
+
+#[test]
+fn bf_1180_undocked_caller_cannot_list_docked_foreign_ship_or_nested_bay() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        verify_nested_unit_list_in_snap, ShipAccessConfig,
+    };
+
+    let ctx = test_ctx();
+    let owner_id = 92_880_011_i64;
+    let mate_id = 92_880_012_i64;
+    let corp_id = 98_880_011_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let owner_ship = 1_880_200_001_i64;
+    let mate_ship = 1_880_200_002_i64;
+    let sma_ship = 1_880_200_010_i64;
+    let fh_ore = 1_880_200_011_i64;
+    let nest_box = 1_880_200_012_i64;
+    let nest_ore = 1_880_200_013_i64;
+
+    ensure_char(&ctx, owner_id, corp_id, Some(station_id), sys_id, owner_ship);
+    ensure_char(&ctx, mate_id, corp_id, None, sys_id, mate_ship);
+    insert_item(&ctx, owner_ship, 587, owner_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, mate_ship, 587, mate_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, sma_ship, 587, owner_id, owner_ship, InventoryFlag::ShipHangar, 1, true);
+    insert_item(&ctx, fh_ore, 34, owner_id, owner_ship, InventoryFlag::FleetHangar, 50, false);
+    // Nested container owned by mate_id inside docked owner_ship FleetHangar.
+    insert_item(&ctx, nest_box, 17_366, mate_id, owner_ship, InventoryFlag::FleetHangar, 1, true);
+    insert_item(&ctx, nest_ore, 34, mate_id, nest_box, InventoryFlag::Cargo, 25, false);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            777_880,
+            FleetRecord {
+                fleet_id: 777_880,
+                boss_id: owner_id,
+                members: vec![owner_id, mate_id],
+                ..Default::default()
+            },
+        );
+        set_ship_access_config_snap(
+            snap,
+            owner_ship,
+            &ShipAccessConfig {
+                allow_fleet_smb: true,
+                allow_corp_smb: true,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: true,
+                password: None,
+            },
+            0,
+        )
+        .unwrap();
+        snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
+    });
+
+    let mate_sess = make_session(mate_id, corp_id, None, Some(sys_id), Some(mate_ship));
+    let bound_owner_ship = make_bound(owner_ship, mate_id);
+    let bound_nest = make_bound(nest_box, mate_id);
+    let kw = HashMap::new();
+    let row_count = |rep: PyRep| -> usize {
+        let PyRep::ObjectEx { list, .. } = rep else {
+            panic!("expected ObjectEx rowset, got {rep:?}");
+        };
+        list.len()
+    };
+
+    // Undocked caller holding bound moniker for docked corp/fleet ship must get 0 rows.
+    assert_eq!(
+        row_count(handle_list(&ctx, &mate_sess, Some(&bound_owner_ship), &[], &kw).unwrap()),
+        0,
+        "undocked List on docked foreign ship must return 0 rows"
+    );
+    assert_eq!(
+        row_count(
+            super::handle_list_by_flags(
+                &ctx,
+                &mate_sess,
+                Some(&bound_owner_ship),
+                &[PyRep::List(vec![PyRep::Integer(90)])],
+                &kw,
+            )
+            .unwrap()
+        ),
+        0,
+        "undocked ListByFlags([90]) on docked foreign ship must return 0 rows"
+    );
+    assert_eq!(
+        row_count(
+            super::handle_list_by_flags(
+                &ctx,
+                &mate_sess,
+                Some(&bound_owner_ship),
+                &[PyRep::List(vec![PyRep::Integer(155)])],
+                &kw,
+            )
+            .unwrap()
+        ),
+        0,
+        "undocked ListByFlags([155]) on docked foreign ship must return 0 rows"
+    );
+    assert_eq!(
+        row_count(handle_list(&ctx, &mate_sess, Some(&bound_nest), &[], &kw).unwrap()),
+        0,
+        "undocked List on nested container inside docked foreign ship must return 0 rows"
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        let (unlock_none, rows_none) = super::verify_and_collect_foreign_ship_rows(
+            &ctx, snap, &mate_sess, mate_id, owner_ship, false, false, None, None,
+        )
+        .unwrap();
+        assert!(unlock_none.is_none() && rows_none.is_empty());
+        let (unlock_docked, rows_docked) = super::verify_and_collect_foreign_ship_rows(
+            &ctx, snap, &mate_sess, mate_id, owner_ship, true, true, Some(&[90]), None,
+        )
+        .unwrap();
+        assert!(unlock_docked.is_none() && rows_docked.is_empty());
+        assert_eq!(
+            verify_nested_unit_list_in_snap(&ctx, snap, &mate_sess, mate_id, nest_box, None)
+                .unwrap_err()
+                .code,
+            "BoundObjectOwnershipViolation"
+        );
+    });
+
+    // Move foreign ship into space >2,500m -> second-snapshot helpers must reject OutOfRange.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&owner_ship).unwrap().location_id = i64::from(sys_id);
+        snap.items.get_mut(&owner_ship).unwrap().flag = InventoryFlag::None;
+        snap.item_positions.insert(owner_ship, [10_000.0, 0.0, 0.0]);
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            super::verify_and_collect_foreign_ship_rows(
+                &ctx, snap, &mate_sess, mate_id, owner_ship, true, true, Some(&[90]), None,
+            )
+            .unwrap_err()
+            .code,
+            "OutOfRange"
+        );
+        assert_eq!(
+            verify_nested_unit_list_in_snap(&ctx, snap, &mate_sess, mate_id, nest_box, None)
+                .unwrap_err()
+                .code,
+            "OutOfRange"
+        );
+    });
+}

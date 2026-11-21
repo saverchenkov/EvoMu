@@ -3,7 +3,7 @@
 use crate::router::{context::BoundObjectEntry, ServerContext};
 use crate::services::combat_crimewatch::{self, SafetyLevel};
 use crate::services::inventory_fitting::fitting_containers_ships::{
-    read_container_ship_state, save_container_ship_state,
+    set_alsc_item_locked_snap, set_container_password_snap,
 };
 use crate::services::{inventory_stacking, station_structure};
 use eve_db::{
@@ -458,9 +458,9 @@ async fn inventory_stacking_split_merge_stackall_and_loot_rules() {
     );
 
     // MultiMerge: ALSC lock check + owner mismatch + valid merge
-    let mut alsc = read_container_ship_state(&ctx);
-    alsc.alsc_locked_items.insert(st_b);
-    save_container_ship_state(&ctx, &alsc);
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, st_b, true, 0).unwrap();
+    });
     assert_eq!(
         inventory_stacking::handle_stack_ops(
             &ctx,
@@ -476,8 +476,9 @@ async fn inventory_stacking_split_merge_stackall_and_loot_rules() {
         .code,
         "ALSCItemLocked"
     );
-    alsc.alsc_locked_items.remove(&st_b);
-    save_container_ship_state(&ctx, &alsc);
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, st_b, false, 0).unwrap();
+    });
 
     assert!(inventory_stacking::handle_stack_ops(
         &ctx,
@@ -576,9 +577,9 @@ async fn inventory_stacking_split_merge_stackall_and_loot_rules() {
         .is_some_and(|st| st.suspect_flag_until_unix > 0));
 
     // ALSC password check & empty jetcan despawn
-    let mut pw_state = read_container_ship_state(&ctx);
-    pw_state.container_passwords.insert(jetcan_id, "secret".into());
-    save_container_ship_state(&ctx, &pw_state);
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, jetcan_id, 1, "secret", 0).unwrap();
+    });
     let jet_bound = make_bound(jetcan_id, char_id);
     let space_owner = make_session(char_id, corp_id, None, Some(sys_id), Some(ship_id));
     assert_eq!(

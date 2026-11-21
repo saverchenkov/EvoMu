@@ -7,7 +7,9 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
 use crate::services::combat_crimewatch::{
     with_mut_combat_runtime, DetailedKillmail, KillmailAttackerEntry, SafetyLevel,
 };
-use crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state;
+use crate::services::inventory_fitting::fitting_containers_ships::{
+    set_alsc_item_locked_snap, set_container_password_snap, set_container_unlocked_snap,
+};
 use eve_db::{FleetRecord, InventoryFlag, KillmailRecord};
 use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_proto::PyRep;
@@ -217,10 +219,10 @@ async fn loot_all_location_dock_acl_criminal_corp_fleet_locked_and_singleton_bra
             .await
             .unwrap();
     }
-    write_container_ship_state(&ctx, |st| {
-        st.container_passwords.insert(sc_id, "pw".into());
-        st.unlocked_containers.insert((sc_id, char_id));
-        st.alsc_locked_items.insert(alsc_child);
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, sc_id, 1, "pw", 0).unwrap();
+        set_container_unlocked_snap(snap, sc_id, char_id, true, 0).unwrap();
+        set_alsc_item_locked_snap(snap, alsc_child, true, 0).unwrap();
     });
     {
         let mut cw = ctx.crimewatch.write().unwrap();

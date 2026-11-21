@@ -10,7 +10,7 @@ use crate::services::combat_crimewatch::{
     with_combat_runtime, with_mut_combat_runtime, DetailedKillmail,
     KillmailAttackerEntry, KillmailItemEntry, SELF_DESTRUCT_COUNTDOWN_SECS,
 };
-use crate::services::inventory_fitting::write_container_ship_state;
+use crate::services::inventory_fitting::set_container_password_snap;
 use eve_db::{
     CorpWalletDivisionRecord, CorporationRecord, InventoryFlag, IskCents, KillmailRecord,
     PersistedSpaceObjectMeta,
@@ -336,8 +336,8 @@ async fn bubble_decay_precursor_deactivate_loot_all_split_and_killmail_variants(
             make_fighter_item(jetcan_loot_id, 18_068, char_id, jetcan_id, InventoryFlag::Cargo, 1), // 1 m3
         );
     });
-    write_container_ship_state(&ctx, |st| {
-        st.container_passwords.insert(locked_sc_id, "secret".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, locked_sc_id, 1, "secret", 0).unwrap();
     });
 
     assert_eq!(
