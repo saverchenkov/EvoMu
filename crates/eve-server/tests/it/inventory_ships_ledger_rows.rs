@@ -1058,7 +1058,20 @@ async fn test_rename_ship_kill_counter_ship_tree_and_masteries() {
     let _ = ctx.drain_notifications_for_char(C1);
     call(&ctx, &mut s1, "invbroker", "SetLabel", vec![PyRep::Integer(100_000_001), PyRep::String("Wolfpack Leader".into())]).await.unwrap();
     let notes = ctx.drain_notifications_for_char(C1);
-    assert!(notes.iter().any(|n| n.event == "OnSlimItemChange" && n.args.first().and_then(|a| a.as_i64()) == Some(100_000_001)));
+    let slim_notif = notes
+        .iter()
+        .find(|n| n.event == "OnSlimItemChange" && n.args.first().and_then(|a| a.as_i64()) == Some(100_000_001))
+        .expect("OnSlimItemChange for renamed ship");
+    assert_eq!(slim_notif.args.len(), 2);
+    assert_eq!(
+        slim_notif.args[1].dict_get("name"),
+        Some(&PyRep::String("Wolfpack Leader".into()))
+    );
+    assert_eq!(
+        slim_notif.args[1].dict_get("shipTypeID").or_else(|| slim_notif.args[1].dict_get("typeID")),
+        Some(&PyRep::Integer(587))
+    );
+    assert!(slim_notif.args[1].dict_get("hackingSecurityState").is_some());
     let info = call(&ctx, &mut s1, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(100_000_001)]).await.unwrap();
     assert_eq!(info.dict_get("customName").and_then(|v| v.as_str()), Some("Wolfpack Leader"));
     let all = call(&ctx, &mut s1, "invbroker", "GetAllItems", vec![]).await.unwrap();

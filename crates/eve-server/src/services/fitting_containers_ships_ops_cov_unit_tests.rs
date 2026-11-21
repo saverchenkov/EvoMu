@@ -350,13 +350,8 @@ async fn ext_tail_covers_invbroker_item_locking_and_encoded_items() {
                 ..Default::default()
             },
         );
-        let mut st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
-        st.set_container_password(secure_cont_id, 1, "open-sesame".to_string());
-        crate::services::fitting_containers_ships::save_container_ship_state_snap(
-            snap,
-            ctx.now_unix(),
-            &st,
-        );
+        set_container_password_snap(snap, secure_cont_id, 1, "open-sesame", ctx.now_unix())
+            .unwrap();
     });
 
     let poco_bound = BoundObjectEntry {
@@ -465,12 +460,11 @@ async fn ext_tail_covers_invbroker_item_locking_and_encoded_items() {
         PyRep::String("open-sesame".into())
     );
     ctx.db.with_snapshot(|s| {
-        let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(s);
-        assert!(st.unlocked_containers.contains(&(secure_cont_id, char_id)));
+        assert!(is_container_unlocked_snap(s, secure_cont_id, char_id));
         assert!(
-            st.alsc_logs
-                .get(&secure_cont_id)
-                .is_some_and(|logs| logs.iter().any(|l| l.action == "ALSCActionRetrievePassword"))
+            container_alsc_logs_snap(s, secure_cont_id)
+                .iter()
+                .any(|l| l.action == "ALSCActionRetrievePassword")
         );
     });
 

@@ -60,10 +60,10 @@ fn emit_shipcaster_target_state_changed(ctx: &ServerContext, solar_system_id: u3
     );
 }
 
-fn build_beacon_slim_keyval(ctx: &ServerContext, pad: &LandingPadRecord) -> PyRep {
+fn build_beacon_slim_keyval(ctx: &ServerContext, pad: &LandingPadRecord) -> crate::router::notify_registry::SlimItemKeyVal {
     let (group_id, category_id) = ctx.sde.types.get(&pad.type_id).map(|t| (i64::from(t.group_id), i64::from(t.category_id))).unwrap_or((4547, 2));
     let progress: Vec<(PyRep, PyRep)> = pad.contributed_materials.iter().map(|(&tid, &q)| (PyRep::Integer(i64::from(tid)), PyRep::Integer(i64::from(q)))).collect();
-    PyRep::keyval([
+    crate::router::notify_registry::SlimItemKeyVal::from_pairs([
         ("itemID", PyRep::Integer(pad.item_id)), ("typeID", PyRep::Integer(i64::from(pad.type_id))),
         ("groupID", PyRep::Integer(group_id)), ("categoryID", PyRep::Integer(category_id)),
         ("ownerID", PyRep::Integer(i64::from(pad.faction_id))), ("charID", PyRep::None),
@@ -74,10 +74,11 @@ fn build_beacon_slim_keyval(ctx: &ServerContext, pad: &LandingPadRecord) -> PyRe
 }
 
 async fn emit_beacon_slim_item_change(ctx: &ServerContext, old_pad: &LandingPadRecord, new_pad: &LandingPadRecord) {
+    use crate::router::notify_registry::ToNotifyArg;
     ctx.emit_typed(
         NotificationTarget::SolarSystem(new_pad.solar_system_id),
         crate::router::notify_registry::OnSlimItemChange {
-            old_slim: build_beacon_slim_keyval(ctx, old_pad),
+            old_slim: build_beacon_slim_keyval(ctx, old_pad).into_notify_arg(),
             new_slim: build_beacon_slim_keyval(ctx, new_pad),
         },
     );
