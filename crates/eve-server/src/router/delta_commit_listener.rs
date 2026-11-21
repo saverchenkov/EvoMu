@@ -9,7 +9,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::cache_notifications::{
-    assemble_pending_notification, current_dispatch_staging_scope_id,
+    assemble_pending_notification, current_dispatch_staging_scope_info,
     enqueue_or_stage_pending_batch, find_staged_notification_by_seq,
     insert_before_staged_seq_or_stage, is_active_dispatch_char, next_notification_seq_id,
     pending_notifications_ptr, push_pending_notification_capped, try_stage_dispatch_notification,
@@ -365,8 +365,9 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
             let now_unix = db.now_unix_secs();
             // Assigned per `(owner_id, account_key)` inside `EpochLedger::record_batch`.
             let commit_epoch = 0u64;
-            let staging_scope_id =
-                current_dispatch_staging_scope_id(Some(&*pend), Some(&notify_tx));
+            let staging_scope_info =
+                current_dispatch_staging_scope_info(Some(&*pend), Some(&notify_tx));
+            let staging_scope_id = staging_scope_info.as_ref().map(|(scope_id, _)| *scope_id);
 
             let (emitted_effects, mut committed_records) = if effects.notifications.is_empty() {
                 (EmittedEffectKeys::default(), Vec::new())
@@ -441,7 +442,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 now_unix,
                 &*db,
                 &emitted_effects.item_effects,
-                staging_scope_id.is_some(),
+                staging_scope_info,
             );
 
             if !committed_records.is_empty() {
@@ -603,7 +604,8 @@ pub(crate) fn try_handle_legacy_account_change_emit(
     let (account_key, owner_id, manual_bal) = extract_account_change_fields(payload_args)?;
     let bridge = lookup_commit_bridge(ctx)?;
     let staging_scope_id =
-        current_dispatch_staging_scope_id(Some(&*ctx.pending_notifications), Some(&ctx.notify_tx));
+        current_dispatch_staging_scope_info(Some(&*ctx.pending_notifications), Some(&ctx.notify_tx))
+            .map(|(scope_id, _)| scope_id);
     let matching: Vec<ProjectedAccountRecord> = {
         let ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
         let current_wallet_epoch = ledger.wallet_epoch(owner_id, &account_key);
