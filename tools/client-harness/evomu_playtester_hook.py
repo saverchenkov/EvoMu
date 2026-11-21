@@ -12,6 +12,7 @@ Provides a localhost TCP JSON-RPC server that:
 """
 
 import __builtin__
+import collections
 import json
 import math
 import os
@@ -21,11 +22,17 @@ import sys
 import threading
 import time
 import traceback
+import types as _py_types
 import weakref
 
 import evomu_inclient_helpers as H
 
 sys.dont_write_bytecode = True
+
+try:
+    from collections import OrderedDict as _OrderedDict
+except Exception:
+    _OrderedDict = None
 
 _STARTED = False
 _FLIGHT_RECORDER = []
@@ -38,8 +45,21 @@ _SCATTER_SEQ = 0
 _HOOKED_REMOTESVC = False
 _HOOK_RELOAD_GEN = 0
 _MACHO_CALL_TASKLET_DEPTH = {}
-_BOUND_OID_SERVICE_MAP = {}
+_BOUND_OID_SERVICE_MAP = _OrderedDict() if _OrderedDict is not None else {}
 _BOUND_OID_RE = re.compile(r"^N=\d+:\d+")
+_TEXT_TYPES = (str, unicode) if sys.version_info[0] < 3 else (str, bytes)
+_PY2_INSTANCE_TYPE = getattr(_py_types, "InstanceType", None)
+_SKIP_RECORD_TYPES = tuple(
+    t for t in (
+        _py_types.FunctionType,
+        _py_types.MethodType,
+        _py_types.BuiltinFunctionType,
+        _py_types.BuiltinMethodType,
+        type,
+        getattr(_py_types, "ClassType", None),
+    )
+    if t is not None
+)
 _QUASAR_IN_FLIGHT = {}
 _QUASAR_IN_FLIGHT_SEQ = 0
 _PY_INT_TYPES = (int, type(1 << 65))
@@ -105,10 +125,26 @@ _WARP_TELEMETRY = {
 }
 
 
+def _coerce_text(val, max_len=96):
+    if not isinstance(val, _TEXT_TYPES):
+        return ""
+    if sys.version_info[0] >= 3 and isinstance(val, bytes):
+        try:
+            s = val.decode("utf-8", "replace")
+        except Exception:
+            return ""
+    elif sys.version_info[0] < 3 and isinstance(val, unicode):
+        try:
+            s = val.encode("utf-8", "replace")
+        except Exception:
+            return ""
+    else:
+        s = val
+    return s.strip()[:max_len]
+
+
 def _is_canonical_service_name(svc_name):
-    if svc_name is None or isinstance(svc_name, bool):
-        return False
-    s = _safe_str(svc_name, 64).strip()
+    s = _coerce_text(svc_name, 64)
     if not s or s in ("moniker", "bound_object", "None"):
         return False
     if s.startswith("N=") or s.isdigit():
@@ -117,21 +153,19 @@ def _is_canonical_service_name(svc_name):
 
 
 def _normalize_oid_key(val):
-    if val is None or isinstance(val, bool):
-        return ""
-    if sys.version_info[0] >= 3 and isinstance(val, bytes):
-        try:
-            s = val.decode("utf-8", "replace")
-        except Exception:
-            s = str(val)
-    else:
-        s = _safe_str(val, 96)
-    return s.strip()[:96]
+    return _coerce_text(val, 96)
 
 
 def _safe_own_dict(obj):
+    if obj is None:
+        return None
     try:
-        d = object.__getattribute__(obj, "__dict__")
+        if _PY2_INSTANCE_TYPE is not None and type(obj) is _PY2_INSTANCE_TYPE:
+            # CPython 2.7 instance_getattr1 fast-paths "__dict__" without invoking __getattr__,
+            # whereas object.__getattribute__ raises AttributeError on classic instances.
+            d = getattr(obj, "__dict__", None)
+        else:
+            d = object.__getattribute__(obj, "__dict__")
         if isinstance(d, dict):
             return d
     except Exception:
@@ -140,21 +174,39 @@ def _safe_own_dict(obj):
 
 
 def _safe_own_slot_attr(obj, attr_name):
+    if obj is None:
+        return None
+    if _PY2_INSTANCE_TYPE is not None and type(obj) is _PY2_INSTANCE_TYPE:
+        own_d = _safe_own_dict(obj)
+        return own_d.get(attr_name) if own_d is not None else None
     try:
         return object.__getattribute__(obj, attr_name)
     except Exception:
         return None
 
 
-def _record_bound_service_bindings(obj, svc_name, _depth=0, _seen=None):
-    if not _is_canonical_service_name(svc_name) or obj is None or _depth > 2:
+def _safe_own_attr(obj, attr_name):
+    own_d = _safe_own_dict(obj)
+    if own_d is not None and attr_name in own_d:
+        return own_d[attr_name]
+    return _safe_own_slot_attr(obj, attr_name)
+
+
+def _get_moniker_service_name(self_mon):
+    try:
+        for k in ("_Moniker__serviceName", "serviceName", "_serviceName", "__serviceName__"):
+            sv = _safe_own_attr(self_mon, k)
+            if _is_canonical_service_name(sv):
+                return _coerce_text(sv, 48)
+    except Exception:
+        pass
+    return "moniker"
+
+
+def _record_bound_service_bindings_inner(obj, svc_s, _depth=0, _seen=None):
+    if obj is None or _depth > 2:
         return
-    if isinstance(obj, (bool, float, _PY_INT_TYPES)) or callable(obj):
-        return
-    if sys.version_info[0] < 3:
-        if isinstance(obj, (str, unicode)):
-            return
-    elif isinstance(obj, (str, bytes)):
+    if isinstance(obj, (bool, float, _PY_INT_TYPES)) or isinstance(obj, _TEXT_TYPES) or isinstance(obj, _SKIP_RECORD_TYPES):
         return
     if _seen is None:
         _seen = set()
@@ -163,15 +215,14 @@ def _record_bound_service_bindings(obj, svc_name, _depth=0, _seen=None):
         return
     _seen.add(oid_obj)
 
-    svc_s = _safe_str(svc_name, 48).strip()
     if isinstance(obj, (tuple, list)):
         for item in obj[:8]:
-            _record_bound_service_bindings(item, svc_s, _depth + 1, _seen)
+            _record_bound_service_bindings_inner(item, svc_s, _depth + 1, _seen)
         return
     if isinstance(obj, dict):
         cnt = 0
         for v in obj.values():
-            _record_bound_service_bindings(v, svc_s, _depth + 1, _seen)
+            _record_bound_service_bindings_inner(v, svc_s, _depth + 1, _seen)
             cnt += 1
             if cnt >= 8:
                 break
@@ -189,42 +240,57 @@ def _record_bound_service_bindings(obj, svc_name, _depth=0, _seen=None):
     found_keys = []
     for k in id_keys:
         v = own_d.get(k) if own_d is not None else _safe_own_slot_attr(obj, k)
-        if v is not None and not callable(v):
+        if isinstance(v, _TEXT_TYPES) and not isinstance(v, _SKIP_RECORD_TYPES):
             ks = _normalize_oid_key(v)
-            if ks:
+            if ks and _BOUND_OID_RE.match(ks):
                 found_keys.append(ks)
     if own_d is not None:
-        text_types = (str, unicode) if sys.version_info[0] < 3 else (str, bytes)
         for v in own_d.values():
-            if isinstance(v, text_types):
+            if isinstance(v, _TEXT_TYPES):
                 vs = _normalize_oid_key(v)
                 if vs and _BOUND_OID_RE.match(vs):
                     found_keys.append(vs)
     for nk in nested_keys:
         nv = own_d.get(nk) if own_d is not None else _safe_own_slot_attr(obj, nk)
         if nv is not None:
-            _record_bound_service_bindings(nv, svc_s, _depth + 1, _seen)
+            _record_bound_service_bindings_inner(nv, svc_s, _depth + 1, _seen)
 
-    if found_keys:
-        if len(_BOUND_OID_SERVICE_MAP) >= 4096:
-            for old_k in list(_BOUND_OID_SERVICE_MAP.keys())[:1024]:
-                _BOUND_OID_SERVICE_MAP.pop(old_k, None)
-        for fk in found_keys:
-            _BOUND_OID_SERVICE_MAP[fk] = svc_s
+    for fk in found_keys:
+        _BOUND_OID_SERVICE_MAP.pop(fk, None)
+        while len(_BOUND_OID_SERVICE_MAP) >= 4096:
+            if _OrderedDict is not None and isinstance(_BOUND_OID_SERVICE_MAP, _OrderedDict):
+                _BOUND_OID_SERVICE_MAP.popitem(last=False)
+            else:
+                for old_k in sorted(_BOUND_OID_SERVICE_MAP.keys())[:1024]:
+                    _BOUND_OID_SERVICE_MAP.pop(old_k, None)
+                break
+        _BOUND_OID_SERVICE_MAP[fk] = svc_s
+
+
+def _record_bound_service_bindings(obj, svc_name, _depth=0, _seen=None):
+    try:
+        if not _is_canonical_service_name(svc_name):
+            return
+        svc_s = _coerce_text(svc_name, 48)
+        _record_bound_service_bindings_inner(obj, svc_s, _depth=_depth, _seen=_seen)
+    except Exception:
+        pass
 
 
 def _resolve_bound_service_name(self_wrap, pid, oid):
-    own_d = _safe_own_dict(self_wrap)
-    for k in ("serviceName", "_serviceName", "__serviceName__", "_Moniker__serviceName"):
-        sv = own_d.get(k) if own_d is not None else _safe_own_slot_attr(self_wrap, k)
-        if _is_canonical_service_name(sv):
-            return _safe_str(sv, 48).strip()
-    for candidate in (oid, pid):
-        ck = _normalize_oid_key(candidate)
-        if ck and ck in _BOUND_OID_SERVICE_MAP:
-            mapped = _BOUND_OID_SERVICE_MAP[ck]
-            if _is_canonical_service_name(mapped):
-                return mapped
+    try:
+        for k in ("serviceName", "_serviceName", "__serviceName__", "_Moniker__serviceName"):
+            sv = _safe_own_attr(self_wrap, k)
+            if _is_canonical_service_name(sv):
+                return _coerce_text(sv, 48)
+        for candidate in (oid, pid):
+            ck = _normalize_oid_key(candidate)
+            if ck and _BOUND_OID_RE.match(ck) and ck in _BOUND_OID_SERVICE_MAP:
+                mapped = _BOUND_OID_SERVICE_MAP[ck]
+                if _is_canonical_service_name(mapped):
+                    return mapped
+    except Exception:
+        pass
     return ""
 
 
@@ -712,7 +778,7 @@ def _install_flight_recorder_hooks(sm):
             raw_orig_mcall = getattr(orig_mcall, "__func__", getattr(orig_mcall, "im_func", orig_mcall))
 
             def _wrapped_monikered_call(self_mon, call, *args, **kwargs):
-                svc_n = str(getattr(self_mon, "_Moniker__serviceName", None) or "moniker")
+                svc_n = _get_moniker_service_name(self_mon)
                 meth_n = str(call[0]) if isinstance(call, (tuple, list)) and len(call) > 0 else str(call)
                 call_args = call[1] if isinstance(call, (tuple, list)) and len(call) > 1 else args
                 tid = _get_macho_tasklet_id()
@@ -747,7 +813,7 @@ def _install_flight_recorder_hooks(sm):
             raw_orig_mbind = getattr(orig_mbind, "__func__", getattr(orig_mbind, "im_func", orig_mbind))
 
             def _wrapped_moniker_bind(self_mon, *args, **kwargs):
-                svc_n = str(getattr(self_mon, "_Moniker__serviceName", None) or "moniker")
+                svc_n = _get_moniker_service_name(self_mon)
                 res = raw_orig_mbind(self_mon, *args, **kwargs)
                 _record_bound_service_bindings(res, svc_n)
                 _record_bound_service_bindings(self_mon, svc_n)
@@ -769,11 +835,11 @@ def _install_flight_recorder_hooks(sm):
                 tid = _get_macho_tasklet_id()
                 if _MACHO_CALL_TASKLET_DEPTH.get(tid, 0) > 0:
                     return raw_orig_oc_call(self_wrap, *args, **kwargs)
-                pid = getattr(self_wrap, "persistantObjectID", None)
-                oid = getattr(self_wrap, "objectID", None)
+                pid = _safe_own_attr(self_wrap, "persistantObjectID")
+                oid = _safe_own_attr(self_wrap, "objectID")
                 resolved_svc = _resolve_bound_service_name(self_wrap, pid, oid)
                 svc_n = resolved_svc or _safe_str(pid if pid is not None else (oid if oid is not None else "bound_object"), 48)
-                meth_n = _safe_str(getattr(self_wrap, "method", "") or "", 48)
+                meth_n = _safe_str(_safe_own_attr(self_wrap, "method") or "", 48)
                 _MACHO_CALL_TASKLET_DEPTH[tid] = _MACHO_CALL_TASKLET_DEPTH.get(tid, 0) + 1
                 t0 = time.time()
                 try:
