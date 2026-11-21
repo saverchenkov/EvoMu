@@ -6,9 +6,10 @@
 use crate::router::ServerContext;
 use crate::services::inventory_fitting;
 use crate::services::inventory_fitting::fitting_containers_ships::{
-    can_character_access_ship_bay_with_password_snap, effective_item_unit_volume,
-    handle_containers_ships_and_fitting, is_container_group, validate_container_and_bay_move,
-    write_container_ship_state,
+    can_character_access_ship_bay_with_password_snap, clear_container_unlocks_snap,
+    effective_item_unit_volume, handle_containers_ships_and_fitting, is_container_group,
+    set_alsc_item_locked_snap, set_container_password_snap, set_ship_access_config_snap,
+    ship_access_config_snap, validate_container_and_bay_move,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
@@ -261,16 +262,16 @@ fn validate_container_and_bay_move_enforces_locks_passwords_nested_containers_an
     assert_eq!(self_err.code, "UserError");
 
     // 2. ALSC locked item cannot be moved out
-    write_container_ship_state(&ctx, |st| {
-        st.alsc_locked_items.insert(trit_in_alsc_id);
-        st.container_passwords.insert(alsc_id, "secret123".into());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, trit_in_alsc_id, true, 0).unwrap();
+        set_container_password_snap(snap, alsc_id, 1, "secret123", 0).unwrap();
     });
     let locked_err = validate_container_and_bay_move(&ctx, char_id, trit_in_alsc_id, station_id, hangar_flag, &kw, None).unwrap_err();
     assert_eq!(locked_err.code, "ALSCItemLocked");
 
     // 3. Unlock item, now password check triggers when moving out without password
-    write_container_ship_state(&ctx, |st| {
-        st.alsc_locked_items.remove(&trit_in_alsc_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        set_alsc_item_locked_snap(snap, trit_in_alsc_id, false, 0).unwrap();
     });
     let pw_err = validate_container_and_bay_move(&ctx, char_id, trit_in_alsc_id, station_id, hangar_flag, &kw, None).unwrap_err();
     assert_eq!(pw_err.code, "ALSCPasswordNeededToOpen");
@@ -368,10 +369,11 @@ fn validate_ship_maintenance_bay_and_fleet_hangar_rules_and_access_controls() {
             snap.characters.insert(corpmate_id, corp_ch);
         }
     });
-    write_container_ship_state(&ctx, |st| {
-        let cfg = st.ship_configs.entry(archon_id).or_default();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cfg = ship_access_config_snap(snap, archon_id);
         cfg.allow_corp_smb = true;
         cfg.password = Some("bay-pass".into());
+        set_ship_access_config_snap(snap, archon_id, &cfg, 0).unwrap();
     });
     ctx.db.with_snapshot(|snap| {
         assert!(!can_character_access_ship_bay_with_password_snap(snap, corpmate_id, archon_id, owner_id, true, Some("wrong")));
@@ -525,9 +527,9 @@ async fn container_open_validation_alsc_config_bitmask_asset_worth_and_plastic_w
     assert_eq!(dict_get(&cfg_get, "lockByDefault").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(dict_get(&cfg_get, "passwordPerAction").and_then(|v| v.as_bool()), Some(true));
 
-    write_container_ship_state(&ctx, |st| {
-        st.container_passwords.insert(pkg_cont_id, "pw1".into());
-        st.unlocked_containers.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, pkg_cont_id, 1, "pw1", 0).unwrap();
+        clear_container_unlocks_snap(snap, pkg_cont_id);
     });
     assert_eq!(handle_containers_ships_and_fitting(&ctx, &mut session, None, "invbroker", "ValidateItemCanBeOpened", &[PyRep::Integer(pkg_cont_id)], &kw).await.unwrap().unwrap_err().code, "ContainerIsLocked");
 

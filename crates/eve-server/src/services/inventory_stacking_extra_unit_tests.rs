@@ -6,9 +6,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{context::BoundObjectEntry, ServerContext};
-use crate::services::inventory_fitting::fitting_containers_ships::{
-    read_container_ship_state, save_container_ship_state,
-};
+use crate::services::inventory_fitting::fitting_containers_ships::set_container_password_snap;
 use crate::services::inventory_stacking::{
     despawn_empty_jetcan_if_needed, evaluate_space_wreck_or_jetcan_loot, handle_list,
     handle_list_by_flags, handle_multi_add, handle_stack_ops,
@@ -495,11 +493,9 @@ async fn list_ownership_corp_roles_range_and_loot_abandonment_rules() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&jetcan_id).unwrap().owner_id = char_id;
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.container_passwords.insert(jetcan_id, "pw42".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_container_password_snap(snap, jetcan_id, 1, "pw42", 0).unwrap();
+    });
     let jet_bound = bound_inv(jetcan_id, char_id);
     assert_eq!(
         handle_list(&ctx, &sess, Some(&jet_bound), &[], &kw)

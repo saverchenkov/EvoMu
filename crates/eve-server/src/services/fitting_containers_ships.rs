@@ -13,11 +13,11 @@ pub(crate) use super::fitting_containers_ships_ops::{
     custom_item_flag_snap, is_container_unlocked_snap, set_alsc_item_locked_snap,
     set_container_config_snap, set_container_password_snap, set_container_unlocked_snap,
     set_custom_item_flag_snap, set_ship_access_config_snap, ship_access_config_snap,
-    ship_password_snap, AlscLogEntry, ShipAccessConfig,
+    ship_password_snap, AlscLogEntry, ContainerConfig, ShipAccessConfig,
 };
 #[cfg(test)]
 pub(crate) use super::fitting_containers_ships_ops::{
-    legacy_container_ship_test_shim::*, ContainerConfig, MAX_ALSC_LOGS_PER_CONTAINER,
+    legacy_container_ship_test_shim::*, MAX_ALSC_LOGS_PER_CONTAINER,
 };
 
 /// Resolves a fallback ship `type_id` (from the character's most recent killmail or `670` Capsule)
@@ -266,7 +266,7 @@ pub(crate) fn resolve_corp_container_log_target(
     Some((corp_id, c_item.type_id as i32, c_item.location_id, flag_str))
 }
 
-fn record_container_add_log_in_snap(
+pub(crate) fn record_container_add_log_in_snap(
     sde: &eve_sde::SdeRegistry,
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -335,6 +335,7 @@ fn record_container_add_log_in_snap(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn record_container_add_log(
     ctx: &ServerContext,
     char_id: i64,
@@ -360,7 +361,7 @@ pub(crate) fn record_container_add_log(
     }
 }
 
-fn record_container_take_log_in_snap(
+pub(crate) fn record_container_take_log_in_snap(
     sde: &eve_sde::SdeRegistry,
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -413,6 +414,7 @@ fn record_container_take_log_in_snap(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn record_container_take_log(
     ctx: &ServerContext,
     char_id: i64,
@@ -436,6 +438,156 @@ pub(crate) fn record_container_take_log(
     }) {
         tracing::error!(error = %err.message, container_id, "record_container_take_log failed");
     }
+}
+
+pub(crate) fn validate_src_container_access_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    moving_item: &eve_db::InventoryItemRecord,
+    dest_loc: i64,
+    supplied_pw: Option<&str>,
+) -> Result<(), BridgeRpcError> {
+    if moving_item.location_id == dest_loc {
+        return Ok(());
+    }
+    let Some(src_cont) = snap.items.get(&moving_item.location_id) else {
+        return Ok(());
+    };
+    let src_grp = ctx.sde.types.get(&src_cont.type_id).map(|t| t.group_id).unwrap_or(0);
+    if !is_container_group(src_grp, src_cont.type_id) {
+        return Ok(());
+    }
+    if src_grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT
+        && src_cont.owner_id != char_id
+    {
+        return Err(BridgeRpcError::user_error("OwnershipViolation"));
+    }
+    if matches!(src_grp, 340 | 448) || container_password_snap(snap, src_cont.item_id, 1).is_some()
+    {
+        validate_container_password_in_snap(snap, src_cont.item_id, char_id, supplied_pw, false)?;
+    }
+    let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+    let cont_corp = if snap.corporations.contains_key(&src_cont.owner_id) {
+        src_cont.owner_id
+    } else if (116..=122).contains(&(src_cont.flag as i64))
+        && char_corp > 0
+        && moving_item.owner_id == char_corp
+    {
+        char_corp
+    } else {
+        0
+    };
+    if cont_corp > 0 && cont_corp == char_corp {
+        let (is_ceo, roles) = crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
+            snap,
+            cont_corp,
+            char_id,
+            Some(src_cont.location_id),
+            ctx.now_unix(),
+        );
+        let src_flag = src_cont.flag as i64;
+        let div_idx = if (116..=122).contains(&src_flag) {
+            (src_flag - 116) as usize
+        } else {
+            0
+        };
+        let req_role = eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx.min(6)];
+        if !is_ceo && (roles & (eve_db::corp_roles::ROLE_DIRECTOR | req_role)) == 0 {
+            return Err(BridgeRpcError::user_error("CorpRoleDenied"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_container_password_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    container_id: i64,
+    char_id: i64,
+    supplied_pw: Option<&str>,
+    check_per_action: bool,
+) -> Result<(), BridgeRpcError> {
+    if let Some(req_pw) = container_password_snap(snap, container_id, 1) {
+        let need_check = (check_per_action
+            && container_config_snap(snap, container_id).password_per_action)
+            || !is_container_unlocked_snap(snap, container_id, char_id);
+        if !req_pw.is_empty() && need_check && supplied_pw != Some(req_pw.as_str()) {
+            return Err(BridgeRpcError::user_error("ALSCPasswordNeededToOpen"));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finalize_add_move_side_effects_in_snap(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    pending_alsc_take: Option<&(i64, AlscLogEntry)>,
+    custom_flag_ids: &[i64],
+    custom_flag_opt: Option<u16>,
+    moved_item_id: i64,
+    moved_tid: u32,
+    moved_qty: i32,
+    src_loc: i64,
+    src_flag_u16: u16,
+    new_loc: i64,
+    dest_flag_u16: u16,
+    supplied_pw: Option<&str>,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    apply_add_move_kv_side_effects_in_snap(
+        snap,
+        pending_alsc_take,
+        custom_flag_ids,
+        custom_flag_opt,
+        now_unix,
+    )?;
+    record_inv_move_logs_in_snap(
+        &ctx.sde,
+        snap,
+        char_id,
+        moved_item_id,
+        moved_tid,
+        moved_qty,
+        src_loc,
+        new_loc,
+        pending_alsc_take.is_none(),
+        now_unix,
+    )?;
+    record_ship_bay_unlock_for_ancestors_snap(
+        ctx,
+        snap,
+        char_id,
+        new_loc,
+        dest_flag_u16,
+        src_loc,
+        src_flag_u16,
+        supplied_pw,
+    )
+}
+
+pub(crate) fn record_inv_move_logs_in_snap(
+    sde: &eve_sde::SdeRegistry,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    item_id: i64,
+    moved_tid: u32,
+    moved_qty: i32,
+    old_loc: i64,
+    new_loc: i64,
+    record_take: bool,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    record_container_add_log_in_snap(
+        sde, snap, char_id, item_id, moved_tid, moved_qty, new_loc, now_unix,
+    )?;
+    if record_take && old_loc != new_loc && old_loc > 0 {
+        record_container_take_log_in_snap(
+            sde, snap, char_id, item_id, moved_tid, moved_qty, old_loc, now_unix,
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn record_container_rename_log(
@@ -815,6 +967,131 @@ pub(crate) fn record_ship_bay_unlock_for_ancestors_snap(
 }
 
 /// Validates container rules, ALSC locks/passwords, SMA (`flag 90`), and Fleet Hangar (`flag 155`) on item move.
+pub(crate) fn validate_container_dest_rules_in_snap(
+    ctx: &ServerContext,
+    char_id: i64,
+    moving_item: &eve_db::InventoryItemRecord,
+    dest_item: &eve_db::InventoryItemRecord,
+    dest_type: &eve_sde::InvType,
+) -> Result<bool, BridgeRpcError> {
+    let moving_grp = ctx
+        .sde
+        .types
+        .get(&moving_item.type_id)
+        .map(|t| t.group_id)
+        .unwrap_or(0);
+    // Station Container (`group 448`, unpacked volume >= 500,000 m3) cannot be moved into a ship when assembled
+    if moving_grp == 448 && moving_item.singleton && dest_type.category_id == 6 {
+        return Err(BridgeRpcError {
+            code: "CapacityExceeded".into(),
+            message: "Assembled Station Containers cannot be loaded into a ship".into(),
+            client_error: None,
+        });
+    }
+    if matches!(dest_type.group_id, 513 | 902)
+        && dest_type.category_id == 6
+        && moving_item.singleton
+        && is_container_group(moving_grp, moving_item.type_id)
+        && moving_grp != 649
+    {
+        return Err(BridgeRpcError {
+            code: "OnlyFreightContainersAllowedInFreighters".into(),
+            message: "Freight containers are the only containers allowed assembled in freighter holds"
+                .into(),
+            client_error: None,
+        });
+    }
+    if !is_container_group(dest_type.group_id, dest_type.type_id) {
+        return Ok(false);
+    }
+    if dest_type.group_id == crate::services::mobile_deployables::GROUP_CRAB_BEACON {
+        return Err(BridgeRpcError::user_error("CannotPutItemsInCrabBeacon"));
+    }
+    if dest_type.group_id == 1247 {
+        return Err(BridgeRpcError {
+            code: "CannotAddToSiphon".into(),
+            message: "Items cannot be placed into a Mobile Siphon Unit".into(),
+            client_error: None,
+        });
+    }
+    if dest_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
+        if dest_item.owner_id != char_id {
+            return Err(BridgeRpcError {
+                code: "OwnershipViolation".into(),
+                message: "Only the owner may store items in this Mobile Depot".into(),
+                client_error: None,
+            });
+        }
+    } else if !dest_item.singleton {
+        return Err(BridgeRpcError {
+            code: "ContainerNotAssembled".into(),
+            message: format!(
+                "Target container {} must be assembled before storing items",
+                dest_item.item_id
+            ),
+            client_error: None,
+        });
+    }
+    if is_container_group(moving_grp, moving_item.type_id) {
+        return Err(BridgeRpcError {
+            code: "CannotPutContainerInContainer".into(),
+            message: "Cannot place a container inside another container".into(),
+            client_error: None,
+        });
+    }
+    Ok(true)
+}
+
+pub(crate) fn validate_container_capacity_in_snap(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    dest_item: &eve_db::InventoryItemRecord,
+    dest_type: &eve_sde::InvType,
+    new_loc: i64,
+    excluded_ids: &[i64],
+    moving_vol: f64,
+) -> Result<(), BridgeRpcError> {
+    let cap = dest_item
+        .dynamic_attributes
+        .get(&eve_sde::attr_ids::CAPACITY)
+        .copied()
+        .filter(|&c| c > 0.0)
+        .unwrap_or_else(|| {
+            if dest_type.capacity > 0.0 {
+                dest_type.capacity
+            } else {
+                dest_type
+                    .default_attributes
+                    .get(&eve_sde::attr_ids::CAPACITY)
+                    .copied()
+                    .unwrap_or(0.0)
+            }
+        });
+    if cap <= 0.0 {
+        return Err(BridgeRpcError {
+            code: "CapacityExceeded".into(),
+            message: format!("Container {} has no storage capacity", dest_type.name),
+            client_error: None,
+        });
+    }
+    let used: f64 = snap
+        .items
+        .values()
+        .filter(|i| i.location_id == new_loc && !excluded_ids.contains(&i.item_id))
+        .map(|i| effective_item_unit_volume(sde, i) * (i.quantity as f64))
+        .sum();
+    if used + moving_vol > cap + 1e-4 {
+        return Err(BridgeRpcError {
+            code: "CapacityExceeded".into(),
+            message: format!(
+                "Container capacity of {cap} m³ exceeded (used {used:.1} m³, adding {moving_vol:.1} m³)"
+            ),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_container_and_bay_move(
     ctx: &ServerContext,
     char_id: i64,
@@ -1007,7 +1284,6 @@ fn validate_container_and_bay_move_impl(
             return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by contract or job"), client_error: None });
         }
         let moving_type = ctx.sde.types.get(&moving_item.type_id);
-        let moving_grp = moving_type.map(|t| t.group_id).unwrap_or(0);
         let moving_cat = moving_type.map(|t| t.category_id).unwrap_or(0);
         let move_qty = requested_qty.unwrap_or(moving_item.quantity as i64).max(1) as f64;
         let extra_charge_vol: f64 = if !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132)
@@ -1032,86 +1308,16 @@ fn validate_container_and_bay_move_impl(
         let Some(dest_item) = snap.items.get(&new_loc) else { return Ok(None); };
         let Some(dest_type) = ctx.sde.types.get(&dest_item.type_id) else { return Ok(None); };
 
-        // Station Container (`group 448`, unpacked volume >= 500,000 m3) cannot be moved into a ship when assembled
-        if moving_grp == 448 && moving_item.singleton && dest_type.category_id == 6 {
-            return Err(BridgeRpcError {
-                code: "CapacityExceeded".into(),
-                message: "Assembled Station Containers cannot be loaded into a ship".into(),
-                client_error: None,
-            });
-        }
-        if matches!(dest_type.group_id, 513 | 902) && dest_type.category_id == 6 && moving_item.singleton && is_container_group(moving_grp, moving_item.type_id) && moving_grp != 649 {
-            return Err(BridgeRpcError {
-                code: "OnlyFreightContainersAllowedInFreighters".into(),
-                message: "Freight containers are the only containers allowed assembled in freighter holds".into(),
-                client_error: None,
-            });
-        }
-
-        // Moving into a Container (`group 12 | 340 | 448 | 649`, jetcan `23`, or Mobile Depot `1246`)
-        if is_container_group(dest_type.group_id, dest_type.type_id) {
-            if dest_type.group_id == crate::services::mobile_deployables::GROUP_CRAB_BEACON {
-                return Err(BridgeRpcError::user_error("CannotPutItemsInCrabBeacon"));
-            }
-            if dest_type.group_id == 1247 {
-                return Err(BridgeRpcError { code: "CannotAddToSiphon".into(), message: "Items cannot be placed into a Mobile Siphon Unit".into(), client_error: None });
-            }
-            if dest_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
-                if dest_item.owner_id != char_id {
-                    return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may store items in this Mobile Depot".into(), client_error: None });
-                }
-            } else if !dest_item.singleton {
-                return Err(BridgeRpcError {
-                    code: "ContainerNotAssembled".into(),
-                    message: format!("Target container {new_loc} must be assembled before storing items"),
-                    client_error: None,
-                });
-            }
-            if is_container_group(moving_grp, moving_item.type_id) {
-                return Err(BridgeRpcError {
-                    code: "CannotPutContainerInContainer".into(),
-                    message: "Cannot place a container inside another container".into(),
-                    client_error: None,
-                });
-            }
-            let cap = dest_item
-                .dynamic_attributes
-                .get(&eve_sde::attr_ids::CAPACITY)
-                .copied()
-                .filter(|&c| c > 0.0)
-                .unwrap_or_else(|| {
-                    if dest_type.capacity > 0.0 {
-                        dest_type.capacity
-                    } else {
-                        dest_type
-                            .default_attributes
-                            .get(&eve_sde::attr_ids::CAPACITY)
-                            .copied()
-                            .unwrap_or(0.0)
-                    }
-                });
-            if cap <= 0.0 {
-                return Err(BridgeRpcError {
-                    code: "CapacityExceeded".into(),
-                    message: format!("Container {} has no storage capacity", dest_type.name),
-                    client_error: None,
-                });
-            }
-            let used: f64 = snap
-                .items
-                .values()
-                .filter(|i| i.location_id == new_loc && i.item_id != item_id)
-                .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64))
-                .sum();
-            if used + moving_total_vol > cap + 1e-4 {
-                return Err(BridgeRpcError {
-                    code: "CapacityExceeded".into(),
-                    message: format!(
-                        "Container capacity of {cap} m³ exceeded (used {used:.1} m³, adding {moving_total_vol:.1} m³)"
-                    ),
-                    client_error: None,
-                });
-            }
+        if validate_container_dest_rules_in_snap(ctx, char_id, moving_item, dest_item, dest_type)? {
+            validate_container_capacity_in_snap(
+                &ctx.sde,
+                snap,
+                dest_item,
+                dest_type,
+                new_loc,
+                &[item_id],
+                moving_total_vol,
+            )?;
             return Ok(Some((dest_type.group_id, moving_item.type_id, moving_item.quantity)));
         }
 
@@ -1585,15 +1791,16 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
                 Err(e) => return Some(Err(e)),
             };
-            if let Err(e) = authorize_container_inspect(ctx, session, char_id, container_id, false) {
-                return Some(Err(e));
-            }
-            let (has_pw, cfg) = ctx.db.with_snapshot(|snap| {
+            let (has_pw, cfg) = match ctx.db.with_snapshot(|snap| -> Result<(bool, ContainerConfig), BridgeRpcError> {
+                authorize_container_inspect_in_snap(ctx, session, snap, char_id, container_id, false)?;
                 let has_pw = container_password_snap(snap, container_id, 1).is_some()
                     || container_password_snap(snap, container_id, 2).is_some();
                 let cfg = container_config_snap(snap, container_id);
-                (has_pw, cfg)
-            });
+                Ok((has_pw, cfg))
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             Some(Ok(PyRep::keyval([
                 ("containerID", PyRep::Integer(container_id)), ("passwordRequired", PyRep::Bool(has_pw)),
                 ("hasPassword", PyRep::Bool(has_pw)), ("lockByDefault", PyRep::Bool(cfg.lock_by_default)),
@@ -1661,19 +1868,31 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 PyRep::Integer(n) => Some(*n != 0),
                 _ => None,
             });
-            if let Err(e) = authorize_container_inspect(ctx, session, char_id, container_id, false) {
-                return Some(Err(e));
-            }
-            let (flag_id, location_id, container_owner_id, container_type_id) =
-                ctx.db.with_snapshot(|snap| {
-                    let cont = snap.items.get(&container_id);
-                    let flag_id = cont.map(|c| c.flag as i64).unwrap_or(4);
-                    let container_owner_id = cont
-                        .map(|c| c.owner_id)
-                        .filter(|&o| o > 0)
-                        .unwrap_or(char_id);
-                    let container_type_id = cont.map(|c| c.type_id).unwrap_or(0);
-                    let mut loc = cont.map(|c| c.location_id).unwrap_or(0);
+            let provided = kwargs
+                .get("password")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    (!is_bound_client_call)
+                        .then(|| args.get(1).and_then(|a| a.as_str()))
+                        .flatten()
+                })
+                .unwrap_or("");
+            let now_unix = ctx.now_unix_secs();
+            const ALSC_PAGE_LIMIT: usize = 50;
+            let (raw_logs, flag_id, location_id, container_owner_id) = match ctx.db.try_with_mut_snapshot(
+                |snap| -> Result<Result<(Vec<AlscLogEntry>, i64, i64, i64), BridgeRpcError>, BridgeRpcError> {
+                    let cont = authorize_container_inspect_in_snap(
+                        ctx,
+                        session,
+                        snap,
+                        char_id,
+                        container_id,
+                        false,
+                    )?;
+                    let flag_id = cont.flag as i64;
+                    let container_owner_id = if cont.owner_id > 0 { cont.owner_id } else { char_id };
+                    let container_type_id = cont.type_id;
+                    let mut loc = cont.location_id;
                     for _ in 0..16 {
                         if loc <= 0 {
                             break;
@@ -1700,21 +1919,6 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                             .filter(|&v| v > 0)
                             .unwrap_or_else(|| container_id.max(1));
                     }
-                    (flag_id, loc, container_owner_id, container_type_id)
-                });
-            let provided = kwargs
-                .get("password")
-                .and_then(|v| v.as_str())
-                .or_else(|| {
-                    (!is_bound_client_call)
-                        .then(|| args.get(1).and_then(|a| a.as_str()))
-                        .flatten()
-                })
-                .unwrap_or("");
-            let now_unix = ctx.now_unix_secs();
-            const ALSC_PAGE_LIMIT: usize = 50;
-            let raw_logs = match ctx.db.try_with_mut_snapshot(
-                |snap| -> Result<Result<Vec<AlscLogEntry>, BridgeRpcError>, BridgeRpcError> {
                     let cfg = container_config_snap(snap, container_id);
                     let need_check = cfg.password_per_action
                         || !is_container_unlocked_snap(snap, container_id, char_id);
@@ -1756,7 +1960,12 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                             set_container_unlocked_snap(snap, container_id, char_id, true, now_unix)?;
                         }
                     }
-                    Ok(Ok(container_alsc_logs_snap(snap, container_id)))
+                    Ok(Ok((
+                        container_alsc_logs_snap(snap, container_id),
+                        flag_id,
+                        loc,
+                        container_owner_id,
+                    )))
                 },
             ) {
                 Ok(Ok(logs)) => logs,
@@ -2158,13 +2367,14 @@ pub(crate) fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError 
     }
 }
 
-pub(super) fn authorize_container_inspect(
+pub(super) fn authorize_container_inspect_in_snap<'a>(
     ctx: &ServerContext,
     session: &SessionState,
+    snap: &'a eve_db::WorldStateSnapshot,
     char_id: i64,
     container_id: i64,
     allow_ship: bool,
-) -> Result<(), BridgeRpcError> {
+) -> Result<&'a eve_db::InventoryItemRecord, BridgeRpcError> {
     if container_id <= 0 {
         return Err(rpc_err(
             "InvalidContainerID",
@@ -2173,58 +2383,56 @@ pub(super) fn authorize_container_inspect(
     }
     let is_gm = session.has_gm_role()
         || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
-    ctx.db.with_snapshot(|snap| {
-        let Some(cont) = snap.items.get(&container_id) else {
-            return Err(rpc_err(
-                "ContainerNotFound",
-                format!("Container {container_id} not found"),
-            ));
-        };
-        let type_info = ctx.sde.types.get(&cont.type_id);
-        let is_container = type_info.is_some_and(|t| {
-            matches!(t.group_id, 12 | 340 | 448 | 649) || (allow_ship && t.category_id == 6)
-        });
-        if !is_container {
-            return Err(rpc_err(
-                "ALSCAccessDenied",
-                format!("Item {container_id} is not an accessible secure container"),
-            ));
+    let Some(cont) = snap.items.get(&container_id) else {
+        return Err(rpc_err(
+            "ContainerNotFound",
+            format!("Container {container_id} not found"),
+        ));
+    };
+    let type_info = ctx.sde.types.get(&cont.type_id);
+    let is_container = type_info.is_some_and(|t| {
+        matches!(t.group_id, 12 | 340 | 448 | 649) || (allow_ship && t.category_id == 6)
+    });
+    if !is_container {
+        return Err(rpc_err(
+            "ALSCAccessDenied",
+            format!("Item {container_id} is not an accessible secure container"),
+        ));
+    }
+    if is_gm || cont.owner_id == char_id {
+        return Ok(cont);
+    }
+    let caller_corp = session
+        .corporation_id
+        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+        .unwrap_or(0);
+    if caller_corp > 0 && cont.owner_id == caller_corp {
+        let (is_ceo, eff_role) = snap.effective_corp_roles_at(
+            caller_corp,
+            char_id,
+            None,
+            session.corp_role,
+            ctx.now_unix(),
+        );
+        if is_ceo
+            || (eff_role
+                & (eve_db::corp_roles::ROLE_DIRECTOR
+                    | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG))
+                != 0
+        {
+            return Ok(cont);
         }
-        if is_gm || cont.owner_id == char_id {
-            return Ok(());
-        }
-        let caller_corp = session
-            .corporation_id
-            .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
-            .unwrap_or(0);
-        if caller_corp > 0 && cont.owner_id == caller_corp {
-            let (is_ceo, eff_role) = snap.effective_corp_roles_at(
-                caller_corp,
-                char_id,
-                None,
-                session.corp_role,
-                ctx.now_unix(),
-            );
-            if is_ceo
-                || (eff_role
-                    & (eve_db::corp_roles::ROLE_DIRECTOR
-                        | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG))
-                    != 0
-            {
-                return Ok(());
-            }
-            return Err(rpc_err(
-                "ALSCAccessDenied",
-                format!("Not authorized to access corporate container {container_id}"),
-            ));
-        }
-        Err(BridgeRpcError {
-            code: "ALSCAccessDenied".into(),
-            message: format!(
-                "Not authorized to view configuration or log for container {container_id}"
-            ),
-            client_error: None,
-        })
+        return Err(rpc_err(
+            "ALSCAccessDenied",
+            format!("Not authorized to access corporate container {container_id}"),
+        ));
+    }
+    Err(BridgeRpcError {
+        code: "ALSCAccessDenied".into(),
+        message: format!(
+            "Not authorized to view configuration or log for container {container_id}"
+        ),
+        client_error: None,
     })
 }
 

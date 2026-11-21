@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::services::inventory_fitting::fitting_containers_ships::{
-    read_container_ship_state, save_container_ship_state,
+    set_ship_access_config_snap, ship_access_config_snap, ship_password_snap,
 };
 use eve_db::{
     CorporationRecord, InventoryFlag, InventoryItemRecord, StarbaseDetailSettings,
@@ -184,18 +184,18 @@ async fn forcefield_protection_blocking_roles_structure_towers_and_ballpark_fall
     assert!(can_enter_forcefield(&ctx, ceo_id, member_ship, struct_tower_id));
     assert!(!can_enter_forcefield(&ctx, member_id, member_ship, struct_tower_id));
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.entry(member_ship).or_default().password = Some("wrongpw".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cfg = ship_access_config_snap(snap, member_ship);
+        cfg.password = Some("wrongpw".into());
+        set_ship_access_config_snap(snap, member_ship, &cfg, 0).unwrap();
+    });
     assert!(!can_enter_forcefield(&ctx, member_id, member_ship, struct_tower_id));
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.entry(member_ship).or_default().password = Some("structpw".into());
-        save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cfg = ship_access_config_snap(snap, member_ship);
+        cfg.password = Some("structpw".into());
+        set_ship_access_config_snap(snap, member_ship, &cfg, 0).unwrap();
+    });
     assert!(can_enter_forcefield(&ctx, member_id, member_ship, struct_tower_id));
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -331,7 +331,7 @@ fn ship_configuration_error_and_flag_paths() {
         PyRep::None
     );
     assert_eq!(
-        read_container_ship_state(&ctx).ship_passwords.get(&ship_id).map(String::as_str),
+        ctx.db.with_snapshot(|snap| ship_password_snap(snap, ship_id)).as_deref(),
         Some("alpha")
     );
     assert_eq!(
@@ -339,7 +339,7 @@ fn ship_configuration_error_and_flag_paths() {
             .unwrap(),
         PyRep::None
     );
-    assert!(!read_container_ship_state(&ctx).ship_passwords.contains_key(&ship_id));
+    assert!(ctx.db.with_snapshot(|snap| ship_password_snap(snap, ship_id)).is_none());
 
     assert!(ship_configuration(
         &ctx,
@@ -349,7 +349,7 @@ fn ship_configuration_error_and_flag_paths() {
     )
     .is_ok());
     assert_eq!(
-        read_container_ship_state(&ctx).ship_passwords.get(&ship_id).map(String::as_str),
+        ctx.db.with_snapshot(|snap| ship_password_snap(snap, ship_id)).as_deref(),
         Some("beta")
     );
 
@@ -363,9 +363,9 @@ fn ship_configuration_error_and_flag_paths() {
         ])],
     )
     .unwrap();
-    let st = read_container_ship_state(&ctx);
-    assert!(!st.ship_configs[&ship_id].allow_corp_hangar);
-    assert!(!st.ship_configs[&ship_id].allow_fleet_smb);
+    let ship_cfg = ctx.db.with_snapshot(|snap| ship_access_config_snap(snap, ship_id));
+    assert!(!ship_cfg.allow_corp_hangar);
+    assert!(!ship_cfg.allow_fleet_smb);
     assert!(matches!(cfg_res, PyRep::Dict(_)));
 
     assert_eq!(

@@ -1533,7 +1533,6 @@ async fn handle_invbroker_add(
                     merged_item: eve_db::InventoryItemRecord,
                     prev_qty: i32,
                     target_pre_owner: i64,
-                    effective_item_id: i64,
                     moved_tid: u32,
                     moved_qty: i32,
                     src_ship_bay_owner: Option<i64>,
@@ -1779,13 +1778,14 @@ async fn handle_invbroker_add(
                                     .filter(|i| i.location_id == orig_item.location_id && i.flag == orig_item.flag && i.item_id != orig_item_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 8))
                                     .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity.max(1) as f64)).sum::<f64>();
                             }
-                            if fitting_containers_ships::is_container_group(dest_type.group_id, dest_type.type_id) {
-                                let cap = dest_item.dynamic_attributes.get(&eve_sde::attr_ids::CAPACITY).copied().filter(|&c| c > 0.0)
-                                    .unwrap_or_else(|| if dest_type.capacity > 0.0 { dest_type.capacity } else { dest_type.default_attributes.get(&eve_sde::attr_ids::CAPACITY).copied().unwrap_or(0.0) });
-                                let used: f64 = snap.items.values().filter(|i| i.location_id == new_loc && i.item_id != orig_item_id).map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();
-                                if cap <= 0.0 || used + moving_vol > cap + 1e-4 {
-                                    return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Container capacity of {cap} m³ exceeded"), client_error: None });
-                                }
+                            if fitting_containers_ships::validate_container_dest_rules_in_snap(
+                                ctx, char_id, &orig_item, dest_item, dest_type,
+                            )? {
+                                fitting_containers_ships::validate_container_capacity_in_snap(
+                                    &ctx.sde, snap, dest_item, dest_type, new_loc, &[orig_item_id], moving_vol,
+                                )?;
+                                let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
+                                fitting_containers_ships::validate_container_password_in_snap(snap, new_loc, char_id, supplied_pw, true)?;
                             } else if matches!(flag_u16, 90 | 155) && dest_type.category_id == 6 {
                                 let supplied_pw = kwargs
                                     .get("password")
@@ -1985,34 +1985,17 @@ async fn handle_invbroker_add(
                                 target_item.owner_id = merge_owner;
                                 target_item.version += 1;
                                 let merged_snapshot = target_item.clone();
-                                let supplied_pw = kwargs
-                                    .get("password")
-                                    .and_then(|v| v.as_str())
-                                    .or_else(|| args.iter().find_map(|a| a.as_str()));
-                                let now_unix = ctx.now_unix_secs();
+                                let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
                                 let clear_ids = split_qty_opt.is_none().then_some(effective_item_id);
-                                fitting_containers_ships::apply_add_move_kv_side_effects_in_snap(
-                                    snap,
-                                    pending_alsc_take.as_ref(),
-                                    clear_ids.as_slice(),
-                                    None,
-                                    now_unix,
-                                )?;
-                                fitting_containers_ships::record_ship_bay_unlock_for_ancestors_snap(
-                                    ctx,
-                                    snap,
-                                    char_id,
-                                    new_loc,
-                                    flag_u16,
-                                    orig_item.location_id,
-                                    orig_item.flag as u16,
-                                    supplied_pw,
+                                fitting_containers_ships::finalize_add_move_side_effects_in_snap(
+                                    ctx, snap, char_id, pending_alsc_take.as_ref(), clear_ids.as_slice(), None,
+                                    effective_item_id, active_src_record.type_id, active_src_record.quantity,
+                                    orig_item.location_id, orig_item.flag as u16, new_loc, flag_u16, supplied_pw, ctx.now_unix_secs(),
                                 )?;
                                 return Ok(AddTxOutcome::Merged {
                                     merged_item: merged_snapshot,
                                     prev_qty,
                                     target_pre_owner,
-                                    effective_item_id,
                                     moved_tid: active_src_record.type_id,
                                     moved_qty: active_src_record.quantity,
                                     src_ship_bay_owner,
@@ -2153,30 +2136,15 @@ async fn handle_invbroker_add(
                     }
                 }
 
-                let supplied_pw = kwargs
-                    .get("password")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| args.iter().find_map(|a| a.as_str()));
-                let now_unix = ctx.now_unix_secs();
+                let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
                 let mut custom_flag_ids = Vec::with_capacity(1 + unfitted_charges.len());
                 custom_flag_ids.push(effective_item_id);
                 custom_flag_ids.extend(unfitted_charges.iter().map(|(_, post_c)| post_c.item_id));
-                fitting_containers_ships::apply_add_move_kv_side_effects_in_snap(
-                    snap,
-                    pending_alsc_take.as_ref(),
-                    &custom_flag_ids,
+                fitting_containers_ships::finalize_add_move_side_effects_in_snap(
+                    ctx, snap, char_id, pending_alsc_take.as_ref(), &custom_flag_ids,
                     matches!(flag_u16, 90 | 155).then_some(flag_u16),
-                    now_unix,
-                )?;
-                fitting_containers_ships::record_ship_bay_unlock_for_ancestors_snap(
-                    ctx,
-                    snap,
-                    char_id,
-                    new_loc,
-                    flag_u16,
-                    old_loc_id,
-                    old_flag_id as u16,
-                    supplied_pw,
+                    updated.item_id, updated.type_id, updated.quantity,
+                    old_loc_id, old_flag_id as u16, updated.location_id, flag_u16, supplied_pw, ctx.now_unix_secs(),
                 )?;
 
                 Ok(AddTxOutcome::Moved {
@@ -2201,21 +2169,17 @@ async fn handle_invbroker_add(
                     merged_item,
                     prev_qty,
                     target_pre_owner,
-                    effective_item_id,
                     moved_tid,
                     moved_qty,
                     src_ship_bay_owner,
                     dst_ship_bay_foreign_owner,
                 }) => {
-                    item_id = effective_item_id;
                     if looted_from_space {
                         let fid = session.fleet_id.or_else(|| crate::services::notify_emitters_seasons_tactical::char_fleet_id(ctx, char_id));
                         crate::services::notify_emitters_character_services::emit_fleet_loot_event_if_in_fleet(ctx, char_id, fid, &[(moved_tid, moved_qty)]);
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, orig_source_loc_id).await;
                     }
-                    fitting_containers_ships::record_container_add_log(ctx, char_id, item_id, moved_tid, moved_qty, new_loc);
                     if pending_alsc_take.is_none() && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
-                        fitting_containers_ships::record_container_take_log(ctx, char_id, item_id, moved_tid, moved_qty, orig_source_loc_id);
                         crate::services::pve_dungeon_runtime::on_dungeon_item_looted(ctx, char_id, session.solar_system_id, orig_source_loc_id, moved_tid).await;
                     }
                     if orig_source_loc_id != new_loc {
@@ -2357,23 +2321,7 @@ async fn handle_invbroker_add(
                         )
                         .await;
                     }
-                    fitting_containers_ships::record_container_add_log(
-                        ctx,
-                        char_id,
-                        updated.item_id,
-                        updated.type_id,
-                        updated.quantity,
-                        updated.location_id,
-                    );
                     if pending_alsc_take.is_none() && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
-                        fitting_containers_ships::record_container_take_log(
-                            ctx,
-                            char_id,
-                            updated.item_id,
-                            updated.type_id,
-                            updated.quantity,
-                            orig_source_loc_id,
-                        );
                         crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
                             ctx,
                             char_id,

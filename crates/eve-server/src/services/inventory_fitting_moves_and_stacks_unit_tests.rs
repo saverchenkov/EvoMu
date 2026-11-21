@@ -3,7 +3,7 @@
 
 use super::super::*;
 use super::*;
-use crate::services::fitting_containers_ships::{write_container_ship_state, ShipAccessConfig};
+use crate::services::fitting_containers_ships::{set_ship_access_config_snap, ShipAccessConfig};
 use crate::services::inventory_fitting::{csprng_unit_f64, handle};
 use eve_db::{
     corp_roles, CorporationRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord,
@@ -417,8 +417,8 @@ async fn invbroker_add_move_auth_quantum_core_escape_bay_and_stack_merge() {
         "ItemLocked"
     );
 
-    write_container_ship_state(&ctx, |st| {
-        st.ship_configs.insert(bs_id, ShipAccessConfig::default());
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(snap, bs_id, &ShipAccessConfig::default(), 0).unwrap();
     });
     assert!(handle(&ctx, &mut session, None, "", "", &[], &kw).await.is_none());
 }

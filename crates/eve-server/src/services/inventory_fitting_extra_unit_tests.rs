@@ -1327,7 +1327,7 @@ fn decode_user_error(err: &BridgeRpcError) -> (String, HashMap<String, f64>) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invbroker_add_enforces_foreign_ship_bay_acl_transfers_owner_and_notifies() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -1425,20 +1425,21 @@ async fn invbroker_add_enforces_foreign_ship_bay_acl_transfers_owner_and_notifie
     ctx.db
         .acquire_online_lock(mate_uid, 1_002, Some(mate_id), true, now_ts)
         .unwrap();
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_carrier,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: Some("bay-pw".into()),
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let mut mate_sess = SessionState::new(2);
     mate_sess.user_id = Some(mate_uid);
@@ -2051,7 +2052,7 @@ fn install_r2_synthetic_types(ctx: &mut ServerContext) -> (u32, u32, u32, u32, u
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bf_1290_r2_01_blocks_bare_space_and_piloted_ship_teleport_and_fails_closed() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::{DisconnectedShipEntry, FleetRecord};
 
@@ -2126,20 +2127,21 @@ async fn bf_1290_r2_01_blocks_bare_space_and_piloted_ship_teleport_and_fails_clo
         snap.items.insert(jetcan_trit, mk_item(jetcan_trit, 34, mate_id, space_jetcan, InventoryFlag::Cargo, 10, false));
         snap.items.insert(jetcan_pyerite, mk_item(jetcan_pyerite, 35, mate_id, space_jetcan, InventoryFlag::Cargo, 12, false));
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             foreign_space_carrier,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: true,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: true,
                 password: None,
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     ceo_sess.ship_id = Some(ceo_carrier);
     ceo_sess.corp_role = corp_roles::ROLE_DIRECTOR;
@@ -2292,7 +2294,7 @@ async fn bf_1290_r2_01_blocks_bare_space_and_piloted_ship_teleport_and_fails_clo
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bf_1290_r2_02_recursive_sma_owner_transfer_and_nested_bay_containers() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -2355,20 +2357,21 @@ async fn bf_1290_r2_02_recursive_sma_owner_transfer_and_nested_bay_containers() 
     let _ = ctx.db.acquire_online_lock(owner_uid, 2001, Some(owner_id), true, now_ts);
     let _ = ctx.db.acquire_online_lock(711, 2002, Some(mate_id), true, now_ts);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_carrier,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: Some("bay-pw".into()),
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let mut owner_live_sess = owner_sess;
     owner_live_sess.ship_id = Some(owner_carrier);
@@ -2605,7 +2608,7 @@ async fn bf_1290_r2_02_recursive_sma_owner_transfer_and_nested_bay_containers() 
 #[test]
 fn bf_1290_r2_03_space_titan_surface_range_self_inv_item_and_no_tokio_panic() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -2654,20 +2657,21 @@ fn bf_1290_r2_03_space_titan_surface_range_self_inv_item_and_no_tokio_panic() {
         snap.item_positions.insert(owner_titan, [11_500.0, 0.0, 0.0]);
         snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_titan,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: None,
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let mut mate_sess = SessionState::new(5);
     mate_sess.user_id = Some(722);
@@ -2781,7 +2785,7 @@ fn bf_1290_r2_03_space_titan_surface_range_self_inv_item_and_no_tokio_panic() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bf_1290_r2_03_space_titan_surface_range_add_and_multiadd() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -2825,20 +2829,21 @@ async fn bf_1290_r2_03_space_titan_surface_range_add_and_multiadd() {
         snap.item_positions.insert(owner_titan, [11_500.0, 0.0, 0.0]);
         snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_titan,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: false,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: None,
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
     let mut mate_sess = SessionState::new(6);
     mate_sess.user_id = Some(723);
     mate_sess.character_id = Some(mate_id);
@@ -2888,7 +2893,7 @@ async fn bf_1290_r2_03_space_titan_surface_range_add_and_multiadd() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bf_1290_r2_04_multiadd_sma_rules_positional_pw_and_split_notify() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -2942,20 +2947,21 @@ async fn bf_1290_r2_04_multiadd_sma_rules_positional_pw_and_split_notify() {
     let owner_uid = ctx.db.with_snapshot(|s| s.characters[&owner_id].user_id);
     let _ = ctx.db.acquire_online_lock(owner_uid, 2005, Some(owner_id), true, now_ts);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_carrier,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: Some("bay-pw".into()),
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let mut mate_sess = SessionState::new(7);
     mate_sess.user_id = Some(732);
@@ -3100,7 +3106,7 @@ async fn bf_1290_r2_04_multiadd_sma_rules_positional_pw_and_split_notify() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bf_1290_r3_split_stack_and_multiadd_recursive_owner_invariants() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -3162,20 +3168,21 @@ async fn bf_1290_r3_split_stack_and_multiadd_recursive_owner_invariants() {
     let owner_uid = ctx.db.with_snapshot(|s| s.characters[&owner_id].user_id);
     let _ = ctx.db.acquire_online_lock(owner_uid, 2010, Some(owner_id), true, now_ts);
 
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_titan,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: Some("bay-pw".into()),
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let mut mate_sess = SessionState::new(8);
     mate_sess.user_id = Some(742);
@@ -3296,10 +3303,10 @@ async fn bf_1290_r3_split_stack_and_multiadd_recursive_owner_invariants() {
         assert_eq!(snap.items[&fh_split_id].owner_id, owner_id);
         assert_eq!(snap.items[&fh_split_id].flag, InventoryFlag::FleetHangar);
         assert_eq!(
-            crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state_snap(snap)
-                .custom_item_flags
-                .get(&fh_split_id)
-                .copied(),
+            crate::services::inventory_fitting::fitting_containers_ships::custom_item_flag_snap(
+                snap,
+                fh_split_id
+            ),
             Some(155)
         );
     });

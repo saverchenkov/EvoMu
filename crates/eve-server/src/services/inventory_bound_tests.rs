@@ -997,11 +997,10 @@ fn issue_885_recheck_invbroker_add_auth_in_snap_rejects_mid_flight_revocations()
     });
 
     // 2. Mid-flight ALSC lock on source item -> ALSCItemLocked
-    {
-        let mut st = crate::services::fitting_containers_ships::read_container_ship_state(&ctx);
-        st.alsc_locked_items.insert(item_id);
-        crate::services::fitting_containers_ships::save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::services::fitting_containers_ships::set_alsc_item_locked_snap(snap, item_id, true, 0)
+            .unwrap();
+    });
     ctx.db.with_snapshot(|snap| {
         let err = super::recheck_invbroker_add_auth_in_snap(
             &ctx,
@@ -1018,12 +1017,14 @@ fn issue_885_recheck_invbroker_add_auth_in_snap_rejects_mid_flight_revocations()
         .unwrap_err();
         assert_eq!(err.code, "ALSCItemLocked");
     });
-    {
-        let mut st = crate::services::fitting_containers_ships::read_container_ship_state(&ctx);
-        st.alsc_locked_items.clear();
-        st.container_passwords.insert(cont_id, "secret".into());
-        crate::services::fitting_containers_ships::save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::services::fitting_containers_ships::set_alsc_item_locked_snap(snap, item_id, false, 0)
+            .unwrap();
+        crate::services::fitting_containers_ships::set_container_password_snap(
+            snap, cont_id, 1, "secret", 0,
+        )
+        .unwrap();
+    });
 
     // 3. Mid-flight container password set without unlock -> ALSCPasswordNeededToOpen
     ctx.db.with_snapshot(|snap| {
@@ -1042,11 +1043,12 @@ fn issue_885_recheck_invbroker_add_auth_in_snap_rejects_mid_flight_revocations()
         .unwrap_err();
         assert_eq!(err.code, "ALSCPasswordNeededToOpen");
     });
-    {
-        let mut st = crate::services::fitting_containers_ships::read_container_ship_state(&ctx);
-        st.container_passwords.clear();
-        crate::services::fitting_containers_ships::save_container_ship_state(&ctx, &st);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::services::fitting_containers_ships::set_container_password_snap(
+            snap, cont_id, 1, "", 0,
+        )
+        .unwrap();
+    });
 
     // 4. Mid-flight revocation of corporation take roles -> CorpRoleDenied
     ctx.db.with_mut_snapshot(|snap| {
@@ -2577,7 +2579,7 @@ async fn moveme_with_inflight_ship_and_station_invbroker_allows_get_self_inv_ite
 #[test]
 fn issue_1290_ship_bay_targets_foreign_bay_auth_and_station_fuel_redirect() {
     use crate::services::inventory_fitting::fitting_containers_ships::{
-        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+        set_ship_access_config_snap, ShipAccessConfig,
     };
     use eve_db::FleetRecord;
 
@@ -2677,20 +2679,21 @@ fn issue_1290_ship_bay_targets_foreign_bay_auth_and_station_fuel_redirect() {
         snap.items.insert(mate_owned_bay_item, mk(mate_owned_bay_item, 34, mate_id, owner_titan, InventoryFlag::FleetHangar, 10, false));
         snap.items.insert(box_id, mk(box_id, 3293, owner_id, station_id, InventoryFlag::Hangar, 1, true));
     });
-    {
-        let mut st = read_container_ship_state(&ctx);
-        st.ship_configs.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ship_access_config_snap(
+            snap,
             owner_titan,
-            ShipAccessConfig {
+            &ShipAccessConfig {
                 allow_fleet_smb: true,
                 allow_corp_smb: false,
                 allow_fleet_hangar: true,
                 allow_corp_hangar: false,
                 password: Some("pw123".into()),
             },
-        );
-        save_container_ship_state(&ctx, &st);
-    }
+            0,
+        )
+        .unwrap();
+    });
 
     let owner_sess = SessionState {
         user_id: Some(owner_id as u64),
