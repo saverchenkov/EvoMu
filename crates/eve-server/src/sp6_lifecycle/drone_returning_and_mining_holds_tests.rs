@@ -31,8 +31,8 @@ async fn step_returning_drones_and_abandon_fighters_cover_capacity_and_tube_clea
     let fighter_other_sys = 920_100_021;
 
     spawn_ball(&ctx, sys_id, ship_id, 587, DVec3::ZERO);
-    // Exact 2501m (> 2500m) stays returning
-    spawn_ball(&ctx, sys_id, ret_far, 2454, DVec3::new(2_501.0, 0.0, 0.0));
+    // Exact surface_distance 2501m (2501 + 15 + 15 = 2531m center > 2500m) stays returning
+    spawn_ball(&ctx, sys_id, ret_far, 2454, DVec3::new(2_531.0, 0.0, 0.0));
     spawn_ball(&ctx, sys_id, ret_missing_ship, 2454, DVec3::new(500.0, 0.0, 0.0));
 
     with_mut_combat_runtime(&ctx, |rt| {

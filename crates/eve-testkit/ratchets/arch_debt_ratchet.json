@@ -144,7 +144,7 @@
         "services/character_lifecycle.rs": 6,
         "services/character_skill_ops.rs": 1,
         "services/character_skills_helpers.rs": 2,
-        "services/combat_fighters.rs": 13,
+        "services/combat_fighters.rs": 12,
         "services/combat_legacy_ess.rs": 7,
         "services/combat_missiles_aoe.rs": 2,
         "services/combat_npc_ai.rs": 1,
@@ -476,7 +476,7 @@
         "services/character_gm_tools.rs": 1,
         "services/character_lifecycle.rs": 3,
         "services/character_skill_ops.rs": 1,
-        "services/combat_fighters.rs": 9,
+        "services/combat_fighters.rs": 8,
         "services/combat_legacy_ess.rs": 2,
         "services/combat_npcs_drones.rs": 3,
         "services/combat_weapons.rs": 2,
@@ -743,8 +743,6 @@
         "services/wallet_serverops.rs": 8,
         "services/wallet_services_ext.rs": 12,
         "services/wormhole_lifecycle_ops.rs": 1,
-        "sp6_lifecycle.rs": 2,
-        "sp6_lifecycle/drone_return.rs": 1,
         "system_actor/cycles.rs": 1
       }
     },
@@ -786,11 +784,11 @@
         "services/client_login.rs": 25,
         "services/cluster_macho_misc_services.rs": 2,
         "services/combat_crimewatch.rs": 10,
-        "services/combat_fighters.rs": 53,
-        "services/combat_fighters_abilities.rs": 52,
+        "services/combat_fighters.rs": 49,
+        "services/combat_fighters_abilities.rs": 50,
         "services/combat_legacy_ess.rs": 25,
         "services/combat_missiles_aoe.rs": 3,
-        "services/combat_npcs_drones.rs": 34,
+        "services/combat_npcs_drones.rs": 23,
         "services/combat_weapons.rs": 21,
         "services/combat_weapons_spool.rs": 11,
         "services/combat_wrecks_killmails.rs": 5,
@@ -942,8 +940,7 @@
         "services/tourney_service.rs": 20,
         "services/wallet_serverops.rs": 2,
         "services/wormhole_lifecycle_ops.rs": 2,
-        "sp6_lifecycle.rs": 12,
-        "sp6_lifecycle/drone_return.rs": 4
+        "sp6_lifecycle.rs": 9
       }
     },
     "slash_command_prefix_parse": {

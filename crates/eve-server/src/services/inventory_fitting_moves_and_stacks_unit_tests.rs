@@ -422,3 +422,227 @@ async fn invbroker_add_move_auth_quantum_core_escape_bay_and_stack_merge() {
     });
     assert!(handle(&ctx, &mut session, None, "", "", &[], &kw).await.is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invbroker_add_splits_starter_and_cargo_stacked_modules_when_qty_one() {
+    let ctx = ServerContext::with_sde_and_repository(
+        super::shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 90_000_001i64;
+    let station_id = 60_003_760i64;
+    let ship_id = 100_000_001i64;
+    let starter_mod_id = 100_000_004i64;
+
+    // 1. Verify #1551 seed invariant: starter Overdrive Injector System II stack (qty 2) is non-singleton
+    ctx.db.with_snapshot(|snap| {
+        let item = &snap.items[&starter_mod_id];
+        assert_eq!(item.type_id, 1236);
+        assert_eq!(item.quantity, 2);
+        assert!(
+            !item.singleton,
+            "starter stacked module 100_000_004 must be non-singleton"
+        );
+    });
+
+    ctx.db
+        .acquire_online_lock(1, 96_601, Some(char_id), true, ctx.now_unix())
+        .expect("char online");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let mut session = SessionState::default();
+    session.session_id = 96_601;
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_170);
+    session.station_id = Some(station_id);
+    session.solar_system_id = Some(30_000_142);
+    session.ship_id = Some(ship_id);
+
+    let ship_bound = BoundObjectEntry {
+        bound_id: 1,
+        session_id: 96_601,
+        user_id: 1,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: ship_id,
+        oid_str: format!("N=888444:{ship_id}"),
+        ref_id: 1,
+    };
+
+    // 2. Exact V24 TryFit wire payload from station hangar: shipInv.Add(item_id, station_id, qty=1, flag=LoSlot0)
+    let mut fit1_kw = HashMap::new();
+    fit1_kw.insert("flag".into(), PyRep::Integer(InventoryFlag::LoSlot0 as i64));
+    fit1_kw.insert("qty".into(), PyRep::Integer(1));
+    fit1_kw.insert("machoVersion".into(), PyRep::Integer(1));
+    let fit1_rep = handle(
+        &ctx,
+        &mut session,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(starter_mod_id), PyRep::Integer(station_id)],
+        &fit1_kw,
+    )
+    .await
+    .unwrap()
+    .expect("fitting stacked starter module with qty=1 must split 1 unit into LoSlot0");
+    let fitted1_id = fit1_rep
+        .dict_get("itemID")
+        .and_then(PyRep::as_i64)
+        .expect("itemID");
+    assert_ne!(fitted1_id, starter_mod_id);
+    ctx.db.with_snapshot(|snap| {
+        let fitted = &snap.items[&fitted1_id];
+        assert_eq!(fitted.location_id, ship_id);
+        assert_eq!(fitted.flag, InventoryFlag::LoSlot0);
+        assert_eq!(fitted.quantity, 1);
+        assert!(fitted.singleton);
+        let rem = &snap.items[&starter_mod_id];
+        assert_eq!(rem.location_id, station_id);
+        assert_eq!(rem.flag, InventoryFlag::Hangar);
+        assert_eq!(rem.quantity, 1);
+        assert!(!rem.singleton);
+    });
+    let notifs1 = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs1.iter().any(|n| n.event == "OnModuleFitted"));
+    assert!(notifs1.iter().any(|n| {
+        n.event == "OnItemChange"
+            && n.args
+                .first()
+                .and_then(|r| r.dict_get("itemID"))
+                .and_then(PyRep::as_i64)
+                == Some(starter_mod_id)
+            && n.args
+                .first()
+                .and_then(|r| r.dict_get("quantity"))
+                .and_then(PyRep::as_i64)
+                == Some(1)
+    }));
+    assert!(notifs1.iter().any(|n| {
+        n.event == "OnItemChange"
+            && n.args
+                .first()
+                .and_then(|r| r.dict_get("itemID"))
+                .and_then(PyRep::as_i64)
+                == Some(fitted1_id)
+            && n.args
+                .first()
+                .and_then(|r| r.dict_get("flagID"))
+                .and_then(PyRep::as_i64)
+                == Some(InventoryFlag::LoSlot0 as i64)
+    }));
+
+    // 3. Fit the remaining 1 unit of starter_mod_id into LoSlot1 with qty=1
+    let mut fit2_kw = HashMap::new();
+    fit2_kw.insert("flag".into(), PyRep::Integer(InventoryFlag::LoSlot1 as i64));
+    fit2_kw.insert("qty".into(), PyRep::Integer(1));
+    handle(
+        &ctx,
+        &mut session,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(starter_mod_id), PyRep::Integer(station_id)],
+        &fit2_kw,
+    )
+    .await
+    .unwrap()
+    .expect("fitting remaining 1 unit from starter stack must succeed");
+    ctx.db.with_snapshot(|snap| {
+        let fitted2 = &snap.items[&starter_mod_id];
+        assert_eq!(fitted2.location_id, ship_id);
+        assert_eq!(fitted2.flag, InventoryFlag::LoSlot1);
+        assert_eq!(fitted2.quantity, 1);
+        assert!(fitted2.singleton);
+    });
+
+    // 4. Fitting from a Ship Cargo stack with explicit qty=2 rejects; qty=1 splits & MultiAdd flagAutoFit splits
+    let cargo_stack_id = 96_600_501i64;
+    let hangar_stack_id = 96_600_502i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cargo_stack_id,
+            mk_item(cargo_stack_id, 484, char_id, ship_id, InventoryFlag::Cargo, 2, false),
+        );
+        snap.items.insert(
+            hangar_stack_id,
+            mk_item(hangar_stack_id, 484, char_id, station_id, InventoryFlag::Hangar, 2, false),
+        );
+    });
+
+    let mut bad_qty_kw = HashMap::new();
+    bad_qty_kw.insert("flag".into(), PyRep::Integer(InventoryFlag::HiSlot1 as i64));
+    bad_qty_kw.insert("qty".into(), PyRep::Integer(2));
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut session,
+            Some(&ship_bound),
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(cargo_stack_id), PyRep::Integer(ship_id)],
+            &bad_qty_kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CannotFitStackedModule"
+    );
+
+    let mut cargo_fit_kw = HashMap::new();
+    cargo_fit_kw.insert("flag".into(), PyRep::Integer(InventoryFlag::HiSlot1 as i64));
+    cargo_fit_kw.insert("qty".into(), PyRep::Integer(1));
+    let cargo_fit_rep = handle(
+        &ctx,
+        &mut session,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(cargo_stack_id), PyRep::Integer(ship_id)],
+        &cargo_fit_kw,
+    )
+    .await
+    .unwrap()
+    .expect("fitting stacked module from ship cargo with qty=1 must split 1 unit");
+    let cargo_fitted_id = cargo_fit_rep
+        .dict_get("itemID")
+        .and_then(PyRep::as_i64)
+        .expect("cargo split itemID");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&cargo_fitted_id].flag, InventoryFlag::HiSlot1);
+        assert!(snap.items[&cargo_fitted_id].singleton);
+        assert_eq!(snap.items[&cargo_stack_id].flag, InventoryFlag::Cargo);
+        assert_eq!(snap.items[&cargo_stack_id].quantity, 1);
+    });
+
+    let mut multi_kw = HashMap::new();
+    multi_kw.insert("flag".into(), PyRep::Integer(0));
+    handle(
+        &ctx,
+        &mut session,
+        Some(&ship_bound),
+        "invbroker",
+        "MultiAdd",
+        &[
+            PyRep::List(vec![PyRep::Integer(hangar_stack_id)]),
+            PyRep::Integer(station_id),
+        ],
+        &multi_kw,
+    )
+    .await
+    .unwrap()
+    .expect("MultiAdd flagAutoFit on stacked module splits 1 unit");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&hangar_stack_id].flag, InventoryFlag::Hangar);
+        assert_eq!(snap.items[&hangar_stack_id].quantity, 1);
+        assert!(snap.items.values().any(|it| {
+            it.location_id == ship_id
+                && it.flag == InventoryFlag::HiSlot2
+                && it.type_id == 484
+                && it.singleton
+                && it.quantity == 1
+        }));
+    });
+}

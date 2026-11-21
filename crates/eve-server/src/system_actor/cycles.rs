@@ -2168,14 +2168,15 @@ pub(crate) fn emit_cycle_deactivation(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     hook: Option<&ModuleDeactivationHook>,
 ) {
+    if cycle.module_id < 0
+        || super::cycles_tackle::parse_minion_cycle_parent(&cycle.effect_name).is_some()
+    {
+        return;
+    }
+    let Some(h) = hook else { return; };
     let char_id = cycle
         .owner_char_id
-        .or_else(|| {
-            ballpark
-                .ball_slim_meta
-                .get(&cycle.ship_id)
-                .and_then(|m| m.char_id)
-        })
+        .or_else(|| ballpark.ball_slim_meta.get(&cycle.ship_id).and_then(|m| m.char_id))
         .or_else(|| {
             db_opt.as_ref().and_then(|db| {
                 db.with_snapshot(|s| {
@@ -2187,13 +2188,8 @@ pub(crate) fn emit_cycle_deactivation(
                 })
             })
         })
-        .or_else(|| {
-            ballpark
-                .ball_slim_meta
-                .get(&cycle.ship_id)
-                .and_then(|m| (m.owner_id > 0).then_some(m.owner_id))
-        });
-    if let (Some(cid), Some(h)) = (char_id, hook) {
+        .or_else(|| ballpark.ball_slim_meta.get(&cycle.ship_id).and_then(|m| (m.owner_id > 0).then_some(m.owner_id)));
+    if let Some(cid) = char_id {
         h(cid, cycle);
     }
 }

@@ -40,12 +40,13 @@ pub use cluster_tick_downtime::{
 };
 pub use drone_return::{
     abandon_drones_and_fighters_for_ship_sync, abandon_drones_on_warp_sync,
-    disconnect_drones_for_ship_on_warp_sync, handle_cmd_return_bay, step_repeating_drone_mining,
+    disconnect_drones_for_ship_on_warp_sync, handle_cmd_abandon_drone,
+    handle_cmd_reconnect_to_drones, handle_cmd_return_bay, step_repeating_drone_mining,
     step_returning_drones,
 };
 
 use crate::router::notify_registry::{
-    push_typed_session_notification, OnDroneControlLost, OnSafeLogoffAborted, OnSafeLogoffFailed,
+    push_typed_session_notification, OnSafeLogoffAborted, OnSafeLogoffFailed,
     OnSafeLogoffTimerStarted,
 };
 use crate::router::{NotificationTarget, ServerContext};
@@ -59,7 +60,6 @@ use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const SAFE_LOGOFF_COUNTDOWN_SECS: u64 = 30;
@@ -2533,181 +2533,6 @@ pub fn clear_abyssal_session(ctx: &ServerContext, char_id: i64) {
     with_mut_sp6_state(&ctx.db, |st| {
         st.abyssal_sessions.remove(&char_id);
     });
-}
-
-/// Abandons specified drones (or all drones) in space for the calling character (`rpc:entity.CmdAbandonDrone`).
-pub async fn handle_cmd_abandon_drone(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let Some(sys_id) = session.solar_system_id else {
-        return Err(BridgeRpcError {
-            code: "NoSolarSystem".into(),
-            message: "Session has no active solar system".into(),
-            client_error: None,
-        });
-    };
-    let raw_target = match args.first() {
-        Some(PyRep::None) | None => kwargs.get("droneIDs"),
-        other => other,
-    };
-    let target_ids: Vec<i64> = match raw_target {
-        Some(PyRep::List(list) | PyRep::Tuple(list)) => {
-            list.iter().filter_map(|x| x.as_i64()).collect()
-        }
-        Some(v) => v.as_i64().into_iter().collect(),
-        None => Vec::new(),
-    };
-
-    let mut abandoned_balls = Vec::new();
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        for d in rt.active_drones_in_space.values_mut() {
-            if d.solar_system_id == sys_id && d.owner_char_id == char_id && !d.is_abandoned {
-                let matches_filter = target_ids.is_empty()
-                    || target_ids.contains(&d.ball_id)
-                    || target_ids.contains(&d.drone_item_id);
-                if matches_filter {
-                    d.is_abandoned = true;
-                    d.owner_char_id = 0;
-                    d.parent_ship_id = 0;
-                    d.target_id = None;
-                    d.activity_state = 0;
-                    abandoned_balls.push((d.ball_id, d.type_id));
-                    rt.active_drone_miners.remove(&d.ball_id);
-                }
-            }
-        }
-    });
-
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for &(bid, tid) in &abandoned_balls {
-        let _ = sys_handle
-            .emit_destiny_event(
-                bid,
-                eve_destiny::DestinyEvent::OnDroneStateChange {
-                    drone_id: bid,
-                    owner_id: 0,
-                    controller_id: 0,
-                    activity_state: 0,
-                    type_id: tid,
-                    controller_owner_id: 0,
-                    target_id: None,
-                },
-            )
-            .await;
-    }
-
-    for &(bid, _) in &abandoned_balls {
-        let abandon_notif = OnDroneControlLost { drone_id: bid };
-        ctx.emit_typed(NotificationTarget::Character(char_id), abandon_notif.clone());
-        push_typed_session_notification(session, abandon_notif);
-    }
-
-    Ok(PyRep::Dict(vec![]))
-}
-
-/// Reconnects to abandoned drones within 250km and bandwidth/control count limits (`rpc:entity.CmdReconnectToDrones`, `feat:drones.reconnect-drones`).
-pub async fn handle_cmd_reconnect_to_drones(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into(), client_error: None });
-    };
-    let Some(sys_id) = session.solar_system_id else {
-        return Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None });
-    };
-    if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
-        return Err(e);
-    }
-
-    let raw_target = match args.first() {
-        Some(PyRep::None) | None => kwargs.get("droneIDs"),
-        other => other,
-    };
-    let target_ids: Vec<i64> = match raw_target {
-        Some(PyRep::List(list) | PyRep::Tuple(list)) => list.iter().filter_map(|x| x.as_i64()).collect(),
-        Some(v) => v.as_i64().into_iter().collect(),
-        None => Vec::new(),
-    };
-
-    let mut ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
-    let snap_type_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id)).unwrap_or(0);
-    if snap_type_id > 0 && ship_fit_opt.as_ref().map(|f| f.ship.type_id) != Some(snap_type_id) {
-        ctx.invalidate_ship_fitting(ship_id);
-        ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
-    }
-    let (max_drones_allowed, ship_bw, _) = crate::services::combat_crimewatch::combat_npcs_drones::pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
-    let (mut cur_count, mut cur_bw) = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        let active: Vec<&crate::services::combat_crimewatch::DroneSpaceState> = rt
-            .active_drones_in_space.values().filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned).collect();
-        (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
-    });
-
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let ship_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(glam::DVec3::ZERO);
-
-    let candidates: Vec<(i64, i64, f64, u32)> = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.values().filter(|d| {
-            d.solar_system_id == sys_id
-                && ((d.is_abandoned && d.original_owner_char_id == char_id) || (d.owner_char_id == char_id && d.parent_ship_id == 0))
-                && (target_ids.is_empty() || target_ids.contains(&d.ball_id) || target_ids.contains(&d.drone_item_id))
-        }).map(|d| (d.ball_id, d.drone_item_id, d.bandwidth_used, d.type_id)).collect()
-    });
-
-    let mut reconnected = Vec::new();
-    let mut errors: HashMap<String, Vec<i64>> = HashMap::new();
-
-    for (bid, did, bw, tid) in candidates {
-        let drone_pos = sys_handle
-            .get_ball_snapshot(bid)
-            .await
-            .ok()
-            .flatten()
-            .map(|(_, b)| b.position);
-        if let Some(pos) = drone_pos {
-            if pos.distance(ship_pos) > 250_000.0 {
-                errors.entry("OutOfRange".into()).or_default().push(bid);
-                continue;
-            }
-        }
-        if cur_count >= max_drones_allowed {
-            errors.entry("MaxDronesExceeded".into()).or_default().push(bid);
-            continue;
-        }
-        if cur_bw + bw > ship_bw {
-            errors.entry("InsufficientBandwidth".into()).or_default().push(bid);
-            continue;
-        }
-
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            if let Some(d) = rt.active_drones_in_space.get_mut(&bid) {
-                d.is_abandoned = false;
-                d.owner_char_id = char_id;
-                d.parent_ship_id = ship_id;
-                d.activity_state = 0;
-                d.target_id = None;
-                cur_count += 1;
-                cur_bw += bw;
-                reconnected.push((bid, did, tid));
-            }
-        });
-    }
-
-    drone_reconnect_finish::finish_reconnect_drones(ctx, &sys_handle, char_id, ship_id, &reconnected)
-        .await;
-
-    let errors_py: Vec<(PyRep, PyRep)> = errors
-        .into_iter()
-        .map(|(k, v)| (PyRep::String(k), PyRep::List(v.into_iter().map(PyRep::Integer).collect())))
-        .collect();
-    Ok(PyRep::Dict(errors_py))
 }
 
 #[cfg(test)] #[path = "sp6_lifecycle_unit_tests.rs"] mod sp6_lifecycle_unit_tests;

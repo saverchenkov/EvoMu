@@ -487,6 +487,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    Box::pin(async move {
     match (service, method) {
         ("ship", "Eject") | ("ship", "LeaveShip") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -507,10 +508,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     client_error: None,
                 }));
             }
-            let (old_ship_type_id, char_dock, char_sys, char_home) = ctx.db.with_snapshot(|snap| {
+            let (old_ship_type_id, old_ship_owner_id, char_dock, char_sys, char_home) = ctx.db.with_snapshot(|snap| {
                 let ch = snap.characters.get(&char_id);
+                let ship = snap.items.get(&old_ship_id);
                 (
-                    snap.items.get(&old_ship_id).map(|it| it.type_id),
+                    ship.map(|it| it.type_id),
+                    ship.map(|it| it.owner_id),
                     ch.and_then(|c| c.station_id.or(c.structure_id)),
                     ch.map(|c| c.solar_system_id).filter(|&s| s > 0),
                     ch.map(|c| c.home_station_id).unwrap_or(0),
@@ -538,42 +541,61 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
             let now_unix = ctx.now_unix_secs();
             let mut live_eject_pos: Option<DVec3> = None;
-            if method == "Eject" {
-                let has_explicit_pickid =
-                    kwargs.get("pickid").is_some_and(|v| !matches!(v, PyRep::None));
-                let has_explicit_ship_id =
-                    kwargs.get("shipID").is_some_and(|v| !matches!(v, PyRep::None));
-                let explicit_ship_id = if args.first().is_none_or(|a| matches!(a, PyRep::None))
-                    && !has_explicit_pickid
-                    && has_explicit_ship_id
-                {
-                    crate::router::RpcArgs::new(args, kwargs).opt_positive_i64(0, "shipID")
-                } else {
-                    crate::router::RpcArgs::new(args, kwargs).opt_positive_i64(0, "pickid")
-                };
-                match explicit_ship_id {
-                    Ok(Some(target_ship_id)) if target_ship_id != old_ship_id => {
-                        let message = format!(
-                            "Eject target ship {target_ship_id} does not match active ship {old_ship_id}"
-                        );
-                        return Some(Err(BridgeRpcError::with_client_error(
-                            "InvalidShip",
-                            message.clone(),
-                            eve_proto::ClientError::CustomInfo(format!("InvalidShip: {message}")),
-                        )));
-                    }
-                    Ok(_) => {}
-                    Err(e) => return Some(Err(e)),
+            let has_explicit_pickid =
+                kwargs.get("pickid").is_some_and(|v| !matches!(v, PyRep::None));
+            let has_explicit_ship_id =
+                kwargs.get("shipID").is_some_and(|v| !matches!(v, PyRep::None));
+            let explicit_ship_id = if args.first().is_none_or(|a| matches!(a, PyRep::None))
+                && !has_explicit_pickid
+                && has_explicit_ship_id
+            {
+                crate::router::RpcArgs::new(args, kwargs).opt_positive_i64(0, "shipID")
+            } else {
+                crate::router::RpcArgs::new(args, kwargs).opt_positive_i64(0, "pickid")
+            };
+            let explicit_ship_id = match explicit_ship_id {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if let Some(target_ship_id) = explicit_ship_id.filter(|&id| id != old_ship_id) {
+                let owned_by_other = ctx.db.with_snapshot(|snap| {
+                    snap.items.get(&target_ship_id).is_some_and(|it| it.owner_id != char_id)
+                });
+                if owned_by_other {
+                    let message = format!("Ship {target_ship_id} is not owned by character {char_id}");
+                    return Some(Err(BridgeRpcError::with_client_error(
+                        "OwnershipViolation",
+                        message.clone(),
+                        eve_proto::ClientError::CustomInfo(message),
+                    )));
                 }
+                let message = format!(
+                    "{method} target ship {target_ship_id} does not match active ship {old_ship_id}"
+                );
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "InvalidShip",
+                    message.clone(),
+                    eve_proto::ClientError::CustomInfo(format!("InvalidShip: {message}")),
+                )));
+            }
+            if old_ship_type_id.is_none() {
+                return Some(Err(active_ship_not_found_err(old_ship_id)));
+            }
+            if old_ship_owner_id != Some(char_id) {
+                let message = format!("Ship {old_ship_id} is not owned by character {char_id}");
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "OwnershipViolation",
+                    message.clone(),
+                    eve_proto::ClientError::CustomInfo(message),
+                )));
+            }
+            if method == "Eject" {
                 if let Err(e) = crate::services::space_navigation_advanced::check_immobilizing_module_active(
                     ctx,
                     old_ship_id,
                     "eject",
                 ) {
                     return Some(Err(e));
-                }
-                if old_ship_type_id.is_none() {
-                    return Some(Err(active_ship_not_found_err(old_ship_id)));
                 }
                 let Some(sys_id) = sys_opt else {
                     return Some(Err(ship_not_in_space_err(format!(
@@ -668,6 +690,14 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 let Some(old_ship) = snap.items.get(&old_ship_id).cloned() else {
                     return Err(active_ship_not_found_err(old_ship_id));
                 };
+                if old_ship.owner_id != char_id {
+                    let message = format!("Ship {old_ship_id} is not owned by character {char_id}");
+                    return Err(BridgeRpcError::with_client_error(
+                        "OwnershipViolation",
+                        message.clone(),
+                        eve_proto::ClientError::CustomInfo(message),
+                    ));
+                }
                 if old_ship.type_id == 670 {
                     return Err(BridgeRpcError {
                         code: "CannotEjectFromCapsule".into(),
@@ -2263,6 +2293,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
 
         _ => None,
     }
+    }).await
 }
 
 async fn handle_board_stored_ship(

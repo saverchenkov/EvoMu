@@ -125,8 +125,8 @@ async fn cmd_return_bay_sentry_out_of_range_prevalidation_and_mobile_follow_tran
     spawn_ball(&ctx, sys_id, ship_id, 645, DVec3::ZERO);
     // Mobile drone at 3_000m (> 2_500m, <= max_ctrl_range)
     spawn_ball(&ctx, sys_id, mobile_far, 2454, DVec3::new(3_000.0, 0.0, 0.0));
-    // Sentry drone at 2_500.1m (> 2_500m -> SentryDroneOutOfScoopRange)
-    spawn_ball(&ctx, sys_id, sentry_far, 23561, DVec3::new(2_500.1, 0.0, 0.0));
+    // Sentry drone at surface_distance 2_500.1m (2_500.1 + 12 + 12 = 2_524.1m center -> SentryDroneOutOfScoopRange)
+    spawn_ball(&ctx, sys_id, sentry_far, 23561, DVec3::new(2_524.1, 0.0, 0.0));
 
     with_mut_combat_runtime(&ctx, |rt| {
         rt.active_drones_in_space.insert(
