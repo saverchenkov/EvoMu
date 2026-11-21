@@ -427,7 +427,7 @@ pub struct CombatRuntimeState {
     pub self_destruct_sim_remaining_secs: HashMap<i64, f64>,
     pub gm_logi_soaks: HashMap<u32, crate::services::gm_soak_commands::GmLogiSoakState>,
     pub gm_deadwarps: HashMap<i64, crate::services::gm_soak_commands::GmDeadwarpState>,
-    pub(crate) extended_npc_weapon_runtime: HashMap<(u32, i64), crate::combat::npc_ai_weapons_loot::ExtendedNpcWeaponRuntime>,
+    pub(crate) extended_npc_weapon_runtime: crate::combat::npc_ai_weapons_loot::SharedExtendedNpcWeaponRuntime,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -516,6 +516,9 @@ impl CombatRuntimeState {
         self.synced_runtime_epoch = combat_epoch;
         self.synced_ext_hash = ext_hash;
         self.synced_baseline = Some(std::sync::Arc::new(p.clone()));
+        crate::combat::npc_ai_weapons_loot::prune_wrt_snap(
+            crate::combat::npc_ai_weapons_loot::capture_wrt_prune(&self.extended_npc_weapon_runtime, &self.npc_entities),
+        );
     }
 
     #[inline]
@@ -722,7 +725,6 @@ impl CombatRuntimeState {
             self.active_drones_in_space.clear();
             self.drone_next_ready_unix.clear();
             self.npc_entities.clear();
-            self.extended_npc_weapon_runtime.clear();
             self.encounter_waves.clear();
             self.fighter_unit_damage_accum.clear();
             self.fighter_tube_rearm_until.clear();
@@ -757,11 +759,6 @@ impl CombatRuntimeState {
             self.active_drones_in_space = ext.active_drones_in_space;
             self.drone_next_ready_unix = ext.drone_next_ready_unix;
             self.npc_entities = ext.npc_entities;
-            self.extended_npc_weapon_runtime.retain(|&(sid, bid), wrt| {
-                self.npc_entities
-                    .get(&bid)
-                    .is_some_and(|n| n.solar_system_id == sid && n.type_id == wrt.npc_type_id)
-            });
             if !ext.pending_bounty_ticks.is_empty() || p.pending_bounty_ticks.is_empty() {
                 self.pending_bounty_ticks = ext.pending_bounty_ticks.into_iter().collect();
             }
@@ -1298,12 +1295,7 @@ pub(super) fn rehydrate_combat_runtime_with_hook(
     force_full: bool,
     after_snapshot_hook: impl FnMut(),
 ) {
-    rehydrate_combat_runtime_locks_with_hook(
-        &ctx.db,
-        &*ctx.combat_ephemeral,
-        force_full,
-        after_snapshot_hook,
-    );
+    rehydrate_combat_runtime_locks_with_hook(&ctx.db, &*ctx.combat_ephemeral, force_full, after_snapshot_hook);
 }
 
 pub(crate) fn rehydrate_combat_runtime_locks_with_hook(
@@ -1315,21 +1307,22 @@ pub(crate) fn rehydrate_combat_runtime_locks_with_hook(
     loop {
         let cw_before = db.combat_state_epoch();
         let rt_before = db.combat_runtime_epoch();
-        let persisted_arc = db
-            .with_snapshot(|s| std::sync::Arc::clone(s.combat_crimewatch_state.as_arc()));
+        let persisted_arc = db.with_snapshot(|s| std::sync::Arc::clone(s.combat_crimewatch_state.as_arc()));
         after_snapshot_hook();
         if db.combat_state_epoch() != cw_before || db.combat_runtime_epoch() != rt_before {
             continue;
         }
-        let mut guard = combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        if db.combat_state_epoch() != cw_before || db.combat_runtime_epoch() != rt_before {
-            continue;
-        }
-        if force_full || !guard.is_synced_with_db(cw_before, rt_before) {
-            guard.reconcile_with_db_persisted(&persisted_arc, cw_before, rt_before, force_full);
-        }
+        let prune_snap = {
+            let mut guard = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+            if db.combat_state_epoch() != cw_before || db.combat_runtime_epoch() != rt_before {
+                continue;
+            }
+            if force_full || !guard.is_synced_with_db(cw_before, rt_before) {
+                guard.reconcile_with_db_persisted(&persisted_arc, cw_before, rt_before, force_full);
+                Some(crate::combat::npc_ai_weapons_loot::capture_wrt_prune(&guard.extended_npc_weapon_runtime, &guard.npc_entities))
+            } else { None }
+        };
+        if let Some(snap) = prune_snap { crate::combat::npc_ai_weapons_loot::prune_wrt_snap(snap); }
         break;
     }
 }
@@ -1523,48 +1516,38 @@ pub fn with_mut_combat_runtime_tx_locks<R>(
         let pre_cw = db.combat_state_epoch();
         let pre_rt = db.combat_runtime_epoch();
         let mut guard_copy = {
-            let guard = combat_ephemeral
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
+            let guard = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
             guard.clone()
         };
         let pre_ram_p = guard_copy.to_persisted();
-        guard_copy.reconcile_with_db_persisted(
-            s.combat_crimewatch_state.as_arc(),
-            pre_cw,
-            pre_rt,
-            false,
-        );
+        guard_copy.reconcile_with_db_persisted(s.combat_crimewatch_state.as_arc(), pre_cw, pre_rt, false);
         let out = f(s, &mut guard_copy);
         let persisted = guard_copy.to_persisted();
         let changed = *s.combat_crimewatch_state != persisted;
-        let expected_cw = if changed {
-            pre_cw.wrapping_add(1)
-        } else {
-            pre_cw
-        };
+        let expected_cw = if changed { pre_cw.wrapping_add(1) } else { pre_cw };
         let (expected_rt, next_arc) = if changed {
             let arc = std::sync::Arc::new(persisted);
             s.combat_crimewatch_state = eve_db::CowCell::from_arc(std::sync::Arc::clone(&arc));
             (pre_rt.wrapping_add(1), arc)
         } else {
-            (
-                pre_rt,
-                std::sync::Arc::clone(s.combat_crimewatch_state.as_arc()),
-            )
+            (pre_rt, std::sync::Arc::clone(s.combat_crimewatch_state.as_arc()))
         };
         guard_copy.mark_synced_arc(&next_arc, expected_cw, expected_rt);
         (out, guard_copy, expected_rt, pre_ram_p)
     });
     if db.combat_runtime_epoch() == expected_rt {
-        let mut guard = combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        if db.combat_runtime_epoch() == expected_rt && guard.to_persisted() == pre_ram_p {
-            let cur_cw = db.combat_state_epoch();
-            let mut next = staged_next;
-            next.synced_db_epoch = cur_cw;
-            *guard = next;
+        let maybe_prune = {
+            let mut guard = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+            if db.combat_runtime_epoch() == expected_rt && guard.to_persisted() == pre_ram_p {
+                let mut next = staged_next;
+                next.synced_db_epoch = db.combat_state_epoch();
+                let snap = crate::combat::npc_ai_weapons_loot::capture_wrt_prune_if_changed(guard.synced_db_epoch == 0, &guard.npc_entities, &next.npc_entities, &next.extended_npc_weapon_runtime);
+                *guard = next;
+                Some(snap)
+            } else { None }
+        };
+        if let Some(snap_opt) = maybe_prune {
+            if let Some(snap) = snap_opt { crate::combat::npc_ai_weapons_loot::prune_wrt_snap(snap); }
             return out;
         }
     }

@@ -1828,21 +1828,27 @@ pub fn on_ball_destroyed_sync(
     // 2. Extended NPC entity
     let removed_ext_npc = if crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
         rt.npc_entities.contains_key(&ball_id)
-            || rt.extended_npc_weapon_runtime.contains_key(&(sys_id, ball_id))
     }) {
         crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
             let removed = rt.npc_entities.remove(&ball_id);
-            rt.extended_npc_weapon_runtime.remove(&(sys_id, ball_id));
-            if let Some(ref ext) = removed {
+            if removed.is_some() {
                 rt.record_destroyed_item_id(ball_id);
-                rt.extended_npc_weapon_runtime
-                    .remove(&(ext.solar_system_id, ball_id));
             }
             removed
         })
     } else {
         None
     };
+    crate::combat::npc_ai_weapons_loot::clear_extended_npc_weapon_runtime(ctx, sys_id, &[ball_id]);
+    if let Some(ref ext_npc) = removed_ext_npc {
+        if ext_npc.solar_system_id != sys_id {
+            crate::combat::npc_ai_weapons_loot::clear_extended_npc_weapon_runtime(
+                ctx,
+                ext_npc.solar_system_id,
+                &[ball_id],
+            );
+        }
+    }
     if let Some(ext_npc) = removed_ext_npc {
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.remove(&ball_id);

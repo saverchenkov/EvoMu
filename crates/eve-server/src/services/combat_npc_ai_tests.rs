@@ -2225,13 +2225,13 @@ async fn extended_npc_ai_idle_cooldown_decays_between_engagements() {
         "17641 must fire immediately on initial engagement"
     );
 
-    let (t_cd0, m_cd0) = with_combat_ephemeral(&ctx, |rt| {
-        let wrt = rt
-            .extended_npc_weapon_runtime
-            .get(&(sys_id, npc_id))
-            .expect("17641 runtime must be initialized after firing");
-        (wrt.turret_cooldown_s, wrt.missile_cooldown_s)
-    });
+    let (t_cd0, m_cd0) =
+        crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx, |wrt| {
+            let wrt = wrt
+                .get(&(sys_id, npc_id))
+                .expect("17641 runtime must be initialized after firing");
+            (wrt.turret_cooldown_s, wrt.missile_cooldown_s)
+        });
     assert!(
         t_cd0 > 1.0 || m_cd0 > 1.0,
         "17641 should retain >1s cooldown immediately after firing (t={t_cd0}, m={m_cd0})"
@@ -2244,9 +2244,8 @@ async fn extended_npc_ai_idle_cooldown_decays_between_engagements() {
         step_extended_npc_ai_sync(&ctx, sys_id);
     }
 
-    with_combat_ephemeral(&ctx, |rt| {
-        let wrt = rt
-            .extended_npc_weapon_runtime
+    crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx, |wrt| {
+        let wrt = wrt
             .get(&(sys_id, npc_id))
             .expect("live idle NPC must keep its weapon runtime");
         assert_eq!(wrt.turret_cooldown_s, 0.0, "turret cooldown must decay to 0 while idle");
@@ -2292,8 +2291,8 @@ async fn extended_npc_weapon_runtime_pruned_on_death_pipeline_empty_system_and_p
     let npc_a =
         spawn_specialized_npc_entity(&ctx, sys_id, 2_386, "Pirate", 500_010, DVec3::ZERO).await;
     step_extended_npc_ai_sync(&ctx, sys_id);
-    with_combat_ephemeral(&ctx, |rt| {
-        assert!(rt.extended_npc_weapon_runtime.contains_key(&(sys_id, npc_a)));
+    crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx, |wrt| {
+        assert!(wrt.contains_key(&(sys_id, npc_a)));
     });
     let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(
         &ctx,
@@ -2303,37 +2302,25 @@ async fn extended_npc_weapon_runtime_pruned_on_death_pipeline_empty_system_and_p
         DVec3::ZERO,
     )
     .expect("death pipeline cleanup");
-    with_combat_ephemeral(&ctx, |rt| {
-        assert!(!rt.npc_entities.contains_key(&npc_a));
-        assert!(!rt.extended_npc_weapon_runtime.contains_key(&(sys_id, npc_a)));
+    with_combat_ephemeral(&ctx, |rt| assert!(!rt.npc_entities.contains_key(&npc_a)));
+    crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx, |wrt| {
+        assert!(!wrt.contains_key(&(sys_id, npc_a)));
     });
 
-    // 2. step_extended_npc_ai_sync prunes stale weapon runtime before empty-system early exits
-    // and also prunes orphans on live systems when no entity state changed.
+    // 2. step_extended_npc_ai_sync prunes stale weapon runtime on empty and live systems.
     let (_b, _cs, npc_sample_ent) =
         crate::services::wormhole_pve_seeding::build_specialized_npc_components(
-            &ctx,
-            sys_id,
-            9_990_001,
-            2_386,
-            "Pirate",
-            500_010,
-            DVec3::ZERO,
+            &ctx, sys_id, 9_990_001, 2_386, "Pirate", 500_010, DVec3::ZERO,
         );
     let sample_wrt = crate::combat::npc_ai_weapons_loot::take_or_init_extended_npc_weapon_runtime(
-        &ctx,
-        sys_id,
-        &npc_sample_ent,
+        &ctx, sys_id, &npc_sample_ent,
     );
     crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(
-        &ctx,
-        sys_id,
-        9_990_001,
-        sample_wrt.clone(),
+        &ctx, sys_id, 9_990_001, sample_wrt.clone(),
     );
     step_extended_npc_ai_sync(&ctx, sys_id);
-    with_combat_ephemeral(&ctx, |rt| {
-        assert!(!rt.extended_npc_weapon_runtime.contains_key(&(sys_id, 9_990_001)));
+    crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx, |wrt| {
+        assert!(!wrt.contains_key(&(sys_id, 9_990_001)));
     });
 
     ctx.systems.get_or_spawn(sys_id).try_remove_ball(ship_id);
@@ -2341,62 +2328,128 @@ async fn extended_npc_weapon_runtime_pruned_on_death_pipeline_empty_system_and_p
         spawn_specialized_npc_entity(&ctx, sys_id, 2_386, "Pirate", 500_010, DVec3::ZERO).await;
     let npc_b_ent = with_combat_ephemeral(&ctx, |rt| rt.npc_entities[&npc_b].clone());
     let wrt_b = crate::combat::npc_ai_weapons_loot::take_or_init_extended_npc_weapon_runtime(
-        &ctx,
-        sys_id,
-        &npc_b_ent,
+        &ctx, sys_id, &npc_b_ent,
     );
-    crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(
-        &ctx,
-        sys_id,
-        npc_b,
-        wrt_b.clone(),
-    );
-    crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(
-        &ctx,
-        sys_id,
-        9_990_002,
-        wrt_b.clone(),
-    );
+    crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(&ctx, sys_id, npc_b, wrt_b.clone());
+    crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(&ctx, sys_id, 9_990_002, wrt_b.clone());
     step_extended_npc_ai_sync(&ctx, sys_id);
-    with_combat_ephemeral(&ctx, |rt| {
-        assert!(rt.extended_npc_weapon_runtime.contains_key(&(sys_id, npc_b)));
-        assert!(!rt.extended_npc_weapon_runtime.contains_key(&(sys_id, 9_990_002)));
+    crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx, |wrt| {
+        assert!(wrt.contains_key(&(sys_id, npc_b)));
+        assert!(!wrt.contains_key(&(sys_id, 9_990_002)));
     });
 
-    // 3. CombatRuntimeState::sync_from_persisted retains matching live (sid, bid, type_id) only,
-    // drops stale/mismatched entries, and clears all entries on empty persisted payloads.
-    let mut persisted =
-        crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.to_persisted());
+    // 3. Rehydration prunes mismatched/stale entries after dropping combat_ephemeral and retains live ones.
+    let mut persisted = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.to_persisted());
     let wrong_sys_id = sys_id + 1;
     let mut rt_clone = crate::services::combat_crimewatch::CombatRuntimeState::default();
     rt_clone.npc_entities.insert(npc_b, npc_b_ent.clone());
-    rt_clone.extended_npc_weapon_runtime.insert(
-        (sys_id, npc_b),
-        wrt_b.clone(),
-    );
-    rt_clone
-        .extended_npc_weapon_runtime
-        .insert((sys_id, 9_990_003), sample_wrt.clone());
-    rt_clone
-        .extended_npc_weapon_runtime
-        .insert((wrong_sys_id, npc_b), sample_wrt);
-    rt_clone.sync_from_persisted(&persisted);
-    assert!(rt_clone.extended_npc_weapon_runtime.contains_key(&(sys_id, npc_b)));
-    assert!(!rt_clone.extended_npc_weapon_runtime.contains_key(&(sys_id, 9_990_003)));
-    assert!(!rt_clone.extended_npc_weapon_runtime.contains_key(&(wrong_sys_id, npc_b)));
-
-    // Type-ID mismatch is also pruned on sync_from_persisted.
-    if let Some(wrt_live) = rt_clone.extended_npc_weapon_runtime.get_mut(&(sys_id, npc_b)) {
-        wrt_live.npc_type_id = npc_b_ent.type_id.saturating_add(999);
+    {
+        let mut wrt = rt_clone.extended_npc_weapon_runtime.map.write().unwrap_or_else(|e| e.into_inner());
+        wrt.insert((sys_id, npc_b), wrt_b.clone());
+        wrt.insert((sys_id, 9_990_003), sample_wrt.clone());
+        wrt.insert((wrong_sys_id, npc_b), sample_wrt);
     }
-    rt_clone.sync_from_persisted(&persisted);
-    assert!(!rt_clone.extended_npc_weapon_runtime.contains_key(&(sys_id, npc_b)));
+    rt_clone.rehydrate_from_persisted_epochs(&persisted, 10, true);
+    {
+        let wrt = rt_clone.extended_npc_weapon_runtime.map.read().unwrap_or_else(|e| e.into_inner());
+        assert!(wrt.contains_key(&(sys_id, npc_b)));
+        assert!(!wrt.contains_key(&(sys_id, 9_990_003)));
+        assert!(!wrt.contains_key(&(wrong_sys_id, npc_b)));
+    }
+    if let Some(live) = rt_clone.extended_npc_weapon_runtime.map.write().unwrap().get_mut(&(sys_id, npc_b)) {
+        live.npc_type_id = npc_b_ent.type_id.saturating_add(999);
+    }
+    rt_clone.rehydrate_from_persisted_epochs(&persisted, 11, true);
+    assert!(rt_clone.extended_npc_weapon_runtime.map.read().unwrap().is_empty());
 
-    // Empty persisted extended JSON clears everything.
+    crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(&ctx, sys_id, 9_990_004, wrt_b);
+    crate::services::combat_crimewatch::rehydrate_combat_runtime_from_db_forced(&ctx);
+    crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx, |wrt| {
+        assert!(wrt.contains_key(&(sys_id, npc_b)));
+        assert!(!wrt.contains_key(&(sys_id, 9_990_004)));
+    });
     persisted.extended_runtime_json.clear();
-    rt_clone
-        .extended_npc_weapon_runtime
-        .insert((sys_id, npc_b), wrt_b);
-    rt_clone.sync_from_persisted(&persisted);
-    assert!(rt_clone.extended_npc_weapon_runtime.is_empty());
+    ctx.db.with_mut_snapshot(|s| s.combat_crimewatch_state = persisted.into());
+    crate::services::combat_crimewatch::rehydrate_combat_runtime_from_db_forced(&ctx);
+    crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx, |wrt| assert!(wrt.is_empty()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn extended_npc_weapon_runtime_survives_concurrent_epoch_bumps_and_two_system_ticks() {
+    let (base_ctx, _, _, _, _) = make_fighter_ctx_and_session();
+    let (ctx, char_id, ship_a, sys_a) = make_isolated_extended_npc_ctx(std::sync::Arc::clone(&base_ctx.sde));
+    let (char_b, ship_b, sys_b) = (char_id + 1, ship_a + 1, sys_a + 2);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&char_id].clone();
+        ch.character_id = char_b;
+        ch.active_ship_id = ship_b;
+        ch.solar_system_id = sys_b;
+        snap.characters.insert(char_b, ch);
+        snap.items.insert(
+            ship_b,
+            crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item(
+                ship_b, 587, char_b, sys_b as i64, eve_db::InventoryFlag::None, 1,
+            ),
+        );
+    });
+    let initial_shield = 10_000_000.0;
+    spawn_extended_test_ship(&ctx, sys_a, ship_a, DVec3::new(1_000.0, 0.0, 0.0), DVec3::ZERO, 1_000.0, initial_shield).await;
+    spawn_extended_test_ship(&ctx, sys_b, ship_b, DVec3::new(1_000.0, 0.0, 0.0), DVec3::ZERO, 1_000.0, initial_shield).await;
+    let npc_a = spawn_specialized_npc_entity(&ctx, sys_a, 17_641, "Pirate", 500_011, DVec3::ZERO).await;
+    let npc_b = spawn_specialized_npc_entity(&ctx, sys_b, 17_641, "Pirate", 500_011, DVec3::ZERO).await;
+
+    let (prof, _) = crate::combat::npc_ai_weapons_loot::inspect_npc_sde_profile(&ctx.sde, 17_641, None, 500_011);
+    let t_cd = prof.turret.as_ref().expect("17641 turret").cycle_duration_s;
+    let m_cd = prof.missile.as_ref().expect("17641 missile").cycle_duration_s;
+    let t_shots_max = 1 + (9.0 / t_cd).floor() as usize;
+    let m_shots_max = 1 + (9.0 / m_cd).floor() as usize;
+    let fx_max = t_shots_max + m_shots_max;
+    assert!(fx_max < 18, "17641 cooldowns ({t_cd}s/{m_cd}s) must cap 10-tick shots below unthrottled 20");
+    let max_dmg = 3.0 * (t_shots_max as f64 * prof.turret.as_ref().unwrap().shot_damage.total()
+        + m_shots_max as f64 * prof.missile.as_ref().unwrap().volley_damage.total());
+
+    ctx.systems.get_or_spawn(sys_a).ballpark.write().unwrap().pending_events.clear();
+    ctx.systems.get_or_spawn(sys_b).ballpark.write().unwrap().pending_events.clear();
+    step_extended_npc_ai_sync(&ctx, sys_a);
+    step_extended_npc_ai_sync(&ctx, sys_b);
+
+    let ctx_arc = std::sync::Arc::new(ctx);
+    let (ca, cb, cc, cd) = (ctx_arc.clone(), ctx_arc.clone(), ctx_arc.clone(), ctx_arc.clone());
+    let ta = tokio::task::spawn_blocking(move || for _ in 0..9 { step_extended_npc_ai_sync(&ca, sys_a); });
+    let tb = tokio::task::spawn_blocking(move || for _ in 0..9 { step_extended_npc_ai_sync(&cb, sys_b); });
+    let tc = tokio::task::spawn_blocking(move || {
+        for i in 0..30_i64 {
+            crate::services::combat_crimewatch::with_mut_combat_runtime(&cc, |rt| {
+                rt.limited_engagements.entry(char_id).or_default().insert(char_b + i, 999);
+            });
+        }
+    });
+    let td = tokio::task::spawn_blocking(move || {
+        for i in 0..20_i64 {
+            cd.db.with_mut_snapshot(|s| {
+                s.combat_crimewatch_state.as_inner_mut().kill_right_expires_unix.insert(99_000 + i, (i + 1) as u64);
+            });
+            crate::services::combat_crimewatch::rehydrate_combat_runtime_from_db_forced(&cd);
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        ta.await.unwrap();
+        tb.await.unwrap();
+        tc.await.unwrap();
+        td.await.unwrap();
+    }).await.expect("concurrent weapon ticks and epoch bumps must complete without deadlock");
+
+    for (sid, ship, npc) in [(sys_a, ship_a, npc_a), (sys_b, ship_b, npc_b)] {
+        let sh = ctx_arc.systems.get_or_spawn(sid);
+        let fx_cnt = {
+            let bp = sh.ballpark.read().unwrap();
+            bp.pending_events.iter().filter(|e| matches!(e, eve_destiny::DestinyEvent::OnSpecialFX { ball_id, .. } if *ball_id == npc)).count()
+        };
+        let dmg = initial_shield - sh.get_combat_state(ship).await.unwrap().unwrap().shield_hp;
+        assert!(fx_cnt >= 2 && fx_cnt <= fx_max, "sys {sid} FX {fx_cnt} exceeded cooldown budget {fx_max}");
+        assert!(dmg > 0.0 && dmg <= max_dmg, "sys {sid} damage {dmg} exceeded cooldown budget {max_dmg}");
+    }
+    crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx_arc, |wrt| {
+        assert!(wrt.contains_key(&(sys_a, npc_a)) && wrt.contains_key(&(sys_b, npc_b)));
+    });
 }

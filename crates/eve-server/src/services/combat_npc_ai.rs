@@ -529,7 +529,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         ctx,
         solar_system_id,
     );
-    let (mut npcs_in_sys, has_scram, prev_npc_scram_targets, is_debugged, has_system_weapon_runtime) = {
+    let (mut npcs_in_sys, has_scram, prev_npc_scram_targets, is_debugged) = {
         let guard = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
         let npcs: Vec<_> = guard
             .npc_entities
@@ -541,22 +541,20 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         let has_scram = scram_opt.is_some_and(|s| !s.is_empty());
         let prev_scram = scram_opt.cloned().unwrap_or_default();
         let debugged = !guard.behavior_debugging_active.is_empty();
-        let has_weapon_rt = guard
-            .extended_npc_weapon_runtime
-            .keys()
-            .any(|&(sid, _)| sid == solar_system_id);
-        (npcs, has_scram, prev_scram, debugged, has_weapon_rt)
+        (npcs, has_scram, prev_scram, debugged)
     };
-    if npcs_in_sys.is_empty() && has_system_weapon_runtime {
-        with_mut_combat_ephemeral(ctx, |rt| {
-            rt.extended_npc_weapon_runtime.retain(|&(sid, bid), _| {
-                sid != solar_system_id
-                    || rt
-                        .npc_entities
-                        .get(&bid)
-                        .is_some_and(|n| n.solar_system_id == solar_system_id)
-            });
+    let has_system_weapon_runtime =
+        crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(ctx, |wrt| {
+            wrt.keys().any(|&(sid, _)| sid == solar_system_id)
         });
+    if npcs_in_sys.is_empty() && has_system_weapon_runtime {
+        crate::combat::npc_ai_weapons_loot::finalize_system_weapon_runtime_step(
+            ctx,
+            solar_system_id,
+            &[],
+            &HashSet::new(),
+            &HashSet::new(),
+        );
     }
     let active_sentry_checks: Vec<(i64, DVec3)> =
         crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
@@ -637,7 +635,17 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 })
                 .collect();
             let edencom_ids = if has_edencom_npc {
-                view.balls.keys().copied().collect()
+                view.balls
+                    .iter()
+                    .filter(|&(&id, b)| {
+                        !(40_000_000..80_000_000).contains(&id)
+                            && crate::combat::npc_ai_weapons_loot::is_edencom_arc_combatant_type(
+                                &ctx.sde,
+                                b.type_id,
+                            )
+                    })
+                    .map(|(&id, _)| id)
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -1509,12 +1517,14 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
             let mut st_guard = sys_handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
             let st = &mut *st_guard;
+            let mut ewar_applied = false;
             if npc.web_speed_factor < 0.0
                 && dist <= npc.web_range
                 && !bp.combat_states.get(&target_id).is_some_and(|tcs| tcs.is_web_immune)
             {
                 let mult = (1.0 + npc.web_speed_factor / 100.0).clamp(0.1, 1.0);
                 let _ = bp.set_speed_fraction(target_id, (target_ball.speed_fraction.max(1.0)) * mult);
+                ewar_applied = true;
             }
             let can_scram = if npc.archetype == "Sleeper" {
                 npc.sleeper_wh_class >= 3
@@ -1542,10 +1552,12 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     &st.db_opt,
                     deact_guard.as_ref(),
                 );
+                ewar_applied = true;
             }
             if npc.neut_amount > 0.0 && dist <= npc.optimal_range {
                 if let Some(tcs) = bp.combat_states.get_mut(&target_id) {
                     tcs.capacitor = (tcs.capacitor - npc.neut_amount).max(0.0);
+                    ewar_applied = true;
                 }
             }
             if npc.archetype == "ZarzakhGateGun" {
@@ -1570,7 +1582,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     &mut homefront_damage_events,
                 );
             crate::system_actor::sync_ball_positions(&bp, &sys_handle.ball_positions, &sys_handle.scrambled_balls);
-            weapon_fired || active_npc_scram_targets.contains(&target_id)
+            weapon_fired || ewar_applied || active_npc_scram_targets.contains(&target_id)
         };
         if !destroyed_in_call.contains(&nid) {
             crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(
@@ -1655,12 +1667,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         .chain(destroyed_in_call.iter().copied())
         .collect();
     let need_scram_write = !active_npc_scram_targets.is_empty() || has_scram;
-    if !dead_npcs_to_remove.is_empty()
-        || !updated_npcs.is_empty()
-        || !cleared_ids.is_empty()
-        || need_scram_write
-        || has_system_weapon_runtime
-    {
+    if !dead_npcs_to_remove.is_empty() || !updated_npcs.is_empty() || need_scram_write {
         with_mut_combat_ephemeral(ctx, |rt| {
             for dead_id in dead_npcs_to_remove {
                 rt.npc_entities.remove(&dead_id);
@@ -1676,23 +1683,16 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             } else if has_scram {
                 rt.npc_scrambled_ships.remove(&solar_system_id);
             }
-            for bid in &cleared_ids {
-                rt.extended_npc_weapon_runtime
-                    .remove(&(solar_system_id, *bid));
-            }
-            rt.extended_npc_weapon_runtime
-                .retain(|&(sid, bid), _| {
-                    sid != solar_system_id
-                        || rt.npc_entities
-                            .get(&bid)
-                            .is_some_and(|n| n.solar_system_id == solar_system_id)
-                });
-            for (&(sid, bid), wrt) in &mut rt.extended_npc_weapon_runtime {
-                if sid == solar_system_id && !attacked_npc_ids.contains(&bid) {
-                    wrt.decay_cooldowns(1.0);
-                }
-            }
         });
+    }
+    if !cleared_ids.is_empty() || has_system_weapon_runtime || !attacked_npc_ids.is_empty() {
+        crate::combat::npc_ai_weapons_loot::finalize_system_weapon_runtime_step(
+            ctx,
+            solar_system_id,
+            &cleared_ids,
+            &destroyed_in_call,
+            &attacked_npc_ids,
+        );
     }
 }
 

@@ -14,8 +14,9 @@ use super::npc_ai::spawn_npc_wreck_and_loot_in_snap;
 use super::npc_ai_weapons_loot::{
     build_npc_ball_from_sde, clear_extended_npc_weapon_runtime,
     execute_extended_npc_attack_in_bp, fallback_log_registry, inspect_npc_sde_profile,
-    resolve_npc_combat_profile, resolve_npc_weapon_ammo_loot, resolve_npc_wreck_type_id,
-    store_extended_npc_weapon_runtime, take_or_init_extended_npc_weapon_runtime,
+    is_edencom_arc_combatant_type, resolve_npc_combat_profile, resolve_npc_weapon_ammo_loot,
+    resolve_npc_wreck_type_id, store_extended_npc_weapon_runtime,
+    take_or_init_extended_npc_weapon_runtime, with_extended_npc_weapon_runtime,
     EdencomHostilityMeta, NpcSizeClass, NpcWeaponKind,
 };
 
@@ -281,9 +282,8 @@ fn npc_extended_weapon_runtime_is_context_scoped_and_pruned() {
     store_extended_npc_weapon_runtime(&ctx_a, sys_id, ball_id, rt_a_reloaded);
 
     clear_extended_npc_weapon_runtime(&ctx_a, sys_id, &[ball_id]);
-    let has_entry = crate::services::combat_crimewatch::with_combat_ephemeral(&ctx_a, |rt| {
-        rt.extended_npc_weapon_runtime.contains_key(&(sys_id, ball_id))
-    });
+    let has_entry =
+        with_extended_npc_weapon_runtime(&ctx_a, |wrt| wrt.contains_key(&(sys_id, ball_id)));
     assert!(!has_entry);
     let rt_a_fresh = take_or_init_extended_npc_weapon_runtime(&ctx_a, sys_id, &npc);
     assert_eq!(rt_a_fresh.turret_cooldown_s, 0.0);
@@ -575,4 +575,141 @@ async fn npc_attack_skips_missile_fx_and_cooldown_after_turret_destroys_target()
         weapon_rt.missile_cooldown_s, 0.0,
         "missile cooldown must not be burned after turret destroys target"
     );
+}
+
+#[tokio::test]
+async fn npc_edencom_vorton_arc_never_hits_player_wreck_jetcan_or_deployable() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let npc_id = 9_940_001_i64;
+    let (npc_ball, npc_cs, mut npc) =
+        crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+            &ctx,
+            sys_id,
+            npc_id,
+            56_188,
+            "EDENCOM",
+            500_027,
+            DVec3::ZERO,
+        );
+
+    let drone_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 18 && is_edencom_arc_combatant_type(&ctx.sde, t.type_id))
+        .map(|t| t.type_id)
+        .expect("SDE combatant drone type");
+    assert!(!is_edencom_arc_combatant_type(&ctx.sde, 26_557), "wreck must never be an arc target");
+    assert!(!is_edencom_arc_combatant_type(&ctx.sde, 23), "jetcan must never be an arc target");
+    assert!(!is_edencom_arc_combatant_type(&ctx.sde, 33_474), "deployable must never be an arc target");
+
+    let char_id = 90_000_141_i64;
+    let primary_id = 9_940_002_i64;
+    let wreck_id = 9_940_003_i64;
+    let jetcan_id = 9_940_004_i64;
+    let depot_id = 9_940_005_i64;
+    let drone_id = 9_940_006_i64;
+    npc.threat_table.insert(primary_id, 100.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut ch) = snap.characters.values().next().cloned() {
+            ch.character_id = char_id;
+            ch.active_ship_id = primary_id;
+            ch.standings.insert(500_027, -5.0);
+            snap.characters.insert(char_id, ch);
+        }
+        let template = snap.items.values().next().cloned().expect("seed item");
+        for &(id, tid) in &[
+            (primary_id, 587_u32),
+            (wreck_id, 26_557),
+            (jetcan_id, 23),
+            (depot_id, 33_474),
+            (drone_id, drone_tid),
+        ] {
+            let mut item = template.clone();
+            item.item_id = id;
+            item.type_id = tid;
+            item.owner_id = char_id;
+            item.location_id = sys_id as i64;
+            item.flag = InventoryFlag::None;
+            snap.items.insert(id, item);
+        }
+    });
+
+    let meta = EdencomHostilityMeta::collect(
+        &ctx,
+        &[primary_id, wreck_id, jetcan_id, depot_id, drone_id],
+    );
+    let mut weapon_rt = take_or_init_extended_npc_weapon_runtime(&ctx, sys_id, &npc);
+    let mk_ball = |id: i64, tid: u32, x: f64| Ball {
+        id,
+        type_id: tid,
+        position: DVec3::new(x, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 365.0,
+        inertia: 3.45,
+        mass: 1_067_000.0,
+        radius: 37.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let mk_cs = || {
+        let mut cs = ctx.build_type_combat_state(587);
+        cs.max_shield_hp = 5_000.0;
+        cs.shield_hp = 5_000.0;
+        cs.max_armor_hp = 5_000.0;
+        cs.armor_hp = 5_000.0;
+        cs.max_structure_hp = 5_000.0;
+        cs.structure_hp = 5_000.0;
+        cs
+    };
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (pri_s, wreck_s, jetcan_s, depot_s, drone_s) = {
+        let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.balls.insert(npc_id, npc_ball);
+        bp.combat_states.insert(npc_id, npc_cs);
+        for &(id, tid, x) in &[
+            (primary_id, 587_u32, 10_000.0),
+            (wreck_id, 26_557, 11_000.0),
+            (jetcan_id, 23, 11_500.0),
+            (depot_id, 33_474, 12_000.0),
+            (drone_id, drone_tid, 12_500.0),
+        ] {
+            bp.balls.insert(id, mk_ball(id, tid, x));
+            bp.combat_states.insert(id, mk_cs());
+        }
+        let sigs = HashMap::new();
+        let destroyed_in_call = HashSet::new();
+        let mut destroyed_in_tick = Vec::new();
+        let mut homefront_events = Vec::new();
+        let fired = execute_extended_npc_attack_in_bp(
+            &ctx,
+            &mut bp,
+            &mut npc,
+            &mut weapon_rt,
+            primary_id,
+            &sigs,
+            false,
+            false,
+            Some(&meta),
+            &destroyed_in_call,
+            &mut destroyed_in_tick,
+            &mut homefront_events,
+        );
+        assert!(fired);
+        (
+            bp.combat_states[&primary_id].shield_hp,
+            bp.combat_states[&wreck_id].shield_hp,
+            bp.combat_states[&jetcan_id].shield_hp,
+            bp.combat_states[&depot_id].shield_hp,
+            bp.combat_states[&drone_id].shield_hp,
+        )
+    };
+    assert!(pri_s < 5_000.0, "primary target must take Vorton damage");
+    assert!(drone_s < 5_000.0, "hostile combatant drone within 10km must take Vorton arc damage");
+    assert_eq!(wreck_s, 5_000.0, "player wreck must never be damaged by Vorton arc");
+    assert_eq!(jetcan_s, 5_000.0, "jetcan must never be damaged by Vorton arc");
+    assert_eq!(depot_s, 5_000.0, "deployable must never be damaged by Vorton arc");
 }

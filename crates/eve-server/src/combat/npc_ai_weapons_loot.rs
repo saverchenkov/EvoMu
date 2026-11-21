@@ -5,9 +5,7 @@
 
 use crate::combat::npc_ai::{faction_damage_vector, regional_pirate_faction_id};
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{
-    with_combat_ephemeral, with_mut_combat_ephemeral, ExtendedNpcEntity,
-};
+use crate::services::combat_crimewatch::{with_combat_ephemeral, ExtendedNpcEntity};
 use crate::services::wormhole_pve_seeding::is_any_capital_group;
 use eve_destiny::{
     Ball, Ballpark, CombatState, DamageVector, DestinyEvent, MovementMode, SpecialFxWireMeta,
@@ -236,6 +234,30 @@ impl ExtendedNpcWeaponRuntime {
         self.turret_cooldown_s = (self.turret_cooldown_s - elapsed_s).max(0.0);
         self.missile_cooldown_s = (self.missile_cooldown_s - elapsed_s).max(0.0);
     }
+}
+
+pub(crate) type ExtendedNpcWeaponRuntimeMap = HashMap<(u32, i64), ExtendedNpcWeaponRuntime>;
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SharedExtendedNpcWeaponRuntime {
+    pub(crate) map: std::sync::Arc<
+        eve_db::lock_rank::RankedRwLock<
+            ExtendedNpcWeaponRuntimeMap,
+            { eve_db::lock_rank::RANK_LEAF },
+        >,
+    >,
+    pub(crate) epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+pub(crate) type WeaponRuntimePruneSnapshot =
+    (SharedExtendedNpcWeaponRuntime, HashMap<i64, (u32, u32)>, u64);
+
+pub(crate) fn is_edencom_arc_combatant_type(sde: &SdeRegistry, type_id: u32) -> bool {
+    if type_id == 26_468 {
+        return false;
+    }
+    sde.types.get(&type_id).is_none_or(|t| {
+        !matches!(t.group_id, 12 | 186 | 340 | 448 | 649)
+            && matches!(t.category_id, 6 | 11 | 18 | 65 | 87)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -969,8 +991,9 @@ fn expected_specialized_optimal_range(
     };
     if !profile.is_synthetic_fallback {
         match archetype {
-            "SleeperSentry" => attr(54).unwrap_or(250_000.0),
-            "EmpireSentry" => attr(54).unwrap_or(500_000.0),
+            "SleeperSentry" | "EmpireSentry" => {
+                attr(54).filter(|&v| v > 0.0).unwrap_or(profile.engagement_optimal_range)
+            }
             _ => profile.engagement_optimal_range,
         }
     } else {
@@ -1448,6 +1471,106 @@ pub(crate) fn evaluate_npc_missile_or_vorton_hit(
     Some(base_damage.scaled(factor))
 }
 
+fn clone_extended_npc_weapon_runtime_arc(ctx: &ServerContext) -> SharedExtendedNpcWeaponRuntime {
+    let guard = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+    guard.extended_npc_weapon_runtime.clone()
+}
+
+pub(crate) fn with_extended_npc_weapon_runtime<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&ExtendedNpcWeaponRuntimeMap) -> R,
+) -> R {
+    let shared = clone_extended_npc_weapon_runtime_arc(ctx);
+    let guard = shared.map.read().unwrap_or_else(|e| e.into_inner());
+    f(&guard)
+}
+
+pub(crate) fn with_mut_extended_npc_weapon_runtime<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut ExtendedNpcWeaponRuntimeMap) -> R,
+) -> R {
+    let shared = clone_extended_npc_weapon_runtime_arc(ctx);
+    let mut guard = shared.map.write().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+
+pub(crate) fn capture_wrt_prune(
+    shared: &SharedExtendedNpcWeaponRuntime,
+    npc_entities: &HashMap<i64, ExtendedNpcEntity>,
+) -> WeaponRuntimePruneSnapshot {
+    let seq = shared.epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+    let live = npc_entities
+        .iter()
+        .map(|(&id, n)| (id, (n.solar_system_id, n.type_id)))
+        .collect();
+    (shared.clone(), live, seq)
+}
+
+pub(crate) fn capture_wrt_prune_if_changed(
+    was_unsynced: bool,
+    old_npcs: &HashMap<i64, ExtendedNpcEntity>,
+    next_npcs: &HashMap<i64, ExtendedNpcEntity>,
+    next_shared: &SharedExtendedNpcWeaponRuntime,
+) -> Option<WeaponRuntimePruneSnapshot> {
+    let changed = (was_unsynced && next_npcs.is_empty())
+        || old_npcs.len() != next_npcs.len()
+        || old_npcs.iter().any(|(bid, old)| {
+            next_npcs
+                .get(bid)
+                .is_none_or(|n| (n.solar_system_id, n.type_id) != (old.solar_system_id, old.type_id))
+        });
+    changed.then(|| capture_wrt_prune(next_shared, next_npcs))
+}
+
+pub(crate) fn prune_wrt_snap((shared, live, seq): WeaponRuntimePruneSnapshot) {
+    let mut wrt = shared.map.write().unwrap_or_else(|e| e.into_inner());
+    if shared.epoch.load(std::sync::atomic::Ordering::Acquire) == seq {
+        wrt.retain(|&(sid, bid), entry| {
+            live.get(&bid)
+                .is_some_and(|&(nsid, ntid)| nsid == sid && ntid == entry.npc_type_id)
+        });
+    }
+}
+
+pub(crate) fn finalize_system_weapon_runtime_step(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    cleared_ids: &[i64],
+    destroyed_in_call: &HashSet<i64>,
+    attacked_npc_ids: &HashSet<i64>,
+) {
+    let (shared, seq, live_in_sys): (_, u64, HashMap<i64, u32>) = {
+        let guard = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+        let seq = guard
+            .extended_npc_weapon_runtime
+            .epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        let live = guard
+            .npc_entities
+            .values()
+            .filter(|n| n.solar_system_id == solar_system_id)
+            .map(|n| (n.ball_id, n.type_id))
+            .collect();
+        (guard.extended_npc_weapon_runtime.clone(), seq, live)
+    };
+    let mut wrt = shared.map.write().unwrap_or_else(|e| e.into_inner());
+    for bid in cleared_ids {
+        wrt.remove(&(solar_system_id, *bid));
+    }
+    if shared.epoch.load(std::sync::atomic::Ordering::Acquire) == seq {
+        wrt.retain(|&(sid, bid), entry| {
+            sid != solar_system_id
+                || (live_in_sys.get(&bid) == Some(&entry.npc_type_id)
+                    && !destroyed_in_call.contains(&bid))
+        });
+    }
+    for (&(sid, bid), entry) in wrt.iter_mut() {
+        if sid == solar_system_id && !attacked_npc_ids.contains(&bid) {
+            entry.decay_cooldowns(1.0);
+        }
+    }
+}
+
 pub(crate) fn clear_extended_npc_weapon_runtime(
     ctx: &ServerContext,
     solar_system_id: u32,
@@ -1456,10 +1579,9 @@ pub(crate) fn clear_extended_npc_weapon_runtime(
     if ball_ids.is_empty() {
         return;
     }
-    with_mut_combat_ephemeral(ctx, |rt| {
+    with_mut_extended_npc_weapon_runtime(ctx, |wrt| {
         for &bid in ball_ids {
-            rt.extended_npc_weapon_runtime
-                .remove(&(solar_system_id, bid));
+            wrt.remove(&(solar_system_id, bid));
         }
     });
 }
@@ -1469,9 +1591,8 @@ pub(crate) fn take_or_init_extended_npc_weapon_runtime(
     solar_system_id: u32,
     npc: &ExtendedNpcEntity,
 ) -> ExtendedNpcWeaponRuntime {
-    let existing = with_mut_combat_ephemeral(ctx, |rt| {
-        rt.extended_npc_weapon_runtime
-            .remove(&(solar_system_id, npc.ball_id))
+    let existing = with_mut_extended_npc_weapon_runtime(ctx, |wrt| {
+        wrt.remove(&(solar_system_id, npc.ball_id))
     });
     let mut rt = match existing {
         Some(cached) if cached.npc_type_id == npc.type_id => cached,
@@ -1513,9 +1634,8 @@ pub(crate) fn store_extended_npc_weapon_runtime(
     ball_id: i64,
     runtime: ExtendedNpcWeaponRuntime,
 ) {
-    with_mut_combat_ephemeral(ctx, |rt| {
-        rt.extended_npc_weapon_runtime
-            .insert((solar_system_id, ball_id), runtime);
+    with_mut_extended_npc_weapon_runtime(ctx, |wrt| {
+        wrt.insert((solar_system_id, ball_id), runtime);
     });
 }
 
@@ -1574,6 +1694,16 @@ impl EdencomHostilityMeta {
             }
             let mut drones: HashMap<i64, (i64, Option<i64>, HashMap<i64, f64>)> = HashMap::new();
             for &id in ball_ids {
+                let is_drone_or_fighter = drone_owner_cids.contains_key(&id)
+                    || snap.items.get(&id).is_some_and(|it| {
+                        ctx.sde.types.get(&it.type_id).is_some_and(|t| {
+                            matches!(t.category_id, 18 | 87)
+                                && !matches!(t.group_id, 12 | 186 | 340 | 448 | 649)
+                        })
+                    });
+                if !is_drone_or_fighter {
+                    continue;
+                }
                 let ocid_opt = drone_owner_cids.get(&id).copied().or_else(|| {
                     snap.items
                         .get(&id)
@@ -1663,6 +1793,7 @@ fn apply_extended_damage_to_ball(
 }
 
 fn collect_edencom_arc_hits(
+    sde: &SdeRegistry,
     edencom_meta: Option<&EdencomHostilityMeta>,
     npc: &ExtendedNpcEntity,
     bp: &Ballpark,
@@ -1677,6 +1808,7 @@ fn collect_edencom_arc_hits(
             other_id != npc.ball_id
                 && other_id != target_id
                 && !destroyed_in_call.contains(&other_id)
+                && is_edencom_arc_combatant_type(sde, other_ball.type_id)
                 && !matches!(other_ball.mode, MovementMode::Warp { .. })
                 && bp.combat_states.get(&other_id).is_some_and(|cs| {
                     cs.structure_hp > 0.0 && !cs.is_cloaked && !cs.is_invulnerable()
@@ -1770,6 +1902,7 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
         } else if npc.archetype.eq_ignore_ascii_case("Edencom") {
             if let Some(target_pos) = bp.balls.get(&target_id).map(|b| b.position) {
                 let hits = collect_edencom_arc_hits(
+                    &ctx.sde,
                     edencom_meta,
                     npc,
                     bp,
@@ -1877,6 +2010,7 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
                     if npc.archetype.eq_ignore_ascii_case("Edencom") {
                         if let Some(tpos) = target_pos {
                             let hits = collect_edencom_arc_hits(
+                                &ctx.sde,
                                 edencom_meta,
                                 npc,
                                 bp,
