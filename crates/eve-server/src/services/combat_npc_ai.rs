@@ -322,11 +322,16 @@ where
             name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
             ..Default::default()
         };
-        let _ = sys_handle.spawn_ball_with_meta(ball, cs, npc_meta).await;
+        let _ = Box::pin(sys_handle.spawn_ball_with_meta(ball, cs, npc_meta)).await;
         post_build(&mut entity);
         out_entities.push((ball_id, entity));
         spawned_ids.push(ball_id);
     }
+    crate::combat::npc_ai_weapons_loot::clear_extended_npc_weapon_runtime(
+        ctx,
+        solar_system_id,
+        &spawned_ids,
+    );
     spawned_ids
 }
 
@@ -538,6 +543,19 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         let debugged = !guard.behavior_debugging_active.is_empty();
         (npcs, has_scram, prev_scram, debugged)
     };
+    let has_system_weapon_runtime =
+        crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(ctx, |wrt| {
+            wrt.keys().any(|&(sid, _)| sid == solar_system_id)
+        });
+    if npcs_in_sys.is_empty() && has_system_weapon_runtime {
+        crate::combat::npc_ai_weapons_loot::finalize_system_weapon_runtime_step(
+            ctx,
+            solar_system_id,
+            &[],
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+    }
     let active_sentry_checks: Vec<(i64, DVec3)> =
         crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
             rt.sentry_gun_aggression
@@ -555,10 +573,24 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
     }
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
 
-    let (lite_balls, cand_ball_ids, mut dead_npc_set, stale_sentry_ships): (
+    let has_edencom_npc = npcs_in_sys
+        .iter()
+        .any(|n| n.archetype.eq_ignore_ascii_case("Edencom"));
+    let has_sleeper_sentry = npcs_in_sys.iter().any(|n| n.archetype == "SleeperSentry");
+
+    let (
+        lite_balls,
+        cand_ball_ids,
+        mut dead_npc_set,
+        stale_sentry_ships,
+        view_sigs,
+        edencom_ball_ids,
+    ): (
         HashMap<i64, BallSnapshotLite>,
         Vec<i64>,
         HashSet<i64>,
+        Vec<i64>,
+        HashMap<i64, (Option<f64>, Option<f64>)>,
         Vec<i64>,
     ) = {
         let view = sys_handle.view();
@@ -577,11 +609,46 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             }
         }
         if npcs_in_sys.is_empty() && !has_scram {
-            (HashMap::new(), Vec::new(), HashSet::new(), stale_sentry_ships)
+            (
+                HashMap::new(),
+                Vec::new(),
+                HashSet::new(),
+                stale_sentry_ships,
+                HashMap::new(),
+                Vec::new(),
+            )
         } else {
             let mut lites = HashMap::new();
             let mut cand_ids = Vec::new();
             let mut dead_npcs = HashSet::new();
+            let sigs: HashMap<i64, (Option<f64>, Option<f64>)> = view
+                .combat_states
+                .iter()
+                .map(|(&id, cs)| {
+                    (
+                        id,
+                        (
+                            (cs.signature_radius > 0.0).then_some(cs.signature_radius),
+                            cs.base_signature_radius.filter(|&s| s > 0.0),
+                        ),
+                    )
+                })
+                .collect();
+            let edencom_ids = if has_edencom_npc {
+                view.balls
+                    .iter()
+                    .filter(|&(&id, b)| {
+                        !(40_000_000..80_000_000).contains(&id)
+                            && crate::combat::npc_ai_weapons_loot::is_edencom_arc_combatant_type(
+                                &ctx.sde,
+                                b.type_id,
+                            )
+                    })
+                    .map(|(&id, _)| id)
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             let to_lite = |id: i64, b: &Ball| -> BallSnapshotLite {
                 let is_cloaked_or_dead = view
@@ -642,7 +709,14 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 }
             }
 
-            (lites, cand_ids, dead_npcs, stale_sentry_ships)
+            (
+                lites,
+                cand_ids,
+                dead_npcs,
+                stale_sentry_ships,
+                sigs,
+                edencom_ids,
+            )
         }
     };
     if !stale_sentry_ships.is_empty() {
@@ -991,6 +1065,76 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
     let mut cached_s_stage = None;
     let mut cached_sentry_disabled = None;
 
+    let sim_elapsed_secs = if has_sleeper_sentry {
+        sys_handle
+            .actor_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .sim_elapsed_secs
+    } else {
+        0.0
+    };
+    let edencom_meta = has_edencom_npc.then(|| {
+        crate::combat::npc_ai_weapons_loot::EdencomHostilityMeta::collect(ctx, &edencom_ball_ids)
+    });
+
+    let mut capital_ball_ids: HashSet<i64> = precomputed_cands
+        .iter()
+        .filter(|c| c.is_capital)
+        .map(|c| c.cand_id)
+        .collect();
+    let mut missing_cap_lookup: Vec<i64> = Vec::new();
+    for (&bid, lite) in &lite_balls {
+        if let Some(t) = ctx.sde.types.get(&lite.type_id) {
+            if crate::services::wormhole_pve_seeding::is_any_capital_group(t.group_id) {
+                capital_ball_ids.insert(bid);
+            }
+        } else if !cand_by_id.contains_key(&bid) {
+            missing_cap_lookup.push(bid);
+        }
+    }
+    if !missing_cap_lookup.is_empty() {
+        ctx.db.with_snapshot(|snap| {
+            for bid in missing_cap_lookup {
+                if let Some(item) = snap.items.get(&bid) {
+                    if let Some(t) = ctx.sde.types.get(&item.type_id) {
+                        if crate::services::wormhole_pve_seeding::is_any_capital_group(t.group_id)
+                        {
+                            capital_ball_ids.insert(bid);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let mut target_sig_radii: HashMap<i64, f64> = HashMap::with_capacity(lite_balls.len());
+    for (&bid, lite) in &lite_balls {
+        let (cs_sig_opt, base_sig_opt) = view_sigs.get(&bid).copied().unwrap_or((None, None));
+        let eff_sig = if base_sig_opt.is_some() {
+            cs_sig_opt.unwrap_or(40.0)
+        } else {
+            let raw_sde = cand_by_id
+                .get(&bid)
+                .map(|c| c.sig_radius)
+                .filter(|&s| s > 0.0)
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .get(&lite.type_id)
+                        .and_then(|t| {
+                            t.default_attributes
+                                .get(&eve_sde::attr_ids::SIGNATURE_RADIUS)
+                                .copied()
+                        })
+                        .filter(|&s| s > 0.0)
+                })
+                .unwrap_or(lite.radius.max(40.0));
+            ctx.effective_target_signature_radius(bid, cs_sig_opt.unwrap_or(raw_sde))
+        };
+        target_sig_radii.insert(bid, eff_sig.max(1.0));
+    }
+
     let mut group_peer_ids_by_group: HashMap<u32, Vec<i64>> = HashMap::new();
     for n in &npcs_in_sys {
         if !dead_npc_set.contains(&n.ball_id) {
@@ -1000,6 +1144,8 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 .push(n.ball_id);
         }
     }
+
+    let mut attacked_npc_ids: HashSet<i64> = HashSet::new();
 
     for npc_val in npcs_in_sys.drain(..) {
         let nid = npc_val.ball_id;
@@ -1342,19 +1488,43 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         };
         let dist = npc_ball.position.distance(target_ball.position);
 
-        // 3. Apply NPC EWAR & 4. Archetype Weapon Application synchronously on Ballpark
+        // 3. Preload weapon runtime & checks outside Ballpark write lock (`#1396` / lock-order rule),
+        // then apply NPC EWAR & Archetype Weapon Application synchronously on Ballpark.
+        let is_capital_target = capital_ball_ids.contains(&target_id);
+        let sleeper_sentry_can_fire = if npc.archetype == "SleeperSentry" {
+            let interval_s =
+                crate::combat::npc_ai::compute_sleeper_sentry_interval_s(ctx, npc.type_id);
+            dist <= npc.optimal_range
+                && crate::services::wormhole_pve_escalations::can_sentry_fire_and_record(
+                    ctx,
+                    nid,
+                    interval_s,
+                    sim_elapsed_secs,
+                )
+        } else {
+            false
+        };
+        attacked_npc_ids.insert(nid);
+        let mut weapon_rt =
+            crate::combat::npc_ai_weapons_loot::take_or_init_extended_npc_weapon_runtime(
+                ctx,
+                solar_system_id,
+                &npc,
+            );
         let mut destroyed_in_tick: Vec<(i64, i64, eve_destiny::Ball)> = Vec::new();
         let mut homefront_damage_events: Vec<(i64, i64, f64)> = Vec::new();
         let did_aggress = {
             let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
             let mut st_guard = sys_handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
             let st = &mut *st_guard;
+            let mut ewar_applied = false;
             if npc.web_speed_factor < 0.0
                 && dist <= npc.web_range
                 && !bp.combat_states.get(&target_id).is_some_and(|tcs| tcs.is_web_immune)
             {
                 let mult = (1.0 + npc.web_speed_factor / 100.0).clamp(0.1, 1.0);
                 let _ = bp.set_speed_fraction(target_id, (target_ball.speed_fraction.max(1.0)) * mult);
+                ewar_applied = true;
             }
             let can_scram = if npc.archetype == "Sleeper" {
                 npc.sleeper_wh_class >= 3
@@ -1382,104 +1552,46 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     &st.db_opt,
                     deact_guard.as_ref(),
                 );
+                ewar_applied = true;
             }
             if npc.neut_amount > 0.0 && dist <= npc.optimal_range {
                 if let Some(tcs) = bp.combat_states.get_mut(&target_id) {
                     tcs.capacitor = (tcs.capacitor - npc.neut_amount).max(0.0);
+                    ewar_applied = true;
                 }
             }
-
-            let mut cycle_dmg = npc.damage_vector;
-            if npc.archetype == "Drifter" && npc.drifter_overshield_hp > 0.0 {
-                if let Some(ncs) = bp.combat_states.get(&nid) {
-                    let lost = (ncs.max_shield_hp - ncs.shield_hp).max(0.0)
-                        + (ncs.max_armor_hp - ncs.armor_hp).max(0.0)
-                        + (ncs.max_structure_hp - ncs.structure_hp).max(0.0);
-                    if lost >= npc.drifter_overshield_hp {
-                        npc.drifter_overshield_hp = 0.0;
-                    }
-                }
-            }
-            if npc.archetype == "Triglavian" {
-                let mult = 1.0 + (npc.entropic_cycles as f64 * 0.10).min(1.50);
-                cycle_dmg = cycle_dmg.scaled(mult);
-                npc.entropic_cycles = npc.entropic_cycles.saturating_add(1);
-            } else if npc.archetype == "Drifter"
-                && ctx.sde.types.get(&npc.type_id).is_none_or(|t| t.group_id != 1956)
-                && npc.drifter_overshield_hp <= 0.0
-                && !npc.drifter_doomsday_fired
-            {
-                npc.drifter_doomsday_fired = true;
-                cycle_dmg = DamageVector::new(2_500.0, 2_500.0, 2_500.0, 2_500.0);
-            } else if npc.archetype.eq_ignore_ascii_case("Edencom") {
-                let candidates: Vec<(i64, DVec3)> = lite_balls
-                    .iter()
-                    .filter(|(&other_id, _)| {
-                        other_id != nid
-                            && other_id != target_id
-                            && !destroyed_in_call.contains(&other_id)
-                            && (npc.threat_table.contains_key(&other_id)
-                                || is_candidate_hostile_to_edencom(ctx, &npc, other_id, target_id))
-                    })
-                    .map(|(&other_id, other_ball)| (other_id, other_ball.position))
-                    .collect();
-                let hits = crate::formulas::vorton_arc_targets_with_cap(
-                    target_id,
-                    target_ball.position,
-                    &candidates,
-                    10_000.0,
-                    5,
-                );
-                for arc_id in hits.into_iter().skip(1) {
-                    if let Some((_, true, Some(dead_ball))) = bp.apply_damage_to_ball(arc_id, npc.damage_vector.scaled(0.5)) {
-                        destroyed_in_tick.push((nid, arc_id, dead_ball));
-                    }
-                }
-            } else if npc.archetype == "Sleeper" {
-                let is_cap = cand_by_id
-                    .get(&target_id)
-                    .map(|c| c.is_capital)
-                    .unwrap_or_else(|| {
-                        ctx.db.with_snapshot(|snap| {
-                            snap.items.get(&target_id).and_then(|i| {
-                                ctx.sde.types.get(&i.type_id).map(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659))
-                            }).unwrap_or(false)
-                        })
-                    });
-                if is_cap {
-                    cycle_dmg = cycle_dmg.scaled(2.5);
-                }
-            } else if npc.archetype == "ZarzakhGateGun" {
+            if npc.archetype == "ZarzakhGateGun" {
                 apply_zarzakh_gate_gun_ewar(&ctx.sde, npc.type_id, &mut bp, target_id, target_ball.radius, dist);
             } else if npc.archetype == "CounterInsurgencySentry" || npc.type_id == 79_507 {
                 crate::services::security_mgr::apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, target_id, target_ball.radius, dist);
             }
-            let can_fire = if npc.archetype == "SleeperSentry" {
-                let interval_s = crate::combat::npc_ai::compute_sleeper_sentry_interval_s(ctx, npc.type_id);
-                dist <= npc.optimal_range
-                    && crate::services::wormhole_pve_escalations::can_sentry_fire_and_record(
-                        ctx, nid, interval_s, st.sim_elapsed_secs,
-                    )
-            } else {
-                true
-            };
-            if can_fire {
-                if let Some((applied, destroyed, dead_opt)) =
-                    bp.apply_damage_to_ball(target_id, cycle_dmg)
-                {
-                    if applied > 0.0 {
-                        homefront_damage_events.push((nid, target_id, applied));
-                    }
-                    if destroyed {
-                        if let Some(dead_ball) = dead_opt {
-                            destroyed_in_tick.push((nid, target_id, dead_ball));
-                        }
-                    }
-                }
-            }
+
+            let weapon_fired =
+                crate::combat::npc_ai_weapons_loot::execute_extended_npc_attack_in_bp(
+                    ctx,
+                    &mut bp,
+                    &mut npc,
+                    &mut weapon_rt,
+                    target_id,
+                    &target_sig_radii,
+                    is_capital_target,
+                    sleeper_sentry_can_fire,
+                    edencom_meta.as_ref(),
+                    &destroyed_in_call,
+                    &mut destroyed_in_tick,
+                    &mut homefront_damage_events,
+                );
             crate::system_actor::sync_ball_positions(&bp, &sys_handle.ball_positions, &sys_handle.scrambled_balls);
-            can_fire || active_npc_scram_targets.contains(&target_id)
+            weapon_fired || ewar_applied || active_npc_scram_targets.contains(&target_id)
         };
+        if !destroyed_in_call.contains(&nid) {
+            crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(
+                ctx,
+                solar_system_id,
+                nid,
+                weapon_rt,
+            );
+        }
         for (atk_id, dst_id, app) in homefront_damage_events {
             crate::services::pve_homefront_sites::on_homefront_combat_damage_event_sync(
                 ctx, None, atk_id, dst_id, app,
@@ -1549,6 +1661,11 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         );
     }
 
+    let cleared_ids: Vec<i64> = dead_npcs_to_remove
+        .iter()
+        .copied()
+        .chain(destroyed_in_call.iter().copied())
+        .collect();
     let need_scram_write = !active_npc_scram_targets.is_empty() || has_scram;
     if !dead_npcs_to_remove.is_empty() || !updated_npcs.is_empty() || need_scram_write {
         with_mut_combat_ephemeral(ctx, |rt| {
@@ -1567,6 +1684,15 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 rt.npc_scrambled_ships.remove(&solar_system_id);
             }
         });
+    }
+    if !cleared_ids.is_empty() || has_system_weapon_runtime || !attacked_npc_ids.is_empty() {
+        crate::combat::npc_ai_weapons_loot::finalize_system_weapon_runtime_step(
+            ctx,
+            solar_system_id,
+            &cleared_ids,
+            &destroyed_in_call,
+            &attacked_npc_ids,
+        );
     }
 }
 
@@ -1669,6 +1795,23 @@ pub async fn destroy_specialized_npc_with_hint(
     killer_char_id: i64,
     hint: Option<(u32, DVec3)>,
 ) -> (i64, f64, Vec<u32>) {
+    Box::pin(destroy_specialized_npc_with_hint_inner(
+        ctx,
+        solar_system_id,
+        npc_ball_id,
+        killer_char_id,
+        hint,
+    ))
+    .await
+}
+
+async fn destroy_specialized_npc_with_hint_inner(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    npc_ball_id: i64,
+    killer_char_id: i64,
+    hint: Option<(u32, DVec3)>,
+) -> (i64, f64, Vec<u32>) {
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     let ball_opt = sys_handle.get_ball_snapshot(npc_ball_id).await.ok().flatten().map(|(_, b)| b);
     let pos = ball_opt
@@ -1684,6 +1827,11 @@ pub async fn destroy_specialized_npc_with_hint(
             .remove(&npc_ball_id)
             .or_else(|| rt.destroyed_npc_cache.remove(&npc_ball_id))
     });
+    crate::combat::npc_ai_weapons_loot::clear_extended_npc_weapon_runtime(
+        ctx,
+        solar_system_id,
+        &[npc_ball_id],
+    );
     let convoy_opt = ctx.living_world.get_convoy(npc_ball_id);
     let mining_hauler_convoy = convoy_opt.is_none().then(|| ctx.living_world.get_mining_hauler_convoy(npc_ball_id)).flatten();
     let had_tracked_npc = npc_opt.is_some() || convoy_opt.is_some() || mining_hauler_convoy.is_some();
@@ -1782,19 +1930,11 @@ pub async fn destroy_specialized_npc_with_hint(
         crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(ctx, killer_char_id, &["DamageNPCShips", "DestroyNPCShips"], 1, Some(solar_system_id as i64));
     }
 
-    let wreck_type_id = if archetype == "Sleeper" {
-        30495 // Sleeper Large Intermediate Wreck (`attr 901 = -15.0`)
-    } else if archetype == "Drifter" {
-        37531 // Drifter Response Battleship Wreck (`attr 901 = -20.0`)
-    } else if archetype == "Hauler" {
-        npc_type_id
-            .and_then(|tid| ctx.sde.resolve_wreck_type_id(tid, None))
-            .unwrap_or(26557)
-    } else {
-        npc_type_id
-            .and_then(|tid| ctx.sde.resolve_wreck_type_id(tid, None))
-            .unwrap_or(26473)
-    };
+    let wreck_type_id = crate::combat::npc_ai_weapons_loot::resolve_npc_wreck_type_id(
+        &ctx.sde,
+        npc_type_id,
+        Some(archetype.as_str()),
+    );
 
     let mut dropped_types = Vec::new();
     if let Some(tag_tid) = tag_drop_opt {
@@ -1982,42 +2122,37 @@ pub async fn destroy_specialized_npc_with_hint(
         }
     }
 
-    let now_unix = ctx.now_unix();
-    let wreck_id = ctx.db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        let wid = snap.next_entity_id;
-        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
-        snap.items.insert(
-            wid,
-            InventoryItemRecord {
-                item_id: wid,
-                type_id: wreck_type_id,
-                owner_id: killer_char_id,
-                location_id: solar_system_id as i64,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.item_positions
-            .insert(wid, [pos.x, pos.y, pos.z]);
-        for &ltid in &dropped_types {
-            snap.next_entity_id += 1;
-            let lid = snap.next_entity_id;
-            let qty = if let Some((custom_tid, custom_qty)) = effective_custom_loot {
-                if custom_tid == ltid {
-                    (custom_qty as i32).max(1)
-                } else if ltid == 34 || ltid == 35 {
-                    50_000
-                } else {
-                    1
+    let mut ammo_qty_override: Option<(u32, i32)> = None;
+    if !matches!(archetype.as_str(), "TransmissionRelay" | "Hauler") {
+        if let Some(tid) = npc_type_id {
+            let (profile, _) = crate::combat::npc_ai_weapons_loot::inspect_npc_sde_profile(
+                &ctx.sde,
+                tid,
+                Some(bounty_isk),
+                effective_faction.unwrap_or(0),
+            );
+            if let Some((ammo_tid, ammo_qty)) =
+                crate::combat::npc_ai_weapons_loot::resolve_npc_weapon_ammo_loot(
+                    &ctx.sde,
+                    Some(tid),
+                    &profile,
+                    effective_faction,
+                )
+            {
+                if !dropped_types.contains(&ammo_tid) {
+                    dropped_types.push(ammo_tid);
                 }
+                ammo_qty_override = Some((ammo_tid, ammo_qty));
+            }
+        }
+    }
+
+    let loot_entries: Vec<(u32, i32, bool)> = dropped_types
+        .iter()
+        .map(|&ltid| {
+            let is_bpc = matches!(ltid, 33817 | 33819 | 33821);
+            let qty = if let Some((_, custom_qty)) = effective_custom_loot.filter(|(t, _)| *t == ltid) {
+                (custom_qty as i32).max(1)
             } else if let Some(ref conv) = convoy_opt {
                 if conv.cargo_type_id == ltid {
                     conv.cargo_quantity.max(1)
@@ -2026,32 +2161,27 @@ pub async fn destroy_specialized_npc_with_hint(
                 } else {
                     1
                 }
+            } else if let Some((_, ammo_qty)) = ammo_qty_override.filter(|(t, _)| *t == ltid) {
+                ammo_qty
             } else if ltid == 34 || ltid == 35 {
                 50_000
             } else {
                 1
             };
-            let is_bpc = matches!(ltid, 33817 | 33819 | 33821);
-            snap.items.insert(
-                lid,
-                InventoryItemRecord {
-                    item_id: lid,
-                    type_id: ltid,
-                    owner_id: killer_char_id,
-                    location_id: wid,
-                    flag: InventoryFlag::Cargo,
-                    quantity: if is_bpc { 1 } else { qty },
-                    singleton: is_bpc,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: is_bpc,
-                    blueprint_runs_remaining: is_bpc.then_some(1),
-                },
-            );
-        }
-        wid
+            (ltid, qty, is_bpc)
+        })
+        .collect();
+    let now_unix = ctx.now_unix();
+    let wreck_id = ctx.db.with_mut_snapshot(|snap| {
+        crate::combat::npc_ai::spawn_npc_wreck_and_loot_in_snap(
+            snap,
+            solar_system_id,
+            killer_char_id,
+            pos,
+            now_unix,
+            wreck_type_id,
+            &loot_entries,
+        )
     });
 
     let wreck_sde = ctx.sde.types.get(&wreck_type_id);

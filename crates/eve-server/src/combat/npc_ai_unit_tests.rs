@@ -395,27 +395,28 @@ async fn npc_ai_orbit_attack_cooldown_and_destruction_factions_and_abyssal() {
     );
     assert_eq!(mgr.entities[&npc_ball_id].target_id, None);
 
-    // Verify all faction ammo loot drops in normal system and no wreck in Abyssal system (32_000_000)
-    for (idx, (fid, expected_ammo)) in [
-        (500_010u32, 204u32),
-        (500_012, 178),
-        (500_020, 230),
-        (500_011, 213),
-        (999_999, 212),
+    // Verify SDE-derived wrecks, size-scaled scraps, and weapon-matched ammo loot (and zero wreck in Abyssal system 32_000_000)
+    for (idx, (type_id, fid, expected_wreck, expected_scrap_qty, expected_ammo)) in [
+        (2_382u32, 500_010u32, 26_573u32, 2i32, Some((222u32, 25i32))),   // Guristas Arrogator (Frigate Hybrid)
+        (2_381u32, 500_020u32, 26_586u32, 5i32, Some((230u32, 60i32))),   // Serpentis Chief Spy (Cruiser Hybrid)
+        (17_641u32, 500_011u32, 26_563u32, 10i32, Some((199u32, 120i32))), // Arch Angel Raelek (Battleship Projectile)
+        (2_386u32, 500_010u32, 26_573u32, 2i32, Some((266u32, 25i32))),   // Guristas Plunderer (Frigate Missile)
+        (79_589u32, 500_014u32, 79_586u32, 20i32, None),                   // ORE Rorqual (Capital unarmed)
     ]
     .into_iter()
     .enumerate()
     {
         let bid = 100_400_100 + idx as i64;
+        let spawn_pos = DVec3::new((idx as f64 + 1.0) * 1_000.0, 0.0, 0.0);
         mgr.entities.insert(
             bid,
             NpcCombatEntity {
                 ball_id: bid,
-                type_id: 597,
+                type_id,
                 faction_id: fid,
                 state: NpcAiState::Idle,
                 spawn_group_id: 10 + idx as u32,
-                spawn_pos: DVec3::ZERO,
+                spawn_pos,
                 target_id: None,
                 bounty_isk: 20_000.0,
                 optimal_range: 5_000.0,
@@ -427,21 +428,53 @@ async fn npc_ai_orbit_attack_cooldown_and_destruction_factions_and_abyssal() {
                 has_armor_rep: false,
             },
         );
-        mgr.handle_npc_destroyed(&ctx, sys_id, bid, player_char, 20_000)
-            .unwrap();
-        let has_ammo = ctx.db.with_snapshot(|snap| {
+        let before_wrecks: std::collections::HashSet<i64> = ctx.db.with_snapshot(|snap| {
             snap.items
                 .values()
-                .any(|i| i.owner_id == player_char && i.type_id == expected_ammo && i.quantity == 100)
+                .filter(|i| i.location_id == sys_id as i64 && i.type_id == expected_wreck)
+                .map(|i| i.item_id)
+                .collect()
         });
-        assert!(has_ammo);
+        mgr.handle_npc_destroyed(&ctx, sys_id, bid, player_char, 20_000)
+            .unwrap();
+        ctx.db.with_snapshot(|snap| {
+            let new_wreck = snap
+                .items
+                .values()
+                .find(|i| {
+                    i.location_id == sys_id as i64
+                        && i.type_id == expected_wreck
+                        && i.owner_id == player_char
+                        && i.singleton
+                        && !before_wrecks.contains(&i.item_id)
+                })
+                .expect("SDE wreck item must spawn in system");
+            let contents: Vec<_> = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == new_wreck.item_id)
+                .collect();
+            assert!(
+                contents.iter().any(|i| i.type_id == 15_331 && i.quantity == expected_scrap_qty && i.owner_id == player_char),
+                "expected {expected_scrap_qty}x Metal Scraps inside wreck {expected_wreck} for npc {type_id}"
+            );
+            match expected_ammo {
+                Some((ammo_tid, ammo_qty)) => assert!(
+                    contents.iter().any(|i| i.type_id == ammo_tid && i.quantity == ammo_qty && i.owner_id == player_char),
+                    "expected {ammo_qty}x weapon ammo {ammo_tid} inside wreck {expected_wreck} for npc {type_id}"
+                ),
+                None => assert_eq!(
+                    contents.len(),
+                    1,
+                    "unarmed npc {type_id} should drop only metal scraps, no weapon ammo"
+                ),
+            }
+        });
     }
 
-    // Abyssal system (32_000_000) does not spawn wreck 26557
+    // Abyssal system (32_000_000) does not spawn wrecks or loot items
     let abyss_bid = 100_400_200;
-    let wrecks_before = ctx
-        .db
-        .with_snapshot(|s| s.items.values().filter(|i| i.type_id == 26557).count());
+    let items_before = ctx.db.with_snapshot(|s| s.items.len());
     mgr.entities.insert(
         abyss_bid,
         NpcCombatEntity {
@@ -464,10 +497,8 @@ async fn npc_ai_orbit_attack_cooldown_and_destruction_factions_and_abyssal() {
     );
     mgr.handle_npc_destroyed(&ctx, 32_000_000, abyss_bid, player_char, 25_000)
         .unwrap();
-    let wrecks_after = ctx
-        .db
-        .with_snapshot(|s| s.items.values().filter(|i| i.type_id == 26557).count());
-    assert_eq!(wrecks_after, wrecks_before);
+    let items_after = ctx.db.with_snapshot(|s| s.items.len());
+    assert_eq!(items_after, items_before);
     assert_eq!(mgr.clone_soldier_respawn_timers.get(&32_000_000), Some(&26_200));
 }
 
