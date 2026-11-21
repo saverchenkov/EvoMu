@@ -2,9 +2,7 @@
 
 use super::*;
 use crate::router::ServerContext;
-use crate::services::inventory_fitting::fitting_containers_ships::{
-    ContainerShipRuntimeState, save_container_ship_state_snap,
-};
+use crate::services::inventory_fitting::fitting_containers_ships::set_container_password_snap;
 use eve_db::{
     CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
     TrainedSkillRecord, UpwellStructureRecord, WorldRepository,
@@ -579,9 +577,7 @@ fn install_job_corp_roles_container_locks_bpc_invention_skills_materials_funds_a
         snap.items.insert(maxed_bpo_id, maxed_item);
         snap.items.insert(corp_bpo_id, make_item(corp_bpo_id, 688, corp_id, station_id, InventoryFlag::CorpSAG1, 1, true));
 
-        let mut rt = ContainerShipRuntimeState::default();
-        rt.set_container_password(pw_cont_id, 1, "secret".into());
-        save_container_ship_state_snap(snap, 1000, &rt);
+        set_container_password_snap(snap, pw_cont_id, 1, "secret", 1000).unwrap();
     });
 
     let mut sess = char_session(char_id, corp_id, Some(station_id), None);
