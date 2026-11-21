@@ -602,6 +602,7 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
             ch.balance = IskCents::from_isk(1_000_000);
         }
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
     let err = call_gov(
         &ctx,
         &mut ceo,
@@ -636,6 +637,7 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
             corp.set_division_balance(2, IskCents::from_isk(1_000_000));
         }
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
     for bad_args in [
         vec![
             PyRep::Integer(-1), PyRep::Integer(7), PyRep::Integer(1), PyRep::String("Bad".into()),

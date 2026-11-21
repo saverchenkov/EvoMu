@@ -1506,6 +1506,7 @@ async fn clone_jump_corp_creation_recruitment_ad_and_office_rental_notifications
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&PILOT_A).unwrap().balance = IskCents::from_isk(5_000_000);
     });
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
     let cj_ok = rpc(&ctx, &mut sess_a, "jumpCloneSvc", "CloneJump", &[PyRep::Integer(8_801)])
         .await
         .expect("funded CloneJump");
@@ -1528,6 +1529,7 @@ async fn clone_jump_corp_creation_recruitment_ad_and_office_rental_notifications
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&PILOT_A).unwrap().balance = IskCents::from_isk(500_000);
     });
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
     let corp_err = rpc(
         &ctx,
         &mut sess_a,
@@ -1543,6 +1545,7 @@ async fn clone_jump_corp_creation_recruitment_ad_and_office_rental_notifications
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&PILOT_A).unwrap().balance = IskCents::from_isk(500_000_000);
     });
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
     let created = rpc(
         &ctx,
         &mut sess_a,
@@ -1594,6 +1597,7 @@ async fn clone_jump_corp_creation_recruitment_ad_and_office_rental_notifications
             .unwrap()
             .set_division_balance(1, IskCents::from_isk(1_000_000));
     });
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
     let ad_ok = rpc(&ctx, &mut sess_a, "corpRecProxy", "CreateRecruitmentAd", &ad_args)
         .await
         .expect("funded CreateRecruitmentAd");
@@ -1618,6 +1622,7 @@ async fn clone_jump_corp_creation_recruitment_ad_and_office_rental_notifications
             .unwrap()
             .set_division_balance(1, IskCents::from_isk(1_000));
     });
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
     let rent_err = rpc(&ctx, &mut sess_a, "officeManager", "RentOffice", &[PyRep::Integer(dest_station_id)])
         .await
         .unwrap_err();
@@ -1630,6 +1635,7 @@ async fn clone_jump_corp_creation_recruitment_ad_and_office_rental_notifications
             .unwrap()
             .set_division_balance(1, IskCents::from_isk(200_000));
     });
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
     let rent_npc = rpc(&ctx, &mut sess_a, "officeManager", "RentOffice", &[PyRep::Integer(dest_station_id)])
         .await
         .expect("funded NPC RentOffice");
