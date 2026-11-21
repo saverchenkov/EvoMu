@@ -734,7 +734,7 @@ pub fn handle(
                 let Some((tids, is_python_set)) = crate::services::market_price_history::extract_type_ids_arg(args.first()) else {
                     return Some(Err(rpc_err("InvalidArgument", "GetHistoryForManyTypeIDs requires a list or set of typeIDs")));
                 };
-                let now_unix = ctx.now_unix();
+                let now_unix = crate::services::market_price_history::client_history_partition_cutoff_unix(ctx);
                 let entries = ctx.db.with_snapshot(|snap| {
                     let hdr = DBRowDescriptor::market_history_header();
                     let mut out = Vec::with_capacity(tids.len());
@@ -1274,7 +1274,7 @@ pub fn handle(
             }
 
             "GetPlexHistory" => {
-                let now_unix = ctx.now_unix();
+                let now_unix = crate::services::market_price_history::client_history_partition_cutoff_unix(ctx);
                 let (old_rows, new_rows) = ctx.db.with_snapshot(|snap| {
                     crate::services::market_price_history::build_partitioned_global_price_history_rows(
                         snap,
@@ -1290,7 +1290,7 @@ pub fn handle(
             }
 
             "GetPlexNewPriceHistory" | "GetPlexOldPriceHistory" => {
-                let now_unix = ctx.now_unix();
+                let now_unix = crate::services::market_price_history::client_history_partition_cutoff_unix(ctx);
                 let is_old = method == "GetPlexOldPriceHistory";
                 let rows = ctx.db.with_snapshot(|snap| {
                     let (old_rows, new_rows) =

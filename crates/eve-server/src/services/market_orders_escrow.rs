@@ -2005,7 +2005,8 @@ pub fn handle_orders_escrow(
                 return Some(Ok(DBRowDescriptor::market_history_header().build_crowset(Vec::new())));
             };
 
-            let now_unix = ctx.now_unix();
+            let now_unix =
+                crate::services::market_price_history::client_history_partition_cutoff_unix(ctx);
             let is_old = method == "GetOldPriceHistory";
             let rows = ctx.db.with_snapshot(|snap| {
                 let (old_rows, new_rows) = if is_plex {
