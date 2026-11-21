@@ -194,6 +194,38 @@ fn restore_claimed_drone_if_alive(ctx: &ServerContext, drone: DroneSpaceState) {
     });
 }
 
+fn build_abandoned_drone_state_change(drone_id: i64, type_id: u32) -> OnDroneStateChange {
+    OnDroneStateChange {
+        drone_id,
+        owner_id: 0,
+        controller_id: 0,
+        activity_state: 0,
+        drone_type_id: i64::from(type_id),
+        controller_owner_id: 0,
+        target_id: None,
+    }
+}
+
+/// Emits V24 drone-control teardown notifications in client-safe order (`#1564`):
+/// `OnDroneStateChange(0, 0)` clears `michelle.stateByDroneID` before `OnDroneControlLost`
+/// unloads the item from `clientDogmaLocation.dogmaItems`, preventing `DroneGroupHeader` tooltip `KeyError`.
+fn emit_drone_control_lost_sync(ctx: &ServerContext, char_id: i64, drone_id: i64, type_id: u32) {
+    if char_id <= 0 {
+        return;
+    }
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        build_abandoned_drone_state_change(drone_id, type_id),
+    );
+    crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
+        ctx, char_id, drone_id, 0, None,
+    );
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        OnDroneControlLost { drone_id },
+    );
+}
+
 /// Abandons a returning drone in place when its parent ship is destroyed, docked,
 /// or no longer in the drone's solar system, leaving both the space ball and item intact.
 async fn abandon_returning_drone_in_space(
@@ -254,7 +286,7 @@ async fn abandon_returning_drone_in_space(
             bid,
             eve_destiny::DestinyEvent::OnDroneStateChange {
                 drone_id: item_id,
-                owner_id: prev_owner,
+                owner_id: 0,
                 controller_id: 0,
                 activity_state: 0,
                 type_id,
@@ -263,15 +295,7 @@ async fn abandon_returning_drone_in_space(
             },
         )
         .await;
-    if prev_owner > 0 {
-        ctx.emit_typed(
-            NotificationTarget::Character(prev_owner),
-            OnDroneControlLost { drone_id: bid },
-        );
-        crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
-            ctx, prev_owner, item_id, 0, None,
-        );
-    }
+    emit_drone_control_lost_sync(ctx, prev_owner, item_id, type_id);
 }
 
 fn is_ship_available_for_scoop_in_snap(
@@ -661,34 +685,51 @@ pub fn abandon_drones_on_warp_sync(
     ship_id: i64,
     sys_id: u32,
 ) {
-    let mut abandoned_balls = Vec::new();
+    let mut abandoned_drones = Vec::new();
     with_mut_combat_runtime(ctx, |rt| {
         for d in rt.active_drones_in_space.values_mut() {
             if d.solar_system_id == sys_id
                 && (d.owner_char_id == char_id || d.parent_ship_id == ship_id)
                 && !d.is_abandoned
             {
+                let notify_char_id = if d.owner_char_id > 0 {
+                    d.owner_char_id
+                } else {
+                    char_id
+                };
                 d.is_abandoned = true;
                 d.owner_char_id = 0;
                 d.parent_ship_id = 0;
                 d.target_id = None;
                 d.activity_state = 0;
-                abandoned_balls.push(d.ball_id);
+                d.assist_char_id = None;
+                d.guard_char_id = None;
+                abandoned_drones.push((d.ball_id, d.drone_item_id, d.type_id, notify_char_id));
                 rt.active_drone_miners.remove(&d.ball_id);
+                rt.drone_next_ready_unix.remove(&d.ball_id);
             }
         }
     });
-    if !abandoned_balls.is_empty() {
+    if !abandoned_drones.is_empty() {
         let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
-        for &bid in &abandoned_balls {
+        for &(bid, did, tid, notify_char_id) in &abandoned_drones {
             if let Some(ref sys_handle) = sys_handle_opt {
                 sys_handle.try_remove_module_cycle(bid, -bid);
                 sys_handle.try_stop_ball(bid);
+                let _ = sys_handle.try_emit_destiny_event(
+                    bid,
+                    eve_destiny::DestinyEvent::OnDroneStateChange {
+                        drone_id: did,
+                        owner_id: 0,
+                        controller_id: 0,
+                        activity_state: 0,
+                        type_id: tid,
+                        controller_owner_id: 0,
+                        target_id: None,
+                    },
+                );
             }
-            ctx.emit_typed(
-                NotificationTarget::Character(char_id),
-                OnDroneControlLost { drone_id: bid },
-            );
+            emit_drone_control_lost_sync(ctx, notify_char_id, did, tid);
         }
     }
 }
@@ -950,7 +991,7 @@ pub async fn handle_cmd_abandon_drone(
     };
     let target_ids = extract_drone_target_ids(args, kwargs);
 
-    let mut abandoned_balls = Vec::new();
+    let mut abandoned_drones = Vec::new();
     with_mut_combat_runtime(ctx, |rt| {
         for d in rt.active_drones_in_space.values_mut() {
             if d.solar_system_id == sys_id && d.owner_char_id == char_id && !d.is_abandoned {
@@ -963,15 +1004,18 @@ pub async fn handle_cmd_abandon_drone(
                     d.parent_ship_id = 0;
                     d.target_id = None;
                     d.activity_state = 0;
-                    abandoned_balls.push((d.ball_id, d.type_id));
+                    d.assist_char_id = None;
+                    d.guard_char_id = None;
+                    abandoned_drones.push((d.ball_id, d.drone_item_id, d.type_id));
                     rt.active_drone_miners.remove(&d.ball_id);
+                    rt.drone_next_ready_unix.remove(&d.ball_id);
                 }
             }
         }
     });
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for &(bid, tid) in &abandoned_balls {
+    for &(bid, did, tid) in &abandoned_drones {
         crate::services::combat_crimewatch::combat_npcs_drones::clear_drone_web_cycle(
             &sys_handle,
             bid,
@@ -981,7 +1025,7 @@ pub async fn handle_cmd_abandon_drone(
             .emit_destiny_event(
                 bid,
                 eve_destiny::DestinyEvent::OnDroneStateChange {
-                    drone_id: bid,
+                    drone_id: did,
                     owner_id: 0,
                     controller_id: 0,
                     activity_state: 0,
@@ -993,10 +1037,10 @@ pub async fn handle_cmd_abandon_drone(
             .await;
     }
 
-    for &(bid, _) in &abandoned_balls {
-        let abandon_notif = OnDroneControlLost { drone_id: bid };
-        ctx.emit_typed(NotificationTarget::Character(char_id), abandon_notif.clone());
-        push_typed_session_notification(session, abandon_notif);
+    for &(_, did, tid) in &abandoned_drones {
+        emit_drone_control_lost_sync(ctx, char_id, did, tid);
+        push_typed_session_notification(session, build_abandoned_drone_state_change(did, tid));
+        push_typed_session_notification(session, OnDroneControlLost { drone_id: did });
     }
 
     Ok(PyRep::Dict(vec![]))

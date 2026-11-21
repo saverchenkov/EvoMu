@@ -46,7 +46,7 @@ pub(crate) fn parse_drone_web_ids(effect_name: &str) -> Option<(BallId, i64)> {
     parse_minion_cycle_ids("drone_web:", effect_name)
 }
 
-fn parse_minion_cycle_parent(effect_name: &str) -> Option<BallId> {
+pub(crate) fn parse_minion_cycle_parent(effect_name: &str) -> Option<BallId> {
     parse_siren_tackle_ids(effect_name)
         .or_else(|| parse_drone_web_ids(effect_name))
         .map(|(parent_id, _)| parent_id)

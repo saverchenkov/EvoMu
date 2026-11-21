@@ -615,3 +615,161 @@ async fn disconnect_hold_committed_warp_immobilizer_safe_logoff_and_unobserved_f
     abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, 30_000_144);
 }
 
+#[tokio::test]
+async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_control_lost() {
+    use super::handle_cmd_abandon_drone;
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142;
+    let char_id = 90_000_156;
+    let ship_id = 100_156_001;
+    let d_warp_ball = 100_156_010;
+    let d_warp_item = 100_156_011;
+    let d_cmd = 100_156_020;
+
+    spawn_ball(&ctx, sys_id, d_warp_ball, 2454, DVec3::new(500.0, 0.0, 0.0));
+    spawn_ball(&ctx, sys_id, d_cmd, 2454, DVec3::new(900.0, 0.0, 0.0));
+
+    let make_drone = |ball_id: i64, drone_item_id: i64| DroneSpaceState {
+        ball_id,
+        drone_item_id,
+        type_id: 2454,
+        group_id: 100,
+        owner_char_id: char_id,
+        original_owner_char_id: char_id,
+        parent_ship_id: ship_id,
+        solar_system_id: sys_id,
+        target_id: Some(999),
+        activity_state: 1,
+        assist_char_id: Some(char_id),
+        guard_char_id: None,
+        is_abandoned: false,
+        is_sentry: false,
+        bandwidth_used: 5.0,
+        max_velocity: 1_500.0,
+        optimal_range: 5_000.0,
+        damage_vector: DamageVector::default(),
+        shield_repair_amount: 0.0,
+        armor_repair_amount: 0.0,
+        hull_repair_amount: 0.0,
+        web_speed_factor: 1.0,
+        neut_amount: 0.0,
+        ecm_strength: 0.0,
+        tp_sig_bonus_pct: 0.0,
+    };
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space
+            .insert(d_warp_ball, make_drone(d_warp_ball, d_warp_item));
+        rt.drone_next_ready_unix.insert(d_warp_ball, 9_999);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    if let Some(sys_handle) = ctx.systems.get_or_spawn_if_runtime(sys_id) {
+        sys_handle.ballpark.write().unwrap().pending_events.clear();
+    }
+
+    abandon_drones_on_warp_sync(&ctx, char_id, ship_id, sys_id);
+
+    with_combat_runtime(&ctx, |rt| {
+        let d = &rt.active_drones_in_space[&d_warp_ball];
+        assert!(d.is_abandoned);
+        assert_eq!(d.owner_char_id, 0);
+        assert_eq!(d.parent_ship_id, 0);
+        assert_eq!(d.activity_state, 0);
+        assert_eq!(d.target_id, None);
+        assert_eq!(d.assist_char_id, None);
+        assert!(!rt.drone_next_ready_unix.contains_key(&d_warp_ball));
+    });
+
+    let warp_notifs = ctx.drain_notifications_for_char(char_id);
+    let idx_state = warp_notifs
+        .iter()
+        .position(|n| {
+            n.event == "OnDroneStateChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(d_warp_item)
+                && n.args.get(1).and_then(|v| v.as_i64()) == Some(0)
+                && n.args.get(2).and_then(|v| v.as_i64()) == Some(0)
+                && n.args.get(3).and_then(|v| v.as_i64()) == Some(0)
+                && n.args.get(4).and_then(|v| v.as_i64()) == Some(2454)
+                && n.args.get(5).and_then(|v| v.as_i64()) == Some(0)
+        })
+        .expect("warp abandon must emit OnDroneStateChange(0, 0) for michelle.stateByDroneID (#1564)");
+    let idx_act = warp_notifs
+        .iter()
+        .position(|n| {
+            n.event == "OnDroneActivityChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(d_warp_item)
+                && n.args.get(1).and_then(|v| v.as_i64()) == Some(0)
+        })
+        .expect("warp abandon must emit OnDroneActivityChange(0) (#1564)");
+    let idx_lost = warp_notifs
+        .iter()
+        .position(|n| {
+            n.event == "OnDroneControlLost"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(d_warp_item)
+        })
+        .expect("warp abandon must emit OnDroneControlLost (#1564)");
+    assert!(
+        idx_state < idx_act && idx_act < idx_lost,
+        "OnDroneStateChange(0,0) must precede OnDroneControlLost so michelle removes the drone before ClientDogmaLocation unloads it (#1564)"
+    );
+
+    let destiny_events = std::mem::take(
+        &mut ctx
+            .systems
+            .get_or_spawn(sys_id)
+            .ballpark
+            .write()
+            .unwrap()
+            .pending_events,
+    );
+    assert!(
+        destiny_events.into_iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnDroneStateChange {
+                drone_id,
+                owner_id: 0,
+                controller_id: 0,
+                activity_state: 0,
+                type_id: 2454,
+                controller_owner_id: 0,
+                target_id: None,
+            } if drone_id == d_warp_item
+        )),
+        "warp abandon must also enqueue DestinyEvent::OnDroneStateChange(0, 0)"
+    );
+
+    // CmdAbandonDrone must follow the same safe notification ordering.
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(d_cmd, make_drone(d_cmd, d_cmd));
+    });
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        ship_id: Some(ship_id),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+    handle_cmd_abandon_drone(&ctx, &mut sess, &[PyRep::List(vec![PyRep::Integer(d_cmd)])], &HashMap::new())
+        .await
+        .expect("CmdAbandonDrone succeeds");
+    let cmd_notifs = ctx.drain_notifications_for_char(char_id);
+    let c_state = cmd_notifs
+        .iter()
+        .position(|n| {
+            n.event == "OnDroneStateChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(d_cmd)
+                && n.args.get(1).and_then(|v| v.as_i64()) == Some(0)
+                && n.args.get(2).and_then(|v| v.as_i64()) == Some(0)
+        })
+        .expect("CmdAbandonDrone emits OnDroneStateChange(0, 0)");
+    let c_lost = cmd_notifs
+        .iter()
+        .position(|n| {
+            n.event == "OnDroneControlLost"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(d_cmd)
+        })
+        .expect("CmdAbandonDrone emits OnDroneControlLost");
+    assert!(c_state < c_lost, "CmdAbandonDrone must order OnDroneStateChange(0,0) before OnDroneControlLost");
+}
+

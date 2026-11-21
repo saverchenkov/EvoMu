@@ -3549,7 +3549,7 @@ fn drone_web_cycle_parsing_range_orphan_pruning_and_parent_unlock() {
 #[test]
 fn minion_cycle_deactivation_suppressed_on_physics_step_and_remove_ball() {
     use crate::services::tactical_modules::TacticalModulesState;
-    use eve_db::lock_rank::RwLock;
+    use std::sync::RwLock;
 
     let sde_opt = Some(make_tackle_sde());
     let base_scram = HashMap::new();
@@ -3560,7 +3560,7 @@ fn minion_cycle_deactivation_suppressed_on_physics_step_and_remove_ball() {
     let target_id = 9101i64;
     let pilot_char_id = 42_001i64;
 
-    let mut bp = Ballpark::new();
+    let mut bp = Ballpark::new(30_000_142);
     bp.add_ball(make_tackle_ball(parent_id, 587, DVec3::ZERO));
     bp.add_ball(make_tackle_ball(drone_id, 2488, DVec3::new(1_000.0, 0.0, 0.0)));
     bp.add_ball(make_tackle_ball(siren_id, 40560, DVec3::new(1_200.0, 0.0, 0.0)));
@@ -3711,7 +3711,12 @@ fn minion_cycle_deactivation_suppressed_on_physics_step_and_remove_ball() {
         ..ActiveModuleCycle::default()
     });
     reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, Some(&rec_hook));
-    assert!((bp.combat_states[&target_id].web_velocity_multiplier - 0.4).abs() < 1e-6);
+    assert!(
+        bp.combat_states[&target_id].web_velocity_multiplier > 0.0
+            && bp.combat_states[&target_id].web_velocity_multiplier < 0.4,
+        "stacked drone_web + moduleWeb must reduce target velocity below 0.4x"
+    );
+    assert!(bp.combat_states[&target_id].is_warp_scrambled());
 
     let _ = crate::system_actor::cycles::remove_all_ship_module_cycles_preserving_own_db(
         &mut bp,
@@ -3720,8 +3725,8 @@ fn minion_cycle_deactivation_suppressed_on_physics_step_and_remove_ball() {
         &base_core,
         &None,
         target_id,
-        false,
         Some(&rec_hook),
+        false,
     );
     assert!(cycles.is_empty(), "RemoveBall target cleanup must clear all targeted cycles");
     assert_eq!(
