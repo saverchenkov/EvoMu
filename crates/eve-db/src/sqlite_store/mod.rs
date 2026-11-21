@@ -7,6 +7,7 @@ pub mod corp_crimewatch_store;
 pub mod social_store;
 pub mod notes_lp_sequence_store;
 pub mod domain_rows;
+pub(crate) mod lifecycle_store;
 pub mod load;
 pub mod quarantine;
 pub mod schema;

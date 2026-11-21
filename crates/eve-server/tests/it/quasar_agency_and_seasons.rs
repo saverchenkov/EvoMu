@@ -267,16 +267,43 @@ async fn test_pve_seasons_events_and_project_discovery() {
     let spawned = ensure_seasonal_event_sites_for_system(&ctx2, 30_000_144).await;
     assert_eq!(spawned.len(), 1);
     let boss_id = spawned[0].boss_npc_ball_id;
+    let escort_ids = spawned[0].escort_ball_ids.clone();
+    assert_eq!(escort_ids.len(), 2);
     let bal_before = ctx2.db.with_snapshot(|s| s.characters[&PILOT_A].balance.0);
     let pts_before = ctx2
         .db
         .with_snapshot(|s| load_season_state_from_blobs(s, PILOT_A).season_points);
+    assert!(
+        on_special_site_npc_destroyed_core(
+            &ctx2.systems,
+            &ctx2.db,
+            &ctx2.sde,
+            30_000_144,
+            boss_id,
+            Some(PILOT_A),
+        )
+        .await
+        .is_empty(),
+        "boss kill alone must wait for escorts"
+    );
+    assert!(
+        on_special_site_npc_destroyed_core(
+            &ctx2.systems,
+            &ctx2.db,
+            &ctx2.sde,
+            30_000_144,
+            escort_ids[0],
+            Some(PILOT_A),
+        )
+        .await
+        .is_empty()
+    );
     let changes = on_special_site_npc_destroyed_core(
         &ctx2.systems,
         &ctx2.db,
         &ctx2.sde,
         30_000_144,
-        boss_id,
+        escort_ids[1],
         Some(PILOT_A),
     )
     .await;

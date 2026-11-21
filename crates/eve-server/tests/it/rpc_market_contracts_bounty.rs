@@ -2271,3 +2271,372 @@ async fn issue_1328_get_my_expired_contract_list_excludes_deleted_contracts() {
     assert!(!corp_ids_after.contains(&c_exp_del_cid));
     assert!(corp_ids_after.contains(&c_exp_keep_cid));
 }
+
+
+#[tokio::test]
+async fn test_market_ticker_and_history_rpcs_prevent_zero_div_across_advancetime() {
+    use eve_db::ledger::unix_secs_to_date_str;
+    use eve_db::{IskCents, MarketHistoryDayRecord, MarketOrderRecord};
+    use eve_server::services::market_contracts::{
+        JITA_STATION_ID, PLEX_TYPE_ID, THE_FORGE_REGION_ID,
+    };
+
+    const DAY_SECS: u64 = 86_400;
+    const DAY_TICKS: i64 = 86_400 * 10_000_000;
+
+    fn row_prices(crowset: &PyRep) -> Vec<(i64, f64, f64, f64, i64, i64)> {
+        crowset
+            .crowset_rows()
+            .expect("expected CRowset")
+            .iter()
+            .map(|r| {
+                (
+                    r.dbrow_get("historyDate").and_then(PyRep::as_i64).unwrap(),
+                    r.dbrow_get("lowPrice").and_then(PyRep::as_f64).unwrap(),
+                    r.dbrow_get("highPrice").and_then(PyRep::as_f64).unwrap(),
+                    r.dbrow_get("avgPrice").and_then(PyRep::as_f64).unwrap(),
+                    r.dbrow_get("volume").and_then(PyRep::as_i64).unwrap(),
+                    r.dbrow_get("orders").and_then(PyRep::as_i64).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    fn simulate_client_ticker(
+        old_rep: &PyRep,
+        new_rep: &PyRep,
+        client_wallclock_ft: i64,
+    ) -> Vec<f64> {
+        let old = row_prices(old_rep);
+        let new = row_prices(new_rep);
+        for &(ft, low, high, avg, vol, orders) in old.iter().chain(new.iter()) {
+            assert!(ft > 0 && low > 0.0 && high > 0.0 && avg > 0.0 && vol > 0 && orders > 0);
+        }
+        let mut history = Vec::new();
+        let mut last_time = client_wallclock_ft;
+        let midnight_today = (last_time / DAY_TICKS) * DAY_TICKS;
+        let mut last_price = 0.0_f64;
+        for &(entry_ft, _, _, entry_avg, _, _) in &old {
+            while last_time + DAY_TICKS < entry_ft {
+                last_time += DAY_TICKS;
+                history.push(last_price);
+            }
+            history.push(entry_avg);
+            last_time = entry_ft;
+            last_price = entry_avg;
+        }
+        while last_time < midnight_today - DAY_TICKS {
+            last_time += DAY_TICKS;
+            history.push(last_price);
+        }
+        if !new.is_empty() {
+            history.extend(new.iter().map(|r| r.3));
+        } else {
+            history.push(last_price);
+        }
+        if !old.is_empty() || !new.is_empty() {
+            assert!(
+                history.iter().all(|&p| p > 0.0),
+                "client GetHistoryRowList emitted zero avgPrice row: {history:?}"
+            );
+        }
+        if history.len() >= 7 {
+            let denom = history[history.len() - 7];
+            assert!(denom > 0.0, "ticker.py LoadData would divide by zero");
+            let delta = history.last().unwrap() / denom - 1.0;
+            assert!(delta.is_finite());
+        }
+        history
+    }
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let mut s1 = setup_pilot(&ctx, 1901, "demo", "demo-secret", 90_000_001).await;
+    let empty_kw = HashMap::new();
+    let station_id = s1.station_id.unwrap_or(JITA_STATION_ID);
+    let region_id = s1.region_id.unwrap_or(THE_FORGE_REGION_ID);
+    assert_eq!(region_id, THE_FORGE_REGION_ID);
+
+    // Advance 15 days unrebased (like /advancetime), execute real Tritanium + PLEX trades,
+    // plus insert a corrupted zero-price row for type 35, then advance +1 day unrebased.
+    ctx.advance_secs_without_sim_clock_rebase(15 * DAY_SECS);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_history.clear();
+        snap.market_transactions.clear();
+        snap.market_orders.clear();
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.balance = IskCents::from_isk(200_000_000);
+        }
+        let _ = snap.adjust_plex_vault(90_000_001, 20);
+        snap.market_orders.insert(
+            9_960_001,
+            MarketOrderRecord {
+                order_id: 9_960_001,
+                owner_id: 90_000_002,
+                station_id,
+                region_id,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_isk(1_060),
+                vol_entered: 104,
+                vol_remaining: 104,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        snap.market_orders.insert(
+            9_960_002,
+            MarketOrderRecord {
+                order_id: 9_960_002,
+                owner_id: 90_000_002,
+                station_id,
+                region_id,
+                type_id: PLEX_TYPE_ID,
+                is_bid: true,
+                price: IskCents::from_isk(4_800_000),
+                vol_entered: 2,
+                vol_remaining: 2,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(9_600_000),
+            },
+        );
+        snap.market_history.insert(
+            (region_id, 35),
+            vec![MarketHistoryDayRecord {
+                date: unix_secs_to_date_str(common::TEST_CLOCK_BASE_UNIX - 2 * DAY_SECS),
+                lowest: 0.0,
+                highest: 0.0,
+                average: 0.0,
+                volume: 0,
+                order_count: 0,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+    });
+
+    ctx.dispatch_rpc(
+        &mut s1,
+        "marketProxy",
+        None,
+        "BuyMultipleItems",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(34),
+            PyRep::Integer(104),
+            PyRep::Real(1_060.0),
+        ])])],
+        &empty_kw,
+        None,
+    )
+    .await
+    .expect("BuyMultipleItems Tritanium fill");
+
+    ctx.dispatch_rpc(
+        &mut s1,
+        "marketProxy",
+        None,
+        "PlacePlexSellOrder",
+        &[
+            PyRep::Real(4_800_000.0),
+            PyRep::Integer(2),
+            PyRep::Integer(90),
+        ],
+        &empty_kw,
+        None,
+    )
+    .await
+    .expect("PlacePlexSellOrder PLEX fill");
+
+    ctx.advance_secs_without_sim_clock_rebase(DAY_SECS);
+    let client_now_ft = ctx
+        .dispatch_rpc(&mut s1, "machoNet", None, "GetTime", &[], &empty_kw, None)
+        .await
+        .expect("machoNet.GetTime")
+        .as_i64()
+        .unwrap();
+
+    // Verify GetHistoryForManyTypeIDs (PySet mode used by MarketTicker) across 34, 35, 44992.
+    let many_set = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "marketProxy",
+            None,
+            "GetHistoryForManyTypeIDs",
+            &[PyRep::PySet(vec![
+                PyRep::Integer(34),
+                PyRep::Integer(35),
+                PyRep::Integer(PLEX_TYPE_ID as i64),
+            ])],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetHistoryForManyTypeIDs(set)");
+    let PyRep::Dict(many_entries) = many_set else {
+        panic!("expected Dict from GetHistoryForManyTypeIDs");
+    };
+    for tid in [34_i64, PLEX_TYPE_ID as i64] {
+        let PyRep::Tuple(parts) = many_entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(tid))
+            .map(|(_, v)| v)
+            .expect("typeID in GetHistoryForManyTypeIDs")
+        else {
+            panic!("expected (old, new) tuple for {tid}");
+        };
+        assert!(row_prices(&parts[0]).is_empty(), "old_rows must be empty for {tid}");
+        assert_eq!(row_prices(&parts[1]).len(), 1, "new_rows must hold day+15 trade for {tid}");
+        let hist = simulate_client_ticker(&parts[0], &parts[1], client_now_ft);
+        assert_eq!(hist.len(), 1);
+    }
+    let PyRep::Tuple(parts_35) = many_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(35))
+        .map(|(_, v)| v)
+        .expect("type 35 in GetHistoryForManyTypeIDs")
+    else {
+        panic!("expected (old, new) tuple for 35");
+    };
+    assert!(row_prices(&parts_35[0]).is_empty());
+    assert!(row_prices(&parts_35[1]).is_empty());
+
+    // Flat list mode must also omit corrupted zero placeholder for type 35.
+    let many_list = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "marketProxy",
+            None,
+            "GetHistoryForManyTypeIDs",
+            &[PyRep::List(vec![PyRep::Integer(34), PyRep::Integer(35)])],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetHistoryForManyTypeIDs(list)");
+    let PyRep::Dict(flat_entries) = many_list else {
+        panic!("expected Dict from GetHistoryForManyTypeIDs(list)");
+    };
+    let rows_35 = flat_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(35))
+        .map(|(_, v)| row_prices(v))
+        .unwrap();
+    assert!(rows_35.is_empty());
+
+    // Verify GetPlexHistory, GetPlexOld/NewPriceHistory, and GetOld/NewPriceHistory(34).
+    let plex_hist = ctx
+        .dispatch_rpc(&mut s1, "marketProxy", None, "GetPlexHistory", &[], &empty_kw, None)
+        .await
+        .expect("GetPlexHistory");
+    let PyRep::Dict(plex_dict) = plex_hist else {
+        panic!("expected Dict from GetPlexHistory");
+    };
+    let PyRep::Tuple(plex_parts) = plex_dict
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(PLEX_TYPE_ID as i64))
+        .map(|(_, v)| v)
+        .expect("PLEX entry in GetPlexHistory")
+    else {
+        panic!("expected (old, new) tuple in GetPlexHistory");
+    };
+    assert!(row_prices(&plex_parts[0]).is_empty());
+    assert_eq!(row_prices(&plex_parts[1]).len(), 1);
+    assert_eq!(
+        simulate_client_ticker(&plex_parts[0], &plex_parts[1], client_now_ft).len(),
+        1
+    );
+
+    let old_trit = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "marketProxy",
+            None,
+            "GetOldPriceHistory",
+            &[PyRep::Integer(34)],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetOldPriceHistory(34)");
+    let new_trit = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "marketProxy",
+            None,
+            "GetNewPriceHistory",
+            &[PyRep::Integer(34)],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetNewPriceHistory(34)");
+    assert_eq!(simulate_client_ticker(&old_trit, &new_trit, client_now_ft), vec![1_060.0]);
+
+    let old_plex = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "marketProxy",
+            None,
+            "GetPlexOldPriceHistory",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetPlexOldPriceHistory");
+    let new_plex = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "marketProxy",
+            None,
+            "GetPlexNewPriceHistory",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetPlexNewPriceHistory");
+    assert_eq!(
+        simulate_client_ticker(&old_plex, &new_plex, client_now_ft),
+        vec![4_800_000.0]
+    );
+
+    // Rebased clock jump moves day+15 into old_rows across all partitioned endpoints.
+    ctx.advance_secs(17 * DAY_SECS);
+    let rebased_ft = ctx
+        .dispatch_rpc(&mut s1, "machoNet", None, "GetTime", &[], &empty_kw, None)
+        .await
+        .expect("machoNet.GetTime rebased")
+        .as_i64()
+        .unwrap();
+    let old_trit_r = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "marketProxy",
+            None,
+            "GetOldPriceHistory",
+            &[PyRep::Integer(34)],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetOldPriceHistory(34) rebased");
+    let new_trit_r = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "marketProxy",
+            None,
+            "GetNewPriceHistory",
+            &[PyRep::Integer(34)],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetNewPriceHistory(34) rebased");
+    assert_eq!(row_prices(&old_trit_r).len(), 1);
+    assert!(row_prices(&new_trit_r).is_empty());
+    let hist_r = simulate_client_ticker(&old_trit_r, &new_trit_r, rebased_ft);
+    assert!(hist_r.len() >= 2 && hist_r.iter().all(|&p| (p - 1_060.0).abs() < 1e-6));
+}

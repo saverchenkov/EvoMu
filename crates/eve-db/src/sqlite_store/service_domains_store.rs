@@ -75,6 +75,11 @@ macro_rules! impl_service_domain_persist {
                 domain: &'static str,
                 out: &mut Vec<DomainRowChange>,
             ) {
+                let Self {
+                    $($map_f: _,)*
+                    $($set_f: _,)*
+                    $($scalar_f: _,)*
+                } = self;
                 let def = Self::default();
                 let _ = &def;
                 $(
@@ -547,7 +552,8 @@ macro_rules! define_staged_service_domains {
             }
 
             fn apply_to(self, snap: &mut WorldStateSnapshot) {
-                $(snap.$field = self.$field.into();)+
+                let Self { $($field,)+ } = self;
+                $(snap.$field = $field.into();)+
             }
         }
     };

@@ -3233,3 +3233,195 @@ fn place_multi_sell_unlocks_unswept_expired_sell_orders_and_enforces_upwell_plex
         assert_eq!(s.market_orders[&acl_plex_bid_oid].vol_remaining, 8);
     });
 }
+
+
+#[test]
+fn price_history_rpcs_stay_client_aligned_across_advancetime_and_filter_zero_rows() {
+    use crate::services::market_price_history::{
+        client_history_partition_cutoff_unix, date_str_to_unix_secs,
+    };
+    use eve_db::ledger::unix_secs_to_date_str;
+
+    const DAY_SECS: u64 = 86_400;
+    const DAY_TICKS: i64 = 86_400 * 10_000_000;
+
+    fn extract_ft_avg(crowset: &PyRep) -> Vec<(i64, f64)> {
+        crowset
+            .crowset_rows()
+            .expect("CRowset rows")
+            .iter()
+            .map(|r| {
+                (
+                    r.dbrow_get("historyDate").and_then(PyRep::as_i64).unwrap(),
+                    r.dbrow_get("avgPrice").and_then(PyRep::as_f64).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    let ctx = test_ctx();
+    let base_unix = date_str_to_unix_secs("2026-11-20").unwrap() + 43_200;
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_unix),
+    ));
+    let buyer_id = 90_000_001_i64;
+    let seller_id = 90_000_002_i64;
+    let buyer_corp = ctx.db.with_snapshot(|s| s.characters[&buyer_id].corporation_id);
+    let mut buyer_sess = jita_session(buyer_id, buyer_corp);
+    let kw = HashMap::new();
+
+    // Advance 15 days unrebased (/advancetime), trade Tritanium at 1060 ISK x 104, then advance +1d unrebased.
+    ctx.advance_secs_without_sim_clock_rebase(15 * DAY_SECS);
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_history.clear();
+        s.market_transactions.clear();
+        s.market_orders.clear();
+        if let Some(ch) = s.characters.get_mut(&buyer_id) {
+            ch.balance = IskCents::from_isk(100_000_000);
+        }
+        s.market_orders.insert(
+            9_950_001,
+            MarketOrderRecord {
+                order_id: 9_950_001,
+                owner_id: seller_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_isk(1_060),
+                vol_entered: 104,
+                vol_remaining: 104,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        // Seed corrupted zero-price day for type 35 before client wallclock.
+        s.market_history.insert(
+            (THE_FORGE_REGION_ID, 35),
+            vec![eve_db::MarketHistoryDayRecord {
+                date: "2026-11-18".into(),
+                lowest: 0.0,
+                highest: 0.0,
+                average: 0.0,
+                volume: 0,
+                order_count: 0,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+    });
+
+    call_escrow_kw(
+        &ctx,
+        &mut buyer_sess,
+        "BuyMultipleItems",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(34),
+            PyRep::Integer(104),
+            PyRep::Real(1_060.0),
+        ])])],
+        &kw,
+    )
+    .expect("BuyMultipleItems at advancetime day+15");
+
+    ctx.advance_secs_without_sim_clock_rebase(DAY_SECS);
+    assert_eq!(
+        unix_secs_to_date_str(client_history_partition_cutoff_unix(&ctx)),
+        "2026-11-20"
+    );
+
+    let old_34 = extract_ft_avg(
+        &call_escrow_kw(
+            &ctx,
+            &mut buyer_sess,
+            "GetOldPriceHistory",
+            &[PyRep::Integer(34)],
+            &kw,
+        )
+        .expect("GetOldPriceHistory(34)"),
+    );
+    let new_34 = extract_ft_avg(
+        &call_escrow_kw(
+            &ctx,
+            &mut buyer_sess,
+            "GetNewPriceHistory",
+            &[PyRep::Integer(34)],
+            &kw,
+        )
+        .expect("GetNewPriceHistory(34)"),
+    );
+    assert!(
+        old_34.is_empty(),
+        "future trade relative to machoNet.GetTime must not enter GetOldPriceHistory: {old_34:?}"
+    );
+    assert_eq!(new_34.len(), 1);
+    assert!((new_34[0].1 - 1_060.0).abs() < 1e-6);
+
+    // Client GetHistoryRowList simulation must produce zero 0.0 avgPrice rows.
+    let client_now_ft = ctx.now_machonet_wallclock_filetime_ticks();
+    let mut last_time = client_now_ft;
+    let mut last_price = 0.0_f64;
+    let mut client_hist = Vec::new();
+    for &(entry_ft, entry_avg) in &old_34 {
+        while last_time + DAY_TICKS < entry_ft {
+            last_time += DAY_TICKS;
+            client_hist.push(last_price);
+        }
+        client_hist.push(entry_avg);
+        last_time = entry_ft;
+        last_price = entry_avg;
+    }
+    client_hist.extend(new_34.iter().map(|(_, p)| *p));
+    assert_eq!(client_hist.len(), 1);
+    assert!(client_hist.iter().all(|&p| p > 0.0));
+
+    // Type 35 corrupted [0.0, 0.0, 0.0, 0, 0] entry must never surface.
+    assert!(extract_ft_avg(
+        &call_escrow_kw(
+            &ctx,
+            &mut buyer_sess,
+            "GetOldPriceHistory",
+            &[PyRep::Integer(35)],
+            &kw,
+        )
+        .expect("GetOldPriceHistory(35)"),
+    )
+    .is_empty());
+    assert!(extract_ft_avg(
+        &call_escrow_kw(
+            &ctx,
+            &mut buyer_sess,
+            "GetNewPriceHistory",
+            &[PyRep::Integer(35)],
+            &kw,
+        )
+        .expect("GetNewPriceHistory(35)"),
+    )
+    .is_empty());
+
+    // Rebased advance moves the 2026-12-05 trade cleanly into GetOldPriceHistory.
+    ctx.advance_secs(17 * DAY_SECS);
+    let old_34_rebased = extract_ft_avg(
+        &call_escrow_kw(
+            &ctx,
+            &mut buyer_sess,
+            "GetOldPriceHistory",
+            &[PyRep::Integer(34)],
+            &kw,
+        )
+        .expect("GetOldPriceHistory(34) rebased"),
+    );
+    let new_34_rebased = extract_ft_avg(
+        &call_escrow_kw(
+            &ctx,
+            &mut buyer_sess,
+            "GetNewPriceHistory",
+            &[PyRep::Integer(34)],
+            &kw,
+        )
+        .expect("GetNewPriceHistory(34) rebased"),
+    );
+    assert_eq!(old_34_rebased.len(), 1);
+    assert!(new_34_rebased.is_empty());
+}
