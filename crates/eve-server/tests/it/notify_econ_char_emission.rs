@@ -121,7 +121,12 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
     let n_offer_p2 = ctx.drain_notifications_for_char(P2);
     assert_eq!(
         events_from(&n_offer_p2, "OnShipJumpCloneInstallationOffered"),
-        vec![vec![PyRep::Integer(P1), PyRep::Integer(P2), PyRep::Integer(rorq_id), PyRep::Bool(true),]]
+        vec![vec![PyRep::Tuple(vec![
+            PyRep::Integer(P1),
+            PyRep::Integer(P2),
+            PyRep::Integer(rorq_id),
+            PyRep::Bool(true),
+        ])]]
     );
     assert!(ctx.drain_notifications_for_char(p3).is_empty());
 
@@ -139,12 +144,22 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
     let n_acc_p2 = ctx.drain_notifications_for_char(P2);
     assert_eq!(
         events_from(&n_acc_p1, "OnShipJumpCloneInstallationDone"),
-        vec![vec![PyRep::Integer(P1), PyRep::Integer(P2), PyRep::Integer(rorq_id), PyRep::Bool(true),]]
+        vec![vec![PyRep::Tuple(vec![
+            PyRep::Integer(P1),
+            PyRep::Integer(P2),
+            PyRep::Integer(rorq_id),
+            PyRep::Bool(true),
+        ])]]
     );
     assert_eq!(events_from(&n_acc_p1, "OnShipJumpCloneCacheInvalidated"), vec![vec![PyRep::Integer(rorq_id), PyRep::Integer(P2)]]);
     assert_eq!(
         events_from(&n_acc_p2, "OnShipJumpCloneInstallationDone"),
-        vec![vec![PyRep::Integer(P1), PyRep::Integer(P2), PyRep::Integer(rorq_id), PyRep::Bool(true),]]
+        vec![vec![PyRep::Tuple(vec![
+            PyRep::Integer(P1),
+            PyRep::Integer(P2),
+            PyRep::Integer(rorq_id),
+            PyRep::Bool(true),
+        ])]]
     );
     assert_eq!(events_from(&n_acc_p2, "OnJumpCloneCacheInvalidated"), vec![Vec::<PyRep>::new()]);
     assert!(events_from(&n_acc_p1, "OnShipCloneJumpUpdate").is_empty());

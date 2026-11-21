@@ -197,7 +197,17 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
         .expect("SaveFitting 1");
     let fit1 = save1.as_i64().expect("fit1");
     let add_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert_eq!(find_notif(&add_notifs, "OnFittingAdded"), &[PyRep::Integer(PILOT_A), PyRep::Integer(fit1)]);
+    assert_eq!(
+        find_notif(&add_notifs, "OnFittingAdded"),
+        &[PyRep::Integer(PILOT_A), PyRep::List(vec![PyRep::Integer(fit1)])]
+    );
+    let updated_notif = find_notif(&add_notifs, "OnFittingsUpdated");
+    assert_eq!(updated_notif.len(), 1);
+    assert_eq!(updated_notif[0].dict_get("fittingID"), Some(&PyRep::Integer(fit1)));
+    assert_eq!(updated_notif[0].dict_get("ownerID"), Some(&PyRep::Integer(PILOT_A)));
+    assert_eq!(updated_notif[0].dict_get("shipTypeID"), Some(&PyRep::Integer(587)));
+    assert_eq!(updated_notif[0].dict_get("name"), Some(&PyRep::String("Fit One".into())));
+    assert_eq!(updated_notif[0].dict_get("fitData"), Some(&PyRep::List(Vec::new())));
 
     let save2 = rpc(&ctx, &mut sess_a, "charFittingMgr", "SaveFitting", &[PyRep::Integer(PILOT_A), fit_payload("Fit Two")])
         .await

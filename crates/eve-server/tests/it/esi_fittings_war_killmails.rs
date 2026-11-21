@@ -145,11 +145,15 @@ async fn client_fittings(ctx: &ServerContext) -> Vec<(i64, String, i64, Vec<(i64
         .collect()
 }
 
-fn fittings_updated_count(ctx: &ServerContext) -> usize {
+fn drain_fittings_updated(ctx: &ServerContext) -> Vec<PyRep> {
     ctx.drain_notifications_for_char(PILOT)
-        .iter()
-        .filter(|n| n.event == "OnFittingsUpdated" && n.args == vec![PyRep::Integer(PILOT)])
-        .count()
+        .into_iter()
+        .filter(|n| n.event == "OnFittingsUpdated")
+        .map(|n| {
+            assert_eq!(n.args.len(), 1, "OnFittingsUpdated must take 1 arg");
+            n.args.into_iter().next().unwrap()
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -274,7 +278,7 @@ async fn test_esi_fittings_post_and_delete_scopes_errors_and_client_state() {
         client_fittings(&ctx).await.is_empty(),
         "rejected POSTs must not persist"
     );
-    assert_eq!(fittings_updated_count(&ctx), 0);
+    assert!(drain_fittings_updated(&ctx).is_empty());
 
     // 201 Created: pinned body/header schema, private no-store caching, Invalid entry discarded.
     let created = send(
@@ -288,11 +292,12 @@ async fn test_esi_fittings_post_and_delete_scopes_errors_and_client_state() {
     let fit_id = created.json().unwrap()["fitting_id"]
         .as_i64()
         .expect("fitting_id");
-    assert_eq!(
-        fittings_updated_count(&ctx),
-        1,
-        "ESI write notifies the logged-in client"
-    );
+    let updated_on_post = drain_fittings_updated(&ctx);
+    assert_eq!(updated_on_post.len(), 1, "ESI write notifies the logged-in client");
+    assert_eq!(updated_on_post[0].dict_get("fittingID"), Some(&PyRep::Integer(fit_id)));
+    assert_eq!(updated_on_post[0].dict_get("ownerID"), Some(&PyRep::Integer(PILOT)));
+    assert_eq!(updated_on_post[0].dict_get("shipTypeID"), Some(&PyRep::Integer(587)));
+    assert!(matches!(updated_on_post[0].dict_get("fitData"), Some(PyRep::List(items)) if items.len() == 2));
 
     // Same game state the client sees: charFittingMgr.GetFittings returns the ESI fitting with
     // V24 invFlag numbers (MedSlot0 = 19, ServiceSlot3 = 167) and no 'Invalid' entry.
@@ -361,7 +366,7 @@ async fn test_esi_fittings_post_and_delete_scopes_errors_and_client_state() {
     let gone = send(&router, &del(Some(&write), fit_id), 204);
     assert!(gone.body.is_empty());
     assert_eq!(gone.header("Cache-Control"), Some("private, max-age=0"));
-    assert_eq!(fittings_updated_count(&ctx), 1);
+    assert_eq!(drain_fittings_updated(&ctx), vec![PyRep::None]);
     assert!(client_fittings(&ctx).await.is_empty());
     assert_error(
         &send(&router, &del(Some(&write), fit_id), 404),

@@ -1005,7 +1005,7 @@ pub fn dispatch_character_routes(
                 ));
             }
 
-            let res: Result<i64, RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
+            let res: Result<(i64, crate::router::notify_registry::UpdatedFittingKeyVal), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.characters.contains_key(&char_id) {
                     return Err(RouteExecutionResult::error(
                         404,
@@ -1014,27 +1014,26 @@ pub fn dispatch_character_routes(
                 }
                 snap.next_entity_id += 1;
                 let fitting_id = snap.next_entity_id;
-                snap.saved_fittings.insert(
+                let rec = SavedFittingRecord {
                     fitting_id,
-                    SavedFittingRecord {
-                        fitting_id,
-                        owner_id: char_id,
-                        name: name.to_string(),
-                        ship_type_id,
-                        description: description.to_string(),
-                        items: parsed_items,
-                    },
-                );
-                Ok(fitting_id)
+                    owner_id: char_id,
+                    name: name.to_string(),
+                    ship_type_id,
+                    description: description.to_string(),
+                    items: parsed_items,
+                };
+                let fit_kv = crate::router::notify_registry::UpdatedFittingKeyVal::from_saved_fitting(&rec);
+                snap.saved_fittings.insert(fitting_id, rec);
+                Ok((fitting_id, fit_kv))
             });
             Some(match res {
-                Ok(fitting_id) => {
+                Ok((fitting_id, fit_kv)) => {
                     // Same notification the in-game `charFittingMgr.SaveFitting` path sends, so a
                     // logged-in client refreshes its fitting window from the shared state.
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
                         crate::router::notify_registry::OnFittingsUpdated {
-                            fitting: eve_proto::PyRep::Integer(char_id),
+                            fitting: crate::router::notify_registry::UpdatedFittingPayload::Fitting(fit_kv),
                         },
                     );
                     RouteExecutionResult::created_json(json!({ "fitting_id": fitting_id }))
@@ -1078,7 +1077,7 @@ pub fn dispatch_character_routes(
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
                         crate::router::notify_registry::OnFittingsUpdated {
-                            fitting: eve_proto::PyRep::Integer(char_id),
+                            fitting: crate::router::notify_registry::UpdatedFittingPayload::Cleared,
                         },
                     );
                     RouteExecutionResult::no_content(0)

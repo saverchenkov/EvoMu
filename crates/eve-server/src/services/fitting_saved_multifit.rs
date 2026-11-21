@@ -1199,21 +1199,68 @@ pub(crate) async fn handle_ships_and_services(
                         });
                     }
                 }
-                let space_sys = u32::try_from(item.location_id)
-                    .ok()
-                    .filter(|s| is_ship && ctx.sde.solar_systems.contains_key(s));
+                let slim_fields = ctx
+                    .sde
+                    .types
+                    .get(&item.type_id)
+                    .map(|t| (i64::from(t.group_id), i64::from(t.category_id)));
+                let space_slim = if is_ship {
+                    u32::try_from(item.location_id)
+                        .ok()
+                        .filter(|s| ctx.sde.solar_systems.contains_key(s))
+                        .map(|sys_id| {
+                            let (group_id, category_id) = slim_fields.unwrap_or((25, 6));
+                            let owner_char_id = if snap.characters.contains_key(&item.owner_id) {
+                                Some(item.owner_id)
+                            } else if session.ship_id == Some(item_id) {
+                                Some(char_id)
+                            } else {
+                                None
+                            };
+                            let corp_id = if snap.corporations.contains_key(&item.owner_id) {
+                                Some(item.owner_id)
+                            } else {
+                                owner_char_id
+                                    .and_then(|cid| snap.characters.get(&cid))
+                                    .map(|c| c.corporation_id)
+                                    .filter(|&cid| cid > 0)
+                            };
+                            let alliance_id = corp_id
+                                .and_then(|cid| snap.corporations.get(&cid))
+                                .and_then(|c| c.alliance_id)
+                                .filter(|&aid| aid > 0);
+                            (
+                                sys_id,
+                                crate::router::notify_registry::SpaceShipSlimFields {
+                                    item_id,
+                                    type_id: i64::from(item.type_id),
+                                    group_id,
+                                    category_id,
+                                    owner_id: item.owner_id,
+                                    char_id: owner_char_id,
+                                    corp_id,
+                                    alliance_id,
+                                    name: label.to_string(),
+                                },
+                            )
+                        })
+                } else {
+                    None
+                };
                 snap.item_custom_names.insert(item_id, label.to_string());
-                Ok(space_sys)
+                Ok(space_slim)
             });
             match res {
-                Ok(space_sys) => {
+                Ok(space_slim) => {
                     ctx.esi_state.set_custom_item_name(item_id, label.to_string());
-                    if let Some(sys_id) = space_sys {
+                    if let Some((sys_id, slim_fields)) = space_slim {
                         ctx.emit_typed(
                             crate::router::NotificationTarget::SolarSystem(sys_id),
                             crate::router::notify_registry::OnSlimItemChange {
                                 old_slim: PyRep::Integer(item_id),
-                                new_slim: PyRep::String(label.to_string()),
+                                new_slim: crate::router::notify_registry::SlimItemKeyVal::for_space_ship(
+                                    slim_fields,
+                                ),
                             },
                         );
                     }

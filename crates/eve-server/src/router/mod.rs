@@ -18,6 +18,7 @@ pub mod delta_projection;
 pub mod destiny_delivery_policy;
 pub mod dispatch;
 pub mod notify_registry;
+pub mod notify_types;
 pub mod reply_registry;
 pub mod rpc_args;
 pub mod session;
