@@ -3048,12 +3048,16 @@ class TestPlaytester1199AcceptanceCriteria(unittest.TestCase):
             runner_gm = playtester.PlaytesterRunner(args_gm)
             cfg_gm_text = runner_gm.write_server_config().read_text(encoding="utf-8")
             parsed_gm = tomllib.loads(cfg_gm_text) if tomllib is not None else _parse_simple_toml(cfg_gm_text)
-        # BF-1242-R1-03: --persona gm_tester must NOT emit [[admin_accounts]] (which would clobber seed_demo);
-        # instead it uses EVOMU_ADMIN_TOKEN (`admin` 90000003) via `_server_extra_env()`.
+        # BF-1242-R1-03 & #1539: neither default nor --persona gm_tester emits [[admin_accounts]] (which would
+        # clobber seed_demo); both set EVOMU_ADMIN_TOKEN (`admin` 90000003) via `_server_extra_env()` so
+        # `demo` stays role=0 while host GM/timeControl bridge ops run out-of-band.
         admins_gm = parsed_gm.get("admin_accounts", [])
         self.assertEqual(len(admins_gm), 0, f"gm_tester must not emit admin_accounts, got {admins_gm}")
         self.assertTrue(parsed_gm.get("feature_flags", {}).get("seed_demo"))
-        self.assertEqual(runner._server_extra_env(), {})
+        self.assertEqual(
+            runner._server_extra_env(),
+            {"EVOMU_ADMIN_TOKEN": playtester.PLAYTESTER_GM_ADMIN_SECRET},
+        )
         self.assertEqual(
             runner_gm._server_extra_env(),
             {"EVOMU_ADMIN_TOKEN": playtester.PLAYTESTER_GM_ADMIN_SECRET},
@@ -4742,6 +4746,86 @@ class TestBugOracleSessionTelemetryAndArgs(unittest.TestCase):
                 self.assertEqual(snap_ok["handshake"]["client_boot_build"], 3698585)
                 self.assertEqual(snap_ok["handshake"]["build_mismatch"], False)
             finally:
+                runner.oracle.flush()
+
+    def test_host_gm_bridge_rpc_server_and_sim_time_dedup_in_summary(self):
+        import evomu_inclient_helpers as hlp
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged_eve"
+            staged.mkdir(parents=True)
+            args = playtester.parse_args(["--no-github-sync"])
+            args.worktree = str(root)
+            args.runtime_dir = str(root / "rt")
+            args.staged_app = str(staged)
+            runner = playtester.PlaytesterRunner(args)
+            gm_calls = []
+
+            class _FakeGmSm:
+                class _TimeControl:
+                    def AdvanceClock(self, secs, tgt=0):
+                        gm_calls.append(("AdvanceClock", int(secs), int(tgt)))
+                        return 133000000000000000
+
+                    def ClearSessionTimer(self, tgt=0):
+                        gm_calls.append(("ClearSessionTimer", int(tgt)))
+                        return True
+
+                def RemoteSvc(self, name):
+                    if name == "timeControl":
+                        return self._TimeControl()
+                    raise AssertionError(f"unexpected service {name}")
+
+            try:
+                port = runner._ensure_host_gm_bridge_server()
+                self.assertGreater(port, 0)
+                with mock.patch.object(runner, "_ensure_gm_bridge", return_value=_FakeGmSm()):
+                    cfg_path = runner.write_inclient_cfg()
+                    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                    self.assertEqual(cfg["host_gm_port"], port)
+
+                    ipc = hlp.IpcClient(port)
+                    try:
+                        clr_resp = ipc.request({"cmd": "clear_session_timer", "target_char_id": 90000001})
+                        adv_resp = ipc.request({"cmd": "advance_clock", "secs": 15, "target_char_id": 90000001})
+                    finally:
+                        ipc.close()
+
+                self.assertTrue(clr_resp["ok"])
+                self.assertTrue(adv_resp["ok"])
+                inj_id = adv_resp["injection_id"]
+                self.assertEqual(
+                    gm_calls,
+                    [("ClearSessionTimer", 90000001), ("AdvanceClock", 15, 90000001)],
+                )
+
+                # Simulate exec_res returning the same injection_id already buffered host-side
+                exec_res = {
+                    "action_ok": True,
+                    "sim_time_injections": [
+                        {
+                            "injection_id": inj_id,
+                            "seconds": 15.0,
+                            "target_char_id": 90000001,
+                            "via": "gm_bridge",
+                            "source": "inclient",
+                        }
+                    ],
+                }
+                step_sim = runner._absorb_step_sim_time(exec_res)
+                self.assertEqual(step_sim["sim_time_injected_sec"], 15.0)
+                self.assertEqual(step_sim["sim_time_injection_count"], 1)
+                self.assertEqual(exec_res["sim_time_injected_sec"], 15.0)
+
+                summary = runner._write_run_summary(step_num=1, final=True)
+                self.assertEqual(summary["total_sim_time_injected_sec"], 15.0)
+                self.assertEqual(summary["total_sim_time_injection_count"], 1)
+                run_sum_file = json.loads((runner.current_run_dir / "run_summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(run_sum_file["total_sim_time_injected_sec"], 15.0)
+                self.assertEqual(run_sum_file["total_sim_time_injection_count"], 1)
+            finally:
+                runner._stop_host_gm_bridge_server()
                 runner.oracle.flush()
 
 

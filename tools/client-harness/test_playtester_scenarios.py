@@ -2349,6 +2349,121 @@ class Test1202R4And1242Acceptance(unittest.TestCase):
             self.assertEqual(j_res["failure"]["failed_check"], "wait_until_timeout")
             self.assertIn("wait_until_timeout", json.dumps(j_res["failure"]))
 
+    def test_scenario_runner_host_gm_gate_and_sim_time_accounting(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen = root / "sim_acct.json"
+            scen.write_text(
+                json.dumps({
+                    "id": "sim_acct",
+                    "title": "Sim-time accounting without double-counting",
+                    "starting_state": {"account": "demo", "char_id": 90000001, "view": "inflight"},
+                    "steps": [
+                        {
+                            "id": "step_tc_off",
+                            "description": "Step with time_control=False disables host GM bridge",
+                            "time_control": False,
+                            "action": {"type": "dock", "target": "60003760"},
+                            "checks": {},
+                        },
+                        {
+                            "id": "step_tc_on",
+                            "description": "Step with time_control=True allows host GM bridge & dedups sim time",
+                            "time_control": True,
+                            "action": {"type": "jump_gate", "target": "50001234"},
+                            "checks": {},
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            runner = self._runner_in_dir(root, [scen])
+            seen_payloads = []
+            inflight_state = {
+                "session": {"charid": 90000001, "stationid": None, "solarsystemid": 30000142, "solarsystemid2": 30000142},
+                "active_view": "inflight",
+                "open_windows": [],
+                "modals": [],
+                "ui": {"clickable_widgets": []},
+                "space": {"in_space": True, "ego": {"mode": 2, "speed_mps": 0.0}},
+                "skills_state": {},
+                "wallet_state": {},
+            }
+
+            class _FakeGmSm:
+                class _TimeControl:
+                    def AdvanceClock(self, secs, tgt=0):
+                        return 133000000000000000
+                def RemoteSvc(self, name):
+                    return self._TimeControl()
+
+            runner._ensure_gm_bridge = lambda: _FakeGmSm()
+
+            def _fake_rpc(method, params=None, timeout=15.0):
+                if method == "get_state":
+                    return {"ok": True, "state": inflight_state}
+                if method == "get_flight_recorder":
+                    return {"ok": True, "macho_calls": []}
+                if method == "get_guard_hits":
+                    return {"ok": True, "guard_hits": []}
+                if method == "execute_action":
+                    act = dict((params or {}).get("action") or {})
+                    seen_payloads.append(act)
+                    if act.get("type") == "dock":
+                        # Verify host GM gate rejects advance_clock when step time_control is False
+                        denied = runner._handle_host_gm_rpc_request(
+                            {"cmd": "advance_clock", "secs": 15, "target_char_id": 90000001}
+                        )
+                        self.assertFalse(denied["ok"])
+                        self.assertEqual(denied.get("reason"), "host_time_control_disabled")
+                        return {"ok": True, "action_ok": True, "post_state": inflight_state, "flight_recorder": {"macho_calls": []}}
+                    if act.get("type") == "jump_gate":
+                        allowed = runner._handle_host_gm_rpc_request(
+                            {"cmd": "advance_clock", "secs": 15, "target_char_id": 90000001}
+                        )
+                        self.assertTrue(allowed["ok"])
+                        return {
+                            "ok": True,
+                            "action_ok": True,
+                            "post_state": inflight_state,
+                            "sim_time_injections": [
+                                {"injection_id": allowed["injection_id"], "seconds": 15.0, "target_char_id": 90000001, "via": "gm_bridge"}
+                            ],
+                            "flight_recorder": {"macho_calls": []},
+                        }
+                return {"ok": True}
+
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = _fake_rpc
+            runner.start_server = lambda reset_db=True: True
+            runner.start_client = lambda: setattr(
+                runner,
+                "_last_boot_result",
+                {"ok": True, "state": inflight_state, "flight_recorder": {"macho_calls": []}},
+            ) or True
+            runner.stop_client = lambda: None
+            runner.stop_server = lambda: None
+
+            with mock.patch.object(playtester, "get_git_head", return_value="abc1234"), \
+                 mock.patch.object(runner, "_run_destiny_parity_check", return_value=None):
+                rc = runner.run_scenarios()
+
+            self.assertEqual(rc, 0)
+            self.assertFalse(seen_payloads[0]["time_control"])
+            self.assertFalse(seen_payloads[0]["host_time_control"])
+            self.assertFalse(seen_payloads[1]["time_control"])
+            self.assertTrue(seen_payloads[1]["host_time_control"])
+
+            res_data = json.loads((runner.out_dir / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(res_data["total_sim_time_injected_sec"], 15.0)
+            self.assertEqual(res_data["total_sim_time_injection_count"], 1)
+            j_res = res_data["journeys"]["sim_acct"]
+            self.assertEqual(j_res["sim_time_injected_sec"], 15.0)
+            self.assertEqual(j_res["sim_time_injection_count"], 1)
+            self.assertEqual(j_res["steps"][0]["sim_time_injected_sec"], 0.0)
+            self.assertEqual(j_res["steps"][1]["sim_time_injected_sec"], 15.0)
+            self.assertEqual(j_res["steps"][1]["sim_time_injection_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

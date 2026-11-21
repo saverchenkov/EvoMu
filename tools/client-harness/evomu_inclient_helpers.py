@@ -103,6 +103,192 @@ class IpcClient(object):
                 pass
 
 
+_HOST_GM_STATE = {
+    "port": 0,
+    "client": None,
+    "target_char_id": 0,
+    "sim_seq": 0,
+    "sim_events": [],
+}
+
+
+def _resolve_target_char_id(target_char_id=0):
+    if target_char_id:
+        return int(target_char_id)
+    sess = getattr(__builtin__, "session", None)
+    if sess is not None:
+        live = int(getattr(sess, "charid", 0) or 0)
+        if live:
+            return live
+    return int(_HOST_GM_STATE.get("target_char_id") or 0)
+
+
+def _configure_host_gm_bridge(cfg=None, ipc=None, target_char_id=0, port=0):
+    cfg_dict = cfg if isinstance(cfg, dict) else {}
+    if port:
+        resolved_port = int(port)
+    elif isinstance(cfg, dict) and "host_gm_port" in cfg:
+        resolved_port = int(cfg.get("host_gm_port") or 0)
+    else:
+        resolved_port = int(os.environ.get("EVOMU_HOST_GM_PORT") or 0)
+
+    resolved_char = int(
+        target_char_id
+        or cfg_dict.get("char_id")
+        or 0
+    )
+    if not resolved_char:
+        sess = getattr(__builtin__, "session", None)
+        if sess is not None:
+            resolved_char = int(getattr(sess, "charid", 0) or 0)
+
+    old_port = int(_HOST_GM_STATE.get("port") or 0)
+    old_client = _HOST_GM_STATE.get("client")
+    if resolved_port != old_port or (resolved_port == 0 and ipc is None and old_client is not None):
+        if old_client is not None and old_client is not ipc and hasattr(old_client, "close"):
+            try:
+                old_client.close()
+            except Exception:
+                pass
+        _HOST_GM_STATE["client"] = ipc
+    elif ipc is not None:
+        _HOST_GM_STATE["client"] = ipc
+
+    _HOST_GM_STATE["port"] = resolved_port
+    if resolved_char:
+        _HOST_GM_STATE["target_char_id"] = resolved_char
+    return {
+        "port": int(_HOST_GM_STATE.get("port") or 0),
+        "target_char_id": int(_HOST_GM_STATE.get("target_char_id") or 0),
+        "has_client": _HOST_GM_STATE.get("client") is not None,
+    }
+
+
+def _reset_sim_time_telemetry():
+    _HOST_GM_STATE["sim_seq"] = 0
+    _HOST_GM_STATE["sim_events"] = []
+
+
+def snapshot_sim_time_cursor():
+    return int(_HOST_GM_STATE.get("sim_seq") or 0)
+
+
+def _record_sim_time_injection(
+    seconds,
+    target_char_id=0,
+    via="gm_bridge",
+    injection_id=None,
+    source="inclient",
+    method="AdvanceClock",
+):
+    seq = int(_HOST_GM_STATE.get("sim_seq") or 0) + 1
+    _HOST_GM_STATE["sim_seq"] = seq
+    inj_id = injection_id if injection_id else ("inclient-sim-%d" % seq)
+    evt = {
+        "seq": seq,
+        "injection_id": str(inj_id),
+        "seconds": float(seconds),
+        "target_char_id": int(target_char_id or 0),
+        "via": str(via or "gm_bridge"),
+        "source": str(source or "inclient"),
+        "method": str(method or "AdvanceClock"),
+        "ts": time.time(),
+    }
+    events = _HOST_GM_STATE.get("sim_events")
+    if not isinstance(events, list):
+        events = []
+        _HOST_GM_STATE["sim_events"] = events
+    events.append(evt)
+    if len(events) > 2000:
+        del events[:-1000]
+    return evt
+
+
+def collect_sim_time_telemetry(since_seq=0):
+    events = [
+        dict(evt)
+        for evt in (_HOST_GM_STATE.get("sim_events") or [])
+        if int(evt.get("seq", 0) or 0) > int(since_seq or 0)
+    ]
+    total_sec = 0.0
+    for evt in events:
+        try:
+            total_sec += float(evt.get("seconds", 0.0) or 0.0)
+        except Exception:
+            pass
+    return {
+        "sim_time_injected_sec": round(total_sec, 6),
+        "sim_time_injection_count": len(events),
+        "sim_time_injections": events,
+        "sim_seq_after": snapshot_sim_time_cursor(),
+    }
+
+
+def _gm_ipc_request(payload, ipc=None):
+    client = ipc if ipc is not None else _HOST_GM_STATE.get("client")
+    port = int(_HOST_GM_STATE.get("port") or os.environ.get("EVOMU_HOST_GM_PORT") or 0)
+    if client is None and port > 0:
+        try:
+            client = IpcClient(port)
+            _HOST_GM_STATE["port"] = port
+            _HOST_GM_STATE["client"] = client
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+    if client is None:
+        return None
+    try:
+        res = client.request(payload)
+        if (
+            ipc is None
+            and port > 0
+            and isinstance(res, dict)
+            and res.get("error") == "ipc eof"
+        ):
+            try:
+                client.close()
+            except Exception:
+                pass
+            _HOST_GM_STATE["client"] = None
+            client = IpcClient(port)
+            _HOST_GM_STATE["client"] = client
+            res = client.request(payload)
+        return res
+    except Exception as exc:
+        if ipc is None and port > 0:
+            try:
+                client.close()
+            except Exception:
+                pass
+            _HOST_GM_STATE["client"] = None
+            try:
+                client = IpcClient(port)
+                _HOST_GM_STATE["client"] = client
+                return client.request(payload)
+            except Exception as retry_exc:
+                return {"ok": False, "error": str(retry_exc)}
+        return {"ok": False, "error": str(exc)}
+
+
+def _clear_session_timer(sm, ipc=None, target_char_id=0, allow_time_control=True, raise_on_error=False):
+    if not allow_time_control:
+        return False
+    tgt = _resolve_target_char_id(target_char_id)
+    res = _gm_ipc_request(
+        {"cmd": "clear_session_timer", "target_char_id": tgt},
+        ipc=ipc,
+    )
+    if isinstance(res, dict) and res.get("ok"):
+        return True
+    if raise_on_error:
+        if res is None:
+            raise RuntimeError("Host GM bridge unavailable for ClearSessionTimer(target_char_id=%d)" % tgt)
+        raise RuntimeError(
+            "Host GM ClearSessionTimer(target_char_id=%d) failed: %s"
+            % (tgt, (res or {}).get("error") or (res or {}).get("reason") or res)
+        )
+    return False
+
+
 def _get_field(obj, name, default=None):
     if obj is None:
         return default
@@ -609,13 +795,31 @@ def _wait_session_attr(attr, expected, timeout_sec=5.0, raise_on_timeout=True):
     return cur
 
 
-def _try_slash(sm, cmd):
+def _try_slash(sm, cmd, ipc=None, target_char_id=0, raise_on_error=False):
+    tgt = _resolve_target_char_id(target_char_id)
+    res = _gm_ipc_request(
+        {"cmd": "slash_cmd", "command": cmd, "target_char_id": tgt},
+        ipc=ipc,
+    )
+    if isinstance(res, dict) and res.get("handled"):
+        if res.get("ok"):
+            if cmd.startswith("/giveskill ") or cmd.startswith("/setskill "):
+                _sleep_ms(150)
+            return res.get("result")
+        if raise_on_error:
+            raise RuntimeError(
+                "Host GM slash_cmd(%r) failed: %s"
+                % (cmd, res.get("error") or res.get("reason") or res)
+            )
+        return None
     try:
         res = sm.RemoteSvc("slash").SlashCmd(cmd)
         if cmd.startswith("/giveskill ") or cmd.startswith("/setskill "):
             _sleep_ms(150)
         return res
     except Exception:
+        if raise_on_error:
+            raise
         return None
 
 
@@ -788,17 +992,15 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0, allow_time_contro
             _sleep_sim_ms(100)
         sess = getattr(__builtin__, "session", None)
         if getattr(sess, "stationid", None) is None and getattr(sess, "structureid", None) is None:
+            adv_ok = False
             if allow_time_control:
-                try:
-                    sm.RemoteSvc("timeControl").AdvanceClock(2)
-                except Exception:
-                    pass
-                _sleep_sim_ms(1500)
+                adv_ok = bool(_advance_clock(sm, None, 2, raise_on_error=False))
+                _sleep_sim_ms(1500 if adv_ok else 600)
             else:
                 _sleep_sim_ms(600)
             _sleep_ms(300)
             if not settled:
-                post_deadline = time.time() + (12.0 if not allow_time_control else 4.0)
+                post_deadline = time.time() + (4.0 if (allow_time_control and adv_ok) else 12.0)
                 while time.time() < post_deadline:
                     if _is_warp_settled():
                         break
@@ -816,10 +1018,10 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0, allow_time_contro
     _sleep_ms(150)
 
 
-def _warp_full(sm, b_obj, tid, stuff_type="item", distance=0.0):
+def _warp_full(sm, b_obj, tid, stuff_type="item", distance=0.0, ipc=None):
     _ensure_warp_signal_tracker(sm)
     for _ in range(4):
-        sm.RemoteSvc("slash").SlashCmd("/heal")
+        _try_slash(sm, "/heal", ipc=ipc)
         try:
             b_obj.CmdWarpToStuff(stuff_type, tid, float(distance))
         except Exception as exc:
@@ -827,20 +1029,20 @@ def _warp_full(sm, b_obj, tid, stuff_type="item", distance=0.0):
             if "WarpDistanceTooShort" in msg or "WarpTooShort" in msg:
                 break
             if "ShipInWarp" in msg or "ShipAlreadyInWarp" in msg:
-                sm.RemoteSvc("timeControl").AdvanceClock(120)
+                adv_ok = bool(_advance_clock(sm, ipc, 120, raise_on_error=False))
                 _sleep_sim_ms(400)
-                _wait_warp_fx_settled(sm, timeout_sec=4.0)
+                _wait_warp_fx_settled(sm, timeout_sec=(4.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok))
                 continue
             raise
         _sleep_ms(30)
-        sm.RemoteSvc("timeControl").AdvanceClock(240)
+        adv_ok = bool(_advance_clock(sm, ipc, 240))
         _sleep_sim_ms(400)
-        _wait_warp_fx_settled(sm, timeout_sec=4.0)
+        _wait_warp_fx_settled(sm, timeout_sec=(4.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok))
         break
     _wait_view_settled(sm)
 
 
-def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45):
+def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45, ipc=None):
     """Execute one stepped warp leg and assert client-side warp physics & tunnel FX activate."""
     _ensure_warp_signal_tracker(sm)
     start_before = int(_WARP_SIGNAL_STATE["started"])
@@ -855,7 +1057,7 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
     )
 
     for _ in range(4):
-        sm.RemoteSvc("slash").SlashCmd("/heal")
+        _try_slash(sm, "/heal", ipc=ipc)
         try:
             b_obj.CmdWarpToStuff(stuff_type, tid, float(distance))
             break
@@ -864,9 +1066,9 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
             if "WarpDistanceTooShort" in msg or "WarpTooShort" in msg:
                 return {"skipped": True}
             if "ShipInWarp" in msg or "ShipAlreadyInWarp" in msg:
-                sm.RemoteSvc("timeControl").AdvanceClock(120)
+                adv_ok = bool(_advance_clock(sm, ipc, 120, raise_on_error=False))
                 _sleep_sim_ms(400)
-                _wait_warp_fx_settled(sm, timeout_sec=4.0)
+                _wait_warp_fx_settled(sm, timeout_sec=(4.0 if adv_ok else 35.0), allow_time_control=bool(adv_ok))
                 start_before = int(_WARP_SIGNAL_STATE["started"])
                 finish_before = int(_WARP_SIGNAL_STATE["finished"])
                 continue
@@ -882,10 +1084,7 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
 
     for _ in range(int(max_ticks)):
         _sleep_sim_ms(1000)
-        try:
-            sm.RemoteSvc("timeControl").AdvanceClock(1)
-        except Exception:
-            pass
+        _advance_clock(sm, ipc, 1, raise_on_error=False)
         bp = michelle.GetBallpark() if (sid and michelle is not None) else None
         ball = bp.GetBall(sid) if (bp is not None and sid) else None
         if ball is not None:
@@ -920,9 +1119,9 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
             if saw_active_stamp and mode != 3:
                 break
 
-    sm.RemoteSvc("timeControl").AdvanceClock(120)
+    adv_finish_ok = bool(_advance_clock(sm, ipc, 120))
     _sleep_sim_ms(400)
-    _wait_warp_fx_settled(sm, timeout_sec=8.0, min_finished=finish_before + 1)
+    _wait_warp_fx_settled(sm, timeout_sec=(8.0 if adv_finish_ok else 35.0), min_finished=finish_before + 1, allow_time_control=bool(adv_finish_ok))
     _wait_view_settled(sm)
 
     started_delta = int(_WARP_SIGNAL_STATE["started"]) - start_before
@@ -958,7 +1157,7 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
     }
 
 
-def _undock_ship(sm, allow_time_control=True):
+def _undock_ship(sm, allow_time_control=True, ipc=None):
     _wait_view_settled(sm)
     sess = getattr(__builtin__, "session", None)
     if (
@@ -969,14 +1168,20 @@ def _undock_ship(sm, allow_time_control=True):
         _ensure_view(sm, "inflight")
         _ensure_warp_signal_tracker(sm)
         return
-    if allow_time_control:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-    else:
+    clear_ok = bool(
+        _clear_session_timer(
+            sm,
+            ipc=ipc,
+            allow_time_control=allow_time_control,
+            raise_on_error=False,
+        )
+    )
+    if not clear_ok:
         _wait_session_timer_clear(max_wait_sec=12.0)
     _sleep_ms(600)
     sm.RemoteSvc("ship").Undock()
     undocked_ok = False
-    deadline = time.time() + (16.0 if not allow_time_control else 10.0)
+    deadline = time.time() + (10.0 if (allow_time_control and clear_ok) else 16.0)
     while time.time() < deadline:
         sess = getattr(__builtin__, "session", None)
         if (
@@ -1000,27 +1205,33 @@ def _undock_ship(sm, allow_time_control=True):
             )
         )
     if allow_time_control:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
     _ensure_view(sm, "inflight")
     _ensure_warp_signal_tracker(sm)
 
 
-def _dock_station(sm, station_id=60003760, allow_time_control=True):
+def _dock_station(sm, station_id=60003760, allow_time_control=True, ipc=None):
     sess = getattr(__builtin__, "session", None)
     sid = int(getattr(sess, "shipid", 0) or 0) if sess is not None else 0
     michelle = sm.services.get("michelle") if hasattr(sm, "services") else None
     bp = michelle.GetBallpark() if (sid and michelle is not None) else None
     ball = bp.GetBall(sid) if (bp is not None and sid) else None
     if ball is not None and int(getattr(ball, "mode", 0) or 0) == 3:
-        _wait_warp_fx_settled(sm, timeout_sec=6.0, allow_time_control=allow_time_control)
+        _wait_warp_fx_settled(sm, timeout_sec=(6.0 if allow_time_control else 35.0), allow_time_control=allow_time_control)
     _wait_view_settled(sm)
-    if allow_time_control:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-    else:
+    clear_ok = bool(
+        _clear_session_timer(
+            sm,
+            ipc=ipc,
+            allow_time_control=allow_time_control,
+            raise_on_error=False,
+        )
+    )
+    if not clear_ok:
         _wait_session_timer_clear(max_wait_sec=12.0)
     sm.RemoteSvc("stationSvc").Dock(station_id)
     docked_ok = False
-    deadline = time.time() + (16.0 if not allow_time_control else 10.0)
+    deadline = time.time() + (10.0 if (allow_time_control and clear_ok) else 16.0)
     while time.time() < deadline:
         sess = getattr(__builtin__, "session", None)
         if (
@@ -1042,21 +1253,39 @@ def _dock_station(sm, station_id=60003760, allow_time_control=True):
             )
         )
     if allow_time_control:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
     _ensure_view(sm, "hangar")
 
 
-def _advance_clock(sm, ipc, secs):
-    """Advances server simulation clock, using IPC if Client 2 is connected or Client 1 timeControl."""
+def _advance_clock(sm, ipc, secs, target_char_id=0, allow_time_control=True, raise_on_error=True, source="inclient"):
+    """Advances server simulation clock via the host-side GM bridge IPC (never played-client timeControl)."""
+    if not allow_time_control:
+        return False
     secs_i = int(secs)
-    if ipc is not None:
-        try:
-            res = ipc.request({"cmd": "advance_clock", "secs": secs_i})
-            if isinstance(res, dict) and res.get("ok"):
-                return res.get("time", True)
-        except Exception:
-            pass
-    return sm.RemoteSvc("timeControl").AdvanceClock(secs_i)
+    tgt = _resolve_target_char_id(target_char_id)
+    res = _gm_ipc_request(
+        {"cmd": "advance_clock", "secs": secs_i, "target_char_id": tgt},
+        ipc=ipc,
+    )
+    if isinstance(res, dict) and res.get("ok"):
+        _record_sim_time_injection(
+            secs_i,
+            target_char_id=tgt,
+            via=res.get("via", "gm_bridge"),
+            injection_id=res.get("injection_id"),
+            source=source,
+            method="AdvanceClock",
+        )
+        tval = res.get("time")
+        return True if tval is None else tval
+    if raise_on_error:
+        if res is None:
+            raise RuntimeError("Host GM bridge unavailable for AdvanceClock(%d, target_char_id=%d)" % (secs_i, tgt))
+        raise RuntimeError(
+            "Host GM AdvanceClock(%d, target_char_id=%d) failed: %s"
+            % (secs_i, tgt, (res or {}).get("error") or (res or {}).get("reason") or res)
+        )
+    return False
 
 
 def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
@@ -1069,9 +1298,10 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
         _ensure_view(sm, "hangar")
         return
     if cur_station is not None and cur_station != target_station:
-        _undock_ship(sm)
+        _undock_ship(sm, ipc=ipc)
     if getattr(sess, "structureid", None):
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        if not _clear_session_timer(sm, ipc=ipc, raise_on_error=False):
+            _wait_session_timer_clear(max_wait_sec=12.0)
         sm.RemoteSvc("structureDocking").Undock(int(getattr(sess, "structureid")))
         _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
     sess = getattr(__builtin__, "session", None)
@@ -1083,20 +1313,20 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
     if cur_stop_sys and not getattr(sess, "stationid", None) and not getattr(sess, "structureid", None):
         beyonce, _ = sm.RemoteSvc("beyonce").MachoBindObject(cur_stop_sys, None)
         beyonce.CmdStop()
-    _advance_clock(sm, ipc, 12)
+    adv_ok = bool(_advance_clock(sm, ipc, 12, raise_on_error=False))
     _sleep_sim_ms(1200)
-    _sleep_ms(1200)
-    _wait_warp_fx_settled(sm, timeout_sec=5.0)
+    _sleep_ms(1200 if adv_ok else 2000)
+    _wait_warp_fx_settled(sm, timeout_sec=(5.0 if adv_ok else 35.0))
     try:
         sm.RemoteSvc("stationSvc").Dock(target_station)
     except Exception:
-        sm.RemoteSvc("slash").SlashCmd("/tr %d" % target_station)
+        _try_slash(sm, "/tr %d" % target_station, ipc=ipc, raise_on_error=True)
         _wait_session_attr("solarsystemid2", target_system, timeout_sec=3.0, raise_on_timeout=True)
         _wait_view_settled(sm)
-        _advance_clock(sm, ipc, 12)
+        _advance_clock(sm, ipc, 12, raise_on_error=False)
         sm.RemoteSvc("stationSvc").Dock(target_station)
     docked_ok = False
-    deadline = time.time() + 10.0
+    deadline = time.time() + (10.0 if adv_ok else 16.0)
     while time.time() < deadline:
         sess = getattr(__builtin__, "session", None)
         if getattr(sess, "stationid", None) == target_station and getattr(sess, "changing", None) is None:
@@ -1109,7 +1339,7 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
             "Timed out waiting to dock at baseline station %d (got stationid=%r)"
             % (target_station, getattr(sess, "stationid", None) if sess is not None else None)
         )
-    sm.RemoteSvc("timeControl").ClearSessionTimer()
+    _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
     _ensure_view(sm, "hangar")
 
 
@@ -1150,16 +1380,17 @@ def _cleanup_corp_structures(sm, ipc=None, structure_ids=None):
     for sid in ids:
         try:
             if _live_session_attr("structureid", None) == sid:
-                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                if not _clear_session_timer(sm, ipc=ipc, raise_on_error=False):
+                    _wait_session_timer_clear(max_wait_sec=12.0)
                 sm.RemoteSvc("structureDocking").Undock(sid)
                 _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
             try:
                 sm.RemoteSvc("structureDeployment").Unanchor(sid)
             except Exception:
-                sm.RemoteSvc("slash").SlashCmd("/structure state %d 110" % sid)
+                _try_slash(sm, "/structure state %d 110" % sid, ipc=ipc, raise_on_error=True)
                 sm.RemoteSvc("structureDeployment").Unanchor(sid)
-            sm.RemoteSvc("slash").SlashCmd("/upwelltimer %d" % sid)
-            _advance_clock(sm, ipc, 5)
+            _try_slash(sm, "/upwelltimer %d" % sid, ipc=ipc, raise_on_error=True)
+            _advance_clock(sm, ipc, 5, raise_on_error=False)
         except Exception as exc:
             errors.append("structure %d cleanup: %s" % (sid, exc))
     if ids:
@@ -1186,8 +1417,9 @@ def _resign_player_corp(sm, baseline_corp_id=0, ipc=None, structure_ids=None):
     cur_corp = int(_live_session_attr("corpid", 0) or 0)
     if cur_corp >= 98000000 and (not baseline_corp_id or cur_corp != int(baseline_corp_id)):
         _cleanup_corp_structures(sm, ipc=ipc, structure_ids=structure_ids)
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-        _advance_clock(sm, ipc, 12)
+        if not _clear_session_timer(sm, ipc=ipc, raise_on_error=False):
+            _wait_session_timer_clear(max_wait_sec=12.0)
+        _advance_clock(sm, ipc, 12, raise_on_error=False)
         sm.RemoteSvc("corpRegistry").ResignFromCorp()
         resigned = False
         now_corp = cur_corp
@@ -1211,18 +1443,19 @@ def _ensure_home_ship(sm, target_ship_id, ipc=None):
     cur_sid = int(_live_session_attr("shipid", 0) or 0)
     if cur_sid == target_sid:
         return target_sid
-    sm.RemoteSvc("timeControl").ClearSessionTimer()
+    if not _clear_session_timer(sm, ipc=ipc, raise_on_error=False):
+        _wait_session_timer_clear(max_wait_sec=12.0)
     try:
         sm.RemoteSvc("ship").Board(target_sid)
     except Exception:
-        _advance_clock(sm, ipc, 12)
+        _advance_clock(sm, ipc, 12, raise_on_error=False)
         sm.RemoteSvc("ship").AssembleShip([target_sid])
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
         sm.RemoteSvc("ship").Board(target_sid)
     _wait_session_attr("shipid", target_sid, timeout_sec=3.0, raise_on_timeout=True)
     _sleep_ms(100)
     _wait_view_settled(sm)
-    sm.RemoteSvc("timeControl").ClearSessionTimer()
+    _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
     return int(_live_session_attr("shipid", target_sid) or target_sid)
 
 

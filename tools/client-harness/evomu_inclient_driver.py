@@ -31,6 +31,8 @@ from evomu_inclient_helpers import (
     _atomic_write_json,
     _capture_inclient_screenshot,
     _cleanup_corp_structures,
+    _clear_session_timer,
+    _configure_host_gm_bridge,
     _dock_station,
     _ensure_docked_jita,
     _ensure_home_ship,
@@ -56,6 +58,8 @@ from evomu_inclient_helpers import (
     _wait_warp_fx_settled,
     _warp_animated,
     _warp_full,
+    collect_sim_time_telemetry,
+    snapshot_sim_time_cursor,
 )
 
 sys.dont_write_bytecode = True
@@ -134,15 +138,15 @@ def _require_ipc_ok(ipc, payload, context="c2"):
     return resp
 
 
-def _board_station_ship(sm, ship_item_id, assemble=True):
+def _board_station_ship(sm, ship_item_id, assemble=True, ipc=None):
     if assemble:
         sm.RemoteSvc("ship").AssembleShip([int(ship_item_id)])
-    sm.RemoteSvc("timeControl").ClearSessionTimer()
+    _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
     sm.RemoteSvc("ship").Board(int(ship_item_id))
     _wait_session_attr("shipid", int(ship_item_id), timeout_sec=3.0, raise_on_timeout=True)
     _sleep_ms(200)
     _wait_view_settled(sm)
-    sm.RemoteSvc("timeControl").ClearSessionTimer()
+    _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
 
 
 def _journey_launch_login(ctx):
@@ -298,8 +302,8 @@ def _journey_undock_navigate(ctx):
     for cur_sys, gate_id, next_sys in route_sys:
         _wait_view_settled(sm)
         b_cur = _get_beyonce(sm, cur_sys)
-        _warp_full(sm, b_cur, gate_id)
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        _warp_full(sm, b_cur, gate_id, ipc=ipc)
+        _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
         sm.RemoteSvc("beyonce").CmdStargateJump(gate_id)
         _wait_session_attr("solarsystemid2", next_sys, timeout_sec=3.0, raise_on_timeout=True)
         _wait_view_settled(sm)
@@ -317,8 +321,8 @@ def _journey_undock_navigate(ctx):
         _wait_view_settled(sm)
         if need_warp:
             b_cur = _get_beyonce(sm, cur_sys)
-            _warp_full(sm, b_cur, gate_id)
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
+            _warp_full(sm, b_cur, gate_id, ipc=ipc)
+        _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
         sm.RemoteSvc("beyonce").CmdStargateJump(gate_id)
         _wait_session_attr("solarsystemid2", next_sys, timeout_sec=3.0, raise_on_timeout=True)
         _wait_view_settled(sm)
@@ -447,7 +451,7 @@ def _journey_market_trade(ctx):
         False,
         90,
     )
-    sm.RemoteSvc("timeControl").AdvanceClock(305)
+    _advance_clock(sm, ipc, 305)
     orders = sm.RemoteSvc("marketProxy").GetCharOrders()
     sell_orders = [
         o for o in (orders or [])
@@ -554,8 +558,8 @@ def _journey_mining_loop(ctx):
                     break
         if not rock_id:
             b_jita_mine = _get_beyonce(sm, 30000142)
-            _warp_full(sm, b_jita_mine, 50001249)
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            _warp_full(sm, b_jita_mine, 50001249, ipc=ipc)
+            _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
             sm.RemoteSvc("beyonce").CmdStargateJump(50001249)
             _wait_session_attr("solarsystemid2", 30000144, timeout_sec=3.0, raise_on_timeout=True)
             b_perim_mine = _get_beyonce(sm, 30000144)
@@ -569,7 +573,7 @@ def _journey_mining_loop(ctx):
                     if slim_b is not None and int(getattr(slim_b, "groupID", 0) or 0) == 9:
                         belt_id = int(bid)
                         break
-            _warp_full(sm, b_perim_mine, belt_id)
+            _warp_full(sm, b_perim_mine, belt_id, ipc=ipc)
             _wait_view_settled(sm)
             bp_mine = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
             if bp_mine is not None:
@@ -590,15 +594,15 @@ def _journey_mining_loop(ctx):
             dogma_mine.Deactivate(miner_id)
         if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) == 30000144:
             b_perim_ret = _get_beyonce(sm, 30000144)
-            _warp_full(sm, b_perim_ret, 50002185)
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            _warp_full(sm, b_perim_ret, 50002185, ipc=ipc)
+            _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
             sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
             _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0, raise_on_timeout=True)
             _ensure_view(sm, "inflight")
             _wait_view_settled(sm)
             b_jita_ret = _get_beyonce(sm, 30000142)
-            _warp_full(sm, b_jita_ret, 60003760)
-        _dock_station(sm, 60003760)
+            _warp_full(sm, b_jita_ret, 60003760, ipc=ipc)
+        _dock_station(sm, 60003760, ipc=ipc)
         if venture_id:
             inv_hangar, _ = sm.RemoteSvc("invbroker").MachoBindObject(60003760, None)
             _, ship_ore_items = sm.RemoteSvc("invbroker").MachoBindObject(venture_id, ("List", (), {}))
@@ -626,8 +630,8 @@ def _journey_mining_loop(ctx):
         try:
             if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) == 30000144:
                 b_perim_ret = _get_beyonce(sm, 30000144)
-                _warp_full(sm, b_perim_ret, 50002185)
-                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                _warp_full(sm, b_perim_ret, 50002185, ipc=ipc)
+                _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
                 sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
                 _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0, raise_on_timeout=True)
                 _ensure_view(sm, "inflight")
@@ -851,12 +855,12 @@ def _journey_wormholes_filaments(ctx):
     fil_res = None
     body_failed = False
     try:
-        _undock_ship(sm)
+        _undock_ship(sm, ipc=ipc)
         _trace(cfg, "j15 undocked")
         beyonce_jita = _get_beyonce(sm, 30000142)
-        _warp_full(sm, beyonce_jita, 40009082)
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-        sm.RemoteSvc("timeControl").AdvanceClock(65)
+        _warp_full(sm, beyonce_jita, 40009082, ipc=ipc)
+        _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
+        _advance_clock(sm, ipc, 65)
         fid_wh = int(_extract_id(sm.RemoteSvc("fleetMgr").CreateFleet()))
         fl_wh, _ = sm.RemoteSvc("fleetObjectHandler").MachoBindObject(fid_wh, None)
         sm.GetService("fleet").fleet = fl_wh
@@ -887,7 +891,7 @@ def _journey_wormholes_filaments(ctx):
             for _ in range(3):
                 beyonce_rm.CmdSetSpeedFraction(1.0)
                 beyonce_rm.CmdFollowBall(gate_id, 500.0)
-                sm.RemoteSvc("timeControl").AdvanceClock(220)
+                _advance_clock(sm, ipc, 220)
                 try:
                     _trace(cfg, "j15 room %d gate %d" % (rm, gate_id))
                     if rm < 3:
@@ -905,8 +909,8 @@ def _journey_wormholes_filaments(ctx):
         _wait_session_attr("solarsystemid2", 30000142, timeout_sec=5.0, raise_on_timeout=True)
         _sync_quasar_gateway(sm, char_id)
         _wait_view_settled(sm)
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-        sm.RemoteSvc("timeControl").AdvanceClock(65)
+        _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
+        _advance_clock(sm, ipc, 65)
         _trace(cfg, "j15 calling ActivateRandomJumpFilament(%d)" % nj_id)
         fil_res = sm.RemoteSvc("randomJumpMgr").ActivateRandomJumpFilament(nj_id)
         dest_sys = int(_get_field(fil_res, "solarSystemID", _live_session_attr("solarsystemid2", 30000142)) or 30000142)
@@ -922,17 +926,17 @@ def _journey_wormholes_filaments(ctx):
         except Exception as exc:
             cleanup_errors.append("leave_fleet: %s" % exc)
         try:
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
         except Exception as exc:
             cleanup_errors.append("clear_session_timer: %s" % exc)
         try:
             if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) != 30000142:
-                sm.RemoteSvc("slash").SlashCmd("/tr 60003760")
+                _try_slash(sm, "/tr 60003760", ipc=ipc)
                 _wait_session_attr("solarsystemid2", 30000142, timeout_sec=5.0, raise_on_timeout=True)
                 _wait_view_settled(sm)
             elif not _live_session_attr("stationid", None):
                 beyonce_jita2 = _get_beyonce(sm, 30000142)
-                _warp_full(sm, beyonce_jita2, 60003760)
+                _warp_full(sm, beyonce_jita2, 60003760, ipc=ipc)
         except Exception as exc:
             cleanup_errors.append("return_to_jita: %s" % exc)
         try:
@@ -966,9 +970,9 @@ def _journey_ship_loss(ctx):
     try:
         ins_res = sm.RemoteSvc("insuranceSvc").InsureShip(curr_ship, 1.0)
         sm.RemoteSvc("insuranceSvc").GetContracts()
-        _undock_ship(sm)
+        _undock_ship(sm, ipc=ipc)
         sm.RemoteSvc("ship").SelfDestruct()
-        sm.RemoteSvc("timeControl").AdvanceClock(125)
+        _advance_clock(sm, ipc, 125)
         _sleep_ms(250)
         _wait_view_settled(sm)
         pod_ship = int(_live_session_attr("shipid", 0) or 0)
@@ -1044,10 +1048,7 @@ def _journey_industry(ctx):
             or 10800
         )
         adv_ind = max(14400, dur_ind + 600)
-        try:
-            _advance_clock(sm, ipc, adv_ind)
-        except Exception:
-            sm.RemoteSvc("timeControl").AdvanceClock(adv_ind)
+        _advance_clock(sm, ipc, adv_ind)
         jid_ind = _extract_id(job_res)
         sm.RemoteSvc("industryManager").CompleteJob(jid_ind)
     passed = job_res is not None
@@ -1117,7 +1118,7 @@ def _journey_corporation(ctx):
     _try_slash(sm, "/giveskill 3363 2")
     _try_slash(sm, "/giveskill 11584 2")
     _try_slash(sm, "/giveisk 1500000000")
-    sm.RemoteSvc("timeControl").ClearSessionTimer()
+    _clear_session_timer(sm, ipc=ctx.get("ipc"), raise_on_error=False)
     corp_id = 0
     ali_id = 0
     office_res = None
@@ -1137,7 +1138,7 @@ def _journey_corporation(ctx):
         )
         ali_id = int(_extract_id(ali_res, ("allianceID", "id")))
         _wait_session_attr("allianceid", ali_id, timeout_sec=3.0, raise_on_timeout=True)
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        _clear_session_timer(sm, ipc=ctx.get("ipc"), raise_on_error=False)
         corp_info = sm.RemoteSvc("corpRegistry").GetCorporation(corp_id)
         ali_info = sm.RemoteSvc("allianceRegistry").GetAlliance(ali_id)
         wars_rep = sm.RemoteSvc("warsInfoMgr").GetWarsByOwners([corp_id, ali_id])
@@ -1205,13 +1206,13 @@ def _journey_structures(ctx):
             _try_slash(sm, "/giveskill 3363 2")
             _try_slash(sm, "/giveskill 11584 2")
             _try_slash(sm, "/giveisk 500000000")
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
             c_res = sm.RemoteSvc("corpRegistry").AddCorporation(
                 "Structure Builders", "EVSB", "Structure corporation", 10.0, False
             )
             c_id = int(_extract_id(c_res, ("corporationID", "corpID", "id")))
             _wait_session_attr("corpid", c_id, timeout_sec=3.0, raise_on_timeout=True)
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
         _, inv_ships = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
         cur_ship = None
         for it in (inv_ships or []):
@@ -1227,35 +1228,35 @@ def _journey_structures(ctx):
             _try_slash(sm, "/createitem 20185 1")
             hauler_st, _ = _find_hangar_item(sm, 60003760, 20185, reverse=False)
             if hauler_st:
-                _board_station_ship(sm, hauler_st, assemble=True)
+                _board_station_ship(sm, hauler_st, assemble=True, ipc=ipc)
                 active_st_ship = hauler_st
         _try_slash(sm, "/createitem 35832 1")
         cit_id, _ = _find_hangar_item(sm, 60003760, 35832, reverse=False)
         if cit_id:
             sm.GetService("invCache").GetInventoryFromId(active_st_ship).Add(cit_id, 60003760)
-        _undock_ship(sm)
+        _undock_ship(sm, ipc=ipc)
         if cit_id:
             b_jita_st = _get_beyonce(sm, 30000142)
-            _warp_full(sm, b_jita_st, 50001249)
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            _warp_full(sm, b_jita_st, 50001249, ipc=ipc)
+            _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
             sm.RemoteSvc("beyonce").CmdStargateJump(50001249)
             _wait_session_attr("solarsystemid2", 30000144, timeout_sec=3.0)
             b_perim = _get_beyonce(sm, 30000144)
             _ensure_view(sm, "inflight")
             _wait_view_settled(sm)
-            _warp_full(sm, b_perim, 50002183)
-            sm.RemoteSvc("slash").SlashCmd("/heal")
+            _warp_full(sm, b_perim, 50002183, ipc=ipc)
+            _try_slash(sm, "/heal", ipc=ipc)
             b_perim.CmdWarpToStuff("item", 40009248, 0.0)
-            sm.RemoteSvc("timeControl").AdvanceClock(112)
+            _advance_clock(sm, ipc, 112)
             bm_mid = sm.RemoteSvc("accessGroupBookmarkMgr").BookmarkStaticLocation(
                 "Perim MidSafe", active_st_ship, "Perim", None
             )
             _sleep_sim_ms(350)
-            sm.RemoteSvc("timeControl").AdvanceClock(240)
+            _advance_clock(sm, ipc, 240)
             _sleep_sim_ms(1500)
             _wait_warp_fx_settled(sm, timeout_sec=4.0)
-            _warp_full(sm, b_perim, int(bm_mid[0]), stuff_type="bookmark")
-            sm.RemoteSvc("timeControl").AdvanceClock(604860)
+            _warp_full(sm, b_perim, int(bm_mid[0]), stuff_type="bookmark", ipc=ipc)
+            _advance_clock(sm, ipc, 604860)
             anc_res = sm.RemoteSvc("structureDeployment").Anchor(cit_id, "Station Citadel")
             struct_id = int(_extract_id(anc_res) or cit_id)
             core_rep = _try_slash(sm, "/load me 56201 1")
@@ -1268,24 +1269,24 @@ def _journey_structures(ctx):
             inv_st.Add(core_id, active_st_ship, flag=180)
             for _ in range(4):
                 _try_slash(sm, "/upwelltimer %d" % struct_id)
-            sm.RemoteSvc("timeControl").AdvanceClock(900)
+            _advance_clock(sm, ipc, 900)
             _sleep_ms(200)
             sm.RemoteSvc("structureDirectory").GetMyCorporationStructures()
             sm.RemoteSvc("structureDirectory").GetMyDockableStructures(30000144)
             try:
-                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
                 sm.RemoteSvc("structureDocking").Dock(struct_id)
                 _wait_session_attr("structureid", struct_id, timeout_sec=3.0, raise_on_timeout=True)
                 sm.RemoteSvc("structureControl").TakeControl(struct_id)
                 sm.RemoteSvc("structureControl").GetStructurePilot(struct_id)
                 sm.RemoteSvc("structureControl").ReleaseControl(struct_id)
-                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
                 sm.RemoteSvc("structureDocking").Undock(struct_id)
                 _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
             except Exception:
                 if _live_session_attr("structureid", None) is not None:
                     try:
-                        sm.RemoteSvc("timeControl").ClearSessionTimer()
+                        _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
                         sm.RemoteSvc("structureDocking").Undock(struct_id)
                         _wait_session_attr("structureid", None, timeout_sec=3.0, raise_on_timeout=True)
                     except Exception as undock_exc:
@@ -1296,8 +1297,8 @@ def _journey_structures(ctx):
                         sys.stdout.flush()
                 raise
             _cleanup_corp_structures(sm, ipc=ipc, structure_ids=(struct_id,))
-            _warp_full(sm, b_perim, 50002185)
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            _warp_full(sm, b_perim, 50002185, ipc=ipc)
+            _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
             sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
             _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0, raise_on_timeout=True)
             b_jita_back = _get_beyonce(sm, 30000142)
@@ -1548,7 +1549,7 @@ def _journey_titans(ctx):
     dd_ok = False
     body_failed = False
     try:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
         _try_slash(sm, "/tr 30004759")
         _wait_session_attr("solarsystemid2", 30004759, timeout_sec=5.0, raise_on_timeout=True)
         _ensure_view(sm, "inflight")
@@ -1556,7 +1557,7 @@ def _journey_titans(ctx):
         sp_tit = _try_slash(sm, "/spawn 11567")
         titan_id = int(_get_field(sp_tit, "spawnedID", _get_field(sp_tit, "itemID", 0)) or 0)
         if titan_id > 0:
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
             sm.RemoteSvc("ship").Board(titan_id)
             _wait_session_attr("shipid", titan_id, timeout_sec=3.0, raise_on_timeout=True)
             dd_fit = _try_slash(sm, "/fit me 24550")
@@ -1573,7 +1574,7 @@ def _journey_titans(ctx):
                 dogma_tit, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(titan_id, None)
                 dd_res = dogma_tit.Activate(dd_mod_id, "superWeapon", cap_tgt_id, 0)
                 dd_ok = dd_res is not None
-                sm.RemoteSvc("timeControl").AdvanceClock(310)
+                _advance_clock(sm, ipc, 310)
                 _try_slash(sm, "/despawn %d" % cap_tgt_id)
     except Exception:
         body_failed = True
@@ -1581,7 +1582,7 @@ def _journey_titans(ctx):
     finally:
         cleanup_errors = []
         try:
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            _clear_session_timer(sm, ipc=ipc, raise_on_error=False)
         except Exception as exc:
             cleanup_errors.append("ClearSessionTimer: %s" % exc)
         try:
@@ -1738,6 +1739,7 @@ def _execute_all_journeys(cfg, ipc):
         return ctx["char2_id"]
 
     ctx["ensure_c2_ready"] = ensure_c2_ready
+    _configure_host_gm_bridge(cfg=cfg, ipc=ipc, target_char_id=char_id)
 
     out_dir = cfg.get("out_dir")
     if out_dir and not os.path.isdir(out_dir):
@@ -1831,6 +1833,7 @@ def _execute_all_journeys(cfg, ipc):
             guard_seq_before = boot_guard_cursor
         else:
             guard_seq_before = _read_guard_cursor()
+        sim_seq_before = snapshot_sim_time_cursor()
         first_journey = False
         pre_reset_tb = None
         try:
@@ -1853,6 +1856,7 @@ def _execute_all_journeys(cfg, ipc):
                 shot_path = _capture_inclient_screenshot(out_dir, jid, ipc=ipc)
             metrics = {"pre_reset_failed": True}
             guard_info = _collect_guard_telemetry(guard_seq_before)
+            sim_info = collect_sim_time_telemetry(sim_seq_before)
             entry = {
                 "passed": False,
                 "bridge_verified": False,
@@ -1864,6 +1868,7 @@ def _execute_all_journeys(cfg, ipc):
                 "evidence": _format_evidence(False, [], metrics, shot_path, pre_reset_tb),
             }
             entry.update(guard_info)
+            entry.update(sim_info)
             outcomes[jid] = entry
             if outcomes_path:
                 _atomic_write_json(outcomes_path, outcomes)
@@ -1917,6 +1922,7 @@ def _execute_all_journeys(cfg, ipc):
             tb_str = ("%s\n%s" % (tb_str, post_tb)) if tb_str else post_tb
 
         guard_info = _collect_guard_telemetry(guard_seq_before)
+        sim_info = collect_sim_time_telemetry(sim_seq_before)
         entry = {
             "passed": bool(passed),
             "bridge_verified": bool(passed),
@@ -1928,6 +1934,7 @@ def _execute_all_journeys(cfg, ipc):
             "evidence": _format_evidence(bool(passed), j_rpcs, metrics, shot_path, tb_str),
         }
         entry.update(guard_info)
+        entry.update(sim_info)
         outcomes[jid] = entry
         if outcomes_path:
             _atomic_write_json(outcomes_path, outcomes)
