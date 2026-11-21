@@ -1034,7 +1034,7 @@ fn sync_character_session_probe_is_non_destructive_and_tracks_db_alliance() {
         ch.character_id = char_id;
         ch.corporation_id = corp_id;
         ch.alliance_id = Some(ally_a);
-        ch.active_ship_id = 0;
+        ch.active_ship_id = new_ship;
         ch.station_id = Some(60_003_760);
         ch.structure_id = None;
         ch.solar_system_id = 30_000_142;
@@ -1097,4 +1097,82 @@ fn sync_character_session_probe_is_non_destructive_and_tracks_db_alliance() {
     });
     sync_character_session(&ctx, &mut real_sess);
     assert_eq!(real_sess.alliance_id, None);
+}
+
+#[test]
+fn bf01_bf02_forced_fw_and_ship_sync_converge_across_direct_enlistment_leave_ship_and_relogin() {
+    let ctx = test_ctx();
+    let sid = 1_000_891_100_i64;
+    let restored_ship = 9_881_201_i64;
+    let (char_id, corp_id, uid) = ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("demo char");
+        let cid = ch.character_id;
+        let corp = ch.corporation_id;
+        let uid = if ch.user_id == 0 { 1 } else { ch.user_id };
+        ch.user_id = uid;
+        ch.station_id = Some(60_003_760);
+        ch.structure_id = None;
+        ch.solar_system_id = 30_000_142;
+        ch.war_faction_id = None;
+        ch.active_ship_id = restored_ship;
+        snap.characters.insert(cid, ch);
+        let mut fw = crate::services::fw_enlistment::load_store(snap);
+        fw.forced_war_faction_sync.insert(cid, None);
+        if let Ok(json) = serde_json::to_string(&fw) {
+            snap.item_custom_names
+                .insert(crate::services::fw_enlistment::FW_ENLISTMENT_STORE_KEY, json);
+        }
+        (cid, corp, uid)
+    });
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| {
+        s.forced_session_ship_sync.insert(char_id, (sid, Some(restored_ship)));
+    });
+    let mut sess = make_session(char_id, corp_id, 30_000_142, None, Some(60_003_760), 0);
+    sync_character_session(&ctx, &mut sess);
+    assert_eq!(sess.war_faction_id, None);
+    assert_eq!(sess.ship_id, Some(restored_ship));
+
+    // BF-01: CreateMyDirectEnlistment & RemoveMyDirectEnlistment must survive sync_character_session.
+    crate::services::fw_enlistment::handle(
+        &ctx, &mut sess, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[eve_proto::PyRep::Integer(500_001)],
+    ).unwrap().expect("CreateMyDirectEnlistment succeeds");
+    sync_character_session(&ctx, &mut sess);
+    assert_eq!(sess.war_faction_id, Some(500_001));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut fw = crate::services::fw_enlistment::load_store(snap);
+        fw.forced_war_faction_sync.insert(char_id, Some(500_001));
+        if let Ok(json) = serde_json::to_string(&fw) {
+            snap.item_custom_names.insert(crate::services::fw_enlistment::FW_ENLISTMENT_STORE_KEY, json);
+        }
+    });
+    sync_character_session(&ctx, &mut sess);
+    crate::services::fw_enlistment::handle(
+        &ctx, &mut sess, "fwCharacterEnlistmentMgr", "RemoveMyDirectEnlistment", &[],
+    ).unwrap().expect("RemoveMyDirectEnlistment succeeds");
+    sync_character_session(&ctx, &mut sess);
+    assert_eq!(sess.war_faction_id, None);
+
+    // BF-02: LeaveShip / active_ship_id == 0 and SelectCharacterID must never resurrect restored_ship.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = 0;
+    });
+    sess.ship_id = None;
+    sync_character_session(&ctx, &mut sess);
+    assert_eq!(sess.ship_id, None);
+
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| {
+        s.forced_session_ship_sync.insert(char_id, (sid, Some(restored_ship)));
+    });
+    let mut relogin = SessionState::new(sess.session_id + 1);
+    relogin.user_id = Some(uid);
+    let _ = ctx.db.acquire_online_lock(uid, relogin.session_id, None, true, ctx.now_unix());
+    let kw = HashMap::new();
+    crate::services::character_skills::character_gm_tools::handle_char_unbound(
+        &ctx, &mut relogin, "charUnboundMgr", "SelectCharacterID", &[eve_proto::PyRep::Integer(char_id)], &kw,
+    ).unwrap().expect("SelectCharacterID succeeds");
+    assert_eq!(relogin.ship_id, None);
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| {
+        assert!(!s.forced_session_ship_sync.contains_key(&char_id));
+    });
 }

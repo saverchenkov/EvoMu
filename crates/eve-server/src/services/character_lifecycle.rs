@@ -111,23 +111,29 @@ fn unix_to_filetime(unix_secs: u64) -> i64 {
     (unix_secs as i64 + 11_644_473_600) * 10_000_000
 }
 
-/// Returns `Some(result)` for RPCs fully handled here; `None` lets the regular handler run.
-fn has_corp_director_or_personnel_manager_role(snap: &eve_db::WorldStateSnapshot, caller_char_id: i64, target_corp_id: i64) -> bool {
-    let Some(corp) = snap.corporations.get(&target_corp_id) else {
-        return false;
-    };
-    if eve_db::is_excluded_corp_member(corp, caller_char_id) {
-        return false;
-    }
-    let (is_ceo, mut total_roles) =
+/// Checks whether `caller_char_id` holds Director or Personnel Manager global roles in `target_corp_id`.
+fn has_corp_director_or_personnel_manager_role_at(
+    snap: &eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    caller_char_id: i64,
+    target_corp_id: i64,
+    now_unix: u64,
+) -> bool {
+    let actor = eve_db::CorpActor::resolve_for_corp(snap, sde, target_corp_id, caller_char_id, None, now_unix);
+    actor.is_member && actor.is_director_or(eve_db::corp_roles::ROLE_PERSONNEL_MANAGER)
+}
+
+#[cfg(test)]
+fn has_corp_director_or_personnel_manager_role(
+    snap: &eve_db::WorldStateSnapshot,
+    caller_char_id: i64,
+    target_corp_id: i64,
+) -> bool {
+    let (is_ceo, total_roles) =
         snap.effective_corp_roles_at_db(target_corp_id, caller_char_id, None, 0);
-    if is_ceo {
-        return true;
-    }
-    if let Some(scoped) = snap.char_scoped_roles.get(&caller_char_id) {
-        total_roles |= eve_db::corp_roles::encode_corp_role_names(&scoped.roles);
-    }
-    (total_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER)) != 0
+    is_ceo
+        || (total_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER))
+            != 0
 }
 
 pub fn handle(
@@ -1088,7 +1094,15 @@ fn handle_char_mgr(
                 let authorized = ctx.db.with_snapshot(|snap| {
                     let target_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                     let caller_corp = snap.characters.get(&session_char_id).map(|c| c.corporation_id).unwrap_or(0);
-                    target_corp > 0 && target_corp == caller_corp && has_corp_director_or_personnel_manager_role(snap, session_char_id, target_corp)
+                    target_corp > 0
+                        && target_corp == caller_corp
+                        && has_corp_director_or_personnel_manager_role_at(
+                            snap,
+                            &ctx.sde,
+                            session_char_id,
+                            target_corp,
+                            ctx.now_unix(),
+                        )
                 });
                 if !authorized {
                     return Some(Err(err(

@@ -161,6 +161,14 @@ fn resolve_enforces_npc_exclusion_ceo_pending_stasis_and_location_scoping() {
     let global_post = CorpActor::resolve(&snap, &sde, member_id, now + 86_400);
     assert_eq!(global_post.effective_roles & ROLE_HANGAR_CAN_TAKE[1], 0);
     assert_eq!(global_post.effective_roles & ROLE_HANGAR_CAN_TAKE[2], 0);
+    snap.characters.get_mut(&member_id).unwrap().station_id = Some(base_id);
+    let (db_ceo, db_global) =
+        effective_corp_roles_at_db(&snap, corp_id, member_id, None, now + 86_400);
+    assert!(!db_ceo);
+    assert_eq!(db_global & ROLE_HANGAR_CAN_TAKE[1], 0);
+    let (_, db_base) =
+        effective_corp_roles_at_db(&snap, corp_id, member_id, Some(base_id), now + 86_400);
+    assert_ne!(db_base & ROLE_HANGAR_CAN_TAKE[1], 0);
 
     // 6. Cross-corp resolve_for_corp denies even CEO if character's DB corp changed, and AllianceRecord fallback resolves
     snap.alliances.insert(

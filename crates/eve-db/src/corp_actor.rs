@@ -266,6 +266,7 @@ pub(crate) fn evaluate_corp_roles_for_record(
 }
 
 /// Computes `(is_ceo, effective_roles)` purely from `snap` without any `session_roles` fallback.
+/// Location-scoped roles are evaluated only when an explicit `Some(location_id)` is provided.
 pub fn effective_corp_roles_at_db(
     snap: &WorldStateSnapshot,
     corp_id: i64,
@@ -276,7 +277,16 @@ pub fn effective_corp_roles_at_db(
     let Some(corp) = snap.corporations.get(&corp_id) else {
         return (false, 0);
     };
-    evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, true, None, now_unix)
+    evaluate_corp_roles_for_record(
+        snap,
+        corp_id,
+        corp,
+        char_id,
+        location_id,
+        location_id.is_some(),
+        None,
+        now_unix,
+    )
 }
 
 pub(crate) fn effective_corp_roles_at_with_fallback(
@@ -334,6 +344,10 @@ impl CorpActor {
     }
 
     /// Resolves `char_id`'s DB authority specifically against `corp_id` at `location_id`.
+    ///
+    /// Synthetic fixtures without a `snap.characters` entry (`!char_in_db`) can still resolve
+    /// `is_player_corp_member()` / `is_director()` when present in `corp.ceo_id` or non-empty
+    /// `corp.members`, whereas [`Self::require_member`] strictly requires `char_in_db`.
     pub fn resolve_for_corp(
         snap: &WorldStateSnapshot,
         sde: &SdeRegistry,

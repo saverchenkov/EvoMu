@@ -67,6 +67,9 @@ fn save_store(snap: &mut eve_db::WorldStateSnapshot, store: &FwEnlistmentStore) 
 }
 
 pub(crate) fn take_forced_war_faction_sync(ctx: &ServerContext, char_id: i64) -> Option<Option<i64>> {
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+        s.forced_war_faction_sync_db_baseline.remove(&char_id);
+    });
     if !ctx.db.with_snapshot(|s| load_store(s).forced_war_faction_sync.contains_key(&char_id)) {
         return None;
     }
@@ -468,8 +471,15 @@ fn create_direct(
         rec.faction_id = Some(faction_id);
         rec.enlisted_on_unix = Some(now);
         snap.fw_runtime.direct_enlisted_chars.insert(char_id, faction_id);
+        let mut store = load_store(snap);
+        if store.forced_war_faction_sync.remove(&char_id).is_some() {
+            save_store(snap, &store);
+        }
         Ok((new_corp_opt, released))
     })?;
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+        s.forced_war_faction_sync_db_baseline.remove(&char_id);
+    });
     let (moved_corp_opt, released) = (moved_corp_opt.0, moved_corp_opt.1);
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if let Some((_, new_cid)) = moved_corp_opt {
@@ -556,9 +566,13 @@ fn remove_direct(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRe
         };
         let mut store = load_store(snap);
         store.cooldown_until.insert(char_id, until);
+        store.forced_war_faction_sync.remove(&char_id);
         save_store(snap, &store);
         Ok((new_corp_opt, old_wf, corp_fac, released))
     })?;
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+        s.forced_war_faction_sync_db_baseline.remove(&char_id);
+    });
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if let Some((_, new_cid)) = moved_corp_opt {
         session.corporation_id = Some(new_cid);

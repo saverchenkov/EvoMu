@@ -369,6 +369,9 @@ async fn engage_structure_control(
     }
 
     let old_ship = session.ship_id;
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+        s.forced_session_ship_sync.remove(&char_id);
+    });
     let _ = ctx.execute_session_transition_sync(
         Some(session),
         crate::router::SessionTransitionSpec::for_kind(
@@ -557,6 +560,9 @@ fn sync_released_ship_on_session(
     restored_ship: i64,
 ) {
     let old_ship = session.ship_id;
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+        s.forced_session_ship_sync.remove(&char_id);
+    });
     let relinquished = if restored_ship > 0 {
         let _ = ctx.execute_session_transition_sync(
             Some(session),
@@ -746,20 +752,15 @@ pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionS
     let Some(cid) = session.character_id else {
         return;
     };
-    let (forced_corp, baseline, forced_ship) =
+    let (forced_corp, baseline, wf_baseline, forced_ship) =
         crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
             (
                 s.forced_session_corp_sync.get(&cid).copied(),
                 s.forced_session_corp_sync_db_baseline.get(&cid).copied(),
+                s.forced_war_faction_sync_db_baseline.get(&cid).copied(),
                 s.forced_session_ship_sync.get(&cid).copied(),
             )
         });
-    if let Some((old_structure_id, new_ship_opt)) = forced_ship {
-        if new_ship_opt.is_some() || session.ship_id == Some(old_structure_id) {
-            session.ship_id = new_ship_opt;
-        }
-    }
-    let ship_after_forced = session.ship_id;
     let now_unix = ctx.now_unix();
     let sess_corp_opt = session.corporation_id.filter(|&sc| sc > 0);
     let (actor, forced_wf, ch_opt, stale_struct, split_fixture_ally) = ctx.db.with_snapshot(|snap| {
@@ -779,7 +780,9 @@ pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionS
             .get(&cid)
             .copied();
         let ch_opt = snap.characters.get(&cid).cloned();
-        let stale_struct = ship_after_forced.is_some_and(|sid| snap.structures.contains_key(&sid));
+        let stale_struct = session
+            .ship_id
+            .is_some_and(|sid| snap.structures.contains_key(&sid));
         (actor, forced_wf, ch_opt, stale_struct, split_fixture_ally)
     });
     if actor.char_in_db {
@@ -842,13 +845,42 @@ pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionS
         session.alliance_id = new_ally;
         session.corp_role = new_role;
     }
-    if let Some(new_wf) = forced_wf {
-        session.war_faction_id = new_wf;
-    }
     if let Some(ch) = ch_opt {
+        if let Some(queued_wf) = forced_wf {
+            if queued_wf == ch.war_faction_id {
+                if wf_baseline != Some(ch.war_faction_id) {
+                    crate::services::fleet_social::fleet_social_persistence::with_social_state(
+                        ctx,
+                        |s| {
+                            s.forced_war_faction_sync_db_baseline
+                                .insert(cid, ch.war_faction_id);
+                        },
+                    );
+                }
+                session.war_faction_id = ch.war_faction_id;
+            } else if wf_baseline == Some(queued_wf) {
+                session.war_faction_id = ch.war_faction_id;
+            } else {
+                session.war_faction_id = queued_wf;
+            }
+        } else {
+            if wf_baseline.is_some() {
+                crate::services::fleet_social::fleet_social_persistence::with_social_state(
+                    ctx,
+                    |s| {
+                        s.forced_war_faction_sync_db_baseline.remove(&cid);
+                    },
+                );
+            }
+            session.war_faction_id = ch.war_faction_id;
+        }
         let override_ship = if ch.active_ship_id != 0 {
             Some(Some(ch.active_ship_id))
-        } else if stale_struct {
+        } else if stale_struct
+            || forced_ship.is_some_and(|(old_structure_id, new_ship_opt)| {
+                new_ship_opt.is_none() && session.ship_id == Some(old_structure_id)
+            })
+        {
             Some(None)
         } else {
             Some(session.ship_id)
@@ -859,6 +891,15 @@ pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionS
             override_ship,
             Some(&ctx.sde),
         );
+    } else {
+        if let Some(new_wf) = forced_wf {
+            session.war_faction_id = new_wf;
+        }
+        if let Some((old_structure_id, new_ship_opt)) = forced_ship {
+            if new_ship_opt.is_some() || session.ship_id == Some(old_structure_id) {
+                session.ship_id = new_ship_opt;
+            }
+        }
     }
 }
 

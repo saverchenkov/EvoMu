@@ -567,13 +567,30 @@ pub(crate) fn handle_update_members(
                     new_roles: dec(new_roles),
                 });
             }
+            let full_effective_roles = if snap
+                .corporations
+                .get(&corp_id)
+                .is_some_and(|c| c.ceo_id == target_char_id)
+            {
+                effective_roles
+            } else {
+                eve_db::CorpActor::resolve_for_corp(
+                    snap,
+                    &ctx.sde,
+                    corp_id,
+                    target_char_id,
+                    None,
+                    now_unix,
+                )
+                .effective_roles
+            };
             let delayed = (pending_hangar | pending_title_delayed | pend_hq | pend_base | pend_other) != 0
                 || new_roles > old_roles;
             results.push((
                 target_char_id,
                 old_roles,
                 new_roles,
-                effective_roles,
+                full_effective_roles,
                 delayed,
                 (old_ra.roles_at_hq, eff_hq, old_ra.roles_at_base, eff_base, old_ra.roles_at_other, eff_other),
             ));

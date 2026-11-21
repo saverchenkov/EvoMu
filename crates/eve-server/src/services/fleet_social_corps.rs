@@ -299,7 +299,6 @@ pub(crate) fn require_corp_caller(
         }
     });
     let caller_corp = initial_corp?;
-    session.corporation_id = Some(caller_corp);
     if let Some(target) = target_corp_arg {
         if target != caller_corp {
             return Err(corp_actor_denied_error(
@@ -322,6 +321,7 @@ pub(crate) fn require_corp_caller(
             actor.is_director_or(corp_roles::ROLE_PERSONNEL_MANAGER),
         ))
     })?;
+    session.corporation_id = Some(caller_corp);
     session.alliance_id = alliance_id;
     Ok((caller_corp, char_id, has_director))
 }
@@ -341,7 +341,10 @@ fn get_corp_member_snapshot(
         mids.sort_unstable();
         mids.into_iter().filter_map(|mid| {
             snap.characters.get(&mid).map(|ch| {
-                let (_, role_mask) = snap.effective_corp_roles_at_db(corp_id, mid, None, now_unix);
+                let role_mask = eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, mid, None, now_unix,
+                )
+                .effective_roles;
                 let ra = snap.corp_role_assignments.get(&(corp_id, mid)).cloned().unwrap_or_default();
                 let tmask = gov_opt.and_then(|g| g.member_titles.get(&mid).copied()).unwrap_or(0);
                 let title = gov_opt
@@ -1453,7 +1456,7 @@ pub(super) fn handle_corps(
                     if let Some(app) = corp_mut.applications.get_mut(&app_id) {
                         app.status = "Withdrawn".into();
                     }
-                    return Ok((corp_id, applicant_id, old_corp_id, "Withdrawn".to_string(), app_msg, app_ts, None, Vec::new()));
+                    return Ok((corp_id, applicant_id, old_corp_id, None, 0, "Withdrawn".to_string(), app_msg, app_ts, None, Vec::new()));
                 }
 
                 if is_invitation {
@@ -1469,7 +1472,7 @@ pub(super) fn handle_corps(
                     if let Some(app) = corp_mut.applications.get_mut(&app_id) {
                         app.status = "Rejected".into();
                     }
-                    return Ok((corp_id, applicant_id, old_corp_id, "Rejected".to_string(), app_msg, app_ts, None, Vec::new()));
+                    return Ok((corp_id, applicant_id, old_corp_id, None, 0, "Rejected".to_string(), app_msg, app_ts, None, Vec::new()));
                 }
                 if !action.eq_ignore_ascii_case("accepted") {
                     return Err(BridgeRpcError { code: "InvalidApplicationAction".into(), message: format!("Unknown application action '{action}'"), client_error: None });
@@ -1505,6 +1508,26 @@ pub(super) fn handle_corps(
                         client_error: None,
                     });
                 }
+
+                let old_ally = eve_db::corp_actor::resolve_corp_alliance_id(
+                    snap,
+                    &ctx.sde,
+                    old_corp_id,
+                    None,
+                );
+                let old_role = if old_corp_id != corp_id {
+                    eve_db::CorpActor::resolve_for_corp(
+                        snap,
+                        &ctx.sde,
+                        old_corp_id,
+                        applicant_id,
+                        None,
+                        now_unix,
+                    )
+                    .effective_roles
+                } else {
+                    0
+                };
 
                 if old_corp_id != corp_id {
                     if let Some(old_corp) = snap.corporations.get_mut(&old_corp_id) {
@@ -1549,16 +1572,16 @@ pub(super) fn handle_corps(
                 };
                 let released = record_corp_join_in_snap(snap, applicant_id, old_corp_id, corp_id, now_unix);
 
-                Ok((corp_id, applicant_id, old_corp_id, "Accepted".to_string(), app_msg, app_ts, welcome_mail_id, released))
+                Ok((corp_id, applicant_id, old_corp_id, old_ally, old_role, "Accepted".to_string(), app_msg, app_ts, welcome_mail_id, released))
             });
 
             match res {
-                Ok((corp_id, applicant_id, old_corp_id, status_str, app_msg, app_ts, welcome_mail_id, released)) => {
+                Ok((corp_id, applicant_id, old_corp_id, old_ally, old_role, status_str, app_msg, app_ts, welcome_mail_id, released)) => {
                     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
                     if status_str == "Accepted" {
                         let fallback_sys = session.solar_system_id.unwrap_or(0);
                         let fallback_dock = session.station_id.or(session.structure_id);
-                        let (old_ally, new_ally, old_role, app_sys, app_dock) = ctx.db.with_snapshot(|s| {
+                        let (new_ally, app_sys, app_dock) = ctx.db.with_snapshot(|s| {
                             let (sys_id, dock_id) = s
                                 .characters
                                 .get(&applicant_id)
@@ -1568,17 +1591,9 @@ pub(super) fn handle_corps(
                                 eve_db::corp_actor::resolve_corp_alliance_id(
                                     s,
                                     &ctx.sde,
-                                    old_corp_id,
-                                    None,
-                                ),
-                                eve_db::corp_actor::resolve_corp_alliance_id(
-                                    s,
-                                    &ctx.sde,
                                     corp_id,
                                     None,
                                 ),
-                                s.effective_corp_roles_at_db(old_corp_id, applicant_id, None, now_unix)
-                                    .1,
                                 sys_id,
                                 dock_id,
                             )

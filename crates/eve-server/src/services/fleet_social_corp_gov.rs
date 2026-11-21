@@ -1335,7 +1335,7 @@ pub(super) fn handle_corp_gov(
                 if snap.corporations.contains_key(&corp_id) {
                     snap.seed_default_corp_titles(corp_id);
                 }
-                let corp_ally = snap.corporations.get(&corp_id).and_then(|c| c.alliance_id);
+                let corp_ally = eve_db::corp_actor::resolve_corp_alliance_id(snap, &ctx.sde, corp_id, None);
                 let mut results = Vec::with_capacity(rows_to_update.len());
                 let mut sync_updates = Vec::new();
                 for (title_id, title_name, masks) in &rows_to_update {
@@ -1380,8 +1380,10 @@ pub(super) fn handle_corp_gov(
                 titles.sort_by_key(|t| t.title_id);
                 if roles_mask != prev_rmask {
                     for mid in holders {
-                        let (_, new_eff) =
-                            snap.effective_corp_roles_at_db(corp_id, mid, None, now_unix);
+                        let new_eff = eve_db::CorpActor::resolve_for_corp(
+                            snap, &ctx.sde, corp_id, mid, None, now_unix,
+                        )
+                        .effective_roles;
                         sync_updates.push((mid, (corp_id, corp_ally, new_eff)));
                     }
                 }
@@ -1453,8 +1455,10 @@ pub(super) fn handle_corp_gov(
                             Vec::new()
                         };
                         for mid in holders {
-                            let (_, new_eff) =
-                                snap.effective_corp_roles_at_db(corp_id, mid, None, now_unix);
+                            let new_eff = eve_db::CorpActor::resolve_for_corp(
+                                snap, &ctx.sde, corp_id, mid, None, now_unix,
+                            )
+                            .effective_roles;
                             sync_updates.push((mid, (corp_id, corp_ally, new_eff)));
                         }
                     }
@@ -1491,6 +1495,7 @@ pub(super) fn handle_corp_gov(
         ("corpRegistry", "ResignFromCEO") => {
             let new_ceo_opt = args.first().and_then(|a| a.as_i64());
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let corp_ally = eve_db::corp_actor::resolve_corp_alliance_id(snap, &ctx.sde, corp_id, None);
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                     return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                 };
@@ -1505,7 +1510,6 @@ pub(super) fn handle_corp_gov(
                         client_error: None,
                     });
                 }
-                let corp_ally = corp.alliance_id;
                 corp.ceo_id = next_ceo;
                 if next_ceo != char_id {
                     corp.member_roles.insert(char_id, 0);
@@ -1844,8 +1848,10 @@ pub(super) fn handle_corp_gov(
                                 s, &ctx.sde, corp_id, None,
                             );
                             let r = if old_ceo_id > 0 && old_ceo_id != new_ceo_id {
-                                s.effective_corp_roles_at_db(corp_id, old_ceo_id, None, now_unix)
-                                    .1
+                                eve_db::CorpActor::resolve_for_corp(
+                                    s, &ctx.sde, corp_id, old_ceo_id, None, now_unix,
+                                )
+                                .effective_roles
                             } else {
                                 0
                             };

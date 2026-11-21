@@ -57,6 +57,7 @@ pub(crate) struct SocialExtrasState {
     pub(crate) active_probes: HashMap<i64, Vec<(i64, [f64; 3], f64, u64)>>,
     pub(crate) forced_session_corp_sync: HashMap<i64, (i64, Option<i64>, u64)>,
     pub(crate) forced_session_corp_sync_db_baseline: HashMap<i64, (i64, Option<i64>, u64)>,
+    pub(crate) forced_war_faction_sync_db_baseline: HashMap<i64, Option<i64>>,
     pub(crate) forced_session_ship_sync: HashMap<i64, (i64, Option<i64>)>,
 }
 
@@ -93,6 +94,16 @@ pub(crate) fn clear_forced_corp_sync(ctx: &ServerContext, char_id: i64) {
     with_social_state(ctx, |s| {
         s.forced_session_corp_sync.remove(&char_id);
         s.forced_session_corp_sync_db_baseline.remove(&char_id);
+    });
+}
+
+/// Clears all stale forced corp, war-faction-baseline, and ship sync state (e.g. on `SelectCharacterID`).
+pub(crate) fn clear_forced_session_syncs(ctx: &ServerContext, char_id: i64) {
+    with_social_state(ctx, |s| {
+        s.forced_session_corp_sync.remove(&char_id);
+        s.forced_session_corp_sync_db_baseline.remove(&char_id);
+        s.forced_war_faction_sync_db_baseline.remove(&char_id);
+        s.forced_session_ship_sync.remove(&char_id);
     });
 }
 

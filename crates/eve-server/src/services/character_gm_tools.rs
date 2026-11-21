@@ -599,7 +599,7 @@ pub fn handle_char_unbound(
                     c.corporation_id,
                 );
             }
-            crate::services::fleet_social::fleet_social_persistence::clear_forced_corp_sync(
+            crate::services::fleet_social::fleet_social_persistence::clear_forced_session_syncs(
                 ctx,
                 c.character_id,
             );

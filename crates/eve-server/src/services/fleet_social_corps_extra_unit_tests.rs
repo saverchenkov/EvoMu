@@ -599,3 +599,39 @@ fn authz_88_select_character_loads_db_roles_and_corp_handlers_reject_stale_sessi
     assert_eq!(mem_sess.corporation_id, Some(corp_id));
     assert_eq!(mem_sess.alliance_id, Some(ally_id));
 }
+
+#[test]
+fn bf03_global_corp_checks_ignore_docked_roles_and_respect_grant_clock() {
+    let now = 1_800_040_000_u64;
+    let ctx = test_ctx_with_clock(now);
+    let (mut ceo_sess, mut mem_sess) = seed_player_corps(&ctx);
+    let (corp_id, ceo_id, mem_id, hq_id) = (98_000_001_i64, 90_000_001_i64, 90_000_002_i64, 60_003_760_i64);
+    let hq_roles = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().hq_station_id = Some(hq_id);
+        let ch = snap.characters.get_mut(&mem_id).unwrap();
+        ch.station_id = Some(hq_id);
+        ch.structure_id = None;
+        snap.corp_role_assignments.insert((corp_id, mem_id), eve_db::CorpMemberRoleAssignment { character_id: mem_id, roles_at_hq: hq_roles, ..Default::default() });
+        let gov = snap.corp_governance.entry(corp_id).or_default();
+        gov.member_titles.insert(mem_id, 1);
+        gov.pending_role_grants.insert(mem_id, (corp_roles::ROLE_DIRECTOR, now + 3_600));
+    });
+    let kw = HashMap::new();
+    let members = call_corps(&ctx, &mut ceo_sess, "corpRegistry", "GetMembers", &[], &kw).unwrap();
+    let PyRep::Rowset { rows, .. } = &members else { panic!("expected Rowset") };
+    let row = rows.iter().find(|r| r[0].as_i64() == Some(mem_id)).unwrap();
+    assert_eq!((row[2].as_i64(), row[8].as_i64(), row[10].as_i64()), (Some(0), Some(0), Some(hq_roles as i64)));
+
+    call_corps(&ctx, &mut ceo_sess, "corpRegistry", "UpdateTitle", &[PyRep::Integer(1), PyRep::String("HQOnly".into()), PyRep::Integer(corp_roles::ROLE_TRADER as i64), PyRep::Integer(0)], &kw).unwrap();
+    call_corps(&ctx, &mut ceo_sess, "corpRegistry", "DeleteTitle", &[PyRep::Integer(1)], &kw).unwrap();
+    let queued = crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| s.forced_session_corp_sync.get(&mem_id).copied()).unwrap();
+    assert_eq!(queued.2, 0, "BF-03: UpdateTitle/DeleteTitle must not leak roles_at_hq into global sync");
+
+    let denied = crate::services::character_lifecycle::handle(&ctx, &mut mem_sess, "charMgr", "GetPrivateInfoOnCorpChange", &[PyRep::Integer(ceo_id)], &kw).unwrap();
+    assert_eq!(denied.unwrap_err().code, "CustomError");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance.get_mut(&corp_id).unwrap().pending_role_grants.insert(mem_id, (corp_roles::ROLE_DIRECTOR, now - 1));
+    });
+    assert!(crate::services::character_lifecycle::handle(&ctx, &mut mem_sess, "charMgr", "GetPrivateInfoOnCorpChange", &[PyRep::Integer(ceo_id)], &kw).unwrap().is_ok());
+}
