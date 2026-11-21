@@ -6378,6 +6378,156 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
                 "protocol_error",
             )
 
+    def test_oracle_rejects_local_variables_and_non_user_error_crashes_for_exemptions(self):
+        oracle_cls = playtester.PlaytesterBugOracle
+
+        # 1. Real KeyError/AttributeError crashes inside exempted tasklets with UserError markers in Local variables / source lines.
+        crash_cases = (
+            (
+                "fitting KeyError with ModuleFitFailed in locals",
+                "[Playtester] Client exception: KeyError: 'shipID'",
+                (
+                    "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x1, ctxt='fittingSlotController.OnDropData'>\",) kwargs={}\n"
+                    "Traceback (most recent call last):\n"
+                    '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 310, in OnDropData\n'
+                    "    raise UserError('ModuleFitFailed', {'moduleName': 'Core Probe Launcher I', 'reason': 'Missing skill'})\n"
+                    "KeyError: 'shipID'\n"
+                    "Local variables:\n"
+                    "  err = \"UserError('ModuleFitFailed', {'moduleName': 'Core Probe Launcher I', 'reason': 'Missing skill'})\"\n"
+                    "EXCEPTION END\n"
+                ),
+            ),
+            (
+                "ModuleButton AttributeError with TargetNotLocked in locals",
+                "[Playtester] Client exception: AttributeError: 'NoneType'",
+                (
+                    "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x2, ctxt='ModuleButton.OnStateChange'>\",) kwargs={}\n"
+                    "Traceback (most recent call last):\n"
+                    '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1630, in OnStateChange\n'
+                    '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1580, in ActivateEffect\n'
+                    "AttributeError: 'NoneType' object has no attribute 'state'\n"
+                    "Local variables:\n"
+                    "  prev = 'UserError: User error, msg=TargetNotLocked, dict={}'\n"
+                    "EXCEPTION END\n"
+                ),
+            ),
+            (
+                "RadialMenu TypeError with ShipInWarp in locals",
+                "[Playtester] Client exception: TypeError: bad arg",
+                (
+                    "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x3, ctxt='RadialMenu::ClickButton:OnButtonClick'>\",) kwargs={}\n"
+                    "Traceback (most recent call last):\n"
+                    '  File "eve/client/script/ui/shared/radialMenu/radialMenuActions.py", line 264, in OnButtonClick\n'
+                    '  File "eve/client/script/ui/eveCommands.py", line 1150, in CmdStopShip\n'
+                    "TypeError: bad arg\n"
+                    "Thread Locals:\n"
+                    "  msg = 'ShipInWarp'\n"
+                    "EXCEPTION END\n"
+                ),
+            ),
+            (
+                "Window.Open RuntimeError with WindowBlockedFromOpening in locals",
+                "[Playtester] Client exception: RuntimeError: ui fail",
+                (
+                    "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x4, ctxt='Open'>\",) kwargs={}\n"
+                    "Traceback (most recent call last):\n"
+                    '  File "packages/carbonui/control/window.py", line 4164, in Open\n'
+                    "RuntimeError: ui fail\n"
+                    "Local variables:\n"
+                    "  last = 'UserError: User error, msg=WindowBlockedFromOpening, dict={}'\n"
+                    "EXCEPTION END\n"
+                ),
+            ),
+        )
+        for label, hl, tb in crash_cases:
+            self.assertTrue(oracle_cls._is_unhandled_tasklet_traceback(hl, tb), label)
+            self.assertFalse(oracle_cls.is_ignorable_client_traceback(hl, tb), label)
+            self.assertFalse(oracle_cls.is_expected_user_error({"trace": tb, "headline": hl}), label)
+
+        # 2. Missing-moduleName ModuleFitFailed with unrelated moduleName in Local variables or trailing sibling dict must NOT suppress (#1568/#1569).
+        missing_name_with_locals = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x5, ctxt='fittingSlotController.OnDropData'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 310, in OnDropData\n'
+            "    if not self.TryFit(item): pass\n"
+            "UserError: User error, msg=ModuleFitFailed, dict={'reason': 'Low CPU'}\n"
+            "Local variables:\n"
+            "  item = {'moduleName': 'Core Probe Launcher I', 'reason': 'unused'}\n"
+            "EXCEPTION END\n"
+        )
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=ModuleFitFailed, dict={'reason': 'Low CPU'}",
+                missing_name_with_locals,
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ModuleFitFailed, dict={'reason': 'Low CPU'}",
+                missing_name_with_locals,
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"error": "UserError('ModuleFitFailed', {'reason': 'Low CPU'}), meta={'moduleName': 'Core Probe Launcher I'}"}
+            )
+        )
+
+        # 3. Concatenated multi-block trace combining KeyError + benign TargetNotLocked must remain non-ignorable.
+        concat_crash_and_benign = (
+            'Traceback (most recent call last):\n'
+            '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 22, in OnDropData\n'
+            "KeyError: 'boom'\n"
+            'Traceback (most recent call last):\n'
+            '  File "eve/client/script/environment/godma.py", line 2441, in Activate\n'
+            "UserError: User error, msg=TargetNotLocked, dict={}\n"
+        )
+        self.assertFalse(oracle_cls.is_ignorable_client_traceback("", concat_crash_and_benign))
+        self.assertFalse(oracle_cls.is_expected_user_error(concat_crash_and_benign))
+
+        # 4. WindowBlockedFromOpening outside carbonui/control/window.py Open/ToggleOpenClose must remain unhandled.
+        inv_open_or_show_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x6, ctxt='OpenOrShow'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/inventory/invWindow.py", line 1357, in OpenOrShow\n'
+            "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}\n"
+        )
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=WindowBlockedFromOpening", inv_open_or_show_tb
+            )
+        )
+
+        # 5. Session-end flight recorder anomaly analyzer skips valid ModuleFitFailed, flags missing moduleName.
+        valid_calls = [
+            {
+                "service": "invbroker",
+                "method": "MultiAdd",
+                "seq": idx,
+                "ts": 100.0 + idx,
+                "status": "ERR(UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1', 'moduleName': 'Core Probe Launcher I'}))",
+                "error": "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1', 'moduleName': 'Core Probe Launcher I'})",
+            }
+            for idx in range(4)
+        ]
+        self.assertEqual(oracle_cls.analyze_flight_recorder_anomalies(valid_calls), [])
+
+        missing_name_calls = [
+            {
+                "service": "invbroker",
+                "method": "MultiAdd",
+                "seq": idx,
+                "ts": 200.0 + idx,
+                "status": "ERR(UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1'}))",
+                "error": "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1'})",
+            }
+            for idx in range(4)
+        ]
+        anoms = oracle_cls.analyze_flight_recorder_anomalies(missing_name_calls)
+        self.assertEqual(len(anoms), 1)
+        self.assertEqual(anoms[0]["kind"], "flight_recorder_rpc_anomaly")
+        self.assertEqual(anoms[0]["non_ok_calls"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()

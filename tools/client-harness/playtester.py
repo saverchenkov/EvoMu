@@ -6087,15 +6087,84 @@ class PlaytesterBugOracle:
         r"""['"]reason['"]\s*:\s*u?(?:'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)")""",
         re.IGNORECASE,
     )
+    _MODULE_FIT_FAILED_DICT_START_RE = re.compile(
+        r"(?:UserError\s*:?\s*\(\s*u?['\"]ModuleFitFailed['\"]\s*,\s*"
+        r"|msg\s*=\s*u?['\"]?ModuleFitFailed\b[^\r\n{]*,\s*dict\s*=\s*"
+        r"|['\"]ModuleFitFailed['\"]\s*,\s*)(?=\{)",
+        re.IGNORECASE,
+    )
+    _WINDOW_OPEN_FN_RE = re.compile(r"\bin\s+(?:open|toggleopenclose)\b", re.IGNORECASE)
+
+    @staticmethod
+    def _extract_balanced_dict_repr(text: str) -> str:
+        """Return balanced `{...}` repr starting at `text[0] == '{'`, respecting Python string quotes."""
+        if not text or text[0] != "{":
+            return ""
+        depth = 0
+        quote: Optional[str] = None
+        escaped = False
+        for idx, ch in enumerate(text):
+            if quote is not None:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == quote:
+                    quote = None
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[: idx + 1]
+        return ""
+
+    @classmethod
+    def _strip_trace_frame_and_header_text(cls, headline: str, trace: str = "") -> str:
+        """Return lowercased headline + primary traceback text stripped of locals, callstack, and footer."""
+        stripped = sync_bugs_to_github._strip_trace_locals_and_end(str(trace or ""))
+        primary_lines, _ = sync_bugs_to_github._split_trace_sections(stripped)
+        return (f"{headline or ''}\n" + "\n".join(primary_lines)).lower()
+
+    @classmethod
+    def _extract_raised_user_error(cls, headline: str, trace: str = "") -> Tuple[Optional[str], str]:
+        """Return `(user_error_key, raised_exc_text)` iff the actual raised exception is a `UserError`."""
+        ue_key = cls.extract_client_user_error_key({"trace": trace, "headline": headline})
+        if not ue_key:
+            return None, ""
+        stripped_trace = sync_bugs_to_github._strip_trace_locals_and_end(str(trace or "")).strip()
+        if stripped_trace and sync_bugs_to_github._RE_TRACEBACK_INDICATORS.search(stripped_trace):
+            exc_class, exc_msg, _ = sync_bugs_to_github.parse_traceback_summary(stripped_trace, "")
+            cls_short = exc_class.split(".")[-1].strip()
+            if cls_short == "UserError" or exc_class.strip().lower().startswith("user error"):
+                raised = f"{exc_class}: {exc_msg}" if exc_msg else exc_class
+                return ue_key, raised
+        if headline and sync_bugs_to_github.extract_client_user_error_key(headline):
+            return ue_key, str(headline).strip()
+        return ue_key, stripped_trace or str(headline or "").strip()
 
     @classmethod
     def _has_nonempty_module_fit_failed(cls, raw_text: str) -> bool:
-        """Return True iff `raw_text` is `ModuleFitFailed` with non-empty `moduleName` and `reason`."""
-        low = (raw_text or "").lower()
-        if "modulefitfailed" not in low:
+        """Return True iff the raised `ModuleFitFailed` payload dict has non-empty `moduleName` and `reason`."""
+        text = str(raw_text or "")
+        if "modulefitfailed" not in text.lower():
             return False
-        name_m = cls._MODULE_FIT_FAILED_NAME_RE.search(low)
-        reason_m = cls._MODULE_FIT_FAILED_REASON_RE.search(low)
+        if sync_bugs_to_github._RE_TRACEBACK_INDICATORS.search(text):
+            ue_key, raised = cls._extract_raised_user_error("", text)
+            if not ue_key or ue_key.lower() != "modulefitfailed" or not raised:
+                return False
+            text = raised
+        dict_match = cls._MODULE_FIT_FAILED_DICT_START_RE.search(text)
+        if not dict_match:
+            return False
+        dict_repr = cls._extract_balanced_dict_repr(text[dict_match.end() :])
+        if not dict_repr:
+            return False
+        name_m = cls._MODULE_FIT_FAILED_NAME_RE.search(dict_repr)
+        reason_m = cls._MODULE_FIT_FAILED_REASON_RE.search(dict_repr)
         if not name_m or not reason_m:
             return False
         name_val = (name_m.group(1) if name_m.group(1) is not None else name_m.group(2) or "").strip()
@@ -6105,13 +6174,24 @@ class PlaytesterBugOracle:
     @classmethod
     def is_ignorable_client_traceback(cls, headline: str, trace: str = "", expected_text: str = "") -> bool:
         """Return True iff traceback is a benign client-only race or expected game-rule UserError."""
+        blocks = cls.parse_tb_blocks(trace) if trace else []
+        if len(blocks) > 1:
+            return all(
+                cls.is_ignorable_client_traceback(
+                    str(blk.get("headline") or ""),
+                    str(blk.get("trace") or ""),
+                    expected_text,
+                )
+                for blk in blocks
+            )
         if cls.is_benign_client_traceback(headline, trace):
             return True
-        combined = f"{headline or ''}\n{trace or ''}"
-        return (
-            not cls._is_unhandled_tasklet_traceback(headline, trace)
-            and cls.is_expected_user_error(combined, expected_text)
-        )
+        if cls._is_unhandled_tasklet_traceback(headline, trace):
+            return False
+        ue_key, raised_exc_text = cls._extract_raised_user_error(headline, trace)
+        if not ue_key or not raised_exc_text:
+            return False
+        return cls.is_expected_user_error(raised_exc_text, expected_text)
 
     @classmethod
     def is_benign_client_traceback(cls, headline: str, trace: str = "") -> bool:
@@ -6134,18 +6214,32 @@ class PlaytesterBugOracle:
     @classmethod
     def _is_unhandled_tasklet_traceback(cls, headline: str, trace: str = "") -> bool:
         """Background tasklet exceptions (e.g. autopilot UserError) are real crashes, not benign action rejections."""
-        txt = f"{headline or ''}\n{trace or ''}".lower()
-        if "unhandled exception in" not in txt:
+        blocks = cls.parse_tb_blocks(trace) if trace else []
+        if len(blocks) > 1:
+            return any(
+                cls._is_unhandled_tasklet_traceback(
+                    str(blk.get("headline") or ""),
+                    str(blk.get("trace") or ""),
+                )
+                for blk in blocks
+            )
+        raw_txt = f"{headline or ''}\n{trace or ''}".lower()
+        if "unhandled exception in" not in raw_txt:
             return False
+        ue_key, raised_exc_text = cls._extract_raised_user_error(headline, trace)
+        if not ue_key:
+            return True
+        ue_key_low = ue_key.lower()
+        ue_subkey_low = ue_key_low.split(":", 1)[1] if ":" in ue_key_low else ue_key_low
+        txt = cls._strip_trace_frame_and_header_text(headline, trace)
         # CarbonUI drag/drop inventory moves raise benign UserError (e.g. NotEnoughCargoSpace)
         # out of BluepyTasklet::_MoveItems / _MoveItems so the client UI can show a modal popup (#1227).
-        if ("bluepytasklet::_moveitems" in txt or "in _moveitems" in txt) and "notenoughcargospace" in txt:
+        if ("bluepytasklet::_moveitems" in txt or "in _moveitems" in txt) and ue_key_low == "notenoughcargospace":
             return False
         # CarbonUI drag-drop/fit rejections raise UserError('CustomInfo', {'info': 'FittingValidationFailed: ...'})
         # out of fittingSlotController/invCache fitting tasklets (GH #1223) when a slot/hardpoint rule rejects the fit.
         if (
-            "usererror" in txt
-            and "fittingvalidationfailed" in txt
+            ue_subkey_low.startswith("fittingvalidationfailed")
             and (
                 "fittingslotcontroller" in txt
                 or "invcache" in txt
@@ -6157,8 +6251,8 @@ class PlaytesterBugOracle:
         # Fitting drag-drop/slot tasklets raise UserError('ModuleFitFailed', {'moduleName': ..., 'reason': ...})
         # out of fittingSlotController/invCache/clientDogmaLocation when a skill/slot rule rejects the fit (#1576/#1578).
         if (
-            "usererror" in txt
-            and cls._has_nonempty_module_fit_failed(txt)
+            ue_key_low == "modulefitfailed"
+            and cls._has_nonempty_module_fit_failed(raised_exc_text)
             and (
                 "fittingslotcontroller" in txt
                 or "invcache" in txt
@@ -6174,26 +6268,22 @@ class PlaytesterBugOracle:
         # on rule rejections like NoAmmoLoaded, InsufficientFuel (#1230), NotEnoughCapacitor (#1231),
         # or TargetNotLocked (#1566).
         if (
-            "usererror" in txt
-            and "modulebutton.onstatechange" in txt
+            "modulebutton.onstatechange" in txt
             and "activateeffect" in txt
-            and any(
-                marker in txt
-                for marker in (
-                    "noammoloaded",
-                    "insufficientfuel",
-                    "notenoughcapacitor",
-                    "invalidtarget",
-                    "targetnotlocked",
-                )
+            and ue_subkey_low
+            in (
+                "noammoloaded",
+                "insufficientfuel",
+                "notenoughcapacitor",
+                "invalidtarget",
+                "targetnotlocked",
             )
         ):
             return False
         # RadialMenu stop-ship clicks issued during or right at warp transitions raise benign
         # UserError(ShipInWarp) inside RadialMenu::ClickButton:OnButtonClick -> CmdStopShip (#1570).
         if (
-            "usererror" in txt
-            and "shipinwarp" in txt
+            ue_key_low == "shipinwarp"
             and ("radialmenu" in txt or "radialmenuactions.py" in txt)
             and ("stopmyship" in txt or "cmdstopship" in txt)
         ):
@@ -6201,10 +6291,9 @@ class PlaytesterBugOracle:
         # UI window opens (e.g. CargoHold command while docked/transitioning) raise benign
         # UserError(WindowBlockedFromOpening) out of carbonui/control/window.py Open (#1575).
         if (
-            "usererror" in txt
-            and "windowblockedfromopening" in txt
-            and "window.py" in txt
-            and ("in open" in txt or "toggleopenclose" in txt)
+            ue_key_low == "windowblockedfromopening"
+            and "carbonui/control/window.py" in txt
+            and bool(cls._WINDOW_OPEN_FN_RE.search(txt))
         ):
             return False
         # Vanilla V24 ModuleButton/ModuleController AutoReload raises UserError(CannotLoadNotEnoughCharges)
@@ -6213,21 +6302,18 @@ class PlaytesterBugOracle:
         if (
             "autoreload" in txt
             and "loadammotypetomodule" in txt
-            and "cannotloadnotenoughcharges" in txt
+            and ue_key_low == "cannotloadnotenoughcharges"
         ):
             return False
         # Vanilla V24 UI drone helpers (e.g. LaunchDrones partial-stack capacity rejection)
         # defer expected game-rule UserErrors onto a background tasklet via eveMisc.py:raise_.
         if (
-            "usererror" in txt
-            and "evemisc.py" in txt
+            "evemisc.py" in txt
             and ("in raise_" in txt or "function raise_" in txt)
-            and any(
-                marker in txt
-                for marker in (
-                    "nodronemanagementabilitiesleft",
-                    "notenoughdronebayspace",
-                )
+            and ue_key_low
+            in (
+                "nodronemanagementabilitiesleft",
+                "notenoughdronebayspace",
             )
         ):
             return False
@@ -6235,9 +6321,37 @@ class PlaytesterBugOracle:
 
     @classmethod
     def is_expected_user_error(cls, err_obj: Any, expected_text: str = "") -> bool:
-        err_low = (
-            str(err_obj.get("error") or err_obj) if isinstance(err_obj, dict) else str(err_obj)
-        ).lower()
+        if isinstance(err_obj, dict):
+            raw_err = str(
+                err_obj.get("error")
+                or err_obj.get("trace")
+                or err_obj.get("traceback")
+                or err_obj.get("message")
+                or err_obj.get("msg")
+                or err_obj.get("headline")
+                or err_obj
+            )
+        else:
+            raw_err = str(err_obj)
+        if sync_bugs_to_github._RE_TRACEBACK_INDICATORS.search(raw_err):
+            blocks = cls.parse_tb_blocks(raw_err)
+            if len(blocks) > 1:
+                return all(
+                    cls.is_expected_user_error(
+                        str(blk.get("trace") or blk.get("headline") or ""),
+                        expected_text,
+                    )
+                    for blk in blocks
+                )
+            ue_key, raised = cls._extract_raised_user_error("", raw_err)
+            if not ue_key or not raised:
+                return False
+            raw_err = raised
+        else:
+            _, non_ue = sync_bugs_to_github._inspect_client_headline_for_user_error(raw_err)
+            if non_ue:
+                return False
+        err_low = raw_err.lower()
         if "usererror(" not in err_low and "usererror:" not in err_low:
             return False
         if "slasherror" in err_low:
@@ -6248,7 +6362,7 @@ class PlaytesterBugOracle:
         if "structurenotoperational" in err_low and "in state 'nocore'" in err_low and "cannot be controlled" in err_low:
             return True
         if "modulefitfailed" in err_low:
-            return cls._has_nonempty_module_fit_failed(err_low)
+            return cls._has_nonempty_module_fit_failed(raw_err)
         expected_low = (expected_text or "").lower()
         if any(kw in expected_low for kw in cls.EXPECTED_USER_ERROR_KEYWORDS):
             return True
@@ -6986,7 +7100,10 @@ class PlaytesterBugOracle:
                 if not is_non_ok:
                     continue
                 combined_err = f"{status_up} {err_txt}".lower()
-                if any(tok in combined_err for tok in cls.BENIGN_FLIGHT_FLOW_MARKERS):
+                call_err = err_txt or str(item.get("status") or "").strip()
+                if any(tok in combined_err for tok in cls.BENIGN_FLIGHT_FLOW_MARKERS) or (
+                    call_err and cls.is_expected_user_error({"error": call_err})
+                ):
                     benign_errors += 1
                     continue
                 unexpected_errors.append(item)
