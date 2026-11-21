@@ -1704,6 +1704,70 @@ async fn seasonal_relay_hack_idempotent_expiry_and_overflow_container_consistenc
         "repeat on_seasonal_relay_hacked must not drain boss shield a second time"
     );
 
+    // Verify stationary SHK relay ball is pinned (!BALL_FLAG_IS_FREE) in SetState (`P2 #3`)
+    // and seed PVE_EXPLORATION_NOTE_ID hacking state for R1482-R4-P1-1 cleanup verification.
+    let expected_pos = DVec3::from_array(details.site_position) + DVec3::new(500.0, 0.0, 0.0);
+    let obs_id = 1_060_899_i64;
+    let _ = sys_handle
+        .spawn_ball(make_site_npc_ball(
+            obs_id,
+            587,
+            expected_pos + DVec3::new(10.0, 0.0, 0.0),
+        ))
+        .await;
+    let (_, pre_set_state, _) = sys_handle
+        .get_set_state(obs_id)
+        .await
+        .expect("pre-completion get_set_state");
+    let Some(eve_proto::PyRep::Bytes(pre_bytes)) = pre_set_state.dict_get("state") else {
+        panic!("pre-completion SetState missing bytes state");
+    };
+    let (_, _, pre_balls) =
+        eve_destiny::wire::decode_add_balls(pre_bytes).expect("decode pre SetState");
+    let wire_relay = pre_balls
+        .iter()
+        .find(|b| b.id == details.relay_ball_id)
+        .expect("relay ball present in SetState wire buffer");
+    assert_eq!(
+        wire_relay.flags & eve_destiny::wire::BALL_FLAG_IS_FREE,
+        0,
+        "stationary SHK relay ball must omit BALL_FLAG_IS_FREE"
+    );
+
+    crate::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        assert!(
+            reg.sites_by_system
+                .get(&sys_id)
+                .is_some_and(|l| l.iter().any(|s| s.site_id == details.exploration_site_id)),
+            "SHK site must be registered in PVE_EXPLORATION_NOTE_ID prior to completion"
+        );
+        reg.hacked_containers.insert((sys_id, details.relay_ball_id));
+        reg.failure_counts.insert((sys_id, details.relay_ball_id), 2);
+        reg.self_repair_turns
+            .insert((pilot, details.relay_ball_id), 3);
+        reg.hacking_games.insert(
+            (pilot, details.relay_ball_id),
+            crate::services::pve_exploration::HackingGameSession {
+                game_id: 99_001,
+                character_id: pilot,
+                solar_system_id: sys_id,
+                container_id: details.relay_ball_id,
+                site_id: details.exploration_site_id.clone(),
+                is_relic: false,
+                is_ghost_site: false,
+                is_sleeper_cache_puzzle: false,
+                virus_coherence: 50,
+                max_virus_coherence: 50,
+                base_virus_strength: 20,
+                polymorphic_shield_charges: 0,
+                secondary_vector_target: None,
+                utilities: Vec::new(),
+                tiles: Vec::new(),
+                status: "Won".into(),
+            },
+        );
+    });
+
     // 2. Overflow cargo container DB metadata matches Ballpark ball (`P2 #1`).
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&pilot) {
@@ -1711,7 +1775,6 @@ async fn seasonal_relay_hack_idempotent_expiry_and_overflow_container_consistenc
         }
     });
     let expected_cont_type = resolve_loot_container_type_id(&sde);
-    let expected_pos = DVec3::from_array(details.site_position) + DVec3::new(500.0, 0.0, 0.0);
     let mut kill_ids = vec![site.boss_npc_ball_id];
     kill_ids.extend_from_slice(&site.escort_ball_ids);
     for &npc_bid in &kill_ids {
@@ -1733,6 +1796,43 @@ async fn seasonal_relay_hack_idempotent_expiry_and_overflow_container_consistenc
                 "destroyed seasonal NPC {npc_bid} must be recorded in #1032 recently_destroyed_item_ids"
             );
         }
+    });
+    crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+        assert!(
+            !reg.sites_by_system
+                .get(&sys_id)
+                .is_some_and(|l| l.iter().any(|s| s.site_id == details.exploration_site_id)),
+            "completed seasonal SHK-* site must be removed from PVE_EXPLORATION_NOTE_ID (`R1482-R4-P1-1`)"
+        );
+        assert!(
+            !reg.hacked_containers
+                .contains(&(sys_id, details.relay_ball_id)),
+            "completed seasonal relay must be removed from reg.hacked_containers"
+        );
+        assert!(
+            !reg.failure_counts
+                .contains_key(&(sys_id, details.relay_ball_id)),
+            "completed seasonal relay must be removed from reg.failure_counts"
+        );
+        assert!(
+            !reg.hacking_games
+                .contains_key(&(pilot, details.relay_ball_id)),
+            "completed seasonal relay must be removed from reg.hacking_games"
+        );
+        assert!(
+            !reg.self_repair_turns
+                .contains_key(&(pilot, details.relay_ball_id)),
+            "completed seasonal relay must be removed from reg.self_repair_turns"
+        );
+    });
+    let _ = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+        assert!(
+            !reg.sites_by_system
+                .get(&sys_id)
+                .is_some_and(|l| l.iter().any(|s| s.site_id == details.exploration_site_id)),
+            "subsequent ensure must keep PVE_EXPLORATION_NOTE_ID free of completed SHK-* entries"
+        );
     });
     let (cont_id, cont_type, cont_flag, cont_pos, has_meta) = ctx.db.with_snapshot(|snap| {
         let (&cid, item) = snap
@@ -1771,10 +1871,6 @@ async fn seasonal_relay_hack_idempotent_expiry_and_overflow_container_consistenc
         Some(&eve_proto::PyRep::Integer(pilot)),
         "overflow container SlimItemMeta must use pilot as ownerID"
     );
-    let obs_id = 1_060_899_i64;
-    let _ = sys_handle
-        .spawn_ball(make_site_npc_ball(obs_id, 587, expected_pos + DVec3::new(10.0, 0.0, 0.0)))
-        .await;
     let (_, set_state_rep, _) = sys_handle.get_set_state(obs_id).await.expect("get_set_state");
     let Some(eve_proto::PyRep::Bytes(state_bytes)) = set_state_rep.dict_get("state") else {
         panic!("SetState missing bytes state");
@@ -2039,6 +2135,185 @@ async fn seasonal_concurrent_ensure_and_npc_destruction_never_resurrects_or_dupl
             load_seasonal_cooldown_store(snap)
                 .until_by_system
                 .contains_key(&sys_2)
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seasonal_npc_spawn_racing_step_extended_npc_ai_sync_preserves_ai_and_empty_loot_skips_can() {
+    let sde = shared_sde();
+    let sys_id: SolarSystemId = 30_000_142;
+    let pilot: i64 = 90_060_841;
+    let ship_id: i64 = 1_060_841;
+    let ctx = Arc::new(setup_seasonal_test_ctx(
+        Arc::clone(&sde),
+        1_776_250_000,
+        1,
+        "Crimson Harvest",
+        7,
+        pilot,
+        ship_id,
+        sys_id,
+    ));
+
+    // 1. Fresh spawn raced against concurrent 1 Hz `step_extended_npc_ai_sync` loop (`R1482-R4-P1-2`).
+    let stop_ai = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ctx_ai = Arc::clone(&ctx);
+    let stop_flag = Arc::clone(&stop_ai);
+    let ai_loop = tokio::spawn(async move {
+        while !stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(
+                &ctx_ai,
+                sys_id,
+            );
+            tokio::task::yield_now().await;
+        }
+    });
+    let sites = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    stop_ai.store(true, std::sync::atomic::Ordering::Relaxed);
+    ai_loop.await.expect("fresh ai loop");
+    assert_eq!(sites.len(), 1);
+    let site = sites[0].clone();
+    let details = get_seasonal_site_details(&ctx, site.instance_id).expect("details");
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mut all_npcs = vec![site.boss_npc_ball_id];
+    all_npcs.extend_from_slice(&site.escort_ball_ids);
+    for &bid in &all_npcs {
+        assert!(
+            sys_handle.get_ball_snapshot(bid).await.unwrap().is_some(),
+            "fresh spawned NPC {bid} must exist in Ballpark"
+        );
+    }
+    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        for &bid in &all_npcs {
+            assert!(
+                rt.npc_entities.contains_key(&bid),
+                "fresh spawned NPC {bid} must remain registered in rt.npc_entities after AI race"
+            );
+        }
+    });
+
+    // 2. Recovery re-spawn deterministically interrupted mid-`spawn_ball_with_meta` by
+    //    `step_extended_npc_ai_sync` hooks must still publish all living AI entities (`R1482-R4-P1-2`).
+    let boss_bid = site.boss_npc_ball_id;
+    sys_handle.try_remove_ball(boss_bid);
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.npc_entities.remove(&boss_bid);
+    });
+    let ctx_after = Arc::clone(&ctx);
+    crate::system_actor::set_spawn_ball_with_meta_after_send_hook_for_test(
+        sys_id,
+        boss_bid,
+        Some(Box::new(move || {
+            Box::pin(async move {
+                crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(
+                    &ctx_after,
+                    sys_id,
+                );
+            })
+        })),
+    );
+    let ctx_pre = Arc::clone(&ctx);
+    crate::system_actor::set_spawn_ball_with_meta_pre_reply_hook_for_test(
+        sys_id,
+        boss_bid,
+        Some(Box::new(move || {
+            Box::pin(async move {
+                crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(
+                    &ctx_pre,
+                    sys_id,
+                );
+            })
+        })),
+    );
+    let recovered = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    assert_eq!(recovered.len(), 1);
+
+    // Spawn pilot ship at the site and step AI once more; NPCs must stay alive and engage.
+    sys_handle
+        .spawn_ball_with_meta(
+            make_site_npc_ball(ship_id, 587, DVec3::from_array(details.site_position)),
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: pilot,
+                char_id: Some(pilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn pilot ship");
+    crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(&ctx, sys_id);
+    for &bid in &all_npcs {
+        assert!(
+            sys_handle.get_ball_snapshot(bid).await.unwrap().is_some(),
+            "recovered NPC {bid} must exist in Ballpark"
+        );
+    }
+    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        for &bid in &all_npcs {
+            let ent = rt
+                .npc_entities
+                .get(&bid)
+                .unwrap_or_else(|| panic!("recovered NPC {bid} evicted from rt.npc_entities"));
+            assert_eq!(
+                ent.target_id,
+                Some(ship_id),
+                "seasonal NPC {bid} must remain active and acquire pilot ship"
+            );
+        }
+    });
+
+    // 3. Synthetic empty-loot completion with undocked ship_id == 0 must not spawn an empty
+    //    overflow cargo container (`P2 #1`).
+    let min_sde = Arc::new(SdeRegistry::default());
+    let ctx_empty = Arc::new(setup_seasonal_test_ctx(
+        min_sde,
+        1_776_260_000,
+        1,
+        "Crimson Harvest",
+        7,
+        pilot,
+        ship_id,
+        sys_id,
+    ));
+    let min_sites = ensure_seasonal_event_sites_for_system(&ctx_empty, sys_id).await;
+    assert_eq!(min_sites.len(), 1);
+    let min_site = &min_sites[0];
+    ctx_empty.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot) {
+            ch.active_ship_id = 0;
+        }
+        if let Some(list) = snap.pve_special_sites.seasonal_event_sites.get_mut(&sys_id) {
+            for s in list.iter_mut() {
+                s.loot_type_id = 0;
+            }
+        }
+    });
+    let mut empty_kills = vec![min_site.boss_npc_ball_id];
+    empty_kills.extend_from_slice(&min_site.escort_ball_ids);
+    for bid in empty_kills {
+        let _ = on_special_site_npc_destroyed_core(
+            &ctx_empty.systems,
+            &ctx_empty.db,
+            &ctx_empty.sde,
+            sys_id,
+            bid,
+            Some(pilot),
+        )
+        .await;
+    }
+    let expected_cont_type = resolve_loot_container_type_id(&ctx_empty.sde);
+    ctx_empty.db.with_snapshot(|snap| {
+        let stray_cont = snap.items.values().any(|it| {
+            it.owner_id == pilot
+                && it.location_id == i64::from(sys_id)
+                && it.type_id == expected_cont_type
+        });
+        assert!(
+            !stray_cont,
+            "empty loot_specs must not create an empty overflow Cargo Container"
         );
     });
 }
