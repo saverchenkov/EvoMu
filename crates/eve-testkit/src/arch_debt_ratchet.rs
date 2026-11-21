@@ -1504,10 +1504,12 @@ pub fn member_base_roles() {}
 
     #[test]
     fn rust_and_python_ratchet_scanners_agree_on_live_repo() {
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let canonical_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
             .expect("canonicalize repo root");
+        let root_str = canonical_root.to_string_lossy();
+        let repo_root = PathBuf::from(root_str.trim_start_matches(r"\\?\"));
         let script_path =
             repo_root.join(".agents/skills/evomu-adversarial-review/scripts/tighten_ratchets.py");
         assert!(
@@ -1516,13 +1518,23 @@ pub fn member_base_roles() {}
             script_path.display()
         );
 
-        let output = std::process::Command::new("python3")
-            .arg(&script_path)
-            .arg("--root")
-            .arg(&repo_root)
-            .arg("--dump-counts-json")
-            .output()
-            .expect("invoke python3 tighten_ratchets.py --dump-counts-json");
+        let output = ["python3", "python"]
+            .into_iter()
+            .find_map(|interp| {
+                match std::process::Command::new(interp)
+                    .arg(&script_path)
+                    .arg("--root")
+                    .arg(&repo_root)
+                    .arg("--dump-counts-json")
+                    .output()
+                {
+                    Ok(out) => Some(Ok(out)),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(err) => Some(Err(format!("failed to execute {interp}: {err}"))),
+                }
+            })
+            .expect("neither python3 nor python interpreter found in PATH")
+            .expect("invoke tighten_ratchets.py --dump-counts-json");
         assert!(
             output.status.success(),
             "tighten_ratchets.py --dump-counts-json failed ({:?}):\nstdout:\n{}\nstderr:\n{}",

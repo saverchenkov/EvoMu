@@ -2868,6 +2868,35 @@ mod tests {
         };
         assert!(bad_zero.verify_dir(&tmp).is_err());
 
+        // load_from_path must reject version != 2, unknown fields, and 0 file entries.
+        let v1_json = tmp.join("v1.json");
+        std::fs::write(
+            &v1_json,
+            r#"{"version":1,"owning_issue":929,"files":{"services/alpha.rs":2}}"#,
+        )
+        .expect("write v1.json");
+        assert!(UntypedUserErrorRatchet::load_from_path(&v1_json)
+            .unwrap_err()
+            .contains("expected 2"));
+
+        let unknown_json = tmp.join("unknown.json");
+        std::fs::write(
+            &unknown_json,
+            r#"{"version":2,"owning_issue":929,"legacy_ceiling":242,"files":{}}"#,
+        )
+        .expect("write unknown.json");
+        assert!(UntypedUserErrorRatchet::load_from_path(&unknown_json).is_err());
+
+        let zero_entry_json = tmp.join("zero_entry.json");
+        std::fs::write(
+            &zero_entry_json,
+            r#"{"version":2,"owning_issue":929,"files":{"services/alpha.rs":0}}"#,
+        )
+        .expect("write zero_entry.json");
+        assert!(UntypedUserErrorRatchet::load_from_path(&zero_entry_json)
+            .unwrap_err()
+            .contains("positive integer"));
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

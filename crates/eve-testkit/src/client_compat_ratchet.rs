@@ -64,6 +64,7 @@ pub struct ClientCompatScanReport {
 
 /// Falling v2 per-file ratchet stored in `crates/eve-testkit/ratchets/client_compat_ratchet.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientCompatRatchet {
     pub version: u32,
     #[serde(default)]
@@ -1271,25 +1272,31 @@ mod tests {{
         let report = ratchet
             .verify_default()
             .expect("client_compat_ratchet.json must match repository baseline");
-        assert_eq!(report.rpc_rules, ratchet.counter_sum("rpc_rules"));
-        assert_eq!(report.suppress_rules, ratchet.counter_sum("suppress_rules"));
-        assert_eq!(report.notify_arms, ratchet.counter_sum("notify_arms"));
-        assert_eq!(
-            report.destiny_rewrites,
-            ratchet.counter_sum("destiny_rewrites")
-        );
-        assert_eq!(
-            report.production_lines,
-            ratchet.counter_sum("production_lines")
-        );
-        assert_eq!(
-            report.transport_conditionals,
-            ratchet.counter_sum("transport_conditionals")
-        );
-        assert_eq!(
-            report.direct_layer_test_calls,
-            ratchet.counter_sum("direct_layer_test_calls")
-        );
+        for (key, observed_total) in [
+            ("rpc_rules", report.rpc_rules),
+            ("suppress_rules", report.suppress_rules),
+            ("notify_arms", report.notify_arms),
+            ("destiny_rewrites", report.destiny_rewrites),
+            ("production_lines", report.production_lines),
+            ("transport_conditionals", report.transport_conditionals),
+            ("direct_layer_test_calls", report.direct_layer_test_calls),
+            ("service_caller_trace_params", report.service_caller_trace_params),
+            (
+                "sequencer_set_state_rewrites",
+                report.sequencer_set_state_rewrites,
+            ),
+        ] {
+            let cap = ratchet.counter_sum(key);
+            assert!(
+                observed_total <= cap,
+                "client_compat counter '{key}' exceeded baseline: {observed_total} > {cap}"
+            );
+            let per_file_sum: usize = report.counters[key].values().sum();
+            assert_eq!(
+                observed_total, per_file_sum,
+                "internal scalar vs per-file sum mismatch for '{key}'"
+            );
+        }
         assert_eq!(
             report.service_caller_trace_comparisons,
             0,
@@ -1300,14 +1307,6 @@ mod tests {{
             .get("service_caller_trace_comparisons")
             .expect("counter exists")
             .is_empty());
-        assert_eq!(
-            report.service_caller_trace_params,
-            ratchet.counter_sum("service_caller_trace_params")
-        );
-        assert_eq!(
-            report.sequencer_set_state_rewrites,
-            ratchet.counter_sum("sequencer_set_state_rewrites")
-        );
         assert!(!report.it_dispatch_rpc_files.contains("client_shape_pins.rs"));
     }
 
@@ -1424,6 +1423,26 @@ mod tests {{
             .insert("crates/eve-server/src/services/foo.rs".into(), 1);
         let zero_err = bad_zero_ratchet.validate_schema().unwrap_err();
         assert!(zero_err.contains("zero_required=true"), "{zero_err}");
+
+        // Schema loader must reject v1 versions and unknown legacy v1 fields.
+        let tmp = make_temp_tree("schema_errs");
+        let v1_path = tmp.join("v1.json");
+        let mut v1_ratchet = ratchet.clone();
+        v1_ratchet.version = 1;
+        std::fs::write(&v1_path, serde_json::to_string(&v1_ratchet).unwrap()).unwrap();
+        assert!(ClientCompatRatchet::load_from_path(&v1_path)
+            .unwrap_err()
+            .contains("expected 2"));
+
+        let legacy_path = tmp.join("legacy.json");
+        let mut legacy_val = serde_json::to_value(&ratchet).unwrap();
+        legacy_val
+            .as_object_mut()
+            .unwrap()
+            .insert("max_rpc_rules".into(), serde_json::json!(10));
+        std::fs::write(&legacy_path, serde_json::to_string(&legacy_val).unwrap()).unwrap();
+        assert!(ClientCompatRatchet::load_from_path(&legacy_path).is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
