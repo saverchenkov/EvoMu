@@ -290,14 +290,17 @@ fn resolve_upwell_office_access_and_quote_in_snap(
         char_id,
         Some(now_unix),
     ) {
-        return Err(BridgeRpcError {
-            code: "StructureServiceAccessDenied".into(),
-            message: format!(
+        return Err(BridgeRpcError::structure_service_access_denied(
+            st.structure_id,
+            char_id,
+            &st.name,
+            "offices",
+            "access_profile_denied",
+            format!(
                 "Character {char_id} is denied access to structure {} by access profile",
                 st.structure_id
             ),
-            client_error: None,
-        });
+        ));
     }
     let ext = ops::load_ext_state(snap);
     let Some(prof) = prof_svc::effective_profile_for_structure(&ext, st.structure_id, Some(now_unix))
@@ -308,14 +311,17 @@ fn resolve_upwell_office_access_and_quote_in_snap(
     // `StructureAccessProfile` setting maps are keyed by `settingID` (`structures/settings.pyj`),
     // where `3` is `SETTING_REPROCESSING_TAX` — never check `SERVICE_OFFICES` (`3` in services.pyj).
     if prof.general_settings.get(&prof_svc::SETTING_CORP_RENT_OFFICE) == Some(&false) {
-        return Err(BridgeRpcError {
-            code: "StructureServiceAccessDenied".into(),
-            message: format!(
+        return Err(BridgeRpcError::structure_service_access_denied(
+            st.structure_id,
+            char_id,
+            &st.name,
+            "offices",
+            "profile_setting_disabled",
+            format!(
                 "Office rental setting (20) on structure {} is disabled by access profile",
                 st.structure_id
             ),
-            client_error: None,
-        });
+        ));
     }
 
     if let Some(acl_res) = prof_svc::evaluate_domain_acl_on_profile(
@@ -328,14 +334,17 @@ fn resolve_upwell_office_access_and_quote_in_snap(
     ) {
         return match acl_res {
             Ok(bps) => Ok((bps.max(0) as f64) / 10_000.0),
-            Err(()) => Err(BridgeRpcError {
-                code: "StructureServiceAccessDenied".into(),
-                message: format!(
+            Err(()) => Err(BridgeRpcError::structure_service_access_denied(
+                st.structure_id,
+                char_id,
+                &st.name,
+                "offices",
+                "office_acl_denied",
+                format!(
                     "Character {char_id} is denied office rental on structure {} by office ACL",
                     st.structure_id
                 ),
-                client_error: None,
-            }),
+            )),
         };
     }
 
@@ -343,14 +352,17 @@ fn resolve_upwell_office_access_and_quote_in_snap(
         == Some(&true)
         || prof.service_settings.contains_key(&prof_svc::SETTING_CORP_RENT_OFFICE);
     if !office_enabled {
-        return Err(BridgeRpcError {
-            code: "StructureServiceAccessDenied".into(),
-            message: format!(
+        return Err(BridgeRpcError::structure_service_access_denied(
+            st.structure_id,
+            char_id,
+            &st.name,
+            "offices",
+            "service_not_enabled",
+            format!(
                 "Office rental setting (20) is not enabled on structure {}",
                 st.structure_id
             ),
-            client_error: None,
-        });
+        ));
     }
 
     Ok(prof

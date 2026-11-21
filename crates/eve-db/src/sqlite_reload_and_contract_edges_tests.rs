@@ -146,6 +146,19 @@ fn sqlite_full_table_reload_and_snapshot_contract_edges() {
         );
         snap.char_notes.insert((2001, 5001), "Main hull".into());
         snap.paused_skill_queues.insert(2001);
+        snap.items.insert(
+            6009,
+            InventoryItemRecord {
+                item_id: 6009,
+                owner_id: 2001,
+                location_id: 60003760,
+                type_id: 1236,
+                quantity: 2,
+                flag: InventoryFlag::Hangar,
+                singleton: true,
+                ..InventoryItemRecord::default()
+            },
+        );
     });
 
     let err = repo.try_with_mut_snapshot(|snap| {
@@ -179,6 +192,12 @@ fn sqlite_full_table_reload_and_snapshot_contract_edges() {
         assert_eq!(snap.char_contact_notifications[&2001].len(), 1);
         assert_eq!(snap.char_notes[&(2001, 5001)], "Main hull");
         assert!(snap.paused_skill_queues.contains(&2001));
+        let repaired = &snap.items[&6009];
+        assert_eq!(repaired.quantity, 2);
+        assert!(
+            !repaired.singleton,
+            "SQLite load must normalize legacy quantity > 1 non-BPC singleton items to non-singleton"
+        );
     });
 
     reopened.with_mut_snapshot(|snap| {

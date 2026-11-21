@@ -1115,13 +1115,21 @@ async fn handle_multi_add_auto_fit(
             }
         }
         let Some(target_flag) = chosen else {
-            return Err(BridgeRpcError {
-                code: "FittingValidationFailed".into(),
-                message: last_err.unwrap_or_else(|| {
-                    format!("No free compatible fitting slot for item {}", src_item.item_id)
-                }),
-                client_error: None,
+            let module_name = ctx
+                .sde
+                .get_type(src_item.type_id)
+                .map(|t| t.name.as_str())
+                .unwrap_or("Module");
+            let reason = last_err.unwrap_or_else(|| {
+                format!("No free compatible fitting slot for item {}", src_item.item_id)
             });
+            return Err(BridgeRpcError::fitting_validation_failed(
+                Some(ship_id),
+                Some(src_item.item_id),
+                Some(i64::from(src_item.type_id)),
+                module_name,
+                reason,
+            ));
         };
         planned.push(PlannedFit {
             src_item,

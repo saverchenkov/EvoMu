@@ -1290,7 +1290,7 @@ impl UserErrorKey {
                 ("got".into(), PyRep::Real(0.0)),
             ],
             Self::ModuleFitFailed => vec![
-                ("moduleName".into(), PyRep::ascii_bytes("")),
+                ("moduleName".into(), PyRep::ascii_bytes("Module")),
                 ("reason".into(), PyRep::ascii_bytes("")),
             ],
             Self::InvalidTargetForModule => {
@@ -1311,7 +1311,7 @@ impl UserErrorKey {
             Self::CustomQuestion => vec![("question".into(), PyRep::ascii_bytes(message))],
             Self::SlashError => vec![("reason".into(), PyRep::ascii_bytes(message))],
             Self::ModuleFitFailed => vec![
-                ("moduleName".into(), PyRep::ascii_bytes("")),
+                ("moduleName".into(), PyRep::ascii_bytes("Module")),
                 ("reason".into(), PyRep::ascii_bytes(message)),
             ],
             _ => self.default_args(),
@@ -2090,7 +2090,7 @@ impl BridgeRpcError {
             "FittingValidationFailed" => ClientError::user_with_args(
                 UserErrorKey::ModuleFitFailed,
                 [
-                    ("moduleName", UserErrorArg::Str(String::new())),
+                    ("moduleName", UserErrorArg::Str("Module".to_owned())),
                     ("reason", UserErrorArg::Str(self.message.clone())),
                 ],
             ),
@@ -2123,7 +2123,9 @@ impl BridgeRpcError {
             "InsufficientRole"
             | "GM_InsufficientRole"
             | "UserError: GM_InsufficientRole"
-            | "InsufficientRoles" => ClientError::user(UserErrorKey::InsufficientRoles),
+            | "InsufficientRoles"
+            | "GMRoleRequired"
+            | "GmRoleRequired" => ClientError::user(UserErrorKey::InsufficientRoles),
             "CustomInfo" => ClientError::CustomInfo(self.message.clone()),
             "CustomNotify" => ClientError::CustomNotify(self.message.clone()),
             _ => {

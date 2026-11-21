@@ -1,9 +1,6 @@
 //! Stateful object binding and moniker handles (`MachoBindObject`).
 
-#[path = "binding_transition_policy.rs"]
-mod binding_transition_policy;
-
-pub(crate) use binding_transition_policy::{
+pub(crate) use super::binding_transition_policy::{
     AtomicSceneTransitionRecord, LateCallResolution, ReconnectHoldGuard,
 };
 

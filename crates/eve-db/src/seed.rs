@@ -200,7 +200,7 @@ impl WorldRepository {
         // Seed only starter frigate modules, basic minerals/ore, and an unresearched Rifter BPO (IDs 100_000_003..=100_000_012)
         let starter_items = [
             (100_000_003, 438, 1, true),        // 1MN Afterburner II
-            (100_000_004, 1236, 2, true),       // Overdrive Injector System II
+            (100_000_004, 1236, 2, false),      // Overdrive Injector System II
             (100_000_007, 691, 1, true),        // Rifter Blueprint (unresearched BPO ME0/TE0)
             (100_000_008, 34, 100_000, false),  // Tritanium
             (100_000_009, 35, 50_000, false),   // Pyerite

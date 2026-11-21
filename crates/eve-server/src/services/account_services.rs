@@ -35,8 +35,10 @@ pub(crate) fn req_gm(session: &SessionState, ctx_name: &str) -> Result<(), Bridg
     if session.has_gm_role() {
         Ok(())
     } else {
-        Err(err(
-            "InsufficientRole",
+        Err(BridgeRpcError::insufficient_role(
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            ctx_name,
             format!("{ctx_name} requires GM/Admin role"),
         ))
     }
