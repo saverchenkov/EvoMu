@@ -1234,7 +1234,7 @@ async fn intermediate_insertion_preserves_monotonic_seq_ids_and_prevents_rpc_rep
         let n = assemble_pending_notification(
             pilot_id,
             Some(uid),
-            "OnSkillTrainingCompleted",
+            "OnSkillForcedRefresh",
             "charid",
             vec![],
             0,
