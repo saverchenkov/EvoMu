@@ -74,6 +74,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -98,6 +99,7 @@ SCENARIOS_DIR = HARNESS_DIR / "scenarios"
 if str(HARNESS_DIR) not in sys.path:
     sys.path.insert(0, str(HARNESS_DIR))
 import guard_registry  # noqa: E402
+import gm_slash_utils  # noqa: E402
 
 
 class _GuardHitTracker:
@@ -228,6 +230,7 @@ class _SimTimeTracker:
         self.retain_events = bool(retain_events)
         self.max_recent = int(max_recent)
         self.seen_ids: set = set()
+        self._seen_order: deque = deque()
         self.total_sec: float = 0.0
         self.total_count: int = 0
         self.events: List[Dict[str, Any]] = []
@@ -241,12 +244,13 @@ class _SimTimeTracker:
             if not isinstance(item, dict):
                 continue
             eid = item.get("injection_id")
+            raw_seq = item.get("seq")
             if isinstance(eid, str) and eid.strip():
                 key: Any = ("id", eid.strip())
-            elif isinstance(item.get("seq"), int):
+            elif isinstance(raw_seq, int) and not isinstance(raw_seq, bool):
                 key = (
                     "seq",
-                    int(item["seq"]),
+                    int(raw_seq),
                     str(item.get("method") or ""),
                     float(item.get("seconds") or 0.0),
                 )
@@ -263,8 +267,10 @@ class _SimTimeTracker:
             if key in self.seen_ids:
                 continue
             self.seen_ids.add(key)
-            if len(self.seen_ids) > 20000:
-                self.seen_ids = set(list(self.seen_ids)[-5000:])
+            self._seen_order.append(key)
+            while len(self.seen_ids) > 20000 and self._seen_order:
+                oldest = self._seen_order.popleft()
+                self.seen_ids.discard(oldest)
             try:
                 sec = max(0.0, float(item.get("seconds") or 0.0))
             except Exception:
@@ -6896,6 +6902,7 @@ class PlaytesterRunner:
         self._host_gm_port: int = 0
         self._sim_injection_seq: int = 0
         self._active_step_allows_host_time_control: Optional[bool] = None
+        self._active_step_allows_host_gm_slash: Optional[bool] = None
 
         # Hybrid Planner + Executor + Direct Runner batch state
         self.batch_id: int = 0
@@ -7560,7 +7567,7 @@ class PlaytesterRunner:
             return {"ok": True, "via": "gm_bridge", "target_char_id": tgt}
         if cmd == "slash_cmd":
             if not self._gm_slash_requests_allowed():
-                return {"ok": False, "handled": False, "reason": "host_gm_slash_disabled"}
+                return {"ok": False, "handled": True, "reason": "host_gm_slash_disabled"}
             raw_cmd = str(req.get("command") or "").strip()
             if not raw_cmd.startswith("/"):
                 return {"ok": False, "handled": True, "error": f"invalid_slash_cmd:{raw_cmd}"}
@@ -7577,7 +7584,13 @@ class PlaytesterRunner:
                         rewritten,
                         target_solar_system_id=tgt_sys,
                     )
-                return {
+                sim_evt = self._maybe_record_slash_sim_time_event(
+                    rewritten,
+                    res,
+                    target_char_id=tgt,
+                    source="inclient_host_gm_bridge",
+                )
+                resp_payload: Dict[str, Any] = {
                     "ok": True,
                     "handled": True,
                     "via": "gm_bridge",
@@ -7586,6 +7599,10 @@ class PlaytesterRunner:
                     "target_solar_system_id": tgt_sys,
                     "result": res,
                 }
+                if sim_evt is not None:
+                    resp_payload["injection_id"] = sim_evt["injection_id"]
+                    resp_payload["sim_time_injected_sec"] = sim_evt["seconds"]
+                return resp_payload
             except Exception as exc:
                 return {
                     "ok": False,
@@ -7598,122 +7615,40 @@ class PlaytesterRunner:
                 }
         return {"ok": False, "handled": False, "error": f"unsupported_cmd:{cmd}"}
 
+    def _maybe_record_slash_sim_time_event(
+        self,
+        cmd: str,
+        gm_res: Any,
+        *,
+        target_char_id: int = 0,
+        source: str = "host_gm_bridge",
+    ) -> Optional[Dict[str, Any]]:
+        adv_secs = gm_slash_utils.extract_slash_sim_advance_seconds(
+            cmd,
+            gm_res,
+            target_char_id=target_char_id,
+        )
+        if adv_secs is None:
+            return None
+        verb = str(cmd or "").strip().split()[0].lower()
+        return self._record_host_gm_sim_event(
+            adv_secs,
+            target_char_id=target_char_id,
+            source=source,
+            method=f"SlashCmd:{verb}",
+        )
+
     @staticmethod
     def _looks_like_char_id_token(tok: str, target_char_id: int) -> bool:
-        t = str(tok or "").strip()
-        if not t or not t.isdigit():
-            return False
-        n = int(t)
-        return n == int(target_char_id) or (90_000_000 <= n < 1_000_000_000)
+        return gm_slash_utils.looks_like_char_id_token(tok, target_char_id)
 
     @staticmethod
     def _looks_like_entity_or_location_token(tok: str, target_char_id: int) -> bool:
-        t = str(tok or "").strip()
-        if not t or not t.isdigit():
-            return False
-        n = int(t)
-        return (
-            n == int(target_char_id)
-            or (60_000_000 <= n < 70_000_000)
-            or (90_000_000 <= n < 1_000_000_000)
-            or n >= 1_000_000_000
-        )
+        return gm_slash_utils.looks_like_entity_or_location_token(tok, target_char_id)
 
     @classmethod
     def _rewrite_gm_slash_for_target(cls, cmd: str, target_char_id: int) -> str:
-        raw = str(cmd or "").strip()
-        if not raw.startswith("/") or target_char_id <= 0:
-            return raw
-        parts = raw.split()
-        verb = parts[0].lower()
-        rest = parts[1:]
-        tgt_s = str(int(target_char_id))
-        me_tokens = ("me", "myship", "self")
-
-        if verb == "/giveisk":
-            if len(rest) == 1:
-                return f"/giveisk {tgt_s} {rest[0]}"
-            if len(rest) >= 2 and rest[0].lower() in ("me", "self"):
-                return " ".join(["/giveisk", tgt_s] + rest[1:])
-        elif verb in ("/giveskill", "/setskill"):
-            if len(rest) == 2:
-                return f"{parts[0]} {tgt_s} {rest[0]} {rest[1]}"
-            if len(rest) >= 3 and rest[0].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + rest[1:])
-        elif verb == "/heal":
-            if not rest or rest[0].lower() in ("me", "self"):
-                return f"/heal {tgt_s}"
-        elif verb in ("/teleport", "/tr", "/translocate", "/moveme"):
-            noblock_tokens = [t for t in rest if t.lower() == "noblock"]
-            non_noblock = [t for t in rest if t.lower() != "noblock"]
-            if len(non_noblock) == 1:
-                return " ".join([parts[0], tgt_s, non_noblock[0]] + noblock_tokens)
-            if len(non_noblock) == 2:
-                if non_noblock[0].lower() in me_tokens:
-                    return " ".join([parts[0], tgt_s, non_noblock[1]] + noblock_tokens)
-                if non_noblock[1].lower() in me_tokens:
-                    return " ".join([parts[0], tgt_s, non_noblock[0]] + noblock_tokens)
-        elif verb in ("/giveitem", "/createitem", "/spawn", "/spawnnpc", "/spawnwreck", "/spawnanomaly"):
-            if not rest:
-                return f"{parts[0]} {tgt_s}"
-            if rest[0].lower() in me_tokens:
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if not cls._looks_like_char_id_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb in ("/load", "/fit"):
-            if len(rest) >= 2 and rest[0].lower() in me_tokens:
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if rest and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb == "/setattr":
-            if len(rest) >= 3 and rest[0].lower() in me_tokens:
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if len(rest) == 2 and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb == "/getattr":
-            if len(rest) >= 2 and rest[0].lower() in me_tokens:
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if len(rest) == 1 and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb in ("/energy", "/secstatus"):
-            if len(rest) == 1:
-                return f"{parts[0]} {tgt_s} {rest[0]}"
-            if len(rest) >= 2 and rest[0].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + rest[1:])
-        elif verb == "/cleartimers":
-            if not rest or rest[0].lower() in ("me", "self"):
-                return f"{parts[0]} {tgt_s}"
-        elif verb in ("/completeskills", "/trainskills", "/finishskills"):
-            if not rest:
-                return f"{parts[0]} {tgt_s} all"
-            if rest[0].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + (rest[1:] or ["all"]))
-            if not cls._looks_like_char_id_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb in (
-            "/completeindustry",
-            "/finishjobs",
-            "/industrytimer",
-            "/upwelltimer",
-            "/structuretimer",
-            "/finishstructure",
-        ):
-            if not rest:
-                return f"{parts[0]} {tgt_s}"
-            if rest[0].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if not cls._looks_like_char_id_token(rest[0], target_char_id):
-                return " ".join([parts[0], tgt_s] + rest)
-        elif verb in ("/advancetime", "/fastforward", "/ff"):
-            if not rest:
-                return f"{parts[0]} {tgt_s}"
-            if rest[0].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + rest[1:])
-            if len(rest) >= 2 and rest[-1].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + rest[:-1])
-            if not any(cls._looks_like_char_id_token(t, target_char_id) for t in rest):
-                return " ".join([parts[0], tgt_s] + rest)
-        return raw
+        return gm_slash_utils.rewrite_gm_slash_for_target(cmd, target_char_id)
 
     @staticmethod
     def _should_dispatch_via_gm_bridge(act: Dict[str, Any], act_type: str) -> bool:
@@ -7945,7 +7880,13 @@ class PlaytesterRunner:
                         cmd,
                         target_solar_system_id=act_sys,
                     )
-                    calls_recorded.append({
+                    sim_evt = self._maybe_record_slash_sim_time_event(
+                        cmd,
+                        gm_res,
+                        target_char_id=tgt,
+                        source="gm_action_bridge",
+                    )
+                    call_entry = {
                         "seq": 0,
                         "service": "slash",
                         "method": "SlashCmd",
@@ -7953,7 +7894,12 @@ class PlaytesterRunner:
                         "ok": True,
                         "via": "gm_bridge",
                         "target_char_id": tgt,
-                    })
+                    }
+                    if sim_evt is not None:
+                        sim_events.append(sim_evt)
+                        call_entry["sim_time_injected_sec"] = sim_evt["seconds"]
+                        call_entry["injection_id"] = sim_evt["injection_id"]
+                    calls_recorded.append(call_entry)
                 elif act_type == "train_skill" or (
                     act_type == "station_command"
                     and str(act.get("target") or "").strip().lower() == "inject_and_train_skill"
@@ -7997,7 +7943,13 @@ class PlaytesterRunner:
                         cmd,
                         target_solar_system_id=act_sys,
                     )
-                    calls_recorded.append({
+                    sim_evt = self._maybe_record_slash_sim_time_event(
+                        cmd,
+                        gm_res,
+                        target_char_id=tgt,
+                        source="gm_action_bridge",
+                    )
+                    call_entry = {
                         "seq": 0,
                         "service": "slash",
                         "method": "SlashCmd",
@@ -8005,7 +7957,12 @@ class PlaytesterRunner:
                         "ok": True,
                         "via": "gm_bridge",
                         "target_char_id": tgt,
-                    })
+                    }
+                    if sim_evt is not None:
+                        sim_events.append(sim_evt)
+                        call_entry["sim_time_injected_sec"] = sim_evt["seconds"]
+                        call_entry["injection_id"] = sim_evt["injection_id"]
+                    calls_recorded.append(call_entry)
 
             scatters_observed = self._settle_gm_bridge_scatters(pre_ok, pre_scatters)
             sim_sec = round(sum(float(e.get("seconds") or 0.0) for e in sim_events), 6)
@@ -11030,7 +10987,10 @@ class ScenarioRunner(PlaytesterRunner):
         )
 
     def _gm_slash_requests_allowed(self) -> bool:
-        return self._scenario_requires_gm()
+        return bool(
+            self._scenario_requires_gm()
+            and getattr(self, "_active_step_allows_host_gm_slash", False)
+        )
 
     def _host_gm_port_for_client(self, ensure: bool = False) -> int:
         if not self._scenario_requires_gm():
@@ -11692,7 +11652,9 @@ class ScenarioRunner(PlaytesterRunner):
                             "expected_text": str(act.get("expected_ui_and_state_change") or ""),
                         }
                         prev_allow_tc = getattr(self, "_active_step_allows_host_time_control", None)
+                        prev_allow_gm_slash = getattr(self, "_active_step_allows_host_gm_slash", None)
                         self._active_step_allows_host_time_control = bool(step.get("time_control", False))
+                        self._active_step_allows_host_gm_slash = bool(step.get("setup", False))
                         try:
                             if act_type == "wait" and step.get("wait_until"):
                                 exec_res, post_state = self._execute_wait_until(step, pre_state, ctx)
@@ -11744,6 +11706,7 @@ class ScenarioRunner(PlaytesterRunner):
                                     )
                         finally:
                             self._active_step_allows_host_time_control = prev_allow_tc
+                            self._active_step_allows_host_gm_slash = prev_allow_gm_slash
 
                         elapsed_ms = round((time.time() - t_step) * 1000.0, 2)
                         self._record_session_flight_calls(

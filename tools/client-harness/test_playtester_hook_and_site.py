@@ -6270,7 +6270,7 @@ class TestIssue1539HostGmTimeControlRouting(unittest.TestCase):
             helpers._ensure_docked_jita(fake_sm_j, ipc_retry, station_id=60003760, system_id=30000142)
         self.assertEqual(dock_tries[0], 2)
         self.assertEqual(ipc_retry.calls, 3)
-        self.assertEqual(seen_jita_tcs, [None, False])
+        self.assertEqual(seen_jita_tcs, [False, False])
 
         sess_j_ok = types.SimpleNamespace(
             userid=1, charid=90000001, solarsystemid=30000142, solarsystemid2=30000142,
@@ -6304,7 +6304,7 @@ class TestIssue1539HostGmTimeControlRouting(unittest.TestCase):
              mock.patch.object(helpers, "_wait_warp_fx_settled", side_effect=lambda *_a, **kw: seen_jita_ok_tcs.append(kw.get("allow_time_control"))):
             helpers._ensure_docked_jita(fake_sm_j_ok, ipc_ok, station_id=60003760, system_id=30000142)
         self.assertEqual(dock_tries_ok[0], 2)
-        self.assertEqual(seen_jita_ok_tcs, [None, True])
+        self.assertEqual(seen_jita_ok_tcs, [False, True])
 
         # Check direct fallback timeout scaling inside _wait_warp_fx_settled when warp is active.
         warp_clock = {"t": 100.0}
@@ -6565,17 +6565,17 @@ class TestIssue1539HostGmTimeControlRouting(unittest.TestCase):
                 GetService=lambda n: fake_sm.services.get(n),
                 RemoteSvc=lambda n: fake_sm.services[n],
             )
-            ipc_stub = types.SimpleNamespace(
-                request=lambda payload, timeout=None: (
-                    {"ok": True, "via": "gm_bridge", "target_char_id": 90000001, "injection_id": "inj-10km", "time": 133000000}
-                    if allow_tc
-                    else {"ok": False, "reason": "host_time_control_disabled"}
-                )
-            )
+            ipc_calls = []
+            def _ipc_req(payload, timeout=None):
+                ipc_calls.append(dict(payload))
+                if allow_tc:
+                    return {"ok": True, "via": "gm_bridge", "target_char_id": 90000001, "injection_id": "inj-10km", "time": 133000000}
+                return {"ok": False, "reason": "host_time_control_disabled"}
+            ipc_stub = types.SimpleNamespace(request=_ipc_req)
             fake_es = types.SimpleNamespace(_read_guard_hits=lambda: [], _wrap_macho_rpc_hooks=lambda *_a: None)
             t_clock = {"t": 3000.0}
             with mock.patch.dict(sys.modules, {"evomu_site": fake_es}), \
-                 mock.patch.object(real_helpers, "_HOST_GM_STATE", {"port": 0, "client": ipc_stub, "target_char_id": 90000001, "sim_seq": 0, "sim_events": []}), \
+                 mock.patch.object(real_helpers, "_HOST_GM_STATE", {"port": 0, "client": ipc_stub, "target_char_id": 90000001, "sim_seq": 0, "sim_events": [], "configured_with_ipc": True, "mode": "journeys"}), \
                  mock.patch.object(builtins, "session", sess, create=True), \
                  mock.patch.object(real_helpers.__builtin__, "session", sess, create=True), \
                  mock.patch.object(hook.time, "time", side_effect=lambda: (t_clock.__setitem__("t", t_clock["t"] + 0.1), t_clock["t"])[1]), \
@@ -6590,12 +6590,90 @@ class TestIssue1539HostGmTimeControlRouting(unittest.TestCase):
                  mock.patch.object(real_helpers, "_sleep_sim_ms"):
                 res_jump = hook._execute_action(
                     fake_sm,
-                    {"type": "jump_gate", "target": "50001234", "item_id": 50001234, "allow_time_control": allow_tc},
+                    {"type": "jump_gate", "target": "50001234", "item_id": 50001234, "time_control": allow_tc},
                 )
             self.assertEqual(warp_calls, [])
             self.assertEqual(follow_calls, [50001234])
-            self.assertTrue(len(jump_calls) == 1)
+            self.assertEqual(jump_calls, [50001234])
             self.assertTrue(res_jump.get("ok"), res_jump)
+            if allow_tc:
+                self.assertGreaterEqual(len(ipc_calls), 1)
+            else:
+                self.assertEqual(ipc_calls, [])
+
+    def test_open_structure_cosmetics_run_slash_and_try_slash_fail_closed_without_client_slash(self):
+        hook = _load_hook_with_py2_stubs()
+        real_helpers = _load_helpers_with_py2_stubs()
+        hook.H = real_helpers
+
+        sess = types.SimpleNamespace(
+            userid=1, charid=90000001, corpid=1000167, corprole=0,
+            solarsystemid=None, solarsystemid2=30000142, stationid=60003760,
+            structureid=None, shipid=1001, mutating=0, changing=None,
+        )
+        client_slash_calls = []
+        ipc_slash_calls = []
+
+        class _PlayedSlashSvc:
+            remoteCommandList = ["heal"]
+            def SlashCmd(self, cmd):
+                client_slash_calls.append(cmd)
+                raise AssertionError("played client slash.SlashCmd must never be called: %r" % (cmd,))
+
+        fake_corp = types.SimpleNamespace(AddCorporation=lambda name, ticker: setattr(sess, "corpid", 98000001))
+        fake_ctrl = types.SimpleNamespace(get_cosmetic_state=lambda *_a, **_kw: {"ok": True})
+        fake_cos = types.SimpleNamespace(_structure_cosmetic_states_controller=fake_ctrl)
+        fake_lic = types.SimpleNamespace(get_structure_licenses_for_corporation=lambda: [])
+        fake_sm = types.SimpleNamespace(
+            services={
+                "slash": _PlayedSlashSvc(),
+                "corpRegistry": fake_corp,
+                "cosmeticsSvc": fake_cos,
+                "cosmeticsLicenseSvc": fake_lic,
+                "loyaltyPointsWalletSvc": types.SimpleNamespace(_corpLPBalanceByIssuerCorpID={}),
+            },
+            GetService=lambda n: fake_sm.services.get(n),
+            RemoteSvc=lambda n: fake_sm.services[n],
+        )
+
+        ipc_ok = types.SimpleNamespace(
+            request=lambda payload, timeout=None: (ipc_slash_calls.append(dict(payload)), {"ok": True, "handled": True, "via": "gm_bridge", "result": {"ok": True}})[1]
+        )
+        fake_es = types.SimpleNamespace(_read_guard_hits=lambda: [], _wrap_macho_rpc_hooks=lambda *_a: None)
+        with mock.patch.dict(sys.modules, {"evomu_site": fake_es}), \
+             mock.patch.object(real_helpers, "_HOST_GM_STATE", {"port": 0, "client": ipc_ok, "target_char_id": 90000001, "sim_seq": 0, "sim_events": [], "configured_with_ipc": True, "mode": "playtester"}), \
+             mock.patch.object(builtins, "session", sess, create=True), \
+             mock.patch.object(real_helpers.__builtin__, "session", sess, create=True), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}), \
+             mock.patch.object(real_helpers, "_sync_quasar_gateway"), \
+             mock.patch.object(real_helpers, "_sleep_ms"):
+            res_cos = hook._execute_action(fake_sm, {"type": "open_structure_cosmetics", "target": "1000000000001"})
+            self.assertTrue(res_cos.get("ok"), res_cos)
+            res_rs = hook._execute_action(fake_sm, {"type": "run_slash", "slash_cmd": "/heal"})
+            self.assertTrue(res_rs.get("ok"), res_rs)
+
+        self.assertEqual(client_slash_calls, [])
+        self.assertEqual([c["command"] for c in ipc_slash_calls], ["/cleartimers", "/giveskill 3363 1", "/heal"])
+
+        # Host denial (even with handled=False / reason present) fails closed with zero played-client slash.SlashCmd fallback.
+        denied_ipc = types.SimpleNamespace(
+            request=lambda payload, timeout=None: {"ok": False, "handled": True, "reason": "host_gm_slash_disabled"}
+        )
+        with mock.patch.object(real_helpers, "_HOST_GM_STATE", {"port": 0, "client": denied_ipc, "target_char_id": 90000001, "sim_seq": 0, "sim_events": [], "configured_with_ipc": True, "mode": "scenario"}):
+            self.assertIsNone(real_helpers._try_slash(fake_sm, "/heal", raise_on_error=False))
+            with self.assertRaises(RuntimeError):
+                real_helpers._try_slash(fake_sm, "/heal", raise_on_error=True)
+
+        # EVOMU_HOST_GM_PORT never leaks into run_journeys ipc mode or explicit host_gm_port=0 scenario config.
+        with mock.patch.dict(real_helpers.os.environ, {"EVOMU_HOST_GM_PORT": "59999"}):
+            st_ipc = real_helpers._configure_host_gm_bridge(cfg=None, ipc=denied_ipc, target_char_id=90000001)
+            self.assertEqual(st_ipc["port"], 0)
+            st_scen = real_helpers._configure_host_gm_bridge(cfg={"mode": "scenario", "host_gm_port": 0, "char_id": 90000001}, ipc=None)
+            self.assertEqual(st_scen["port"], 0)
+            self.assertIsNone(real_helpers._try_slash(fake_sm, "/heal", raise_on_error=False))
+        self.assertEqual(client_slash_calls, [])
 
 
 if __name__ == "__main__":

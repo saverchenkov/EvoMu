@@ -43,6 +43,7 @@ if BRIDGE_DIR not in sys.path:
     sys.path.insert(0, BRIDGE_DIR)
 
 import evomu_bridge  # noqa: E402
+import gm_slash_utils  # noqa: E402
 import guard_registry  # noqa: E402
 
 DEFAULT_CLIENT_APP = os.path.expanduser(
@@ -51,96 +52,25 @@ DEFAULT_CLIENT_APP = os.path.expanduser(
 GM_ADMIN_SECRET = "evomu-scenario-gm-secret"
 
 
-def _looks_like_char_id_token(tok, target_char_id):
-    t = str(tok or "").strip()
-    if not t or not t.isdigit():
-        return False
-    n = int(t)
-    return n == int(target_char_id) or (90_000_000 <= n < 1_000_000_000)
+_looks_like_char_id_token = gm_slash_utils.looks_like_char_id_token
+_looks_like_entity_or_location_token = gm_slash_utils.looks_like_entity_or_location_token
+_rewrite_gm_slash_for_target = gm_slash_utils.rewrite_gm_slash_for_target
 
 
-def _looks_like_entity_or_location_token(tok, target_char_id):
-    t = str(tok or "").strip()
-    if not t or not t.isdigit():
-        return False
-    n = int(t)
-    return (
-        n == int(target_char_id)
-        or (60_000_000 <= n < 70_000_000)
-        or (90_000_000 <= n < 1_000_000_000)
-        or n >= 1_000_000_000
-    )
-
-
-def _rewrite_gm_slash_for_target(cmd, target_char_id):
-    raw = str(cmd or "").strip()
-    tgt_id = int(target_char_id or 0)
-    if not raw.startswith("/") or tgt_id <= 0:
-        return raw
-    parts = raw.split()
-    verb = parts[0].lower()
-    rest = parts[1:]
-    tgt_s = str(tgt_id)
-    me_tokens = ("me", "myship", "self")
-
-    if verb == "/giveisk":
-        if len(rest) == 1:
-            return "/giveisk %s %s" % (tgt_s, rest[0])
-        if len(rest) >= 2 and rest[0].lower() in ("me", "self"):
-            return " ".join(["/giveisk", tgt_s] + rest[1:])
-    elif verb in ("/giveskill", "/setskill"):
-        if len(rest) == 2:
-            return "%s %s %s %s" % (parts[0], tgt_s, rest[0], rest[1])
-        if len(rest) >= 3 and rest[0].lower() in ("me", "self"):
-            return " ".join([parts[0], tgt_s] + rest[1:])
-    elif verb == "/heal":
-        if not rest or rest[0].lower() in ("me", "self"):
-            return "/heal %s" % tgt_s
-    elif verb in ("/teleport", "/tr", "/translocate", "/moveme"):
-        noblock_tokens = [t for t in rest if t.lower() == "noblock"]
-        non_noblock = [t for t in rest if t.lower() != "noblock"]
-        if len(non_noblock) == 1:
-            return " ".join([parts[0], tgt_s, non_noblock[0]] + noblock_tokens)
-        if len(non_noblock) == 2:
-            if non_noblock[0].lower() in me_tokens:
-                return " ".join([parts[0], tgt_s, non_noblock[1]] + noblock_tokens)
-            if non_noblock[1].lower() in me_tokens:
-                return " ".join([parts[0], tgt_s, non_noblock[0]] + noblock_tokens)
-    elif verb in ("/giveitem", "/createitem", "/spawn", "/spawnnpc", "/spawnwreck", "/spawnanomaly"):
-        if not rest:
-            return "%s %s" % (parts[0], tgt_s)
-        if rest[0].lower() in me_tokens:
-            return " ".join([parts[0], tgt_s] + rest[1:])
-        if not _looks_like_char_id_token(rest[0], tgt_id):
-            return " ".join([parts[0], tgt_s] + rest)
-    elif verb in ("/load", "/fit"):
-        if len(rest) >= 2 and rest[0].lower() in me_tokens:
-            return " ".join([parts[0], tgt_s] + rest[1:])
-        if rest and not _looks_like_entity_or_location_token(rest[0], tgt_id):
-            return " ".join([parts[0], tgt_s] + rest)
-    elif verb == "/setattr":
-        if len(rest) >= 3 and rest[0].lower() in me_tokens:
-            return " ".join([parts[0], tgt_s] + rest[1:])
-        if len(rest) == 2 and not _looks_like_entity_or_location_token(rest[0], tgt_id):
-            return " ".join([parts[0], tgt_s] + rest)
-    elif verb == "/cleartimers":
-        if not rest or rest[0].lower() in ("me", "self"):
-            return "%s %s" % (parts[0], tgt_s)
-    elif verb in ("/completeskills", "/trainskills", "/finishskills"):
-        if not rest:
-            return "%s %s all" % (parts[0], tgt_s)
-        if rest[0].lower() in ("me", "self"):
-            return " ".join([parts[0], tgt_s] + (rest[1:] or ["all"]))
-        if not _looks_like_char_id_token(rest[0], tgt_id):
-            return " ".join([parts[0], tgt_s] + rest)
-    elif verb in ("/upwelltimer", "/structuretimer", "/finishstructure"):
-        if not rest:
-            return "%s %s" % (parts[0], tgt_s)
-        if rest[0].lower() in ("me", "self"):
-            return " ".join([parts[0], tgt_s] + rest[1:])
-        if not _looks_like_entity_or_location_token(rest[0], tgt_id):
-            return " ".join([parts[0], tgt_s] + rest)
-    return raw
+def _is_gm_transport_error(exc):
+    if isinstance(exc, (OSError, EOFError)):
+        return True
+    if isinstance(exc, RuntimeError):
+        msg = str(exc or "")
+        low = msg.lower()
+        if "evomu rpc error [" in low:
+            return False
+        return (
+            "bridge connection failed:" in low
+            or "not connected" in low
+            or "connection closed" in low
+        )
+    return False
 
 
 def _dedup_sim_time_injections(*batches):
@@ -796,6 +726,24 @@ class IpcCoordinator(object):
         self.sm_gm.RemoteSvc("charUnboundMgr").SelectCharacterID(self.gm_char_id)
         return self.sm_gm
 
+    def _record_gm_sim_injection(self, secs, target_char_id, method, journey_id=None):
+        self._gm_sim_seq += 1
+        inj_id = "rj-gm-%d" % self._gm_sim_seq
+        sec_f = max(0.0, float(secs or 0.0))
+        evt = {
+            "seq": self._gm_sim_seq,
+            "injection_id": inj_id,
+            "seconds": sec_f,
+            "target_char_id": int(target_char_id or 0),
+            "journey_id": journey_id or self._active_span_jid,
+            "via": "gm_bridge",
+            "source": "run_journeys",
+            "method": method,
+            "ts": time.time(),
+        }
+        self._gm_sim_injections.append(evt)
+        return evt
+
     def _gm_advance_clock(self, secs, target_char_id=0, journey_id=None):
         secs_i = int(secs)
         tgt = int(target_char_id or self.default_target_char_id or 90000001)
@@ -804,32 +752,23 @@ class IpcCoordinator(object):
             try:
                 sm_gm = self._ensure_gm(force=(attempt > 0))
                 t_res = sm_gm.RemoteSvc("timeControl").AdvanceClock(secs_i, tgt)
-                self._gm_sim_seq += 1
-                inj_id = "rj-gm-%d" % self._gm_sim_seq
-                self._gm_sim_injections.append(
-                    {
-                        "seq": self._gm_sim_seq,
-                        "injection_id": inj_id,
-                        "seconds": float(secs_i),
-                        "target_char_id": tgt,
-                        "journey_id": journey_id or self._active_span_jid,
-                        "via": "gm_bridge",
-                        "source": "run_journeys",
-                        "method": "AdvanceClock",
-                        "ts": time.time(),
-                    }
+                evt = self._record_gm_sim_injection(
+                    secs_i,
+                    tgt,
+                    "AdvanceClock",
+                    journey_id=journey_id,
                 )
                 return {
                     "ok": True,
                     "time": t_res,
                     "via": "gm_bridge",
                     "target_char_id": tgt,
-                    "injection_id": inj_id,
-                    "sim_time_injected_sec": float(secs_i),
+                    "injection_id": evt["injection_id"],
+                    "sim_time_injected_sec": evt["seconds"],
                 }
             except (OSError, EOFError, RuntimeError) as exc:
                 last_exc = exc
-                if attempt > 0:
+                if not _is_gm_transport_error(exc) or attempt > 0:
                     raise
         raise RuntimeError(str(last_exc) if last_exc is not None else "GM AdvanceClock failed")
 
@@ -843,7 +782,7 @@ class IpcCoordinator(object):
                 return {"ok": True, "via": "gm_bridge", "target_char_id": tgt}
             except (OSError, EOFError, RuntimeError) as exc:
                 last_exc = exc
-                if attempt > 0:
+                if not _is_gm_transport_error(exc) or attempt > 0:
                     raise
         raise RuntimeError(str(last_exc) if last_exc is not None else "GM ClearSessionTimer failed")
 
@@ -894,7 +833,7 @@ class IpcCoordinator(object):
                     rewritten,
                     target_solar_system_id=target_solar_system_id,
                 )
-                return {
+                resp = {
                     "ok": True,
                     "handled": True,
                     "result": res,
@@ -903,9 +842,24 @@ class IpcCoordinator(object):
                     "target_char_id": tgt,
                     "target_solar_system_id": int(target_solar_system_id or 0),
                 }
+                adv_secs = gm_slash_utils.extract_slash_sim_advance_seconds(
+                    rewritten,
+                    res,
+                    target_char_id=tgt,
+                )
+                if adv_secs is not None:
+                    verb = rewritten.split()[0].lower()
+                    evt = self._record_gm_sim_injection(
+                        adv_secs,
+                        tgt,
+                        "SlashCmd:%s" % verb,
+                    )
+                    resp["injection_id"] = evt["injection_id"]
+                    resp["sim_time_injected_sec"] = evt["seconds"]
+                return resp
             except (OSError, EOFError, RuntimeError) as exc:
                 last_exc = exc
-                if attempt > 0:
+                if not _is_gm_transport_error(exc) or attempt > 0:
                     raise
         raise RuntimeError(str(last_exc) if last_exc is not None else "GM SlashCmd failed")
 

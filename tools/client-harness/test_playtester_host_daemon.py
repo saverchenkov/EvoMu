@@ -4858,6 +4858,34 @@ class TestBugOracleSessionTelemetryAndArgs(unittest.TestCase):
                 run_sum_file = json.loads((runner.current_run_dir / "run_summary.json").read_text(encoding="utf-8"))
                 self.assertEqual(run_sum_file["total_sim_time_injected_sec"], 15.0)
                 self.assertEqual(run_sum_file["total_sim_time_injection_count"], 1)
+
+                # /fastforward 180 via slash_cmd records sim-time injection over live host bridge IPC
+                with mock.patch.object(runner, "_ensure_gm_bridge", return_value=_FakeGmSm()):
+                    ipc2 = hlp.IpcClient(port)
+                    try:
+                        ff_resp = ipc2.request({"cmd": "slash_cmd", "command": "/fastforward 180", "target_char_id": 90000001})
+                    finally:
+                        ipc2.close()
+                self.assertTrue(ff_resp["ok"])
+                self.assertEqual(ff_resp["sim_time_injected_sec"], 180.0)
+                step2_sim = runner._absorb_step_sim_time({"action_ok": True})
+                self.assertEqual(step2_sim["sim_time_injected_sec"], 180.0)
+                summary2 = runner._write_run_summary(step_num=2, final=True)
+                self.assertEqual(summary2["total_sim_time_injected_sec"], 195.0)
+                self.assertEqual(summary2["total_sim_time_injection_count"], 2)
+
+                # _SimTimeTracker ignores bool seq=True and preserves newest keys over >20000 events
+                tracker = playtester._SimTimeTracker(retain_events=False)
+                tracker.absorb_events([
+                    {"seq": True, "seconds": 5.0, "method": "AdvanceClock"},
+                    {"seq": False, "seconds": 5.0, "method": "AdvanceClock"},
+                ])
+                self.assertEqual(tracker.total_count, 2)
+                tracker.absorb_events([
+                    {"injection_id": f"k-{i}", "seconds": 1.0} for i in range(20005)
+                ])
+                self.assertIn(("id", "k-20004"), tracker.seen_ids)
+                self.assertNotIn(("id", "k-0"), tracker.seen_ids)
             finally:
                 runner._stop_host_gm_bridge_server()
                 runner.oracle.flush()

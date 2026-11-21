@@ -2464,6 +2464,116 @@ class Test1202R4And1242Acceptance(unittest.TestCase):
             self.assertEqual(j_res["steps"][1]["sim_time_injected_sec"], 15.0)
             self.assertEqual(j_res["steps"][1]["sim_time_injection_count"], 1)
 
+    def test_scenario_runner_slash_cmd_per_step_gate_and_advancetime_sim_telemetry(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen = root / "slash_gate.json"
+            scen.write_text(
+                json.dumps({
+                    "id": "slash_gate",
+                    "title": "Per-step slash_cmd gate & /advancetime telemetry",
+                    "starting_state": {"account": "demo", "char_id": 90000001, "view": "hangar"},
+                    "steps": [
+                        {
+                            "id": "setup_open_cosmetics",
+                            "description": "Setup step enables host slash_cmd IPC",
+                            "setup": True,
+                            "action": {"type": "open_structure_cosmetics", "target": "1000000000001"},
+                            "checks": {},
+                        },
+                        {
+                            "id": "gameplay_step",
+                            "description": "Non-setup gameplay step denies host slash_cmd IPC",
+                            "setup": False,
+                            "action": {"type": "wait", "wait_ms": 50},
+                            "checks": {},
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            runner = self._runner_in_dir(root, [scen])
+            hangar_state = {
+                "session": {"charid": 90000001, "stationid": 60003760, "solarsystemid": None, "solarsystemid2": 30000142},
+                "active_view": "hangar",
+                "open_windows": [],
+                "modals": [],
+                "ui": {"clickable_widgets": []},
+                "space": {},
+                "skills_state": {},
+                "wallet_state": {},
+            }
+            gm_cmds = []
+
+            class _FakeGmSm:
+                class _Slash:
+                    def SlashCmd(self, cmd):
+                        gm_cmds.append(cmd)
+                        if cmd.startswith("/advancetime") or cmd.startswith("/fastforward") or cmd.startswith("/ff"):
+                            return {"command": cmd, "advancedSeconds": 180 if cmd.startswith("/fastforward") else 300}
+                        return {"ok": True}
+                def RemoteSvc(self, name):
+                    return self._Slash()
+
+            runner._ensure_gm_bridge = lambda: _FakeGmSm()
+
+            def _fake_rpc(method, params=None, timeout=15.0):
+                if method == "get_state":
+                    return {"ok": True, "state": hangar_state}
+                if method == "get_flight_recorder":
+                    return {"ok": True, "macho_calls": []}
+                if method == "get_guard_hits":
+                    return {"ok": True, "guard_hits": []}
+                if method == "execute_action":
+                    act = dict((params or {}).get("action") or {})
+                    if act.get("type") == "open_structure_cosmetics":
+                        resp = runner._handle_host_gm_rpc_request(
+                            {"cmd": "slash_cmd", "command": "/advancetime 300", "target_char_id": 90000001}
+                        )
+                        self.assertTrue(resp["ok"])
+                        self.assertTrue(resp["handled"])
+                        self.assertEqual(resp["sim_time_injected_sec"], 300.0)
+                        return {"ok": True, "action_ok": True, "post_state": hangar_state, "flight_recorder": {"macho_calls": []}}
+                    denied = runner._handle_host_gm_rpc_request(
+                        {"cmd": "slash_cmd", "command": "/heal", "target_char_id": 90000001}
+                    )
+                    self.assertFalse(denied["ok"])
+                    self.assertTrue(denied["handled"])
+                    self.assertEqual(denied.get("reason"), "host_gm_slash_disabled")
+                    return {"ok": True, "action_ok": True, "post_state": hangar_state, "flight_recorder": {"macho_calls": []}}
+                return {"ok": True}
+
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = _fake_rpc
+            runner.start_server = lambda reset_db=True: True
+            runner.start_client = lambda: setattr(
+                runner,
+                "_last_boot_result",
+                {"ok": True, "state": hangar_state, "flight_recorder": {"macho_calls": []}},
+            ) or True
+            runner.stop_client = lambda: None
+            runner.stop_server = lambda: None
+
+            with mock.patch.object(playtester, "get_git_head", return_value="abc1234"), \
+                 mock.patch.object(runner, "_run_destiny_parity_check", return_value=None):
+                rc = runner.run_scenarios()
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(gm_cmds, ["/advancetime 90000001 300"])
+            res_data = json.loads((runner.out_dir / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(res_data["total_sim_time_injected_sec"], 300.0)
+            self.assertEqual(res_data["total_sim_time_injection_count"], 1)
+
+            # Direct GM-bridge slash_command (/fastforward 180) also records sim-time telemetry
+            br_res = runner._execute_gm_or_time_control_via_bridge(
+                {"type": "slash_command", "command": "/fastforward 180"},
+                "slash_command",
+                90000001,
+            )
+            self.assertTrue(br_res["action_ok"])
+            self.assertEqual(br_res["sim_time_injected_sec"], 180.0)
+            self.assertEqual(br_res["sim_time_injection_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -136,8 +136,11 @@ def _resolve_target_solar_system_id(target_solar_system_id=0):
 
 def _configure_host_gm_bridge(cfg=None, ipc=None, target_char_id=0, port=0):
     cfg_dict = cfg if isinstance(cfg, dict) else {}
+    cfg_mode = str(cfg_dict.get("mode") or "").strip().lower()
     if port:
         resolved_port = int(port)
+    elif ipc is not None:
+        resolved_port = 0
     elif isinstance(cfg, dict) and "host_gm_port" in cfg:
         resolved_port = int(cfg.get("host_gm_port") or 0)
     else:
@@ -166,6 +169,8 @@ def _configure_host_gm_bridge(cfg=None, ipc=None, target_char_id=0, port=0):
         _HOST_GM_STATE["client"] = ipc
 
     _HOST_GM_STATE["port"] = resolved_port
+    _HOST_GM_STATE["configured_with_ipc"] = bool(ipc is not None)
+    _HOST_GM_STATE["mode"] = ("journeys" if (ipc is not None and not cfg_mode) else cfg_mode)
     if resolved_char:
         _HOST_GM_STATE["target_char_id"] = resolved_char
     return {
@@ -237,7 +242,12 @@ def collect_sim_time_telemetry(since_seq=0):
 
 def _gm_ipc_request(payload, ipc=None):
     client = ipc if ipc is not None else _HOST_GM_STATE.get("client")
-    port = int(_HOST_GM_STATE.get("port") or os.environ.get("EVOMU_HOST_GM_PORT") or 0)
+    if ipc is not None or _HOST_GM_STATE.get("configured_with_ipc"):
+        port = 0
+    elif _HOST_GM_STATE.get("mode"):
+        port = int(_HOST_GM_STATE.get("port") or 0)
+    else:
+        port = int(_HOST_GM_STATE.get("port") or os.environ.get("EVOMU_HOST_GM_PORT") or 0)
     if client is None and port > 0:
         try:
             client = IpcClient(port)
@@ -816,7 +826,13 @@ def _try_slash(sm, cmd, ipc=None, target_char_id=0, raise_on_error=False, target
         payload,
         ipc=ipc,
     )
-    if isinstance(res, dict) and res.get("handled"):
+    if isinstance(res, dict) and (
+        res.get("handled")
+        or res.get("via") == "gm_bridge"
+        or "reason" in res
+        or res.get("ok") is False
+        or "error" in res
+    ):
         if res.get("ok"):
             if cmd.startswith("/giveskill ") or cmd.startswith("/setskill "):
                 _sleep_ms(150)
@@ -826,6 +842,10 @@ def _try_slash(sm, cmd, ipc=None, target_char_id=0, raise_on_error=False, target
                 "Host GM slash_cmd(%r) failed: %s"
                 % (cmd, res.get("error") or res.get("reason") or res)
             )
+        return None
+    if res is None and _HOST_GM_STATE.get("mode") in ("playtester", "scenario", "journeys"):
+        if raise_on_error:
+            raise RuntimeError("Host GM bridge unavailable for slash_cmd(%r)" % (cmd,))
         return None
     try:
         res = sm.RemoteSvc("slash").SlashCmd(cmd)
@@ -1329,7 +1349,7 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
     sess = getattr(__builtin__, "session", None)
     if getattr(sess, "solarsystemid", None) and not getattr(sess, "stationid", None):
         _sleep_sim_ms(1200)
-    _wait_warp_fx_settled(sm, timeout_sec=35.0)
+    _wait_warp_fx_settled(sm, timeout_sec=35.0, allow_time_control=False)
     sess = getattr(__builtin__, "session", None)
     cur_stop_sys = int(getattr(sess, "solarsystemid", 0) or getattr(sess, "solarsystemid2", 0) or 0) if sess is not None else 0
     if cur_stop_sys and not getattr(sess, "stationid", None) and not getattr(sess, "structureid", None):

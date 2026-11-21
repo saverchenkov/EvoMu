@@ -696,6 +696,11 @@ class _FakeIPC:
             return {"ok": True, "via": "gm_bridge"}
         if cmd == "c2_check_ball_and_dock":
             return {"ok": True, "saw_ship": True, "updates": 2}
+        if cmd == "slash_cmd":
+            if self.state is not None:
+                res = self.state.handle_rpc("slash", "SlashCmd", str(payload.get("command") or ""))
+                return {"ok": True, "handled": True, "via": "gm_bridge", "result": res}
+            return {"ok": True, "handled": True}
         return {"ok": True}
 
     def notify(self, payload):
@@ -1824,21 +1829,59 @@ class RunJourneysIsolationTests(unittest.TestCase):
             })
             self.assertTrue(sl_despawn_jita["ok"])
 
+            # /advancetime 300 via GM bridge records deduplicated sim-time injection
+            sl_adv = ipc._handle_cmd({"cmd": "slash_cmd", "command": "/advancetime 300", "target_char_id": 90000001})
+            self.assertTrue(sl_adv["ok"])
+            self.assertEqual(sl_adv["sim_time_injected_sec"], 300.0)
+            self.assertTrue(sl_adv["injection_id"])
+
             self.assertEqual(
                 gm_calls,
                 [
                     ("timeControl.AdvanceClock", 24, 90000001),
                     ("timeControl.ClearSessionTimer", 90000001),
                     ("slash.SlashCmd", "/completeskills 90000001 all"),
-                    ("slash.SlashCmd", "/upwelltimer 1000000999"),
+                    ("slash.SlashCmd", "/upwelltimer 90000001 1000000999"),
                     ("slash.SlashCmd", "/tr me 32000001 noblock"),
                     ("slash.SlashCmd", "/despawn 77001"),
                     ("slash.SlashCmd", "/tr me 60003760 noblock"),
                     ("timeControl.ClearSessionTimer", 90000003),
                     ("stationSvc.Dock", 60003760),
                     ("slash.SlashCmd", "/despawn 77002"),
+                    ("slash.SlashCmd", "/advancetime 90000001 300"),
                 ],
             )
+
+            # Server RPC error (EvoMu RPC Error) does NOT reconnect/retry GM bridge, whereas EOFError reconnects once.
+            connects = [0]
+            class _ErrGmSm:
+                def __init__(self, fail_mode):
+                    self._fail_mode = fail_mode
+                def RemoteSvc(self, name):
+                    class _S:
+                        def SlashCmd(_s, c):
+                            if self._fail_mode == "rpc_err":
+                                raise RuntimeError("EvoMu RPC Error [EntityNotFound]: missing")
+                            if self._fail_mode == "eof_once" and connects[0] == 1:
+                                raise EOFError("Connection closed")
+                            return {"ok": True}
+                    return _S()
+            def _fake_ensure(force=False):
+                if force or ipc.sm_gm is None:
+                    connects[0] += 1
+                    if isinstance(ipc.sm_gm, _ErrGmSm) and ipc.sm_gm._fail_mode == "eof_once":
+                        ipc.sm_gm = _ErrGmSm("ok")
+                return ipc.sm_gm
+            ipc._ensure_gm = _fake_ensure
+            ipc.sm_gm = _ErrGmSm("rpc_err")
+            with self.assertRaises(RuntimeError):
+                ipc._gm_slash_cmd("/despawn 99999")
+            self.assertEqual(connects[0], 0)
+            ipc.sm_gm = _ErrGmSm("eof_once")
+            connects[0] = 1
+            eof_ok = ipc._gm_slash_cmd("/heal")
+            self.assertTrue(eof_ok["ok"])
+            self.assertEqual(connects[0], 2)
 
             # Deduplication across host coordinator + in-client journey telemetry
             deduped = rj._dedup_sim_time_injections(
@@ -1846,8 +1889,8 @@ class RunJourneysIsolationTests(unittest.TestCase):
                 [{"injection_id": adv["injection_id"], "seconds": 24, "target_char_id": 90000001}],
                 [{"injection_id": "rj-extra-1", "seconds": 6, "target_char_id": 90000001}],
             )
-            self.assertEqual(len(deduped), 2)
-            self.assertEqual(sum(float(x["seconds"]) for x in deduped), 30.0)
+            self.assertEqual(len(deduped), 3)
+            self.assertEqual(sum(float(x["seconds"]) for x in deduped), 330.0)
         finally:
             ipc.close()
 

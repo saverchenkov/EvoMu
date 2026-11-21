@@ -5393,8 +5393,8 @@ def _open_client_window(sm, target, require_open=False):
 
 
 def _run_gm_slash(sm, scmd):
-    slash_svc = sm.GetService("slash")
-    if scmd == "/" and hasattr(slash_svc, "FetchRemoteCommandList"):
+    slash_svc = sm.GetService("slash") if sm is not None else None
+    if scmd == "/" and slash_svc is not None and hasattr(slash_svc, "FetchRemoteCommandList"):
         try:
             if hasattr(slash_svc, "remoteCommandList"):
                 delattr(slash_svc, "remoteCommandList")
@@ -5405,16 +5405,16 @@ def _run_gm_slash(sm, scmd):
         if cmds:
             return "Commands: [%s]" % (", ".join(repr(str(c)) for c in cmds))
         try:
-            sm.RemoteSvc("slash").SlashCmd("/")
+            H._try_slash(sm, "/", raise_on_error=True)
         except Exception as exc:
             args = getattr(exc, "args", None)
             if isinstance(args, tuple) and len(args) >= 2 and isinstance(args[1], dict) and args[1].get("reason"):
                 return _safe_str(args[1]["reason"], 2000)
             return _safe_str(repr(exc), 2000)
         return "FetchRemoteCommandList OK (empty)"
-    # Pre-seed remoteCommandList if absent so svc_slash._SlashCmd never blocks on the
+    # Pre-seed remoteCommandList if absent so client-side helpers never block on the
     # "Hmmm: Unable to acquire server slash command list" modal dialog during automated playtesting.
-    if not hasattr(slash_svc, "remoteCommandList") or getattr(slash_svc, "remoteCommandList", None) is None:
+    if slash_svc is not None and (not hasattr(slash_svc, "remoteCommandList") or getattr(slash_svc, "remoteCommandList", None) is None):
         try:
             setattr(
                 slash_svc,
@@ -5446,7 +5446,7 @@ def _run_gm_slash(sm, scmd):
             )
         except Exception:
             pass
-    return sm.RemoteSvc("slash").SlashCmd(scmd)
+    return H._try_slash(sm, scmd, raise_on_error=True)
 
 
 def _invoke_text_submit_candidates(candidates, result):
@@ -7459,8 +7459,6 @@ def _execute_action(sm, action):
                                                 surf_j = float(getattr(target_ball_j, "surfaceDist", 0.0) or 0.0)
                                         except Exception:
                                             surf_j = None
-                                else:
-                                    warp_adv_ok_j = False
                             if warp_too_short_j or surf_j is None or surf_j > 2400.0:
                                 beyonce.CmdFollowBall(gate_id, 0.0)
                                 approach_tc_ok = bool(warp_adv_ok_j) if did_warp_j else bool(allow_time_control)
