@@ -74,39 +74,8 @@ async fn serve_harness_bridge_client(
                 };
 
                 let prev_session = session.clone();
-                let result = if service == "timeControl" && method == "AdvanceClock" {
-                    let secs = args.first().and_then(|a| match a {
-                        PyRep::Integer(i) => Some(*i as u64),
-                        _ => None,
-                    }).unwrap_or(12);
-                    ctx.advance_secs(secs);
-                    if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-                        let sys_h = ctx.systems.get_or_spawn(sys_id);
-                        let is_warping = matches!(
-                            sys_h.get_ball_snapshot(ship_id).await,
-                            Ok(Some((_, ball))) if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. })
-                        );
-                        let has_invuln_timer = matches!(
-                            sys_h.get_combat_state(ship_id).await,
-                            Ok(Some(cs))
-                                if cs.warp_exit_invulnerable_remaining_ticks > 0
-                                    || cs.undock_invulnerable_remaining_ticks > 0
-                                    || cs.gate_cloak_remaining_ticks > 0
-                        );
-                        if is_warping || has_invuln_timer {
-                            for _ in 0..secs.min(60) {
-                                let _ = sys_h.tick().await;
-                            }
-                        }
-                    }
-                    Ok(PyRep::Bool(true))
-                } else if (service == "timeControl" || service == "harness") && (method == "FastForwardSessionTimer" || method == "ClearSessionTimer") {
-                    if let Some(cid) = session.character_id {
-                        eve_server::services::space_destiny::clear_session_change_timer(&ctx, cid);
-                    }
-                    Ok(PyRep::Bool(true))
-                } else {
-                    ctx.dispatch_rpc(
+                let result = ctx
+                    .dispatch_rpc(
                         &mut session,
                         &service,
                         bound_id,
@@ -115,8 +84,7 @@ async fn serve_harness_bridge_client(
                         &kwargs,
                         caller_trace.as_deref(),
                     )
-                    .await
-                };
+                    .await;
 
                 {
                     if let Ok(mut f) = server_log.lock() {
@@ -276,10 +244,11 @@ async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
     let ctx = Arc::new(ctx);
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
-    ctx.db.provision_gm_account("other", "other-secret", 90_000_004, "ISD Other");
+    ctx.db
+        .provision_gm_account("admin", "evomu-scenario-gm-secret", 90_000_003, "ISD Admin");
     let other_uid = ctx.db.authenticate("other", "other-secret").unwrap().user_id;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.adjust_plex_vault(90_000_004, 50_000);
+        snap.adjust_plex_vault(90_000_002, 50_000);
         snap.account_plex_vault.insert(other_uid, 50_000);
     });
     ctx.db
