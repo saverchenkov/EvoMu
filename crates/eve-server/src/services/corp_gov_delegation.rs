@@ -6,10 +6,10 @@
 
 use super::fleet_social::fleet_social_corps::{read_corp_gov, with_corp_gov};
 use crate::router::notify_registry::{OnCapitalSystemChanged, OnCorpWalletBillsChanged, OnUpdateCapitalInfo};
-use crate::router::{cache_notifications::NotificationTarget, ServerContext};
+use crate::router::{cache_notifications::NotificationTarget, RpcArgs, ServerContext};
 use eve_db::{corp_roles, CorpRecruitmentAd};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ClientError, PyRep, UserErrorKey};
 use std::collections::{HashMap, HashSet};
 
 fn is_excluded_corp_member(corp: &eve_db::CorporationRecord, char_id: i64) -> bool {
@@ -52,45 +52,34 @@ pub(crate) fn handle_corp_rec_queries(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let arg0_i64 = match args {
-        [a0, ..] => a0.as_i64(),
-        [] => None,
-    };
-    let filter_corp = match method {
-        "GetRecruitmentAdsByCorpID" => arg0_i64.or(Some(corp_id)),
-        "GetRecruitmentAdsForCorporation" => Some(corp_id),
-        _ => None,
-    };
-    let filter_ad = if method == "GetRecruitmentAd" {
-        arg0_i64
-    } else {
-        None
-    };
-    let (filter_mask, filter_lang, min_members, max_members) = if method == "SearchCorpAds" {
-        let (a0, a1, a2, a3) = match args {
-            [a0, a1, a2, a3, ..] => (a0.as_i64(), a1.as_i64(), a2.as_i64(), a3.as_i64()),
-            [a0, a1, a2] => (a0.as_i64(), a1.as_i64(), a2.as_i64(), None),
-            [a0, a1] => (a0.as_i64(), a1.as_i64(), None, None),
-            [a0] => (a0.as_i64(), None, None, None),
-            [] => (None, None, None, None),
+    let rpc = RpcArgs::new(args, kwargs);
+    let (filter_corp, filter_ad, filter_mask, filter_lang, min_members, max_members) =
+        match (|| -> Result<_, BridgeRpcError> {
+            let filter_corp = match method {
+                "GetRecruitmentAdsByCorpID" => rpc.opt_i64(0, "corporationID")?.or(Some(corp_id)),
+                "GetRecruitmentAdsForCorporation" => Some(corp_id),
+                _ => None,
+            };
+            let filter_ad = if method == "GetRecruitmentAd" {
+                rpc.opt_i64(0, "adID")?
+            } else {
+                None
+            };
+            let (mask, lang, min_m, max_m) = if method == "SearchCorpAds" {
+                (
+                    rpc.opt_i64(0, "typeMask")?.unwrap_or(0) as u64,
+                    rpc.opt_i64_any(1, &["langMask", "languageMask"])?.unwrap_or(0) as u64,
+                    rpc.opt_i64(2, "minMembers")?,
+                    rpc.opt_i64(3, "maxMembers")?,
+                )
+            } else {
+                (0, 0, None, None)
+            };
+            Ok((filter_corp, filter_ad, mask, lang, min_m, max_m))
+        })() {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
         };
-        let mask = a0
-            .or_else(|| kwargs.get("typeMask").and_then(|a| a.as_i64()))
-            .unwrap_or(0) as u64;
-        let lang = a1
-            .or_else(|| {
-                kwargs
-                    .get("langMask")
-                    .or_else(|| kwargs.get("languageMask"))
-                    .and_then(|a| a.as_i64())
-            })
-            .unwrap_or(0) as u64;
-        let min_m = a2.or_else(|| kwargs.get("minMembers").and_then(|a| a.as_i64()));
-        let max_m = a3.or_else(|| kwargs.get("maxMembers").and_then(|a| a.as_i64()));
-        (mask, lang, min_m, max_m)
-    } else {
-        (0, 0, None, None)
-    };
     let ads = load_corp_rec_ads(ctx);
     let mut rows = Vec::new();
     for ad in &ads {
@@ -149,9 +138,9 @@ pub(crate) fn handle_get_wallet_divisions_info(
         Err(e) => return Some(Err(e)),
     };
     let is_gm = session.has_gm_role();
-    let explicit_corp_id = match args {
-        [a0, ..] => a0.as_i64(),
-        [] => None,
+    let explicit_corp_id = match RpcArgs::positional(args).opt_i64(0, "corporationID") {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
     };
     let now_unix = ctx.now_unix();
     let res = ctx.db.with_snapshot(|snap| {
@@ -163,22 +152,28 @@ pub(crate) fn handle_get_wallet_divisions_info(
             .unwrap_or(0);
         let corp_id = explicit_corp_id.unwrap_or(caller_corp_id);
         if super::industry_pi::is_npc_corporation(ctx, corp_id) {
-            return Err(super::account_services::err(
+            let msg = "NPC corporations do not expose player wallet divisions";
+            return Err(BridgeRpcError::with_client_error(
                 "CorpRoleDenied",
-                "NPC corporations do not expose player wallet divisions",
+                msg,
+                ClientError::CustomInfo(msg.into()),
             ));
         }
         let Some(corp) = snap.corporations.get(&corp_id) else {
-            return Err(super::account_services::err(
+            let msg = format!("Corporation {corp_id} not found");
+            return Err(BridgeRpcError::with_client_error(
                 "CorporationNotFound",
-                format!("Corporation {corp_id} not found"),
+                msg.clone(),
+                ClientError::CustomInfo(msg),
             ));
         };
         if !is_gm {
             if corp_id != caller_corp_id || is_excluded_corp_member(corp, char_id) {
-                return Err(super::account_services::err(
+                let msg = "Viewing corporation wallet divisions requires membership in the target corporation";
+                return Err(BridgeRpcError::with_client_error(
                     "CorpRoleDenied",
-                    "Viewing corporation wallet divisions requires membership in the target corporation",
+                    msg,
+                    ClientError::CustomInfo(msg.into()),
                 ));
             }
             let (is_ceo, caller_role) =
@@ -187,9 +182,11 @@ pub(crate) fn handle_get_wallet_divisions_info(
                 && !corp_roles::has_role(caller_role, corp_roles::ROLE_ACCOUNTANT)
                 && !corp_roles::has_role(caller_role, corp_roles::ROLE_JUNIOR_ACCOUNTANT)
             {
-                return Err(super::account_services::err(
+                let msg = "Viewing corporation wallet divisions requires Accountant role";
+                return Err(BridgeRpcError::with_client_error(
                     "CorpRoleDenied",
-                    "Viewing corporation wallet divisions requires Accountant role",
+                    msg,
+                    ClientError::CustomInfo(msg.into()),
                 ));
             }
         }
@@ -233,25 +230,34 @@ pub(crate) fn handle_get_shares_by_shareholder(
     corp_id: i64,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (target_sh_id, corp_shares) = match args {
-        [PyRep::Bool(true) | PyRep::Integer(1)] => (corp_id, true),
-        [PyRep::Bool(false) | PyRep::Integer(0)] | [] | [PyRep::None] => (char_id, false),
-        [PyRep::Integer(n)] => (*n, *n == corp_id),
-        [first, second, ..] => {
-            let req_corp = matches!(first, PyRep::Bool(true) | PyRep::Integer(1));
-            let explicit = second
-                .as_i64()
-                .unwrap_or(if req_corp { corp_id } else { char_id });
-            (explicit, req_corp || explicit == corp_id)
+    let rpc = RpcArgs::positional(args);
+    let (target_sh_id, corp_shares) = if rpc.len() >= 2 {
+        let req_corp = matches!(
+            rpc.get_raw(0, "corpShares"),
+            Some(PyRep::Bool(true) | PyRep::Integer(1))
+        );
+        let explicit = match rpc.opt_i64(1, "shareholderID") {
+            Ok(v) => v.unwrap_or(if req_corp { corp_id } else { char_id }),
+            Err(e) => return Some(Err(e)),
+        };
+        (explicit, req_corp || explicit == corp_id)
+    } else {
+        match rpc.get_raw(0, "shareholderID") {
+            None | Some(PyRep::Bool(false) | PyRep::Integer(0)) => (char_id, false),
+            Some(PyRep::Bool(true) | PyRep::Integer(1)) => (corp_id, true),
+            Some(_) => match rpc.req_i64(0, "shareholderID") {
+                Ok(n) => (n, n == corp_id),
+                Err(e) => return Some(Err(e)),
+            },
         }
-        _ => (char_id, false),
     };
     if !is_gm {
         if corp_shares {
             if target_sh_id != corp_id || corp_id <= 0 {
-                return Some(Err(super::account_services::err(
+                return Some(Err(BridgeRpcError::with_client_error(
                     "CrpAccessDenied",
                     format!("Cannot view shares for entity {target_sh_id}"),
+                    ClientError::user(UserErrorKey::CrpAccessDenied),
                 )));
             }
             let now_unix = ctx.now_unix();
@@ -272,15 +278,17 @@ pub(crate) fn handle_get_shares_by_shareholder(
                 is_ceo || (eff_roles & corp_roles::ROLE_DIRECTOR) != 0
             });
             if !can_view_corp_shares {
-                return Some(Err(super::account_services::err(
+                return Some(Err(BridgeRpcError::with_client_error(
                     "CrpAccessDenied",
                     "Only CEO or Directors can view corporation-held shares",
+                    ClientError::user(UserErrorKey::CrpAccessDenied),
                 )));
             }
         } else if target_sh_id != char_id {
-            return Some(Err(super::account_services::err(
+            return Some(Err(BridgeRpcError::with_client_error(
                 "CrpAccessDenied",
                 format!("Cannot view shares held by third-party entity {target_sh_id}"),
+                ClientError::user(UserErrorKey::CrpAccessDenied),
             )));
         }
     }
@@ -374,7 +382,8 @@ pub(crate) fn parse_title_dict_entry(entry: &PyRep) -> Option<(i64, String, [u64
 }
 
 pub(crate) fn parse_title_update_rows(args: &[PyRep]) -> Vec<(i64, String, [u64; 8])> {
-    if let [first, ..] = args {
+    let rpc = RpcArgs::positional(args);
+    if let Some(first) = rpc.get_raw(0, "") {
         match first {
             PyRep::Rowset { columns, rows } => {
                 let out: Vec<_> = rows
@@ -433,17 +442,16 @@ pub(crate) fn parse_title_update_rows(args: &[PyRep]) -> Vec<(i64, String, [u64;
             }
         }
     }
-    let (title_id, title_name) = match args {
-        [a0, a1, ..] => (
-            a0.as_i64().unwrap_or(1).max(1),
-            a1.as_str().unwrap_or("Squad Leader").to_string(),
-        ),
-        [a0] => (a0.as_i64().unwrap_or(1).max(1), "Squad Leader".to_string()),
-        [] => (1, "Squad Leader".to_string()),
-    };
+    let title_id = rpc.opt_i64(0, "titleID").ok().flatten().unwrap_or(1).max(1);
+    let title_name = rpc
+        .opt_str(1, "titleName")
+        .ok()
+        .flatten()
+        .unwrap_or("Squad Leader")
+        .to_string();
     let mut masks = [0u64; 8];
-    for i in 0..8 {
-        masks[i] = (args.get(i + 2).and_then(|a| a.as_i64()).unwrap_or(0) as u64)
+    for (i, col_name) in TITLE_ROLE_COLS.iter().enumerate() {
+        masks[i] = (rpc.opt_i64(i + 2, col_name).ok().flatten().unwrap_or(0) as u64)
             & !corp_roles::ROLE_DIRECTOR;
     }
     vec![(title_id, title_name, masks)]
@@ -533,20 +541,28 @@ pub(crate) fn handle_get_recruiters(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let ads = load_corp_rec_ads(ctx);
-    let (target_corp, target_ad) = match args {
-        [a0, a1, ..] => (a0.as_i64().unwrap_or(corp_id), a1.as_i64().unwrap_or(1)),
-        _ => {
-            let ta = match args {
-                [a0] => a0.as_i64().unwrap_or(1),
-                _ => 1,
-            };
-            let tc = ads
-                .iter()
-                .find(|a| a.ad_id == ta)
-                .map(|a| a.corp_id)
-                .unwrap_or(corp_id);
-            (tc, ta)
-        }
+    let rpc = RpcArgs::positional(args);
+    let (target_corp, target_ad) = if rpc.len() >= 2 {
+        let tc = match rpc.opt_i64(0, "corpID") {
+            Ok(v) => v.unwrap_or(corp_id),
+            Err(e) => return Some(Err(e)),
+        };
+        let ta = match rpc.opt_i64(1, "adID") {
+            Ok(v) => v.unwrap_or(1),
+            Err(e) => return Some(Err(e)),
+        };
+        (tc, ta)
+    } else {
+        let ta = match rpc.opt_i64(0, "adID") {
+            Ok(v) => v.unwrap_or(1),
+            Err(e) => return Some(Err(e)),
+        };
+        let tc = ads
+            .iter()
+            .find(|a| a.ad_id == ta)
+            .map(|a| a.corp_id)
+            .unwrap_or(corp_id);
+        (tc, ta)
     };
     let recruiters: Vec<PyRep> = ads
         .iter()
@@ -593,7 +609,8 @@ pub(crate) fn require_corp_director(
         (is_ceo || corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR)).then_some(corp_id)
     });
     corp_id.ok_or_else(|| {
-        super::account_services::err("CorpRoleDenied", "Director or CEO role is required")
+        let msg = "Director or CEO role is required";
+        BridgeRpcError::with_client_error("CorpRoleDenied", msg, ClientError::CustomInfo(msg.into()))
     })
 }
 
@@ -644,14 +661,22 @@ pub(crate) fn require_executor(
             let _ = require_corp_director(ctx, session)?;
             Ok(aid)
         }
-        Some(_) => Err(super::account_services::err(
-            "NotAllianceExecutor",
-            "Only the executor corporation can manage the alliance",
-        )),
-        None => Err(super::account_services::err(
-            "NotInAlliance",
-            "Your corporation is not in an alliance",
-        )),
+        Some(_) => {
+            let msg = "Only the executor corporation can manage the alliance";
+            Err(BridgeRpcError::with_client_error(
+                "NotAllianceExecutor",
+                msg,
+                ClientError::CustomInfo(msg.into()),
+            ))
+        }
+        None => {
+            let msg = "Your corporation is not in an alliance";
+            Err(BridgeRpcError::with_client_error(
+                "NotInAlliance",
+                msg,
+                ClientError::CustomInfo(msg.into()),
+            ))
+        }
     }
 }
 
@@ -698,7 +723,8 @@ pub(crate) fn resolve_alliance_id(
         .or(session.alliance_id)
         .filter(|&id| id > 0)
         .ok_or_else(|| {
-            super::account_services::err("NotInAlliance", "Character is not in an alliance")
+            let msg = "Character is not in an alliance";
+            BridgeRpcError::with_client_error("NotInAlliance", msg, ClientError::CustomInfo(msg.into()))
         })
 }
 
@@ -757,19 +783,13 @@ pub(crate) fn handle_set_capital_system(
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_character(session)?;
     let aid = require_executor(ctx, session)?;
-    let Some(sys_id) = (match args {
-        [a0, ..] => a0.as_i64().filter(|&id| id > 0),
-        [] => None,
-    }) else {
-        return Err(super::account_services::err(
-            "InvalidArgument",
-            "SetCapitalSystem requires solarSystemID",
-        ));
-    };
+    let sys_id = RpcArgs::positional(args).req_positive_i64(0, "solarSystemID")?;
     if !ctx.sde.solar_systems.contains_key(&(sys_id as u32)) {
-        return Err(super::account_services::err(
+        let msg = format!("Unknown solar system {sys_id}");
+        return Err(BridgeRpcError::with_client_error(
             "InvalidSolarSystem",
-            format!("Unknown solar system {sys_id}"),
+            msg.clone(),
+            ClientError::CustomInfo(msg),
         ));
     }
     let now_unix = ctx.now_unix();
@@ -808,9 +828,11 @@ pub(crate) fn handle_cancel_capital_system_transition(
         .try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
             let mut cfg = read_alliance_sov_cfg(snap, aid, now_unix);
             if cfg.pending_capital_system_id.is_none() {
-                return Err(super::account_services::err(
+                let msg = "No pending capital system transition to cancel";
+                return Err(BridgeRpcError::with_client_error(
                     "NoCapitalSystemTransition",
-                    "No pending capital system transition to cancel",
+                    msg,
+                    ClientError::CustomInfo(msg.into()),
                 ));
             }
             cfg.pending_capital_system_id = None;
@@ -852,19 +874,13 @@ pub(crate) fn handle_set_prime_hour(
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_character(session)?;
     let aid = require_executor(ctx, session)?;
-    let Some(hour) = (match args {
-        [a0, ..] => a0.as_i64(),
-        [] => None,
-    }) else {
-        return Err(super::account_services::err(
-            "InvalidArgument",
-            "SetPrimeHour requires hour",
-        ));
-    };
+    let hour = RpcArgs::positional(args).req_i64(0, "hour")?;
     if !(0..=23).contains(&hour) {
-        return Err(super::account_services::err(
+        let msg = format!("Prime hour must be 0..=23, got {hour}");
+        return Err(BridgeRpcError::with_client_error(
             "InvalidPrimeHour",
-            format!("Prime hour must be 0..=23, got {hour}"),
+            msg.clone(),
+            ClientError::CustomInfo(msg),
         ));
     }
     let now_unix = ctx.now_unix();
@@ -1012,29 +1028,36 @@ pub(crate) fn handle_get_alliance_bill_balance(
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_character(session)?;
     let aid = resolve_alliance_id(session, bound_obj_id)?;
-    let bill_id_opt = match args {
-        [a0, ..] => a0.as_i64().filter(|&id| id > 0),
-        [] => None,
-    };
+    let bill_id_opt = RpcArgs::positional(args)
+        .opt_i64(0, "billID")?
+        .filter(|&id| id > 0);
     ctx.db.with_snapshot(|snap| {
         if let Some(bill_id) = bill_id_opt {
             let Some(note) = snap
                 .owner_notes
                 .get(&super::wallet_services_ext::bill_note_id(bill_id))
             else {
-                return Err(super::account_services::err(
+                let msg = format!("Bill {bill_id} not found");
+                return Err(BridgeRpcError::with_client_error(
                     "BillNotFound",
-                    format!("Bill {bill_id} not found"),
+                    msg.clone(),
+                    ClientError::CustomInfo(msg),
                 ));
             };
             let bill: super::wallet_services_ext::CorpBillRecord =
                 serde_json::from_str(&note.note).map_err(|_| {
-                    super::account_services::err("BillNotFound", "Corrupt bill record")
+                    let msg = "Corrupt bill record";
+                    BridgeRpcError::with_client_error(
+                        "BillNotFound",
+                        msg,
+                        ClientError::CustomInfo(msg.into()),
+                    )
                 })?;
             if bill.debtor_id != aid && bill.creditor_id != aid {
-                return Err(super::account_services::err(
+                return Err(BridgeRpcError::with_client_error(
                     "AccessDenied",
                     "Bill does not belong to caller alliance",
+                    ClientError::user(UserErrorKey::AccessDenied),
                 ));
             }
             let bal = if bill.paid {
@@ -1100,19 +1123,10 @@ pub(crate) fn handle_pay_alliance_bill(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let aid = require_executor(ctx, session)?;
-    let (bill_id, from_account_arg) = match args {
-        [a0, a1, ..] => (a0.as_i64().filter(|&id| id > 0), a1.as_i64()),
-        [a0] => (a0.as_i64().filter(|&id| id > 0), None),
-        [] => (None, None),
-    };
-    let Some(bill_id) = bill_id else {
-        return Err(super::account_services::err(
-            "InvalidArgument",
-            "PayBill requires billID",
-        ));
-    };
-    let from_account_key = from_account_arg
-        .or_else(|| kwargs.get("fromAccountKey").and_then(|v| v.as_i64()))
+    let rpc = RpcArgs::new(args, kwargs);
+    let bill_id = rpc.req_positive_i64(0, "billID")?;
+    let from_account_key = rpc
+        .opt_i64(1, "fromAccountKey")?
         .unwrap_or(1000)
         .clamp(1000, 1006) as u16;
     let div_id = (from_account_key - 999) as u8;
@@ -1126,25 +1140,35 @@ pub(crate) fn handle_pay_alliance_bill(
                 .unwrap_or(0);
             let nid = super::wallet_services_ext::bill_note_id(bill_id);
             let Some(note) = snap.owner_notes.get(&nid) else {
-                return Err(super::account_services::err(
+                let msg = format!("Bill {bill_id} not found");
+                return Err(BridgeRpcError::with_client_error(
                     "BillNotFound",
-                    format!("Bill {bill_id} not found"),
+                    msg.clone(),
+                    ClientError::CustomInfo(msg),
                 ));
             };
             let mut bill: super::wallet_services_ext::CorpBillRecord =
                 serde_json::from_str(&note.note).map_err(|_| {
-                    super::account_services::err("BillNotFound", "Corrupt bill record")
+                    let msg = "Corrupt bill record";
+                    BridgeRpcError::with_client_error(
+                        "BillNotFound",
+                        msg,
+                        ClientError::CustomInfo(msg.into()),
+                    )
                 })?;
             if bill.paid {
-                return Err(super::account_services::err(
+                let msg = "Bill is already paid";
+                return Err(BridgeRpcError::with_client_error(
                     "BillAlreadyPaid",
-                    "Bill is already paid",
+                    msg,
+                    ClientError::CustomInfo(msg.into()),
                 ));
             }
             if bill.debtor_id != aid {
-                return Err(super::account_services::err(
+                return Err(BridgeRpcError::with_client_error(
                     "AccessDenied",
                     "Bill does not belong to caller alliance",
+                    ClientError::user(UserErrorKey::AccessDenied),
                 ));
             }
             super::market_trading::market_orders_corp_auth::require_corp_accountant_spend_role(
@@ -1157,12 +1181,18 @@ pub(crate) fn handle_pay_alliance_bill(
             )?;
             let amt = eve_db::IskCents(bill.amount_cents);
             let corp = snap.corporations.get_mut(&corp_id).ok_or_else(|| {
-                super::account_services::err("CorporationNotFound", "Executor corporation not found")
+                let msg = "Executor corporation not found";
+                BridgeRpcError::with_client_error(
+                    "CorporationNotFound",
+                    msg,
+                    ClientError::CustomInfo(msg.into()),
+                )
             })?;
             let bal_after = corp.debit_division(div_id, amt).ok_or_else(|| {
-                super::account_services::err(
+                BridgeRpcError::with_client_error(
                     "NotEnoughMoney",
                     "Insufficient corporation division ISK to pay alliance bill",
+                    ClientError::user(UserErrorKey::NotEnoughMoney),
                 )
             })?;
             snap.append_journal(
