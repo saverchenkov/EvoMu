@@ -1175,6 +1175,14 @@ async fn launched_active_drone_cannot_be_stolen_during_return_or_scoop_race() {
                     ..Default::default()
                 },
             );
+            snap.skills.entry(cid).or_default().insert(
+                3436,
+                eve_db::TrainedSkillRecord {
+                    type_id: 3436,
+                    level: 2,
+                    skill_points: 1_415.0,
+                },
+            );
         }
         snap.items.insert(
             drone_stack_id,

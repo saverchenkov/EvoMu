@@ -621,11 +621,30 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
 
     let ctx = test_ctx();
     let sys_id = 30_000_142;
-    let char_id = 90_000_156;
+    let char_id = 90_000_001;
     let ship_id = 100_156_001;
     let d_warp_ball = 100_156_010;
     let d_warp_item = 100_156_011;
     let d_cmd = 100_156_020;
+
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).expect("demo character");
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.user_id
+    });
+    ctx.db
+        .acquire_online_lock_with_computer_hash(
+            uid,
+            1,
+            Some(char_id),
+            None,
+            true,
+            ctx.now_unix(),
+        )
+        .expect("register online");
 
     spawn_ball(&ctx, sys_id, d_warp_ball, 2454, DVec3::new(500.0, 0.0, 0.0));
     spawn_ball(&ctx, sys_id, d_cmd, 2454, DVec3::new(900.0, 0.0, 0.0));
