@@ -7112,6 +7112,100 @@ class TestHarnessSettleAndDeepWindowInspect1190(unittest.TestCase):
         self.assertIn(("insert_text", "Aura Capsuleer"), events)
         self.assertIn(("on_return", True), events)
 
+    def test_type_text_clears_smart_caret_searchbox_before_shorter_suffix_replace(self):
+        hook = _load_hook_with_py2_stubs()
+
+        class _SearchBoxEdit(object):
+            name = "assetssearchtype"
+            display = True
+            state = 0
+            destroyed = False
+            children = []
+
+            def OnChar(self, char, flag=0):
+                return True
+
+            def __init__(self, initial="Quantum Core"):
+                self.text = initial
+                self.caretIndex = (len(initial), len(initial))
+                self.returned = 0
+
+            def GetAbsolute(self):
+                return (800, 370, 140, 22)
+
+            def GetValue(self):
+                return self.text
+
+            def SetText(self, val):
+                self.text = val
+
+            def GetCursorFromIndex(self, idx):
+                return (idx, idx)
+
+            def RefreshCaretPosition(self):
+                pass
+
+            def GetSmartCaretIndex(self, oldText, newText):
+                old_rev = oldText[::-1]
+                new_rev = newText[::-1]
+                for i in range(len(old_rev)):
+                    if old_rev[i] != new_rev[i]:
+                        return len(new_rev) - i
+                return len(new_rev)
+
+            def SetValue(self, text):
+                old_text = self.GetValue()
+                self.text = text
+                self.caretIndex = self.GetCursorFromIndex(self.GetSmartCaretIndex(old_text, text))
+                self.RefreshCaretPosition()
+
+            def OnReturn(self):
+                self.returned += 1
+
+        box = _SearchBoxEdit(initial="Quantum Core")
+        win = types.SimpleNamespace(
+            name="assets",
+            display=True,
+            state=0,
+            destroyed=False,
+            children=[box],
+            GetAbsolute=lambda: (600, 300, 500, 400),
+        )
+        main_layer = types.SimpleNamespace(
+            name="l_main",
+            children=[win],
+            display=True,
+            state=0,
+            destroyed=False,
+            GetAbsolute=lambda: (0, 0, 1280, 720),
+        )
+        reg = types.SimpleNamespace(GetWindows=lambda: [win], GetFocus=lambda: box)
+        layers = types.SimpleNamespace(l_main=main_layer, main=main_layer)
+        fake_uicore = types.SimpleNamespace(registry=reg, layer=layers, desktop=None, cmd=None)
+        fake_sm = mock.MagicMock()
+
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_wait_session_settled"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}), \
+             mock.patch.object(hook, "_settle_after_action", return_value=20):
+            res = hook._execute_action(
+                fake_sm,
+                {"type": "type_text", "target": "assetssearchtype", "command": "Core\n"},
+            )
+            self.assertTrue(res.get("ok"), res)
+            self.assertEqual(box.text, "Core")
+            self.assertEqual(box.caretIndex, (4, 4))
+            self.assertEqual(box.returned, 1)
+
+            ok_empty, err_empty = hook._write_editable_widget_text(box, "", reg=reg)
+            self.assertTrue(ok_empty, err_empty)
+            self.assertEqual(box.text, "")
+            self.assertEqual(box.caretIndex, (0, 0))
+
 
 if __name__ == "__main__":
     unittest.main()
