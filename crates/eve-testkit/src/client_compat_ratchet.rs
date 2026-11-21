@@ -1,10 +1,11 @@
-//! Falling structural ratchet for `crates/eve-server/src/router/client_compat.rs` and
-//! `:26000` wire-transport bypass guards (`#1189`, `RFC-3 C-9`).
+//! Falling structural ratchet for `crates/eve-server/src/router/client_compat.rs`,
+//! `crates/eve-server/src/outbound_sequencer.rs` post-producer `SetState` rewrites (`RT-92`),
+//! and `:26000` wire-transport bypass guards (`#1189`, `RFC-3 C-9`).
 //!
 //! Pins structural rule counts, production line count, transport conditionals,
-//! `services/` `caller_trace` usage, direct-layer test calls, allowed rule identifiers,
-//! and forbids introducing `ctx.dispatch_rpc(` into new `crates/eve-server/tests/it/*.rs`
-//! files.
+//! `outbound_sequencer` `SetState` rewrites, `services/` `caller_trace` usage,
+//! direct-layer test calls, allowed rule identifiers, and forbids introducing
+//! `ctx.dispatch_rpc(` into new `crates/eve-server/tests/it/*.rs` files.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,7 @@ pub struct ClientCompatScanReport {
     pub direct_layer_test_calls: usize,
     pub service_caller_trace_comparisons: usize,
     pub service_caller_trace_params: usize,
+    pub sequencer_set_state_rewrites: usize,
     pub known_rules: BTreeSet<String>,
     pub service_caller_trace_files: BTreeSet<String>,
     pub it_dispatch_rpc_files: BTreeSet<String>,
@@ -56,6 +58,8 @@ pub struct ClientCompatRatchet {
     pub max_direct_layer_test_calls: usize,
     pub max_service_caller_trace_comparisons: usize,
     pub max_service_caller_trace_params: usize,
+    #[serde(default)]
+    pub max_sequencer_set_state_rewrites: Option<usize>,
     pub max_transport_differing_replies: Option<usize>,
     pub known_rules: Vec<String>,
     pub allowed_service_caller_trace_files: Vec<String>,
@@ -162,6 +166,13 @@ impl ClientCompatRatchet {
             report.service_caller_trace_params,
             self.max_service_caller_trace_params,
         )?;
+        if let Some(cap) = self.max_sequencer_set_state_rewrites {
+            assert_exact_counter(
+                "max_sequencer_set_state_rewrites",
+                report.sequencer_set_state_rewrites,
+                cap,
+            )?;
+        }
 
         let expected_rules: BTreeSet<String> = self.known_rules.iter().cloned().collect();
         let added_rules: Vec<&String> = report.known_rules.difference(&expected_rules).collect();
@@ -254,6 +265,16 @@ pub fn scan_client_compat_in_dirs(
     let compat_raw = std::fs::read_to_string(&compat_path)
         .map_err(|e| format!("failed to read {}: {e}", compat_path.display()))?;
     scan_client_compat_source(&compat_raw, &mut report)?;
+
+    let sequencer_path = server_dir.join("src/outbound_sequencer.rs");
+    if sequencer_path.is_file() {
+        let sequencer_raw = std::fs::read_to_string(&sequencer_path)
+            .map_err(|e| format!("failed to read {}: {e}", sequencer_path.display()))?;
+        let sequencer_clean = strip_rust_comments_and_literals(&sequencer_raw);
+        let sequencer_prod = strip_cfg_test_items(&sequencer_clean);
+        report.sequencer_set_state_rewrites =
+            count_sequencer_set_state_rewrites(&sequencer_prod);
+    }
 
     let src_dir = server_dir.join("src");
     let mut src_files = Vec::new();
@@ -1067,6 +1088,47 @@ fn count_direct_layer_calls(clean_src: &str) -> usize {
     count
 }
 
+/// Counts production post-producer `SetState` mutation helpers, call sites, and state-header
+/// byte-slice rewrites in `crates/eve-server/src/outbound_sequencer.rs` (`RT-92`).
+fn count_sequencer_set_state_rewrites(prod_clean: &str) -> usize {
+    const PREFIXES: &[&[u8]] = &[b"restamp_", b"rewrite_set_state", b"patch_set_state"];
+    let b = prod_clean.as_bytes();
+    let mut count = 0usize;
+    let mut idx = 0usize;
+
+    while idx < b.len() {
+        let is_start = is_ident_byte(b[idx]) && (idx == 0 || !is_ident_byte(b[idx - 1]));
+        if !is_start {
+            idx += 1;
+            continue;
+        }
+        let mut end = idx + 1;
+        while end < b.len() && is_ident_byte(b[end]) {
+            end += 1;
+        }
+        let ident = &b[idx..end];
+        let mut after = end;
+        while after < b.len() && b[after].is_ascii_whitespace() {
+            after += 1;
+        }
+
+        if PREFIXES.iter().any(|p| ident.starts_with(p)) {
+            if is_fn_def_header(b, idx) || b.get(after) == Some(&b'(') {
+                count += 1;
+            }
+        } else if ident == b"copy_from_slice" && b.get(after) == Some(&b'(') {
+            let before = skip_ws_backwards(b, idx);
+            if before > 0 && b[before - 1] == b'.' && (before == 1 || b[before - 2] != b'.') {
+                count += 1;
+            }
+        }
+
+        idx = end;
+    }
+
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1177,6 +1239,10 @@ mod tests {{
             report.service_caller_trace_params,
             ratchet.max_service_caller_trace_params
         );
+        assert_eq!(
+            Some(report.sequencer_set_state_rewrites),
+            ratchet.max_sequencer_set_state_rewrites
+        );
         assert!(!report.it_dispatch_rpc_files.contains("client_shape_pins.rs"));
     }
 
@@ -1237,6 +1303,13 @@ mod tests {{
             .assert_ratchet(&regressed)
             .unwrap_err()
             .contains("max_service_caller_trace_comparisons"));
+
+        let mut regressed = base_report.clone();
+        regressed.sequencer_set_state_rewrites += 1;
+        assert!(ratchet
+            .assert_ratchet(&regressed)
+            .unwrap_err()
+            .contains("max_sequencer_set_state_rewrites"));
 
         // Drop without lowering JSON fails.
         let mut lowered = base_report.clone();
@@ -1301,6 +1374,26 @@ async fn test_bypass() {
 "#,
         )
         .unwrap();
+        std::fs::write(
+            root.join("src/outbound_sequencer.rs"),
+            r#"
+// restamp_comment() must be ignored
+fn restamp_state_header(bytes: &mut [u8]) {
+    bytes[1..5].copy_from_slice(&[0, 0, 0, 0]);
+}
+fn flush_batch(buf: &mut [u8]) {
+    restamp_state_header(buf);
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ignored() {
+        restamp_state_header(&mut []);
+    }
+}
+"#,
+        )
+        .unwrap();
 
         let report =
             scan_client_compat_in_dirs(&root, &root.join("tests/it")).expect("scan synth");
@@ -1314,6 +1407,7 @@ async fn test_bypass() {
         assert_eq!(report.service_caller_trace_comparisons, 1);
         assert_eq!(report.service_caller_trace_params, 1);
         assert_eq!(report.direct_layer_test_calls, 1);
+        assert_eq!(report.sequencer_set_state_rewrites, 3);
         assert!(report
             .known_rules
             .contains("destiny:payload:SetBallInteractive"));

@@ -746,6 +746,22 @@ fn authorize_corp_financial_access_roles_and_transfer_by_owner_positive_id_kill_
             cap_clone.lock().unwrap().push((cid, event.to_string(), bal));
         }
     }));
+    let cap_commit = Arc::clone(&macho_captured);
+    crate::router::delta_commit_listener::install_wallet_delta_sink_listener(
+        &router.db,
+        &router.sde,
+        false,
+        move |target, event, _id, args| {
+            if let crate::router::NotificationTarget::Character(cid) = target {
+                let bal = args
+                    .iter()
+                    .nth(2)
+                    .and_then(eve_proto::PyRep::as_f64)
+                    .unwrap_or(-1.0);
+                cap_commit.lock().unwrap().push((cid, event.to_string(), bal));
+            }
+        },
+    );
 
     let src_before = db.with_snapshot(|s| s.characters[&sess_role_only].balance);
     let dst_before = db.with_snapshot(|s| s.characters[&ceo_id].balance);

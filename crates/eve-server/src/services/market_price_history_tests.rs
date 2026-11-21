@@ -1616,3 +1616,327 @@ fn partitioned_price_history_separates_pre_today_and_today_disjointly() {
         assert_eq!(new_rows[0][0], PyRep::Integer(date_str_to_filetime(&today).unwrap()));
     });
 }
+
+
+#[test]
+fn partition_uses_client_wallclock_after_advancetime_and_omits_zero_price_rows() {
+    use crate::services::market_contracts::{JITA_STATION_ID, PLEX_TYPE_ID, THE_FORGE_REGION_ID};
+    use eve_db::ledger::{unix_secs_to_date_str, MarketTransactionRecord};
+    use eve_db::IskCents;
+
+    const DAY_SECS: u64 = 86_400;
+    const DAY_TICKS: i64 = 86_400 * 10_000_000;
+
+    // Reproduce CCP marketsvc.GetHistoryRowList + ticker.TickerItem.LoadData division check.
+    fn simulate_client_history(
+        old_rows: &[Vec<PyRep>],
+        new_rows: &[Vec<PyRep>],
+        client_wallclock_ft: i64,
+    ) -> Vec<(i64, f64)> {
+        let mut history = Vec::new();
+        let mut last_time = client_wallclock_ft;
+        let midnight_today = (last_time / DAY_TICKS) * DAY_TICKS;
+        let mut last_price = 0.0_f64;
+        for row in old_rows {
+            let entry_ft = row[0].as_i64().unwrap();
+            let entry_avg = row[3].as_f64().unwrap();
+            while last_time + DAY_TICKS < entry_ft {
+                last_time += DAY_TICKS;
+                history.push((last_time, last_price));
+            }
+            history.push((entry_ft, entry_avg));
+            last_time = entry_ft;
+            last_price = entry_avg;
+        }
+        while last_time < midnight_today - DAY_TICKS {
+            last_time += DAY_TICKS;
+            history.push((last_time, last_price));
+        }
+        if !new_rows.is_empty() {
+            for row in new_rows {
+                history.push((row[0].as_i64().unwrap(), row[3].as_f64().unwrap()));
+            }
+        } else {
+            history.push((client_wallclock_ft, last_price));
+        }
+        history
+    }
+
+    let ctx = test_ctx();
+    let base_unix = date_str_to_unix_secs("2026-11-20").unwrap() + 69_010; // 2026-11-20T19:10:10Z (#1527)
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_unix),
+    ));
+
+    // 1. Exact #1527 repro: /advancetime (+15d without rebase) -> trade on 2026-12-05 -> +1d unrebased.
+    ctx.advance_secs_without_sim_clock_rebase(15 * DAY_SECS);
+    let trade_date = unix_secs_to_date_str(ctx.now_unix());
+    assert_eq!(trade_date, "2026-12-05");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_history.clear();
+        snap.market_transactions.clear();
+        let rec = MarketHistoryDayRecord {
+            date: trade_date.clone(),
+            lowest: 1060.0,
+            highest: 1060.0,
+            average: 1060.0,
+            volume: 104,
+            order_count: 5,
+            open_price: Some(1060.0),
+            close_price: Some(1060.0),
+        };
+        snap.market_history
+            .insert((THE_FORGE_REGION_ID, 34), vec![rec.clone()]);
+        snap.market_history
+            .insert((THE_FORGE_REGION_ID, PLEX_TYPE_ID), vec![rec]);
+    });
+    ctx.advance_secs_without_sim_clock_rebase(DAY_SECS);
+
+    let cutoff = client_history_partition_cutoff_unix(&ctx);
+    assert_eq!(unix_secs_to_date_str(cutoff), "2026-11-20");
+    let client_ft = ctx.now_machonet_wallclock_filetime_ticks();
+
+    ctx.db.with_snapshot(|snap| {
+        let (old_trit, new_trit) =
+            build_partitioned_price_history_rows(snap, 34, THE_FORGE_REGION_ID, cutoff);
+        assert!(
+            old_trit.is_empty(),
+            "future-dated trade relative to client wallclock must stay out of old_rows"
+        );
+        assert_eq!(new_trit.len(), 1);
+        let sim_trit = simulate_client_history(&old_trit, &new_trit, client_ft);
+        assert!(sim_trit.iter().all(|(_, avg)| *avg > 0.0));
+
+        let (old_plex, new_plex) =
+            build_partitioned_global_price_history_rows(snap, PLEX_TYPE_ID, cutoff);
+        assert!(old_plex.is_empty());
+        assert_eq!(new_plex.len(), 1);
+        let sim_plex = simulate_client_history(&old_plex, &new_plex, client_ft);
+        assert!(sim_plex.iter().all(|(_, avg)| *avg > 0.0));
+    });
+
+    // 2. Seven distinct future trade days accumulated during unrebased /advancetime still compute
+    //    TickerItem delta cleanly without any 0.0 padding or division by zero.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut seven_days = Vec::new();
+        for offset in 8_u64..15_u64 {
+            seven_days.push(MarketHistoryDayRecord {
+                date: unix_secs_to_date_str(base_unix + offset * DAY_SECS),
+                lowest: 1000.0 + offset as f64,
+                highest: 1010.0 + offset as f64,
+                average: 1005.0 + offset as f64,
+                volume: 100,
+                order_count: 2,
+                open_price: None,
+                close_price: None,
+            });
+        }
+        snap.market_history
+            .insert((THE_FORGE_REGION_ID, 34), seven_days);
+    });
+    ctx.db.with_snapshot(|snap| {
+        let (old_7, new_7) =
+            build_partitioned_price_history_rows(snap, 34, THE_FORGE_REGION_ID, cutoff);
+        assert!(old_7.is_empty());
+        assert_eq!(new_7.len(), 7);
+        let sim_7 = simulate_client_history(&old_7, &new_7, client_ft);
+        assert_eq!(sim_7.len(), 7);
+        assert!(sim_7.iter().all(|(_, avg)| *avg > 0.0));
+        let denom = sim_7[sim_7.len() - 7].1;
+        assert!(denom > 0.0);
+        let delta = sim_7.last().unwrap().1 / denom - 1.0;
+        assert!(delta.is_finite());
+    });
+
+    // 3. Rebased clock advancement moves older trades into old_rows and carries lastPrice forward.
+    ctx.advance_secs(17 * DAY_SECS);
+    let rebased_cutoff = client_history_partition_cutoff_unix(&ctx);
+    let rebased_ft = ctx.now_machonet_wallclock_filetime_ticks();
+    ctx.db.with_snapshot(|snap| {
+        let (old_r, new_r) =
+            build_partitioned_price_history_rows(snap, 34, THE_FORGE_REGION_ID, rebased_cutoff);
+        assert_eq!(old_r.len(), 7);
+        assert!(new_r.is_empty());
+        let sim_r = simulate_client_history(&old_r, &new_r, rebased_ft);
+        assert!(sim_r.len() >= 7);
+        assert!(sim_r.iter().all(|(_, avg)| *avg > 0.0));
+    });
+
+    // 4. Corrupt zero-price / negative / NaN / zero-volume / bad-date rows are stripped from all builders.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_history.clear();
+        snap.market_transactions.clear();
+        snap.market_history.insert(
+            (THE_FORGE_REGION_ID, 35),
+            vec![
+                MarketHistoryDayRecord {
+                    date: "2026-11-17".into(),
+                    lowest: 0.0,
+                    highest: 0.0,
+                    average: 0.0,
+                    volume: 0,
+                    order_count: 0,
+                    open_price: None,
+                    close_price: None,
+                },
+                MarketHistoryDayRecord {
+                    date: "2026-11-18".into(),
+                    lowest: 45.0,
+                    highest: 55.0,
+                    average: 50.0,
+                    volume: 10,
+                    order_count: 2,
+                    open_price: None,
+                    close_price: None,
+                },
+                MarketHistoryDayRecord {
+                    date: "2026-11-19".into(),
+                    lowest: 10.0,
+                    highest: 20.0,
+                    average: -5.0,
+                    volume: 5,
+                    order_count: 1,
+                    open_price: None,
+                    close_price: None,
+                },
+                MarketHistoryDayRecord {
+                    date: "bad-date".into(),
+                    lowest: 10.0,
+                    highest: 20.0,
+                    average: 15.0,
+                    volume: 5,
+                    order_count: 1,
+                    open_price: None,
+                    close_price: None,
+                },
+            ],
+        );
+        // Multi-region global PLEX: corrupted zero row in region 10_000_043 must not drag lowest to 0.0.
+        snap.market_history.insert(
+            (THE_FORGE_REGION_ID, PLEX_TYPE_ID),
+            vec![MarketHistoryDayRecord {
+                date: "2026-11-18".into(),
+                lowest: 4_900_000.0,
+                highest: 5_100_000.0,
+                average: 5_000_000.0,
+                volume: 20,
+                order_count: 3,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+        snap.market_history.insert(
+            (10_000_043, PLEX_TYPE_ID),
+            vec![MarketHistoryDayRecord {
+                date: "2026-11-18".into(),
+                lowest: 0.0,
+                highest: 0.0,
+                average: 0.0,
+                volume: 0,
+                order_count: 0,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+        // Fallback tx: zero-price transaction must be omitted instead of emitting 0.0 average.
+        snap.market_orders.insert(
+            9_777_001,
+            MarketOrderRecord {
+                order_id: 9_777_001,
+                owner_id: 90_000_001,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 36,
+                is_bid: false,
+                price: IskCents::from_isk(10),
+                vol_entered: 1,
+                vol_remaining: 1,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        snap.market_transactions.insert(
+            777_001,
+            MarketTransactionRecord {
+                transaction_id: 777_001,
+                date_unix: base_unix - 2 * DAY_SECS,
+                type_id: 36,
+                quantity: 10,
+                price: IskCents(0),
+                location_id: JITA_STATION_ID,
+                buyer_id: 90_000_002,
+                seller_id: 90_000_001,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 1,
+            },
+        );
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        let reg_rows = build_price_history_rows(snap, 35, THE_FORGE_REGION_ID);
+        assert_eq!(reg_rows.len(), 1);
+        assert_eq!(
+            reg_rows[0][0],
+            PyRep::Integer(date_str_to_filetime("2026-11-18").unwrap())
+        );
+        assert_eq!(reg_rows[0][3], PyRep::Real(50.0));
+
+        let global_plex = build_global_price_history_rows(snap, PLEX_TYPE_ID);
+        assert_eq!(global_plex.len(), 1);
+        assert_eq!(global_plex[0][1], PyRep::Real(4_900_000.0));
+        assert_eq!(global_plex[0][3], PyRep::Real(5_000_000.0));
+
+        assert!(build_price_history_rows(snap, 36, THE_FORGE_REGION_ID).is_empty());
+
+        let mut nan_snap = snap.clone();
+        nan_snap.market_history.insert(
+            (THE_FORGE_REGION_ID, 37),
+            vec![MarketHistoryDayRecord {
+                date: "2026-11-18".into(),
+                lowest: 10.0,
+                highest: 20.0,
+                average: f64::NAN,
+                volume: 5,
+                order_count: 1,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+        assert!(build_price_history_rows(&nan_snap, 37, THE_FORGE_REGION_ID).is_empty());
+        assert!(build_global_price_history_rows(&nan_snap, 37).is_empty());
+    });
+
+    let valid_ft = date_str_to_filetime("2026-11-18").unwrap();
+    let (direct_old, direct_new) = partition_price_history_rows(
+        vec![
+            vec![
+                PyRep::Integer(valid_ft),
+                PyRep::Real(0.0),
+                PyRep::Real(0.0),
+                PyRep::Real(0.0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+            ],
+            vec![
+                PyRep::Integer(valid_ft),
+                PyRep::Real(10.0),
+                PyRep::Real(20.0),
+                PyRep::Real(f64::NAN),
+                PyRep::Integer(5),
+                PyRep::Integer(1),
+            ],
+            vec![
+                PyRep::Integer(0),
+                PyRep::Real(10.0),
+                PyRep::Real(10.0),
+                PyRep::Real(10.0),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+            ],
+        ],
+        base_unix,
+    );
+    assert!(direct_old.is_empty() && direct_new.is_empty());
+}

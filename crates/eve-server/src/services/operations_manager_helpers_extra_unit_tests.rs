@@ -176,6 +176,10 @@ fn activation_task_operation_and_category_reward_payout_and_notifications() {
     });
 
     // 3. Mark t_req as server-verified -> grants task reward, operation ISK, completion item, and skill book in hangar
+    ctx.db
+        .acquire_online_lock(1, 1, Some(char_id), true, 1_700_000_000)
+        .expect("char_id online");
+    let _ = ctx.drain_notifications_for_char(char_id);
     rec.server_verified_tasks.insert(t_req);
     let (out_verified, out_cat) = ctx.db.with_mut_snapshot(|snap| {
         let ov = grant_task_and_operation_rewards(
@@ -229,7 +233,9 @@ fn activation_task_operation_and_category_reward_payout_and_notifications() {
     assert_eq!(out_verified.created_hangar_items.len(), 3); // task item + op item + skill
     assert!(out_cat.new_balance_cents.is_some());
 
-    // 4. Verify notification sink emits OnAccountChange, OnItemChange, and OnRedeemingTokensUpdated
+    // 4. Verify DB commit projected OnAccountChange and reward sink emits OnItemChange and OnRedeemingTokensUpdated
+    let commit_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(commit_notifs.iter().any(|n| n.event == "OnAccountChange"));
     let mut combined = out_verified;
     combined.enqueued_redeem_tokens = true;
     let emitted = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -243,7 +249,7 @@ fn activation_task_operation_and_category_reward_payout_and_notifications() {
         &combined,
     );
     let events = emitted.lock().unwrap().clone();
-    assert!(events.contains(&"OnAccountChange".to_string()));
+    assert!(!events.contains(&"OnAccountChange".to_string()));
     assert!(events.contains(&"OnItemChange".to_string()));
     assert!(events.contains(&"OnRedeemingTokensUpdated".to_string()));
 }
@@ -762,6 +768,7 @@ mod w4_ops_pve_mut_extra_tests {
         });
 
         // 4. Activation + task/op + category payouts for race 4 character docked at station
+        let _ = ctx.drain_notifications_for_char(char_docked_station);
         let (out_act, out_blocked, out_full, out_cat) = ctx.db.with_mut_snapshot(|snap| {
             let mut store = load_store_pub(snap);
             let rec = store.by_character.entry(char_docked_station).or_default();
@@ -862,14 +869,15 @@ mod w4_ops_pve_mut_extra_tests {
         });
 
         let _ = (out_act, out_blocked, out_cat);
-        // 5. Notifications emitted for full outcome (including enqueued_redeem_tokens flag)
-        let _ = ctx.drain_notifications_for_char(char_docked_station);
+        // 5. OnAccountChange emitted on commit; OnItemChange & OnRedeemingTokensUpdated emitted by helper
+        let commit_notifs = ctx.drain_notifications_for_char(char_docked_station);
+        assert!(commit_notifs.iter().any(|n| n.event == "OnAccountChange"));
         let mut notify_out = out_full.clone();
         notify_out.enqueued_redeem_tokens = true;
         emit_operation_reward_notifications(&ctx, char_docked_station, &notify_out);
         let notifs = ctx.drain_notifications_for_char(char_docked_station);
-        assert!(notifs.iter().any(|n| n.event == "OnAccountChange"));
         assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+        assert!(notifs.iter().any(|n| n.event == "OnRedeemingTokensUpdated"));
         assert!(
             notifs.len() >= 2,
             "unexpected notifs: {:?}",

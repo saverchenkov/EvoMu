@@ -295,14 +295,18 @@ async fn test_war_registry_unbind_stats_and_wars_info() {
     // 4. warStatisticMgr: Bind + GetBaseInfo (bound & explicit), GetKills, GetKillsByGroup, GetKillMail
     let ws_bound = rpc(&ctx, &mut sess1, "warStatisticMgr", "Bind", &[PyRep::Integer(war_id)]).await.expect("Bind warStatisticMgr");
     assert!(ws_bound.as_i64().unwrap_or(0) > 0);
-    let base_info = rpc(&ctx, &mut sess1, "warStatisticMgr", "GetBaseInfo", &[]).await.expect("GetBaseInfo bound");
-    assert_eq!(field(&base_info, "warID"), PyRep::Integer(war_id));
-    assert_eq!(field(&base_info, "declaredByID"), PyRep::Integer(corp1_id));
-    assert_eq!(field(&base_info, "againstID"), PyRep::Integer(corp2_id));
-    assert_eq!(field(&base_info, "killsForAggressor"), PyRep::Integer(1));
-    assert_eq!(field(&base_info, "killsForDefender"), PyRep::Integer(0));
-    assert!(field(&base_info, "iskDestroyedByAggressor").as_f64().unwrap_or(0.0) > 0.0);
-    assert!(matches!(field(&base_info, "allies"), PyRep::Dict(_)));
+    let PyRep::Tuple(base_parts) = rpc(&ctx, &mut sess1, "warStatisticMgr", "GetBaseInfo", &[]).await.expect("GetBaseInfo bound") else {
+        panic!("expected 4-tuple from GetBaseInfo");
+    };
+    assert_eq!(base_parts.len(), 4);
+    let base_info = &base_parts[0];
+    assert_eq!(field(base_info, "warID"), PyRep::Integer(war_id));
+    assert_eq!(field(base_info, "declaredByID"), PyRep::Integer(corp1_id));
+    assert_eq!(field(base_info, "againstID"), PyRep::Integer(corp2_id));
+    assert_eq!(field(base_info, "killsForAggressor"), PyRep::Integer(1));
+    assert_eq!(field(base_info, "killsForDefender"), PyRep::Integer(0));
+    assert!(field(base_info, "iskDestroyedByAggressor").as_f64().unwrap_or(0.0) > 0.0);
+    assert!(matches!(field(base_info, "allies"), PyRep::Dict(_)));
 
     let kills_rep = rpc(&ctx, &mut sess1, "warStatisticMgr", "GetKills", &[PyRep::Integer(war_id)]).await.expect("GetKills");
     let (k_cols, k_rows) = rowset_data(&kills_rep);
@@ -372,10 +376,14 @@ async fn test_war_registry_unbind_stats_and_wars_info() {
         });
     });
 
-    let pub_info = rpc(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", &[PyRep::Integer(war_id)]).await.expect("GetPublicWarInfo");
-    assert_eq!(field(&pub_info, "warID"), PyRep::Integer(war_id));
-    assert_eq!(field(&pub_info, "declaredByID"), PyRep::Integer(corp1_id));
-    assert_eq!(field(&pub_info, "againstID"), PyRep::Integer(corp2_id));
+    let PyRep::List(pub_items) = rpc(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", &[PyRep::Integer(war_id)]).await.expect("GetPublicWarInfo") else {
+        panic!("expected List from GetPublicWarInfo");
+    };
+    assert_eq!(pub_items.len(), 1);
+    let pub_info = &pub_items[0];
+    assert_eq!(field(pub_info, "warID"), PyRep::Integer(war_id));
+    assert_eq!(field(pub_info, "declaredByID"), PyRep::Integer(corp1_id));
+    assert_eq!(field(pub_info, "againstID"), PyRep::Integer(corp2_id));
 
     let top50 = rpc(&ctx, &mut sess1, "warsInfoMgr", "GetTop50", &[]).await.expect("GetTop50");
     let (_, top_rows) = rowset_data(&top50);

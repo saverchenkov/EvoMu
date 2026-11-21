@@ -135,12 +135,16 @@ async fn station_queries_guests_standing_check_and_undock_dock_cycle() {
     assert_eq!(owner_stations.len(), 1);
 
     // GetSolarSystem for station ID vs solarSystemID vs missing
+    let st_sys = handle(&ctx, &mut session, "stationSvc", "GetSolarSystem", &[PyRep::Integer(jita_station)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        handle(&ctx, &mut session, "stationSvc", "GetSolarSystem", &[PyRep::Integer(jita_station)], &kw)
-            .await
-            .unwrap()
-            .unwrap(),
-        PyRep::Integer(jita_sys as i64)
+        st_sys,
+        PyRep::keyval([
+            ("solarSystemID", PyRep::Integer(jita_sys as i64)),
+            ("factionID", PyRep::None),
+        ])
     );
     let PyRep::KeyVal(sys_kv) = handle(&ctx, &mut session, "stationSvc", "GetSolarSystem", &[PyRep::Integer(jita_sys as i64)], &kw)
         .await
@@ -150,6 +154,7 @@ async fn station_queries_guests_standing_check_and_undock_dock_cycle() {
         panic!("expected keyval");
     };
     assert_eq!(sys_kv.get("solarSystemID").and_then(|v| v.as_i64()), Some(jita_sys as i64));
+    assert_eq!(sys_kv.get("factionID"), Some(&PyRep::None));
     assert_eq!(
         handle(&ctx, &mut session, "stationSvc", "GetSolarSystem", &[PyRep::Integer(69_999_999)], &kw)
             .await

@@ -422,7 +422,12 @@ async fn test_in_space_compression_and_structure_compression_and_decompression()
     )
     .unwrap()
     .unwrap();
-    assert!((eff_rep.as_f64().unwrap() - 0.84).abs() < 1e-6);
+    let PyRep::Tuple(eff_parts) = eff_rep else {
+        panic!("expected 2-tuple from GetMyGasDecompressionEfficiency, got {eff_rep:?}");
+    };
+    assert_eq!(eff_parts.len(), 2);
+    assert!((eff_parts[0].as_f64().unwrap() - 0.84).abs() < 1e-6);
+    assert_eq!(eff_parts[0], eff_parts[1]);
 }
 
 #[tokio::test]

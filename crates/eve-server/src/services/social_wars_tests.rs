@@ -179,7 +179,7 @@ fn test_declare_war_allies_surrender_peace_treaty_and_statistics() {
     .unwrap();
     assert!(!matches!(for_st, PyRep::None));
 
-    let pub_info = handle_wars(
+    let PyRep::List(pub_items) = handle_wars(
         &ctx,
         &mut agg_sess,
         "warsInfoMgr",
@@ -188,8 +188,12 @@ fn test_declare_war_allies_surrender_peace_treaty_and_statistics() {
         None,
     )
     .unwrap()
-    .unwrap();
-    assert_eq!(dict_i64(&pub_info, "warID"), Some(war_id));
+    .unwrap()
+    else {
+        panic!("expected List from GetPublicWarInfo");
+    };
+    assert_eq!(pub_items.len(), 1);
+    assert_eq!(dict_i64(&pub_items[0], "warID"), Some(war_id));
 
     // 2. Open for allies, ally offer, accept ally
     let opened = handle_wars(
@@ -252,7 +256,7 @@ fn test_declare_war_allies_surrender_peace_treaty_and_statistics() {
             },
         );
     });
-    let base_info = handle_wars(
+    let PyRep::Tuple(base_parts) = handle_wars(
         &ctx,
         &mut agg_sess,
         "warStatisticMgr",
@@ -261,8 +265,12 @@ fn test_declare_war_allies_surrender_peace_treaty_and_statistics() {
         Some(war_id),
     )
     .unwrap()
-    .unwrap();
-    assert_eq!(dict_i64(&base_info, "killsForAggressor"), Some(1));
+    .unwrap()
+    else {
+        panic!("expected 4-tuple from GetBaseInfo");
+    };
+    assert_eq!(base_parts.len(), 4);
+    assert_eq!(dict_i64(&base_parts[0], "killsForAggressor"), Some(1));
 
     let kills = handle_wars(
         &ctx,
@@ -1323,7 +1331,7 @@ fn war_extend_ally_contract_preserves_effective_unix_and_enforces_expiry() {
         }
         other => panic!("expected Rowset, got {other:?}"),
     }
-    let base_info = handle_wars(
+    let PyRep::Tuple(base_parts) = handle_wars(
         &ctx,
         &mut def_sess,
         "warStatisticMgr",
@@ -1332,7 +1340,12 @@ fn war_extend_ally_contract_preserves_effective_unix_and_enforces_expiry() {
         None,
     )
     .unwrap()
-    .unwrap();
+    .unwrap()
+    else {
+        panic!("expected 4-tuple from GetBaseInfo");
+    };
+    assert_eq!(base_parts.len(), 4);
+    let base_info = &base_parts[0];
     let allies_dict = base_info.dict_get("allies").expect("allies dict");
     match allies_dict {
         PyRep::Dict(entries) => {

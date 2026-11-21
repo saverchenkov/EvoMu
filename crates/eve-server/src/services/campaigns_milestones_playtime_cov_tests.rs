@@ -252,22 +252,13 @@ fn resolve_daily_campaign_enroll_seasonal_schedule_labels_notifications_and_stat
         assert!(active_seasonal_schedule_from_snapshot(snap, &ext, 500).is_none());
     });
 
-    // 5. resolve_reward_label_message_id, emit_account_change_isk, resolve_reward_station_id
+    // 5. resolve_reward_label_message_id, resolve_reward_station_id
     let dummy_camp = make_test_campaign(77, 424_242, 7, false);
     assert_eq!(resolve_reward_label_message_id(&ctx, 999_999_888, &dummy_camp), 424_242);
     if let Some((&tid, _)) = ctx.sde.types.iter().next() {
         let lbl = resolve_reward_label_message_id(&ctx, tid, &dummy_camp);
         assert!(lbl > 0);
     }
-
-    sess.drain_notifications();
-    emit_account_change_isk(&ctx, &mut sess, cid, 123_456);
-    let notes = sess.drain_notifications();
-    assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0].0, "OnAccountChange");
-    assert_eq!(notes[0].1[0], PyRep::String("cash".into()));
-    assert_eq!(notes[0].1[1], PyRep::Integer(cid));
-    assert_eq!(notes[0].1[2], PyRep::Real(1234.56));
 
     let mut ch = ctx.db.with_snapshot(|s| s.characters[&cid].clone());
     ch.station_id = None;

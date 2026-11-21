@@ -834,7 +834,9 @@ fn handle_get_structures_i_can_deliver_to(ctx: &ServerContext, session: &mut Ses
     });
     rows.extend(ctx.sde.stations.values().filter(|s| s.solar_system_id == sys_id).map(|s| (s.station_id, s.station_type_id)));
     rows.sort_unstable();
-    Ok(PyRep::List(rows.into_iter().map(|(id, type_id)| PyRep::keyval([("itemID", PyRep::Integer(id)), ("typeID", PyRep::Integer(i64::from(type_id))), ("solarSystemID", PyRep::Integer(i64::from(sys_id)))])).collect()))
+    let items: Vec<PyRep> = rows.into_iter().map(|(id, type_id)| PyRep::keyval([("itemID", PyRep::Integer(id)), ("typeID", PyRep::Integer(i64::from(type_id))), ("solarSystemID", PyRep::Integer(i64::from(sys_id)))])).collect();
+    let first = items.first().cloned().unwrap_or(PyRep::None);
+    Ok(PyRep::Tuple(vec![PyRep::List(items), first]))
 }
 
 fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {

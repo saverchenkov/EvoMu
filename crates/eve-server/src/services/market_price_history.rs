@@ -445,14 +445,49 @@ fn history_row(date_str: &str, low: f64, high: f64, avg: f64, vol: i64, orders: 
     ]
 }
 
+fn is_valid_history_prices(low: f64, high: f64, avg: f64) -> bool {
+    low.is_finite()
+        && high.is_finite()
+        && avg.is_finite()
+        && low > 0.0
+        && high > 0.0
+        && avg > 0.0
+}
+
+fn is_valid_history_day(day: &eve_db::MarketHistoryDayRecord) -> bool {
+    date_str_to_filetime(&day.date).is_some()
+        && is_valid_history_prices(day.lowest, day.highest, day.average)
+        && day.volume > 0
+        && day.order_count > 0
+}
+
+/// Returns the client-aligned Unix cutoff used to partition `old` vs `new` market price
+/// history rows (`now_unix - unrebased_clock_offset_secs`).
+///
+/// Client `marketsvc.GetHistoryRowList` initializes `lastTime = blue.os.GetWallclockTimeNow()`
+/// (synced via `machoNet.GetTime`, which excludes unrebased `/advancetime` offsets) and
+/// `lastPrice = 0.0`, then pads days via `while lastTime + const.DAY < entry.historyDate` for
+/// every `entry` in `old` before reading `entry.avgPrice`. Partitioning against `ctx.now_unix()`
+/// places unrebased future-dated trades into `old`, generating `[ts, 0.0, 0.0, 0.0, 0, 0]`
+/// gap-fill rows and triggering `ZeroDivisionError` in `ticker.TickerItem.LoadData`.
+pub(crate) fn client_history_partition_cutoff_unix(ctx: &ServerContext) -> u64 {
+    ctx.now_unix().saturating_sub(ctx.unrebased_clock_offset_secs())
+}
+
 fn build_transaction_fallback_history_rows<'a>(
     txs: impl Iterator<Item = &'a eve_db::ledger::MarketTransactionRecord>,
 ) -> Vec<Vec<PyRep>> {
     let mut daily_map: std::collections::BTreeMap<String, (f64, f64, i64, i64, f64)> =
         std::collections::BTreeMap::new();
     for tx in txs {
-        let date_str = eve_db::ledger::unix_secs_to_date_str(tx.date_unix);
         let unit_price = tx.price.to_wire_f64();
+        if !unit_price.is_finite() || unit_price <= 0.0 {
+            continue;
+        }
+        let date_str = eve_db::ledger::unix_secs_to_date_str(tx.date_unix);
+        if date_str_to_filetime(&date_str).is_none() {
+            continue;
+        }
         let qty = tx.quantity.max(1);
         let entry = daily_map
             .entry(date_str)
@@ -465,13 +500,16 @@ fn build_transaction_fallback_history_rows<'a>(
     }
     daily_map
         .into_iter()
-        .map(|(date_str, (low, high, vol, orders, total_val))| {
+        .filter_map(|(date_str, (low, high, vol, orders, total_val))| {
             let avg = if vol > 0 {
                 total_val / (vol as f64)
             } else {
                 (low + high) / 2.0
             };
-            history_row(&date_str, low, high, avg, vol, orders)
+            if !is_valid_history_prices(low, high, avg) || vol <= 0 || orders <= 0 {
+                return None;
+            }
+            Some(history_row(&date_str, low, high, avg, vol, orders))
         })
         .collect()
 }
@@ -484,21 +522,27 @@ pub fn build_price_history_rows(
     region_id: u32,
 ) -> Vec<Vec<PyRep>> {
     if let Some(entries) = snap.market_history.get(&(region_id, type_id)) {
-        let mut sorted = entries.clone();
-        sorted.sort_by(|a, b| a.date.cmp(&b.date));
-        return sorted
-            .into_iter()
-            .map(|day| {
-                history_row(
-                    &day.date,
-                    day.lowest,
-                    day.highest,
-                    day.average,
-                    day.volume,
-                    day.order_count,
-                )
-            })
+        let mut sorted: Vec<_> = entries
+            .iter()
+            .filter(|day| is_valid_history_day(day))
+            .cloned()
             .collect();
+        if !sorted.is_empty() || entries.is_empty() {
+            sorted.sort_by(|a, b| a.date.cmp(&b.date));
+            return sorted
+                .into_iter()
+                .map(|day| {
+                    history_row(
+                        &day.date,
+                        day.lowest,
+                        day.highest,
+                        day.average,
+                        day.volume,
+                        day.order_count,
+                    )
+                })
+                .collect();
+        }
     }
     build_transaction_fallback_history_rows(
         snap.market_transactions.values().filter(|tx| {
@@ -537,6 +581,9 @@ pub fn build_global_price_history_rows(
             continue;
         }
         for day in entries {
+            if !is_valid_history_day(day) {
+                continue;
+            }
             let vol = day.volume.max(0);
             let weighted = if vol > 0 {
                 day.average * (vol as f64)
@@ -570,7 +617,7 @@ pub fn build_global_price_history_rows(
     if !daily_buckets.is_empty() {
         return daily_buckets
             .into_iter()
-            .map(|(date_str, b)| {
+            .filter_map(|(date_str, b)| {
                 let avg = if b.entry_count == 1 {
                     b.first_average
                 } else if b.volume > 0 {
@@ -578,7 +625,20 @@ pub fn build_global_price_history_rows(
                 } else {
                     b.unweighted_sum / (b.entry_count as f64)
                 };
-                history_row(&date_str, b.lowest, b.highest, avg, b.volume, b.order_count)
+                if !is_valid_history_prices(b.lowest, b.highest, avg)
+                    || b.volume <= 0
+                    || b.order_count <= 0
+                {
+                    return None;
+                }
+                Some(history_row(
+                    &date_str,
+                    b.lowest,
+                    b.highest,
+                    avg,
+                    b.volume,
+                    b.order_count,
+                ))
             })
             .collect();
     }
@@ -594,6 +654,8 @@ pub fn build_global_price_history_rows(
 /// `(old_rows, new_rows)`, keeping strictly pre-today dates (`historyDate < today`) in
 /// `old_rows` and today/recent dates (`historyDate >= today`) in `new_rows` so combining
 /// `GetOldPriceHistory` + `GetNewPriceHistory` (or PLEX equivalents) never duplicates days.
+/// Drops invalid or non-positive price/volume placeholder rows that would cause client
+/// `marketsvc.GetHistoryRowList` / `ticker.py` division-by-zero crashes.
 pub fn partition_price_history_rows(
     rows: Vec<Vec<PyRep>>,
     now_unix: u64,
@@ -604,6 +666,18 @@ pub fn partition_price_history_rows(
     let mut new_rows = Vec::new();
     for row in rows {
         let row_ft = row.first().and_then(PyRep::as_i64).unwrap_or(0);
+        let low = row.get(1).and_then(PyRep::as_f64).unwrap_or(0.0);
+        let high = row.get(2).and_then(PyRep::as_f64).unwrap_or(0.0);
+        let avg = row.get(3).and_then(PyRep::as_f64).unwrap_or(0.0);
+        let vol = row.get(4).and_then(PyRep::as_i64).unwrap_or(0);
+        let orders = row.get(5).and_then(PyRep::as_i64).unwrap_or(0);
+        if row_ft <= 0
+            || !is_valid_history_prices(low, high, avg)
+            || vol <= 0
+            || orders <= 0
+        {
+            continue;
+        }
         if row_ft < today_filetime {
             old_rows.push(row);
         } else {

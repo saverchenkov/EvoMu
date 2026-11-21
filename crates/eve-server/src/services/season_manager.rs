@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::notify_registry::{
-    OnAccountChange, OnChallengeCompleted, OnChallengeExpired, OnChallengeProgressUpdate,
+    OnChallengeCompleted, OnChallengeExpired, OnChallengeProgressUpdate,
     OnChallengeRewardsGranted, OnItemChange, OnRedeemingQueueUpdated, OnRedeemingTokensUpdated,
     OnSeasonOmegaRewardsClaimed, OnSeasonSelected, OnSeasonalGoalCompleted,
     OnSeasonalPointsUpdated, OnSeasonsFsdDataChanged,
@@ -1399,19 +1399,9 @@ pub fn handle_season_manager(
                 Ok((rep, eff_season_id, prev_pts, pts, is_omega, expired, new_balance_cents, created_item_notif, enqueued_redeem, season_active))
             });
             match res {
-                Ok((rep, season_id, prev_pts, pts, is_omega, expired, new_balance_cents, created_item_notif, enqueued_redeem, season_active)) => {
+                Ok((rep, season_id, prev_pts, pts, is_omega, expired, _new_balance_cents, created_item_notif, enqueued_redeem, season_active)) => {
                     if season_active && is_season_session_initialized(ctx, char_id, session.session_id) {
                         emit_expired_challenges(ctx, char_id, pts, &expired);
-                    }
-                    if let Some(bal_cents) = new_balance_cents {
-                        ctx.emit_typed(
-                            NotificationTarget::Character(char_id),
-                            OnAccountChange {
-                                account_key: "cash".into(),
-                                owner_id: char_id,
-                                balance: eve_db::IskCents(bal_cents).to_f64_isk(),
-                            },
-                        );
                     }
                     if let Some((item_id, type_id, loc_id, qty)) = created_item_notif {
                         let (group_id, category_id) = ctx

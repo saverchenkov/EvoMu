@@ -170,7 +170,10 @@ pub async fn handle(
                 },
             };
             if is_station_lookup {
-                Some(Ok(PyRep::Integer(sys_id as i64)))
+                Some(Ok(PyRep::keyval([
+                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                    ("factionID", PyRep::None),
+                ])))
             } else if let Some(sys) = ctx.sde.solar_systems.get(&sys_id) {
                 Some(Ok(PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(sys.solar_system_id as i64)),
@@ -178,6 +181,7 @@ pub async fn handle(
                     ("constellationID", PyRep::Integer(sys.constellation_id as i64)),
                     ("regionID", PyRep::Integer(sys.region_id as i64)),
                     ("security", PyRep::Real(sys.security_status)),
+                    ("factionID", PyRep::None),
                 ])))
             } else {
                 Some(Err(BridgeRpcError {

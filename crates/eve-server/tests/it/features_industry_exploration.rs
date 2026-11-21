@@ -324,22 +324,24 @@ async fn test_mobile_siphon_steals_material_from_pos_within_range() {
     // Negative 1: Zero theft during anchoring and immediately upon anchor completion (t = 60s)
     ctx.advance_secs(60);
     sys_handle.step_manual(1.0).await.unwrap();
-    let cap_t0 = rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_near_id)])
-        .await.unwrap().as_f64().unwrap_or(1.0);
+    let siphon_ratio = |rep: &PyRep| {
+        let cap = rep.dict_get("capacity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let used = rep.dict_get("used").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        used / cap
+    };
+    let cap_t0 = siphon_ratio(&rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_near_id)]).await.unwrap());
     assert_eq!(cap_t0, 0.0, "Zero theft must occur before a full hourly POS cycle elapses");
 
     // Positive: System actor tick runs cycle 1 -> 60 stolen + 6 waste = 66 drained from POS Silo (134 left)
     ctx.advance_secs(3_600);
     sys_handle.step_manual(1.0).await.unwrap();
-    let cap1 = rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_near_id)])
-        .await.unwrap().as_f64().unwrap_or(0.0);
+    let cap1 = siphon_ratio(&rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_near_id)]).await.unwrap());
     assert!(cap1 > 0.0, "Anchored siphon within 100km of POS Silo must steal raw material on hourly tick");
 
     // Second hourly cycle -> stacks to 120 in near siphon; Athanor, private Hangar, unanchored & far siphons untouched
     ctx.advance_secs(3_600);
     sys_handle.step_manual(1.0).await.unwrap();
-    let cap2 = rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_near_id)])
-        .await.unwrap().as_f64().unwrap_or(0.0);
+    let cap2 = siphon_ratio(&rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_near_id)]).await.unwrap());
     assert!(cap2 > cap1);
     assert_eq!(
         rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_far_id)])
@@ -348,7 +350,10 @@ async fn test_mobile_siphon_steals_material_from_pos_within_range() {
             .code,
         "ItemNotInSpace"
     );
-    assert_eq!(rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(unanchored_siphon_id)]).await.unwrap().as_f64(), Some(0.0));
+    assert_eq!(
+        rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(unanchored_siphon_id)]).await.unwrap(),
+        PyRep::keyval([("capacity", PyRep::Real(1_000.0)), ("used", PyRep::Real(0.0))])
+    );
 
     let ctx_reloaded = reload_ctx(&db_path, Arc::clone(&ctx.sde));
     ctx_reloaded.db.with_snapshot(|snap| {

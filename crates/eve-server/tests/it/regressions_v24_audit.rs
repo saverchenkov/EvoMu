@@ -1121,7 +1121,7 @@ async fn test_structure_ops_and_asset_safety_audit() {
         )
         .await
         .expect("GetStructuresICanDeliverTo");
-    assert!(matches!(deliver_res, PyRep::List(_)));
+    assert!(matches!(&deliver_res, PyRep::Tuple(t) if t.len() == 2 && matches!(t[0], PyRep::List(_))));
 
     // 4. MoveSafetyWrapToStructure with same-system 0.5% fee (feat:structures.asset-safety-manual)
     let wrap_id = 940_000_106i64;

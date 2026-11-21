@@ -37,6 +37,15 @@ fn test_skin_purchase_rollback_branches_account_sink_and_admin_expiration_errors
             cap_clone.lock().unwrap().push((target, method.to_string()));
         },
     ));
+    let cap_commit = Arc::clone(&captured_notifies);
+    crate::router::delta_commit_listener::install_wallet_delta_sink_listener(
+        &router.db,
+        &router.sde,
+        false,
+        move |target, method, _id_type, _args| {
+            cap_commit.lock().unwrap().push((target, method.to_string()));
+        },
+    );
 
     let skinr = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
     let state = CosmeticsMarketState::load_with_sink(

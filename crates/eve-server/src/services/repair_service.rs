@@ -807,16 +807,7 @@ pub async fn handle_repair_items_in_location(
             }
         }
     }
-    if total_cost > 0.0 {
-        ctx.emit_typed(
-            crate::router::NotificationTarget::Character(char_id),
-            crate::router::notify_registry::OnAccountChange {
-                account_key: "cash".into(),
-                owner_id: char_id,
-                balance: new_bal,
-            },
-        );
-    }
+    let _ = new_bal;
     for iid in &repaired_ids {
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),

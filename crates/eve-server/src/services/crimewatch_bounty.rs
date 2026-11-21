@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::router::notify_registry::{
-    OnAccountChange, OnBountyPlaced, OnKillRightSellCancel, OnSecurityStatusUpdate,
+    OnBountyPlaced, OnKillRightSellCancel, OnSecurityStatusUpdate,
 };
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::IskCents;
@@ -534,14 +534,13 @@ pub fn handle_bounty_proxy(
                 let total = *entry;
                 Ok((new_bal.to_wire_f64(), total))
             });
-            let (new_bal, total_pool) = match tx_res {
+            let (_new_bal, total_pool) = match tx_res {
                 Ok(b) => {
                     crate::services::combat_crimewatch::sync_combat_runtime_from_db(ctx);
                     b
                 }
                 Err(e) => return Some(Err(e)),
             };
-            let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal);
             ctx.emit_typed(
                 NotificationTarget::Character(target_id),
                 OnBountyPlaced {
@@ -1020,7 +1019,7 @@ pub fn handle_apply_tags_for_sec_status(
     });
 
     match res {
-        Ok((old_sec, new_sec, new_bal_f64, changed_items, tier_txs)) => {
+        Ok((old_sec, new_sec, _new_bal_f64, changed_items, tier_txs)) => {
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                 let list = rt.sec_status_transactions.entry(char_id).or_default();
                 if tier_txs.is_empty() {
@@ -1051,14 +1050,6 @@ pub fn handle_apply_tags_for_sec_status(
                     }
                 }
             });
-            ctx.emit_typed(
-                crate::router::NotificationTarget::Character(char_id),
-                OnAccountChange {
-                    account_key: "cash".into(),
-                    owner_id: char_id,
-                    balance: new_bal_f64,
-                },
-            );
             for (old_item, new_item_opt) in changed_items {
                 ctx.notify_item_mutation(char_id, Some(&old_item), new_item_opt.as_ref());
             }
