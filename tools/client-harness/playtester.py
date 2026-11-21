@@ -494,6 +494,7 @@ DEFAULT_DOWNTIME_RESUME_BUFFER_SECS = 5.0
 
 _DOWNTIME_EXPLICIT_MARKERS = (
     "clustershuttingdown",
+    "onclustershutdowninitiated",
     "daily cluster downtime",
     "cluster shutdown in progress",
     "reason=clustershutdown",
@@ -507,11 +508,16 @@ _DOWNTIME_DISCONNECT_MARKERS = (
     "connection refused",
     "connection closed",
     "transport closed",
-    "bootstrap_session",
+    "rpc bridge unreachable",
+    "bridge connection failed",
     "not connected",
     "timed out",
-    "rpc",
+    "broken pipe",
+    "remotingerror",
+    "connectionlost",
 )
+
+_DOWNTIME_MODAL_KEYS = ("modals", "modal", "active_modal", "recent_modal_messages")
 
 
 def _utc_secs_of_day(now_unix: Optional[float] = None) -> float:
@@ -539,20 +545,26 @@ def _seconds_until_downtime_ends(
     downtime_utc_secs: int = DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
     window_secs: int = DEFAULT_DOWNTIME_WINDOW_SECS,
     buffer_secs: float = DEFAULT_DOWNTIME_RESUME_BUFFER_SECS,
+    pre_window_secs: int = 0,
 ) -> float:
-    if not _is_cluster_downtime_window(
+    buf = max(0.0, float(buffer_secs))
+    start = int(downtime_utc_secs) % 86400
+    sod = _utc_secs_of_day(now_unix)
+    if _is_cluster_downtime_window(
         now_unix=now_unix,
         downtime_utc_secs=downtime_utc_secs,
         window_secs=window_secs,
     ):
-        return 0.0
-    start = int(downtime_utc_secs) % 86400
-    end = (start + int(window_secs)) % 86400
-    sod = _utc_secs_of_day(now_unix)
-    rem = end - sod
-    if rem <= 0.0:
-        rem += 86400.0
-    return max(0.0, rem + max(0.0, float(buffer_secs)))
+        end = (start + int(window_secs)) % 86400
+        rem = end - sod
+        if rem <= 0.0:
+            rem += 86400.0
+        return max(0.0, rem + buf)
+    if pre_window_secs > 0 and window_secs > 0:
+        until_start = (start - sod) % 86400.0
+        if until_start <= float(pre_window_secs):
+            return max(0.0, until_start + float(window_secs) + buf)
+    return 0.0
 
 
 def _text_mentions_cluster_downtime(text: Any) -> bool:
@@ -569,6 +581,87 @@ def _text_mentions_disconnect(text: Any) -> bool:
     raw = text if isinstance(text, str) else json.dumps(text, default=str)
     low = raw.lower()
     return any(marker in low for marker in _DOWNTIME_DISCONNECT_MARKERS)
+
+
+def _serialize_failure_fragment(value: Any) -> str:
+    if value is None or value == "" or value == [] or value == {}:
+        return ""
+    return value if isinstance(value, str) else json.dumps(value, default=str)
+
+
+def _extract_downtime_modal_texts(ui_snapshot: Any) -> List[str]:
+    if not isinstance(ui_snapshot, dict):
+        frag = _serialize_failure_fragment(ui_snapshot)
+        return [frag] if frag else []
+    texts: List[str] = []
+    containers: List[Dict[str, Any]] = [ui_snapshot]
+    nested_ui = ui_snapshot.get("ui")
+    if isinstance(nested_ui, dict):
+        containers.append(nested_ui)
+    for container in containers:
+        for key in _DOWNTIME_MODAL_KEYS:
+            frag = _serialize_failure_fragment(container.get(key))
+            if frag:
+                texts.append(frag)
+    return texts
+
+
+def _extract_downtime_scatter_texts(flight_recorder: Any) -> List[str]:
+    if not isinstance(flight_recorder, dict):
+        return []
+    frag = _serialize_failure_fragment(flight_recorder.get("scatters_observed"))
+    return [frag] if frag else []
+
+
+def _extract_flight_recorder_failure_texts(
+    flight_recorder: Any,
+) -> tuple[List[str], List[str]]:
+    """Return (both_texts, explicit_only_texts) from flight_recorder without healthy call chatter."""
+    if not isinstance(flight_recorder, dict):
+        return ([], [])
+    both: List[str] = []
+    for key in (
+        "log_exceptions",
+        "macho_exceptions",
+        "quasar_errors",
+        "client_restarted_unexpectedly",
+    ):
+        frag = _serialize_failure_fragment(flight_recorder.get(key))
+        if frag:
+            both.append(frag)
+    macho_calls = flight_recorder.get("macho_calls")
+    if isinstance(macho_calls, list):
+        for entry in macho_calls:
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status") or "OK").strip().upper()
+            err = entry.get("error") or entry.get("exception")
+            if status != "OK" or err:
+                frag = _serialize_failure_fragment(
+                    {"status": status, "error": err} if err else {"status": status}
+                )
+                if frag:
+                    both.append(frag)
+    return (both, _extract_downtime_scatter_texts(flight_recorder))
+
+
+def _filter_downtime_server_log_lines(text: str) -> str:
+    if not text:
+        return ""
+    kept: List[str] = []
+    for line in text.splitlines():
+        low = line.lower()
+        if any(marker in low for marker in _DOWNTIME_EXPLICIT_MARKERS):
+            kept.append(line)
+            continue
+        if "dispatching rpc call" in low:
+            continue
+        if any(
+            lvl in low
+            for lvl in (" warn", " error", " fatal", " critical", "panic", "disconnect", "shutting down")
+        ) or low.startswith(("warn", "error", "fatal", "critical")):
+            kept.append(line)
+    return "\n".join(kept)
 
 
 # ---------------------------------------------------------------------------
@@ -2771,6 +2864,7 @@ def _is_session_boundary_flight_recorder(
     return bool(
         last_flight_recorder.get("server_hot_reloaded_to")
         or last_flight_recorder.get("client_restarted_for_desync")
+        or last_flight_recorder.get("client_restarted_for_downtime")
         or last_flight_recorder.get("client_restarted_unexpectedly")
     )
 
@@ -7110,16 +7204,60 @@ class PlaytesterRunner:
             (run_dir / "client_tracebacks.log") if run_dir is not None else None,
             "_traceback_offset",
         )
-        new_srv = self._peek_new_log_text(
-            (run_dir / "server.log") if run_dir is not None else None,
-            "_server_log_offset",
+        new_srv = _filter_downtime_server_log_lines(
+            self._peek_new_log_text(
+                (run_dir / "server.log") if run_dir is not None else None,
+                "_server_log_offset",
+            )
         )
-        candidates = (exc, exec_res, ui_snapshot, last_flight_recorder, new_tb, new_srv)
-        if any(_text_mentions_cluster_downtime(item) for item in candidates):
+        disconnect_candidates: List[str] = []
+        explicit_only_candidates: List[str] = []
+
+        for raw in (_serialize_failure_fragment(exc), new_tb, new_srv):
+            if raw:
+                disconnect_candidates.append(raw)
+
+        if isinstance(exec_res, dict):
+            for key in (
+                "action_error",
+                "error",
+                "traceback",
+                "blocked_reason",
+                "rpc_error",
+                "client_restarted_unexpectedly",
+            ):
+                frag = _serialize_failure_fragment(exec_res.get(key))
+                if frag:
+                    disconnect_candidates.append(frag)
+            fr_both, fr_explicit = _extract_flight_recorder_failure_texts(
+                exec_res.get("flight_recorder")
+            )
+            disconnect_candidates.extend(fr_both)
+            explicit_only_candidates.extend(fr_explicit)
+        else:
+            frag = _serialize_failure_fragment(exec_res)
+            if frag:
+                disconnect_candidates.append(frag)
+
+        disconnect_candidates.extend(_extract_downtime_modal_texts(ui_snapshot))
+
+        if isinstance(last_flight_recorder, dict):
+            last_both, last_explicit = _extract_flight_recorder_failure_texts(
+                last_flight_recorder
+            )
+            disconnect_candidates.extend(last_both)
+            explicit_only_candidates.extend(last_explicit)
+        else:
+            frag = _serialize_failure_fragment(last_flight_recorder)
+            if frag:
+                disconnect_candidates.append(frag)
+
+        explicit_candidates = disconnect_candidates + explicit_only_candidates
+        if any(_text_mentions_cluster_downtime(item) for item in explicit_candidates):
             return True
         if not _is_cluster_downtime_window(now_unix=now_unix):
             return False
-        if any(_text_mentions_disconnect(item) for item in candidates):
+        if any(_text_mentions_disconnect(item) for item in disconnect_candidates):
             return True
         client_proc = getattr(self, "client_proc", None)
         if client_proc is not None and client_proc.poll() is not None:
@@ -7137,11 +7275,12 @@ class PlaytesterRunner:
     ) -> float:
         """Pause continuous playtester cleanly across daily cluster downtime (~11:00-11:15 UTC)."""
         now_ts = float(time_fn() if now_unix is None else now_unix)
-        wait_secs = _seconds_until_downtime_ends(now_unix=now_ts)
+        wait_secs = _seconds_until_downtime_ends(now_unix=now_ts, pre_window_secs=1200)
         if wait_secs <= 0.0:
-            # Server reported ClusterShuttingDown right near window boundary; back off briefly without spinning.
+            # Server reported ClusterShuttingDown outside pre-window; back off briefly without spinning.
             wait_secs = 15.0
-        target_end = now_ts + min(wait_secs, float(DEFAULT_DOWNTIME_WINDOW_SECS) + 15.0)
+        max_wait_secs = float(DEFAULT_DOWNTIME_WINDOW_SECS) + 1200.0 + 15.0
+        target_end = now_ts + min(wait_secs, max_wait_secs)
         log_warn(
             f"Daily cluster downtime active ({reason or 'ClusterShuttingDown'}); "
             f"stopping client and sleeping {wait_secs:.1f}s until ~11:15 UTC..."
@@ -7168,6 +7307,19 @@ class PlaytesterRunner:
                 log_info(f"Waiting for daily cluster downtime to end (~{remaining:.0f}s remaining)...")
                 last_log_at = cur_ts
         return slept_total
+
+    def _pause_and_resume_after_downtime(self, reason: str) -> Optional[Dict[str, str]]:
+        """Pause across cluster downtime, restart server/client if needed, and return boundary FR."""
+        self._downtime_pause_requested = False
+        self._wait_out_cluster_downtime(reason=reason)
+        if getattr(self, "stop_requested", False) or getattr(self, "reload_requested", False):
+            return None
+        if self.server_proc is None or self.server_proc.poll() is not None:
+            if not self.start_server(reset_db=False):
+                return {"client_restarted_unexpectedly": "eve_server_restart_failed_after_downtime"}
+        if not self.start_client():
+            return {"client_restarted_unexpectedly": "client_restart_failed_after_downtime"}
+        return {"client_restarted_for_downtime": utc_now_iso()}
 
     def _ensure_run_guard_state(self) -> _GuardHitTracker:
         tracker = getattr(self, "_guard_tracker", None)
@@ -8395,6 +8547,27 @@ class PlaytesterRunner:
         except Exception:
             return set()
 
+    def _handle_start_client_failure(
+        self,
+        *,
+        exc: Any = None,
+        reason: str = "",
+        _retry_after_downtime: bool = True,
+    ) -> bool:
+        is_downtime = bool(getattr(self.args, "continuous", False)) and self._is_cluster_downtime_active(
+            exc=exc
+        )
+        self.stop_client()
+        if is_downtime:
+            self._wait_out_cluster_downtime(reason=reason or str(exc or "cluster downtime"))
+            if (
+                _retry_after_downtime
+                and not getattr(self, "stop_requested", False)
+                and not getattr(self, "reload_requested", False)
+            ):
+                return self.start_client(_retry_after_downtime=False)
+        return False
+
     def start_client(self, _retry_after_downtime: bool = True) -> bool:
         self.stop_client()
         host_gm_port = self._host_gm_port_for_client(ensure=True)
@@ -8457,17 +8630,25 @@ class PlaytesterRunner:
         deadline = time.time() + 210.0
         while time.time() < deadline:
             if self.client_proc.poll() is not None:
-                log_err(f"EVE.app exited early with code {self.client_proc.returncode}")
-                self.stop_client()
-                return False
+                rc = self.client_proc.returncode
+                log_err(f"EVE.app exited early with code {rc}")
+                return self._handle_start_client_failure(
+                    exc=RuntimeError(f"EVE.app exited early with code {rc}"),
+                    reason=f"EVE.app exited early with code {rc}",
+                    _retry_after_downtime=_retry_after_downtime,
+                )
             if self.rpc.ping():
                 log_info(f"In-client JSON-RPC bridge connected (client PID {self.client_proc.pid})")
                 break
             time.sleep(0.5)
         else:
-            log_err("Timed out waiting for in-client JSON-RPC hook on port " + str(self.ports["rpc"]))
-            self.stop_client()
-            return False
+            rpc_err = f"Timed out waiting for in-client JSON-RPC hook on port {self.ports['rpc']}"
+            log_err(rpc_err)
+            return self._handle_start_client_failure(
+                exc=TimeoutError(rpc_err),
+                reason=rpc_err,
+                _retry_after_downtime=_retry_after_downtime,
+            )
 
         # Bootstrap login -> character selection -> hangar/space ready
         log_info("Bootstrapping client session into character hangar/space...")
@@ -8487,13 +8668,11 @@ class PlaytesterRunner:
             return True
         except Exception as exc:
             log_err(f"bootstrap_session failed: {exc}")
-            is_downtime = bool(getattr(self.args, "continuous", False)) and self._is_cluster_downtime_active(exc=exc)
-            self.stop_client()
-            if is_downtime:
-                self._wait_out_cluster_downtime(reason=f"bootstrap_session rejected: {exc}")
-                if _retry_after_downtime and not getattr(self, "stop_requested", False):
-                    return self.start_client(_retry_after_downtime=False)
-            return False
+            return self._handle_start_client_failure(
+                exc=exc,
+                reason=f"bootstrap_session rejected: {exc}",
+                _retry_after_downtime=_retry_after_downtime,
+            )
 
     def stop_client(self) -> None:
         self._stop_host_gm_bridge_server()
@@ -9267,10 +9446,41 @@ class PlaytesterRunner:
         )
         if not assert_ok and not benign_reject:
             log_warn(f"Step {step_num}: post-action assertion failed -> {assert_err}")
-        is_downtime_disconnect = bool(getattr(self.args, "continuous", False)) and self._is_cluster_downtime_active(
-            exec_res=exec_res,
-            ui_snapshot=ui_snapshot,
-            last_flight_recorder=last_flight_recorder,
+        has_downtime_signal = bool(
+            (isinstance(exec_res, dict) and exec_res.get("action_ok") is False)
+            or post_hard_error
+            or (not assert_ok and not benign_reject)
+            or step_act_err
+            or (
+                isinstance(exec_res, dict)
+                and (
+                    exec_res.get("error")
+                    or exec_res.get("traceback")
+                    or exec_res.get("blocked_reason")
+                    or exec_res.get("rpc_error")
+                )
+            )
+            or (
+                getattr(self, "client_proc", None) is not None
+                and self.client_proc.poll() is not None
+            )
+            or any(
+                _text_mentions_cluster_downtime(frag) or _text_mentions_disconnect(frag)
+                for frag in _extract_downtime_modal_texts(ui_snapshot)
+            )
+            or any(
+                _text_mentions_cluster_downtime(frag)
+                for frag in _extract_downtime_scatter_texts(post_fr)
+            )
+        )
+        is_downtime_disconnect = (
+            bool(getattr(self.args, "continuous", False))
+            and has_downtime_signal
+            and self._is_cluster_downtime_active(
+                exec_res=exec_res,
+                ui_snapshot=ui_snapshot,
+                last_flight_recorder=last_flight_recorder,
+            )
         )
         if is_downtime_disconnect:
             self._downtime_pause_requested = True
@@ -9496,17 +9706,22 @@ class PlaytesterRunner:
                     last_fr, last_burst = self.execute_step(step_num, last_fr, last_burst)
                 except Exception as exc:
                     if getattr(self.args, "continuous", False) and self._is_cluster_downtime_active(exc=exc):
-                        self._wait_out_cluster_downtime(reason=f"step {step_num} exception: {exc}")
-                        last_fr = {"client_restarted_for_downtime": utc_now_iso()}
+                        resumed_fr = self._pause_and_resume_after_downtime(
+                            reason=f"step {step_num} exception: {exc}"
+                        )
+                        last_fr = resumed_fr if resumed_fr is not None else {}
                         last_burst = []
+                        continue
                     else:
                         log_err(f"Step {step_num} raised exception: {exc}")
                         self.reset_batch_state()
                         time.sleep(2.0)
                 else:
                     if getattr(self, "_downtime_pause_requested", False):
-                        self._wait_out_cluster_downtime(reason=f"step {step_num} cluster downtime disconnect")
-                        last_fr = {"client_restarted_for_downtime": utc_now_iso()}
+                        resumed_fr = self._pause_and_resume_after_downtime(
+                            reason=f"step {step_num} cluster downtime disconnect"
+                        )
+                        last_fr = resumed_fr if resumed_fr is not None else {}
                         last_burst = []
                         continue
                     recovery_reason = self.maybe_recover_corrupted_viewstate(self.last_ui_snapshot)

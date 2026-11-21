@@ -4924,7 +4924,7 @@ class TestClusterDowntimeHandling1190(unittest.TestCase):
             root = Path(td)
             staged = root / "staged_eve"
             staged.mkdir(parents=True)
-            args = playtester.parse_args(["--no-github-sync", "--continuous"])
+            args = playtester.parse_args(["--no-github-sync", "--continuous", "--no-hybrid"])
             args.worktree = str(root)
             args.staged_app = str(staged)
             runner = playtester.PlaytesterRunner(args)
@@ -5011,6 +5011,7 @@ class TestClusterDowntimeHandling1190(unittest.TestCase):
                 wait_calls = []
                 with mock.patch.object(runner, "stop_client"), \
                      mock.patch.object(runner, "_host_gm_port_for_client", return_value=0), \
+                     mock.patch.object(runner, "_crashmon_pids", return_value=set()), \
                      mock.patch("playtester.stage_playtester_client", return_value=staged), \
                      mock.patch("playtester.subprocess.Popen", return_value=fake_proc), \
                      mock.patch.object(runner.rpc, "ping", return_value=True), \
@@ -5055,6 +5056,250 @@ class TestClusterDowntimeHandling1190(unittest.TestCase):
         self.assertIsNone(playtester._check_window_populated({"window": "store", "min_populated": 1, "require_rpc_or_data": False}, alias_state["open_windows"], []))
         ok_p_closed, _ = playtester._evaluate_step_assertions({"expect_window_closed": "people"}, {}, alias_state)
         self.assertFalse(ok_p_closed)
+
+    def test_downtime_healthy_step_inside_window_not_misclassified_bf01(self):
+        from datetime import datetime, timezone
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged_eve"
+            staged.mkdir(parents=True)
+            args = playtester.parse_args(["--no-github-sync", "--continuous", "--no-hybrid"])
+            args.worktree = str(root)
+            args.staged_app = str(staged)
+            runner = playtester.PlaytesterRunner(args)
+            try:
+                runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+                srv_log = runner.current_run_dir / "server.log"
+                srv_log.write_text(
+                    "2026-11-21T11:02:00Z INFO eve_server::router::dispatch: Dispatching RPC call bootstrap_session\n",
+                    encoding="utf-8",
+                )
+                inside = datetime(2026, 11, 21, 11, 2, 0, tzinfo=timezone.utc).timestamp()
+                outside = datetime(2026, 11, 21, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+                healthy_exec = {
+                    "action_ok": True,
+                    "notes": "rpc completed",
+                    "flight_recorder": {
+                        "macho_calls": [{"service": "bootstrap_session", "status": "OK"}],
+                        "log_exceptions": [],
+                        "macho_exceptions": [],
+                        "quasar_errors": [],
+                        "scatters_observed": [{"event": "OnSessionChanged"}],
+                    },
+                }
+                healthy_ui = {
+                    "active_view": "hangar",
+                    "modals": [],
+                    "inventory": [{"name": "bootstrap_session_note", "hint": "rpc"}],
+                    "ui": {"modals": [], "recent_modal_messages": []},
+                }
+                self.assertFalse(
+                    runner._is_cluster_downtime_active(
+                        exec_res=healthy_exec,
+                        ui_snapshot=healthy_ui,
+                        last_flight_recorder=healthy_exec["flight_recorder"],
+                        now_unix=inside,
+                    )
+                )
+                self.assertFalse(
+                    runner._is_cluster_downtime_active(
+                        exec_res=healthy_exec,
+                        ui_snapshot=healthy_ui,
+                        last_flight_recorder=healthy_exec["flight_recorder"],
+                        now_unix=outside,
+                    )
+                )
+                # Explicit shutdown scatter & disconnect modal still trigger appropriately.
+                self.assertTrue(
+                    runner._is_cluster_downtime_active(
+                        exec_res={"flight_recorder": {"scatters_observed": [{"event": "OnClusterShutdownInitiated"}]}},
+                        now_unix=outside,
+                    )
+                )
+                self.assertTrue(
+                    runner._is_cluster_downtime_active(
+                        ui_snapshot={"ui": {"modals": [{"text": "GPSTransportClosed"}]}},
+                        now_unix=inside,
+                    )
+                )
+            finally:
+                runner.oracle.flush()
+
+    def test_downtime_non_disconnect_bug_inside_window_not_suppressed_bf01(self):
+        from datetime import datetime, timezone
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged_eve"
+            staged.mkdir(parents=True)
+            args = playtester.parse_args(["--no-github-sync", "--continuous", "--no-hybrid"])
+            args.worktree = str(root)
+            args.staged_app = str(staged)
+            runner = playtester.PlaytesterRunner(args)
+            try:
+                runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+                tb_log = runner.current_run_dir / "client_tracebacks.log"
+                srv_log = runner.current_run_dir / "server.log"
+                srv_log.write_text(
+                    "2026-11-21T11:02:00Z INFO eve_server::router::dispatch: Dispatching RPC call\n",
+                    encoding="utf-8",
+                )
+                tb_log.write_text(
+                    "Traceback (most recent call last):\nUnimplementedRPC: stationSvc.DoSomething\n",
+                    encoding="utf-8",
+                )
+                inside = datetime(2026, 11, 21, 11, 2, 0, tzinfo=timezone.utc).timestamp()
+                bug_exec = {
+                    "action_ok": False,
+                    "action_error": "UnimplementedRPC: stationSvc.DoSomething",
+                    "flight_recorder": {
+                        "macho_exceptions": ["UnimplementedRPC: stationSvc.DoSomething"],
+                        "log_exceptions": ["Traceback ... UnimplementedRPC"],
+                    },
+                }
+                self.assertFalse(
+                    runner._is_cluster_downtime_active(
+                        exec_res=bug_exec,
+                        now_unix=inside,
+                    )
+                )
+            finally:
+                runner.oracle.flush()
+
+    def test_session_boundary_and_run_loop_downtime_resume_bf02(self):
+        self.assertTrue(
+            playtester._is_session_boundary_flight_recorder(
+                {"client_restarted_for_downtime": "2026-11-21T11:15:05Z"}
+            )
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged_eve"
+            staged.mkdir(parents=True)
+            args = playtester.parse_args(["--no-github-sync", "--continuous", "--no-hybrid"])
+            args.worktree = str(root)
+            args.staged_app = str(staged)
+            runner = playtester.PlaytesterRunner(args)
+            try:
+                runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+                fake_server = mock.MagicMock()
+                fake_server.poll.return_value = None
+                fake_client = mock.MagicMock()
+                fake_client.poll.return_value = None
+
+                def fake_start_server(reset_db=False):
+                    runner.server_proc = fake_server
+                    return True
+
+                start_client_calls = {"n": 0}
+
+                def fake_start_client(_retry_after_downtime=True):
+                    start_client_calls["n"] += 1
+                    runner.client_proc = fake_client
+                    return True
+
+                def fake_stop_client():
+                    runner.client_proc = None
+
+                received_last_frs = []
+
+                def fake_execute_step(step_num, last_fr, last_burst):
+                    received_last_frs.append((step_num, dict(last_fr)))
+                    if len(received_last_frs) == 1:
+                        runner._downtime_pause_requested = True
+                        return {"macho_calls": ["step1"]}, []
+                    runner.stop_requested = True
+                    return {"macho_calls": ["step2"]}, []
+
+                with mock.patch("playtester.DEFAULT_CONTROL_FILE", root / "control"), \
+                     mock.patch("playtester.DEFAULT_PID_FILE", root / "pid"), \
+                     mock.patch.object(runner, "install_signal_handlers"), \
+                     mock.patch.object(runner, "start_server", side_effect=fake_start_server), \
+                     mock.patch.object(runner, "start_client", side_effect=fake_start_client), \
+                     mock.patch.object(runner, "stop_client", side_effect=fake_stop_client), \
+                     mock.patch.object(runner, "stop_server"), \
+                     mock.patch.object(runner, "check_external_reload_triggers", return_value=(False, 0.0)), \
+                     mock.patch.object(runner.rpc, "ping", return_value=True), \
+                     mock.patch.object(runner, "_write_run_summary"), \
+                     mock.patch.object(runner, "harvest_flight_recorder_anomalies"), \
+                     mock.patch.object(runner, "_wait_out_cluster_downtime", side_effect=lambda **kw: fake_stop_client() or 10.0) as wait_mock, \
+                     mock.patch.object(runner, "execute_step", side_effect=fake_execute_step):
+                    rc = runner.run()
+
+                self.assertEqual(rc, 0)
+                self.assertEqual(wait_mock.call_count, 1)
+                self.assertEqual(start_client_calls["n"], 2)
+                self.assertEqual(len(received_last_frs), 2)
+                _, step2_last_fr = received_last_frs[1]
+                self.assertIn("client_restarted_for_downtime", step2_last_fr)
+                self.assertNotIn("client_restarted_unexpectedly", step2_last_fr)
+                self.assertTrue(playtester._is_session_boundary_flight_recorder(step2_last_fr))
+            finally:
+                runner.oracle.flush()
+
+    def test_downtime_pre_window_countdown_and_early_exefile_exit_p2_2(self):
+        from datetime import datetime, timezone
+
+        pre_5m = datetime(2026, 11, 21, 10, 55, 0, tzinfo=timezone.utc).timestamp()
+        pre_30m = datetime(2026, 11, 21, 10, 30, 0, tzinfo=timezone.utc).timestamp()
+        # With pre_window_secs=1200, 10:55 UTC waits across 11:00-11:15:05 UTC (1205s total).
+        self.assertAlmostEqual(
+            playtester._seconds_until_downtime_ends(now_unix=pre_5m, pre_window_secs=1200),
+            1205.0,
+            places=3,
+        )
+        self.assertEqual(
+            playtester._seconds_until_downtime_ends(now_unix=pre_30m, pre_window_secs=1200),
+            0.0,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged_eve"
+            (staged / "bin64").mkdir(parents=True)
+            (staged / "bin64" / "exefile").write_text("", encoding="utf-8")
+            args = playtester.parse_args(["--no-github-sync", "--continuous"])
+            args.worktree = str(root)
+            args.staged_app = str(staged)
+            runner = playtester.PlaytesterRunner(args)
+            try:
+                exited_proc = mock.MagicMock()
+                exited_proc.pid = 42421
+                exited_proc.poll.return_value = 1
+                exited_proc.returncode = 1
+
+                healthy_proc = mock.MagicMock()
+                healthy_proc.pid = 42422
+                healthy_proc.poll.return_value = None
+
+                popen_calls = {"n": 0}
+
+                def fake_popen(*a, **kw):
+                    popen_calls["n"] += 1
+                    return exited_proc if popen_calls["n"] == 1 else healthy_proc
+
+                wait_calls = []
+                with mock.patch.object(runner, "stop_client"), \
+                     mock.patch.object(runner, "_host_gm_port_for_client", return_value=0), \
+                     mock.patch.object(runner, "_crashmon_pids", return_value=set()), \
+                     mock.patch("playtester.stage_playtester_client", return_value=staged), \
+                     mock.patch("playtester.subprocess.Popen", side_effect=fake_popen), \
+                     mock.patch("playtester._is_cluster_downtime_window", return_value=True), \
+                     mock.patch.object(runner.rpc, "ping", return_value=True), \
+                     mock.patch.object(
+                         runner.rpc,
+                         "call",
+                         return_value={"session": {"charid": 90000001}, "active_view": "hangar"},
+                     ), \
+                     mock.patch.object(runner, "_wait_out_cluster_downtime", side_effect=lambda **kw: wait_calls.append(kw) or 10.0):
+                    ok = runner.start_client()
+
+                self.assertTrue(ok)
+                self.assertEqual(popen_calls["n"], 2)
+                self.assertEqual(len(wait_calls), 1)
+            finally:
+                runner.oracle.flush()
 
 
 if __name__ == "__main__":

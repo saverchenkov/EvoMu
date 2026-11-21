@@ -1656,21 +1656,21 @@ def _resolve_secondary_view_surface(vs, sec_vi, uicore=None, sec_name_hint=""):
         layers = getattr(uc, "layer", None) if uc is not None else None
         if layers is not None:
             cand = getattr(layers, sec_name, None)
-            if cand is not None and not getattr(cand, "destroyed", False):
+            if cand is not None and not getattr(cand, "destroyed", False) and _is_visible(cand):
                 sec_layer = cand
             if sec_layer is None:
                 vs_lyr = getattr(layers, "viewstate", None)
                 if vs_lyr is not None:
                     sec_tok = _normalize_window_tok(sec_name)
                     for ch in list(getattr(vs_lyr, "children", []) or []):
-                        if ch is None or getattr(ch, "destroyed", False):
+                        if ch is None or getattr(ch, "destroyed", False) or not _is_visible(ch):
                             continue
                         cname = _safe_str(getattr(ch, "name", "") or "", 64)
                         ctok = _normalize_window_tok(cname[2:] if cname.startswith("l_") else cname)
                         if ctok == sec_tok or (sec_tok and sec_tok in ctok):
                             sec_layer = ch
                             break
-    if sec_view_obj is None and vs is not None:
+    if sec_layer is None and sec_view_obj is None and vs is not None:
         sec_view_obj = getattr(vs, "activeView", None)
     if sec_layer is None and sec_view_obj is not None:
         sec_layer = getattr(sec_view_obj, "layer", None)
@@ -6963,63 +6963,28 @@ def _execute_action(sm, action):
                     edit_node = _resolve_editable_widget(cand)
                 if edit_node is None and not explicit_target and not explicit_xy:
                     edit_node = _find_any_visible_editable(layers)
-                if edit_node is not None and _is_eveui_text_field(edit_node):
-                    try:
-                        if reg is not None and hasattr(reg, "SetFocus"):
-                            reg.SetFocus(edit_node)
-                    except Exception:
-                        pass
-                    ctrl = edit_node.controller
-                    try:
-                        ctrl.clear_text()
-                    except Exception:
-                        pass
-                    if u_txt:
-                        if hasattr(edit_node, "insert_text"):
-                            edit_node.insert_text(u_txt)
-                        elif hasattr(ctrl, "replace_text"):
-                            ctrl.replace_text(u_txt)
-                        else:
-                            ctrl.insert_text(u_txt)
+                wrote_txt, write_err = _write_editable_widget_text(edit_node, u_txt, reg=reg)
+                if wrote_txt:
                     result["typed_into"] = _safe_str(getattr(edit_node, "name", ""), 64)
                     if should_submit:
-                        _invoke_text_submit_candidates(
-                            ((ctrl, "on_return"), (edit_node, "on_return"), (edit_node, "OnReturn"), (edit_node, "Confirm")),
-                            result,
-                        )
-                elif edit_node is not None and (hasattr(edit_node, "SetValue") or hasattr(edit_node, "SetText")):
-                    try:
-                        if reg is not None and hasattr(reg, "SetFocus"):
-                            reg.SetFocus(edit_node)
-                    except Exception:
-                        pass
-                    prefix_val = getattr(edit_node, "prefix", None)
-                    if prefix_val and type(prefix_val).__name__ in ("str", "unicode") and not u_txt.startswith(prefix_val):
-                        u_txt = prefix_val + u_txt
-                    if hasattr(edit_node, "SetValue"):
-                        try:
-                            edit_node.SetValue(u_txt)
-                        except (ValueError, TypeError) as val_exc:
-                            result["ok"] = False
-                            result["error"] = "numeric/value input %r rejected %r: %s" % (
-                                _safe_str(getattr(edit_node, "name", edit_node.__class__.__name__), 48),
-                                _safe_str(u_txt, 48),
-                                val_exc,
+                        if _is_eveui_text_field(edit_node):
+                            submit_cands = (
+                                (edit_node.controller, "on_return"),
+                                (edit_node, "on_return"),
+                                (edit_node, "OnReturn"),
+                                (edit_node, "Confirm"),
                             )
-                            return
-                    else:
-                        edit_node.SetText(u_txt)
-                    if hasattr(edit_node, "OnChange"):
-                        try:
-                            edit_node.OnChange(u_txt)
-                        except Exception:
-                            pass
-                    result["typed_into"] = _safe_str(getattr(edit_node, "name", ""), 64)
-                    if should_submit:
-                        _invoke_text_submit_candidates(
-                            ((edit_node, "OnReturn"), (edit_node, "Confirm"), (edit_node, "OnConfirm")),
-                            result,
-                        )
+                        else:
+                            submit_cands = (
+                                (edit_node, "OnReturn"),
+                                (edit_node, "Confirm"),
+                                (edit_node, "OnConfirm"),
+                            )
+                        _invoke_text_submit_candidates(submit_cands, result)
+                elif write_err not in ("missing edit widget", "widget lacks text input interface"):
+                    result["ok"] = False
+                    result["error"] = write_err
+                    return
                 else:
                     result["ok"] = False
                     result["error"] = "no editable input widget found for target=%r" % (raw_target,)
