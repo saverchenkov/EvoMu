@@ -987,7 +987,7 @@ fn transition_grace_store_lock_order_matches_world_snapshot_under_concurrency() 
     sess.solar_system_id = Some(jita_sys);
 
     // 1. Direct lock-rank check: holding WorldRepository::inner (40), combat_ephemeral (60),
-    //    or bound_objects (60) while reading TRANSITION_DISCONNECT_GRACE must not violate rank order.
+    //    or bound_objects (60) while reading `transition_grace_store` must not violate rank order.
     {
         let _guard = ReconnectHoldGuard::acquire(&ctx, char_id, sid);
         ctx.db.with_mut_snapshot(|_| {
@@ -2264,4 +2264,184 @@ fn same_system_apply_db_false_dock_excludes_active_system_from_departed_location
             &kw,
         )
         .is_none());
+}
+
+#[test]
+fn transition_grace_store_is_isolated_across_independent_server_contexts() {
+    let ctx_a = test_ctx();
+    let ctx_b = test_ctx();
+    assert_ne!(ctx_a.instance_id, ctx_b.instance_id);
+    assert!(!Arc::ptr_eq(
+        &ctx_a.transition_grace_store,
+        &ctx_b.transition_grace_store
+    ));
+
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let sid = 880_099_u64;
+    let jita_sys = 30_000_142_u32;
+    let jita_station = 60_003_760_i64;
+    let ship_a = 1_897_400_901_i64;
+
+    for ctx in [&ctx_a, &ctx_b] {
+        seed_ships_for_policy_tests(
+            ctx,
+            char_id,
+            other_char,
+            jita_station,
+            &[ship_a],
+            1_897_400_998,
+            1_897_400_999,
+        );
+        ctx.db
+            .acquire_online_lock(user_id, sid, Some(char_id), true, ctx.now_unix())
+            .expect("online lock");
+    }
+
+    let mut sess_a = SessionState::new(sid);
+    sess_a.user_id = Some(user_id);
+    sess_a.character_id = Some(char_id);
+
+    let mut sess_b = SessionState::new(sid);
+    sess_b.user_id = Some(user_id);
+    sess_b.character_id = Some(char_id);
+    sess_b.solar_system_id = Some(jita_sys);
+    sess_b.ship_id = Some(ship_a);
+
+    ctx_a
+        .execute_session_transition_sync(
+            Some(&mut sess_a),
+            SessionTransitionSpec::for_kind(
+                char_id,
+                TransitionKind::CharacterLogin {
+                    solar_system_id: jita_sys,
+                    dock_id: Some((jita_station, false)),
+                    ship_id: Some(ship_a),
+                },
+                "login",
+            )
+            .with_emit_on_session_changed(false)
+            .with_sync_local_chat(false),
+        )
+        .expect("ctx_a login");
+    let station_ship_bid = ctx_a
+        .bind_object(&sess_a, "ship", jita_station)
+        .expect("ctx_a bind ship at station");
+    ctx_a
+        .execute_session_transition_sync(
+            Some(&mut sess_a),
+            SessionTransitionSpec::for_kind(
+                char_id,
+                TransitionKind::Undock {
+                    solar_system_id: jita_sys,
+                },
+                "undock",
+            )
+            .with_emit_on_session_changed(false)
+            .with_sync_local_chat(false),
+        )
+        .expect("ctx_a undock");
+
+    let kw = HashMap::new();
+    let grace_bid = ctx_a
+        .allocate_late_call_grace_binding(
+            &sess_a,
+            "ship",
+            jita_station,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        )
+        .expect("ctx_a departed dock grace binding");
+    ctx_a.record_pending_displaced_logoff(sid, user_id, char_id);
+    ctx_a.record_prelogoff_hold_session(char_id, Some((sid, user_id)));
+    let hold_a = ReconnectHoldGuard::acquire(&ctx_a, char_id, sid);
+
+    // Independent `ctx_b` using identical `sid`, `user_id`, `char_id`, and `ship_id`
+    // must observe none of `ctx_a`'s grace store state.
+    assert_eq!(ctx_b.session_scene_epoch(sid), 0);
+    assert!(ctx_b.current_transition_epoch_record(sid).is_none());
+    assert!(ctx_b.transition_epoch_records(sid).is_empty());
+    assert!(matches!(
+        ctx_b.resolve_late_call_with_policy(
+            &sess_b,
+            station_ship_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        ),
+        LateCallResolution::RejectStale
+    ));
+    assert!(matches!(
+        ctx_b.resolve_late_call_with_policy(
+            &sess_b,
+            grace_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        ),
+        LateCallResolution::RejectStale
+    ));
+    assert!(ctx_b
+        .allocate_late_call_grace_binding(
+            &sess_b,
+            "ship",
+            jita_station,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        )
+        .is_none());
+    assert_eq!(ctx_b.take_pending_displaced_logoff(sid), None);
+    assert_eq!(ctx_b.prelogoff_hold_session(char_id), None);
+    assert!(ctx_b.snapshot_prelogoff_hold_sessions().is_empty());
+    assert_eq!(ctx_b.reconnect_hold_session(char_id), None);
+
+    // Purges and hold mutations on `ctx_b` must never touch `ctx_a`'s isolated store.
+    let _hold_b = ReconnectHoldGuard::acquire(&ctx_b, char_id, sid + 1);
+    assert_eq!(ctx_b.reconnect_hold_session(char_id), Some(sid + 1));
+    assert_eq!(ctx_a.reconnect_hold_session(char_id), Some(sid));
+    ctx_b.clear_pending_displaced_logoffs_for_char(user_id, char_id);
+    ctx_b.record_prelogoff_hold_session(char_id, None);
+    ctx_b.clear_prelogoff_hold_session_if_matches(char_id, (sid, user_id));
+    ctx_b.clear_session_scene_epoch(sid);
+    ctx_b.purge_transition_grace_for_session(sid);
+    ctx_b.purge_transition_grace_for_user(user_id);
+
+    assert_eq!(ctx_a.session_scene_epoch(sid), 2);
+    assert!(ctx_a.current_transition_epoch_record(sid).is_some());
+    assert!(matches!(
+        ctx_a.resolve_late_call_with_policy(
+            &sess_a,
+            grace_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+            &kw,
+        ),
+        LateCallResolution::DispatchWithBinding(entry) if entry.object_id == jita_station
+    ));
+    assert_eq!(ctx_a.prelogoff_hold_session(char_id), Some((sid, user_id)));
+    assert_eq!(
+        ctx_a.take_pending_displaced_logoff(sid),
+        Some((user_id, char_id))
+    );
+    assert_eq!(ctx_a.reconnect_hold_session(char_id), Some(sid));
+
+    // Weak handle upgrade preserves the exact per-context store, and dropping `ctx_a`
+    // releases its `ContextGraceStore` with zero global retention.
+    let ctx_a_weak = ctx_a.downgrade();
+    let store_weak = Arc::downgrade(&ctx_a.transition_grace_store);
+    let upgraded = ctx_a_weak.upgrade().expect("upgrade ctx_a");
+    assert!(Arc::ptr_eq(
+        &ctx_a.transition_grace_store,
+        &upgraded.transition_grace_store
+    ));
+    assert_eq!(upgraded.session_scene_epoch(sid), 2);
+    drop(upgraded);
+    drop(hold_a);
+    assert_eq!(ctx_a.reconnect_hold_session(char_id), None);
+    drop(ctx_a);
+    assert!(ctx_a_weak.upgrade().is_none());
+    assert_eq!(store_weak.strong_count(), 0);
 }
