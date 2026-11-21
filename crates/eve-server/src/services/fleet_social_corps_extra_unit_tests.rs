@@ -484,3 +484,118 @@ fn applications_leave_kick_war_blockers_and_wallet_division_take_bits() {
         "InsufficientDivisionFunds"
     );
 }
+
+#[test]
+fn authz_88_select_character_loads_db_roles_and_corp_handlers_reject_stale_session_roles() {
+    let now = 1_800_030_000_u64;
+    let ctx = test_ctx_with_clock(now);
+    let (_ceo_sess, mut mem_sess) = seed_player_corps(&ctx);
+    let corp_id = 98_000_001_i64;
+    let ally_id = 99_888_001_i64;
+    let mem_id = 90_000_002_i64;
+
+    // 1. Seed DB roles + due 24h pending Director grant + corp.alliance_id (ch.alliance_id stale None),
+    // alongside a stale forced_session_corp_sync entry from an old corporation.
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.alliance_id = Some(ally_id);
+        corp.member_roles
+            .insert(mem_id, corp_roles::ROLE_ACCOUNTANT);
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .pending_role_grants
+            .insert(mem_id, (corp_roles::ROLE_DIRECTOR, now - 5));
+        let ch = snap.characters.get_mut(&mem_id).unwrap();
+        ch.alliance_id = None;
+        ch.station_id = Some(60_003_760);
+        ch.structure_id = None;
+        if ch.user_id == 0 {
+            ch.user_id = 1;
+        }
+        ch.user_id
+    });
+    crate::services::fleet_social::fleet_social_persistence::queue_forced_corp_sync(
+        &ctx,
+        mem_id,
+        98_000_999,
+        None,
+        0,
+    );
+
+    let kw = HashMap::new();
+    let mut sel_sess = SessionState {
+        session_id: 9_901,
+        user_id: Some(uid),
+        ..Default::default()
+    };
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, sel_sess.session_id, None, true, now);
+    crate::services::character_skills::character_gm_tools::handle_char_unbound(
+        &ctx,
+        &mut sel_sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(mem_id)],
+        &kw,
+    )
+    .unwrap()
+    .expect("SelectCharacterID succeeds");
+
+    assert_eq!(sel_sess.corporation_id, Some(corp_id));
+    assert_eq!(sel_sess.alliance_id, Some(ally_id));
+    assert_ne!(
+        sel_sess.corp_role & corp_roles::ROLE_ACCOUNTANT,
+        0,
+        "AUTHZ-88: SelectCharacterID must load DB corp roles"
+    );
+    assert_ne!(
+        sel_sess.corp_role & corp_roles::ROLE_DIRECTOR,
+        0,
+        "AUTHZ-88: SelectCharacterID must promote due pending role grants before loading corp_role"
+    );
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| {
+        assert!(!s.forced_session_corp_sync.contains_key(&mem_id));
+    });
+
+    // 2. Stale session.corp_role / session.corporation_id must NOT authorize DB-stripped or excluded caller.
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.member_roles.insert(mem_id, 0);
+        corp.members.remove(&mem_id);
+        snap.corp_role_assignments.remove(&(corp_id, mem_id));
+    });
+    mem_sess.corporation_id = Some(corp_id);
+    mem_sess.corp_role = corp_roles::ROLE_DIRECTOR;
+
+    assert_eq!(
+        call_corps(
+            &ctx,
+            &mut mem_sess,
+            "corpmgr",
+            "AuditMember",
+            &[PyRep::Integer(mem_id)],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        require_corp_caller(&ctx, &mut mem_sess, None)
+            .unwrap_err()
+            .code,
+        "CorpAccessDenied"
+    );
+
+    // Restored non-director DB member with stale session.corporation_id converges to DB corp_id & alliance_id.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().members.insert(mem_id);
+    });
+    mem_sess.corporation_id = Some(98_999_999);
+    let (db_corp, cid, has_dir) = require_corp_caller(&ctx, &mut mem_sess, None).unwrap();
+    assert_eq!((db_corp, cid, has_dir), (corp_id, mem_id, false));
+    assert_eq!(mem_sess.corporation_id, Some(corp_id));
+    assert_eq!(mem_sess.alliance_id, Some(ally_id));
+}

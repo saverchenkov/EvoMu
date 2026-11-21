@@ -91,10 +91,12 @@ pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64)
         }).collect()
     });
     if !matured_changes.is_empty() {
-        let corp_ally = ctx.db.with_snapshot(|s| s.corporations.get(&corp_id).and_then(|c| c.alliance_id));
+        let corp_ally = ctx.db.with_snapshot(|s| {
+            eve_db::corp_actor::resolve_corp_alliance_id(s, &ctx.sde, corp_id, None)
+        });
         for (mid, r0, r1, hq0, hq1, base0, base1, other0, other1) in matured_changes {
             if r0 != r1 {
-                super::fleet_social_persistence::with_social_state(ctx, |s| { s.forced_session_corp_sync.insert(mid, (corp_id, corp_ally, r1)); });
+                super::fleet_social_persistence::queue_forced_corp_sync(ctx, mid, corp_id, corp_ally, r1);
             }
             super::fleet_social_corp_tail::emit_corp_role_session_changed(ctx, corp_id, mid, r0, r1, hq0, hq1, base0, base1, other0, other1);
         }
@@ -241,40 +243,86 @@ struct CorpMemberRowSnapshot {
     squadron_id: i64,
 }
 
+pub(super) fn resolve_db_corp_id(ctx: &ServerContext, char_id: i64) -> Option<i64> {
+    ctx.db.with_snapshot(|snap| {
+        let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, ctx.now_unix());
+        (actor.char_in_db && actor.corp_id > 0).then_some(actor.corp_id)
+    })
+}
+
+pub(super) fn corp_actor_denied_error(
+    denied: eve_db::CorpActorDenied,
+    corp_id: i64,
+) -> BridgeRpcError {
+    match denied {
+        eve_db::CorpActorDenied::CorporationNotFound => BridgeRpcError {
+            code: "CorporationNotFound".into(),
+            message: format!("Corporation {corp_id} not found"),
+            client_error: None,
+        },
+        eve_db::CorpActorDenied::RoleDenied => BridgeRpcError {
+            code: "CorpRoleDenied".into(),
+            message: "Caller lacks required corporation role".into(),
+            client_error: None,
+        },
+        eve_db::CorpActorDenied::NoCorporation
+        | eve_db::CorpActorDenied::NpcCorporation
+        | eve_db::CorpActorDenied::NotMember => BridgeRpcError {
+            code: "CorpAccessDenied".into(),
+            message: "Character is not an active member of target corporation".into(),
+            client_error: None,
+        },
+    }
+}
+
 pub(crate) fn require_corp_caller(
     ctx: &ServerContext,
     session: &mut SessionState,
     target_corp_arg: Option<i64>,
 ) -> Result<(i64, i64, bool), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    if session.corporation_id.is_none() || session.corporation_id == Some(0) {
-        if let Some(cid) = ctx.db.with_snapshot(|s| {
-            s.characters
-                .get(&char_id)
-                .map(|c| c.corporation_id)
-                .filter(|id| s.corporations.contains_key(id) || ctx.sde.npc_corporations.contains_key(id))
-        }) {
-            session.corporation_id = Some(cid);
+    let initial_corp = ctx.db.with_snapshot(|s| {
+        let actor = eve_db::CorpActor::resolve(s, &ctx.sde, char_id, ctx.now_unix());
+        if actor.char_in_db && !actor.is_npc_corp && actor.corp_id > 0 && !actor.corp_exists {
+            return Err(corp_actor_denied_error(
+                eve_db::CorpActorDenied::CorporationNotFound,
+                actor.corp_id,
+            ));
         }
-    }
-    let caller_corp = match session.corporation_id {
-        Some(cid) if cid > 0 => cid,
-        _ => return Err(BridgeRpcError { code: "CorpAccessDenied".into(), message: "Character does not belong to a corporation".into(), client_error: None }),
-    };
+        if actor.char_in_db && (actor.corp_exists || (actor.is_npc_corp && actor.corp_id > 0)) {
+            Ok(actor.corp_id)
+        } else {
+            Err(corp_actor_denied_error(
+                eve_db::CorpActorDenied::NoCorporation,
+                actor.corp_id,
+            ))
+        }
+    });
+    let caller_corp = initial_corp?;
+    session.corporation_id = Some(caller_corp);
     if let Some(target) = target_corp_arg {
         if target != caller_corp {
-            return Err(BridgeRpcError { code: "CorpAccessDenied".into(), message: "Access denied to external corporation members".into(), client_error: None });
+            return Err(corp_actor_denied_error(
+                eve_db::CorpActorDenied::NotMember,
+                target,
+            ));
         }
     }
     promote_due_pending_corp_grants(ctx, caller_corp);
     let now_unix = ctx.now_unix();
-    let has_director = ctx.db.with_snapshot(|s| {
-        if !s.corporations.contains_key(&caller_corp) {
-            return false;
+    let (alliance_id, has_director) = ctx.db.with_snapshot(|s| {
+        let actor = eve_db::CorpActor::resolve(s, &ctx.sde, char_id, now_unix);
+        if !actor.is_npc_corp {
+            if let Err(denied) = actor.require_member() {
+                return Err(corp_actor_denied_error(denied, caller_corp));
+            }
         }
-        let (is_ceo, roles) = s.effective_corp_roles_at(caller_corp, char_id, None, 0, now_unix);
-        is_ceo || (roles & (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER) != 0)
-    });
+        Ok((
+            actor.alliance_id,
+            actor.is_director_or(corp_roles::ROLE_PERSONNEL_MANAGER),
+        ))
+    })?;
+    session.alliance_id = alliance_id;
     Ok((caller_corp, char_id, has_director))
 }
 
@@ -293,7 +341,7 @@ fn get_corp_member_snapshot(
         mids.sort_unstable();
         mids.into_iter().filter_map(|mid| {
             snap.characters.get(&mid).map(|ch| {
-                let (_, role_mask) = snap.effective_corp_roles_at(corp_id, mid, None, 0, now_unix);
+                let (_, role_mask) = snap.effective_corp_roles_at_db(corp_id, mid, None, now_unix);
                 let ra = snap.corp_role_assignments.get(&(corp_id, mid)).cloned().unwrap_or_default();
                 let tmask = gov_opt.and_then(|g| g.member_titles.get(&mid).copied()).unwrap_or(0);
                 let title = gov_opt
@@ -654,15 +702,16 @@ fn handle_audit_member(
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let corp_id = session.corporation_id.unwrap_or(0);
-    promote_due_pending_corp_grants(ctx, corp_id);
+    let caller_corp = resolve_db_corp_id(ctx, char_id).unwrap_or(0);
+    promote_due_pending_corp_grants(ctx, caller_corp);
     let now_unix = ctx.now_unix();
-    let (is_ceo, roles) = ctx.db.with_snapshot(|snap| {
-        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix)
+    let actor = ctx.db.with_snapshot(|snap| {
+        eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, now_unix)
     });
-    if !is_ceo && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR) {
+    if !actor.is_director() {
         return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only Directors and CEO can audit member roles and permissions".into(), client_error: None }));
     }
+    let corp_id = actor.corp_id;
     let target_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("characterID").and_then(|a| a.as_i64()));
     let from_ts = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("fromDate").and_then(|a| a.as_i64())).and_then(normalize_audit_timestamp_to_unix);
     let to_ts = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("toDate").and_then(|a| a.as_i64())).and_then(normalize_audit_timestamp_to_unix);
@@ -745,11 +794,15 @@ pub(super) fn handle_corps(
         ("corpmgr", "GetPublicInfo")
         | ("corpRegistry", "GetCorporation")
         | ("corpmgr", "GetCorporations") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
+            let corp_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| resolve_db_corp_id(ctx, char_id))
+                .unwrap_or(0);
             let corp_info = ctx.db.with_snapshot(|snap| {
                 let allow_war = snap
                     .fleet_and_social_ops
@@ -893,10 +946,15 @@ pub(super) fn handle_corps(
         ("corpmgr", "allianceID")
         | ("corpmgr", "ceoID")
         | ("corpmgr", "corporationID") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
-            let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let corp_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| resolve_db_corp_id(ctx, char_id))
+                .unwrap_or(0);
             let info = ctx.db.with_snapshot(|snap| {
                 snap.corporations.get(&corp_id).map(|c| {
                     let ceo = if c.ceo_id > 0 {
@@ -944,7 +1002,7 @@ pub(super) fn handle_corps(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let corp_id = match session.corporation_id {
+            let corp_id = match resolve_db_corp_id(ctx, char_id) {
                 Some(c) => c,
                 None => {
                     return Some(Err(BridgeRpcError {
@@ -954,6 +1012,7 @@ pub(super) fn handle_corps(
                     }))
                 }
             };
+            promote_due_pending_corp_grants(ctx, corp_id);
             let (desc, url, tax_rate_opt, allow_war_opt) = if args.first().and_then(|a| a.as_i64()).is_some() {
                 (args.get(1).and_then(|a| a.as_str()).unwrap_or(""), args.get(2).and_then(|a| a.as_str()).unwrap_or(""), args.get(3).and_then(|a| a.as_f64()), args.get(4).and_then(|a| a.as_bool()))
             } else {
@@ -968,12 +1027,13 @@ pub(super) fn handle_corps(
                     .get(&corp_id)
                     .copied()
                     .unwrap_or(true);
-                let (is_ceo, caller_role) =
-                    snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
+                let actor = eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                );
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                     return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                 };
-                if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
+                if !actor.is_director() {
                     return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update corporation details".into(), client_error: None });
                 }
                 let (old_desc, old_url, old_tax) = (corp.description.clone(), corp.url.clone(), corp.tax_rate);
@@ -1019,20 +1079,20 @@ pub(super) fn handle_corps(
 
         ("corpRegistry", "UpdateLogo") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let corp_id = session.corporation_id.unwrap_or(0);
+            let corp_id = resolve_db_corp_id(ctx, char_id).unwrap_or(0);
             let s1 = args.first().and_then(|a| a.as_i64()).unwrap_or(10);
             let s2 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(20);
             let s3 = args.get(2).and_then(|a| a.as_i64()).unwrap_or(30);
             let c1 = args.get(3).and_then(|a| a.as_i64()).unwrap_or(5);
             let c2 = args.get(4).and_then(|a| a.as_i64()).unwrap_or(0);
             let c3 = args.get(5).and_then(|a| a.as_i64()).unwrap_or(0);
+            promote_due_pending_corp_grants(ctx, corp_id);
             let now_unix = ctx.now_unix();
             let is_ceo_or_dir = ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
-                    return false;
-                }
-                let (is_ceo, roles) = snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
-                is_ceo || corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR)
+                eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                )
+                .is_director()
             });
             if !is_ceo_or_dir {
                 return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update the corporation logo".into(), client_error: None }));
@@ -1071,21 +1131,23 @@ pub(super) fn handle_corps(
         | ("corpmgr", "UpdateDivisionNames")
         | ("corporationSvc", "UpdateDivisionNames") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(corp_id) = session.corporation_id else {
+            let Some(corp_id) = resolve_db_corp_id(ctx, char_id) else {
                 return Some(Err(BridgeRpcError { code: "NoCorporation".into(), message: "Character has no active corporation".into(), client_error: None }));
             };
             let dict_payload = args.first().and_then(|a| match a { PyRep::Dict(d) => Some(d.as_slice()), _ => None });
             if args.len() >= 14 || args.first().and_then(|a| a.as_str()).is_some() || dict_payload.is_some() {
                 let default_h = ["1st Division", "2nd Division", "3rd Division", "4th Division", "5th Division", "6th Division", "7th Division"];
                 let dict_str = |k: &str| dict_payload.and_then(|entries| entries.iter().find(|(ek, _)| ek.as_str() == Some(k)).and_then(|(_, ev)| ev.as_str()));
+                promote_due_pending_corp_grants(ctx, corp_id);
                 let now_unix = ctx.now_unix();
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    let (is_ceo, caller_role) =
-                        snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
+                    let actor = eve_db::CorpActor::resolve_for_corp(
+                        snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                    );
                     let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                         return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                     };
-                    if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
+                    if !actor.is_director() {
                         return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update division names".into(), client_error: None });
                     }
                     corp.ensure_wallet_divisions();
@@ -1143,14 +1205,16 @@ pub(super) fn handle_corps(
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Division");
             let wallet_name = args.get(2).and_then(|a| a.as_str()).unwrap_or(new_name);
 
+            promote_due_pending_corp_grants(ctx, corp_id);
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (is_ceo, caller_role) =
-                    snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
+                let actor = eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                );
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                     return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                 };
-                if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
+                if !actor.is_director() {
                     return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update division names".into(), client_error: None });
                 }
                 let old_w = if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
@@ -1230,7 +1294,7 @@ pub(super) fn handle_corps(
                     client_error: None,
                 }));
             };
-            if ctx.sde.npc_corporations.contains_key(&corp_id) || (1_000_000..2_000_000).contains(&corp_id) {
+            if eve_db::is_npc_corporation(&ctx.sde, corp_id) {
                 return Some(Err(BridgeRpcError {
                     code: "CannotApplyToNpcCorporation".into(),
                     message: "Players cannot submit membership applications to NPC corporations".into(),
@@ -1338,8 +1402,9 @@ pub(super) fn handle_corps(
                 .and_then(|a| a.as_str())
                 .unwrap_or("Accepted");
             let now_unix = ctx.now_unix();
+            let fallback_corp = resolve_db_corp_id(ctx, char_id);
             if let Some(app_cid) = ctx.db.with_snapshot(|s| {
-                s.corporations.values().find(|c| c.applications.contains_key(&app_id)).map(|c| c.corporation_id).or(session.corporation_id)
+                s.corporations.values().find(|c| c.applications.contains_key(&app_id)).map(|c| c.corporation_id).or(fallback_corp)
             }).filter(|&id| id > 0) {
                 promote_due_pending_corp_grants(ctx, app_cid);
             }
@@ -1351,18 +1416,17 @@ pub(super) fn handle_corps(
                     .values()
                     .find(|c| c.applications.contains_key(&app_id))
                     .map(|c| c.corporation_id)
-                    .or(session.corporation_id)
+                    .or(fallback_corp)
                     .ok_or_else(|| BridgeRpcError {
                         code: "NoCorporation".into(),
                         message: "Application corporation not found".into(),
                         client_error: None,
                     })?;
                 let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CorporationNotFound".into(),
-                        message: format!("Corporation {corp_id} not found"),
-                        client_error: None,
-                    });
+                    return Err(corp_actor_denied_error(
+                        eve_db::CorpActorDenied::CorporationNotFound,
+                        corp_id,
+                    ));
                 };
                 let ceo_id = corp.ceo_id;
                 let (applicant_id, app_msg, app_ts, app_status) = corp
@@ -1375,12 +1439,11 @@ pub(super) fn handle_corps(
                 }
                 let old_corp_id = snap.characters.get(&applicant_id).map(|c| c.corporation_id).unwrap_or(0);
                 let is_invitation = app_status.eq_ignore_ascii_case("invited");
-                let (is_ceo, eff_roles) =
-                    crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                        snap, corp_id, char_id, 0, now_unix,
-                    );
-                let has_personnel_role = is_ceo
-                    || (eff_roles & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) != 0;
+                let caller_actor = eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                );
+                let has_personnel_role =
+                    caller_actor.is_director_or(corp_roles::ROLE_PERSONNEL_MANAGER);
 
                 if action.eq_ignore_ascii_case("withdrawn") {
                     if char_id != applicant_id && !(is_invitation && has_personnel_role) {
@@ -1502,9 +1565,20 @@ pub(super) fn handle_corps(
                                 .map(|c| (c.solar_system_id, c.station_id.or(c.structure_id)))
                                 .unwrap_or((fallback_sys, fallback_dock));
                             (
-                                s.corporations.get(&old_corp_id).and_then(|c| c.alliance_id),
-                                s.corporations.get(&corp_id).and_then(|c| c.alliance_id),
-                                s.effective_corp_roles_at(old_corp_id, applicant_id, None, 0, now_unix).1,
+                                eve_db::corp_actor::resolve_corp_alliance_id(
+                                    s,
+                                    &ctx.sde,
+                                    old_corp_id,
+                                    None,
+                                ),
+                                eve_db::corp_actor::resolve_corp_alliance_id(
+                                    s,
+                                    &ctx.sde,
+                                    corp_id,
+                                    None,
+                                ),
+                                s.effective_corp_roles_at_db(old_corp_id, applicant_id, None, now_unix)
+                                    .1,
                                 sys_id,
                                 dock_id,
                             )
@@ -1536,9 +1610,13 @@ pub(super) fn handle_corps(
                                 "corp_change",
                             );
                         }
-                        super::fleet_social_persistence::with_social_state(ctx, |s| {
-                            s.forced_session_corp_sync.insert(applicant_id, (corp_id, new_ally, 0));
-                        });
+                        super::fleet_social_persistence::queue_forced_corp_sync(
+                            ctx,
+                            applicant_id,
+                            corp_id,
+                            new_ally,
+                            0,
+                        );
                         let m_change = PyRep::Dict(vec![(PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::Integer(old_corp_id), PyRep::Integer(corp_id)]))]);
                         if old_corp_id != corp_id && old_corp_id > 0 {
                             ctx.emit_typed(
@@ -1657,7 +1735,7 @@ pub(super) fn handle_corps(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let corp_id = session.corporation_id.unwrap_or(0);
+            let corp_id = resolve_db_corp_id(ctx, char_id).unwrap_or(0);
             let rpc = crate::router::RpcArgs::positional(args);
             let target_id = match rpc.req_positive_i64(0, "characterID") {
                 Ok(v) => v,
@@ -1674,21 +1752,17 @@ pub(super) fn handle_corps(
             promote_due_pending_corp_grants(ctx, corp_id);
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let actor = eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                );
                 let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CorporationNotFound".into(),
-                        message: format!("Corporation {corp_id} not found"),
-                        client_error: None,
-                    });
+                    return Err(corp_actor_denied_error(
+                        eve_db::CorpActorDenied::CorporationNotFound,
+                        corp_id,
+                    ));
                 };
                 let ceo_id = corp.ceo_id;
-                let (is_ceo, eff_roles) =
-                    crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                        snap, corp_id, char_id, 0, now_unix,
-                    );
-                if !is_ceo
-                    && (eff_roles & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) == 0
-                {
+                if !actor.is_director_or(corp_roles::ROLE_PERSONNEL_MANAGER) {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Inviting characters requires Personnel Manager role".into(),
@@ -1761,9 +1835,15 @@ pub(super) fn handle_corps(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let corp_id = session.corporation_id.unwrap_or(0);
-            let _now_unix = ctx.now_unix();
+            let corp_id = resolve_db_corp_id(ctx, char_id).unwrap_or(0);
+            let now_unix = ctx.now_unix();
             let (can_leave, reason) = ctx.db.with_snapshot(|snap| {
+                let actor = eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                );
+                if actor.require_member().is_err() {
+                    return (false, "NPC Corporation");
+                }
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return (false, "NPC Corporation");
                 };
@@ -1814,17 +1894,20 @@ pub(super) fn handle_corps(
                 Err(e) => return Some(Err(e)),
             };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-            let corp_id = session.corporation_id.unwrap_or(0);
+            let corp_id = resolve_db_corp_id(ctx, char_id).unwrap_or(0);
             let now_unix = ctx.now_unix();
             promote_due_pending_corp_grants(ctx, corp_id);
             let can_kick = ctx.db.with_snapshot(|snap| {
+                let actor = eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                );
+                if actor.require_member().is_err() {
+                    return false;
+                }
                 let Some(c) = snap.corporations.get(&corp_id) else { return false; };
                 if !c.members.contains(&target_id) { return false; }
-                let (is_ceo, caller_role) = snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
                 let auth = char_id == target_id
-                    || is_ceo
-                    || corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR)
-                    || corp_roles::has_role(caller_role, corp_roles::ROLE_PERSONNEL_MANAGER);
+                    || actor.is_director_or(corp_roles::ROLE_PERSONNEL_MANAGER);
                 if !auth || target_id == c.ceo_id { return false; }
                 if super::fleet_social_corp_tail::member_kick_blocker(snap, corp_id, target_id, now_unix).is_some() {
                     return false;
@@ -1855,15 +1938,12 @@ pub(super) fn handle_corps(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let corp_id = match session.corporation_id {
-                Some(c) => c,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoCorporation".into(),
-                        message: "Character has no active corporation".into(),
-                        client_error: None,
-                    }))
-                }
+            let Some(corp_id) = resolve_db_corp_id(ctx, char_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoCorporation".into(),
+                    message: "Character has no active corporation".into(),
+                    client_error: None,
+                }));
             };
             let rpc = crate::router::RpcArgs::new(args, kwargs);
             let from_div_i = match rpc.req_i64(0, "fromDivision") {
@@ -1906,15 +1986,17 @@ pub(super) fn handle_corps(
             promote_due_pending_corp_grants(ctx, corp_id);
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let actor = eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                );
                 if !snap.corporations.contains_key(&corp_id) {
-                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
+                    return Err(corp_actor_denied_error(
+                        eve_db::CorpActorDenied::CorporationNotFound,
+                        corp_id,
+                    ));
                 }
-                let (is_ceo, eff_roles) =
-                    crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                        snap, corp_id, char_id, 0, now_unix,
-                    );
                 let take_bit = corp_roles::ROLE_ACCOUNT_CAN_TAKE[usize::from(from_div - 1)];
-                if !is_ceo && (eff_roles & (corp_roles::ROLE_DIRECTOR | take_bit)) == 0 {
+                if !actor.has_any_role(corp_roles::ROLE_DIRECTOR | take_bit) {
                     return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Transferring between corp wallet divisions requires Director or source wallet division take role".into(), client_error: None });
                 }
                 let corp = snap.corporations.get_mut(&corp_id).unwrap();

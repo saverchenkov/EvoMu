@@ -222,6 +222,7 @@ async fn test_corp_creation_public_info_and_edit_details() {
     // Member without Director role denied UpdateCorporation
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.get_mut(&new_corp_id).unwrap().members.insert(outsider_id);
+        snap.characters.get_mut(&outsider_id).unwrap().corporation_id = new_corp_id;
     });
     sess_outsider.corporation_id = Some(new_corp_id);
     sess_outsider.corp_role = 0;
@@ -711,6 +712,9 @@ async fn npc_corporation_get_member_resolves_member_and_rejects_non_members() {
     assert_eq!(not_mem_err.code, "NotCorpMember");
 
     // Negative: nonexistent corp ID (neither player nor SDE NPC) still returns CorporationNotFound
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).unwrap().corporation_id = 98_999_999;
+    });
     let mut bad_sess = make_session(62_002, 1, pilot_id, 98_999_999, 0);
     let bad_corp_err = rpc(&ctx, &mut bad_sess, "corpRegistry", "GetMember", &[PyRep::Integer(pilot_id)])
         .await

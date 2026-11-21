@@ -1004,3 +1004,97 @@ async fn control_ops_role_takeover_release_session_fallback_and_weapon_tick_muta
     let dealt = dmg_map.get(&target_ship_id).expect("PDB must record damage for hostile target");
     assert!((dealt.em - 500.0).abs() < 1e-6);
 }
+
+#[test]
+fn sync_character_session_probe_is_non_destructive_and_tracks_db_alliance() {
+    let ctx = test_ctx();
+    let corp_id = 98_777_901_i64;
+    let ceo_id = 90_777_900_i64;
+    let char_id = 90_777_901_i64;
+    let ally_a = 99_777_901_i64;
+    let ally_b = 99_777_902_i64;
+    let old_ship = 9_800_901_i64;
+    let new_ship = 72_901_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "AuthzSyncCorp".into();
+        corp.ticker = "AZS".into();
+        corp.ceo_id = ceo_id;
+        corp.alliance_id = Some(ally_a);
+        corp.members.insert(ceo_id);
+        corp.members.insert(char_id);
+        corp.member_roles.insert(ceo_id, u64::MAX);
+        // Member has been demoted to 0 roles in DB.
+        corp.member_roles.insert(char_id, 0);
+        snap.corporations.insert(corp_id, corp);
+
+        let mut ch = snap.characters.values().next().cloned().expect("demo char");
+        ch.character_id = char_id;
+        ch.corporation_id = corp_id;
+        ch.alliance_id = Some(ally_a);
+        ch.active_ship_id = 0;
+        ch.station_id = Some(60_003_760);
+        ch.structure_id = None;
+        ch.solar_system_id = 30_000_142;
+        ch.war_faction_id = None;
+        snap.characters.insert(char_id, ch);
+
+        let mut fw = crate::services::fw_enlistment::load_store(snap);
+        fw.forced_war_faction_sync.insert(char_id, Some(500_004));
+        if let Ok(json) = serde_json::to_string(&fw) {
+            snap.item_custom_names
+                .insert(crate::services::fw_enlistment::FW_ENLISTMENT_STORE_KEY, json);
+        }
+    });
+
+    crate::services::fleet_social::fleet_social_persistence::queue_forced_corp_sync(
+        &ctx,
+        char_id,
+        corp_id,
+        Some(ally_a),
+        0,
+    );
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| {
+        s.forced_session_ship_sync.insert(char_id, (old_ship, Some(new_ship)));
+    });
+
+    let mut real_sess = make_session(
+        char_id,
+        corp_id,
+        30_000_142,
+        Some(old_ship),
+        None,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
+    // Throwaway macho probe runs first and must NOT drain pending forced sync state.
+    let mut probe = real_sess.clone();
+    sync_character_session(&ctx, &mut probe);
+    assert_eq!(probe.corp_role, 0);
+    assert_eq!(probe.alliance_id, Some(ally_a));
+    assert_eq!(probe.war_faction_id, Some(500_004));
+    assert_eq!(probe.ship_id, Some(new_ship));
+
+    // Real session sync runs afterward and still receives every update.
+    sync_character_session(&ctx, &mut real_sess);
+    assert_eq!(real_sess.corp_role, 0);
+    assert_eq!(real_sess.alliance_id, Some(ally_a));
+    assert_eq!(real_sess.war_faction_id, Some(500_004));
+    assert_eq!(real_sess.ship_id, Some(new_ship));
+
+    // AUTHZ-80: alliance change in DB must propagate even with stale forced_session_corp_sync baseline.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().alliance_id = Some(ally_b);
+        snap.characters.get_mut(&char_id).unwrap().alliance_id = Some(ally_b);
+    });
+    sync_character_session(&ctx, &mut real_sess);
+    assert_eq!(real_sess.alliance_id, Some(ally_b));
+
+    // Leaving an alliance clears session.alliance_id even if ch.alliance_id remained stale.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().alliance_id = None;
+    });
+    sync_character_session(&ctx, &mut real_sess);
+    assert_eq!(real_sess.alliance_id, None);
+}

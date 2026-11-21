@@ -46,9 +46,12 @@ fn update_members_edge_payloads_title_role_drop_pending_preservation_and_control
         "InvalidArgument"
     );
 
-    // 3. CorporationNotFound when session corp doesn't exist
+    // 3. CorporationNotFound when DB corp doesn't exist (spoofed session.corporation_id alone stays scoped to DB corp)
     let mut ghost_sess = ceo_sess.clone();
     ghost_sess.corporation_id = Some(98_999_999);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&ceo_id).unwrap().corporation_id = 98_999_999;
+    });
     assert_eq!(
         handle_update_members(
             &ctx,
@@ -61,6 +64,9 @@ fn update_members_edge_payloads_title_role_drop_pending_preservation_and_control
         .code,
         "CorporationNotFound"
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&ceo_id).unwrap().corporation_id = corp_id;
+    });
 
     // 4. Title-only role drop detection (old_had_title_roles && !new_had_title_roles) via snap.corp_titles
     with_corp_gov(&ctx, |g| {
@@ -233,9 +239,12 @@ fn kick_out_edge_cases_personnel_manager_must_be_docked_alliance_war_and_vote_ro
     let ceo_id = 90_000_001_i64;
     let mem_id = 90_000_002_i64;
 
-    // 1. CorporationNotFound on kick
+    // 1. CorporationNotFound on kick when DB corp does not exist
     let mut bad_corp = ceo_sess.clone();
     bad_corp.corporation_id = Some(98_777_777);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&ceo_id).unwrap().corporation_id = 98_777_777;
+    });
     assert_eq!(
         handle_kick_out_members(&ctx, &mut bad_corp, &[PyRep::Integer(mem_id)])
             .unwrap()
@@ -243,6 +252,9 @@ fn kick_out_edge_cases_personnel_manager_must_be_docked_alliance_war_and_vote_ro
             .code,
         "CorporationNotFound"
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&ceo_id).unwrap().corporation_id = corp_id;
+    });
 
     // 2. MustBeDocked when undocked member tries to resign
     ctx.db.with_mut_snapshot(|snap| {

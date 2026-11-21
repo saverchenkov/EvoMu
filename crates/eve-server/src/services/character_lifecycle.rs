@@ -113,11 +113,14 @@ fn unix_to_filetime(unix_secs: u64) -> i64 {
 
 /// Returns `Some(result)` for RPCs fully handled here; `None` lets the regular handler run.
 fn has_corp_director_or_personnel_manager_role(snap: &eve_db::WorldStateSnapshot, caller_char_id: i64, target_corp_id: i64) -> bool {
-    if !snap.corporations.contains_key(&target_corp_id) {
+    let Some(corp) = snap.corporations.get(&target_corp_id) else {
+        return false;
+    };
+    if eve_db::is_excluded_corp_member(corp, caller_char_id) {
         return false;
     }
     let (is_ceo, mut total_roles) =
-        snap.effective_corp_roles_at(target_corp_id, caller_char_id, None, 0, 0);
+        snap.effective_corp_roles_at_db(target_corp_id, caller_char_id, None, 0);
     if is_ceo {
         return true;
     }
@@ -731,8 +734,8 @@ fn handle_delete_character(ctx: &ServerContext, session: &mut SessionState, user
         }
 
         // 4. Remove from corporation membership/roles and apply Player-corp vs NPC-corp economy rules.
-        let is_player_corp = snap.corporations.contains_key(&old_corp_id)
-            && !ctx.sde.npc_corporations.contains_key(&old_corp_id)
+        let is_player_corp = !eve_db::is_npc_corporation(&ctx.sde, old_corp_id)
+            && snap.corporations.contains_key(&old_corp_id)
             && old_corp_id != doomheim;
         let total_isk = ch_snap
             .balance
@@ -1109,15 +1112,17 @@ fn handle_char_mgr(
                 } else {
                     ctx.now_blueos_filetime_ticks()
                 };
-                let (_, mut role_mask) = snap.effective_corp_roles_at(
-                    corp_id,
-                    char_id,
-                    None,
-                    0,
-                    ctx.now_unix(),
-                );
-                if let Some(scoped) = snap.char_scoped_roles.get(&char_id) {
-                    role_mask |= eve_db::corp_roles::encode_corp_role_names(&scoped.roles);
+                let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, ctx.now_unix());
+                let mut role_mask = if actor.char_in_db {
+                    actor.effective_roles
+                } else {
+                    snap.effective_corp_roles_at_db(corp_id, char_id, None, ctx.now_unix())
+                        .1
+                };
+                if actor.is_player_corp_member() {
+                    if let Some(scoped) = snap.char_scoped_roles.get(&char_id) {
+                        role_mask |= eve_db::corp_roles::encode_corp_role_names(&scoped.roles);
+                    }
                 }
                 (corp_id, role_mask, corp_join_ft)
             });

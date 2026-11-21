@@ -8,7 +8,6 @@ use eve_db::{
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
-use super::fleet_social_corp_tail_dispatch::{is_excluded_corp_member, is_npc_corporation_id};
 use crate::services::corp_gov_delegation::{
     handle_corp_rec_queries, handle_get_recruiters, handle_get_shares_by_shareholder,
     handle_get_titles,
@@ -653,7 +652,13 @@ pub(super) fn handle_add_corporation(
     };
     let reg_fee = IskCents::from_isk(1_599_800);
     let now_unix = ctx.now_unix();
-    if let Some(cur_cid) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id)).filter(|&id| id > 0) {
+    if let Some(cur_cid) = ctx
+        .db
+        .with_snapshot(|s| {
+            let cid = eve_db::CorpActor::resolve(s, &ctx.sde, char_id, now_unix).corp_id;
+            (cid > 0 && !eve_db::is_npc_corporation(&ctx.sde, cid)).then_some(cid)
+        })
+    {
         super::fleet_social_corps::promote_due_pending_corp_grants(ctx, cur_cid);
     }
     let sess_in_space = session.station_id.is_none() && session.structure_id.is_none() && session.ship_id.is_some();
@@ -831,6 +836,13 @@ pub(super) fn handle_add_corporation(
             session.corporation_id = Some(corp_id);
             session.alliance_id = None;
             session.corp_role = u64::MAX;
+            super::fleet_social_persistence::queue_forced_corp_sync(
+                ctx,
+                char_id,
+                corp_id,
+                None,
+                u64::MAX,
+            );
             let (act_ship, c_sys, c_dock) = ctx.db.with_snapshot(|s| {
                 s.characters
                     .get(&char_id)
@@ -919,32 +931,21 @@ pub(super) fn handle_corp_gov(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let corp_id = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
-        .or(session.corporation_id)
-        .unwrap_or(0);
-    if !is_npc_corporation_id(ctx, corp_id) {
+    let corp_id = ctx.db.with_snapshot(|s| {
+        eve_db::CorpActor::resolve(s, &ctx.sde, char_id, ctx.now_unix()).corp_id
+    });
+    if !eve_db::is_npc_corporation(&ctx.sde, corp_id) {
         super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     }
     let now_unix = ctx.now_unix();
     let (has_director, has_comms, has_diplomat) = ctx.db.with_snapshot(|snap| {
-        if is_npc_corporation_id(ctx, corp_id) {
-            return (false, false, false);
-        }
-        let Some(corp) = snap.corporations.get(&corp_id) else {
-            return (false, false, false);
-        };
-        if is_excluded_corp_member(corp, char_id) {
-            return (false, false, false);
-        }
-        let (is_ceo, r) = crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-            snap, corp_id, char_id, 0, now_unix,
-        );
-        let dir = is_ceo || (r & corp_roles::ROLE_DIRECTOR) != 0;
-        let comms = dir || (r & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_CHAT_MANAGER)) != 0;
-        let dip = dir || (r & corp_roles::ROLE_DIPLOMAT) != 0;
-        (dir, comms, dip)
+        let actor =
+            eve_db::CorpActor::resolve_for_corp(snap, &ctx.sde, corp_id, char_id, None, now_unix);
+        (
+            actor.is_director(),
+            actor.is_director_or(corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_CHAT_MANAGER),
+            actor.is_director_or(corp_roles::ROLE_DIPLOMAT),
+        )
     });
     let deny_role = |msg: &str| Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: msg.into(), client_error: None }));
 
@@ -1233,7 +1234,7 @@ pub(super) fn handle_corp_gov(
             }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if is_npc_corporation_id(ctx, corp_id) {
+                if eve_db::is_npc_corporation(&ctx.sde, corp_id) {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "NPC corporations cannot pay dividends".into(),
@@ -1241,14 +1242,13 @@ pub(super) fn handle_corp_gov(
                     });
                 }
                 let (cur_bal, member_ids) = {
-                    let (is_ceo, caller_role) =
-                        snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
+                    let actor = eve_db::CorpActor::resolve_for_corp(
+                        snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                    );
                     let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                         return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                     };
-                    if is_excluded_corp_member(corp, char_id)
-                        || (!is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR))
-                    {
+                    if !actor.is_director() {
                         return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Paying dividends requires CEO or Director role".into(), client_error: None });
                     }
                     let cur_bal = corp.division_balance(div_id);
@@ -1381,7 +1381,7 @@ pub(super) fn handle_corp_gov(
                 if roles_mask != prev_rmask {
                     for mid in holders {
                         let (_, new_eff) =
-                            snap.effective_corp_roles_at(corp_id, mid, None, 0, now_unix);
+                            snap.effective_corp_roles_at_db(corp_id, mid, None, now_unix);
                         sync_updates.push((mid, (corp_id, corp_ally, new_eff)));
                     }
                 }
@@ -1392,15 +1392,13 @@ pub(super) fn handle_corp_gov(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !sync_updates.is_empty() {
-                super::fleet_social_persistence::with_social_state(ctx, |s| {
-                    for (mid, entry) in sync_updates {
-                        if mid == char_id {
-                            session.corp_role = entry.2;
-                        }
-                        s.forced_session_corp_sync.insert(mid, entry);
-                    }
-                });
+            for (mid, entry) in sync_updates {
+                if mid == char_id {
+                    session.corp_role = entry.2;
+                }
+                super::fleet_social_persistence::queue_forced_corp_sync(
+                    ctx, mid, entry.0, entry.1, entry.2,
+                );
             }
             let mut last_ret = (1_i64, String::new(), 0_u64);
             for (title_id, title_name, roles_mask, prev) in changes_out {
@@ -1435,7 +1433,7 @@ pub(super) fn handle_corp_gov(
                 if let Some(titles) = snap.corp_titles.get_mut(&corp_id) {
                     titles.retain(|t| t.title_id != title_id);
                 }
-                let corp_ally = snap.corporations.get(&corp_id).and_then(|c| c.alliance_id);
+                let corp_ally = eve_db::corp_actor::resolve_corp_alliance_id(snap, &ctx.sde, corp_id, None);
                 let prev = snap.corp_governance.get_mut(&corp_id).and_then(|s| s.titles.remove(&title_id));
                 let mut sync_updates = Vec::new();
                 if let Some((_, prev_rmask)) = prev {
@@ -1456,7 +1454,7 @@ pub(super) fn handle_corp_gov(
                         };
                         for mid in holders {
                             let (_, new_eff) =
-                                snap.effective_corp_roles_at(corp_id, mid, None, 0, now_unix);
+                                snap.effective_corp_roles_at_db(corp_id, mid, None, now_unix);
                             sync_updates.push((mid, (corp_id, corp_ally, new_eff)));
                         }
                     }
@@ -1466,15 +1464,13 @@ pub(super) fn handle_corp_gov(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !sync_updates.is_empty() {
-                super::fleet_social_persistence::with_social_state(ctx, |s| {
-                    for (mid, entry) in sync_updates {
-                        if mid == char_id {
-                            session.corp_role = entry.2;
-                        }
-                        s.forced_session_corp_sync.insert(mid, entry);
-                    }
-                });
+            for (mid, entry) in sync_updates {
+                if mid == char_id {
+                    session.corp_role = entry.2;
+                }
+                super::fleet_social_persistence::queue_forced_corp_sync(
+                    ctx, mid, entry.0, entry.1, entry.2,
+                );
             }
             let (old_name, old_roles) = prev.map_or((PyRep::None, PyRep::Integer(0)), |(n, r)| (PyRep::String(n), PyRep::Integer(r as i64)));
             let change = PyRep::Dict(vec![
@@ -1524,15 +1520,19 @@ pub(super) fn handle_corp_gov(
                 Ok((next_ceo, corp_ally)) => {
                     if next_ceo != char_id {
                         session.corp_role = 0;
+                        super::fleet_social_persistence::queue_forced_corp_sync(
+                            ctx, char_id, corp_id, corp_ally, 0,
+                        );
                     }
-                    super::fleet_social_persistence::with_social_state(ctx, |s| {
-                        if next_ceo != char_id {
-                            s.forced_session_corp_sync.insert(char_id, (corp_id, corp_ally, 0));
-                        }
-                        if next_ceo > 0 {
-                            s.forced_session_corp_sync.insert(next_ceo, (corp_id, corp_ally, u64::MAX));
-                        }
-                    });
+                    if next_ceo > 0 {
+                        super::fleet_social_persistence::queue_forced_corp_sync(
+                            ctx,
+                            next_ceo,
+                            corp_id,
+                            corp_ally,
+                            u64::MAX,
+                        );
+                    }
                     let change = PyRep::Dict(vec![(
                         PyRep::String(("ceoID").into()),
                         PyRep::Tuple(vec![PyRep::Integer(char_id), PyRep::Integer(next_ceo)]),
@@ -1840,22 +1840,33 @@ pub(super) fn handle_corp_gov(
                 Ok(()) => {
                     if is_ceo_vote {
                         let (corp_ally, old_ceo_roles) = ctx.db.with_snapshot(|s| {
-                            let ally = s.corporations.get(&corp_id).and_then(|c| c.alliance_id);
+                            let ally = eve_db::corp_actor::resolve_corp_alliance_id(
+                                s, &ctx.sde, corp_id, None,
+                            );
                             let r = if old_ceo_id > 0 && old_ceo_id != new_ceo_id {
-                                s.effective_corp_roles_at(corp_id, old_ceo_id, None, 0, now_unix).1
+                                s.effective_corp_roles_at_db(corp_id, old_ceo_id, None, now_unix)
+                                    .1
                             } else {
                                 0
                             };
                             (ally, r)
                         });
-                        super::fleet_social_persistence::with_social_state(ctx, |s| {
-                            if old_ceo_id > 0 && old_ceo_id != new_ceo_id {
-                                s.forced_session_corp_sync
-                                    .insert(old_ceo_id, (corp_id, corp_ally, old_ceo_roles));
-                            }
-                            s.forced_session_corp_sync
-                                .insert(new_ceo_id, (corp_id, corp_ally, u64::MAX));
-                        });
+                        if old_ceo_id > 0 && old_ceo_id != new_ceo_id {
+                            super::fleet_social_persistence::queue_forced_corp_sync(
+                                ctx,
+                                old_ceo_id,
+                                corp_id,
+                                corp_ally,
+                                old_ceo_roles,
+                            );
+                        }
+                        super::fleet_social_persistence::queue_forced_corp_sync(
+                            ctx,
+                            new_ceo_id,
+                            corp_id,
+                            corp_ally,
+                            u64::MAX,
+                        );
                         if session.character_id == Some(old_ceo_id) && old_ceo_id != new_ceo_id {
                             session.corp_role = old_ceo_roles;
                         } else if session.character_id == Some(new_ceo_id) {
@@ -1934,21 +1945,14 @@ pub(super) fn handle_corp_gov(
         ("corpRegistry", "DeleteBulletin") => handle_corp_bulletins(ctx, session, corp_id, char_id, now_unix, has_comms, method, args),
 
         ("corpRecProxy", "CreateRecruitmentAd") | ("corpRecProxy", "UpdateRecruitmentAd") => {
-            if !is_npc_corporation_id(ctx, corp_id) {
+            if !eve_db::is_npc_corporation(&ctx.sde, corp_id) {
                 super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
             }
             let has_role = ctx.db.with_snapshot(|snap| {
-                if is_npc_corporation_id(ctx, corp_id) {
-                    return false;
-                }
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return false;
-                };
-                if is_excluded_corp_member(corp, char_id) {
-                    return false;
-                }
-                let (is_ceo, r) = snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
-                is_ceo || (r & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) != 0
+                eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                )
+                .is_director_or(corp_roles::ROLE_PERSONNEL_MANAGER)
             });
             if !has_role {
                 return deny_role("Managing recruitment ads requires Personnel Manager or Director role");
@@ -2194,17 +2198,10 @@ pub(super) fn handle_corp_gov(
 
         ("corpRecProxy", "DeleteRecruitmentAd") => {
             let has_role = ctx.db.with_snapshot(|snap| {
-                if is_npc_corporation_id(ctx, corp_id) {
-                    return false;
-                }
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return false;
-                };
-                if is_excluded_corp_member(corp, char_id) {
-                    return false;
-                }
-                let (is_ceo, r) = snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
-                is_ceo || (r & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) != 0
+                eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                )
+                .is_director_or(corp_roles::ROLE_PERSONNEL_MANAGER)
             });
             if !has_role {
                 return deny_role("Deleting recruitment ads requires Personnel Manager or Director role");

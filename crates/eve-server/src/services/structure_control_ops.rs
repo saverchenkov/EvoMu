@@ -102,10 +102,25 @@ fn has_defense_acl_permission(
         .map(|c| c.corporation_id)
         .unwrap_or(0);
     let caller_ally = snap
-        .characters
-        .get(&char_id)
+        .corporations
+        .get(&caller_corp)
         .and_then(|c| c.alliance_id)
-        .or_else(|| snap.corporations.get(&caller_corp).and_then(|c| c.alliance_id))
+        .or_else(|| {
+            (caller_corp > 0)
+                .then(|| {
+                    snap.alliances
+                        .values()
+                        .find(|a| a.member_corp_ids.contains(&caller_corp))
+                        .map(|a| a.alliance_id)
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            snap.characters
+                .get(&char_id)
+                .and_then(|c| c.alliance_id)
+                .filter(|_| !snap.corporations.contains_key(&caller_corp))
+        })
         .unwrap_or(0);
     if p.blocked_characters.contains(&char_id)
         || p.defense_blocked_characters.contains(&char_id)
@@ -307,7 +322,7 @@ async fn engage_structure_control(
                 let caller_is_manager = crate::services::station_structure::structure_lifecycle_rpc::has_structure_manager_role(snap, session, char_id, st.owner_corp_id);
                 let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
                 let (pilot_is_ceo, pilot_roles) =
-                    snap.effective_corp_roles_at(st.owner_corp_id, pilot, Some(structure_id), 0, now_unix);
+                    snap.effective_corp_roles_at_db(st.owner_corp_id, pilot, Some(structure_id), now_unix);
                 let pilot_is_manager = pilot_is_ceo || (pilot_roles & req_roles) != 0;
                 let can_takeover = !board_mode && caller_is_manager && !pilot_is_manager;
                 if !can_takeover {
@@ -728,36 +743,122 @@ pub fn release_unauthorized_structure_controllers_in_snap(snap: &mut WorldStateS
 /// Synchronizes live `SessionState` with current DB character spatial/vessel state and
 /// any queued involuntary corp/structure-control release updates (`ServerContext::sync_session`).
 pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionState) {
-    if let Some(cid) = session.character_id {
-        if let Some((new_corp, new_ally, new_role)) =
-            crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| s.forced_session_corp_sync.remove(&cid))
-        {
-            session.corporation_id = Some(new_corp);
-            session.alliance_id = new_ally;
-            session.corp_role = new_role;
+    let Some(cid) = session.character_id else {
+        return;
+    };
+    let (forced_corp, baseline, forced_ship) =
+        crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+            (
+                s.forced_session_corp_sync.get(&cid).copied(),
+                s.forced_session_corp_sync_db_baseline.get(&cid).copied(),
+                s.forced_session_ship_sync.get(&cid).copied(),
+            )
+        });
+    if let Some((old_structure_id, new_ship_opt)) = forced_ship {
+        if new_ship_opt.is_some() || session.ship_id == Some(old_structure_id) {
+            session.ship_id = new_ship_opt;
         }
-        if let Some(new_wf) = crate::services::fw_enlistment::take_forced_war_faction_sync(ctx, cid) {
-            session.war_faction_id = new_wf;
-        }
-        apply_forced_session_ship_sync(ctx, session);
-        if let Some(ch) = ctx.db.get_character(cid).ok() {
-            let stale_struct = session.ship_id.is_some_and(|sid| {
-                ctx.db.with_snapshot(|snap| snap.structures.contains_key(&sid))
-            });
-            let override_ship = if ch.active_ship_id != 0 {
-                Some(Some(ch.active_ship_id))
-            } else if stale_struct {
-                Some(None)
+    }
+    let ship_after_forced = session.ship_id;
+    let now_unix = ctx.now_unix();
+    let sess_corp_opt = session.corporation_id.filter(|&sc| sc > 0);
+    let (actor, forced_wf, ch_opt, stale_struct, split_fixture_ally) = ctx.db.with_snapshot(|snap| {
+        let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, cid, now_unix);
+        let split_fixture_ally = if forced_corp.is_none() && actor.is_npc_corp {
+            sess_corp_opt.and_then(|sc| {
+                snap.corporations
+                    .get(&sc)
+                    .filter(|c| c.ceo_id == cid || c.members.contains(&cid))
+                    .map(|_| eve_db::corp_actor::resolve_corp_alliance_id(snap, &ctx.sde, sc, None))
+            })
+        } else {
+            None
+        };
+        let forced_wf = crate::services::fw_enlistment::load_store(snap)
+            .forced_war_faction_sync
+            .get(&cid)
+            .copied();
+        let ch_opt = snap.characters.get(&cid).cloned();
+        let stale_struct = ship_after_forced.is_some_and(|sid| snap.structures.contains_key(&sid));
+        (actor, forced_wf, ch_opt, stale_struct, split_fixture_ally)
+    });
+    if actor.char_in_db {
+        let db_corp_opt = (actor.corp_id > 0).then_some(actor.corp_id);
+        let db_tuple = (actor.corp_id, actor.alliance_id, actor.effective_roles);
+        if let Some(forced) = forced_corp {
+            if forced == db_tuple {
+                if baseline != Some(db_tuple) {
+                    crate::services::fleet_social::fleet_social_persistence::with_social_state(
+                        ctx,
+                        |s| {
+                            s.forced_session_corp_sync_db_baseline
+                                .insert(cid, db_tuple);
+                        },
+                    );
+                }
+                session.corporation_id = db_corp_opt;
+                session.alliance_id = db_tuple.1;
+                session.corp_role = db_tuple.2;
+            } else if baseline == Some(forced) {
+                crate::services::fleet_social::fleet_social_persistence::queue_forced_corp_sync(
+                    ctx,
+                    cid,
+                    db_tuple.0,
+                    db_tuple.1,
+                    db_tuple.2,
+                );
+                session.corporation_id = db_corp_opt;
+                session.alliance_id = db_tuple.1;
+                session.corp_role = db_tuple.2;
+            } else if actor.corp_id > 0 && forced.0 != actor.corp_id {
+                session.corporation_id = db_corp_opt;
+                session.alliance_id = db_tuple.1;
+                session.corp_role = db_tuple.2;
             } else {
-                Some(session.ship_id)
-            };
-            crate::router::apply_session_from_character(
-                session,
-                &ch,
-                override_ship,
-                Some(&ctx.sde),
-            );
+                session.corporation_id = (forced.0 > 0).then_some(forced.0);
+                session.alliance_id = if actor.corp_id > 0
+                    && actor.corp_exists
+                    && actor.alliance_id.is_some()
+                    && forced.1.is_none()
+                {
+                    actor.alliance_id
+                } else {
+                    forced.1
+                };
+                session.corp_role = forced.2;
+            }
+        } else if let Some(ally_opt) = split_fixture_ally {
+            session.alliance_id = ally_opt;
+        } else {
+            let corp_changed = session.corporation_id != db_corp_opt;
+            session.corporation_id = db_corp_opt;
+            session.alliance_id = actor.alliance_id;
+            if corp_changed || actor.corp_exists || actor.effective_roles != 0 {
+                session.corp_role = actor.effective_roles;
+            }
         }
+    } else if let Some((new_corp, new_ally, new_role)) = forced_corp {
+        session.corporation_id = (new_corp > 0).then_some(new_corp);
+        session.alliance_id = new_ally;
+        session.corp_role = new_role;
+    }
+    if let Some(new_wf) = forced_wf {
+        session.war_faction_id = new_wf;
+    }
+    if let Some(ch) = ch_opt {
+        let override_ship = if ch.active_ship_id != 0 {
+            Some(Some(ch.active_ship_id))
+        } else if stale_struct {
+            Some(None)
+        } else {
+            Some(session.ship_id)
+        };
+        crate::router::apply_session_from_character(
+            session,
+            &ch,
+            override_ship,
+            Some(&ctx.sde),
+        );
     }
 }
 

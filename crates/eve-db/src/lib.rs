@@ -10,6 +10,7 @@
 
 pub mod accounts;
 pub mod characters;
+pub mod corp_actor;
 pub mod clock;
 pub mod cow;
 pub mod cow_collections;
@@ -84,6 +85,10 @@ pub use sqlite_store::{
     clear_quarantine_unreadable_override, default_quarantine_unreadable, list_quarantined_rows,
     parse_cli_quarantine_unreadable, set_quarantine_unreadable,
     with_quarantine_unreadable_for_test, QuarantinedRow,
+};
+pub use corp_actor::{
+    effective_corp_roles_at_db, is_excluded_corp_member, is_npc_corporation, CorpActor,
+    CorpActorDenied,
 };
 pub use snapshot_ext::{
     CalendarEventRecord, ChatChannelAclRecord, CorpVoteBallotRecord, CorpVoteCaseRecord,

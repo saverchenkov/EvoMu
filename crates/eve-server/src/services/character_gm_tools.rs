@@ -593,27 +593,30 @@ pub fn handle_char_unbound(
                 )));
             }
 
-            session.character_id = Some(c.character_id); session.corporation_id = Some(c.corporation_id);
-            session.alliance_id = c.alliance_id; session.war_faction_id = c.war_faction_id;
+            if !eve_db::is_npc_corporation(&ctx.sde, c.corporation_id) {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
+                    ctx,
+                    c.corporation_id,
+                );
+            }
+            crate::services::fleet_social::fleet_social_persistence::clear_forced_corp_sync(
+                ctx,
+                c.character_id,
+            );
+            let _ = crate::services::fw_enlistment::take_forced_war_faction_sync(
+                ctx,
+                c.character_id,
+            );
+            let actor = ctx.db.with_snapshot(|snap| {
+                eve_db::CorpActor::resolve(snap, &ctx.sde, c.character_id, now_unix)
+            });
+            session.character_id = Some(c.character_id);
+            session.corporation_id = (actor.corp_id > 0).then_some(actor.corp_id);
+            session.alliance_id = actor.alliance_id;
+            session.war_faction_id = c.war_faction_id;
             crate::router::apply_session_from_character(session, &c, None, Some(&ctx.sde));
             session.solar_system_id = Some(eff_sys);
-            session.corp_role = ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&c.corporation_id) {
-                    return 0;
-                }
-                let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
-                    c.corporation_id,
-                    c.character_id,
-                    None,
-                    0,
-                    now_unix,
-                );
-                if is_ceo {
-                    u64::MAX
-                } else {
-                    eff_roles
-                }
-            });
+            session.corp_role = actor.effective_roles;
             if c.station_id.is_none() && c.structure_id.is_none() {
                 let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
                     ctx,

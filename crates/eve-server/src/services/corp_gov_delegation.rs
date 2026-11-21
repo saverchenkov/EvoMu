@@ -12,10 +12,6 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, ClientError, PyRep, UserErrorKey};
 use std::collections::{HashMap, HashSet};
 
-fn is_excluded_corp_member(corp: &eve_db::CorporationRecord, char_id: i64) -> bool {
-    corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id)
-}
-
 pub(crate) fn load_corp_rec_ads(ctx: &ServerContext) -> Vec<CorpRecruitmentAd> {
     let mut ads: Vec<CorpRecruitmentAd> = ctx
         .db
@@ -148,14 +144,9 @@ pub(crate) fn handle_get_wallet_divisions_info(
     };
     let now_unix = ctx.now_unix();
     let res = ctx.db.with_snapshot(|snap| {
-        let caller_corp_id = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.corporation_id)
-            .or(session.corporation_id)
-            .unwrap_or(0);
-        let corp_id = explicit_corp_id.unwrap_or(caller_corp_id);
-        if super::industry_pi::is_npc_corporation(ctx, corp_id) {
+        let caller_actor = eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, now_unix);
+        let corp_id = explicit_corp_id.unwrap_or(caller_actor.corp_id);
+        if eve_db::is_npc_corporation(&ctx.sde, corp_id) {
             let msg = "NPC corporations do not expose player wallet divisions";
             return Err(BridgeRpcError::with_client_error(
                 "CorpRoleDenied",
@@ -172,19 +163,23 @@ pub(crate) fn handle_get_wallet_divisions_info(
             ));
         };
         if !is_gm {
-            if corp_id != caller_corp_id || is_excluded_corp_member(corp, char_id) {
-                let msg = "Viewing corporation wallet divisions requires membership in the target corporation";
+            let target_actor =
+                eve_db::CorpActor::resolve_for_corp(snap, &ctx.sde, corp_id, char_id, None, now_unix);
+            if corp_id != caller_actor.corp_id || target_actor.require_member().is_err() {
+                let msg =
+                    "Viewing corporation wallet divisions requires membership in the target corporation";
                 return Err(BridgeRpcError::with_client_error(
                     "CorpRoleDenied",
                     msg,
                     ClientError::CustomInfo(msg.into()),
                 ));
             }
-            let (is_ceo, caller_role) =
-                snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
-            if !is_ceo
-                && !corp_roles::has_role(caller_role, corp_roles::ROLE_ACCOUNTANT)
-                && !corp_roles::has_role(caller_role, corp_roles::ROLE_JUNIOR_ACCOUNTANT)
+            if !target_actor.is_ceo
+                && !corp_roles::has_role(target_actor.effective_roles, corp_roles::ROLE_ACCOUNTANT)
+                && !corp_roles::has_role(
+                    target_actor.effective_roles,
+                    corp_roles::ROLE_JUNIOR_ACCOUNTANT,
+                )
             {
                 let msg = "Viewing corporation wallet divisions requires Accountant role";
                 return Err(BridgeRpcError::with_client_error(
@@ -266,20 +261,10 @@ pub(crate) fn handle_get_shares_by_shareholder(
             }
             let now_unix = ctx.now_unix();
             let can_view_corp_shares = ctx.db.with_snapshot(|snap| {
-                if super::industry_pi::is_npc_corporation(ctx, corp_id) {
-                    return false;
-                }
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return false;
-                };
-                if is_excluded_corp_member(corp, char_id) {
-                    return false;
-                }
-                let (is_ceo, eff_roles) =
-                    crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                        snap, corp_id, char_id, 0, now_unix,
-                    );
-                is_ceo || (eff_roles & corp_roles::ROLE_DIRECTOR) != 0
+                eve_db::CorpActor::resolve_for_corp(
+                    snap, &ctx.sde, corp_id, char_id, None, now_unix,
+                )
+                .is_director()
             });
             if !can_view_corp_shares {
                 return Some(Err(BridgeRpcError::with_client_error(
@@ -595,22 +580,8 @@ pub(crate) fn require_corp_director(
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
     let corp_id = ctx.db.with_snapshot(|snap| {
-        let corp_id = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.corporation_id)
-            .or(session.corporation_id)
-            .unwrap_or(0);
-        if super::industry_pi::is_npc_corporation(ctx, corp_id) {
-            return None;
-        }
-        let corp = snap.corporations.get(&corp_id)?;
-        if is_excluded_corp_member(corp, char_id) {
-            return None;
-        }
-        let (is_ceo, roles) =
-            snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
-        (is_ceo || corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR)).then_some(corp_id)
+        let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, now_unix);
+        actor.is_director().then_some(actor.corp_id)
     });
     corp_id.ok_or_else(|| {
         let msg = "Director or CEO role is required";
@@ -625,37 +596,8 @@ pub(crate) fn require_executor(
 ) -> Result<i64, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let (caller_corp, aid) = ctx.db.with_snapshot(|snap| {
-        let caller_corp = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.corporation_id)
-            .or(session.corporation_id)
-            .unwrap_or(0);
-        let corp_opt = snap.corporations.get(&caller_corp);
-        let aid = corp_opt
-            .and_then(|c| c.alliance_id)
-            .or_else(|| {
-                if corp_opt.is_none() {
-                    snap.characters.get(&char_id).and_then(|c| c.alliance_id)
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                snap.alliances
-                    .values()
-                    .find(|a| a.member_corp_ids.contains(&caller_corp))
-                    .map(|a| a.alliance_id)
-            })
-            .or_else(|| {
-                if corp_opt.is_none() && !snap.characters.contains_key(&char_id) {
-                    session.alliance_id
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0);
-        (caller_corp, aid)
+        let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, ctx.now_unix());
+        (actor.corp_id, actor.alliance_id.unwrap_or(0))
     });
     let exec = ctx
         .db
