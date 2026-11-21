@@ -1470,15 +1470,15 @@ async fn recall_fighters_rejects_concurrent_dock_in_db_and_abandons_without_movi
     });
     locked_rx.await.unwrap();
 
-    let tube_loads = ctx.fighter_tube_loads.clone();
+    let active_fighters = ctx.active_fighters.clone();
     let watcher = tokio::spawn(async move {
         for _ in 0..400 {
-            if tube_loads.read().unwrap().contains_key(&(ship_id, 0)) {
+            if !active_fighters.read().unwrap().contains_key(&fball) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        // Grace yield so RecallFightersToTubes blocks on DB write lock after reserving the tube.
+        // Grace yield so RecallFightersToTubes blocks on DB write lock after claiming the squadron.
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         let _ = release_tx.send(());
     });

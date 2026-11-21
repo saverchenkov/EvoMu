@@ -1001,6 +1001,29 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
     assert_eq!(err_load_abandoned.code, "ItemNotInFighterBay");
 
     // 7. Recall fighters (feat:drones.fighter-launch-recall)
+    let err_recall_oor = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "RecallFightersToTubes",
+            &[PyRep::List(vec![
+                PyRep::Integer(f2_ball_id),
+                PyRep::Integer(f3_ball_id),
+            ])],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_recall_oor.code, "FighterOutOfRange");
+
+    let (_, ship_recall_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let recall_pos =
+        ship_recall_ball.position + DVec3::new(ship_recall_ball.radius + 500.0, 0.0, 0.0);
+    let _ = sys_handle.set_ball_position(f2_ball_id, recall_pos).await;
+    let _ = sys_handle.set_ball_position(f3_ball_id, recall_pos).await;
+
     let recall_res = ctx
         .dispatch_rpc(
             &mut sess,

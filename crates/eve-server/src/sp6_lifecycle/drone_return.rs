@@ -274,6 +274,15 @@ pub(crate) async fn abandon_returning_drone_in_space(
                 }
                 true
             }
+            None
+                if crate::services::combat_crimewatch::combat_npcs_drones::is_recently_destroyed_in_persisted(
+                    &snap.combat_crimewatch_state,
+                    bid,
+                    item_id,
+                ) =>
+            {
+                false
+            }
             None => {
                 super::record_drone_ball_meta_in_snap(snap, item_id, bid);
                 if let Some(pos) = live_pos {
