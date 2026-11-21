@@ -3901,18 +3901,24 @@ def _resolve_space_command_item_id(bp, sid, sub, query_target):
         bgroup = int(getattr(slim, "groupID", 0) or 0)
         bcat = int(getattr(slim, "categoryID", 0) or 0)
         tier = None
+        is_weak_match = 0
         if bgroup == 10 or bname_lc.startswith("stargate ("):
             st_tier = _match_stargate_target_tier(slim, bname, q_lc, raw_lc)
             if st_tier is not None:
                 tier = 0 if st_tier <= 1 else st_tier
+                if st_tier >= 2:
+                    is_weak_match = 1
             elif q_type_str and btype == q_type_str:
                 tier = 1
         elif bname_lc and (bname_lc == q_lc or bname_lc == raw_lc):
             tier = 0
         elif q_type_str and btype == q_type_str:
             tier = 1
-        elif bname_lc and (q_lc in bname_lc or bname_lc in raw_lc):
+        elif bname_lc and q_lc in bname_lc:
             tier = 2
+        elif bname_lc and bname_lc in raw_lc:
+            tier = 3
+            is_weak_match = 1
         if tier is None:
             continue
         bdist = _resolve_ball_surface_dist(bp, sid, bid)
@@ -3924,10 +3930,11 @@ def _resolve_space_command_item_id(bp, sid, sub, query_target):
             suitability = 0 if bdist < 200000.0 else 1
         else:
             suitability = 0
-        # Enforce action suitability (on-grid <200 km for lock/approach/orbit, >150 km for warp_to,
-        # dockable category for dock) before string tier so an off-grid 7.9 AU exact match like
-        # "Veldspar" never beats an on-grid "Veldspar II-Grade" asteroid in the current belt.
-        cand_key = (suitability, tier, bdist, int(bid))
+        # Keep reverse-substring celestial ancestors (bname_lc in raw_lc) and
+        # non-exact stargate matches (st_tier >= 2) behind exact/forward/typeID
+        # matches, while letting action suitability outrank tier between strong
+        # matches (e.g., on-grid "Veldspar II-Grade" over 7.9 AU "Veldspar").
+        cand_key = (is_weak_match, suitability, tier, bdist, int(bid))
         if best_key is None or cand_key < best_key:
             best_key = cand_key
             best_bid = int(bid)
