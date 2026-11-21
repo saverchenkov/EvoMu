@@ -382,30 +382,36 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if bm.solar_system_id != sys_id {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidTarget".into(),
-                    message: format!("Bookmark {bm_id} is in another solar system"),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::invalid_target(
+                    Some(bm_id),
+                    None,
+                    "WarpToBookmark",
+                    "bookmark_wrong_solar_system",
+                    format!("Bookmark {bm_id} is in another solar system"),
+                )));
             }
             let handle = ctx.systems.get_or_spawn(sys_id);
             let dest = DVec3::new(bm.x, bm.y, bm.z);
             let (_, ball) = match handle.get_ball_snapshot(ship_id).await {
                 Ok(Some(v)) => v,
                 _ => {
-                    return Some(Err(BridgeRpcError {
-                        code: "ShipNotInSpace".into(),
-                        message: "Active ship is not spawned in Ballpark".into(),
-                        client_error: None,
-                    }));
+                    return Some(Err(BridgeRpcError::ship_not_in_space(
+                        ship_id,
+                        Some(char_id),
+                        Some(sys_id),
+                        "WarpToBookmark",
+                        "Active ship is not spawned in Ballpark",
+                    )));
                 }
             };
             if matches!(ball.mode, MovementMode::Warp { .. }) {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: "Active ship is already in warp".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "warp_to_bookmark_already_in_warp",
+                    "Active ship is already in warp",
+                )));
             }
             let cur_pos = ball.position;
             let dist = (dest - cur_pos).length();
@@ -1103,11 +1109,12 @@ fn handle_enable_behavior_debugging(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     if !session.has_gm_role() {
-        return Err(BridgeRpcError {
-            code: "InsufficientRole".into(),
-            message: "EnableBehaviorDebugging requires GM role".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role(
+            eve_db::service_roles::ROLE_GM_MASK,
+            session.role,
+            "EnableBehaviorDebugging",
+            "EnableBehaviorDebugging requires GM role",
+        ));
     }
     let (_, char_id) = ServerContext::require_character(session)?;
     let entity_id = args
@@ -1140,11 +1147,12 @@ fn handle_disable_behavior_debugging(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     if !session.has_gm_role() {
-        return Err(BridgeRpcError {
-            code: "InsufficientRole".into(),
-            message: "DisableBehaviorDebugging requires GM role".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role(
+            eve_db::service_roles::ROLE_GM_MASK,
+            session.role,
+            "DisableBehaviorDebugging",
+            "DisableBehaviorDebugging requires GM role",
+        ));
     }
     let (_, char_id) = ServerContext::require_character(session)?;
     let entity_id = args
@@ -1353,11 +1361,13 @@ async fn handle_open_shipping_unit_storage(
         .map(|t| matches!(t.group_id, 12 | 340 | 448 | 649) || t.category_id == 22)
         .unwrap_or(false);
     if !is_shipping_or_container {
-        return Err(BridgeRpcError {
-            code: "InvalidTarget".into(),
-            message: format!("Target entity {unit_id} is not a shipping unit or deployable container"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::invalid_target(
+            Some(unit_id),
+            None,
+            unit_type.map(|t| t.name.as_str()).unwrap_or("target"),
+            "not_shipping_unit_or_container",
+            format!("Target entity {unit_id} is not a shipping unit or deployable container"),
+        ));
     }
 
     let (unit_owner, is_authorized) = ctx.db.with_snapshot(|snap| {
@@ -1592,8 +1602,11 @@ fn authorize_space_siphon_or_container(
         ));
     }
     let Some(ship_pos) = view.ball_position(ship_id) else {
-        return Err(rpc_err(
-            "ShipNotInSpace",
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            session.character_id,
+            Some(caller_sys),
+            "space_inspect_container_or_siphon",
             "Caller ship is not spawned in space",
         ));
     };

@@ -753,8 +753,10 @@ pub(crate) fn handle_place_bid(
                 return Err(rpc_err("ContractExpired", format!("Auction contract {cid} has expired")));
             }
             if c.status != "Outstanding" {
-                return Err(rpc_err(
-                    "InvalidContractState",
+                return Err(eve_proto::BridgeRpcError::invalid_contract_state(
+                    cid,
+                    "Outstanding",
+                    &c.status,
                     format!("Auction {cid} is no longer Outstanding"),
                 ));
             }
@@ -1280,8 +1282,10 @@ pub(crate) fn handle_reject_delete_fail(
                 ));
             }
             if c.contract_type == "Auction" && c.current_bidder_id.is_some() {
-                return Err(rpc_err(
-                    "InvalidContractState",
+                return Err(eve_proto::BridgeRpcError::invalid_contract_state(
+                    cid,
+                    "NoBids",
+                    "HasBids",
                     "Cannot reject an auction contract that has active bids",
                 ));
             }
@@ -1361,8 +1365,10 @@ pub(crate) fn handle_reject_delete_fail(
         {
             return Ok(("Failed", Vec::new(), resolve_delta.finish(snap)));
         }
-        Err(rpc_err(
-            "InvalidContractState",
+        Err(eve_proto::BridgeRpcError::invalid_contract_state(
+            cid,
+            "Outstanding",
+            &c.status,
             format!("Contract {cid} in state '{}' cannot be resolved via {method}", c.status),
         ))
     })?;

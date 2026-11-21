@@ -1225,7 +1225,12 @@ pub fn handle(
                     return Err(rpc_err("ContractExpired", format!("Contract {cid} has expired; escrowed items and reward returned to issuer")));
                 }
                 if c.status != "Outstanding" {
-                    return Err(rpc_err("InvalidContractState", format!("Contract {cid} is in state '{}', not Outstanding", c.status)));
+                    return Err(eve_proto::BridgeRpcError::invalid_contract_state(
+                        cid,
+                        "Outstanding",
+                        &c.status,
+                        format!("Contract {cid} is in state '{}', not Outstanding", c.status),
+                    ));
                 }
                 if !matches!(c.contract_type.as_str(), "Courier" | "ItemExchange") {
                     return Err(rpc_err("InvalidContractType", format!("Contract type '{}' cannot be directly accepted via AcceptContract", c.contract_type)));
@@ -1257,7 +1262,12 @@ pub fn handle(
                     return Err(rpc_err("CrpAccessDenied", "Accepting a contract on behalf of a corporation requires ROLE_CONTRACT_MANAGER or ROLE_DIRECTOR"));
                 }
                 if caller_station != Some(c.start_station_id) {
-                    return Err(rpc_err("MustBeDockedAtStartStation", format!("Accepting contract {cid} requires being docked at {}", c.start_station_id)));
+                    return Err(eve_proto::BridgeRpcError::must_be_docked_at_start_station(
+                        Some(cid),
+                        c.start_station_id,
+                        caller_station,
+                        format!("Accepting contract {cid} requires being docked at {}", c.start_station_id),
+                    ));
                 }
                 for iid in &c.item_ids {
                     let valid_escrow = snap.items.get(iid).map(|item| item.location_id == cid && item.flag == InventoryFlag::Locked).unwrap_or(false);
@@ -1568,7 +1578,12 @@ pub fn handle(
                     ));
                 }
                 if c.status != "InProgress" || (c.acceptor_id != Some(char_id) && !is_corp_acceptor) {
-                    return Err(rpc_err("InvalidContractState", format!("Contract {cid} is not InProgress for character {char_id}")));
+                    return Err(eve_proto::BridgeRpcError::invalid_contract_state(
+                        cid,
+                        "InProgress",
+                        &c.status,
+                        format!("Contract {cid} is not InProgress for character {char_id}"),
+                    ));
                 }
                 if c.contract_type != "Courier" {
                     return Err(rpc_err("InvalidContractType", format!("Contract {cid} is not a Courier contract")));

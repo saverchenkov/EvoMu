@@ -5,6 +5,10 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "client_error_facts.rs"]
+mod client_error_facts;
+pub use client_error_facts::RejectionFacts;
+
 use crate::{marshal, BridgeRpcError, PyRep};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -639,10 +643,31 @@ pub enum UserErrorKey {
     // --- Protocol & Devtools ---
     SlashError,
     UnMachoDestination,
+
+    // --- V24 Structure, Fitting, Combat, Contracts & Navigation Rejections (#1195) ---
+    CannotUseFittingInStructureWithoutDeed,
+    CannotRepairInStructureWithoutDeed,
+    StructureServiceUnavailable,
+    StructureDockingDenied,
+    NotDockable,
+    NotEnoughEnergy,
+    JumpNotEnoughCap,
+    CantShipNotPresent,
+    ModuleFitFailed,
+    CannotPerformOnMultipleItems,
+    InvalidTargetForModule,
+    DeniedTargetSelf,
+    CantDockAfterAggression,
+    CantJumpAfterAggression,
+    ConContractNotOutstanding,
+    ConContractNotInProgress,
+    ConContractInvalid,
+    ConAuctionHasBids,
+    ModuleNoLongerPresentForCharges,
 }
 
 impl UserErrorKey {
-    /// Exhaustive slice of all 99 typed [`UserErrorKey`] variants.
+    /// Exhaustive slice of all 118 typed [`UserErrorKey`] variants.
     pub const ALL: &[Self] = &[
         Self::InsureShipFailedSingleContract,
         Self::InsureShipFailedMultipleContracts,
@@ -743,6 +768,25 @@ impl UserErrorKey {
         Self::PISkillRequiredToSurveyPlanetResources,
         Self::SlashError,
         Self::UnMachoDestination,
+        Self::CannotUseFittingInStructureWithoutDeed,
+        Self::CannotRepairInStructureWithoutDeed,
+        Self::StructureServiceUnavailable,
+        Self::StructureDockingDenied,
+        Self::NotDockable,
+        Self::NotEnoughEnergy,
+        Self::JumpNotEnoughCap,
+        Self::CantShipNotPresent,
+        Self::ModuleFitFailed,
+        Self::CannotPerformOnMultipleItems,
+        Self::InvalidTargetForModule,
+        Self::DeniedTargetSelf,
+        Self::CantDockAfterAggression,
+        Self::CantJumpAfterAggression,
+        Self::ConContractNotOutstanding,
+        Self::ConContractNotInProgress,
+        Self::ConContractInvalid,
+        Self::ConAuctionHasBids,
+        Self::ModuleNoLongerPresentForCharges,
     ];
 
     /// Exact V24 `eveexceptions.UserError` message key string sent on the wire.
@@ -853,6 +897,29 @@ impl UserErrorKey {
             }
             Self::SlashError => "SlashError",
             Self::UnMachoDestination => "UnMachoDestination",
+            Self::CannotUseFittingInStructureWithoutDeed => {
+                "CannotUseFittingInStructureWithoutDeed"
+            }
+            Self::CannotRepairInStructureWithoutDeed => {
+                "CannotRepairInStructureWithoutDeed"
+            }
+            Self::StructureServiceUnavailable => "StructureServiceUnavailable",
+            Self::StructureDockingDenied => "StructureDockingDenied",
+            Self::NotDockable => "NotDockable",
+            Self::NotEnoughEnergy => "NotEnoughEnergy",
+            Self::JumpNotEnoughCap => "JumpNotEnoughCap",
+            Self::CantShipNotPresent => "CantShipNotPresent",
+            Self::ModuleFitFailed => "ModuleFitFailed",
+            Self::CannotPerformOnMultipleItems => "CannotPerformOnMultipleItems",
+            Self::InvalidTargetForModule => "InvalidTargetForModule",
+            Self::DeniedTargetSelf => "DeniedTargetSelf",
+            Self::CantDockAfterAggression => "CantDockAfterAggression",
+            Self::CantJumpAfterAggression => "CantJumpAfterAggression",
+            Self::ConContractNotOutstanding => "ConContractNotOutstanding",
+            Self::ConContractNotInProgress => "ConContractNotInProgress",
+            Self::ConContractInvalid => "ConContractInvalid",
+            Self::ConAuctionHasBids => "ConAuctionHasBids",
+            Self::ModuleNoLongerPresentForCharges => "ModuleNoLongerPresentForCharges",
         }
     }
 
@@ -964,6 +1031,25 @@ impl UserErrorKey {
             Self::PISkillRequiredToSurveyPlanetResources => Some(3384),
             Self::SlashError => Some(1591),
             Self::UnMachoDestination => Some(1668),
+            Self::CannotUseFittingInStructureWithoutDeed => Some(7470),
+            Self::CannotRepairInStructureWithoutDeed => Some(7469),
+            Self::StructureServiceUnavailable => Some(4986),
+            Self::StructureDockingDenied => Some(4886),
+            Self::NotDockable => Some(1334),
+            Self::NotEnoughEnergy => Some(1344),
+            Self::JumpNotEnoughCap => Some(1036),
+            Self::CantShipNotPresent => Some(422),
+            Self::ModuleFitFailed => Some(1228),
+            Self::CannotPerformOnMultipleItems => Some(2271),
+            Self::InvalidTargetForModule => Some(7824),
+            Self::DeniedTargetSelf => Some(788),
+            Self::CantDockAfterAggression => Some(377),
+            Self::CantJumpAfterAggression => Some(385),
+            Self::ConContractNotOutstanding => Some(2015),
+            Self::ConContractNotInProgress => Some(2085),
+            Self::ConContractInvalid => Some(5048),
+            Self::ConAuctionHasBids => Some(2045),
+            Self::ModuleNoLongerPresentForCharges => Some(1230),
         }
     }
 
@@ -1016,7 +1102,15 @@ impl UserErrorKey {
             | Self::FleetNotFound
             | Self::FleetNotInFleet
             | Self::CantbookmarkEveSystem
-            | Self::UnMachoDestination => Some(2),
+            | Self::UnMachoDestination
+            | Self::CannotPerformOnMultipleItems
+            | Self::ConAuctionHasBids
+            | Self::ConContractInvalid
+            | Self::ConContractNotInProgress
+            | Self::ConContractNotOutstanding
+            | Self::JumpNotEnoughCap
+            | Self::ModuleFitFailed
+            | Self::NotDockable => Some(2),
             Self::CustomNotify
             | Self::NotEnoughDroneBaySpace
             | Self::NotEnoughFighterBaySpace
@@ -1068,7 +1162,18 @@ impl UserErrorKey {
             | Self::InvalidPinType
             | Self::InvalidSchematic
             | Self::PISkillRequiredToSurveyPlanetResources
-            | Self::SlashError => Some(3),
+            | Self::SlashError
+            | Self::CannotRepairInStructureWithoutDeed
+            | Self::CannotUseFittingInStructureWithoutDeed
+            | Self::CantDockAfterAggression
+            | Self::CantJumpAfterAggression
+            | Self::CantShipNotPresent
+            | Self::DeniedTargetSelf
+            | Self::InvalidTargetForModule
+            | Self::ModuleNoLongerPresentForCharges
+            | Self::NotEnoughEnergy
+            | Self::StructureDockingDenied
+            | Self::StructureServiceUnavailable => Some(3),
             Self::InsureShipAlreadyInsured | Self::CustomQuestion => Some(4),
             Self::CustomError => Some(7),
         }
@@ -1165,6 +1270,32 @@ impl UserErrorKey {
             Self::CustomError => vec![("error".into(), PyRep::ascii_bytes(self.as_str()))],
             Self::CustomQuestion => vec![("question".into(), PyRep::ascii_bytes(self.as_str()))],
             Self::NotCloseEnoughToJump => vec![("maxdist".into(), PyRep::Integer(2_500))],
+            Self::InvalidTargetGroup => vec![("groupName".into(), PyRep::ascii_bytes(""))],
+            Self::CannotUseFittingInStructureWithoutDeed
+            | Self::CannotRepairInStructureWithoutDeed
+            | Self::StructureDockingDenied => {
+                vec![("structureName".into(), PyRep::ascii_bytes(""))]
+            }
+            Self::StructureServiceUnavailable => vec![
+                ("serviceName".into(), PyRep::ascii_bytes("")),
+                ("structureName".into(), PyRep::ascii_bytes("")),
+            ],
+            Self::NotEnoughEnergy => vec![
+                ("effectname".into(), PyRep::ascii_bytes("")),
+                ("need".into(), PyRep::Real(0.0)),
+                ("got".into(), PyRep::Real(0.0)),
+            ],
+            Self::JumpNotEnoughCap => vec![
+                ("need".into(), PyRep::Real(0.0)),
+                ("got".into(), PyRep::Real(0.0)),
+            ],
+            Self::ModuleFitFailed => vec![
+                ("moduleName".into(), PyRep::ascii_bytes("")),
+                ("reason".into(), PyRep::ascii_bytes("")),
+            ],
+            Self::InvalidTargetForModule => {
+                vec![("moduleName".into(), PyRep::ascii_bytes(""))]
+            }
             _ => Vec::new(),
         }
     }
@@ -1179,6 +1310,10 @@ impl UserErrorKey {
             Self::CustomError => vec![("error".into(), PyRep::ascii_bytes(message))],
             Self::CustomQuestion => vec![("question".into(), PyRep::ascii_bytes(message))],
             Self::SlashError => vec![("reason".into(), PyRep::ascii_bytes(message))],
+            Self::ModuleFitFailed => vec![
+                ("moduleName".into(), PyRep::ascii_bytes("")),
+                ("reason".into(), PyRep::ascii_bytes(message)),
+            ],
             _ => self.default_args(),
         }
     }
@@ -1201,6 +1336,12 @@ pub enum ClientError {
     User {
         key: UserErrorKey,
         args: Vec<(String, PyRep)>,
+    },
+    /// Named V24 `eveexceptions.UserError(key, dict(args))` paired with structured game-state rejection facts (`#1195`).
+    Rejected {
+        key: UserErrorKey,
+        args: Vec<(String, PyRep)>,
+        facts: RejectionFacts,
     },
     /// Generic modal `eveexceptions.UserError('CustomInfo', {'info': msg})`.
     CustomInfo(String),
@@ -1239,10 +1380,53 @@ impl ClientError {
         }
     }
 
+    /// Constructs a [`ClientError::Rejected`] with no extra dictionary arguments and structured [`RejectionFacts`].
+    pub fn rejected(key: UserErrorKey, facts: RejectionFacts) -> Self {
+        Self::Rejected {
+            key,
+            args: Vec::new(),
+            facts,
+        }
+    }
+
+    /// Constructs a [`ClientError::Rejected`] with typed dictionary arguments and structured [`RejectionFacts`].
+    pub fn rejected_with_args(
+        key: UserErrorKey,
+        args: impl IntoIterator<Item = impl IntoUserErrorArg>,
+        facts: RejectionFacts,
+    ) -> Self {
+        Self::Rejected {
+            key,
+            args: args
+                .into_iter()
+                .map(IntoUserErrorArg::into_user_error_pair)
+                .collect(),
+            facts,
+        }
+    }
+
+    /// Returns the typed [`UserErrorKey`] and dictionary args for both `User` and `Rejected`.
+    pub fn as_user_error(&self) -> Option<(UserErrorKey, &[(String, PyRep)])> {
+        match self {
+            Self::User { key, args } | Self::Rejected { key, args, .. } => {
+                Some((*key, args.as_slice()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns structured rejection facts if this [`ClientError`] is [`ClientError::Rejected`].
+    pub const fn rejection_facts(&self) -> Option<&RejectionFacts> {
+        match self {
+            Self::Rejected { facts, .. } => Some(facts),
+            _ => None,
+        }
+    }
+
     /// Returns the V24 client UI presentation mode (`Modal` vs `Notify`) enforced for this error.
     pub const fn presentation(&self) -> UserErrorPresentation {
         match self {
-            Self::User { key, .. } => key.presentation(),
+            Self::User { key, .. } | Self::Rejected { key, .. } => key.presentation(),
             Self::CustomInfo(_)
             | Self::Unimplemented { .. }
             | Self::Internal(_)
@@ -1376,7 +1560,7 @@ impl ClientError {
     /// tuple `(original_command, MACHONETERR_WRAPPEDEXCEPTION, (marshal::encode(exc),))`.
     pub fn to_macho_error_body(&self, original_command: i64) -> PyRep {
         match self {
-            Self::User { key, args } => {
+            Self::User { key, args } | Self::Rejected { key, args, .. } => {
                 let mut merged: Vec<(String, PyRep)> = args.clone();
                 for (def_k, def_v) in key.default_args() {
                     if !merged.iter().any(|(k, _)| k == &def_k) {
@@ -1515,7 +1699,7 @@ impl BridgeRpcError {
     /// [`Self::to_client_error`] is lossless without parsing `message` or using global state.
     pub fn from_client_error(client_error: ClientError) -> Self {
         let (code, message) = match &client_error {
-            ClientError::User { key, args } => {
+            ClientError::User { key, args } | ClientError::Rejected { key, args, .. } => {
                 let code_str = key.as_str().to_string();
                 let msg_str = if *key == UserErrorKey::InsureShipFailedSingleContract {
                     if let Some(owner_id) = args
@@ -1540,6 +1724,12 @@ impl BridgeRpcError {
                     )
                 {
                     format_capacity_message(args).unwrap_or_else(|| code_str.clone())
+                } else if matches!(key, UserErrorKey::NotEnoughEnergy | UserErrorKey::JumpNotEnoughCap) {
+                    if let (Some(need), Some(got)) = (find_numeric_arg(args, "need"), find_numeric_arg(args, "got")) {
+                        format!("capacitor need={need}, got={got}")
+                    } else {
+                        code_str.clone()
+                    }
                 } else if *key == UserErrorKey::MarketExceededOrderCount {
                     let cur = args
                         .iter()
@@ -1822,15 +2012,17 @@ impl BridgeRpcError {
             matches!(service.trim(), "slash" | "publicQaToolsServer") && method == "SlashCmd";
 
         if let Some(ref typed) = self.client_error {
-            if !is_slash_rpc
-                || matches!(
-                    typed.as_ref(),
-                    ClientError::User {
-                        key: UserErrorKey::SlashError,
-                        ..
-                    }
-                )
-            {
+            let is_typed_slash = matches!(
+                typed.as_ref(),
+                ClientError::User {
+                    key: UserErrorKey::SlashError,
+                    ..
+                } | ClientError::Rejected {
+                    key: UserErrorKey::SlashError,
+                    ..
+                }
+            );
+            if !is_slash_rpc || is_typed_slash {
                 return (**typed).clone();
             }
         }
@@ -1881,10 +2073,56 @@ impl BridgeRpcError {
                 key: UserErrorKey::TargetTooFar,
                 args: UserErrorKey::TargetTooFar.default_args(),
             },
-            "NoChargesLoaded" => ClientError::User {
+            "NoChargesLoaded" | "NoAmmoLoaded" => ClientError::User {
                 key: UserErrorKey::NoCharges,
                 args: UserErrorKey::NoCharges.default_args(),
             },
+            "QuantumCoreRequired" => ClientError::User {
+                key: UserErrorKey::CannotUseFittingInStructureWithoutDeed,
+                args: UserErrorKey::CannotUseFittingInStructureWithoutDeed.default_args(),
+            },
+            "ShipAlreadyInWarp" | "ShipInWarp" => ClientError::user(UserErrorKey::ShipInWarp),
+            "NotEnoughCapacitor" => ClientError::User {
+                key: UserErrorKey::NotEnoughEnergy,
+                args: UserErrorKey::NotEnoughEnergy.default_args(),
+            },
+            "ShipNotInSpace" => ClientError::user(UserErrorKey::CantShipNotPresent),
+            "FittingValidationFailed" => ClientError::user_with_args(
+                UserErrorKey::ModuleFitFailed,
+                [
+                    ("moduleName", UserErrorArg::Str(String::new())),
+                    ("reason", UserErrorArg::Str(self.message.clone())),
+                ],
+            ),
+            "CannotFitStackedModule" => {
+                ClientError::user(UserErrorKey::CannotPerformOnMultipleItems)
+            }
+            "InvalidTarget" => ClientError::User {
+                key: UserErrorKey::InvalidTargetForModule,
+                args: UserErrorKey::InvalidTargetForModule.default_args(),
+            },
+            "InventoryNotAccessible" => ClientError::user(UserErrorKey::AccessDenied),
+            "MustBeDockedAtStartStation" | "MustBeDocked" => {
+                ClientError::user(UserErrorKey::MustBeDocked)
+            }
+            "StructureNotDockable" => ClientError::user(UserErrorKey::NotDockable),
+            "StructureServiceAccessDenied" => ClientError::User {
+                key: UserErrorKey::StructureServiceUnavailable,
+                args: UserErrorKey::StructureServiceUnavailable.default_args(),
+            },
+            "WeaponsTimerActive" => ClientError::user(UserErrorKey::CantDockAfterAggression),
+            "CannotJumpWithWeaponsTimer" => {
+                ClientError::user(UserErrorKey::CantJumpAfterAggression)
+            }
+            "InvalidContractState" => ClientError::user(UserErrorKey::ConContractNotOutstanding),
+            "ModuleNotFound" => ClientError::user(UserErrorKey::ItemNotFound),
+            "OwnershipOrLocationViolation" => {
+                ClientError::user(UserErrorKey::CantDoThatWithSomeoneElsesStuff)
+            }
+            "InsufficientRole"
+            | "GM_InsufficientRole"
+            | "UserError: GM_InsufficientRole"
+            | "InsufficientRoles" => ClientError::user(UserErrorKey::InsufficientRoles),
             "CustomInfo" => ClientError::CustomInfo(self.message.clone()),
             "CustomNotify" => ClientError::CustomNotify(self.message.clone()),
             _ => {
@@ -1901,634 +2139,7 @@ impl BridgeRpcError {
     }
 }
 
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn decode_wrapped_user_error(body: &PyRep) -> (String, Vec<(PyRep, PyRep)>) {
-        let PyRep::Tuple(parts) = body else {
-            panic!("expected ErrorResponse tuple");
-        };
-        assert_eq!(parts[1], PyRep::Integer(MACHONETERR_WRAPPEDEXCEPTION));
-        let PyRep::Tuple(inner) = &parts[2] else {
-            panic!("expected inner payload tuple");
-        };
-        let PyRep::Bytes(raw) = &inner[0] else {
-            panic!("expected marshaled exception bytes");
-        };
-        let PyRep::ObjectEx { header, .. } = marshal::decode(raw).unwrap() else {
-            panic!("expected ObjectEx");
-        };
-        let PyRep::Tuple(h) = *header else {
-            panic!("expected header tuple");
-        };
-        assert_eq!(h[0], PyRep::Token("eveexceptions.UserError".into()));
-        let PyRep::Tuple(u_args) = &h[1] else {
-            panic!("expected UserError args");
-        };
-        let name = u_args[0].as_str().expect("UserError name").to_owned();
-        let PyRep::Dict(entries) = &u_args[1] else {
-            panic!("expected UserError dict");
-        };
-        (name, entries.clone())
-    }
-
-    #[test]
-    fn all_user_error_keys_round_trip_and_produce_valid_macho_error_body() {
-        for &key in UserErrorKey::ALL {
-            assert_eq!(UserErrorKey::from_code(key.as_str()), Some(key));
-            assert_eq!(key.to_string(), key.as_str());
-            if key.v24_dialog_id().is_none() {
-                assert!(
-                    V24_PROGRAMMATIC_USER_ERROR_KEYS.contains(&key.as_str()),
-                    "{key:?} must be in V24_PROGRAMMATIC_USER_ERROR_KEYS"
-                );
-            }
-            let err = ClientError::user(key);
-            let body = err.to_macho_error_body(6);
-            let PyRep::Tuple(parts) = &body else {
-                panic!("expected ErrorResponse tuple");
-            };
-            assert_eq!(parts[0], PyRep::Integer(6));
-            let (name, _entries) = decode_wrapped_user_error(&body);
-            assert_eq!(name, key.as_str());
-        }
-    }
-
-    #[test]
-    fn user_error_arg_encodes_v24_tuples_and_6dp_reals() {
-        assert_eq!(
-            UserErrorArg::TypeId(587).to_pyrep(),
-            PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(587)])
-        );
-        assert_eq!(
-            UserErrorArg::Label(UI_LABEL_SHIP_TOO_LARGE).to_pyrep(),
-            PyRep::Tuple(vec![
-                PyRep::Integer(101),
-                PyRep::String(UI_LABEL_SHIP_TOO_LARGE.into())
-            ])
-        );
-        assert_eq!(UserErrorArg::Int(42).to_pyrep(), PyRep::Integer(42));
-        assert_eq!(
-            UserErrorArg::Real(15.123456789).to_pyrep(),
-            PyRep::Real(15.123457)
-        );
-        assert_eq!(UserErrorArg::Real(f64::NAN).to_pyrep(), PyRep::Real(0.0));
-        assert_eq!(
-            UserErrorArg::IskCents(IskCents::from_raw_cents(12_345)).to_pyrep(),
-            PyRep::Real(123.45)
-        );
-
-        let args_slice: &[(&str, UserErrorArg)] = &[("typeID", UserErrorArg::Int(3300))];
-        let from_slice = ClientError::user_with_args(UserErrorKey::SkillMissing, args_slice);
-        let from_array = ClientError::user_with_args(
-            UserErrorKey::SkillMissing,
-            [("typeID", UserErrorArg::Int(3300))],
-        );
-        assert_eq!(from_slice, from_array);
-
-        let arg_rt: UserErrorArg =
-            serde_json::from_str(&serde_json::to_string(&UserErrorArg::TypeId(670)).unwrap())
-                .unwrap();
-        assert_eq!(arg_rt, UserErrorArg::TypeId(670));
-        let lbl_rt: UserErrorArg = serde_json::from_str(
-            &serde_json::to_string(&UserErrorArg::Label(UI_LABEL_SHIP_TOO_LARGE)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(lbl_rt, UserErrorArg::Label(UI_LABEL_SHIP_TOO_LARGE));
-    }
-
-    #[test]
-    fn user_error_presentation_is_enforced_per_key_modal_vs_notify() {
-        assert_eq!(
-            UserErrorKey::CustomInfo.presentation(),
-            UserErrorPresentation::Modal
-        );
-        assert_eq!(
-            UserErrorKey::NotEnoughCargoSpace.presentation(),
-            UserErrorPresentation::Modal
-        );
-        assert_eq!(
-            UserErrorKey::ShipCannotUseStargate.presentation(),
-            UserErrorPresentation::Modal
-        );
-        assert_eq!(
-            UserErrorKey::CustomNotify.presentation(),
-            UserErrorPresentation::Notify
-        );
-        assert_eq!(
-            UserErrorKey::DockingRequestDenied.presentation(),
-            UserErrorPresentation::Notify
-        );
-        assert_eq!(
-            UserErrorKey::TargetTooFar.presentation(),
-            UserErrorPresentation::Notify
-        );
-        assert_eq!(
-            UserErrorKey::NoCharges.presentation(),
-            UserErrorPresentation::Notify
-        );
-        assert_eq!(
-            UserErrorKey::TargetNotLocked.presentation(),
-            UserErrorPresentation::Notify
-        );
-
-        let notify = BridgeRpcError::custom_notify("Toast alert");
-        assert_eq!(notify.code, "CustomNotify");
-        assert_eq!(notify.message, "Toast alert");
-        assert_eq!(
-            notify.client_presentation("svc", "m"),
-            UserErrorPresentation::Notify
-        );
-        let client_notify = notify.to_client_error("svc", "m");
-        assert_eq!(client_notify, ClientError::CustomNotify("Toast alert".into()));
-        let (wire_key, wire_dict) = decode_wrapped_user_error(&client_notify.to_macho_error_body(6));
-        assert_eq!(wire_key, "CustomNotify");
-        assert_eq!(
-            wire_dict,
-            vec![(PyRep::ascii_bytes("notify"), PyRep::ascii_bytes("Toast alert"))]
-        );
-    }
-
-    #[test]
-    fn client_error_variants_map_totally_without_string_scraping() {
-        let cargo = BridgeRpcError::hold_capacity_error(
-            UserErrorKey::NotEnoughCargoSpace,
-            80.0,
-            15.1234567,
-        );
-        assert_eq!(cargo.code, "NotEnoughCargoSpace");
-        assert_eq!(cargo.message, "volume=80, available=15.123457");
-        assert_eq!(
-            cargo.to_client_error("invbroker", "Add"),
-            ClientError::User {
-                key: UserErrorKey::NotEnoughCargoSpace,
-                args: vec![
-                    ("volume".into(), PyRep::Real(80.0)),
-                    ("available".into(), PyRep::Real(15.123457)),
-                ],
-            }
-        );
-
-        let cargo_typed = BridgeRpcError::user_error_with_args(
-            UserErrorKey::NotEnoughCargoSpace,
-            [
-                ("volume", UserErrorArg::Real(80.0)),
-                ("available", UserErrorArg::Real(15.5)),
-            ],
-        );
-        assert_eq!(cargo_typed.code, "NotEnoughCargoSpace");
-        assert_eq!(cargo_typed.message, "volume=80, available=15.5");
-
-        for cap_key in [
-            UserErrorKey::NotEnoughCargoSpace,
-            UserErrorKey::NotEnoughDroneBaySpace,
-            UserErrorKey::NotEnoughFighterBaySpace,
-            UserErrorKey::NotEnoughSpecialBaySpace,
-            UserErrorKey::NotEnoughSpace,
-        ] {
-            assert!(cap_key.is_capacity_error(), "{cap_key:?} must be capacity error");
-            assert_eq!(
-                cap_key.default_args(),
-                vec![
-                    ("volume".into(), PyRep::Real(0.0)),
-                    ("available".into(), PyRep::Real(0.0)),
-                ]
-            );
-            let fallback = BridgeRpcError::user_error(cap_key.as_str()).to_client_error("invbroker", "Add");
-            assert_eq!(
-                fallback,
-                ClientError::User {
-                    key: cap_key,
-                    args: vec![
-                        ("volume".into(), PyRep::Real(0.0)),
-                        ("available".into(), PyRep::Real(0.0)),
-                    ],
-                }
-            );
-        }
-        assert_eq!(
-            UserErrorKey::NotEnoughChargeSpace.default_args(),
-            vec![
-                ("capacity".into(), PyRep::Real(0.0)),
-                ("volume".into(), PyRep::Real(0.0)),
-            ]
-        );
-        assert_eq!(
-            UserErrorKey::NoSpaceForThat.default_args(),
-            vec![
-                ("itemTypeName".into(), PyRep::Integer(0)),
-                ("itemVolume".into(), PyRep::Real(0.0)),
-                ("volumeAvailable".into(), PyRep::Real(0.0)),
-            ]
-        );
-        assert_eq!(
-            UserErrorKey::NoSpaceForThatOverload.default_args(),
-            vec![
-                ("item".into(), PyRep::Integer(0)),
-                ("maximum".into(), PyRep::Real(0.0)),
-                ("used".into(), PyRep::Real(0.0)),
-            ]
-        );
-        assert_eq!(
-            UserErrorKey::NotEnoughCargoSpaceOverload.default_args(),
-            vec![
-                ("item".into(), PyRep::ascii_bytes("")),
-                ("maximum".into(), PyRep::Real(0.0)),
-                ("used".into(), PyRep::Real(0.0)),
-            ]
-        );
-
-        let no_charges = BridgeRpcError::no_charges_loaded(2410, "Empty weapon");
-        assert_eq!(no_charges.code, "NoChargesLoaded");
-        let (nc_key, nc_dict) =
-            decode_wrapped_user_error(&no_charges.to_client_error("dogmaIM", "Activate").to_macho_error_body(6));
-        assert_eq!(nc_key, "NoCharges");
-        assert_eq!(
-            nc_dict,
-            vec![(
-                PyRep::ascii_bytes("launcher"),
-                PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(2410)]),
-            )]
-        );
-
-        let docking_denied =
-            BridgeRpcError::docking_request_denied(UI_LABEL_SHIP_TOO_LARGE, "Too big");
-        let (dd_key, dd_dict) = decode_wrapped_user_error(
-            &docking_denied
-                .to_client_error("station", "Dock")
-                .to_macho_error_body(6),
-        );
-        assert_eq!(dd_key, "DockingRequestDenied");
-        assert_eq!(
-            dd_dict,
-            vec![(
-                PyRep::ascii_bytes("reason"),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(101),
-                    PyRep::String(UI_LABEL_SHIP_TOO_LARGE.into()),
-                ]),
-            )]
-        );
-
-        let closed_gate = BridgeRpcError::gate_closed(50001234);
-        assert_eq!(
-            closed_gate.client_presentation("beyonce", "CmdStargateJump"),
-            UserErrorPresentation::Modal
-        );
-        let (gc_key, gc_dict) = decode_wrapped_user_error(
-            &closed_gate
-                .to_client_error("beyonce", "CmdStargateJump")
-                .to_macho_error_body(6),
-        );
-        assert_eq!(gc_key, "CustomInfo");
-        assert_eq!(
-            gc_dict,
-            vec![(
-                PyRep::ascii_bytes("info"),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(101),
-                    PyRep::String(UI_LABEL_GATE_CLOSED.into()),
-                ]),
-            )]
-        );
-
-        assert_eq!(
-            UserErrorKey::NotCloseEnoughToJump.presentation(),
-            UserErrorPresentation::Notify
-        );
-        let not_close = BridgeRpcError::not_close_enough_to_jump(2_600.0, 16_691.0, 16_591.0, 2_500.0);
-        assert_eq!(
-            not_close.client_presentation("beyonce", "CmdStargateJump"),
-            UserErrorPresentation::Notify
-        );
-        let (ncj_key, ncj_dict) = decode_wrapped_user_error(
-            &not_close
-                .to_client_error("beyonce", "CmdStargateJump")
-                .to_macho_error_body(6),
-        );
-        assert_eq!(ncj_key, "NotCloseEnoughToJump");
-        assert_eq!(
-            ncj_dict,
-            vec![(PyRep::ascii_bytes("maxdist"), PyRep::Integer(2_500))]
-        );
-
-        let too_far = BridgeRpcError::target_out_of_range("Guristas Scout", 484, 42_500.5, "Too far");
-        assert_eq!(too_far.code, "TargetOutOfRange");
-        let (tf_key, tf_dict) = decode_wrapped_user_error(
-            &too_far
-                .to_client_error("dogmaIM", "Activate")
-                .to_macho_error_body(6),
-        );
-        assert_eq!(tf_key, "TargetTooFar");
-        assert!(tf_dict.contains(&(PyRep::ascii_bytes("targetname"), PyRep::ascii_bytes("Guristas Scout"))));
-        assert!(tf_dict.contains(&(PyRep::ascii_bytes("module"), PyRep::Integer(484))));
-        assert!(tf_dict.contains(&(PyRep::ascii_bytes("distance"), PyRep::Real(42_500.5))));
-        let orders = BridgeRpcError::max_open_orders_reached(5, 5);
-        assert_eq!(orders.code, "MaxOpenOrdersReached");
-        assert_eq!(
-            orders.to_client_error("marketProxy", "PlaceBuyOrder"),
-            ClientError::User {
-                key: UserErrorKey::MarketExceededOrderCount,
-                args: vec![
-                    ("curCnt".into(), PyRep::Integer(5)),
-                    ("maxCnt".into(), PyRep::Integer(5)),
-                ],
-            }
-        );
-
-        let custom = BridgeRpcError::custom_info("Info message");
-        assert_eq!(
-            custom.to_client_error("svc", "m"),
-            ClientError::CustomInfo("Info message".into())
-        );
-
-        let unimpl = ClientError::Unimplemented {
-            service: "insuranceSvc".into(),
-            method: "InsureShip".into(),
-        };
-        let body = unimpl.to_macho_error_body(6);
-        let PyRep::Tuple(parts) = body else { panic!() };
-        let PyRep::Tuple(inner) = &parts[2] else { panic!() };
-        let PyRep::Bytes(raw) = &inner[0] else { panic!() };
-        let PyRep::ObjectEx { header, .. } = marshal::decode(raw).unwrap() else {
-            panic!()
-        };
-        let PyRep::Tuple(h) = *header else { panic!() };
-        assert_eq!(h[0], PyRep::Token("exceptions.RuntimeError".into()));
-    }
-
-    #[test]
-    fn bridge_rpc_error_carries_client_error_by_value_across_serde_without_collisions() {
-        let skill_a = BridgeRpcError::user_error_with_args(
-            UserErrorKey::SkillMissing,
-            [("typeID", UserErrorArg::Int(3300))],
-        );
-        let skill_b = BridgeRpcError::user_error_with_args(
-            UserErrorKey::SkillMissing,
-            [("typeID", UserErrorArg::Int(3436))],
-        );
-        let skill_empty = BridgeRpcError::from_user_key(UserErrorKey::SkillMissing);
-        assert_eq!(
-            skill_a.to_client_error("skillMgr2", "InjectSkillpoints"),
-            ClientError::User {
-                key: UserErrorKey::SkillMissing,
-                args: vec![("typeID".into(), PyRep::Integer(3300))],
-            }
-        );
-        assert_eq!(
-            skill_b.to_client_error("skillMgr2", "InjectSkillpoints"),
-            ClientError::User {
-                key: UserErrorKey::SkillMissing,
-                args: vec![("typeID".into(), PyRep::Integer(3436))],
-            }
-        );
-        assert_eq!(
-            skill_empty.to_client_error("skillMgr2", "InjectSkillpoints"),
-            ClientError::User {
-                key: UserErrorKey::SkillMissing,
-                args: Vec::new(),
-            }
-        );
-
-        let env = crate::BridgeEnvelope::RpcResponse {
-            req_id: 42,
-            result: Err(skill_a.clone()),
-        };
-        let wire = env.to_wire_bytes().expect("wire encode");
-        let decoded = crate::BridgeEnvelope::from_wire_bytes(&wire).expect("wire decode");
-        assert_eq!(decoded, env);
-
-        let untyped = BridgeRpcError::user_error("CustomLegacyCode");
-        let json = serde_json::to_string(&untyped).expect("json encode");
-        assert!(
-            !json.contains("client_error"),
-            "None client_error must be omitted from JSON: {json}"
-        );
-        let parsed: BridgeRpcError =
-            serde_json::from_str(r#"{"code":"CustomLegacyCode","message":"CustomLegacyCode"}"#)
-                .expect("legacy json decode");
-        assert_eq!(parsed, untyped);
-
-        assert!(
-            UserErrorKey::InsureShipFailedSingleContract
-                .default_args()
-                .is_empty(),
-            "InsureShipFailedSingleContract default_args must not emit a hardcoded character ID"
-        );
-    }
-
-    #[test]
-    fn gh1082_targeting_and_module_activation_user_error_keys_have_v24_dialog_ids() {
-        let expected = [
-            (UserErrorKey::TargetNotLocked, "TargetNotLocked", 1627),
-            (
-                UserErrorKey::TargetingAptitudeAlreadyFullyUtilized,
-                "TargetingAptitudeAlreadyFullyUtilized",
-                1634,
-            ),
-            (
-                UserErrorKey::TargetingSystemsAlreadyFullyUtilized,
-                "TargetingSystemsAlreadyFullyUtilized",
-                1636,
-            ),
-            (
-                UserErrorKey::TargetingSystemsBeingJammed,
-                "TargetingSystemsBeingJammed",
-                1637,
-            ),
-            (UserErrorKey::EffectAlreadyActive2, "EffectAlreadyActive2", 3252),
-        ];
-        for (key, key_str, dialog_id) in expected {
-            assert_eq!(key.as_str(), key_str);
-            assert_eq!(UserErrorKey::from_code(key_str), Some(key));
-            assert_eq!(key.v24_dialog_id(), Some(dialog_id));
-            let err = BridgeRpcError::from_user_key(key);
-            assert_eq!(
-                err.to_client_error("dogmaIM", "Activate"),
-                ClientError::User {
-                    key,
-                    args: Vec::new(),
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn warp_too_short_and_destination_gone_decode_as_v24_notify_errors() {
-        assert_eq!(UserErrorKey::ALL.len(), 99);
-        let expected = [
-            (UserErrorKey::WarpTooShort, "WarpTooShort", 3435),
-            (UserErrorKey::WarpDestinationGone, "WarpDestinationGone", 1679),
-        ];
-        for (key, wire_name, dialog_id) in expected {
-            assert_eq!(key.as_str(), wire_name);
-            assert_eq!(UserErrorKey::from_code(wire_name), Some(key));
-            assert_eq!(key.v24_dialog_id(), Some(dialog_id));
-            assert_eq!(key.v24_dialog_type(), Some(3));
-            assert_eq!(key.presentation(), UserErrorPresentation::Notify);
-            assert!(key.default_args().is_empty());
-
-            let client_err = ClientError::user(key);
-            assert_eq!(client_err.presentation(), UserErrorPresentation::Notify);
-            let (decoded_key, decoded_dict) =
-                decode_wrapped_user_error(&client_err.to_macho_error_body(6));
-            assert_eq!(decoded_key, wire_name);
-            assert!(decoded_dict.is_empty());
-        }
-
-        let warp_short_helper = BridgeRpcError::warp_distance_too_short(
-            "Warp vector distance 1000.0 m is below minimum 150,000 m",
-        );
-        assert_eq!(warp_short_helper.code, "WarpDistanceTooShort");
-        assert_eq!(
-            warp_short_helper.client_presentation("beyonce", "CmdWarpToStuff"),
-            UserErrorPresentation::Notify
-        );
-        assert_eq!(
-            warp_short_helper.to_client_error("beyonce", "CmdWarpToStuff"),
-            ClientError::user(UserErrorKey::WarpTooShort)
-        );
-
-        for (code, expected_key, expected_wire) in [
-            ("WarpDistanceTooShort", UserErrorKey::WarpTooShort, "WarpTooShort"),
-            ("WarpTooShort", UserErrorKey::WarpTooShort, "WarpTooShort"),
-            (
-                "InvalidWarpDestination",
-                UserErrorKey::WarpDestinationGone,
-                "WarpDestinationGone",
-            ),
-            (
-                "WarpDestinationGone",
-                UserErrorKey::WarpDestinationGone,
-                "WarpDestinationGone",
-            ),
-        ] {
-            let err = BridgeRpcError {
-                code: code.into(),
-                message: "cannot warp".into(),
-                client_error: None,
-            };
-            assert_eq!(
-                err.client_presentation("beyonce", "CmdWarpToStuff"),
-                UserErrorPresentation::Notify
-            );
-            let client_err = err.to_client_error("beyonce", "CmdWarpToStuff");
-            assert_eq!(client_err, ClientError::user(expected_key));
-            let (decoded_key, decoded_dict) =
-                decode_wrapped_user_error(&client_err.to_macho_error_body(6));
-            assert_eq!(decoded_key, expected_wire);
-            assert!(decoded_dict.is_empty());
-        }
-    }
-
-    #[test]
-    fn bound_ownership_and_auth_denied_encode_as_unmacho_destination() {
-        for code in ["BoundObjectOwnershipViolation", "BindAuthorizationDenied"] {
-            let err = BridgeRpcError {
-                code: code.into(),
-                message: "stale station ship moniker".into(),
-                client_error: None,
-            };
-            assert_eq!(err.code, code);
-            let client_err = err.to_client_error("ship", "MachoBindObject");
-            assert_eq!(
-                client_err,
-                ClientError::SessionMismatch(format!("{code}: stale station ship moniker"))
-            );
-            assert_eq!(client_err.presentation(), UserErrorPresentation::Modal);
-            let (decoded_key, decoded_dict) =
-                decode_wrapped_user_error(&client_err.to_macho_error_body(6));
-            assert_eq!(decoded_key, "UnMachoDestination");
-            assert_ne!(decoded_key, "CustomInfo");
-            assert_eq!(decoded_dict[0].0.as_str(), Some("info"));
-            assert_eq!(
-                decoded_dict[0].1.as_str(),
-                Some(format!("{code}: stale station ship moniker").as_str())
-            );
-        }
-    }
-
-    #[test]
-    fn item_qty_checked_construction_arithmetic_narrowing_and_serde() {
-        assert_eq!(ItemQty::MIN.get(), 1);
-        assert_eq!(ItemQty::ONE.as_i64(), 1);
-        assert_eq!(ItemQty::STACK_MAX.get(), i64::from(i32::MAX));
-        assert_eq!(ItemQty::MAX.get(), i64::MAX);
-
-        assert_eq!(ItemQty::try_from_i64(0), Err(ItemQtyError::NonPositive(0)));
-        assert_eq!(ItemQty::try_from_i64(-7), Err(ItemQtyError::NonPositive(-7)));
-        assert_eq!(
-            ItemQty::try_from_i64(i64::MIN),
-            Err(ItemQtyError::NonPositive(i64::MIN))
-        );
-        assert_eq!(ItemQty::try_from_u64(0), Err(ItemQtyError::Zero));
-        let over_signed = u64::try_from(i64::MAX).unwrap() + 1;
-        assert_eq!(
-            ItemQty::try_from_u64(over_signed),
-            Err(ItemQtyError::ExceedsMax(over_signed))
-        );
-        assert_eq!(ItemQty::try_from_i32(0), Err(ItemQtyError::NonPositive(0)));
-        assert_eq!(ItemQty::try_from_u32(0), Err(ItemQtyError::Zero));
-        assert_eq!(ItemQty::try_from_usize(0), Err(ItemQtyError::Zero));
-
-        let stack_max = ItemQty::try_from_i32(i32::MAX).expect("i32::MAX valid");
-        assert_eq!(stack_max, ItemQty::STACK_MAX);
-        assert_eq!(stack_max.try_into_stack_i32(), Ok(i32::MAX));
-        assert_eq!(i32::try_from(stack_max), Ok(i32::MAX));
-
-        let above_stack = stack_max.checked_add(ItemQty::ONE).expect("i32::MAX + 1 fits i64");
-        assert_eq!(
-            above_stack.try_into_stack_i32(),
-            Err(ItemQtyError::ExceedsStackMax(i64::from(i32::MAX) + 1))
-        );
-
-        let u32_max_qty = ItemQty::try_from_u32(u32::MAX).expect("u32::MAX fits i64");
-        assert_eq!(u32_max_qty.try_into_u32(), Ok(u32::MAX));
-        let above_u32 = u32_max_qty.checked_add(ItemQty::ONE).unwrap();
-        assert_eq!(above_u32.try_into_u32(), Err(ItemQtyError::Overflow));
-
-        assert_eq!(
-            ItemQty::MAX.checked_add(ItemQty::ONE),
-            Err(ItemQtyError::Overflow)
-        );
-        let five = ItemQty::try_from(5_i64).unwrap();
-        let two = ItemQty::try_from(2_u64).unwrap();
-        assert_eq!(five.checked_sub(two), Some(ItemQty::try_from(3_i32).unwrap()));
-        assert_eq!(two.checked_sub(two), None);
-        assert_eq!(two.checked_sub(five), None);
-
-        assert_eq!(five.checked_mul(two), Ok(ItemQty::try_from(10_u32).unwrap()));
-        assert_eq!(
-            ItemQty::MAX.checked_mul(two),
-            Err(ItemQtyError::Overflow)
-        );
-        assert_eq!(five.checked_mul_u64(0), Err(ItemQtyError::Zero));
-        assert_eq!(five.checked_mul_u64(4), Ok(ItemQty::try_from(20_i64).unwrap()));
-        assert_eq!(u64::from(five), 5_u64);
-        assert_eq!(i64::from(five), 5_i64);
-        assert_eq!(five.to_string(), "5");
-        assert_eq!(UserErrorArg::from(five), UserErrorArg::Int(5));
-
-        let json = serde_json::to_string(&five).expect("serialize ItemQty");
-        assert_eq!(json, "5");
-        let rt: ItemQty = serde_json::from_str(&json).expect("deserialize ItemQty");
-        assert_eq!(rt, five);
-        assert!(serde_json::from_str::<ItemQty>("0").is_err());
-        assert!(serde_json::from_str::<ItemQty>("-3").is_err());
-
-        let custom_err = ItemQtyError::ExceedsStackMax(i64::from(i32::MAX) + 1)
-            .into_rpc_error("InvalidCommodityQuantity");
-        assert_eq!(custom_err.code, "InvalidCommodityQuantity");
-        assert!(matches!(
-            custom_err.client_error.as_deref(),
-            Some(ClientError::CustomInfo(_))
-        ));
-
-        let default_rpc = ItemQtyError::Zero.into_rpc_error("InvalidQuantity");
-        assert_eq!(default_rpc.code, "InvalidQuantity");
-        let helper_rpc = BridgeRpcError::invalid_quantity("bad qty");
-        assert_eq!(helper_rpc.code, "InvalidQuantity");
-        assert_eq!(helper_rpc.message, "bad qty");
-    }
-}
+#[path = "client_error_tests.rs"]
+mod tests;

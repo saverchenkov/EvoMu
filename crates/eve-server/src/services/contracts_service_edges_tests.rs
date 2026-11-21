@@ -813,3 +813,36 @@ fn contract_notification_tracker_item_changed_and_location_ids_pin_all_fields() 
         assert_eq!(super::contract_location_ids(&ctx.sde, snap, 999_999_999), (0, 0));
     });
 }
+
+#[test]
+fn gh1195_contract_rejections_preserve_typed_errors_and_facts() {
+    let (ctx, mut issuer_sess, issuer_id, mut acceptor_sess, acceptor_id, _, _, station_id, dest_station_id) = setup_sandbox();
+    let kw = HashMap::new();
+    let item_id = 710_999_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(item_id, make_fighter_item(item_id, 34, issuer_id, station_id, InventoryFlag::Hangar, 5));
+    });
+    let cid = created_cid(&call_contract(&ctx, &mut issuer_sess, "CreateContract", vec![PyRep::keyval([
+        ("contractType", PyRep::Integer(1)), ("availability", PyRep::Integer(1)),
+        ("assigneeID", PyRep::Integer(acceptor_id)), ("price", PyRep::Real(0.0)),
+        ("reward", PyRep::Real(100_000.0)), ("itemList", PyRep::List(vec![PyRep::Integer(item_id)])),
+        ("title", PyRep::String("GH1195 Contract".into())),
+    ])], &kw).unwrap()).unwrap();
+
+    acceptor_sess.station_id = Some(dest_station_id);
+    let dock_err = call_contract(&ctx, &mut acceptor_sess, "AcceptContract", vec![PyRep::Integer(cid), PyRep::Bool(false)], &kw).unwrap_err();
+    assert_eq!(dock_err.code, "MustBeDockedAtStartStation");
+    assert_eq!(dock_err.rejection_facts(), Some(&eve_proto::RejectionFacts::MustBeDockedAtStartStation {
+        contract_id: Some(cid), required_station_id: station_id, caller_station_id: Some(dest_station_id),
+    }));
+    assert_eq!(dock_err.to_client_error("contractProxy", "AcceptContract").as_user_error().map(|(k, _)| k), Some(eve_proto::UserErrorKey::MustBeDocked));
+
+    acceptor_sess.station_id = Some(station_id);
+    call_contract(&ctx, &mut acceptor_sess, "RejectContract", vec![PyRep::Integer(cid)], &kw).unwrap();
+    let state_err = call_contract(&ctx, &mut acceptor_sess, "AcceptContract", vec![PyRep::Integer(cid), PyRep::Bool(false)], &kw).unwrap_err();
+    assert_eq!(state_err.code, "InvalidContractState");
+    assert_eq!(state_err.rejection_facts(), Some(&eve_proto::RejectionFacts::InvalidContractState {
+        contract_id: cid, expected_state: "Outstanding".to_owned(), actual_state: "Rejected".to_owned(),
+    }));
+    assert_eq!(state_err.to_client_error("contractProxy", "AcceptContract").as_user_error().map(|(k, _)| k), Some(eve_proto::UserErrorKey::ConContractNotOutstanding));
+}
