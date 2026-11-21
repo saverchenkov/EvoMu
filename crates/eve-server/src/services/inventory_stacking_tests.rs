@@ -5433,3 +5433,473 @@ fn bf_1180_undocked_caller_cannot_list_docked_foreign_ship_or_nested_bay() {
         );
     });
 }
+
+fn grant_tayra_cargo_skills(ctx: &ServerContext, char_id: i64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk_map = snap.skills.entry(char_id).or_default();
+        for sk in [3327_u32, 3342, 3392, 3394] {
+            sk_map.insert(
+                sk,
+                eve_db::TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+}
+
+fn ship_attr_changes_for(
+    notifs: &[crate::router::PendingMachoNotification],
+    ship_id: i64,
+    attr_id: u16,
+) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    let target_attr = i64::from(attr_id);
+    for n in notifs.iter().filter(|n| n.event == "OnModuleAttributeChanges") {
+        let Some(PyRep::List(entries)) = n.args.first() else {
+            continue;
+        };
+        for entry in entries {
+            let PyRep::Tuple(t) = entry else {
+                continue;
+            };
+            if t.get(2).and_then(PyRep::as_i64) == Some(ship_id)
+                && t.get(3).and_then(PyRep::as_i64) == Some(target_attr)
+            {
+                if let (Some(new_val), Some(old_val)) = (
+                    t.get(5).and_then(PyRep::as_f64),
+                    t.get(6).and_then(PyRep::as_f64),
+                ) {
+                    out.push((new_val, old_val));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn assert_has_ship_attr_delta(
+    notifs: &[crate::router::PendingMachoNotification],
+    ship_id: i64,
+    attr_id: u16,
+    expected_new: f64,
+    expected_old: f64,
+    label: &str,
+) {
+    let changes = ship_attr_changes_for(notifs, ship_id, attr_id);
+    assert!(
+        changes
+            .iter()
+            .any(|&(new_v, old_v)| (new_v - expected_new).abs() < 1e-6 && (old_v - expected_old).abs() < 1e-6),
+        "{label}: expected attr {attr_id} delta {expected_old} -> {expected_new} on ship {ship_id}, got {changes:?} (notifs={notifs:?})"
+    );
+}
+
+#[tokio::test]
+async fn gh1545_tayra_cargohold_fit_unfit_syncs_godma_capacity_at_zero_cpu_pg() {
+    let ctx = test_ctx();
+    let char_id = 90_000_945_i64;
+    let corp_id = 98_000_002_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 1_000_945_001_i64;
+    let cargo_trit_id = 1_000_945_002_i64;
+    let extra_trit_id = 1_000_945_003_i64;
+    let astrahus_id = 1_000_945_004_i64;
+    let exp_auto_id = 1_000_945_005_i64;
+    let exp_add_id = 1_000_945_006_i64;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), 30_000_142, ship_id);
+    // Tayra (649) with Caldari Hauler V (3342=5): 7300 * 1.25 = 9125.0 m3 cargo; 8500.0 m3 used -> 625.0 m3 free.
+    insert_item(&ctx, ship_id, 649, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, cargo_trit_id, 34, char_id, ship_id, InventoryFlag::Cargo, 850_000, false);
+    insert_item(&ctx, extra_trit_id, 34, char_id, station_id, InventoryFlag::Hangar, 100, false);
+    insert_item(&ctx, astrahus_id, 35832, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    insert_item(&ctx, exp_auto_id, 1319, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    insert_item(&ctx, exp_add_id, 1319, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    grant_tayra_cargo_skills(&ctx, char_id);
+
+    let kw = HashMap::new();
+    let mut offline_kw = HashMap::new();
+    offline_kw.insert("online".to_string(), PyRep::Bool(false));
+    let mut sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
+    let hangar_bound = make_bound(station_id, char_id);
+    let ship_bound = make_bound(ship_id, char_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Negative check: fitting Expanded Cargohold II (1319) explicitly offline must not emit CAPACITY (38) delta,
+    //    leaving 625.0 m3 free when attempting to move Astrahus (35832, 8000 m3) into Cargo.
+    let add_off = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(exp_add_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::LoSlot0 as i64),
+        ],
+        &offline_kw,
+    )
+    .await
+    .expect("handled")
+    .expect("offline Expanded Cargohold II fit");
+    let fitted_off_id = add_off.dict_get("itemID").and_then(PyRep::as_i64).unwrap();
+    let off_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        ship_attr_changes_for(&off_notifs, ship_id, eve_sde::attr_ids::CAPACITY).is_empty(),
+        "offline Expanded Cargohold II must not change CAPACITY (38): {off_notifs:?}"
+    );
+    let off_cargo_err = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(astrahus_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(off_cargo_err.code, "NotEnoughCargoSpace");
+    assert!(
+        off_cargo_err.message.contains("available=625"),
+        "expected 625 m3 free offline, got: {}",
+        off_cargo_err.message
+    );
+    crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        Some(&hangar_bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(fitted_off_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("unfit offline module");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 2. MultiAdd flagAutoFit of Expanded Cargohold II (1319, 0 CPU / 0 PG) must still emit
+    //    OnModuleAttributeChanges for CAPACITY (38): 9125.0 -> 11634.375, matching server available=3134.375.
+    let fit_res = handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(exp_auto_id)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .await
+    .expect("MultiAdd autofit Expanded Cargohold II");
+    let PyRep::List(fitted_items) = fit_res.dict_get("items").unwrap() else {
+        panic!("expected items list");
+    };
+    let fitted_auto_id = fitted_items[0].as_i64().unwrap();
+    let auto_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_has_ship_attr_delta(
+        &auto_notifs,
+        ship_id,
+        eve_sde::attr_ids::CAPACITY,
+        11_634.375,
+        9_125.0,
+        "MultiAdd autofit Expanded Cargohold II",
+    );
+
+    let on_cargo_err = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(astrahus_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(on_cargo_err.code, "NotEnoughCargoSpace");
+    assert!(
+        on_cargo_err.message.contains("available=3134.375"),
+        "expected 3134.375 m3 free online, got: {}",
+        on_cargo_err.message
+    );
+
+    // 3. Negative check: ordinary cargo move into Cargo does not emit ship CAPACITY changes.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(extra_trit_id)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("move ordinary cargo");
+    let cargo_move_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        ship_attr_changes_for(&cargo_move_notifs, ship_id, eve_sde::attr_ids::CAPACITY).is_empty(),
+        "ordinary Cargo move must not emit ship CAPACITY change: {cargo_move_notifs:?}"
+    );
+
+    // 4. Unfitting via MultiAdd back to Hangar emits CAPACITY drop 11634.375 -> 9125.0.
+    handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&hangar_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(fitted_auto_id)]),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("MultiAdd unfit Expanded Cargohold II");
+    let multi_unfit_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_has_ship_attr_delta(
+        &multi_unfit_notifs,
+        ship_id,
+        eve_sde::attr_ids::CAPACITY,
+        9_125.0,
+        11_634.375,
+        "MultiAdd unfit Expanded Cargohold II",
+    );
+
+    // 5. Fitting & unfitting online Expanded Cargohold II via invbroker.Add also syncs CAPACITY.
+    let add_on = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(fitted_off_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::LoSlot0 as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("Add online Expanded Cargohold II");
+    let fitted_add_on_id = add_on.dict_get("itemID").and_then(PyRep::as_i64).unwrap();
+    let add_on_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_has_ship_attr_delta(
+        &add_on_notifs,
+        ship_id,
+        eve_sde::attr_ids::CAPACITY,
+        11_634.375,
+        9_125.0,
+        "invbroker.Add fit Expanded Cargohold II",
+    );
+
+    crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        Some(&hangar_bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(fitted_add_on_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("Add unfit Expanded Cargohold II");
+    let add_unfit_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_has_ship_attr_delta(
+        &add_unfit_notifs,
+        ship_id,
+        eve_sde::attr_ids::CAPACITY,
+        9_125.0,
+        11_634.375,
+        "invbroker.Add unfit Expanded Cargohold II",
+    );
+}
+
+#[tokio::test]
+async fn gh1545_destroy_fitting_gm_fit_strip_and_saved_apply_sync_capacity() {
+    let ctx = test_ctx();
+    let char_id = 90_000_946_i64;
+    let corp_id = 98_000_002_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 1_000_946_001_i64;
+    let exp_id = 1_000_946_002_i64;
+    let rig_id = 1_000_946_003_i64;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), 30_000_142, ship_id);
+    insert_item(&ctx, ship_id, 649, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, exp_id, 1319, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    // Medium Cargohold Optimization I (31119): +15% capacity -> 9125.0 * 1.15 = 10493.75 m3.
+    insert_item(&ctx, rig_id, 31119, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    grant_tayra_cargo_skills(&ctx, char_id);
+
+    let kw = HashMap::new();
+    let mut sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
+    let ship_bound = make_bound(ship_id, char_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Saved-fit apply (validate_and_apply_fitting) emits CAPACITY 9125.0 -> 11634.375.
+    let (fitted_count, missing, _) = crate::services::fitting_saved_apply::validate_and_apply_fitting(
+        &ctx,
+        char_id,
+        station_id,
+        &[ship_id],
+        Some(649),
+        &[(1319, InventoryFlag::LoSlot0, 1)],
+        true,
+    )
+    .expect("validate_and_apply_fitting succeeds");
+    assert_eq!(fitted_count, 1);
+    assert!(missing.is_empty());
+    let apply_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_has_ship_attr_delta(
+        &apply_notifs,
+        ship_id,
+        eve_sde::attr_ids::CAPACITY,
+        11_634.375,
+        9_125.0,
+        "validate_and_apply_fitting Expanded Cargohold II",
+    );
+
+    // 2. StripFitting emits CAPACITY 11634.375 -> 9125.0; repeated StripFitting emits nothing.
+    crate::services::character_skill_ops::handle(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "StripFitting",
+        &[PyRep::Integer(ship_id)],
+        &kw,
+    )
+    .expect("matched")
+    .expect("StripFitting succeeds");
+    let strip_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_has_ship_attr_delta(
+        &strip_notifs,
+        ship_id,
+        eve_sde::attr_ids::CAPACITY,
+        9_125.0,
+        11_634.375,
+        "StripFitting Expanded Cargohold II",
+    );
+
+    crate::services::character_skill_ops::handle(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "StripFitting",
+        &[PyRep::Integer(ship_id)],
+        &kw,
+    )
+    .expect("matched")
+    .expect("empty StripFitting succeeds");
+    let empty_strip_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !empty_strip_notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"),
+        "no-op StripFitting must not emit OnModuleAttributeChanges: {empty_strip_notifs:?}"
+    );
+
+    // 3. GM `/fit 1319` emits CAPACITY 9125.0 -> 11634.375.
+    crate::services::character_skills::character_gm_tools::handle_gm_slash_ext(&ctx, &mut sess, char_id, "/fit 1319")
+        .await
+        .expect("handled")
+        .expect("/fit 1319 succeeds");
+    let gm_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_has_ship_attr_delta(
+        &gm_notifs,
+        ship_id,
+        eve_sde::attr_ids::CAPACITY,
+        11_634.375,
+        9_125.0,
+        "GM /fit 1319",
+    );
+
+    crate::services::character_skill_ops::handle(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "StripFitting",
+        &[PyRep::Integer(ship_id)],
+        &kw,
+    )
+    .expect("matched")
+    .expect("reset StripFitting");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 4. Fitting Medium Cargohold Optimization I (31119) + DestroyFitting syncs 9125.0 -> 10493.75 -> 9125.0.
+    let rig_fit = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(rig_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::RigSlot0 as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("fit Medium Cargohold Optimization I");
+    let fitted_rig_id = rig_fit.dict_get("itemID").and_then(PyRep::as_i64).unwrap();
+    let rig_fit_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_has_ship_attr_delta(
+        &rig_fit_notifs,
+        ship_id,
+        eve_sde::attr_ids::CAPACITY,
+        10_493.75,
+        9_125.0,
+        "fit Medium Cargohold Optimization I",
+    );
+
+    crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "DestroyFitting",
+        &[PyRep::Integer(fitted_rig_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("DestroyFitting rig");
+    let destroy_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_has_ship_attr_delta(
+        &destroy_notifs,
+        ship_id,
+        eve_sde::attr_ids::CAPACITY,
+        9_125.0,
+        10_493.75,
+        "DestroyFitting Medium Cargohold Optimization I",
+    );
+}

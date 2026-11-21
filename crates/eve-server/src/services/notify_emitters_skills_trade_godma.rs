@@ -41,7 +41,23 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
-/// Clears the Alpha injector ready notification latch when an Alpha injector is consumed.
+const SHIP_ATTR_DELTA_EPS: f64 = 1e-9;
+
+fn resolved_ship_attr_val(
+    ctx: &ServerContext,
+    attrs: &BTreeMap<u16, f64>,
+    attr_id: u16,
+) -> f64 {
+    attrs.get(&attr_id).copied().unwrap_or_else(|| {
+        ctx.sde
+            .attributes
+            .get(&attr_id)
+            .map(|a| a.default_value)
+            .unwrap_or(0.0)
+    })
+}
+
+/// Evaluates and snapshots all ship attributes (including hold capacities and fitting loads).
 pub(crate) fn snapshot_ship_fitting_attrs(
     ctx: &ServerContext,
     fit: &eve_dogma::ShipFittingEngine,
@@ -54,12 +70,52 @@ pub(crate) fn snapshot_ship_fitting_attrs(
         .copied()
         .chain(eval_ctx.ship.modifiers.iter().map(|m| m.target_attribute_id))
         .collect();
-    attr_ids_set.insert(eve_sde::attr_ids::CPU_LOAD);
-    attr_ids_set.insert(eve_sde::attr_ids::POWER_LOAD);
+    for attr_id in [
+        eve_sde::attr_ids::CPU_LOAD,
+        eve_sde::attr_ids::POWER_LOAD,
+        eve_sde::attr_ids::CAPACITY,
+        eve_sde::attr_ids::DRONE_CAPACITY,
+        908, // shipMaintenanceBayCapacity
+        912, // fleetHangarCapacity
+    ] {
+        attr_ids_set.insert(attr_id);
+    }
     attr_ids_set
         .into_iter()
         .map(|attr_id| (attr_id, eval_ctx.ship.get_attribute(attr_id, &ctx.sde)))
         .collect()
+}
+
+/// Rebuilds `ship_id`'s fitting and snapshots its ship attributes when accessible.
+pub(crate) fn snapshot_ship_fitting_attrs_for_ship(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+) -> Option<BTreeMap<u16, f64>> {
+    ctx.get_or_rebuild_ship_fitting(char_id, ship_id)
+        .ok()
+        .map(|fit| snapshot_ship_fitting_attrs(ctx, &fit))
+}
+
+/// Returns true if any ship attribute differs by more than [`SHIP_ATTR_DELTA_EPS`].
+pub(crate) fn ship_fitting_attrs_have_delta(
+    ctx: &ServerContext,
+    before: &BTreeMap<u16, f64>,
+    after: &BTreeMap<u16, f64>,
+) -> bool {
+    before
+        .keys()
+        .chain(after.keys())
+        .copied()
+        .collect::<std::collections::BTreeSet<u16>>()
+        .into_iter()
+        .any(|attr_id| {
+            let old_val = resolved_ship_attr_val(ctx, before, attr_id);
+            let new_val = resolved_ship_attr_val(ctx, after, attr_id);
+            old_val.is_finite()
+                && new_val.is_finite()
+                && (new_val - old_val).abs() > SHIP_ATTR_DELTA_EPS
+        })
 }
 
 pub(crate) fn emit_ship_fitting_attr_changes(
@@ -69,16 +125,19 @@ pub(crate) fn emit_ship_fitting_attr_changes(
     before: &BTreeMap<u16, f64>,
     after: &BTreeMap<u16, f64>,
 ) {
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
     let mut keys: std::collections::BTreeSet<u16> = before.keys().copied().collect();
     keys.extend(after.keys().copied());
     keys.insert(eve_sde::attr_ids::CPU_LOAD);
     keys.insert(eve_sde::attr_ids::POWER_LOAD);
     let mut changes = Vec::new();
     for attr_id in keys {
-        let old_val = before.get(&attr_id).copied().unwrap_or(0.0);
-        let new_val = after.get(&attr_id).copied().unwrap_or(0.0);
-        if (new_val - old_val).abs() > 1e-9
+        let old_val = resolved_ship_attr_val(ctx, before, attr_id);
+        let new_val = resolved_ship_attr_val(ctx, after, attr_id);
+        if !old_val.is_finite() || !new_val.is_finite() {
+            continue;
+        }
+        if (new_val - old_val).abs() > SHIP_ATTR_DELTA_EPS
             || matches!(
                 attr_id,
                 eve_sde::attr_ids::CPU_LOAD | eve_sde::attr_ids::POWER_LOAD
@@ -105,6 +164,45 @@ pub(crate) fn emit_ship_fitting_attr_changes(
         );
     }
 }
+
+/// Diffs `before` against `after_fit` and emits `OnModuleAttributeChanges` for ship deltas.
+pub(crate) fn emit_ship_fitting_attr_changes_from_fit(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    before_opt: Option<&BTreeMap<u16, f64>>,
+    after_fit: &eve_dogma::ShipFittingEngine,
+    only_if_changed: bool,
+) -> Option<BTreeMap<u16, f64>> {
+    let before = before_opt?;
+    let after = snapshot_ship_fitting_attrs(ctx, after_fit);
+    if only_if_changed && !ship_fitting_attrs_have_delta(ctx, before, &after) {
+        return Some(after);
+    }
+    emit_ship_fitting_attr_changes(ctx, char_id, ship_id, before, &after);
+    Some(after)
+}
+
+/// Rebuilds `ship_id`'s fitting, diffs against `before_opt`, and emits `OnModuleAttributeChanges`.
+pub(crate) fn emit_ship_fitting_attr_changes_for_ship(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    before_opt: Option<&BTreeMap<u16, f64>>,
+    only_if_changed: bool,
+) -> Option<BTreeMap<u16, f64>> {
+    before_opt?;
+    let after_fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok()?;
+    emit_ship_fitting_attr_changes_from_fit(
+        ctx,
+        char_id,
+        ship_id,
+        before_opt,
+        &after_fit,
+        only_if_changed,
+    )
+}
+/// Clears the Alpha injector ready notification latch when an Alpha injector is consumed.
 pub fn clear_alpha_avail_notified(snap: &mut WorldStateSnapshot, char_id: i64) {
     snap.kv_mut(eve_db::Ns::AlphaAvailNotified)
         .remove(char_id, "");
