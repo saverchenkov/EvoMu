@@ -362,3 +362,363 @@ async fn reprocessing_quotes_and_reprocess_npc_structure_and_error_paths() {
     assert_eq!(err.code, "InvalidArgument");
     let _ = (DVec3::ZERO, HashMap::<String, PyRep>::new());
 }
+
+#[tokio::test]
+async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
+    use crate::router::{client_wire::ClientWireSession, TestContext};
+    use eve_db::{
+        CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, UpwellStructureRecord,
+        WorldRepository,
+    };
+    use eve_proto::PyRep;
+    use eve_sde::SdeRegistry;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const JITA_STATION_ID: i64 = 60_003_760;
+    const PERIMETER_STATION_ID: i64 = 60_002_956;
+    const JITA_SYSTEM_ID: u32 = 30_000_142;
+    const PERIMETER_SYSTEM_ID: u32 = 30_000_144;
+    const THE_FORGE_REGION_ID: u32 = 10_000_002;
+
+    let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = TestContext::with_sde_and_repository(sde, db).with_rpc_rate_budget_disabled();
+
+    let uid = ctx.db.provision_player_account("reproc1563", "reproc1563-secret");
+    let char_id = 940_001;
+    let other_char_id = 940_002;
+    let corp_id = 98_940_001;
+    let ship_id = 940_500;
+    let prev_struct_id = 1_000_000_940_001;
+    let cur_struct_id = 1_000_000_940_002;
+    let service_mod_id = 940_501;
+    let ore_npc_id = 940_101;
+    let ore_prev_struct_id = 940_102;
+    let ore_cur_struct_id = 940_103;
+    let ore_guard_id = 940_104;
+    let stale_office_id = 940_801;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = char_id;
+        ch.user_id = uid;
+        ch.name = "Jita Reprocessor".into();
+        ch.corporation_id = corp_id;
+        ch.station_id = Some(JITA_STATION_ID);
+        ch.structure_id = None;
+        ch.solar_system_id = JITA_SYSTEM_ID;
+        ch.constellation_id = 20_000_020;
+        ch.region_id = THE_FORGE_REGION_ID;
+        ch.active_ship_id = ship_id;
+        ch.balance = IskCents::from_isk(10_000_000);
+        snap.characters.insert(char_id, ch);
+
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Refining Test Corp".into();
+        corp.ticker = "RF15".into();
+        corp.ceo_id = char_id;
+        snap.corporations.insert(corp_id, corp);
+
+        for (sid, sys_id, name) in [
+            (prev_struct_id, PERIMETER_SYSTEM_ID, "Prev Stale Raitaru"),
+            (cur_struct_id, JITA_SYSTEM_ID, "Current Online Raitaru"),
+        ] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35825,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys_id,
+                    name: name.into(),
+                    state: "ShieldVulnerable".into(),
+                    fuel_blocks: 500,
+                    quantum_core_installed: true,
+                    ..Default::default()
+                },
+            );
+        }
+
+        // Real deployed structures can also exist in `snap.items` in space (`solar_system_id`).
+        snap.items.insert(
+            prev_struct_id,
+            InventoryItemRecord {
+                item_id: prev_struct_id,
+                type_id: 35825,
+                owner_id: corp_id,
+                location_id: PERIMETER_SYSTEM_ID as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            service_mod_id,
+            InventoryItemRecord {
+                item_id: service_mod_id,
+                type_id: 35899,
+                owner_id: corp_id,
+                location_id: cur_struct_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(service_mod_id, true);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+
+        for (oid, loc) in [
+            (ore_npc_id, JITA_STATION_ID),
+            (ore_prev_struct_id, JITA_STATION_ID),
+            (ore_guard_id, JITA_STATION_ID),
+            (ore_cur_struct_id, cur_struct_id),
+        ] {
+            snap.items.insert(
+                oid,
+                InventoryItemRecord {
+                    item_id: oid,
+                    type_id: 1230, // Veldspar
+                    owner_id: char_id,
+                    location_id: loc,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 200,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+
+        snap.items.insert(
+            stale_office_id,
+            InventoryItemRecord {
+                item_id: stale_office_id,
+                type_id: 27,
+                owner_id: corp_id,
+                location_id: PERIMETER_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let kw = HashMap::new();
+    let mut client = ClientWireSession::new(&ctx, char_id as u64);
+    let login_out = client
+        .call_wire(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("reproc1563".into()),
+                PyRep::String("reproc1563-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(login_out.marshal_errors.is_empty());
+    let login_rep = login_out.rpc_result.expect("Login must succeed");
+    assert!(!matches!(login_rep, PyRep::None));
+    let select_out = client
+        .call_wire(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+    assert!(select_out.marshal_errors.is_empty());
+    let select_rep = select_out.rpc_result.expect("SelectCharacterID must succeed");
+    assert!(!matches!(select_rep, PyRep::None));
+    assert_eq!(client.session.station_id, Some(JITA_STATION_ID));
+
+    // 1. Exact #1563 V24 call after undocking from Perimeter (60002956) and redocking at Jita IV-4 (60003760).
+    let wire_out = client
+        .call_wire(
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_npc_id)]),
+                PyRep::Integer(JITA_STATION_ID),
+                PyRep::None,
+                PyRep::Integer(PERIMETER_STATION_ID),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(wire_out.marshal_errors.is_empty());
+    let wire_res = wire_out
+        .rpc_result
+        .expect("stale NPC station Item hangar output location must resolve to current docked station");
+    let PyRep::Tuple(ref tuple_parts) = wire_res else {
+        panic!("expected 2-tuple MachoNet reply, got {wire_res:?}");
+    };
+    assert_eq!(tuple_parts.len(), 2);
+    assert_eq!(tuple_parts[0], PyRep::List(vec![PyRep::Integer(ore_npc_id)]));
+    let PyRep::Dict(ref out_map) = tuple_parts[1] else {
+        panic!("expected outputByTypeID dict, got {:?}", tuple_parts[1]);
+    };
+    let trit_wire_qty = out_map
+        .iter()
+        .find_map(|(k, v)| match (k, v) {
+            (PyRep::Integer(34), PyRep::Integer(q)) => Some(*q),
+            _ => None,
+        })
+        .expect("expected Tritanium (34) output on MachoNet reply");
+    assert!(trit_wire_qty > 0);
+
+    // 2. Stale Upwell structure output hangar -> current NPC station Item hangar.
+    let prev_struct_out = client
+        .call_wire(
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_prev_struct_id)]),
+                PyRep::Integer(JITA_STATION_ID),
+                PyRep::None,
+                PyRep::Integer(prev_struct_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(prev_struct_out.marshal_errors.is_empty());
+    let prev_struct_rep = prev_struct_out
+        .rpc_result
+        .expect("stale Upwell structure Item hangar output location must resolve to current station");
+    assert!(matches!(prev_struct_rep, PyRep::Tuple(_)));
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ore_npc_id));
+        assert!(!snap.items.contains_key(&ore_prev_struct_id));
+        let trit_total_at_jita: i64 = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.type_id == 34
+                    && i.owner_id == char_id
+                    && i.location_id == JITA_STATION_ID
+                    && i.flag == InventoryFlag::Hangar
+            })
+            .map(|i| i64::from(i.quantity))
+            .sum();
+        assert_eq!(trit_total_at_jita, trit_wire_qty * 2);
+        assert!(
+            !snap.items.values().any(|i| i.type_id == 34 && i.location_id == PERIMETER_STATION_ID),
+            "reprocessed minerals must never land in the stale station"
+        );
+        assert!(
+            !snap.items.values().any(|i| i.type_id == 34 && i.location_id == prev_struct_id),
+            "reprocessed minerals must never land in the stale structure"
+        );
+    });
+
+    // 3. Stale NPC station output hangar -> current docked online Upwell structure.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = Some(cur_struct_id);
+        }
+    });
+    ctx.sync_session(&mut client.session);
+    assert_eq!(client.session.structure_id, Some(cur_struct_id));
+    let cur_struct_out = client
+        .call_wire(
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_cur_struct_id)]),
+                PyRep::Integer(cur_struct_id),
+                PyRep::None,
+                PyRep::Integer(PERIMETER_STATION_ID),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(cur_struct_out.marshal_errors.is_empty());
+    let cur_struct_rep = cur_struct_out
+        .rpc_result
+        .expect("stale NPC station Item hangar must resolve to current docked structure hangar");
+    assert!(matches!(cur_struct_rep, PyRep::Tuple(_)));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ore_cur_struct_id));
+        assert!(snap.items.values().any(|i| {
+            i.type_id == 34
+                && i.owner_id == char_id
+                && i.location_id == cur_struct_id
+                && i.flag == InventoryFlag::Hangar
+                && i.quantity > 0
+        }));
+    });
+
+    // Restore Jita character docking for guard assertions.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.structure_id = None;
+        }
+    });
+    ctx.sync_session(&mut client.session);
+    assert_eq!(client.session.station_id, Some(JITA_STATION_ID));
+
+    // 4. Security guards must still reject non-existent stations, mismatched owners, unrented offices, and non-hangar flags.
+    let guard_cases: Vec<(PyRep, i64, InventoryFlag, &str)> = vec![
+        (PyRep::None, 60_999_999, InventoryFlag::Hangar, "InvalidOutputLocation"),
+        (PyRep::Integer(corp_id), PERIMETER_STATION_ID, InventoryFlag::Hangar, "InvalidOutputLocation"),
+        (PyRep::Integer(other_char_id), PERIMETER_STATION_ID, InventoryFlag::Hangar, "OwnershipOrLocationViolation"),
+        (PyRep::None, PERIMETER_STATION_ID, InventoryFlag::CorpSAG1, "InvalidOutputLocation"),
+        (PyRep::None, PERIMETER_STATION_ID, InventoryFlag::Cargo, "InvalidOutputLocation"),
+        (PyRep::None, PERIMETER_STATION_ID, InventoryFlag::HiSlot0, "InvalidOutputLocation"),
+        (PyRep::None, stale_office_id, InventoryFlag::CorpSAG1, "InvalidOutputLocation"),
+    ];
+    for (owner_rep, out_loc, out_flag, expected_code) in guard_cases {
+        let err = client
+            .call_wire(
+                "reprocessingSvc",
+                None,
+                "Reprocess",
+                &[
+                    PyRep::List(vec![PyRep::Integer(ore_guard_id)]),
+                    PyRep::Integer(JITA_STATION_ID),
+                    owner_rep.clone(),
+                    PyRep::Integer(out_loc),
+                    PyRep::Integer(out_flag as i64),
+                ],
+                &kw,
+            )
+            .await
+            .rpc_result
+            .expect_err("negative security output-location guard must still reject");
+        assert_eq!(
+            err.code, expected_code,
+            "unexpected error for ({owner_rep:?}, {out_loc}, {out_flag:?}): {err:?}"
+        );
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&ore_guard_id).map(|i| i.quantity), Some(200));
+    });
+}
