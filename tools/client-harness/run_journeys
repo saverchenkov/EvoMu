@@ -36,11 +36,14 @@ sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 BRIDGE_DIR = os.path.join(REPO_ROOT, "client-bridge")
 if BRIDGE_DIR not in sys.path:
     sys.path.insert(0, BRIDGE_DIR)
 
 import evomu_bridge  # noqa: E402
+import guard_registry  # noqa: E402
 
 DEFAULT_CLIENT_APP = os.path.expanduser(
     "~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app"
@@ -856,6 +859,8 @@ def launch_real_client(client_app, host, macho_port, login, log_path, auto_selec
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["EVOMU_HARNESS_DIR"] = HERE
+    # Attestation journeys disable all server-caused guards so server regressions surface directly.
+    env[guard_registry.DISABLE_SERVER_GUARDS_ENV] = "1"
     py_site = os.path.join(stage_dir, "evomu_py_site")
     env["PYTHONPATH"] = py_site
     if inclient_cfg_path:
@@ -1559,6 +1564,34 @@ def finalize_journey_run(
             evidence_val = b_info["evidence"]
         else:
             evidence_val = "Not executed (real client did not run)."
+        if isinstance(rc_info.get("guard_hits"), list):
+            rc_guard_summary = guard_registry.summarize_guard_hits(
+                rc_info.get("guard_hits") or [],
+                client_guards_off=rc_info.get(
+                    "client_guards_off", bool(should_launch_real_client)
+                ),
+            )
+        else:
+            raw_by_guard = rc_info.get("guard_hits_by_guard")
+            by_guard = dict(raw_by_guard) if isinstance(raw_by_guard, dict) else {}
+            raw_co_by_guard = rc_info.get("client_only_guard_hits_by_guard")
+            co_by_guard = dict(raw_co_by_guard) if isinstance(raw_co_by_guard, dict) else {}
+            rc_guard_summary = {
+                "client_guards_off": bool(
+                    rc_info.get("client_guards_off", bool(should_launch_real_client))
+                ),
+                "guard_hits_count": int(
+                    rc_info.get("guard_hits_count", sum(by_guard.values())) or 0
+                ),
+                "guard_hits_by_guard": {k: by_guard[k] for k in sorted(by_guard.keys())},
+                "client_only_guard_hits": int(
+                    rc_info.get("client_only_guard_hits", sum(co_by_guard.values())) or 0
+                ),
+                "client_only_guard_hits_by_guard": {
+                    k: co_by_guard[k] for k in sorted(co_by_guard.keys())
+                },
+            }
+
         journeys_out[jid] = {
             "passed": rc_ok,
             "title": j.get("title", jid),
@@ -1573,7 +1606,29 @@ def finalize_journey_run(
             "client_log_excerpt": cli_ex,
             "server_log_excerpt": srv_ex,
             "evidence": evidence_val,
+            "client_guards_off": rc_guard_summary["client_guards_off"],
+            "guard_hits_count": rc_guard_summary["guard_hits_count"],
+            "guard_hits_by_guard": rc_guard_summary["guard_hits_by_guard"],
+            "client_only_guard_hits": rc_guard_summary["client_only_guard_hits"],
+            "client_only_guard_hits_by_guard": rc_guard_summary["client_only_guard_hits_by_guard"],
         }
+
+    agg_hits_by_guard = {}
+    agg_co_by_guard = {}
+    agg_hits_count = 0
+    agg_co_count = 0
+    for j_entry in journeys_out.values():
+        agg_hits_count += int(j_entry.get("guard_hits_count", 0) or 0)
+        agg_co_count += int(j_entry.get("client_only_guard_hits", 0) or 0)
+        for gid, cnt in (j_entry.get("guard_hits_by_guard") or {}).items():
+            agg_hits_by_guard[gid] = agg_hits_by_guard.get(gid, 0) + int(cnt or 0)
+        for gid, cnt in (j_entry.get("client_only_guard_hits_by_guard") or {}).items():
+            agg_co_by_guard[gid] = agg_co_by_guard.get(gid, 0) + int(cnt or 0)
+    top_guards_off = (
+        all(bool(j_entry.get("client_guards_off", False)) for j_entry in journeys_out.values())
+        if journeys_out
+        else bool(should_launch_real_client)
+    )
 
     result = {
         "journeys": journeys_out,
@@ -1589,6 +1644,13 @@ def finalize_journey_run(
         "stale_errors": stale_list,
         "driver_errors": driver_list,
         "destiny_log_classification": destiny_log_classification,
+        "client_guards_off": top_guards_off,
+        "guard_hits_count": agg_hits_count,
+        "guard_hits_by_guard": {k: agg_hits_by_guard[k] for k in sorted(agg_hits_by_guard.keys())},
+        "client_only_guard_hits": agg_co_count,
+        "client_only_guard_hits_by_guard": {
+            k: agg_co_by_guard[k] for k in sorted(agg_co_by_guard.keys())
+        },
     }
     res_path = os.path.join(out_dir, "result.json")
     with open(res_path, "w") as rf:

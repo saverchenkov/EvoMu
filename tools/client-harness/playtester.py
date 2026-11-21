@@ -95,6 +95,118 @@ HOOK_SCRIPT_PATH = HARNESS_DIR / "evomu_playtester_hook.py"
 SITE_SCRIPT_PATH = HARNESS_DIR / "evomu_site.py"
 HELPERS_SCRIPT_PATH = HARNESS_DIR / "evomu_inclient_helpers.py"
 SCENARIOS_DIR = HARNESS_DIR / "scenarios"
+if str(HARNESS_DIR) not in sys.path:
+    sys.path.insert(0, str(HARNESS_DIR))
+import guard_registry  # noqa: E402
+
+
+class _GuardHitTracker:
+    """Deduplicating accumulator for client behaviour-guard hits across RPC payloads."""
+
+    def __init__(self, retain_all: bool = True, max_recent: int = 100) -> None:
+        self.retain_all = bool(retain_all)
+        self.max_recent = int(max_recent)
+        self.seen_seqs: set = set()
+        self.last_seq: int = 0
+        self.total_count: int = 0
+        self.by_guard: Dict[str, int] = {}
+        self.client_only_count: int = 0
+        self.client_only_by_guard: Dict[str, int] = {}
+        self.client_guards_off: Optional[bool] = None
+        self.hits: List[Dict[str, Any]] = []
+        self.recent_hits: List[Dict[str, Any]] = []
+
+    def absorb_hits(self, raw_hits: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw_hits, list):
+            return []
+        added: List[Dict[str, Any]] = []
+        for item in raw_hits:
+            if not isinstance(item, dict):
+                continue
+            seq_val = item.get("seq")
+            if isinstance(seq_val, int):
+                dedup_key: Any = ("seq", seq_val)
+                if seq_val > self.last_seq:
+                    self.last_seq = seq_val
+            else:
+                dedup_key = (
+                    "raw",
+                    str(item.get("guard") or ""),
+                    str(item.get("function") or ""),
+                    str(item.get("reason") or ""),
+                    item.get("time"),
+                )
+            if dedup_key in self.seen_seqs:
+                continue
+            self.seen_seqs.add(dedup_key)
+            if len(self.seen_seqs) > 10000:
+                self.seen_seqs = {
+                    k
+                    for k in self.seen_seqs
+                    if isinstance(k, tuple) and k[0] == "seq" and k[1] > self.last_seq - 2000
+                }
+            gid = str(item.get("guard") or "unknown")
+            self.total_count += 1
+            self.by_guard[gid] = self.by_guard.get(gid, 0) + 1
+            if guard_registry.is_approved_client_only(gid):
+                self.client_only_count += 1
+                self.client_only_by_guard[gid] = self.client_only_by_guard.get(gid, 0) + 1
+            entry = dict(item)
+            added.append(entry)
+            if self.retain_all:
+                self.hits.append(entry)
+            self.recent_hits.append(entry)
+            if len(self.recent_hits) > self.max_recent:
+                self.recent_hits = self.recent_hits[-self.max_recent:]
+        return added
+
+    def absorb_payload(self, payload: Any) -> List[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        fr = payload.get("flight_recorder")
+        if isinstance(fr, dict):
+            fr_sum = fr.get("guard_summary")
+            if isinstance(fr_sum, dict) and isinstance(fr_sum.get("client_guards_off"), bool):
+                self.client_guards_off = fr_sum["client_guards_off"]
+        top_sum = payload.get("guard_summary")
+        if isinstance(top_sum, dict) and isinstance(top_sum.get("client_guards_off"), bool):
+            self.client_guards_off = top_sum["client_guards_off"]
+        if isinstance(payload.get("guard_hits"), list):
+            return self.absorb_hits(payload.get("guard_hits"))
+        if isinstance(fr, dict) and isinstance(fr.get("guard_hits"), list):
+            return self.absorb_hits(fr.get("guard_hits"))
+        return []
+
+    def poll_rpc(self, rpc_obj: Any, timeout: float = 2.0) -> List[Dict[str, Any]]:
+        if rpc_obj is None or not callable(getattr(rpc_obj, "call", None)):
+            return []
+        try:
+            resp = rpc_obj.call("get_guard_hits", {"since_seq": self.last_seq}, timeout=timeout)
+        except Exception:
+            return []
+        if not isinstance(resp, dict):
+            return []
+        if isinstance(resp.get("result"), dict):
+            resp = resp["result"]
+        if not isinstance(resp.get("guard_hits"), list) and not isinstance(resp.get("guard_summary"), dict):
+            return []
+        return self.absorb_payload(resp)
+
+    def summary(self, default_guards_off: bool = False) -> Dict[str, Any]:
+        guards_off = default_guards_off if self.client_guards_off is None else bool(self.client_guards_off)
+        ordered_by_guard = {gid: self.by_guard[gid] for gid in sorted(self.by_guard.keys())}
+        ordered_co_by_guard = {
+            gid: self.client_only_by_guard[gid]
+            for gid in sorted(self.client_only_by_guard.keys())
+        }
+        return {
+            "client_guards_off": guards_off,
+            "guard_hits_count": self.total_count,
+            "guard_hits_by_guard": ordered_by_guard,
+            "client_only_guard_hits": self.client_only_count,
+            "client_only_guard_hits_by_guard": ordered_co_by_guard,
+            "server_caused_guard_hits": self.total_count - self.client_only_count,
+        }
 CLIENT_BRIDGE_DIR = REPO_ROOT / "client-bridge"
 
 DEFAULT_CACHE_ROOT = Path(
@@ -2121,6 +2233,7 @@ class PlaytesterMemory:
             "coverage_frontier": default_frontier,
             "recent_actions": [],
             "filed_incident_fingerprints": [],
+            "last_run_summary": None,
         }
 
     def save(self) -> None:
@@ -2338,12 +2451,24 @@ class PlaytesterMemory:
             "ok": bool(action_outcome.get("action_ok", True)),
             "action_error": action_outcome.get("action_error"),
             "state_diff": action_outcome.get("state_diff"),
+            "guard_hit_count": int(
+                action_outcome.get(
+                    "guard_hit_count",
+                    len(action_outcome.get("guard_hits") or []),
+                )
+                or 0
+            ),
+            "guard_hits": list(action_outcome.get("guard_hits") or [])[:25],
         }
         if action_outcome.get("slash_result"):
             recent_entry["slash_result"] = str(action_outcome["slash_result"])[:2000]
         recent.append(recent_entry)
         self.data["recent_actions"] = recent[-20:]
         self.maybe_rotate_persona()
+        self.save()
+
+    def update_run_summary(self, summary: Dict[str, Any]) -> None:
+        self.data["last_run_summary"] = dict(summary or {})
         self.save()
 
 
@@ -6625,6 +6750,63 @@ class PlaytesterRunner:
             async_write=True,
         )
         self._refresh_oracle_handshake_builds()
+        self._guard_tracker = _GuardHitTracker(retain_all=False, max_recent=100)
+
+    def _ensure_run_guard_state(self) -> _GuardHitTracker:
+        tracker = getattr(self, "_guard_tracker", None)
+        if tracker is None:
+            tracker = _GuardHitTracker(retain_all=False, max_recent=100)
+            self._guard_tracker = tracker
+        return tracker
+
+    def _record_step_guard_hits(
+        self, step_num: int, exec_res: Any
+    ) -> Dict[str, Any]:
+        tracker = self._ensure_run_guard_state()
+        has_inline_guards = isinstance(exec_res, dict) and (
+            isinstance(exec_res.get("guard_hits"), list)
+            or isinstance(exec_res.get("guard_summary"), dict)
+            or isinstance((exec_res.get("flight_recorder") or {}).get("guard_hits"), list)
+        )
+        step_hits = tracker.absorb_payload(exec_res)
+        if not has_inline_guards:
+            step_hits.extend(tracker.poll_rpc(getattr(self, "rpc", None), timeout=2.0))
+        run_summary = tracker.summary(default_guards_off=False)
+        if isinstance(exec_res, dict):
+            step_summary = guard_registry.summarize_guard_hits(
+                step_hits, client_guards_off=run_summary["client_guards_off"]
+            )
+            exec_res["guard_hits"] = step_hits
+            exec_res["guard_hit_count"] = len(step_hits)
+            exec_res["guard_hits_by_guard"] = step_summary["guard_hits_by_guard"]
+            exec_res["guard_summary"] = run_summary
+        return run_summary
+
+    def _write_run_summary(
+        self, step_num: int = 0, final: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        tracker = self._ensure_run_guard_state()
+        summary = tracker.summary(default_guards_off=False)
+        summary["step"] = int(step_num)
+        summary["final"] = bool(final)
+        summary["updated_at"] = utc_now_iso()
+        summary["recent_guard_hits"] = list(tracker.recent_hits)
+        run_dir = getattr(self, "current_run_dir", None)
+        if isinstance(run_dir, Path):
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "run_summary.json").write_text(
+                    json.dumps(summary, indent=2), encoding="utf-8"
+                )
+            except Exception as exc:
+                log_warn(f"Failed writing run_summary.json: {exc}")
+        mem = getattr(self, "memory", None)
+        if isinstance(mem, PlaytesterMemory):
+            try:
+                mem.update_run_summary(summary)
+            except Exception as exc:
+                log_warn(f"Failed updating memory last_run_summary: {exc}")
+        return summary
 
     def _server_bin_mtime(self) -> Optional[float]:
         for rel in ("target/debug/eve-server", "target/release/eve-server"):
@@ -7548,6 +7730,8 @@ class PlaytesterRunner:
         client_logs_dir.mkdir(parents=True, exist_ok=True)
 
         env = os.environ.copy()
+        # Continuous playtester keeps server-caused guards enabled so hits are recorded.
+        env.pop(guard_registry.DISABLE_SERVER_GUARDS_ENV, None)
         env["EVE_PUBLIC_GATEWAY_ADDRESS"] = f"127.0.0.1:{self.ports['gateway']}"
         env["EVOMU_HARNESS_DIR"] = str(HARNESS_DIR)
         env["PYTHONPATH"] = str(stage_dir / "evomu_py_site")
@@ -7603,6 +7787,7 @@ class PlaytesterRunner:
                 timeout=110.0,
             )
             self._sync_initial_session_flight_calls(boot)
+            self._ensure_run_guard_state().absorb_payload(boot)
             log_info(
                 f"Session ready: charid={boot.get('session', {}).get('charid')} "
                 f"view={boot.get('active_view')} stationid={boot.get('session', {}).get('stationid')} "
@@ -8335,6 +8520,8 @@ class PlaytesterRunner:
                     burst_paths.append(bp)
                 time.sleep(0.35)
 
+        self._record_step_guard_hits(step_num, exec_res)
+        self._write_run_summary(step_num=step_num, final=False)
         (step_dir / "exec_result.json").write_text(
             json.dumps(exec_res, indent=2), encoding="utf-8"
         )
@@ -8524,6 +8711,7 @@ class PlaytesterRunner:
 
         step_num = int(self.memory.data.get("total_steps", 0))
         executed_this_invocation = 0
+        self._ensure_run_guard_state()
         last_origin_check = time.time()
         last_fr: Dict[str, Any] = {}
         last_burst: List[Path] = []
@@ -8599,6 +8787,11 @@ class PlaytesterRunner:
                 self.harvest_flight_recorder_anomalies(step_num=step_num)
             except Exception as exc:
                 log_warn(f"Flight-recorder anomaly harvest skipped due to error: {exc}")
+            try:
+                self._ensure_run_guard_state().poll_rpc(getattr(self, "rpc", None), timeout=2.0)
+                self._write_run_summary(step_num=step_num, final=True)
+            except Exception as exc:
+                log_warn(f"Final run_summary write skipped due to error: {exc}")
             if getattr(self, "agy_pool", None) is not None:
                 try:
                     self.agy_pool.shutdown()
@@ -10433,6 +10626,8 @@ class ScenarioRunner(PlaytesterRunner):
         client_logs_dir.mkdir(parents=True, exist_ok=True)
 
         env = os.environ.copy()
+        # Attestation scenarios disable all server-caused client guards so server bugs surface directly.
+        env[guard_registry.DISABLE_SERVER_GUARDS_ENV] = "1"
         env["EVE_PUBLIC_GATEWAY_ADDRESS"] = f"127.0.0.1:{self.ports['gateway']}"
         env["EVOMU_HARNESS_DIR"] = str(HARNESS_DIR)
         env["PYTHONPATH"] = str(stage_dir / "evomu_py_site")
@@ -10778,6 +10973,7 @@ class ScenarioRunner(PlaytesterRunner):
         self._last_boot_result = {}
 
         t_scen_start = time.time()
+        guard_tracker = _GuardHitTracker(retain_all=True, max_recent=500)
         step_records: List[Dict[str, Any]] = []
         step_timings_ms: Dict[str, float] = {}
         step_rpcs: Dict[str, List[str]] = {}
@@ -10851,12 +11047,14 @@ class ScenarioRunner(PlaytesterRunner):
                         client_version = str(boot_state["client_version"])
 
                     startup_fr = (self._last_boot_result.get("flight_recorder") or {})
+                    guard_tracker.absorb_payload(self._last_boot_result)
                     startup_calls = list(startup_fr.get("macho_calls") or [])
                     if not startup_calls:
                         try:
                             fr_resp = self.rpc.call("get_flight_recorder", {"since_seq": 0}, timeout=8.0) or {}
                             if isinstance(fr_resp.get("result"), dict):
                                 fr_resp = fr_resp["result"]
+                            guard_tracker.absorb_payload(fr_resp)
                             startup_calls = list(fr_resp.get("macho_calls") or [])
                         except Exception:
                             startup_calls = []
@@ -11015,6 +11213,7 @@ class ScenarioRunner(PlaytesterRunner):
                         if step_log_errs:
                             log_errors.extend(step_log_errs)
 
+                        step_guard_hits = guard_tracker.absorb_payload(exec_res)
                         step_records.append({
                             "step_index": step_num,
                             "step_id": step_id,
@@ -11026,6 +11225,8 @@ class ScenarioRunner(PlaytesterRunner):
                             "rpcs": rpcs_for_step,
                             "setup": bool(step.get("setup", False)),
                             "time_control": bool(step.get("time_control", False)),
+                            "guard_hits": step_guard_hits,
+                            "guard_hits_count": len(step_guard_hits),
                         })
                         if not ok_step:
                             shot_path = self._capture_failure_screenshot(scen_dir / f"failure_step_{step_num}_{step_id}.png")
@@ -11042,6 +11243,8 @@ class ScenarioRunner(PlaytesterRunner):
                             break
                         pre_state = dict(post_state) if isinstance(post_state, dict) else pre_state
         finally:
+            if not (failure_info and "timeout" in str(failure_info.get("reason") or "").lower()):
+                guard_tracker.poll_rpc(getattr(self, "rpc", None), timeout=2.0)
             self._close_gm_bridge()
             self.stop_client()
             self.stop_server()
@@ -11095,6 +11298,15 @@ class ScenarioRunner(PlaytesterRunner):
             "steps": step_records,
             "failure": failure_info,
         }
+        guard_summary = guard_tracker.summary(default_guards_off=True)
+        journey_entry["client_guards_off"] = guard_summary["client_guards_off"]
+        journey_entry["guard_hits"] = list(guard_tracker.hits)
+        journey_entry["guard_hits_count"] = guard_summary["guard_hits_count"]
+        journey_entry["guard_hits_by_guard"] = guard_summary["guard_hits_by_guard"]
+        journey_entry["client_only_guard_hits"] = guard_summary["client_only_guard_hits"]
+        journey_entry["client_only_guard_hits_by_guard"] = guard_summary[
+            "client_only_guard_hits_by_guard"
+        ]
         meta = {
             "client_version": client_version,
             "client_build": client_build,
@@ -11136,6 +11348,19 @@ class ScenarioRunner(PlaytesterRunner):
             if meta["client_build"]:
                 client_build = _coerce_int_client_build(meta["client_build"])
 
+        all_guard_hits: List[Dict[str, Any]] = []
+        for entry_item in journeys.values():
+            if isinstance(entry_item.get("guard_hits"), list):
+                all_guard_hits.extend(entry_item["guard_hits"])
+        all_guards_off = (
+            all(bool(entry_item.get("client_guards_off", False)) for entry_item in journeys.values())
+            if journeys
+            else True
+        )
+        guard_rollup = guard_registry.summarize_guard_hits(
+            all_guard_hits, client_guards_off=all_guards_off
+        )
+
         result_payload = {
             "journeys": journeys,
             "client_version": client_version,
@@ -11145,6 +11370,11 @@ class ScenarioRunner(PlaytesterRunner):
             "client_logs": all_client_logs,
             "log_errors": all_log_errors,
             "destiny_log_classification": last_destiny_cls,
+            "client_guards_off": guard_rollup["client_guards_off"],
+            "guard_hits_count": guard_rollup["guard_hits_count"],
+            "guard_hits_by_guard": guard_rollup["guard_hits_by_guard"],
+            "client_only_guard_hits": guard_rollup["client_only_guard_hits"],
+            "client_only_guard_hits_by_guard": guard_rollup["client_only_guard_hits_by_guard"],
         }
         result_path = self.out_dir / "result.json"
         result_path.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
