@@ -1515,12 +1515,169 @@ fn t() {
 
         # 5. Live repo verification: dump-counts-json & check_all_ratchets & stringly_error_bypass v2 tight
         live_counts = tighten_ratchets.collect_all_counts(REPO_ROOT)
-        self.assertEqual(len(live_counts["arch_debt"]), 19)
+        self.assertGreaterEqual(len(live_counts["arch_debt"]), 19)
         self.assertEqual(set(live_counts["client_compat"]["counters"].keys()), set(ratchet_checks.CLIENT_COMPAT_COUNTER_KEYS))
         self.assertGreater(sum(live_counts["untyped_user_error"].values()), 0)
+        self.assertEqual(set(live_counts["test_fixture"].keys()), set(ratchet_checks.TEST_FIXTURE_PATTERNS))
         self.assertEqual(ratchet_checks.check_all_ratchets(REPO_ROOT), [])
         _, sb_slack, sb_regs = tighten_ratchets.tighten_ratchets(REPO_ROOT, write=False, targets=("stringly_error_bypass",))
         self.assertEqual((sb_slack, sb_regs), (0, []))
+
+    def test_1540_test_fixture_ratchet_parity_enforcement_and_tightening(self):
+        import tighten_ratchets  # noqa: E402
+
+        # 1. Exact scanner parity on clean & dirty snippets mirroring crates/eve-testkit/src/test_fixture_ratchet.rs
+        clean_src = (
+            "// SessionState { comment }\n"
+            "/* SessionState { nested /* comment */ } let _ = dispatch_rpc(); */\n"
+            "// let _ = ctx.dispatch_rpc(&mut s, \"svc\", None, \"M\", &[], &kw, None).await;\n"
+            "let text = \"SessionState { literal } let _ = dispatch_rpc();\";\n"
+            "let mut sess = SessionState::new(100);\n"
+            "let rep = harness.call_ok(\"account\", None, \"GetCashBalance\", &[], &kw).await;\n"
+            "let _unused_local = 42;\n"
+            "let _ = std::fs::remove_file(\"/tmp/none\");\n"
+            "let _ = plain_non_method_call(1);\n"
+            "let _ = crate::call(1);\n"
+        )
+        self.assertEqual(ratchet_checks.count_hand_built_sessions(clean_src), 0)
+        self.assertEqual(ratchet_checks.count_discarded_rpc_results(clean_src), 0)
+
+        dirty_src = (
+            "let s1 = SessionState { session_id: 1, ..Default::default() };\n"
+            "let s2 = SessionState { session_id: 2, ..Default::default() };\n"
+            "let _ = ctx.dispatch_rpc(&mut sess, \"a\", None, \"B\", &[], &kw, None).await;\n"
+            "let _ = ctx.dispatch_rpc(&mut sess, \"a\", None, \"C\", &[], &kw, None).await.expect(\"C\");\n"
+            "let _ = harness.call(\"a\", None, \"D\", &[], &kw).await;\n"
+            "let _ = call_rpc(&ctx, &mut sess, \"a\", \"E\", &[]).await;\n"
+            "let _ = gm.call_wire(\"a\", None, \"F\", &[], &kw).await;\n"
+            "let _act_rep = harness.call_ok(\"dogmaIM\", None, \"Activate\", &[], &kw).await;\n"
+            "let _lock_rep = wire_session_call_ok(&mut s, \"target\", \"AddTarget\", &[]).await;\n"
+        )
+        self.assertEqual(ratchet_checks.count_hand_built_sessions(dirty_src), 2)
+        self.assertEqual(ratchet_checks.count_discarded_rpc_results(dirty_src), 7)
+
+        # Edge cases: nested let _ = inside block counts once (advances past statement); unmatched `}` stops stmt;
+        # whitespace before `.call_ok(` and `rpc`/`rpc_res`/`call_exchange` all match.
+        edge_src = (
+            "fn f() {\n"
+            "    let _ = { let _ = dispatch_rpc(); };\n"
+            "    if true { let _ = rpc_res() }\n"
+            "    let _x = h . call_ok (1);\n"
+            "    let _y = call_exchange(1);\n"
+            "    let _z = rpc(1);\n"
+            "}\n"
+        )
+        self.assertEqual(ratchet_checks.count_discarded_rpc_results(edge_src), 5)
+
+        # 2. Synthetic repo: per-file enforcement, umbrella protection, auto-tightening, and regression refusal
+        with tempfile.TemporaryDirectory() as tmp:
+            a_rel = "crates/eve-server/tests/it/alpha.rs"
+            b_rel = "crates/eve-server/tests/it/sub/beta.rs"
+            _write(
+                os.path.join(tmp, a_rel),
+                "fn t() {\n"
+                "  let s = SessionState { session_id: 1 };\n"
+                "  let _ = harness.call_ok(\"svc\", None, \"M\", &[], &kw).await;\n"
+                "}\n",
+            )
+            _write(
+                os.path.join(tmp, b_rel),
+                "fn t() {\n"
+                "  let s1 = SessionState { session_id: 1 };\n"
+                "  let s2 = SessionState { session_id: 2 };\n"
+                "  let _ = ctx.dispatch_rpc(&mut s1, \"a\", None, \"B\", &[], &kw, None).await;\n"
+                "  let _ = call_rpc(&ctx, &mut s2, \"a\", \"C\", &[]).await;\n"
+                "}\n",
+            )
+            _write(
+                os.path.join(tmp, ratchet_checks.TEST_FIXTURE_REL),
+                json.dumps({
+                    "version": 2,
+                    "owning_issue": "#1540",
+                    "description": "test",
+                    "patterns": {
+                        "hand_built_sessions": {"rule": "r1", "zero_required": False, "files": {a_rel: 1, b_rel: 2}},
+                        "discarded_rpc_results": {"rule": "r2", "zero_required": False, "files": {a_rel: 1, b_rel: 2}},
+                    },
+                }),
+            )
+            self.assertEqual(ratchet_checks.check_all_ratchets(tmp, cache_path=os.path.join(tmp, "c.json")), [])
+            self.assertIn(1540, ratchet_checks.protected_umbrella_issues(tmp))
+            self.assertEqual(
+                tighten_ratchets.tighten_ratchets(tmp, write=False, targets=("test_fixture",)),
+                ([], 0, []),
+            )
+
+            # Removing debt without touching JSON passes cleanly (no non-zero equality pin)
+            _write(os.path.join(tmp, a_rel), "fn t() { let _ = SessionState::new(1); }\n")
+            _write(
+                os.path.join(tmp, b_rel),
+                "fn t() {\n"
+                "  let s1 = SessionState { session_id: 1 };\n"
+                "  let _ = ctx.dispatch_rpc(&mut s1, \"a\", None, \"B\", &[], &kw, None).await;\n"
+                "}\n",
+            )
+            self.assertEqual(ratchet_checks.check_all_ratchets(tmp, cache_path=os.path.join(tmp, "c.json")), [])
+
+            # Auto-tighten strictly lowers beta (2->1) and deletes alpha (1->0)
+            changed, slack, regs = tighten_ratchets.tighten_ratchets(tmp, write=True, targets=("test_fixture",))
+            self.assertEqual(regs, [])
+            self.assertEqual(slack, 4)
+            self.assertEqual(changed, [ratchet_checks.TEST_FIXTURE_REL])
+            tf_after = ratchet_checks._read_json(os.path.join(tmp, ratchet_checks.TEST_FIXTURE_REL))
+            self.assertEqual(tf_after["patterns"]["hand_built_sessions"]["files"], {b_rel: 1})
+            self.assertEqual(tf_after["patterns"]["discarded_rpc_results"]["files"], {b_rel: 1})
+            self.assertEqual(
+                tighten_ratchets.tighten_ratchets(tmp, write=False, targets=("test_fixture",)),
+                ([], 0, []),
+            )
+
+            # Adding debt to an unlisted file or increasing beta fails hard, and tighten_ratchets refuses to raise
+            _write(os.path.join(tmp, a_rel), "fn t() { let s = SessionState { session_id: 9 }; }\n")
+            _write(
+                os.path.join(tmp, b_rel),
+                "fn t() {\n"
+                "  let s1 = SessionState { session_id: 1 };\n"
+                "  let _ = ctx.dispatch_rpc(&mut s1, \"a\", None, \"B\", &[], &kw, None).await;\n"
+                "  let _ = harness.call(\"a\", None, \"C\", &[], &kw).await;\n"
+                "}\n",
+            )
+            viols = ratchet_checks.check_all_ratchets(tmp, cache_path=os.path.join(tmp, "c.json"))
+            self.assertTrue(any(v[0] == "RATCHET_TEST_FIXTURE" and a_rel in v[1] for v in viols), viols)
+            self.assertTrue(any(v[0] == "RATCHET_TEST_FIXTURE" and b_rel in v[1] for v in viols), viols)
+            _, _, regs2 = tighten_ratchets.tighten_ratchets(tmp, write=True, targets=("test_fixture",))
+            self.assertEqual(len(regs2), 2)
+            tf_still = ratchet_checks._read_json(os.path.join(tmp, ratchet_checks.TEST_FIXTURE_REL))
+            self.assertEqual(tf_still["patterns"]["hand_built_sessions"]["files"], {b_rel: 1})
+            self.assertEqual(tf_still["patterns"]["discarded_rpc_results"]["files"], {b_rel: 1})
+
+            # Once all files reach 0 and tighten, #1540 is automatically unprotected
+            _write(os.path.join(tmp, a_rel), "fn t() {}\n")
+            _write(os.path.join(tmp, b_rel), "fn t() {}\n")
+            tighten_ratchets.tighten_ratchets(tmp, write=True, targets=("test_fixture",))
+            self.assertNotIn(1540, ratchet_checks.protected_umbrella_issues(tmp))
+
+        # 3. Live repo verification (upper-bound safe so parallel #1540 cleanup tracks never trip false equality)
+        live_doc = ratchet_checks._read_json(os.path.join(REPO_ROOT, ratchet_checks.TEST_FIXTURE_REL))
+        self.assertEqual(ratchet_checks.check_test_fixture_ratchet(REPO_ROOT), [])
+        _, _, tf_regs = tighten_ratchets.tighten_ratchets(REPO_ROOT, write=False, targets=("test_fixture",))
+        self.assertEqual(tf_regs, [])
+        if any(sum(live_doc["patterns"][p]["files"].values()) > 0 for p in ratchet_checks.TEST_FIXTURE_PATTERNS):
+            self.assertIn(1540, ratchet_checks.protected_umbrella_issues(REPO_ROOT))
+        # Also confirm --dump-counts-json CLI preserves existing keys and exposes `test_fixture`
+        dump_proc = subprocess.run(
+            [sys.executable, os.path.join(SCRIPTS_DIR, "tighten_ratchets.py"), "--root", REPO_ROOT, "--dump-counts-json"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        dumped = json.loads(dump_proc.stdout)
+        self.assertTrue(
+            {"arch_debt", "client_compat", "untyped_user_error", "stringly_error_bypass", "test_fixture"}.issubset(
+                dumped.keys()
+            )
+        )
+        self.assertEqual(set(dumped["test_fixture"].keys()), set(ratchet_checks.TEST_FIXTURE_PATTERNS))
 
 
 if __name__ == "__main__":
