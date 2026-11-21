@@ -67,8 +67,12 @@ pub(crate) fn handle_corp_rec_queries(
             };
             let (mask, lang, min_m, max_m) = if method == "SearchCorpAds" {
                 (
-                    rpc.opt_i64(0, "typeMask")?.unwrap_or(0) as u64,
-                    rpc.opt_i64_any(1, &["langMask", "languageMask"])?.unwrap_or(0) as u64,
+                    rpc.opt_u64(0, "typeMask")?.unwrap_or(0),
+                    match rpc.get_raw(1, "langMask") {
+                        Some(_) => rpc.opt_u64(1, "langMask")?,
+                        None => rpc.opt_u64(1, "languageMask")?,
+                    }
+                    .unwrap_or(0),
                     rpc.opt_i64(2, "minMembers")?,
                     rpc.opt_i64(3, "maxMembers")?,
                 )
@@ -137,7 +141,7 @@ pub(crate) fn handle_get_wallet_divisions_info(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let is_gm = session.has_gm_role();
+    let is_gm = ServerContext::has_canonical_gm_role(session);
     let explicit_corp_id = match RpcArgs::positional(args).opt_i64(0, "corporationID") {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
@@ -783,8 +787,11 @@ pub(crate) fn handle_set_capital_system(
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_character(session)?;
     let aid = require_executor(ctx, session)?;
-    let sys_id = RpcArgs::positional(args).req_positive_i64(0, "solarSystemID")?;
-    if !ctx.sde.solar_systems.contains_key(&(sys_id as u32)) {
+    let rpc = RpcArgs::positional(args);
+    let sys_id = rpc.req_u32(0, "solarSystemID")?;
+    let _ = rpc.req_positive_i64(0, "solarSystemID")?;
+    let sys_id_i64 = i64::from(sys_id);
+    if !ctx.sde.solar_systems.contains_key(&sys_id) {
         let msg = format!("Unknown solar system {sys_id}");
         return Err(BridgeRpcError::with_client_error(
             "InvalidSolarSystem",
@@ -798,7 +805,7 @@ pub(crate) fn handle_set_capital_system(
         .try_with_mut_snapshot(|snap| -> Result<Option<i64>, BridgeRpcError> {
             let mut cfg = read_alliance_sov_cfg(snap, aid, now_unix);
             let prev = cfg.capital_system_id;
-            cfg.pending_capital_system_id = Some(sys_id);
+            cfg.pending_capital_system_id = Some(sys_id_i64);
             cfg.capital_valid_after_unix = now_unix + 7 * 86_400;
             write_alliance_sov_cfg(snap, aid, &cfg);
             Ok(prev)
@@ -810,7 +817,7 @@ pub(crate) fn handle_set_capital_system(
             change: PyRep::Tuple(vec![
                 PyRep::Integer(aid),
                 old_cap.map(PyRep::Integer).unwrap_or(PyRep::None),
-                PyRep::Integer(sys_id),
+                PyRep::Integer(sys_id_i64),
             ]),
         },
     );
@@ -1029,7 +1036,8 @@ pub(crate) fn handle_get_alliance_bill_balance(
     let _ = ServerContext::require_character(session)?;
     let aid = resolve_alliance_id(session, bound_obj_id)?;
     let bill_id_opt = RpcArgs::positional(args)
-        .opt_i64(0, "billID")?
+        .get_raw(0, "billID")
+        .and_then(|v| v.as_i64())
         .filter(|&id| id > 0);
     ctx.db.with_snapshot(|snap| {
         if let Some(bill_id) = bill_id_opt {
@@ -1229,4 +1237,149 @@ pub(crate) fn handle_pay_alliance_bill(
         OnCorpWalletBillsChanged {},
     );
     Ok(PyRep::Bool(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eve_db::{AllianceRecord, CorporationRecord};
+
+    fn setup_alliance_exec_ctx() -> (ServerContext, SessionState, i64, i64) {
+        let ctx = ServerContext::new();
+        let char_id = 90_550_001_i64;
+        let corp_id = 98_550_001_i64;
+        let aid = 99_550_001_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = snap.characters.values().next().unwrap().clone();
+            ch.character_id = char_id;
+            ch.corporation_id = corp_id;
+            ch.alliance_id = Some(aid);
+            snap.characters.insert(char_id, ch);
+
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = corp_id;
+            corp.name = "Delegation Exec Corp".into();
+            corp.ticker = "DEXEC".into();
+            corp.ceo_id = char_id;
+            corp.alliance_id = Some(aid);
+            corp.members = HashSet::from([char_id]);
+            corp.member_roles = HashMap::from([(char_id, u64::MAX)]);
+            corp.ensure_wallet_divisions();
+            snap.corporations.insert(corp_id, corp);
+
+            snap.alliances.insert(
+                aid,
+                AllianceRecord {
+                    alliance_id: aid,
+                    name: "Delegation Alliance".into(),
+                    short_name: "DALL".into(),
+                    executor_corp_id: corp_id,
+                    member_corp_ids: HashSet::from([corp_id]),
+                },
+            );
+        });
+        let mut sess = SessionState::new(9_550);
+        sess.user_id = Some(9_550);
+        sess.character_id = Some(char_id);
+        sess.corporation_id = Some(corp_id);
+        sess.alliance_id = Some(aid);
+        sess.corp_role = u64::MAX;
+        (ctx, sess, corp_id, aid)
+    }
+
+    #[test]
+    fn set_capital_system_rejects_u32_truncation_and_non_positive_ids() {
+        let (ctx, sess, _, aid) = setup_alliance_exec_ctx();
+        let wrapped_jita = (1_i64 << 32) + 30_000_142;
+        assert_eq!(
+            handle_set_capital_system(&ctx, &sess, &[PyRep::Integer(wrapped_jita)])
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        for bad in [0_i64, -1_i64] {
+            assert_eq!(
+                handle_set_capital_system(&ctx, &sess, &[PyRep::Integer(bad)])
+                    .unwrap_err()
+                    .code,
+                "InvalidArgument"
+            );
+        }
+        assert_eq!(
+            handle_set_capital_system(&ctx, &sess, &[PyRep::Integer(30_000_142)]).unwrap(),
+            PyRep::Bool(true)
+        );
+        let stored = ctx
+            .db
+            .with_snapshot(|snap| read_alliance_sov_cfg(snap, aid, 0).pending_capital_system_id);
+        assert_eq!(stored, Some(30_000_142));
+    }
+
+    #[test]
+    fn get_alliance_bill_balance_handles_optional_and_non_int_contract_args() {
+        let (ctx, sess, _, aid) = setup_alliance_exec_ctx();
+        for arg in [
+            vec![],
+            vec![PyRep::None],
+            vec![PyRep::Integer(0)],
+            vec![PyRep::String("Test".into())],
+        ] {
+            let bal = handle_get_alliance_bill_balance(&ctx, &sess, &arg, Some(aid)).unwrap();
+            assert_eq!(bal, PyRep::Real(0.0));
+        }
+    }
+
+    #[test]
+    fn search_corp_ads_rejects_negative_masks_and_accepts_language_mask_kwarg() {
+        let (ctx, mut sess, corp_id, _) = setup_alliance_exec_ctx();
+        let empty_kw = HashMap::new();
+        assert_eq!(
+            handle_corp_rec_queries(
+                &ctx,
+                corp_id,
+                0,
+                "SearchCorpAds",
+                &[PyRep::Integer(-1)],
+                &empty_kw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            handle_corp_rec_queries(
+                &ctx,
+                corp_id,
+                0,
+                "SearchCorpAds",
+                &[PyRep::Integer(0), PyRep::Integer(-2)],
+                &empty_kw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "InvalidArgument"
+        );
+        let bad_kw = HashMap::from([("languageMask".into(), PyRep::Integer(-3))]);
+        assert_eq!(
+            handle_corp_rec_queries(&ctx, corp_id, 0, "SearchCorpAds", &[PyRep::Integer(0)], &bad_kw)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        let ok_kw = HashMap::from([("languageMask".into(), PyRep::Integer(4))]);
+        assert!(
+            handle_corp_rec_queries(&ctx, corp_id, 0, "SearchCorpAds", &[PyRep::Integer(0)], &ok_kw)
+                .unwrap()
+                .is_ok()
+        );
+        sess.role = eve_machonet::service_roles::ROLE_GMH;
+        assert!(
+            handle_get_wallet_divisions_info(&ctx, &mut sess, &[PyRep::Integer(corp_id)])
+                .unwrap()
+                .is_ok()
+        );
+    }
 }
