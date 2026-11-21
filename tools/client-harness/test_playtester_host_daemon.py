@@ -6179,6 +6179,205 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
             )
         )
 
+    def test_expected_user_error_module_fit_failed_requires_nonempty_metadata(self):
+        oracle_cls = playtester.PlaytesterBugOracle
+        positive_errors = (
+            "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3416 level 1 (trained: 0) for module Small Shield Booster I (type 399)', 'moduleName': 'Small Shield Booster I'})",
+            "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I (type 17938)', 'moduleName': 'Core Probe Launcher I'})",
+            "UserError: User error, msg=ModuleFitFailed, dict={'moduleName': u'1MN Afterburner I', 'reason': u'Not enough CPU'}",
+            'UserError("ModuleFitFailed", {"moduleName": "Damage Control I", "reason": "Max group fitted"})',
+        )
+        for err in positive_errors:
+            self.assertTrue(oracle_cls.is_expected_user_error({"error": err}), err)
+
+        negative_errors = (
+            "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3416'})",
+            "UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': ''})",
+            "UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': u'   '})",
+            "UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': None})",
+            "UserError('ModuleFitFailed', {'moduleName': 'Small Shield Booster I'})",
+            "UserError('ModuleFitFailed', {'moduleName': 'Small Shield Booster I', 'reason': ''})",
+            "UserError('ModuleFitFailed', {})",
+        )
+        for err in negative_errors:
+            self.assertFalse(
+                oracle_cls.is_expected_user_error(
+                    {"error": err},
+                    expected_text="Fitting rejects module or shows error modal",
+                ),
+                err,
+            )
+
+        fitting_fit_failed_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x9, ctxt='fittingSlotController.OnDropData'>\",) kwargs={}\n"
+            'Traceback (most recent call last):\n'
+            '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+            '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 310, in OnDropData\n'
+            '  File "eve/client/script/inc/invCache.py", line 915, in TryFit\n'
+            "UserError: User error, msg=ModuleFitFailed, dict={'reason': u'Missing required skill 3412 level 1', 'moduleName': u'Core Probe Launcher I'}\n"
+        )
+        self.assertFalse(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=ModuleFitFailed", fitting_fit_failed_tb
+            )
+        )
+        self.assertTrue(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ModuleFitFailed", fitting_fit_failed_tb
+            )
+        )
+
+        missing_name_fitting_tb = fitting_fit_failed_tb.replace(
+            ", 'moduleName': u'Core Probe Launcher I'", ""
+        )
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=ModuleFitFailed", missing_name_fitting_tb
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ModuleFitFailed", missing_name_fitting_tb
+            )
+        )
+
+    def test_tasklet_expected_user_error_exemptions_and_evaluate_step_clean(self):
+        oracle_cls = playtester.PlaytesterBugOracle
+
+        target_not_locked_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0xb22ca3718, abps=1001, ctxt='<NO CONTEXT>^<bound method ModuleButton.OnStateChange of <ModuleButton object>>'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+            '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1630, in OnStateChange\n'
+            '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1580, in ActivateEffect\n'
+            '  File "eve/client/script/environment/godma.py", line 2441, in Activate\n'
+            "UserError: User error, msg=TargetNotLocked, dict={}\n"
+        )
+        radial_stop_ship_warp_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x8f130f858, abps=1001, ctxt='RadialMenu::ClickButton:OnButtonClick'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+            '  File "eve/client/script/ui/shared/radialMenu/radialMenuActions.py", line 264, in OnButtonClick\n'
+            '  File "eve/client/script/ui/services/menuSvcExtras/movementFunctions.py", line 683, in StopMyShip\n'
+            '  File "eve/client/script/ui/eveCommands.py", line 1150, in CmdStopShip\n'
+            "UserError: User error, msg=ShipInWarp, dict={}\n"
+        )
+        window_blocked_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x956b40158, abps=1001, ctxt='<NO CONTEXT>^<bound method EveCommandService.__OpenCargoHoldOfActiveShip_thread of <EveCommandService>>'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+            '  File "eve/client/script/ui/eveCommands.py", line 1980, in __OpenCargoHoldOfActiveShip_thread\n'
+            '  File "eve/client/script/ui/shared/inventory/invWindow.py", line 1357, in OpenOrShow\n'
+            '  File "packages/carbonui/control/window.py", line 4164, in Open\n'
+            "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}\n"
+        )
+        autopilot_ship_in_warp_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0xca370d558, abps=1001, ctxt=None>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "autopilot.py", line 628, in __NavigateSystemTo\n'
+            '  File "structureDocking.py", line 68, in RequestDocking\n'
+            "UserError: User error, msg=ShipInWarp, dict={}\n"
+        )
+
+        for label, hl, tb in (
+            ("TargetNotLocked", "UserError: User error, msg=TargetNotLocked, dict={}", target_not_locked_tb),
+            ("ShipInWarp radial", "UserError: User error, msg=ShipInWarp, dict={}", radial_stop_ship_warp_tb),
+            ("WindowBlockedFromOpening", "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}", window_blocked_tb),
+        ):
+            self.assertFalse(oracle_cls._is_unhandled_tasklet_traceback(hl, tb), label)
+            self.assertTrue(oracle_cls.is_ignorable_client_traceback(hl, tb), label)
+
+        # Regression guard: autopilot tasklet ShipInWarp must remain unhandled/non-ignorable.
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=ShipInWarp, dict={}", autopilot_ship_in_warp_tb
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ShipInWarp, dict={}", autopilot_ship_in_warp_tb
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            tb_log = root / "client_tracebacks.log"
+            srv = root / "server.log"
+            shot = root / "screen.png"
+            sdir = root / "step_98362"
+            qdir.mkdir()
+            sdir.mkdir()
+            tb_log.write_text("", encoding="utf-8")
+            srv.write_text("", encoding="utf-8")
+            shot.write_bytes(b"png")
+
+            mem = playtester.PlaytesterMemory(root, git_head="496975a8e")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+
+            fr_clean = {
+                "log_exceptions": [
+                    {"headline": "UserError: User error, msg=TargetNotLocked, dict={}", "trace": target_not_locked_tb},
+                    {"headline": "UserError: User error, msg=ShipInWarp, dict={}", "trace": radial_stop_ship_warp_tb},
+                    {"headline": "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}", "trace": window_blocked_tb},
+                ],
+                "quasar_errors": [],
+                "macho_exceptions": [
+                    {
+                        "service": "invbroker",
+                        "method": "MultiAdd",
+                        "error": "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I (type 17938)', 'moduleName': 'Core Probe Launcher I'})",
+                    }
+                ],
+            }
+            queued_clean = oracle.evaluate_step(
+                step_num=98362,
+                git_head="496975a8e",
+                decision={"action": {"type": "click_widget", "target": "context_menu_Fit to Active Ship"}, "bug_report": {"should_file": False}},
+                exec_res={"action_ok": True, "flight_recorder": fr_clean},
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(queued_clean, [])
+
+            # Empty moduleName on ModuleFitFailed must still file protocol_error (#1568/#1569 guard).
+            queued_empty = oracle.evaluate_step(
+                step_num=98363,
+                git_head="496975a8e",
+                decision={"action": {"type": "click_widget", "target": "context_menu_Fit to Active Ship"}, "bug_report": {"should_file": False}},
+                exec_res={
+                    "action_ok": False,
+                    "flight_recorder": {
+                        "log_exceptions": [],
+                        "quasar_errors": [],
+                        "macho_exceptions": [
+                            {
+                                "service": "invbroker",
+                                "method": "MultiAdd",
+                                "error": "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3416'})",
+                            }
+                        ],
+                    },
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(len(queued_empty), 1)
+            self.assertEqual(
+                json.loads(queued_empty[0].read_text(encoding="utf-8"))["kind"],
+                "protocol_error",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

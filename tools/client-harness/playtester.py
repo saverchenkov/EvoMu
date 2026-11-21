@@ -6079,6 +6079,29 @@ class PlaytesterBugOracle:
         "windowblockedfromopening",
     )
 
+    _MODULE_FIT_FAILED_NAME_RE = re.compile(
+        r"""['"]modulename['"]\s*:\s*u?(?:'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)")""",
+        re.IGNORECASE,
+    )
+    _MODULE_FIT_FAILED_REASON_RE = re.compile(
+        r"""['"]reason['"]\s*:\s*u?(?:'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)")""",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _has_nonempty_module_fit_failed(cls, raw_text: str) -> bool:
+        """Return True iff `raw_text` is `ModuleFitFailed` with non-empty `moduleName` and `reason`."""
+        low = (raw_text or "").lower()
+        if "modulefitfailed" not in low:
+            return False
+        name_m = cls._MODULE_FIT_FAILED_NAME_RE.search(low)
+        reason_m = cls._MODULE_FIT_FAILED_REASON_RE.search(low)
+        if not name_m or not reason_m:
+            return False
+        name_val = (name_m.group(1) if name_m.group(1) is not None else name_m.group(2) or "").strip()
+        reason_val = (reason_m.group(1) if reason_m.group(1) is not None else reason_m.group(2) or "").strip()
+        return bool(name_val and reason_val)
+
     @classmethod
     def is_ignorable_client_traceback(cls, headline: str, trace: str = "", expected_text: str = "") -> bool:
         """Return True iff traceback is a benign client-only race or expected game-rule UserError."""
@@ -6108,8 +6131,8 @@ class PlaytesterBugOracle:
             return True
         return False
 
-    @staticmethod
-    def _is_unhandled_tasklet_traceback(headline: str, trace: str = "") -> bool:
+    @classmethod
+    def _is_unhandled_tasklet_traceback(cls, headline: str, trace: str = "") -> bool:
         """Background tasklet exceptions (e.g. autopilot UserError) are real crashes, not benign action rejections."""
         txt = f"{headline or ''}\n{trace or ''}".lower()
         if "unhandled exception in" not in txt:
@@ -6131,9 +6154,25 @@ class PlaytesterBugOracle:
             )
         ):
             return False
+        # Fitting drag-drop/slot tasklets raise UserError('ModuleFitFailed', {'moduleName': ..., 'reason': ...})
+        # out of fittingSlotController/invCache/clientDogmaLocation when a skill/slot rule rejects the fit (#1576/#1578).
+        if (
+            "usererror" in txt
+            and cls._has_nonempty_module_fit_failed(txt)
+            and (
+                "fittingslotcontroller" in txt
+                or "invcache" in txt
+                or "tryfit" in txt
+                or "ondropdata" in txt
+                or "clientdogmalocation" in txt
+                or "fitmodule" in txt
+            )
+        ):
+            return False
         # Pre-queued module activation on target lock / UI triggers fires out of
         # ModuleButton.OnStateChange -> ActivateEffect and shows a benign Information modal
-        # on rule rejections like NoAmmoLoaded, InsufficientFuel (#1230), or NotEnoughCapacitor (#1231).
+        # on rule rejections like NoAmmoLoaded, InsufficientFuel (#1230), NotEnoughCapacitor (#1231),
+        # or TargetNotLocked (#1566).
         if (
             "usererror" in txt
             and "modulebutton.onstatechange" in txt
@@ -6145,8 +6184,27 @@ class PlaytesterBugOracle:
                     "insufficientfuel",
                     "notenoughcapacitor",
                     "invalidtarget",
+                    "targetnotlocked",
                 )
             )
+        ):
+            return False
+        # RadialMenu stop-ship clicks issued during or right at warp transitions raise benign
+        # UserError(ShipInWarp) inside RadialMenu::ClickButton:OnButtonClick -> CmdStopShip (#1570).
+        if (
+            "usererror" in txt
+            and "shipinwarp" in txt
+            and ("radialmenu" in txt or "radialmenuactions.py" in txt)
+            and ("stopmyship" in txt or "cmdstopship" in txt)
+        ):
+            return False
+        # UI window opens (e.g. CargoHold command while docked/transitioning) raise benign
+        # UserError(WindowBlockedFromOpening) out of carbonui/control/window.py Open (#1575).
+        if (
+            "usererror" in txt
+            and "windowblockedfromopening" in txt
+            and "window.py" in txt
+            and ("in open" in txt or "toggleopenclose" in txt)
         ):
             return False
         # Vanilla V24 ModuleButton/ModuleController AutoReload raises UserError(CannotLoadNotEnoughCharges)
@@ -6189,6 +6247,8 @@ class PlaytesterBugOracle:
                 return True
         if "structurenotoperational" in err_low and "in state 'nocore'" in err_low and "cannot be controlled" in err_low:
             return True
+        if "modulefitfailed" in err_low:
+            return cls._has_nonempty_module_fit_failed(err_low)
         expected_low = (expected_text or "").lower()
         if any(kw in expected_low for kw in cls.EXPECTED_USER_ERROR_KEYWORDS):
             return True
