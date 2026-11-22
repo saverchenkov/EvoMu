@@ -125,6 +125,10 @@
           "type": "boolean",
           "description": "True to double-click the target widget or coordinate."
         },
+        "strict_wait": {
+          "type": "boolean",
+          "description": "True with wait to sleep the full wait_ms duration without early exit."
+        },
         "clear": {
           "type": "boolean",
           "description": "True with type_text to clear an input/filter box and invoke ClearFilter()."

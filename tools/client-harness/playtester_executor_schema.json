@@ -129,6 +129,9 @@
         "double_click": {
           "type": "boolean"
         },
+        "strict_wait": {
+          "type": "boolean"
+        },
         "clear": {
           "type": "boolean"
         },

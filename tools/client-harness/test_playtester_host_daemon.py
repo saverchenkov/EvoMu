@@ -7986,6 +7986,7 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
             )
             self.assertIn("Active Inventory Filter Warning", prompt_filtered)
             self.assertIn("quick_filter='trit'", prompt_filtered)
+            self.assertIn("quickFilterInputBox", prompt_filtered)
 
             prompt_clear = playtester.build_reasoning_prompt(
                 step_num=102,
@@ -8011,20 +8012,22 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
             {
                 "action": {
                     "type": "type_text",
-                    "target": "QuickFilterEdit",
+                    "target": "quickFilterInputBox",
+                    "strict_wait": True,
                     "clear": True,
                     "expect_in_warp_rejection": True,
                     "allow_in_warp_error": True,
                 }
             }
         )
+        self.assertTrue(exec_norm["action"]["strict_wait"])
         self.assertTrue(exec_norm["action"]["clear"])
         self.assertIsNone(exec_norm["action"]["command"])
         self.assertTrue(exec_norm["action"]["expect_in_warp_rejection"])
         self.assertTrue(exec_norm["action"]["allow_in_warp_error"])
 
-        # 2) _normalize_planner_decision + _resolve_direct_action must preserve clear=True
-        # WITHOUT falling back command = "QuickFilterEdit".
+        # 2) _normalize_planner_decision + _resolve_direct_action must preserve strict_wait & clear=True
+        # WITHOUT falling back command = "quickFilterInputBox".
         plan_dec = playtester._normalize_planner_decision(
             {
                 "delegated_plan": {
@@ -8035,7 +8038,8 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
                             "exec_mode": "direct",
                             "action": {
                                 "type": "type_text",
-                                "target": "QuickFilterEdit",
+                                "target": "quickFilterInputBox",
+                                "strict_wait": True,
                                 "clear": True,
                             },
                         }
@@ -8044,22 +8048,23 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
             }
         )
         step = plan_dec["delegated_plan"]["steps"][0]
-        self.assertEqual(step["target_or_command_hint"], "QuickFilterEdit")
+        self.assertEqual(step["target_or_command_hint"], "quickFilterInputBox")
         resolved, reason = playtester._resolve_direct_action(
             step,
             ui_snapshot={
                 "ui": {
                     "clickable_widgets": [
-                        {"name": "quickFilterInputBox", "path": "QuickFilterEdit", "cls": "QuickFilterEdit"}
+                        {"name": "quickFilterInputBox", "path": "InvContQuickFilter/quickFilterInputBox", "cls": "SingleLineEditText"}
                     ]
                 }
             },
         )
         self.assertEqual(reason, "")
+        self.assertTrue(resolved["strict_wait"])
         self.assertTrue(resolved["clear"])
         self.assertIsNone(resolved["command"])
 
-        # 3) All three schemas allow clear, expect_in_warp_rejection, and allow_in_warp_error.
+        # 3) All three schemas allow strict_wait, clear, expect_in_warp_rejection, and allow_in_warp_error.
         for schema_name, prop_getter in (
             ("playtester_action_schema.json", lambda d: d["properties"]["action"]["properties"]),
             ("playtester_executor_schema.json", lambda d: d["properties"]["action"]["properties"]),
@@ -8069,7 +8074,7 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
             ),
         ):
             props = prop_getter(json.loads((HARNESS_DIR / schema_name).read_text(encoding="utf-8")))
-            for flag_key in ("clear", "expect_in_warp_rejection", "allow_in_warp_error"):
+            for flag_key in ("strict_wait", "clear", "expect_in_warp_rejection", "allow_in_warp_error"):
                 self.assertIn(flag_key, props, f"{flag_key} missing in {schema_name}")
                 self.assertEqual(props[flag_key]["type"], "boolean")
 

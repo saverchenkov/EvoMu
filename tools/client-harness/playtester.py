@@ -3505,7 +3505,7 @@ def build_reasoning_prompt(
             f"- **⚠️ Active Inventory Filter Warning:** Inventory window currently has an active filter "
             f"(`quick_filter={inv_qf!r}`, `active_filters={inv_af!r}`), which hides non-matching items in the UI! "
             f"Do NOT conclude items are missing or `ui_state_desync` before clearing the filter "
-            f"(`type_text` with `clear: true` on `QuickFilterEdit` or clicking clear filters).\n"
+            f"(`type_text` with `clear: true` on `quickFilterInputBox` or clicking clear filters).\n"
         )
 
     has_screen = bool(screenshot_path and Path(screenshot_path).exists())

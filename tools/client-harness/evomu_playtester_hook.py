@@ -173,16 +173,16 @@ def _safe_own_dict(obj):
     return None
 
 
-def _safe_own_slot_attr(obj, attr_name):
+def _safe_own_slot_attr(obj, attr_name, default=None):
     if obj is None:
-        return None
+        return default
     if _PY2_INSTANCE_TYPE is not None and type(obj) is _PY2_INSTANCE_TYPE:
         own_d = _safe_own_dict(obj)
-        return own_d.get(attr_name) if own_d is not None else None
+        return own_d.get(attr_name, default) if own_d is not None else default
     try:
         return object.__getattribute__(obj, attr_name)
     except Exception:
-        return None
+        return default
 
 
 def _safe_own_attr(obj, attr_name):
@@ -4250,11 +4250,19 @@ def _sample_ego_warp_state(sm):
             if hasattr(fx_svc, "GetAllBallActivationNames"):
                 fx_names = list(fx_svc.GetAllBallActivationNames(sid) or [])
             elif hasattr(fx_svc, "GetActivations"):
-                fx_names = [
-                    str(getattr(a, "guid", a) or "")
-                    for a in list(fx_svc.GetActivations() or [])
-                    if getattr(a, "guid", a)
-                ]
+                acts = []
+                for a in list(fx_svc.GetActivations() or []):
+                    a_sid = getattr(a, "shipID", getattr(a, "ballID", None))
+                    if a_sid is not None:
+                        try:
+                            if int(a_sid) != sid:
+                                continue
+                        except Exception:
+                            pass
+                    guid = getattr(a, "guid", a)
+                    if guid:
+                        acts.append(str(guid))
+                fx_names = acts
         except Exception:
             fx_names = []
     warp_cache_val = getattr(space_svc, "warpDestinationCache", None) if space_svc is not None else None
@@ -4618,10 +4626,23 @@ def _wait_active_warp_before_command(sm, allow_time_control=True, timeout_sec=No
 
 def _extract_inv_container_payload(iv):
     """Extract cached inventory items via own dict/slots first (`cachedItems`/`listed`), falling back to `.items`."""
+    _missing = object()
     own_d = _safe_own_dict(iv)
-    cached_attr = own_d.get("cachedItems") if own_d is not None else _safe_own_slot_attr(iv, "cachedItems")
-    if isinstance(cached_attr, dict):
-        listed_val = own_d.get("listed") if own_d is not None else _safe_own_slot_attr(iv, "listed")
+    if own_d is not None:
+        has_v24_fields = ("cachedItems" in own_d) or ("listed" in own_d)
+        cached_attr = own_d.get("cachedItems")
+        listed_val = own_d.get("listed")
+    else:
+        cached_attr = _safe_own_slot_attr(iv, "cachedItems", _missing)
+        listed_val = _safe_own_slot_attr(iv, "listed", _missing)
+        has_v24_fields = (cached_attr is not _missing) or (listed_val is not _missing)
+        if cached_attr is _missing:
+            cached_attr = None
+        if listed_val is _missing:
+            listed_val = None
+    if has_v24_fields:
+        if not isinstance(cached_attr, dict):
+            return False, [], None
         listed_flags = set(listed_val) if isinstance(listed_val, (set, frozenset, list, tuple)) else None
         if listed_flags is not None:
             if not listed_flags and not cached_attr:
@@ -6683,6 +6704,15 @@ def _execute_action(sm, action):
     layers = getattr(uicore, "layer", None) if uicore is not None else None
     result = {"ok": True, "action_ok": True, "action_type": raw_atype, "target": raw_target}
     cancel_flag = [False]
+    cancel_reason = [None]
+
+    def _abort_if_cancelled():
+        if not cancel_flag[0]:
+            return False
+        result["ok"] = False
+        if not result.get("error"):
+            result["error"] = cancel_reason[0] or "action cancelled after timeout"
+        return True
 
     def _do_action():
         try:
@@ -7946,9 +7976,7 @@ def _execute_action(sm, action):
                             allow_time_control=allow_time_control,
                             cancel_check=lambda: cancel_flag[0],
                         )
-                        if cancel_flag[0]:
-                            result["ok"] = False
-                            result["error"] = result.get("error") or "action cancelled after timeout"
+                        if _abort_if_cancelled():
                             return
                         sess = getattr(__builtin__, "session", None)
                         sys_id = int(getattr(sess, "solarsystemid", 0) or 0) if sess is not None else 0
@@ -8696,9 +8724,7 @@ def _execute_action(sm, action):
                             allow_time_control=allow_time_control,
                             cancel_check=lambda: cancel_flag[0],
                         )
-                        if cancel_flag[0]:
-                            result["ok"] = False
-                            result["error"] = result.get("error") or "action cancelled after timeout"
+                        if _abort_if_cancelled():
                             return
                     _WARP_TELEMETRY["last_warp_saw_mode3"] = False
                     _WARP_TELEMETRY["last_warp_saw_fx_warping"] = False
@@ -8892,10 +8918,12 @@ def _execute_action(sm, action):
             # break after 0.8s so serve_forever_on_stackless never deadlocks or waits 12s!
             if (time.time() - t_start) > 0.8:
                 if bool(_active_modal_keys() - pre_modal_keys):
+                    cancel_reason[0] = "action cancelled after modal block"
                     cancel_flag[0] = True
                     result["blocked_by_modal"] = True
                     break
         if not done_flag[0] and not result.get("blocked_by_modal"):
+            cancel_reason[0] = "action cancelled after timeout"
             cancel_flag[0] = True
             result["ok"] = False
             result["error"] = "action tasklet timed out after %.1fs" % (time.time() - t_start,)
