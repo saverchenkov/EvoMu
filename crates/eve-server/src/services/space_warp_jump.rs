@@ -2473,9 +2473,6 @@ async fn handle_cmd_stargate_jump(
         ctx, char_id, old_sys, current_ball.position.to_array(),
     );
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
-    });
     ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
     // Destination grid watchers already have the destination stargate materialized and must not
     // receive `AddBalls2` or `OnSpecialFX(ship_id)` while the arriving ship holds gate cloak (#871/#1084).
@@ -2547,13 +2544,6 @@ async fn handle_cmd_stargate_jump(
         dest_sys_id as i64,
     );
     let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, dest_sys_id).await;
-    crate::services::combat_crimewatch::schedule_highsec_criminal_concord_if_needed(
-        ctx,
-        char_id,
-        ship_id,
-        dest_sys_id,
-        now_unix,
-    );
     record_session_change_timer(ctx, char_id, now_unix, dest_sys_id, spawn_tick, "stargate_jump");
 
     crate::quasar_gateway::isolate_side_effect(
@@ -3176,12 +3166,8 @@ async fn handle_dock(
                 "dock",
             )
             .with_apply_db(false)
-            .with_cleanup_departing_space(false)
             .with_preserve_session_ship(true);
             let _ = ctx.execute_session_transition_sync(Some(session), dock_spec);
-            deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-            crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
-            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
             if let Some(ship_rec) = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).cloned()) {
                 ctx.notify_item_record_change(
                     char_id,

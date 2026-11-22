@@ -1059,7 +1059,6 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 ctx,
                 session,
                 char_id,
-                old_sys,
                 ship_id,
                 prep.now_unix,
                 prep.ship_mass,
@@ -1698,7 +1697,6 @@ async fn complete_cosmic_wormhole_arrival(
     ctx: &ServerContext,
     session: &mut SessionState,
     char_id: i64,
-    old_sys: SolarSystemId,
     ship_id: i64,
     now_unix: u64,
     ship_mass: f64,
@@ -1728,11 +1726,6 @@ async fn complete_cosmic_wormhole_arrival(
         rep_wh_type_id,
         fallback_exit_pos,
     } = post_summary;
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
-    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
-    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
-
     let _ = ctx.execute_session_transition_sync(
         Some(session),
         crate::router::SessionTransitionSpec::for_kind(
@@ -1741,8 +1734,6 @@ async fn complete_cosmic_wormhole_arrival(
             "wormhole_jump",
         )
         .with_apply_db(false)
-        .with_cleanup_departing_space(false)
-        .with_sync_local_chat(false)
         .with_emit_on_session_changed(false),
     );
     crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);

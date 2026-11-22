@@ -724,13 +724,15 @@ pub fn emit_system_wide_effect_start(
     true
 }
 
-pub fn build_system_wide_effects_on_ship_dict(
+/// Collects deduplicated active info-bubble system-wide effects `(effect_id, source_item_id, source_type_id)`
+/// visible in `solar_system_id` when `in_space` is true.
+pub fn collect_active_system_wide_effects_in_system(
     ctx: &ServerContext,
     solar_system_id: Option<u32>,
     in_space: bool,
-) -> PyRep {
+) -> Vec<(i64, i64, u32)> {
     let Some(sys_id) = solar_system_id.filter(|_| in_space) else {
-        return PyRep::Dict(Vec::new());
+        return Vec::new();
     };
     let mut active: Vec<(i64, u32)> = ctx.db.with_snapshot(|snap| {
         snap.items
@@ -778,7 +780,7 @@ pub fn build_system_wide_effects_on_ship_dict(
     }
     active.sort_unstable();
     active.dedup();
-    let entries = active
+    active
         .into_iter()
         .map(|(source_item_id, source_type_id)| {
             let effect_id = ctx
@@ -788,6 +790,19 @@ pub fn build_system_wide_effects_on_ship_dict(
                 .and_then(|t| t.effect_ids.first().copied())
                 .map(i64::from)
                 .unwrap_or_else(|| i64::from(source_type_id));
+            (effect_id, source_item_id, source_type_id)
+        })
+        .collect()
+}
+
+pub fn build_system_wide_effects_on_ship_dict(
+    ctx: &ServerContext,
+    solar_system_id: Option<u32>,
+    in_space: bool,
+) -> PyRep {
+    let entries = collect_active_system_wide_effects_in_system(ctx, solar_system_id, in_space)
+        .into_iter()
+        .map(|(effect_id, source_item_id, source_type_id)| {
             (
                 PyRep::Tuple(vec![
                     PyRep::Integer(source_item_id),
@@ -825,6 +840,26 @@ pub fn emit_system_wide_effect_stop(
 ) {
     ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
+        OnSystemWideEffectStop {
+            effect_id,
+            source_item_id,
+            source_type_id,
+        },
+    );
+}
+
+/// Emits `OnSystemWideEffectStop` strictly to a departing character (`"charid"`) without
+/// cancelling active effects for pilots remaining in the source solar system (`#1122`).
+pub fn emit_system_wide_effect_stop_for_character(
+    ctx: &ServerContext,
+    char_id: i64,
+    effect_id: i64,
+    source_item_id: i64,
+    source_type_id: i64,
+) {
+    ctx.emit_typed_with_id_type(
+        NotificationTarget::Character(char_id),
+        "charid",
         OnSystemWideEffectStop {
             effect_id,
             source_item_id,

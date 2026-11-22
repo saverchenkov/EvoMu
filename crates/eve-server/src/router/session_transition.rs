@@ -18,7 +18,7 @@ use eve_sde::SdeRegistry;
 use glam::DVec3;
 
 use super::binding::AtomicSceneTransitionRecord;
-use super::notify_registry::{push_typed_session_notification, OnSessionChanged, OnTradeCancel};
+use super::notify_registry::{push_typed_session_notification, OnSessionChanged};
 use super::{NotificationTarget, ServerContext};
 
 /// Destination location domain for an atomic character/session transition.
@@ -192,15 +192,42 @@ pub struct SessionTransitionSpec {
     pub spawn_destination_ball: bool,
     pub accept_ballpark_dock: Option<(i64, DVec3)>,
     pub preserve_session_ship: bool,
+    pub close_active_trades: bool,
+    pub clear_completed_safe_logoff: bool,
+    pub emit_system_wide_effect_stop: bool,
 }
 
 impl SessionTransitionSpec {
+    fn minimal_defaults(char_id: i64, kind: TransitionKind, reason: &'static str) -> Self {
+        Self {
+            char_id,
+            kind,
+            reason,
+            validate_destination: false,
+            move_ship_item: false,
+            apply_db: false,
+            cleanup_departing_space: false,
+            deactivate_modules: false,
+            abort_self_destruct: false,
+            abandon_drones: false,
+            sync_local_chat: false,
+            invalidate_bounds: false,
+            sync_quasar_gateway: false,
+            emit_on_session_changed: false,
+            arrive_ball_pos: None,
+            spawn_destination_ball: false,
+            accept_ballpark_dock: None,
+            preserve_session_ship: false,
+            close_active_trades: true,
+            clear_completed_safe_logoff: true,
+            emit_system_wide_effect_stop: true,
+        }
+    }
+
     pub fn for_kind(char_id: i64, kind: TransitionKind, reason: &'static str) -> Self {
+        let base = Self::minimal_defaults(char_id, kind, reason);
         match kind {
             TransitionKind::Dock { .. } => Self {
-                char_id,
-                kind,
-                reason,
                 validate_destination: true,
                 move_ship_item: true,
                 apply_db: true,
@@ -208,39 +235,21 @@ impl SessionTransitionSpec {
                 deactivate_modules: true,
                 abort_self_destruct: true,
                 abandon_drones: true,
-                sync_local_chat: false,
                 invalidate_bounds: true,
                 sync_quasar_gateway: true,
                 emit_on_session_changed: true,
-                arrive_ball_pos: None,
-                spawn_destination_ball: false,
-                accept_ballpark_dock: None,
-                preserve_session_ship: false,
+                ..base
             },
             TransitionKind::Undock { .. } => Self {
-                char_id,
-                kind,
-                reason,
                 validate_destination: true,
                 move_ship_item: true,
                 apply_db: true,
-                cleanup_departing_space: false,
-                deactivate_modules: false,
-                abort_self_destruct: false,
-                abandon_drones: false,
-                sync_local_chat: false,
                 invalidate_bounds: true,
                 sync_quasar_gateway: true,
                 emit_on_session_changed: true,
-                arrive_ball_pos: None,
-                spawn_destination_ball: false,
-                accept_ballpark_dock: None,
-                preserve_session_ship: false,
+                ..base
             },
-            TransitionKind::JumpSystem { .. } => Self {
-                char_id,
-                kind,
-                reason,
+            TransitionKind::JumpSystem { .. } | TransitionKind::DeathRespawn { .. } => Self {
                 validate_destination: true,
                 move_ship_item: true,
                 apply_db: true,
@@ -252,37 +261,18 @@ impl SessionTransitionSpec {
                 invalidate_bounds: true,
                 sync_quasar_gateway: true,
                 emit_on_session_changed: true,
-                arrive_ball_pos: None,
-                spawn_destination_ball: false,
-                accept_ballpark_dock: None,
-                preserve_session_ship: false,
+                ..base
             },
             TransitionKind::BoardShip { .. } | TransitionKind::EjectToPod { .. } => Self {
-                char_id,
-                kind,
-                reason,
-                validate_destination: false,
-                move_ship_item: false,
                 apply_db: true,
-                cleanup_departing_space: false,
-                deactivate_modules: false,
                 abort_self_destruct: true,
-                abandon_drones: false,
-                sync_local_chat: false,
                 invalidate_bounds: true,
                 sync_quasar_gateway: true,
                 emit_on_session_changed: true,
-                arrive_ball_pos: None,
-                spawn_destination_ball: false,
-                accept_ballpark_dock: None,
-                preserve_session_ship: false,
+                ..base
             },
             TransitionKind::CloneJump { .. } => Self {
-                char_id,
-                kind,
-                reason,
                 validate_destination: true,
-                move_ship_item: false,
                 apply_db: true,
                 cleanup_departing_space: true,
                 deactivate_modules: true,
@@ -292,90 +282,25 @@ impl SessionTransitionSpec {
                 invalidate_bounds: true,
                 sync_quasar_gateway: true,
                 emit_on_session_changed: true,
-                arrive_ball_pos: None,
-                spawn_destination_ball: false,
-                accept_ballpark_dock: None,
-                preserve_session_ship: false,
-            },
-            TransitionKind::DeathRespawn { .. } => Self {
-                char_id,
-                kind,
-                reason,
-                validate_destination: true,
-                move_ship_item: true,
-                apply_db: true,
-                cleanup_departing_space: true,
-                deactivate_modules: true,
-                abort_self_destruct: true,
-                abandon_drones: true,
-                sync_local_chat: true,
-                invalidate_bounds: true,
-                sync_quasar_gateway: true,
-                emit_on_session_changed: true,
-                arrive_ball_pos: None,
-                spawn_destination_ball: false,
-                accept_ballpark_dock: None,
-                preserve_session_ship: false,
+                ..base
             },
             TransitionKind::Teleport { .. } => Self {
-                char_id,
-                kind,
-                reason,
-                validate_destination: false,
                 move_ship_item: true,
                 apply_db: true,
-                cleanup_departing_space: false,
-                deactivate_modules: false,
-                abort_self_destruct: false,
-                abandon_drones: false,
                 sync_local_chat: true,
                 invalidate_bounds: true,
                 sync_quasar_gateway: true,
                 emit_on_session_changed: true,
-                arrive_ball_pos: None,
-                spawn_destination_ball: false,
-                accept_ballpark_dock: None,
-                preserve_session_ship: false,
+                ..base
             },
             TransitionKind::CharacterLogin { .. } => Self {
-                char_id,
-                kind,
-                reason,
-                validate_destination: false,
-                move_ship_item: false,
-                apply_db: false,
-                cleanup_departing_space: false,
-                deactivate_modules: false,
-                abort_self_destruct: false,
-                abandon_drones: false,
                 sync_local_chat: true,
-                invalidate_bounds: false,
                 sync_quasar_gateway: true,
-                emit_on_session_changed: false,
-                arrive_ball_pos: None,
-                spawn_destination_ball: false,
-                accept_ballpark_dock: None,
-                preserve_session_ship: false,
+                ..base
             },
             TransitionKind::Logout => Self {
-                char_id,
-                kind,
-                reason,
-                validate_destination: false,
-                move_ship_item: false,
-                apply_db: false,
-                cleanup_departing_space: false,
-                deactivate_modules: false,
-                abort_self_destruct: false,
-                abandon_drones: false,
-                sync_local_chat: false,
                 invalidate_bounds: true,
-                sync_quasar_gateway: false,
-                emit_on_session_changed: false,
-                arrive_ball_pos: None,
-                spawn_destination_ball: false,
-                accept_ballpark_dock: None,
-                preserve_session_ship: false,
+                ..base
             },
         }
     }
@@ -428,6 +353,21 @@ impl SessionTransitionSpec {
 
     pub fn with_preserve_session_ship(mut self, preserve: bool) -> Self {
         self.preserve_session_ship = preserve;
+        self
+    }
+
+    pub fn with_close_active_trades(mut self, close: bool) -> Self {
+        self.close_active_trades = close;
+        self
+    }
+
+    pub fn with_clear_completed_safe_logoff(mut self, clear: bool) -> Self {
+        self.clear_completed_safe_logoff = clear;
+        self
+    }
+
+    pub fn with_emit_system_wide_effect_stop(mut self, emit: bool) -> Self {
+        self.emit_system_wide_effect_stop = emit;
         self
     }
 }
@@ -656,10 +596,12 @@ pub fn apply_character_transition_in_snap(
         new_ship_id,
         move_ship_item,
         validate_destination,
+        false,
     )
     .map(|(ch, _)| ch)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_character_transition_in_snap_with_trades(
     snap: &mut WorldStateSnapshot,
     sde: &SdeRegistry,
@@ -668,6 +610,7 @@ fn apply_character_transition_in_snap_with_trades(
     new_ship_id: Option<i64>,
     move_ship_item: bool,
     validate_destination: bool,
+    close_active_trades: bool,
 ) -> Result<(CharacterRecord, Vec<(i64, i64, i64)>), DbError> {
     let ch_pre = snap
         .characters
@@ -690,15 +633,7 @@ fn apply_character_transition_in_snap_with_trades(
         validate_destination,
     )?;
 
-    let old_dock = ch_pre.station_id.or(ch_pre.structure_id);
-    let new_dock = if matches!(location, TransitionLocation::ClearAll) {
-        None
-    } else if matches!(location, TransitionLocation::KeepCurrent) {
-        old_dock
-    } else {
-        station_id.or(structure_id)
-    };
-    let cancelled_trades = if old_dock != new_dock {
+    let cancelled_trades = if close_active_trades {
         crate::services::wallet_services_ext::cancel_open_trades_for_character_in_snap(
             snap, char_id,
         )
@@ -1088,31 +1023,6 @@ fn sync_session_from_character_with_override(
     diff
 }
 
-fn run_departing_space_cleanup_sync(
-    ctx: &ServerContext,
-    char_id: i64,
-    ship_id: i64,
-    sys_id: u32,
-    spec: &SessionTransitionSpec,
-) {
-    if !spec.cleanup_departing_space || ship_id <= 0 || sys_id == 0 {
-        return;
-    }
-    if spec.abandon_drones {
-        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
-            ctx, char_id, ship_id, sys_id,
-        );
-    }
-    if spec.abort_self_destruct {
-        crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
-    }
-    if spec.deactivate_modules {
-        crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
-            ctx, char_id, ship_id,
-        );
-    }
-}
-
 fn apply_spec_destination_to_character_copy(
     sde: &SdeRegistry,
     ch: &mut CharacterRecord,
@@ -1169,6 +1079,7 @@ fn finalize_transition_session_and_epoch(
     mut session: Option<&mut SessionState>,
     prev_session: &SessionState,
     updated_ch: Option<&CharacterRecord>,
+    departing: &super::teardown_registry::DepartingSceneSnapshot,
     spec: &SessionTransitionSpec,
 ) -> (HashMap<String, (PyRep, PyRep)>, u64) {
     let override_ship = (spec.preserve_session_ship && prev_session.ship_id.is_some())
@@ -1227,16 +1138,171 @@ fn finalize_transition_session_and_epoch(
         ctx.quasar_gateway.on_session_changed(&next_snapshot, ctx.now_unix());
     }
     let diff = prev_session.compute_diff(&next_snapshot);
+    let mut emitted_to_char = false;
     if spec.emit_on_session_changed && !diff.is_empty() {
         if let Some(sess) = session {
             if let Some(cid) = sess.character_id.or_else(|| updated_ch.map(|c| c.character_id)) {
                 emit_on_session_changed(ctx, Some(sess), &next_snapshot, cid, &diff);
+                emitted_to_char = true;
             }
         } else {
             emit_on_session_changed(ctx, None, &next_snapshot, spec.char_id, &diff);
+            emitted_to_char = true;
         }
     }
+    super::teardown_registry::run_post_finalize_system_wide_sync(
+        ctx,
+        spec,
+        departing,
+        updated_ch,
+        &diff,
+        emitted_to_char,
+    );
     (diff, scene_epoch)
+}
+
+fn prepare_transition_inputs(
+    ctx: &ServerContext,
+    session_opt: Option<&SessionState>,
+    spec: &SessionTransitionSpec,
+) -> (
+    Option<CharacterRecord>,
+    SessionState,
+    super::teardown_registry::DepartingSceneSnapshot,
+) {
+    let pre_ch = ctx.db.get_character(spec.char_id).ok();
+    let has_live_session = session_opt.is_some();
+    let prev_session = match session_opt {
+        Some(s) => s.clone(),
+        None => match pre_ch.as_ref() {
+            Some(ch) => synthetic_session_from_character(spec.char_id, ch, None, &ctx.sde),
+            None => SessionState::new(0),
+        },
+    };
+    let departing = super::teardown_registry::resolve_departing_scene(
+        &prev_session,
+        pre_ch.as_ref(),
+        has_live_session,
+        spec,
+    );
+    (pre_ch, prev_session, departing)
+}
+
+fn validate_transition_destination(
+    ctx: &ServerContext,
+    spec: &SessionTransitionSpec,
+    pre_ch: Option<&CharacterRecord>,
+) -> Result<(), BridgeRpcError> {
+    if !spec.validate_destination {
+        return Ok(());
+    }
+    if let Some(ch) = pre_ch {
+        ctx.db
+            .with_snapshot(|snap| {
+                resolve_destination_location(
+                    snap,
+                    &ctx.sde,
+                    spec.char_id,
+                    ch,
+                    spec.kind.destination_location(),
+                    true,
+                )
+            })
+            .map_err(db_err_to_rpc)?;
+    }
+    Ok(())
+}
+
+fn apply_transition_db_and_trades(
+    ctx: &ServerContext,
+    spec: &SessionTransitionSpec,
+) -> Result<Option<CharacterRecord>, BridgeRpcError> {
+    let dest_loc = spec.kind.destination_location();
+    let target_ship = spec.kind.target_ship_id();
+    if matches!(spec.kind, TransitionKind::Logout) {
+        super::teardown_registry::run_non_db_trade_teardown_sync(ctx, spec);
+        return Ok(None);
+    }
+    if spec.apply_db {
+        let (ch, cancelled_trades) = ctx
+            .db
+            .try_with_mut_snapshot(|snap| {
+                apply_character_transition_in_snap_with_trades(
+                    snap,
+                    &ctx.sde,
+                    spec.char_id,
+                    dest_loc,
+                    target_ship,
+                    spec.move_ship_item,
+                    spec.validate_destination,
+                    spec.close_active_trades,
+                )
+            })
+            .map_err(db_err_to_rpc)?;
+        super::teardown_registry::emit_cancelled_trade_notifications(ctx, &cancelled_trades);
+        return Ok(Some(ch));
+    }
+    super::teardown_registry::run_non_db_trade_teardown_sync(ctx, spec);
+    let mut ch_opt = ctx.db.get_character(spec.char_id).ok();
+    if !matches!(spec.kind, TransitionKind::CharacterLogin { .. }) {
+        if let Some(ref mut ch) = ch_opt {
+            apply_spec_destination_to_character_copy(&ctx.sde, ch, dest_loc, target_ship);
+        }
+    }
+    Ok(ch_opt)
+}
+
+async fn spawn_destination_ball_if_needed(
+    ctx: &ServerContext,
+    spec: &SessionTransitionSpec,
+    updated_ch: Option<&CharacterRecord>,
+    removed_ball: Option<&Ball>,
+) -> Option<u64> {
+    if !spec.spawn_destination_ball {
+        return None;
+    }
+    let ch = updated_ch?;
+    if ch.station_id.is_some() || ch.structure_id.is_some() || ch.active_ship_id <= 0 {
+        return None;
+    }
+    let ship_id = ch.active_ship_id;
+    let ship_item = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).cloned());
+    let type_id = ship_item.as_ref().map(|it| it.type_id).unwrap_or(670);
+    let mut ball = removed_ball.cloned().unwrap_or_else(|| {
+        let radius = ctx
+            .sde
+            .types
+            .get(&type_id)
+            .map(|t| t.radius.max(10.0))
+            .unwrap_or(35.0);
+        Ball {
+            id: ship_id,
+            type_id,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 335.0,
+            inertia: 0.25,
+            mass: 1_000_000.0,
+            radius,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        }
+    });
+    if let Some(pos) = spec.arrive_ball_pos {
+        ball.position = pos;
+    }
+    ball.velocity = DVec3::ZERO;
+    ball.speed_fraction = 0.0;
+    ball.mode = MovementMode::Stop;
+    let combat_state = ctx.build_ship_combat_state(spec.char_id, ship_id, type_id);
+    let slim_meta = ctx.build_ship_slim_meta(spec.char_id, type_id);
+    let dest_handle = ctx.systems.get_or_spawn(ch.solar_system_id);
+    let arrival_tick = dest_handle
+        .spawn_ball_with_meta(ball, combat_state, slim_meta)
+        .await
+        .ok();
+    let _ = dest_handle.push_set_state(ship_id).await;
+    arrival_tick
 }
 
 impl ServerContext {
@@ -1247,108 +1313,25 @@ impl ServerContext {
         mut session: Option<&mut SessionState>,
         spec: SessionTransitionSpec,
     ) -> Result<SessionTransitionResult, BridgeRpcError> {
-        let pre_ch = self.db.get_character(spec.char_id).ok();
-        let prev_session = match session.as_deref() {
-            Some(s) => s.clone(),
-            None => match pre_ch.as_ref() {
-                Some(ch) => synthetic_session_from_character(spec.char_id, ch, None, &self.sde),
-                None => SessionState::new(0),
-            },
-        };
-
-        let old_sys = pre_ch
-            .as_ref()
-            .map(|c| c.solar_system_id)
-            .or(prev_session.solar_system_id)
-            .unwrap_or(0);
-        let old_dock = pre_ch
-            .as_ref()
-            .and_then(|c| c.station_id.or(c.structure_id))
-            .or(prev_session.station_id)
-            .or(prev_session.structure_id);
-        let old_ship = pre_ch
-            .as_ref()
-            .map(|c| c.active_ship_id)
-            .or(prev_session.ship_id)
-            .unwrap_or(0);
-
-        if spec.cleanup_departing_space && old_dock.is_none() {
-            run_departing_space_cleanup_sync(self, spec.char_id, old_ship, old_sys, &spec);
-        } else if spec.abort_self_destruct && old_ship > 0 {
-            crate::sp6_lifecycle::abort_self_destruct_for_ship(self, old_ship);
-        }
-
-        let dest_loc = spec.kind.destination_location();
-        let target_ship = spec.kind.target_ship_id();
-        let updated_ch = if matches!(spec.kind, TransitionKind::Logout) {
-            crate::services::wallet_services_ext::cancel_open_trades_for_character(
-                self,
-                spec.char_id,
-            );
-            None
-        } else if spec.apply_db {
-            let (ch, cancelled_trades) = self
-                .db
-                .try_with_mut_snapshot(|snap| {
-                    apply_character_transition_in_snap_with_trades(
-                        snap,
-                        &self.sde,
-                        spec.char_id,
-                        dest_loc,
-                        target_ship,
-                        spec.move_ship_item,
-                        spec.validate_destination,
-                    )
-                })
-                .map_err(db_err_to_rpc)?;
-            for (trade_id, char_a, char_b) in cancelled_trades {
-                self.release_bound_objects_for_object("trademgr", trade_id);
-                for party in [char_a, char_b] {
-                    self.emit_typed(
-                        NotificationTarget::Character(party),
-                        OnTradeCancel {
-                            container_id: trade_id,
-                        },
-                    );
-                }
-            }
-            Some(ch)
-        } else {
-            let mut ch_opt = self.db.get_character(spec.char_id).ok();
-            if !matches!(spec.kind, TransitionKind::CharacterLogin { .. }) {
-                if let Some(ref mut ch) = ch_opt {
-                    apply_spec_destination_to_character_copy(
-                        &self.sde,
-                        ch,
-                        dest_loc,
-                        target_ship,
-                    );
-                }
-            }
-            ch_opt
-        };
-
-        if spec.sync_local_chat {
-            if let Some(ref ch) = updated_ch {
-                let prev_opt = if matches!(spec.kind, TransitionKind::CharacterLogin { .. })
-                    || old_sys == 0
-                {
-                    None
-                } else {
-                    Some(old_sys)
-                };
-                self.sync_character_local_chat(spec.char_id, prev_opt, ch.solar_system_id);
-            }
-        }
-
+        let (pre_ch, prev_session, departing) =
+            prepare_transition_inputs(self, session.as_deref(), &spec);
+        validate_transition_destination(self, &spec, pre_ch.as_ref())?;
+        super::teardown_registry::run_pre_transition_teardown_sync(self, &spec, &departing);
+        let updated_ch = apply_transition_db_and_trades(self, &spec)?;
+        super::teardown_registry::run_post_db_pre_finalize_hooks_sync(
+            self,
+            &spec,
+            &departing,
+            updated_ch.as_ref(),
+        );
         let (diff, scene_epoch) = finalize_transition_session_and_epoch(
             self,
             session.as_deref_mut(),
             &prev_session,
             updated_ch.as_ref(),
+            &departing,
             &spec,
         );
-
         Ok(SessionTransitionResult {
             updated_character: updated_ch,
             diff,
@@ -1365,175 +1348,44 @@ impl ServerContext {
         mut session: Option<&mut SessionState>,
         spec: SessionTransitionSpec,
     ) -> Result<SessionTransitionResult, BridgeRpcError> {
-        let pre_ch = self.db.get_character(spec.char_id).ok();
-        let prev_session = match session.as_deref() {
-            Some(s) => s.clone(),
-            None => match pre_ch.as_ref() {
-                Some(ch) => synthetic_session_from_character(spec.char_id, ch, None, &self.sde),
-                None => SessionState::new(0),
-            },
-        };
-
-        let old_sys = pre_ch
-            .as_ref()
-            .map(|c| c.solar_system_id)
-            .or(prev_session.solar_system_id)
-            .unwrap_or(0);
-        let old_dock = pre_ch
-            .as_ref()
-            .and_then(|c| c.station_id.or(c.structure_id))
-            .or(prev_session.station_id)
-            .or(prev_session.structure_id);
-        let old_ship = pre_ch
-            .as_ref()
-            .map(|c| c.active_ship_id)
-            .or(prev_session.ship_id)
-            .unwrap_or(0);
-
-        if spec.validate_destination {
-            if let Some(ref ch) = pre_ch {
-                self.db
-                    .with_snapshot(|snap| {
-                        resolve_destination_location(
-                            snap,
-                            &self.sde,
-                            spec.char_id,
-                            ch,
-                            spec.kind.destination_location(),
-                            true,
-                        )
-                    })
-                    .map_err(db_err_to_rpc)?;
-            }
-        }
+        let (pre_ch, prev_session, departing) =
+            prepare_transition_inputs(self, session.as_deref(), &spec);
+        validate_transition_destination(self, &spec, pre_ch.as_ref())?;
+        super::teardown_registry::run_pre_transition_teardown_sync(self, &spec, &departing);
 
         let mut removed_ball = None;
-        if spec.cleanup_departing_space && old_dock.is_none() && old_sys != 0 && old_ship > 0 {
-            run_departing_space_cleanup_sync(self, spec.char_id, old_ship, old_sys, &spec);
-            let old_handle = self.systems.get_or_spawn(old_sys);
-            let _ = old_handle.clear_target_locks(old_ship).await;
-            if let Some((dock_id, dock_pos)) = spec.accept_ballpark_dock {
-                removed_ball = old_handle.accept_docking(old_ship, dock_id, dock_pos).await;
+        if super::teardown_registry::should_run_departing_ballpark_cleanup(&spec, &departing) {
+            let old_handle = self.systems.get_or_spawn(departing.sys_id);
+            let _ = old_handle.clear_target_locks(departing.ship_id).await;
+            removed_ball = if let Some((dock_id, dock_pos)) = spec.accept_ballpark_dock {
+                old_handle
+                    .accept_docking(departing.ship_id, dock_id, dock_pos)
+                    .await
             } else {
-                removed_ball = old_handle.remove_ball(old_ship).await;
-            }
-        } else if spec.abort_self_destruct && old_ship > 0 {
-            crate::sp6_lifecycle::abort_self_destruct_for_ship(self, old_ship);
+                old_handle.remove_ball(departing.ship_id).await
+            };
         }
 
-        let dest_loc = spec.kind.destination_location();
-        let target_ship = spec.kind.target_ship_id();
-        let updated_ch = if matches!(spec.kind, TransitionKind::Logout) {
-            crate::services::wallet_services_ext::cancel_open_trades_for_character(
-                self,
-                spec.char_id,
-            );
-            None
-        } else if spec.apply_db {
-            let (ch, cancelled_trades) = self
-                .db
-                .try_with_mut_snapshot(|snap| {
-                    apply_character_transition_in_snap_with_trades(
-                        snap,
-                        &self.sde,
-                        spec.char_id,
-                        dest_loc,
-                        target_ship,
-                        spec.move_ship_item,
-                        spec.validate_destination,
-                    )
-                })
-                .map_err(db_err_to_rpc)?;
-            for (trade_id, char_a, char_b) in cancelled_trades {
-                self.release_bound_objects_for_object("trademgr", trade_id);
-                for party in [char_a, char_b] {
-                    self.emit_typed(
-                        NotificationTarget::Character(party),
-                        OnTradeCancel {
-                            container_id: trade_id,
-                        },
-                    );
-                }
-            }
-            Some(ch)
-        } else {
-            let mut ch_opt = self.db.get_character(spec.char_id).ok();
-            if !matches!(spec.kind, TransitionKind::CharacterLogin { .. }) {
-                if let Some(ref mut ch) = ch_opt {
-                    apply_spec_destination_to_character_copy(
-                        &self.sde,
-                        ch,
-                        dest_loc,
-                        target_ship,
-                    );
-                }
-            }
-            ch_opt
-        };
-
-        let mut arrival_tick = None;
-        if spec.spawn_destination_ball {
-            if let Some(ref ch) = updated_ch {
-                if ch.station_id.is_none() && ch.structure_id.is_none() && ch.active_ship_id > 0 {
-                    let ship_id = ch.active_ship_id;
-                    let ship_item = self.db.with_snapshot(|snap| snap.items.get(&ship_id).cloned());
-                    let type_id = ship_item.as_ref().map(|it| it.type_id).unwrap_or(670);
-                    let mut ball = removed_ball.clone().unwrap_or_else(|| {
-                        let radius = self
-                            .sde
-                            .types
-                            .get(&type_id)
-                            .map(|t| t.radius.max(10.0))
-                            .unwrap_or(35.0);
-                        Ball {
-                            id: ship_id,
-                            type_id,
-                            position: DVec3::ZERO,
-                            velocity: DVec3::ZERO,
-                            max_velocity: 335.0,
-                            inertia: 0.25,
-                            mass: 1_000_000.0,
-                            radius,
-                            speed_fraction: 0.0,
-                            mode: MovementMode::Stop,
-                        }
-                    });
-                    if let Some(pos) = spec.arrive_ball_pos {
-                        ball.position = pos;
-                    }
-                    ball.velocity = DVec3::ZERO;
-                    ball.speed_fraction = 0.0;
-                    ball.mode = MovementMode::Stop;
-                    let combat_state = self.build_ship_combat_state(spec.char_id, ship_id, type_id);
-                    let slim_meta = self.build_ship_slim_meta(spec.char_id, type_id);
-                    let dest_handle = self.systems.get_or_spawn(ch.solar_system_id);
-                    arrival_tick = dest_handle
-                        .spawn_ball_with_meta(ball, combat_state, slim_meta)
-                        .await
-                        .ok();
-                    let _ = dest_handle.push_set_state(ship_id).await;
-                }
-            }
-        }
-
-        if spec.sync_local_chat {
-            if let Some(ref ch) = updated_ch {
-                let prev_opt = if matches!(spec.kind, TransitionKind::CharacterLogin { .. })
-                    || old_sys == 0
-                {
-                    None
-                } else {
-                    Some(old_sys)
-                };
-                self.sync_character_local_chat(spec.char_id, prev_opt, ch.solar_system_id);
-            }
-        }
-
+        let updated_ch = apply_transition_db_and_trades(self, &spec)?;
+        let arrival_tick = spawn_destination_ball_if_needed(
+            self,
+            &spec,
+            updated_ch.as_ref(),
+            removed_ball.as_ref(),
+        )
+        .await;
+        super::teardown_registry::run_post_db_pre_finalize_hooks_sync(
+            self,
+            &spec,
+            &departing,
+            updated_ch.as_ref(),
+        );
         let (diff, scene_epoch) = finalize_transition_session_and_epoch(
             self,
             session.as_deref_mut(),
             &prev_session,
             updated_ch.as_ref(),
+            &departing,
             &spec,
         );
 

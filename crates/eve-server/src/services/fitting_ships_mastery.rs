@@ -424,7 +424,6 @@ async fn handle_dogma_create_newbie_ship(
         );
         ctx.notify_item_change(char_id, row, vec![(3, PyRep::Integer(old_loc))]);
     }
-    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, corvette_id);
     ctx.invalidate_ship_fitting(corvette_id);
     let _ = ctx.execute_session_transition_sync(
         Some(session),
@@ -865,7 +864,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 .with_apply_db(false)
                 .with_emit_on_session_changed(false),
             );
-            crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, old_ship_id);
             ctx.invalidate_ship_fitting(old_ship_id);
             ctx.invalidate_ship_fitting(capsule_id);
             if dock_opt.is_some() {
@@ -1177,8 +1175,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     if let Some(prev) = prev_ship_id {
                         ctx.invalidate_ship_fitting(prev);
                         if prev != sid {
-                            crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, prev);
-                            crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, sid);
                             crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
                                 ctx,
                                 char_id,
@@ -1433,7 +1429,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     for old_rec in &removed_capsule_items {
                         ctx.emit_item_deleted_routed(char_id, old_rec);
                     }
-                    crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, char_id);
                     let ship_state = prime_ship_on_board(ctx, session, char_id, sid);
                     Some(Ok(ship_state))
                 }

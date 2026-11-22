@@ -292,7 +292,6 @@ impl ServerContext {
         char_id: i64,
         mut session_opt: Option<&mut SessionState>,
     ) {
-        crate::services::wallet_services_ext::cancel_open_trades_for_character(self, char_id);
         crate::services::structure_control_ops::release_all_structure_control_for_character(
             self,
             session_opt.as_deref_mut(),
@@ -311,17 +310,11 @@ impl ServerContext {
                 });
             }
         }
-        let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect_sync(self, char_id);
-        crate::services::character_skills::notify_watchlist_presence(self, char_id, false);
-        crate::services::fleet_social::fleet_social_notify::on_character_logout(self, char_id);
-        crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
-            self, char_id,
+        super::teardown_registry::run_disconnect_teardown_sync(
+            self,
+            char_id,
+            session_opt.as_deref(),
         );
-        crate::services::fleet_social::revoke_xmpp_auth_token(self, char_id);
-        if let Ok(mut cn) = self.systems.cluster_nodes.write() {
-            cn.char_rebased_system_gen.remove(&char_id);
-        }
-        self.clear_notifications_for_char(char_id);
     }
 
     /// Unified disconnect cleanup shared by both native `machoNet` TCP (`handle_macho_client`)
