@@ -185,6 +185,33 @@ fn handle_fw_warzone_collection(
     Ok(PyRep::List(list))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("dynamicResourceCacheMgr", "GetDBSMapData", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dynamicResourceCacheMgr", "GetDynamicResourceSettings", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dynamicResourceCacheMgr", "GetESSAgencyData", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dynamicResourceCacheMgr", "GetESSReserveBankKeys", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dynamicResourceCacheMgr", "GetESSSystemDetails", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dynamicResourceCacheMgr", "get", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dynamicResourceCacheMgr", "iteritems", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovMgr", "remove_from_cache", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fwWarzoneSolarsystem", "iteritems", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fwWarzoneSolarsystem", "itervalues", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fwWarzoneSolarsystem", "keys", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

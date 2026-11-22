@@ -1174,6 +1174,25 @@ fn handle_check_and_send_skill_notifications(
     Ok(PyRep::None)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    service: &str,
+    method: &str,
+    _args: &[PyRep],
+    _kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle_skill_notifications_and_injections(ctx, session, service, method)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("skillMgr2", "CheckAndSendNotifications", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("nonDiminishingInjectionMgr", "GetAvailableNonDiminishingInjections", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("alphaInjectorMgr", "GetNextAvailableInjection", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+];
+
 /// Station-entry skill notification check (`skillMgr2.CheckAndSendNotifications`,
 /// `notifications/client/development/skillHistoryProvider.pyj:22`) and non-diminishing
 /// skill injection lookup (`nonDiminishingInjectionMgr.GetAvailableNonDiminishingInjections`,

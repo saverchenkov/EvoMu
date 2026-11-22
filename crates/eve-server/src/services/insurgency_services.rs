@@ -1274,6 +1274,26 @@ pub async fn step_system_insurgency_tick_delta(ctx: &ServerContext, sys_id: u32,
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("insurgencySolarsystem", "GetAllVisibleCampaigns", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("insurgencySolarsystem", "GetLocalCampaignClientSnapshot", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

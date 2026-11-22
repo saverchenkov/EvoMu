@@ -12,7 +12,7 @@ use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use std::collections::{HashMap, HashSet};
 
 #[path = "inventory_stacking_ops.rs"]
-mod inventory_stacking_ops;
+pub(crate) mod inventory_stacking_ops;
 pub(super) use inventory_stacking_ops::handle_stack_ops;
 use super::fitting_containers_ships::{
     edge_distance_in_space_snap, foreign_ship_deny_err, list_with_optional_ship_unlock,

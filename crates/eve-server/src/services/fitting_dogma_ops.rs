@@ -10,6 +10,33 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::attr_ids;
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_dogma_ops(ctx, session, bound_entry, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("dogmaIM", "AddTargetOBO", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "CancelAddTarget", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "RemoveTargetOBO", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "RemoveTargets", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "QueryAttributeValue", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "QueryAllAttributesForItem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "FullyDescribeAttribute", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "ShipOnlineModules", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "InitiateModuleRepairMany", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "ChangeDroneSettings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 pub(crate) async fn handle_dogma_ops(
     ctx: &ServerContext,
     session: &mut SessionState,

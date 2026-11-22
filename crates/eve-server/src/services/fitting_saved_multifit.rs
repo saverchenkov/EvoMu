@@ -12,6 +12,48 @@ fn rpc_err(code: &str, msg: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: msg.into(), client_error: None }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_ships_and_services(
+        ctx,
+        session,
+        bound_entry,
+        service,
+        method,
+        args,
+        kwargs,
+    ))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("insuranceSvc", "InsureShip", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("insuranceSvc", "GetInsurancePrice", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("insuranceSvc", "GetContractForShip", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("insuranceSvc", "UnInsureShip", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("insuranceSvc", "GetContracts", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("insuranceSvc", "GetInsurancePrices", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dynamicItemService", "CreateDynamicItem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dynamicItemSvc", "CreateDynamicItem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dynamicItemService", "GetDynamicItemInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("repackagingSvc", "RepackageItems", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "AssembleShip", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("repairSvc", "GetRepairQuotes", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("repairSvc", "RepairItems", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("repairSvc", "RepairItemsInStation", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("repairSvc", "RepairItemsInStructure", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("repairSvc", "RepairAll", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "SetLabel", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 pub(crate) async fn handle_ships_and_services(
     ctx: &ServerContext,
     session: &mut SessionState,

@@ -1984,15 +1984,6 @@ impl ServerContext {
         if let Some(res) = box_fut(|| services::sov_fw_insurgency::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = box_fut(|| services::cosmetics_ui_ops::handle(self, session, effective_service, method, args, kwargs)).await {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::campaigns_and_milestones::handle(self, session, effective_service, method, args, kwargs)).await {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::cosmetics_events::handle(self, session, effective_service, method, args, kwargs)).await {
-            return res;
-        }
         if let Some(res) = services::corp_registry_ops::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }

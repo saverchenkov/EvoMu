@@ -131,6 +131,39 @@ pub(crate) fn is_in_access_group(
     false
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("accessGroupBookmarkMgr", "BookmarkStaticLocation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "GetMyActiveBookmarks", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "UpdateBookmark", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "DeleteBookmarks", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "CopyBookmarksToFolderAndSubfolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "MoveBookmarksToFolderAndSubfolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "AddFolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "UpdateFolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "DeleteFolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "CreateSubfolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "UpdateSubfolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "DeleteSubfolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "AddToKnownFolders", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "UpdateKnownFolderState", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "RemoveFromKnownFolders", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "GetFolderInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("accessGroupBookmarkMgr", "SearchFoldersWithAdminAccess", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 /// Dispatches all 17 `accessGroupBookmarkMgr` RPC methods.
 pub(crate) async fn handle(
     ctx: &ServerContext,

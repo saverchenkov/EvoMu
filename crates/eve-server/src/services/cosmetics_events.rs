@@ -225,6 +225,24 @@ pub async fn interdict_convoy(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+/// Only `GiveSkin` is registered here; `shipCosmeticsMgr.ActivateSkinLicense` is owned by `cosmetics_ui_ops::RPCS`.
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("shipCosmeticsMgr", "GiveSkin", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

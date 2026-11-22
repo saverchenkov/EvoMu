@@ -224,6 +224,118 @@ pub const COMPILED_RPC_MODULES: &[CompiledRpcModule] = &[
         file: "services/fitting_module_cycles.rs",
         rpcs: crate::services::inventory_fitting::fitting_module_cycles::RPCS,
     },
+    CompiledRpcModule {
+        file: "services/campaigns_and_milestones.rs",
+        rpcs: crate::services::campaigns_and_milestones::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/cosmetics_events.rs",
+        rpcs: crate::services::cosmetics_events::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/cosmetics_ui_ops.rs",
+        rpcs: crate::services::cosmetics_ui_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/config_service.rs",
+        rpcs: crate::services::config_service::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/hypernet_raffle_ops.rs",
+        rpcs: crate::services::hypernet_raffle_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/implant_plugging.rs",
+        rpcs: crate::services::implant_plugging::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/pve_incursion_sites.rs",
+        rpcs: crate::services::pve_incursion_sites::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/security_mgr.rs",
+        rpcs: crate::services::security_mgr::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/jump_clone_names.rs",
+        rpcs: crate::services::jump_clone_names::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fw_enlistment.rs",
+        rpcs: crate::services::fw_enlistment::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fw_gameplay_rpc.rs",
+        rpcs: crate::services::fw_gameplay::fw_gameplay_rpc::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/insurgency_services.rs",
+        rpcs: crate::services::insurgency_services::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/sov_warzone_dynamic.rs",
+        rpcs: crate::services::sov_warzone_dynamic::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/industry_facilities_bps.rs",
+        rpcs: crate::services::industry_pi::industry_facilities_bps::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/pi_colonies.rs",
+        rpcs: crate::services::industry_pi::pi_colonies::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/pi_orbital_registry.rs",
+        rpcs: crate::services::industry_pi::pi_orbital_registry::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/pi_orbitals_gm.rs",
+        rpcs: crate::services::industry_pi::pi_orbitals_gm::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/pi_orbitals.rs",
+        rpcs: crate::services::industry_pi::pi_orbitals::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/market_orders_escrow.rs",
+        rpcs: crate::services::market_trading::market_orders_escrow::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fitting_dogma_ops.rs",
+        rpcs: crate::services::inventory_fitting::fitting_dogma_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fitting_mgr_service.rs",
+        rpcs: crate::services::inventory_fitting::fitting_mgr_service::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fitting_saved_multifit.rs",
+        rpcs: crate::services::inventory_fitting::fitting_saved_multifit::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/combat_fighters.rs",
+        rpcs: crate::services::combat_crimewatch::combat_fighters::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/combat_npcs_drones.rs",
+        rpcs: crate::services::combat_crimewatch::combat_npcs_drones::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_access_group_bookmarks.rs",
+        rpcs: crate::services::fleet_social::fleet_social_access_group_bookmarks::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_finder_tactical.rs",
+        rpcs: crate::services::fleet_social::fleet_social_finder_tactical::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_bookmarks.rs",
+        rpcs: crate::services::fleet_social::fleet_social_bookmarks::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/inventory_stacking_ops.rs",
+        rpcs: crate::services::inventory_stacking::inventory_stacking_ops::RPCS,
+    },
 ];
 
 /// Returns the `.rs` paths (relative to `crates/eve-server/src/`) already migrated to `RPCS`.

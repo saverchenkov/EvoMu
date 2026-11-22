@@ -79,6 +79,23 @@ pub fn get_effective_system_security(ctx: &ServerContext, solar_system_id: u32) 
         .unwrap_or(0.0)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    _service: &str,
+    method: &str,
+    args: &[PyRep],
+    _kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle_security_mgr_call(ctx, session, method, args)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("securityMgr", "get_modified_systems", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+];
+
 /// Handles `securityMgr` RPC calls from the game client.
 pub fn handle_security_mgr_call(
     ctx: &ServerContext,

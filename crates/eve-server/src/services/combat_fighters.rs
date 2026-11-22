@@ -356,6 +356,33 @@ async fn require_undocked_uncloaked_fighter_ship(
     Ok((char_id, ship_id, sys_id, sys_handle))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_fighters(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("fighterMgr", "GetFightersForShip", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fighterMgr", "LoadFightersToTube", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fighterMgr", "UnloadTubeToFighterBay", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fighterMgr", "LaunchFightersFromTubes", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fighterMgr", "RecallFightersToTubes", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fighterMgr", "ExecuteMovementCommandOnFighters", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fighterMgr", "CmdActivateAbilitySlots", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fighterMgr", "ActivateAbilitySlotsAtPoint", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fighterMgr", "CmdDeactivateAbilitySlots", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fighterMgr", "CmdAbandonFighter", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fighterMgr", "CmdScoopAbandonedFighterFromSpace", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle_fighters(
     ctx: &ServerContext,
     session: &mut SessionState,

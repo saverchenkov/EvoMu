@@ -909,6 +909,43 @@ fn resolve_bp_facility_loc(
     (None, loc_type_id, None)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if service == "map" {
+        if let Some(res) =
+            crate::services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
+                session, service, method, args,
+            )
+        {
+            return Some(res);
+        }
+    }
+    handle_industry_facilities_bps(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("blueprintManager", "GetBlueprintData", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("blueprintManager", "GetBlueprintDataByOwner", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("blueprintManager", "GetLimits", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("facilityManager", "GetFacilities", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("facilityManager", "GetFacilitiesByID", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("facilityManager", "GetFacilityLocations", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("facilityManager", "GetFacility", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("facilityManager", "GetFacilityTaxes", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("facilityManager", "SetFacilityTaxes", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("facilityManager", "GetMaxActivityModifiers", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("map", "GetIndustryCostModifier", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("map", "GetIndustryJobsOverLast24Hours", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
+
 pub fn handle_industry_facilities_bps(
     ctx: &ServerContext,
     session: &mut SessionState,

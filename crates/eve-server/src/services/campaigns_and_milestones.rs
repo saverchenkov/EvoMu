@@ -362,6 +362,33 @@ pub(crate) fn deliver_login_reward(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("loginCampaignManager", "get_client_campaign_state", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("loginCampaignManager", "claim_reward", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("seasonalLoginCampaignManager", "get_active_campaign", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("seasonalLoginCampaignManager", "get_claim_history", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("seasonalLoginCampaignManager", "claim_reward", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("infoGatheringMgr", "GetStateAndConfig", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("infoGatheringMgr", "LogInfoEventsFromClient", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("milestoneMgr", "ProcessCharacterLogon", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("milestoneMgr", "ClaimRewards", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("communityTrackMgr", "get_instance_attributes_public", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("communityTrackMgr", "change_qa_mode", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

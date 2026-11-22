@@ -5,6 +5,35 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(std::future::ready(handle_pi_orbital_registry(
+        ctx,
+        session,
+        service,
+        method,
+        args,
+        kwargs,
+        bound_entry,
+    )))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("planetOrbitalRegistryBroker", "GetTaxRate", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetOrbitalRegistryBroker", "GetSettingsInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetOrbitalRegistryBroker", "UpdateSettings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetOrbitalRegistryBroker", "RevertOrbitalsToInterBus", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 pub fn handle_pi_orbital_registry(
     ctx: &ServerContext,
     session: &mut SessionState,

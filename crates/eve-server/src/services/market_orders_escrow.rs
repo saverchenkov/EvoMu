@@ -530,6 +530,16 @@ fn validate_buy_multiple_preconditions(
     Ok((region_id, avail_isk))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("marketProxy", "PlaceMultiSellOrder", RpcDispatchHandler::Sync(handle_orders_escrow)),
+    rpc_entry("marketProxy", "CancelCharOrder", RpcDispatchHandler::Sync(handle_orders_escrow)),
+    rpc_entry("marketProxy", "BuyMultipleItems", RpcDispatchHandler::Sync(handle_orders_escrow)),
+    rpc_entry("marketProxy", "GetOldPriceHistory", RpcDispatchHandler::Sync(handle_orders_escrow)),
+    rpc_entry("marketProxy", "GetNewPriceHistory", RpcDispatchHandler::Sync(handle_orders_escrow)),
+];
+
 pub fn handle_orders_escrow(
     ctx: &ServerContext,
     session: &mut SessionState,

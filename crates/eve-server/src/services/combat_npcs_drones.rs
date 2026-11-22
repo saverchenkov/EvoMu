@@ -1021,6 +1021,36 @@ async fn validate_return_bay_filter(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_npcs_drones(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("ship", "LaunchDrones", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("entity", "CmdReturnBay", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("entity", "CmdReturnHome", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("entity", "CmdReturnAndOrbit", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("entity", "CmdEngage", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("entity", "CmdAssist", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("entity", "CmdGuard", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("entity", "ChangeDroneSettings", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("entity", "SetAggressive", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("entity", "CmdAbandonDrone", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ship", "ScoopToDroneBay", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ship", "ScoopDrone", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("entity", "CmdReconnectToDrones", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("entity", "CmdSalvage", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 /// Handles all V24 client Drone RPCs (`ship.LaunchDrones`, `ship.ScoopToDroneBay`, `entity.CmdReturnBay`,
 /// `entity.CmdReturnHome`, `entity.CmdReturnAndOrbit`, `entity.CmdEngage`, `entity.CmdAssist`, `entity.CmdGuard`,
 /// `entity.ChangeDroneSettings`, `entity.SetAggressive`, `entity.CmdAbandonDrone`, `entity.CmdReconnectToDrones`, `entity.CmdSalvage`).

@@ -1207,6 +1207,26 @@ pub async fn on_incursion_boss_destroyed(
     res
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_incursion_rpc(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("incursion", "GetIncursionLPLog", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("incursion", "UpdateIncursionLPLog", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("taleMgr", "GetGlobalWorldEventTales", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("taleMgr", "get_active_tales_by_template", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle_incursion_rpc(
     ctx: &ServerContext,
     session: &mut SessionState,
