@@ -6734,6 +6734,34 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
             )
         )
 
+        # BF-USERERR-R4-01 (BF-02): Empty-primary / truncated / CALLSTACK:-only traces must never
+        # leak a UserError from CALLSTACK: via parse_traceback_summary fallback.
+        mff_skill_line = (
+            "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0)', "
+            "'moduleName': 'Miner I'})"
+        )
+        callstack_leak_cases = (
+            "EXCEPTION #1\nNone\n\nCALLSTACK:\n  File \"foo.py\", line 10, in Bar\n"
+            "    UserError: User error, msg=NotEnoughCPU, dict={}\n",
+            "Traceback (most recent call last):\n"
+            "  File \"foo.py\", line 10, in Bar\n\n"
+            "CALLSTACK:\n"
+            f"  Formatted exception info: {mff_skill_line}\n",
+            "CALLSTACK:\n"
+            "  File \"eve/client/script/fitting.py\", line 10, in Foo\n"
+            f"  log.LogTraceback args=(\"{mff_skill_line}\",) kwargs={{}}\n",
+        )
+        for leak_tb in callstack_leak_cases:
+            self.assertEqual(oracle_cls._extract_raised_user_error("", leak_tb), (None, ""))
+            self.assertFalse(
+                oracle_cls.is_expected_user_error(
+                    {"trace": leak_tb, "headline": ""}, ui_state=untrained_ui_state
+                )
+            )
+            self.assertFalse(
+                oracle_cls.is_ignorable_client_traceback("", leak_tb, ui_state=untrained_ui_state)
+            )
+
         # BF-USERERR-03: BENIGN_FLIGHT_FLOW_MARKERS must not short-circuit missing-moduleName ModuleFitFailed.
         for reason in (
             "FittingValidationFailed: missing skill",
@@ -7044,6 +7072,297 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
                 mem_disk["last_run_summary"]["precondition_verified_user_error_exemptions"],
                 1,
             )
+
+            # Standalone macho_calls ERR (not mirrored in macho_exceptions) is also collected, while
+            # mirrored seq=42 macho_calls ERR does not double-count.
+            extra_calls_exec = {
+                "flight_recorder": {
+                    "macho_exceptions": [
+                        {
+                            "service": "invbroker",
+                            "method": "MultiAdd",
+                            "seq": 42,
+                            "error": mff_err,
+                        }
+                    ],
+                    "macho_calls": [
+                        {
+                            "service": "invbroker",
+                            "method": "MultiAdd",
+                            "seq": 42,
+                            "status": "ERR",
+                            "error": mff_err,
+                        },
+                        {
+                            "service": "invbroker",
+                            "method": "Add",
+                            "seq": 99,
+                            "status": "ERR",
+                            "error": mff_err,
+                        },
+                    ],
+                    "log_exceptions": [],
+                }
+            }
+            calls_collected = playtester.PlaytesterBugOracle.collect_exec_res_user_error_exemptions(
+                extra_calls_exec, ui_state=untrained_ui_state, step_num=3
+            )
+            self.assertEqual(
+                [(h["channel"], h.get("seq")) for h in calls_collected],
+                [("macho_exceptions", 42), ("macho_calls", 99)],
+            )
+
+            # Non-seq harvester anomalies preserve step_num (instead of step=0) and dedup across harvests.
+            non_seq_calls = [
+                {
+                    "service": "invbroker",
+                    "method": "MultiAdd",
+                    "ts": 200.0 + i,
+                    "status": f"ERR({mff_err})",
+                    "error": mff_err,
+                }
+                for i in range(4)
+            ]
+            fresh_mem = playtester.PlaytesterMemory(root / "mem2", git_head="496975a8e")
+            fresh_oracle = playtester.PlaytesterBugOracle(root, qdir, fresh_mem, sync_github=False)
+            fresh_tracker = playtester._UserErrorExemptionTracker(retain_all=True, max_recent=100)
+            self.assertEqual(
+                fresh_oracle.record_flight_recorder_anomalies(
+                    non_seq_calls,
+                    step_num=7,
+                    ui_state=untrained_ui_state,
+                    exemption_tracker=fresh_tracker,
+                ),
+                [],
+            )
+            self.assertEqual(len(fresh_tracker.hits), 4)
+            self.assertTrue(all(h["step"] == 7 for h in fresh_tracker.hits))
+            self.assertTrue(all(str(h.get("dedup_id", "")).startswith("step:7:") for h in fresh_tracker.hits))
+            # Second harvest of the exact same non-seq list must add zero duplicates.
+            self.assertEqual(
+                fresh_oracle.record_flight_recorder_anomalies(
+                    non_seq_calls,
+                    step_num=7,
+                    ui_state=untrained_ui_state,
+                    exemption_tracker=fresh_tracker,
+                ),
+                [],
+            )
+            self.assertEqual(len(fresh_tracker.hits), 4)
+            self.assertEqual(fresh_tracker.summary()["user_error_exemptions_count"], 4)
+
+    def test_scenario_checks_log_scan_and_runner_user_error_exemptions(self):
+        untrained_ui_state = {
+            "skills_state": {"total_trained_skills": 1, "trained_skill_levels": {"3300": 4}}
+        }
+        trained_ui_state = {
+            "skills_state": {"total_trained_skills": 2, "trained_skill_levels": {"3300": 4, "3412": 2}}
+        }
+        mff_err = (
+            "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 "
+            "(trained: 0) for module Core Probe Launcher I (type 17938)', "
+            "'moduleName': 'Core Probe Launcher I'})"
+        )
+        cpu_err = "UserError('ModuleFitFailed', {'reason': 'Not enough CPU', 'moduleName': 'Miner I'})"
+        window_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x956b40158, "
+            "ctxt='__OpenCargoHoldOfActiveShip_thread'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+            '  File "packages/carbonui/control/window.py", line 4164, in Open\n'
+            "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}\n"
+        )
+
+        # 1. evaluate_scenario_checks: exempts verified skill MFF (macho_exceptions & macho_calls) + tasklet TB.
+        ok_pass, chk_pass, msg_pass = playtester.evaluate_scenario_checks(
+            {"no_error_reply": True, "no_client_exception": True},
+            untrained_ui_state,
+            {},
+            {
+                "action_ok": True,
+                "flight_recorder": {
+                    "macho_exceptions": [
+                        {"service": "invbroker", "method": "MultiAdd", "seq": 10, "error": mff_err}
+                    ],
+                    "macho_calls": [
+                        {"service": "invbroker", "method": "Add", "seq": 11, "status": "ERR", "error": mff_err}
+                    ],
+                    "log_exceptions": [
+                        {"headline": "UserError: User error, msg=WindowBlockedFromOpening, dict={}", "trace": window_tb}
+                    ],
+                },
+            },
+        )
+        self.assertTrue(ok_pass, f"{chk_pass}: {msg_pass}")
+
+        # Fail closed when skills_state shows trained skill or CPU reason.
+        ok_trained, chk_trained, _ = playtester.evaluate_scenario_checks(
+            {"no_error_reply": True},
+            trained_ui_state,
+            trained_ui_state,
+            {
+                "action_ok": True,
+                "flight_recorder": {
+                    "macho_calls": [
+                        {"service": "invbroker", "method": "Add", "seq": 12, "status": "ERR", "error": mff_err}
+                    ]
+                },
+            },
+        )
+        self.assertFalse(ok_trained)
+        self.assertEqual(chk_trained, "no_error_reply")
+
+        ok_cpu, chk_cpu, _ = playtester.evaluate_scenario_checks(
+            {"no_error_reply": True},
+            untrained_ui_state,
+            untrained_ui_state,
+            {
+                "action_ok": True,
+                "flight_recorder": {
+                    "macho_exceptions": [
+                        {"service": "invbroker", "method": "Add", "seq": 13, "error": cpu_err}
+                    ]
+                },
+            },
+        )
+        self.assertFalse(ok_cpu)
+        self.assertEqual(chk_cpu, "no_error_reply")
+
+        # 2. scan_scenario_logs_for_errors forwards ui_state and populates exemptions_out.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            srv_log = root / "server.log"
+            cli_log = root / "client.log"
+            tb_log = root / "client_tracebacks.log"
+            srv_log.write_text("", encoding="utf-8")
+            cli_log.write_text("", encoding="utf-8")
+            mff_tb = (
+                "EXCEPTION #1 logged at 10/11/26 20:00:00 : Client fitting blocked\n"
+                "Traceback (most recent call last):\n"
+                '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 185, in FitModule\n'
+                f"UserError: User error, msg=ModuleFitFailed, dict={{'reason': 'Missing required skill 3412 level 1 (trained: 0)', 'moduleName': 'Core Probe Launcher I'}}\n"
+                "EXCEPTION END\n"
+            )
+            tb_log.write_text(mff_tb + "\n" + window_tb + "\nEXCEPTION END\n", encoding="utf-8")
+
+            # Without live skills_state -> MFF traceback fails closed.
+            errs_no_ui = playtester.scan_scenario_logs_for_errors(
+                srv_log, [cli_log], traceback_log_path=tb_log, ui_state={}, step_num=1
+            )
+            self.assertEqual(len(errs_no_ui), 1)
+            self.assertIn("ModuleFitFailed", errs_no_ui[0])
+
+            # With live untrained skills_state -> clean + both exemptions recorded.
+            scan_ex = []
+            errs_ok = playtester.scan_scenario_logs_for_errors(
+                srv_log,
+                [cli_log],
+                traceback_log_path=tb_log,
+                ui_state=untrained_ui_state,
+                exemptions_out=scan_ex,
+                step_num=2,
+            )
+            self.assertEqual(errs_ok, [])
+            self.assertEqual(
+                {h["key"] for h in scan_ex},
+                {"ModuleFitFailed", "WindowBlockedFromOpening"},
+            )
+            self.assertEqual(sum(1 for h in scan_ex if h["verified"]), 1)
+
+            # 3. ScenarioRunner end-to-end rollup & empty-post_state tail skill preservation.
+            scen_path = root / "scen.json"
+            scen_path.write_text(
+                json.dumps(
+                    {
+                        "id": "t_scen_exemption_rollup",
+                        "title": "Scenario exemption rollup",
+                        "starting_state": {},
+                        "steps": [
+                            {"id": "step_1", "action": {"type": "wait", "wait_ms": 10}, "checks": {}},
+                            {"id": "step_2", "action": {"type": "wait", "wait_ms": 10}, "checks": {}},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = playtester.parse_args(["--scenario", str(scen_path), "--no-github-sync"])
+            args.runtime_dir = str(root / "runtime")
+            args.out_dir = str(root / "out")
+            runner = playtester.ScenarioRunner(args, scenario_paths=[scen_path], out_dir=root / "out")
+            runner.start_server = mock.MagicMock(return_value=True)
+            runner.stop_server = mock.MagicMock()
+
+            def _mock_start_client():
+                scen_dir = runner.current_run_dir
+                (scen_dir / "server.log").write_text("", encoding="utf-8")
+                (scen_dir / "client.log").write_text("", encoding="utf-8")
+                (scen_dir / "client_tracebacks.log").write_text("", encoding="utf-8")
+                runner._last_boot_result = {
+                    "state": {"session": {"charid": 90000001}, **untrained_ui_state},
+                    "flight_recorder": {
+                        "macho_calls": [
+                            {"seq": 1, "service": "publicGatewaySvc", "method": "SendRequest", "status": "OK"}
+                        ]
+                    },
+                }
+                return True
+
+            runner.start_client = mock.MagicMock(side_effect=_mock_start_client)
+            runner._close_gm_bridge = mock.MagicMock()
+            runner._capture_failure_screenshot = mock.MagicMock(return_value=None)
+            runner._run_destiny_parity_check = mock.MagicMock(return_value=None)
+
+            call_idx = {"n": 0}
+
+            def _rpc_call(method, *_args, **_kwargs):
+                if method == "get_state":
+                    return {"state": {"session": {"charid": 90000001}, **untrained_ui_state}}
+                if method == "execute_action":
+                    call_idx["n"] += 1
+                    if call_idx["n"] == 1:
+                        return {
+                            "action_ok": True,
+                            "post_state": {"session": {"charid": 90000001}, **untrained_ui_state},
+                            "flight_recorder": {
+                                "macho_exceptions": [
+                                    {"service": "invbroker", "method": "MultiAdd", "seq": 11, "error": mff_err}
+                                ],
+                                "macho_calls": [
+                                    {"service": "invbroker", "method": "MultiAdd", "seq": 11, "status": "ERR", "error": mff_err}
+                                ],
+                                "log_exceptions": [
+                                    {"headline": "UserError: User error, msg=WindowBlockedFromOpening, dict={}", "trace": window_tb}
+                                ],
+                            },
+                        }
+                    # Step 2 returns empty post_state while writing MFF traceback before tail scan.
+                    return {"action_ok": True, "post_state": {}, "flight_recorder": {"macho_calls": []}}
+                return {}
+
+            def _stop_client():
+                tb_file = runner.current_run_dir / "client_tracebacks.log"
+                tb_file.write_text(mff_tb, encoding="utf-8")
+
+            runner.stop_client = mock.MagicMock(side_effect=_stop_client)
+            rpc_mock = mock.MagicMock()
+            rpc_mock.call.side_effect = _rpc_call
+            runner.rpc = rpc_mock
+
+            rc = runner.run_scenarios()
+            self.assertEqual(rc, 0)
+            result = json.loads((root / "out" / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["log_errors"], [])
+            self.assertEqual(result["user_error_exemptions_count"], 3)
+            self.assertEqual(
+                result["user_error_exemptions_by_key"],
+                {"ModuleFitFailed": 2, "WindowBlockedFromOpening": 1},
+            )
+            self.assertEqual(result["precondition_verified_user_error_exemptions"], 2)
+            self.assertEqual(result["unverified_user_error_exemptions"], 1)
+            j_entry = result["journeys"]["t_scen_exemption_rollup"]
+            self.assertTrue(j_entry["passed"])
+            self.assertEqual(j_entry["user_error_exemptions_count"], 3)
+            self.assertEqual(j_entry["steps"][0]["user_error_exemption_count"], 2)
 
 
 if __name__ == "__main__":

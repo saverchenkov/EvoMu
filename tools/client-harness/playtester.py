@@ -394,7 +394,7 @@ class _UserErrorExemptionTracker:
             mechanism = str(item.get("mechanism") or "unknown").strip() or "unknown"
             channel = str(item.get("channel") or "unknown").strip() or "unknown"
             raw_step = item.get("step")
-            if isinstance(raw_step, int) and not isinstance(raw_step, bool):
+            if isinstance(raw_step, int) and not isinstance(raw_step, bool) and raw_step > 0:
                 step_val = int(raw_step)
             elif step_num is not None:
                 step_val = int(step_num)
@@ -6395,7 +6395,11 @@ class PlaytesterBugOracle:
         """Return `(user_error_key, raised_exc_text)` iff the actual raised exception is a `UserError`."""
         stripped_trace = sync_bugs_to_github._strip_trace_locals_and_end(str(trace or "")).strip()
         if stripped_trace and sync_bugs_to_github._RE_TRACEBACK_INDICATORS.search(stripped_trace):
-            exc_class, exc_msg, _ = sync_bugs_to_github.parse_traceback_summary(stripped_trace, "")
+            primary_lines, _ = sync_bugs_to_github._split_trace_sections(stripped_trace)
+            primary_only = "\n".join(primary_lines).strip()
+            if not primary_only:
+                return None, ""
+            exc_class, exc_msg, _ = sync_bugs_to_github.parse_traceback_summary(primary_only, "")
             cls_short = exc_class.split(".")[-1].strip()
             if cls_short == "UserError" or exc_class.strip().lower().startswith("user error"):
                 raised = f"{exc_class}: {exc_msg}" if exc_msg else exc_class
@@ -7028,6 +7032,45 @@ class PlaytesterBugOracle:
             )
             if isinstance(part, dict) and isinstance(part.get("user_error_exemptions"), list):
                 collected.extend(part["user_error_exemptions"])
+            macho_seqs = {
+                int(h["seq"])
+                for h in collected
+                if h.get("channel") == "macho_exceptions"
+                and isinstance(h.get("seq"), int)
+                and not isinstance(h.get("seq"), bool)
+            }
+            macho_unseq_keys = {
+                str(h.get("key") or "").lower()
+                for h in collected
+                if h.get("channel") == "macho_exceptions"
+                and (not isinstance(h.get("seq"), int) or isinstance(h.get("seq"), bool))
+            }
+            for idx, call_entry in enumerate(fr.get("macho_calls") or ()):
+                if not isinstance(call_entry, dict):
+                    continue
+                if str(call_entry.get("status") or "").upper() != "ERR":
+                    continue
+                call_err = call_entry.get("error") or call_entry
+                ok_call, det_call = cls.classify_expected_user_error(
+                    call_err, expected_text, ui_state=ui_state
+                )
+                if not ok_call or det_call is None:
+                    continue
+                call_seq = call_entry.get("seq")
+                if isinstance(call_seq, int) and not isinstance(call_seq, bool):
+                    if int(call_seq) in macho_seqs:
+                        continue
+                elif str(det_call.get("key") or "").lower() in macho_unseq_keys:
+                    continue
+                collected.append(
+                    cls._build_exemption_hit(
+                        det_call,
+                        channel="macho_calls",
+                        step_num=step_num,
+                        occ_idx=idx,
+                        seq=call_seq,
+                    )
+                )
         for idx, tb_item in enumerate(unseen_tracebacks or ()):
             if not isinstance(tb_item, dict):
                 continue
@@ -7717,6 +7760,7 @@ class PlaytesterBugOracle:
         polling_storm_per_min: float = 200.0,
         ui_state: Optional[Dict[str, Any]] = None,
         exemptions_out: Optional[List[Dict[str, Any]]] = None,
+        step_num: int = 0,
     ) -> List[Dict[str, Any]]:
         """
         Inspect session flight-recorder RPC calls for:
@@ -7794,11 +7838,16 @@ class PlaytesterBugOracle:
                                 "verified": False,
                                 "detail": call_err[:240],
                             }
+                        else:
+                            ex_det = dict(ex_det)
+                        item_ts = item.get("ts") if item.get("ts") is not None else item.get("timestamp")
+                        if item_ts is not None:
+                            ex_det["ts"] = item_ts
                         exemptions_out.append(
                             cls._build_exemption_hit(
                                 ex_det,
                                 channel="flight_recorder_harvester",
-                                step_num=0,
+                                step_num=int(step_num or 0),
                                 occ_idx=len(exemptions_out),
                                 seq=item.get("seq"),
                             )
@@ -7910,6 +7959,7 @@ class PlaytesterBugOracle:
             polling_storm_per_min=polling_storm_per_min,
             ui_state=ui_state if ui_state is not None else getattr(self, "_last_step_ui_state", None),
             exemptions_out=harvester_exemptions,
+            step_num=step_num,
         )
         if harvester_exemptions:
             if getattr(self, "_exemption_tracker", None) is not None:
@@ -11720,7 +11770,9 @@ def evaluate_scenario_checks(
     pre = pre_state if isinstance(pre_state, dict) else {}
     post = post_state if isinstance(post_state, dict) else {}
     expected_text = str(ctx.get("expected_text") or "")
-    scen_ui_state = _select_live_skill_state(post, pre)
+    scen_ui_state = _select_live_skill_state(
+        post, _select_live_skill_state(pre, ctx.get("ui_state"))
+    )
 
     # 1. Existing scene-graph / window / modal / ball / session assertions
     base_ok, base_msg = _evaluate_step_assertions(chk, res, post)
@@ -13309,6 +13361,7 @@ class ScenarioRunner(PlaytesterRunner):
                     if startup_calls:
                         self._record_session_flight_calls(startup_calls)
                     pre_state = dict(boot_state)
+                    last_live_skill_state = dict(boot_state) if isinstance(boot_state, dict) else {}
                     recent_rpcs: List[str] = [_format_rpc_name(c) for c in startup_calls if _format_rpc_name(c)]
                     user_cfg, _, _, _ = self._scenario_auth_params()
                     primary_char_name = str(
@@ -13330,6 +13383,7 @@ class ScenarioRunner(PlaytesterRunner):
                             "server_handshake_seen": self._server_handshake_seen,
                             "check_server_unimplemented_rpc": self._check_server_unimplemented_rpc,
                             "expected_text": str(act.get("expected_ui_and_state_change") or ""),
+                            "ui_state": last_live_skill_state,
                         }
                         prev_allow_tc = getattr(self, "_active_step_allows_host_time_control", None)
                         prev_allow_gm_slash = getattr(self, "_active_step_allows_host_gm_slash", None)
@@ -13446,7 +13500,14 @@ class ScenarioRunner(PlaytesterRunner):
                                 fail_msg = f"Client cache diverged from server SQLite after 2.0s without relog: {delta_msg}"
                         cur_logs, cur_tb_path = _gather_client_logs()
                         step_log_exemptions: List[Dict[str, Any]] = []
-                        scen_step_state = _select_live_skill_state(post_state, pre_state)
+                        scen_step_state = _select_live_skill_state(
+                            post_state,
+                            _select_live_skill_state(pre_state, last_live_skill_state),
+                        )
+                        last_live_skill_state = (
+                            _select_live_skill_state(scen_step_state, last_live_skill_state)
+                            or last_live_skill_state
+                        )
                         step_log_errs = scan_scenario_logs_for_errors(
                             slog_path,
                             cur_logs,
@@ -13541,13 +13602,17 @@ class ScenarioRunner(PlaytesterRunner):
                 f"[classify_client_log] destiny desync detected: stale_at_action={destiny_cls.get('stale_at_action')}"
             )
         tail_log_exemptions: List[Dict[str, Any]] = []
+        tail_ui_state = _select_live_skill_state(
+            pre_state if "pre_state" in locals() else None,
+            last_live_skill_state if "last_live_skill_state" in locals() else None,
+        )
         log_errors.extend(
             scan_scenario_logs_for_errors(
                 slog_path,
                 client_logs,
                 traceback_log_path=tb_log_path,
                 log_offsets=step_log_offsets,
-                ui_state=pre_state if "pre_state" in locals() else None,
+                ui_state=tail_ui_state,
                 exemptions_out=tail_log_exemptions,
                 step_num=len(step_records),
             )
