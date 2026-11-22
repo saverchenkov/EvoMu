@@ -8667,6 +8667,205 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
             self.assertEqual(delayed_follow_calls, [(40009088, 50.0)])
         hook._WARP_TELEMETRY["in_warp"] = False
 
+    def test_hook_cleanup_persona_hygiene_contracts_filters_and_remotesvc_fallback(self):
+        hook = _load_hook_with_py2_stubs()
+        sess = types.SimpleNamespace(userid=100, charid=90000001, stationid=60003760, shipid=90001001)
+
+        stale_proxy = mock.Mock()
+        stale_proxy.GetContractListForOwner.side_effect = RuntimeError("proxySvc stale")
+        deleted_ids = []
+
+        class FakeRemoteProxy:
+            def GetContractListForOwner(self, char_id, is_corp, status_filter, include_all):
+                assert char_id == 90000001
+                return types.SimpleNamespace(
+                    contracts=[
+                        {"contractID": 758446151, "issuerID": 90000001, "forCorp": False, "status": 0, "currentBidderID": None},
+                        types.SimpleNamespace(contractID=758446152, issuerID=90000001, forCorp=False, status="Outstanding", currentBidderID=0),
+                        {"contractID": 758446153, "issuerID": 90000001, "forCorp": False, "status": 0, "currentBidderID": 90000002},
+                        {"contractID": 758446154, "issuerID": 90000001, "forCorp": True, "status": 0, "currentBidderID": None},
+                        {"contractID": 758446155, "issuerID": 90000002, "forCorp": False, "status": 0, "currentBidderID": None},
+                        {"contractID": 758446156, "issuerID": 90000001, "forCorp": False, "status": 2, "currentBidderID": None},
+                    ]
+                )
+
+            def DeleteContract(self, contract_id):
+                deleted_ids.append(contract_id)
+
+        remote_proxy = FakeRemoteProxy()
+        fake_sm = types.SimpleNamespace(
+            services={"contracts": types.SimpleNamespace(contractProxySvc=stale_proxy)},
+            ProxySvc=lambda name: stale_proxy,
+            RemoteSvc=lambda name: remote_proxy,
+        )
+
+        with mock.patch.dict(builtins.__dict__, {"session": sess}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess)), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            res = hook._cleanup_persona_hygiene(
+                fake_sm,
+                cleanup_contracts=True,
+                stack_hangar=False,
+                stack_cargo=False,
+                suppress_flight=True,
+            )
+
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(deleted_ids, [758446151, 758446152])
+        self.assertEqual(res["deleted_contracts"], [758446151, 758446152])
+        self.assertEqual(
+            res["skipped_contracts"],
+            [
+                {"contract_id": 758446153, "reason": "has_bidder"},
+                {"contract_id": 758446154, "reason": "for_corp"},
+                {"contract_id": 758446155, "reason": "foreign_issuer"},
+                {"contract_id": 758446156, "reason": "status_2"},
+            ],
+        )
+
+    def test_hook_cleanup_persona_hygiene_stacks_station_structure_cargo_and_suppresses_flight(self):
+        hook = _load_hook_with_py2_stubs()
+        hook._FLIGHT_RECORDER.clear()
+        hook._FLIGHT_SEQ = 0
+
+        class FakeInv:
+            def __init__(self, cached_items=None):
+                self.stack_calls = []
+                self.cachedItems = cached_items
+
+            def StackAll(self, flag):
+                hook._record_flight("macho", "inv", "StackAll", "(%s,)" % (flag,), "OK", 1.0)
+                self.stack_calls.append(flag)
+
+        station_hangar = FakeInv()
+        struct_hangar = FakeInv()
+        cargo_inv = FakeInv()
+
+        ic_station = mock.Mock()
+        ic_station.inventories = {}
+        ic_station.GetInventory.return_value = station_hangar
+        ic_station.GetInventoryFromId.side_effect = lambda loc_id: cargo_inv if loc_id == 90001001 else struct_hangar
+
+        sm_station = types.SimpleNamespace(services={"invCache": ic_station})
+        sess_station = types.SimpleNamespace(userid=100, charid=90000001, stationid=60003760, structureid=None, shipid=90001001)
+
+        with mock.patch.dict(builtins.__dict__, {"session": sess_station}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_station)), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            res_st = hook._cleanup_persona_hygiene(
+                sm_station, cleanup_contracts=False, stack_hangar=True, stack_cargo=True, suppress_flight=True
+            )
+
+        self.assertTrue(res_st["ok"], res_st)
+        ic_station.GetInventory.assert_called_once_with(10004)
+        self.assertEqual(station_hangar.stack_calls, [4])
+        self.assertEqual(cargo_inv.stack_calls, [5])
+        self.assertEqual(res_st["stacked_targets"], ["hangar:60003760", "cargo:90001001"])
+        self.assertEqual(hook._FLIGHT_RECORDER, [])
+        self.assertEqual(hook._HYGIENE_FLIGHT_SUPPRESS_DEPTH, {})
+
+        # Upwell structure uses GetInventoryFromId(structureid) rather than containerHangar 10004
+        struct_hangar.stack_calls.clear()
+        cargo_inv.stack_calls.clear()
+        ic_station.GetInventory.reset_mock()
+        sess_struct = types.SimpleNamespace(userid=100, charid=90000001, stationid=None, structureid=1030000000001, shipid=90001001)
+        with mock.patch.dict(builtins.__dict__, {"session": sess_struct}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_struct)), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            res_up = hook._cleanup_persona_hygiene(
+                sm_station, cleanup_contracts=False, stack_hangar=True, stack_cargo=True, suppress_flight=True
+            )
+        self.assertTrue(res_up["ok"], res_up)
+        ic_station.GetInventory.assert_not_called()
+        self.assertEqual(struct_hangar.stack_calls, [4])
+        self.assertEqual(cargo_inv.stack_calls, [5])
+
+        # In space: cargo StackAll(5) only runs when cached duplicates exist and not in warp
+        cargo_inv.stack_calls.clear()
+        sess_space = types.SimpleNamespace(
+            userid=100, charid=90000001, stationid=None, structureid=None, solarsystemid=30000142, shipid=90001001
+        )
+        ic_station.inventories = {
+            (90001001, 5): FakeInv(
+                cached_items={
+                    1: {"itemID": 1, "typeID": 34, "flagID": 5, "singleton": 0},
+                    2: {"itemID": 2, "typeID": 34, "flagID": 5, "singleton": 0},
+                }
+            )
+        }
+        hook._WARP_TELEMETRY["in_warp"] = False
+        with mock.patch.dict(builtins.__dict__, {"session": sess_space}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_space)), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            res_dup = hook._cleanup_persona_hygiene(
+                sm_station, cleanup_contracts=False, stack_hangar=True, stack_cargo=True, suppress_flight=True
+            )
+        self.assertEqual(cargo_inv.stack_calls, [5])
+        self.assertEqual(res_dup["stacked_targets"], ["cargo:90001001"])
+
+        # In warp: skips cargo StackAll(5) even with cached duplicates
+        cargo_inv.stack_calls.clear()
+        hook._WARP_TELEMETRY["in_warp"] = True
+        with mock.patch.dict(builtins.__dict__, {"session": sess_space}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_space)), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            res_warp = hook._cleanup_persona_hygiene(
+                sm_station, cleanup_contracts=False, stack_hangar=True, stack_cargo=True, suppress_flight=True
+            )
+        self.assertEqual(cargo_inv.stack_calls, [])
+        self.assertEqual(res_warp["stacked_targets"], [])
+        hook._WARP_TELEMETRY["in_warp"] = False
+
+        # Outside suppression, _record_flight records normally
+        hook._record_flight("macho", "inv", "StackAll", "(5,)", "OK", 1.0)
+        self.assertEqual(len(hook._FLIGHT_RECORDER), 1)
+
+    def test_hook_dispatch_cleanup_persona_hygiene_uses_bounded_uthread(self):
+        hook = _load_hook_with_py2_stubs()
+        fake_sock = mock.MagicMock()
+        fake_sock.getsockname.return_value = ("127.0.0.1", 26199)
+        with mock.patch.object(hook.socket, "socket", return_value=fake_sock):
+            srv = hook.PlaytesterRpcServer({"playtester_port": 26199}, mock.Mock())
+
+        spawned = []
+        fake_uthread = types.SimpleNamespace(new=lambda fn: spawned.append(fn) or fn())
+
+        with mock.patch.dict(sys.modules, {"uthread": fake_uthread}), \
+             mock.patch.object(
+                 hook,
+                 "_cleanup_persona_hygiene",
+                 return_value={
+                     "ok": True,
+                     "deleted_contracts": [758446151],
+                     "skipped_contracts": [],
+                     "stacked_targets": ["hangar:60003760"],
+                     "errors": [],
+                 },
+             ) as m_hyg:
+            res = srv._dispatch(
+                {
+                    "method": "cleanup_persona_hygiene",
+                    "params": {"cleanup_contracts": True, "stack_hangar": True, "stack_cargo": False},
+                }
+            )
+
+        self.assertEqual(len(spawned), 1)
+        m_hyg.assert_called_once_with(
+            srv.sm, cleanup_contracts=True, stack_hangar=True, stack_cargo=False, suppress_flight=True
+        )
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["hygiene_result"]["deleted_contracts"], [758446151])
+
+        # Timeout bound returns structured error cleanly
+        fake_uthread_hang = types.SimpleNamespace(new=lambda fn: None)
+        t_vals = iter([0.0, 4.1])
+        with mock.patch.dict(sys.modules, {"uthread": fake_uthread_hang}), \
+             mock.patch.object(hook.time, "time", side_effect=lambda: next(t_vals, 4.1)), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            res_to = srv._dispatch({"method": "cleanup_persona_hygiene", "params": {}})
+        self.assertFalse(res_to["ok"])
+        self.assertIn("cleanup_persona_hygiene tasklet timed out", res_to["hygiene_result"]["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

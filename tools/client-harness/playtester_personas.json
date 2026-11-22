@@ -51,10 +51,10 @@
     {
       "id": "economy_market_contracts_and_industry",
       "title": "Market Search/Buy/Cancel, Contracts Create & Industry Complete/Deliver",
-      "description": "Replace shallow window inspection with transactional completion checkpoints while docked: (1) Regional Market ('market'): find an editable search box (clickable_widgets with editable=true), use type_text with '\\n' (e.g. 'Tritanium\\n' or 'Rifter\\n'), inspect Price History & Order Book, buy an item or place a Buy/Sell order AND cancel an active order verifying wallet_state.isk_balance / OnAccountChange and hangar item delta; (2) Wallet ('wallet'): check ISK & PLEX balances, Journal, Transactions, and '/giveisk' delta parity; (3) Contracts ('contracts'): use type_text search/filter on public/my contracts AND run Create Contract wizard for an Item Exchange contract verifying submission; (4) Industry ('industry'): ensure a blueprint (e.g. Rifter Blueprint 691 + minerals) is in hangar, Start a manufacturing job, run complete_industry_jobs (or advance_server_time), click Deliver, and verify output item delivered via OnItemChange.",
+      "description": "Replace shallow window inspection with transactional completion checkpoints while docked: (1) Regional Market ('market'): find an editable search box (clickable_widgets with editable=true), use type_text with '\\n' (e.g. 'Tritanium\\n' or 'Rifter\\n'), inspect Price History & Order Book, buy an item or place a Buy/Sell order AND cancel an active order verifying wallet_state.isk_balance / OnAccountChange and hangar item delta; (2) Wallet ('wallet'): check ISK & PLEX balances, Journal, Transactions, and '/giveisk' delta parity; (3) Contracts ('contracts'): use type_text search/filter on public/my contracts AND run Create Contract wizard for an Item Exchange contract (when creating a Public Item Exchange contract without requesting items in return, set Price >= 1000 ISK so V24 accepts it; verify submission in My Contracts and Delete your test contract afterward so the L0 1-contract slot stays free); (4) Industry ('industry'): ensure a blueprint (e.g. Rifter Blueprint 691 + minerals) is in hangar (stack/reuse existing hangar items before spawning duplicates), Start a manufacturing job, run complete_industry_jobs (or advance_server_time), click Deliver, and verify output item delivered via OnItemChange.",
       "goals": [
         "Checkpoint 1 (Market Search -> Order/Buy -> Cancel): Open Regional Market, use type_text on the search input ('Tritanium\\n' or 'Veldspar\\n'), view history/orders, execute a market buy or place & cancel a market order, verifying isk_delta & item delivery.",
-        "Checkpoint 2 (Contracts Search & Creation): Open Contracts, test type_text search filtering, and complete Create Contract flow for a simple Item Exchange contract verifying active contract list update.",
+        "Checkpoint 2 (Contracts Search & Creation): Open Contracts, test type_text search filtering, complete Create Contract flow for an Item Exchange contract (set Price >= 1000 ISK if Public with no requested return items), verify active contract list update in My Contracts, and Delete the test contract afterward so the single slot stays free.",
         "Checkpoint 3 (Industry Start -> Complete -> Deliver): Open Industry, load a blueprint job, Start manufacturing (verify fee isk_delta), call complete_industry_jobs, then click Deliver and verify produced item enters Hangar."
       ],
       "rotate_after_steps": 60,
@@ -222,7 +222,7 @@
       "feature_id": "ui.contracts.search_and_create",
       "persona": "economy_market_contracts_and_industry",
       "title": "Contracts Window Search Filter & Item Exchange Creation",
-      "acceptance": "Open Contracts, use type_text search/filter, and create an Item Exchange contract verifying submission and active contract listing."
+      "acceptance": "Open Contracts, use type_text search/filter, create an Item Exchange contract (Price >= 1000 ISK if Public with no requested return items), verify submission and active contract listing in My Contracts, and delete the test contract afterward to keep the L0 slot free."
     },
     {
       "feature_id": "ui.industry.start_complete_and_deliver",

@@ -3483,18 +3483,29 @@ def build_reasoning_prompt(
     )
     prc_banner = ""
     if isinstance(prc_info, dict) and (
-        prc_info.get("closed_windows") or prc_info.get("closed_secondary_view")
+        prc_info.get("closed_windows")
+        or prc_info.get("closed_secondary_view")
+        or prc_info.get("deleted_contracts")
+        or prc_info.get("stacked_targets")
     ):
+        prc_parts = []
+        if prc_info.get("closed_windows") or prc_info.get("closed_secondary_view"):
+            win_part = f"closed utility window(s) `{prc_info.get('closed_windows')}`"
+            if prc_info.get("closed_secondary_view"):
+                win_part += f" (secondary view `{prc_info.get('closed_secondary_view')}`)"
+            prc_parts.append(win_part)
+        if prc_info.get("deleted_contracts"):
+            prc_parts.append(
+                f"deleted stale own Outstanding contract(s) `{prc_info.get('deleted_contracts')}`"
+            )
+        if prc_info.get("stacked_targets"):
+            prc_parts.append(
+                f"merged duplicate item stacks in `{prc_info.get('stacked_targets')}`"
+            )
         prc_banner = (
             f"\n- **⚠️ Harness Persona-Rotation Cleanup Notice:** Immediately before capturing Step {step_num}, "
-            f"the playtester rotated personas and intentionally closed utility window(s) "
-            f"`{prc_info.get('closed_windows')}`"
-            + (
-                f" (secondary view `{prc_info.get('closed_secondary_view')}`)"
-                if prc_info.get("closed_secondary_view")
-                else ""
-            )
-            + ". Do NOT report those closed windows being absent from `open_windows` or `screen.png` as a `ui_state_desync` bug.\n"
+            f"the playtester performed automated hygiene cleanup ({'; '.join(prc_parts)}). "
+            "Do NOT report those closed windows, deleted stale contracts, or merged item stacks as a bug or `ui_state_desync`.\n"
         )
     inv_snap = compact_snap.get("inventory_state") if isinstance(compact_snap.get("inventory_state"), dict) else {}
     inv_qf = inv_snap.get("quick_filter")
@@ -3609,10 +3620,11 @@ Use these ground-truth EVE Online V24.01 expectations to judge whether the game 
 3. **Industry Jobs (`complete_industry_jobs` / `/completeindustry`):**
    - After starting an industry job, running `complete_industry_jobs` (`/completeindustry`) fast-forwards `start_unix` so the job is immediately ready for delivery in the Industry window.
 4. **Ship Fitting & Inventory (`fitting`, `inventory`, `/fit`, `/createitem`):**
-   - Fitting a module or creating an item MUST emit `OnItemChange` and update the Fitting window slots / Ship HUD module rack / Hangar inventory list live. (Note: `/createitem <ship_typeID> 1` for ships `categoryID=6` such as `603` Merlin or `649` Tayra spawns an already-assembled ship directly in **`StationShips` (`Ship hangar`)**, NOT `ItemHangar`; both `StationShips` and `ItemHangar` only show the top visible rows without scrolling, so always filter via `quickFilterInputBox` before assuming an item/ship is absent. Also, double-clicking a module/charge opens Show Info — fit modules via drag-and-drop to a slot, right-click -> `Fit to Active Ship`, or `/fit me <typeID>`.)
-5. **Market & Wallet (`market`, `wallet`, `/giveisk`):**
+   - Fitting a module or creating an item MUST emit `OnItemChange` and update the Fitting window slots / Ship HUD module rack / Hangar inventory list live. (Note: `/createitem <ship_typeID> 1` for ships `categoryID=6` such as `603` Merlin or `649` Tayra spawns an already-assembled ship directly in **`StationShips` (`Ship hangar`)**, NOT `ItemHangar`; both `StationShips` and `ItemHangar` only show the top visible rows without scrolling, so always filter via `quickFilterInputBox` before assuming an item/ship is absent, and clear `quickFilterInputBox` when finished. Reuse existing hangar items and click `Stack All` when cluttered before spawning/buying duplicates. Also, double-clicking a module/charge opens Show Info — fit modules via drag-and-drop to a slot, right-click -> `Fit to Active Ship`, or `/fit me <typeID>`.)
+5. **Market, Contracts & Wallet (`market`, `contracts`, `wallet`, `/giveisk`):**
    - Buying an item or running `/giveisk` MUST emit `OnAccountChange`, update `wallet_state.isk_balance` in `state_diff`, and deliver purchased items to the hangar.
    - **V24 Regional Market widget naming:** `buyParent/buyscroll` is the TOP **Sellers** table (double-click or right-click -> `Buy This` to buy from a seller), whereas `sellParent/sellscroll` is the BOTTOM **Buyers** table (right-clicking your own buy order shows `Modify Order` / `Cancel Order` / `Place Buy Order`, and double-clicking a buy order does NOT open a Buy dialog).
+   - **V24 Contracts & L0 1-Contract Cap:** Creating a **Public Item Exchange** contract without requesting return items MUST set `Price >= 1,000 ISK` (`< 1,000 ISK` is rejected by V24 `CreateContract` with `UserError`). Starter character `Contracting` is L0 (`1` max Outstanding contract), so after verifying a created test contract in `My Contracts`, click `Delete` to keep the slot free for subsequent runs.
 6. **Navigation & Real-Time Warp Animation (`undock`, `dock`, `warp_to`, `approach`, `orbit`):**
    - `undock` MUST transition `active_view` from `hangar` to `inflight` (`space.in_space == true`) and populate `space.nearby_balls`.
    - `warp_to` MUST enter `ball.mode == 3` (`WARP`), activate `effects.Warping` tunnel FX (`warp_telemetry.saw_mode3 == true` and `saw_fx_warping == true`), and move the ship to the destination.
@@ -8376,6 +8388,9 @@ class PlaytesterRunner:
             server_bin_mtime=self._server_bin_mtime(),
         )
         self.pending_persona_cleanup: bool = False
+        self.pending_startup_hygiene: bool = not bool(
+            getattr(args, "scenarios", None) or getattr(args, "scenario", None)
+        )
         if args.persona:
             rotated = self.memory.maybe_rotate_persona(force_id=args.persona)
             if rotated:
@@ -10135,36 +10150,70 @@ class PlaytesterRunner:
             self.reset_batch_state()
             self.pending_persona_cleanup = True
 
-        if self.pending_persona_cleanup:
+        run_window_cleanup = bool(self.pending_persona_cleanup)
+        run_hygiene_cleanup = bool(
+            self.pending_persona_cleanup or getattr(self, "pending_startup_hygiene", False)
+        )
+        if run_window_cleanup or run_hygiene_cleanup:
             self.pending_persona_cleanup = False
+            self.pending_startup_hygiene = False
             self.cached_post_state = None
             self.cached_post_state_ts = 0.0
             self._force_next_screenshot = True
-            try:
-                cln_res = self.rpc.call("cleanup_utility_windows", {"keep_chat": True}, timeout=10.0)
-                closed_list = (
-                    (cln_res.get("cleanup_result") or cln_res.get("result") or cln_res).get("closed_windows")
-                    or []
-                )
-                closed_sec = (cln_res.get("cleanup_result") or cln_res.get("result") or cln_res).get("closed_secondary_view")
-                log_info(
-                    f"Persona rotation cleanup -> closed {len(closed_list)} utility window(s)"
-                    + (f" ({', '.join(closed_list[:6])})" if closed_list else "")
-                    + (f", secondary_view={closed_sec}" if closed_sec else "")
-                )
-                if closed_list or closed_sec:
-                    last_flight_recorder = dict(last_flight_recorder or {})
-                    last_flight_recorder["persona_rotation_cleanup"] = {
-                        "closed_windows": list(closed_list),
-                        "closed_secondary_view": closed_sec,
-                        "note": (
-                            "Harness intentionally closed these utility windows after persona "
-                            "rotation before capturing this step's UI state."
-                        ),
-                    }
+            closed_list: List[Any] = []
+            closed_sec = None
+            deleted_contracts: List[Any] = []
+            stacked_targets: List[Any] = []
+            if run_window_cleanup:
+                try:
+                    cln_res = self.rpc.call("cleanup_utility_windows", {"keep_chat": True}, timeout=10.0)
+                    cln_body = cln_res.get("cleanup_result") or cln_res.get("result") or cln_res
+                    closed_list = list(cln_body.get("closed_windows") or [])
+                    closed_sec = cln_body.get("closed_secondary_view")
+                    log_info(
+                        f"Persona rotation cleanup -> closed {len(closed_list)} utility window(s)"
+                        + (f" ({', '.join(closed_list[:6])})" if closed_list else "")
+                        + (f", secondary_view={closed_sec}" if closed_sec else "")
+                    )
+                except Exception as exc:
+                    log_warn(f"Persona rotation cleanup_utility_windows skipped: {exc}")
+            if run_hygiene_cleanup:
+                try:
+                    hyg_res = self.rpc.call(
+                        "cleanup_persona_hygiene",
+                        {
+                            "cleanup_contracts": True,
+                            "stack_hangar": True,
+                            "stack_cargo": True,
+                            "suppress_flight": True,
+                        },
+                        timeout=10.0,
+                    )
+                    hyg_body = hyg_res.get("hygiene_result") or hyg_res.get("result") or hyg_res
+                    deleted_contracts = list(hyg_body.get("deleted_contracts") or [])
+                    stacked_targets = list(hyg_body.get("stacked_targets") or [])
+                    hyg_errs = list(hyg_body.get("errors") or [])
+                    if deleted_contracts or stacked_targets or hyg_errs:
+                        log_info(
+                            f"Persona hygiene cleanup -> deleted_contracts={deleted_contracts}, "
+                            f"stacked_targets={stacked_targets}"
+                            + (f", errors={hyg_errs}" if hyg_errs else "")
+                        )
+                except Exception as exc:
+                    log_warn(f"Persona hygiene cleanup_persona_hygiene skipped: {exc}")
+            if closed_list or closed_sec or deleted_contracts or stacked_targets:
+                last_flight_recorder = dict(last_flight_recorder or {})
+                last_flight_recorder["persona_rotation_cleanup"] = {
+                    "closed_windows": list(closed_list),
+                    "closed_secondary_view": closed_sec,
+                    "deleted_contracts": list(deleted_contracts),
+                    "stacked_targets": list(stacked_targets),
+                    "note": (
+                        "Harness intentionally performed window, contract, and inventory-stack "
+                        "hygiene before capturing this step's UI state."
+                    ),
+                }
                 time.sleep(0.05)
-            except Exception as exc:
-                log_warn(f"Persona rotation cleanup_utility_windows skipped: {exc}")
 
         # 1. Reuse previous step's post_state when fresh (`<= 3.0s`), falling back to `get_state` RPC
         cached_ps = getattr(self, "cached_post_state", None)
@@ -12886,6 +12935,7 @@ class ScenarioRunner(PlaytesterRunner):
         out_dir: Optional[Path] = None,
     ):
         super().__init__(args)
+        self.pending_startup_hygiene = False
         self.agy_pool = None
         raw_paths = scenario_paths if scenario_paths is not None else [Path(p) for p in (getattr(args, "scenarios", None) or [])]
         self.scenario_paths = [Path(p) for p in raw_paths]

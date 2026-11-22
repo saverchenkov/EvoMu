@@ -8084,6 +8084,189 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
         self.assertEqual(playtester._compute_step_rpc_timeout({"type": "space_command", "target": "dock"}), 65.0)
         self.assertEqual(playtester._compute_step_rpc_timeout({"type": "space_command", "target": "jump_gate"}), 75.0)
 
+    def test_execute_step_startup_and_rotation_hygiene_and_banner_and_prompts(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_p = Path(td)
+            run_dir = td_p / "run"
+            run_dir.mkdir()
+            (td_p / "state").mkdir()
+
+            mem = playtester.PlaytesterMemory(td_p / "state", git_head="deadbeef")
+            econ_persona = next(
+                p for p in (mem.personas_cfg.get("personas") or []) if p.get("id") == "economy_market_contracts_and_industry"
+            )
+            self.assertIn("1000 ISK", econ_persona["description"])
+            self.assertIn("Delete", econ_persona["description"])
+            contract_feat = next(
+                f
+                for f in (mem.personas_cfg.get("initial_frontier") or [])
+                if f.get("feature_id") == "ui.contracts.search_and_create"
+            )
+            self.assertIn("1000 ISK", contract_feat["acceptance"])
+
+            screen = run_dir / "step_1_screen.png"
+            screen.write_bytes(b"\x89PNG\r\n\x1a\n")
+            banner_prompt = playtester.build_reasoning_prompt(
+                1,
+                screen,
+                [],
+                {"open_windows": [], "clickable_widgets": []},
+                {
+                    "ok": True,
+                    "persona_rotation_cleanup": {
+                        "closed_windows": [],
+                        "closed_secondary_view": None,
+                        "deleted_contracts": [758446151],
+                        "stacked_targets": ["hangar:60003760"],
+                    },
+                },
+                mem,
+                "deadbeef",
+            )
+            self.assertIn("Harness Persona-Rotation Cleanup Notice", banner_prompt)
+            self.assertIn("758446151", banner_prompt)
+            self.assertIn("hangar:60003760", banner_prompt)
+            self.assertIn("Price >= 1,000 ISK", banner_prompt)
+            self.assertIn("Stack All", banner_prompt)
+
+            # Non-scenario __init__ sets pending_startup_hygiene=True; --scenario sets False
+            staged_dir = td_p / "staged_eve"
+            staged_dir.mkdir()
+            ns_args = playtester.parse_args(["--no-github-sync", "--continuous"])
+            ns_args.worktree = str(td_p / "wt_ns")
+            ns_args.staged_app = str(staged_dir)
+            sc_args = playtester.parse_args(["--no-github-sync", "--scenario", "smoke"])
+            sc_args.worktree = str(td_p / "wt_sc")
+            sc_args.staged_app = str(staged_dir)
+            with mock.patch.object(playtester, "get_git_head", return_value="deadbeef"):
+                ns_runner = playtester.PlaytesterRunner(ns_args)
+                sc_runner = playtester.PlaytesterRunner(sc_args)
+            try:
+                self.assertTrue(ns_runner.pending_startup_hygiene)
+                self.assertFalse(sc_runner.pending_startup_hygiene)
+            finally:
+                ns_runner.oracle.flush(timeout=2.0)
+                sc_runner.oracle.flush(timeout=2.0)
+
+            runner = playtester.PlaytesterRunner.__new__(playtester.PlaytesterRunner)
+            runner.args = mock.Mock(
+                worktree=str(td_p),
+                hybrid=True,
+                foreground=False,
+                agy_timeout=30,
+                no_github_sync=True,
+                os_input_fallback=False,
+                continuous=False,
+            )
+            runner.hybrid_mode = True
+            runner.worktree_dir = td_p
+            runner.current_run_dir = run_dir
+            runner.planner_model_chain = ["hydrogen-l-tf-high"]
+            runner.routine_planner_model_chain = ["hydrogen-l-tf-medium"]
+            runner.executor_model_chain = ["hydrogen-l-tf-medium"]
+            runner.screenshot_max_dim = 1024
+            runner.server_proc = None
+            runner.client_proc = None
+            runner.batch_id = 0
+            runner.cached_git_head = "deadbeef"
+            runner.cached_post_state = None
+            runner.cached_post_state_ts = 0.0
+            runner.agy_pool = None
+            runner.last_ui_snapshot = None
+            runner.corrupted_viewstate_streak = 0
+            runner._escalation_context = None
+            runner._escalate_to_diagnostic_planner = False
+            runner._force_next_screenshot = False
+            runner.reset_batch_state()
+            runner.memory = mem
+            runner.pending_persona_cleanup = False
+            runner.pending_startup_hygiene = True
+            runner._pending_assertion_escalation = None
+            runner.last_active_persona_id = str((runner.memory.data.get("active_persona") or {}).get("id") or "")
+            runner.memory.apply_planner_decision = mock.Mock()
+            runner.memory.apply_agent_decision = mock.Mock()
+            runner.oracle = playtester.PlaytesterBugOracle(
+                td_p, td_p / ".evomu-bugs" / "queue", runner.memory, sync_github=False, async_write=False
+            )
+
+            snap = {
+                "active_view": "hangar",
+                "session": {"solarsystemid2": 30000142},
+                "ui": {"open_windows": [], "modals": [], "clickable_widgets": []},
+            }
+            rpc_seq = []
+
+            def fake_rpc_call(method, params=None, timeout=15.0):
+                rpc_seq.append(method)
+                if method == "cleanup_utility_windows":
+                    return {"ok": True, "cleanup_result": {"closed_windows": ["InventoryStation"], "closed_secondary_view": None}}
+                if method == "cleanup_persona_hygiene":
+                    return {
+                        "ok": True,
+                        "hygiene_result": {
+                            "deleted_contracts": [758446151],
+                            "stacked_targets": ["hangar:60003760"],
+                            "errors": [],
+                        },
+                    }
+                if method == "get_state":
+                    return dict(snap)
+                if method == "execute_action":
+                    return {"ok": True, "action": params, "elapsed_ms": 10, "post_state": dict(snap), "flight_recorder": {}, "state_diff": {}}
+                return {"ok": True}
+
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = fake_rpc_call
+            plan_dec = {
+                "observation": "Clean hangar",
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {"should_file": False, "category": "none"},
+                "current_goal": "Test",
+                "memory_update": {},
+                "delegated_plan": {
+                    "goal": "Direct wait",
+                    "max_batch_steps": 1,
+                    "steps": [
+                        {
+                            "step_number": 1,
+                            "exec_mode": "direct",
+                            "capture_screenshot": False,
+                            "action_type_hint": "wait",
+                            "target_or_command_hint": "wait",
+                            "instruction": "Wait briefly",
+                            "expected_outcome": "OK",
+                            "action": {"type": "wait", "wait_ms": 0},
+                        }
+                    ],
+                },
+            }
+
+            def fake_cap(dest_path, **kwargs):
+                Path(dest_path).write_bytes(b"\x89PNG\r\n\x1a\n")
+                return {"ok": True, "mode": "mock"}
+
+            with mock.patch.object(playtester, "capture_window_screenshot", side_effect=fake_cap), \
+                 mock.patch.object(playtester, "invoke_agy_planner", return_value=(plan_dec, "hydrogen-l-tf-medium", 1.0)) as m_plan, \
+                 mock.patch.object(playtester, "invoke_agy_executor") as m_exec:
+                # Step 1 (startup hygiene only, no window cleanup)
+                runner.execute_step(1, {}, [])
+                self.assertFalse(runner.pending_startup_hygiene)
+                self.assertEqual(rpc_seq[:2], ["cleanup_persona_hygiene", "get_state"])
+                self.assertNotIn("cleanup_utility_windows", rpc_seq)
+                m_exec.assert_not_called()
+                prompt_1 = m_plan.call_args.kwargs["prompt_text"]
+                self.assertIn("Harness Persona-Rotation Cleanup Notice", prompt_1)
+                self.assertIn("758446151", prompt_1)
+                self.assertIn("hangar:60003760", prompt_1)
+
+                # Step 2 with pending_persona_cleanup=True runs BOTH utility window + persona hygiene cleanup
+                rpc_seq.clear()
+                runner.pending_persona_cleanup = True
+                runner.cached_post_state = None
+                runner.execute_step(2, {}, [])
+                self.assertEqual(rpc_seq[:3], ["cleanup_utility_windows", "cleanup_persona_hygiene", "get_state"])
+                m_exec.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
