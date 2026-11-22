@@ -6179,18 +6179,82 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
             )
         )
 
-    def test_expected_user_error_module_fit_failed_requires_nonempty_metadata(self):
+    def test_expected_user_error_module_fit_failed_precondition_verified(self):
         oracle_cls = playtester.PlaytesterBugOracle
-        positive_errors = (
-            "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3416 level 1 (trained: 0) for module Small Shield Booster I (type 399)', 'moduleName': 'Small Shield Booster I'})",
-            "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I (type 17938)', 'moduleName': 'Core Probe Launcher I'})",
+        untrained_ui_state = {
+            "skills_state": {
+                "total_trained_skills": 2,
+                "trained_skill_levels": {"3300": 4, "3412": 0},
+            }
+        }
+        trained_ui_state = {
+            "skills_state": {
+                "total_trained_skills": 2,
+                "trained_skill_levels": {"3412": 1, "3416": 2},
+            }
+        }
+        empty_skills_ui_state = {"skills_state": {"total_trained_skills": 0, "trained_skill_levels": {}}}
+
+        skill_3416_err = "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3416 level 1 (trained: 0) for module Small Shield Booster I (type 399)', 'moduleName': 'Small Shield Booster I'})"
+        skill_3412_err = "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I (type 17938)', 'moduleName': 'Core Probe Launcher I'})"
+        skill_3412_lvl3_err = "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 3 (trained: 1) for module Expanded Probe Launcher I (type 17901)', 'moduleName': 'Expanded Probe Launcher I'})"
+
+        # 1. Verified untrained skill against live ui_state.skills_state -> exempted + verified telemetry detail.
+        for err, want_skill in ((skill_3416_err, 3416), (skill_3412_err, 3412)):
+            ok, det = oracle_cls.classify_expected_user_error(
+                {"error": err}, ui_state=untrained_ui_state
+            )
+            self.assertTrue(ok, err)
+            self.assertIsNotNone(det)
+            self.assertEqual(det["key"], "ModuleFitFailed")
+            self.assertEqual(det["mechanism"], "precondition_verified")
+            self.assertEqual(det["precondition"], "missing_required_skill")
+            self.assertTrue(det["verified"])
+            self.assertEqual(det["skill_id"], want_skill)
+
+        # Partial trained level (live=1 == reported=1 < req=3) also verifies cleanly.
+        ok_lvl3, det_lvl3 = oracle_cls.classify_expected_user_error(
+            {"error": skill_3412_lvl3_err}, ui_state=trained_ui_state
+        )
+        self.assertTrue(ok_lvl3)
+        self.assertEqual(det_lvl3["skill_id"], 3412)
+        self.assertEqual(det_lvl3["required_level"], 3)
+        self.assertEqual(det_lvl3["trained_level"], 1)
+
+        # 2. Fail closed when ui_state is absent, empty, contradicts trained level, or claims non-skill reason.
+        self.assertFalse(oracle_cls.is_expected_user_error({"error": skill_3412_err}))
+        self.assertFalse(
+            oracle_cls.is_expected_user_error({"error": skill_3412_err}, ui_state={})
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"error": skill_3412_err}, ui_state=empty_skills_ui_state
+            )
+        )
+        # Pilot already trained skill 3412 to 1 & 3416 to 2 -> server rejection is a real bug!
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"error": skill_3412_err}, ui_state=trained_ui_state
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"error": skill_3416_err}, ui_state=trained_ui_state
+            )
+        )
+        # Client sees trained=0 while server reports (trained: 1) -> skill desync must not be suppressed.
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"error": skill_3412_lvl3_err}, ui_state=untrained_ui_state
+            )
+        )
+
+        # Never blanket-exempt CPU/PG/slot/hardpoint/generic ModuleFitFailed even with populated ui_state.
+        never_exempt_errors = (
             "UserError: User error, msg=ModuleFitFailed, dict={'moduleName': u'1MN Afterburner I', 'reason': u'Not enough CPU'}",
             'UserError("ModuleFitFailed", {"moduleName": "Damage Control I", "reason": "Max group fitted"})',
-        )
-        for err in positive_errors:
-            self.assertTrue(oracle_cls.is_expected_user_error({"error": err}), err)
-
-        negative_errors = (
+            "UserError('ModuleFitFailed', {'reason': 'Insufficient turret hardpoints on Badger: 1 fitted, hull limit is 1', 'moduleName': 'Miner I'})",
+            "UserError('ModuleFitFailed', {'reason': 'Not enough powergrid', 'moduleName': '1MN Afterburner I'})",
             "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3416'})",
             "UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': ''})",
             "UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': u'   '})",
@@ -6199,31 +6263,62 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
             "UserError('ModuleFitFailed', {'moduleName': 'Small Shield Booster I', 'reason': ''})",
             "UserError('ModuleFitFailed', {})",
         )
-        for err in negative_errors:
+        for err in never_exempt_errors:
             self.assertFalse(
                 oracle_cls.is_expected_user_error(
                     {"error": err},
                     expected_text="Fitting rejects module or shows error modal",
+                    ui_state=untrained_ui_state,
                 ),
                 err,
             )
 
+        # 3. Fitting tasklet traceback with ModuleFitFailed exempts ONLY when live skill state verifies it.
         fitting_fit_failed_tb = (
             "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x9, ctxt='fittingSlotController.OnDropData'>\",) kwargs={}\n"
             'Traceback (most recent call last):\n'
             '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
             '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 310, in OnDropData\n'
             '  File "eve/client/script/inc/invCache.py", line 915, in TryFit\n'
-            "UserError: User error, msg=ModuleFitFailed, dict={'reason': u'Missing required skill 3412 level 1', 'moduleName': u'Core Probe Launcher I'}\n"
+            "UserError: User error, msg=ModuleFitFailed, dict={'reason': u'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I', 'moduleName': u'Core Probe Launcher I'}\n"
         )
         self.assertFalse(
             oracle_cls._is_unhandled_tasklet_traceback(
-                "UserError: User error, msg=ModuleFitFailed", fitting_fit_failed_tb
+                "UserError: User error, msg=ModuleFitFailed",
+                fitting_fit_failed_tb,
+                ui_state=untrained_ui_state,
             )
         )
         self.assertTrue(
             oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ModuleFitFailed",
+                fitting_fit_failed_tb,
+                ui_state=untrained_ui_state,
+            )
+        )
+        # Same traceback without ui_state or when pilot has skill 3412 -> must remain unhandled & flagged.
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
                 "UserError: User error, msg=ModuleFitFailed", fitting_fit_failed_tb
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ModuleFitFailed", fitting_fit_failed_tb
+            )
+        )
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=ModuleFitFailed",
+                fitting_fit_failed_tb,
+                ui_state=trained_ui_state,
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ModuleFitFailed",
+                fitting_fit_failed_tb,
+                ui_state=trained_ui_state,
             )
         )
 
@@ -6232,12 +6327,16 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
         )
         self.assertTrue(
             oracle_cls._is_unhandled_tasklet_traceback(
-                "UserError: User error, msg=ModuleFitFailed", missing_name_fitting_tb
+                "UserError: User error, msg=ModuleFitFailed",
+                missing_name_fitting_tb,
+                ui_state=untrained_ui_state,
             )
         )
         self.assertFalse(
             oracle_cls.is_ignorable_client_traceback(
-                "UserError: User error, msg=ModuleFitFailed", missing_name_fitting_tb
+                "UserError: User error, msg=ModuleFitFailed",
+                missing_name_fitting_tb,
+                ui_state=untrained_ui_state,
             )
         )
 
@@ -6330,12 +6429,15 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
                     }
                 ],
             }
+            untrained_snap = {
+                "skills_state": {"total_trained_skills": 1, "trained_skill_levels": {"3300": 4}}
+            }
             queued_clean = oracle.evaluate_step(
                 step_num=98362,
                 git_head="496975a8e",
                 decision={"action": {"type": "click_widget", "target": "context_menu_Fit to Active Ship"}, "bug_report": {"should_file": False}},
                 exec_res={"action_ok": True, "flight_recorder": fr_clean},
-                ui_snapshot={},
+                ui_snapshot=untrained_snap,
                 screenshot_path=shot,
                 burst_paths=[],
                 traceback_log=tb_log,
@@ -6344,6 +6446,14 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
                 last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
             )
             self.assertEqual(queued_clean, [])
+            self.assertEqual(len(oracle.last_user_error_exemptions), 4)
+            self.assertEqual(
+                oracle._exemption_tracker.summary()["user_error_exemptions_count"], 4
+            )
+            self.assertEqual(
+                oracle._exemption_tracker.summary()["precondition_verified_user_error_exemptions"],
+                1,
+            )
 
             # Empty moduleName on ModuleFitFailed must still file protocol_error (#1568/#1569 guard).
             queued_empty = oracle.evaluate_step(
@@ -6498,19 +6608,53 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
             )
         )
 
-        # 5. Session-end flight recorder anomaly analyzer skips valid ModuleFitFailed, flags missing moduleName.
+        # 5. Session-end flight recorder anomaly analyzer skips precondition-verified ModuleFitFailed,
+        # flags CPU/unverified ModuleFitFailed and missing moduleName.
+        untrained_ui_state = {
+            "skills_state": {"total_trained_skills": 1, "trained_skill_levels": {"3300": 4}}
+        }
         valid_calls = [
             {
                 "service": "invbroker",
                 "method": "MultiAdd",
                 "seq": idx,
                 "ts": 100.0 + idx,
-                "status": "ERR(UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1', 'moduleName': 'Core Probe Launcher I'}))",
-                "error": "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1', 'moduleName': 'Core Probe Launcher I'})",
+                "status": "ERR(UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I (type 17938)', 'moduleName': 'Core Probe Launcher I'}))",
+                "error": "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I (type 17938)', 'moduleName': 'Core Probe Launcher I'})",
             }
             for idx in range(4)
         ]
-        self.assertEqual(oracle_cls.analyze_flight_recorder_anomalies(valid_calls), [])
+        fr_exemptions = []
+        self.assertEqual(
+            oracle_cls.analyze_flight_recorder_anomalies(
+                valid_calls, ui_state=untrained_ui_state, exemptions_out=fr_exemptions
+            ),
+            [],
+        )
+        self.assertEqual(len(fr_exemptions), 4)
+        self.assertTrue(all(h["verified"] and h["skill_id"] == 3412 for h in fr_exemptions))
+
+        # Without ui_state (or for CPU/PG/hardpoint), ModuleFitFailed must still be flagged as an anomaly.
+        self.assertEqual(len(oracle_cls.analyze_flight_recorder_anomalies(valid_calls)), 1)
+        cpu_calls = [
+            {
+                "service": "invbroker",
+                "method": "MultiAdd",
+                "seq": 50 + idx,
+                "ts": 150.0 + idx,
+                "status": "ERR(UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': 'Miner I'}))",
+                "error": "UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': 'Miner I'})",
+            }
+            for idx in range(4)
+        ]
+        self.assertEqual(
+            len(
+                oracle_cls.analyze_flight_recorder_anomalies(
+                    cpu_calls, ui_state=untrained_ui_state
+                )
+            ),
+            1,
+        )
 
         missing_name_calls = [
             {
@@ -6567,15 +6711,28 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
             )
         )
 
-        # Positive control: LogTraceback directly carrying a valid ModuleFitFailed payload is expected.
+        # Positive control: LogTraceback directly carrying a state-verified ModuleFitFailed payload is expected.
+        untrained_ui_state = {
+            "skills_state": {"total_trained_skills": 1, "trained_skill_levels": {"3300": 4}}
+        }
         logtraceback_valid_mff = (
-            "log.LogTraceback args=(\"UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412', 'moduleName': 'Miner I'})\",) kwargs={}\n"
+            "log.LogTraceback args=(\"UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0)', 'moduleName': 'Miner I'})\",) kwargs={}\n"
             "None\n"
             "\n"
             "CALLSTACK:\n"
             '  File "eve/client/script/fitting.py", line 10, in Foo\n'
         )
-        self.assertTrue(oracle_cls.is_expected_user_error({"trace": logtraceback_valid_mff, "headline": ""}))
+        self.assertTrue(
+            oracle_cls.is_expected_user_error(
+                {"trace": logtraceback_valid_mff, "headline": ""},
+                ui_state=untrained_ui_state,
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"trace": logtraceback_valid_mff, "headline": ""}
+            )
+        )
 
         # BF-USERERR-03: BENIGN_FLIGHT_FLOW_MARKERS must not short-circuit missing-moduleName ModuleFitFailed.
         for reason in (
@@ -6624,9 +6781,21 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
                 {
                     "error": (
                         "UserError('ModuleFitFailed', {'typeID': 483L, "
+                        "'reason': 'Missing required skill 3412 level 1 (trained: 0) for Miner I', 'moduleName': 'Miner I'})"
+                    )
+                },
+                ui_state=untrained_ui_state,
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {
+                    "error": (
+                        "UserError('ModuleFitFailed', {'typeID': 483L, "
                         "'reason': 'Insufficient turret hardpoints', 'moduleName': 'Miner I'})"
                     )
-                }
+                },
+                ui_state=untrained_ui_state,
             )
         )
         window_pre_tb = (
@@ -6739,6 +6908,142 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
                 self.assertEqual(len(queued), 1, label)
                 incident = json.loads(queued[0].read_text(encoding="utf-8"))
                 self.assertEqual(incident["kind"], "client_traceback", label)
+
+    def test_user_error_exemption_telemetry_visibility_and_dedup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mem_dir = root / "runtime"
+            run_dir = root / "run_telemetry"
+            step_dir = run_dir / "steps" / "step_00001"
+            qdir = root / "queue"
+            step_dir.mkdir(parents=True, exist_ok=True)
+            qdir.mkdir(parents=True, exist_ok=True)
+            tb_log = run_dir / "client_tracebacks.log"
+            srv_log = run_dir / "server.log"
+            shot = step_dir / "screen.png"
+            tb_log.write_text("", encoding="utf-8")
+            srv_log.write_text("", encoding="utf-8")
+            shot.write_bytes(b"png")
+
+            runner = playtester.PlaytesterRunner.__new__(playtester.PlaytesterRunner)
+            runner.worktree_dir = root
+            runner.runtime_dir = mem_dir
+            runner.current_run_dir = run_dir
+            runner.memory = playtester.PlaytesterMemory(mem_dir, git_head="496975a8e")
+            runner._guard_tracker = playtester._GuardHitTracker(retain_all=False, max_recent=100)
+            runner._sim_time_tracker = playtester._SimTimeTracker(retain_events=False, max_recent=200)
+            runner._user_error_exemption_tracker = playtester._UserErrorExemptionTracker(
+                retain_all=False, max_recent=100
+            )
+            runner.rpc = None
+            oracle = playtester.PlaytesterBugOracle(root, qdir, runner.memory, sync_github=False)
+
+            untrained_ui_state = {
+                "skills_state": {"total_trained_skills": 1, "trained_skill_levels": {"3300": 4}}
+            }
+            mff_err = (
+                "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 "
+                "(trained: 0) for module Core Probe Launcher I (type 17938)', "
+                "'moduleName': 'Core Probe Launcher I'})"
+            )
+            window_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x956b40158, "
+                "ctxt='__OpenCargoHoldOfActiveShip_thread'>\",) kwargs={}\n"
+                "Traceback (most recent call last):\n"
+                '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+                '  File "packages/carbonui/control/window.py", line 4164, in Open\n'
+                "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}\n"
+            )
+            exec_res = {
+                "action_ok": True,
+                "flight_recorder": {
+                    "macho_exceptions": [
+                        {
+                            "service": "invbroker",
+                            "method": "MultiAdd",
+                            "seq": 42,
+                            "error": mff_err,
+                        }
+                    ],
+                    "log_exceptions": [
+                        {
+                            "headline": "UserError: User error, msg=WindowBlockedFromOpening, dict={}",
+                            "trace": window_tb,
+                        }
+                    ],
+                    "quasar_errors": [],
+                },
+            }
+
+            added, _ = runner._record_step_user_error_exemptions(
+                1, exec_res, expected_text="", ui_state=untrained_ui_state
+            )
+            self.assertEqual(len(added), 2)
+            # Re-recording or feeding oracle.evaluate_step / harvester on same seq=42 must not double-count.
+            queued = oracle.evaluate_step(
+                step_num=1,
+                git_head="496975a8e",
+                decision={"action": {"type": "click_widget", "target": "fit"}, "bug_report": {"should_file": False}},
+                exec_res=exec_res,
+                ui_snapshot=untrained_ui_state,
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=step_dir,
+            )
+            self.assertEqual(queued, [])
+            runner._record_step_user_error_exemptions(
+                1,
+                exec_res,
+                expected_text="",
+                ui_state=untrained_ui_state,
+                extra_hits=oracle.last_user_error_exemptions,
+            )
+            oracle.record_flight_recorder_anomalies(
+                [
+                    {
+                        "service": "invbroker",
+                        "method": "MultiAdd",
+                        "seq": 42,
+                        "ts": 100.0,
+                        "status": f"ERR({mff_err})",
+                        "error": mff_err,
+                    }
+                ],
+                step_num=1,
+                ui_state=untrained_ui_state,
+                exemption_tracker=runner._ensure_user_error_exemption_state(),
+            )
+            runner.memory.apply_agent_decision(
+                1,
+                {"action": {"type": "click_widget", "target": "fit"}, "observation": "ok"},
+                exec_res,
+            )
+            runner._write_run_summary(step_num=1, final=True)
+
+            self.assertEqual(exec_res["user_error_exemption_count"], 2)
+            self.assertEqual(
+                exec_res["user_error_exemptions_by_key"],
+                {"ModuleFitFailed": 1, "WindowBlockedFromOpening": 1},
+            )
+            run_sum = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_sum["user_error_exemptions_count"], 2)
+            self.assertEqual(
+                run_sum["user_error_exemptions_by_key"],
+                {"ModuleFitFailed": 1, "WindowBlockedFromOpening": 1},
+            )
+            self.assertEqual(run_sum["precondition_verified_user_error_exemptions"], 1)
+            self.assertEqual(run_sum["unverified_user_error_exemptions"], 1)
+            self.assertEqual(len(run_sum["recent_user_error_exemptions"]), 2)
+
+            mem_disk = json.loads((mem_dir / "memory.json").read_text(encoding="utf-8"))
+            self.assertEqual(mem_disk["recent_actions"][-1]["user_error_exemption_count"], 2)
+            self.assertEqual(mem_disk["last_run_summary"]["user_error_exemptions_count"], 2)
+            self.assertEqual(
+                mem_disk["last_run_summary"]["precondition_verified_user_error_exemptions"],
+                1,
+            )
 
 
 if __name__ == "__main__":

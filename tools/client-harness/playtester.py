@@ -308,6 +308,175 @@ class _SimTimeTracker:
         }
 
 
+def _select_live_skill_state(
+    primary: Optional[Dict[str, Any]],
+    fallback: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Prefer the state snapshot carrying non-empty `skills_state.trained_skill_levels`."""
+    for cand in (primary, fallback):
+        if not isinstance(cand, dict):
+            continue
+        sk = cand.get("skills_state")
+        if isinstance(sk, dict) and isinstance(sk.get("trained_skill_levels"), dict) and sk.get("trained_skill_levels"):
+            return cand
+        if isinstance(cand.get("trained_skill_levels"), dict) and cand.get("trained_skill_levels"):
+            return cand
+    if isinstance(primary, dict) and primary:
+        return primary
+    return fallback if isinstance(fallback, dict) else None
+
+
+def summarize_user_error_exemptions(
+    hits: Optional[List[Dict[str, Any]]] = None,
+    *,
+    tracker: Optional["_UserErrorExemptionTracker"] = None,
+) -> Dict[str, Any]:
+    """Aggregate exemption hit counts by UserError key, mechanism, and precondition verification."""
+    if tracker is not None and hits is None:
+        by_key = dict(tracker.by_key)
+        by_mech = dict(tracker.by_mechanism)
+        total = int(tracker.total_count)
+        verified_total = int(tracker.verified_count)
+    else:
+        by_key = {}
+        by_mech = {}
+        total = 0
+        verified_total = 0
+        for item in hits or ():
+            if not isinstance(item, dict):
+                continue
+            key_name = str(item.get("key") or "unknown").strip() or "unknown"
+            mech = str(item.get("mechanism") or "unknown").strip() or "unknown"
+            total += 1
+            if item.get("verified"):
+                verified_total += 1
+            by_key[key_name] = by_key.get(key_name, 0) + 1
+            by_mech[mech] = by_mech.get(mech, 0) + 1
+    return {
+        "user_error_exemptions_count": total,
+        "user_error_exemptions_by_key": {k: by_key[k] for k in sorted(by_key.keys())},
+        "user_error_exemptions_by_mechanism": {m: by_mech[m] for m in sorted(by_mech.keys())},
+        "precondition_verified_user_error_exemptions": verified_total,
+        "unverified_user_error_exemptions": total - verified_total,
+    }
+
+
+class _UserErrorExemptionTracker:
+    """Deduplicating accumulator for expected UserError and tasklet-traceback exemptions (#1539)."""
+
+    def __init__(self, retain_all: bool = True, max_recent: int = 100) -> None:
+        self.retain_all = bool(retain_all)
+        self.max_recent = int(max_recent)
+        self.session_gen: int = 0
+        self.seen_ids: set = set()
+        self._seen_order: deque = deque()
+        self.total_count: int = 0
+        self.verified_count: int = 0
+        self.by_key: Dict[str, int] = {}
+        self.by_mechanism: Dict[str, int] = {}
+        self.hits: List[Dict[str, Any]] = []
+        self.recent_hits: List[Dict[str, Any]] = []
+
+    def reset_client_session(self) -> None:
+        """Advance session generation across client restarts so RPC `seq` IDs do not collide."""
+        self.session_gen += 1
+
+    def absorb_hits(
+        self, raw_hits: Any, *, step_num: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(raw_hits, list):
+            return []
+        added: List[Dict[str, Any]] = []
+        for idx, item in enumerate(raw_hits):
+            if not isinstance(item, dict):
+                continue
+            key_name = str(item.get("key") or "unknown").strip() or "unknown"
+            mechanism = str(item.get("mechanism") or "unknown").strip() or "unknown"
+            channel = str(item.get("channel") or "unknown").strip() or "unknown"
+            raw_step = item.get("step")
+            if isinstance(raw_step, int) and not isinstance(raw_step, bool):
+                step_val = int(raw_step)
+            elif step_num is not None:
+                step_val = int(step_num)
+            else:
+                step_val = 0
+            detail = str(item.get("detail") or item.get("reason") or "")[:240]
+            dedup_id = item.get("dedup_id")
+            seq_val = item.get("seq")
+            if isinstance(dedup_id, str) and dedup_id.strip():
+                dedup_key: Any = ("id", dedup_id.strip())
+            elif isinstance(seq_val, int) and not isinstance(seq_val, bool):
+                dedup_key = ("seq", self.session_gen, int(seq_val), key_name.lower())
+            elif step_val > 0:
+                occ = item.get("occ_idx")
+                dedup_key = (
+                    "step",
+                    step_val,
+                    channel,
+                    key_name.lower(),
+                    mechanism,
+                    detail,
+                    idx if occ is None else occ,
+                )
+            else:
+                dedup_key = (
+                    "raw",
+                    channel,
+                    key_name.lower(),
+                    mechanism,
+                    detail,
+                    item.get("ts"),
+                    idx,
+                )
+            if dedup_key in self.seen_ids:
+                continue
+            self.seen_ids.add(dedup_key)
+            self._seen_order.append(dedup_key)
+            while len(self.seen_ids) > 20000 and self._seen_order:
+                oldest = self._seen_order.popleft()
+                self.seen_ids.discard(oldest)
+
+            self.total_count += 1
+            verified = bool(item.get("verified", False))
+            if verified:
+                self.verified_count += 1
+            self.by_key[key_name] = self.by_key.get(key_name, 0) + 1
+            self.by_mechanism[mechanism] = self.by_mechanism.get(mechanism, 0) + 1
+
+            entry = dict(item)
+            entry["key"] = key_name
+            entry["mechanism"] = mechanism
+            entry["channel"] = channel
+            entry["step"] = step_val
+            entry["verified"] = verified
+            if detail and "detail" not in entry:
+                entry["detail"] = detail
+            added.append(entry)
+            if self.retain_all:
+                self.hits.append(entry)
+            self.recent_hits.append(entry)
+            if len(self.recent_hits) > self.max_recent:
+                self.recent_hits = self.recent_hits[-self.max_recent:]
+        return added
+
+    def absorb_payload(
+        self, payload: Any, *, step_num: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        fr = payload.get("flight_recorder")
+        if isinstance(payload.get("user_error_exemptions"), list):
+            return self.absorb_hits(payload.get("user_error_exemptions"), step_num=step_num)
+        if isinstance(fr, dict) and isinstance(fr.get("user_error_exemptions"), list):
+            return self.absorb_hits(fr.get("user_error_exemptions"), step_num=step_num)
+        return []
+
+    def summary(self) -> Dict[str, Any]:
+        return summarize_user_error_exemptions(
+            self.hits if self.retain_all else None, tracker=None if self.retain_all else self
+        )
+
+
 class _HostGmBridgeRpcServer:
     """Loopback JSON-line TCP server routing in-client time-control requests to the host GM bridge."""
 
@@ -2815,6 +2984,14 @@ class PlaytesterMemory:
                 or 0
             ),
             "guard_hits": list(action_outcome.get("guard_hits") or [])[:25],
+            "user_error_exemption_count": int(
+                action_outcome.get(
+                    "user_error_exemption_count",
+                    len(action_outcome.get("user_error_exemptions") or []),
+                )
+                or 0
+            ),
+            "user_error_exemptions": list(action_outcome.get("user_error_exemptions") or [])[:25],
         }
         if action_outcome.get("slash_result"):
             recent_entry["slash_result"] = str(action_outcome["slash_result"])[:2000]
@@ -5411,6 +5588,9 @@ class PlaytesterBugOracle:
         self._prev_step_dropped_all_log_excs: bool = False
         self.last_unseen_tracebacks: List[Dict[str, str]] = []
         self.last_suppressed_tracebacks: List[Dict[str, str]] = []
+        self.last_user_error_exemptions: List[Dict[str, Any]] = []
+        self._exemption_tracker = _UserErrorExemptionTracker(retain_all=False, max_recent=100)
+        self._last_step_ui_state: Optional[Dict[str, Any]] = None
         self._session_server_request_count: int = 0
         self._session_gateway_request_count: int = 0
         self._session_gateway_transport_error_count: int = 0
@@ -5436,6 +5616,9 @@ class PlaytesterBugOracle:
         self._session_gateway_request_count = 0
         self._session_gateway_transport_error_count = 0
         self._session_flight_seqs_seen.clear()
+        self._last_step_ui_state = None
+        if getattr(self, "_exemption_tracker", None) is not None:
+            self._exemption_tracker.reset_client_session()
         self._session_unseq_entry_ids.clear()
         self._session_unseq_entry_refs.clear()
         if client_boot_build is not None and client_boot_build > 0:
@@ -5954,6 +6137,8 @@ class PlaytesterBugOracle:
         prev_log_excs: List[Any],
         prev_non_benign_macho_excs: List[Any],
         expected_text: str = "",
+        *,
+        ui_state: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Return True iff all non-ignorable prev_tb items match a UserError key in prev_non_benign_macho_excs."""
         macho_keys = {
@@ -5972,13 +6157,13 @@ class PlaytesterBugOracle:
                 return False
 
         tb_text = str(raw_prev_tb or "").strip()
-        if tb_text and not cls.is_ignorable_client_traceback("", tb_text, expected_text):
+        if tb_text and not cls.is_ignorable_client_traceback("", tb_text, expected_text, ui_state=ui_state):
             blocks = cls.parse_tb_blocks(tb_text)
             if blocks:
                 for blk in blocks:
                     hl = str(blk.get("headline") or "")
                     tr = str(blk.get("trace") or "")
-                    if cls.is_ignorable_client_traceback(hl, tr, expected_text):
+                    if cls.is_ignorable_client_traceback(hl, tr, expected_text, ui_state=ui_state):
                         continue
                     saw_any = True
                     k = cls.extract_client_user_error_key(f"{hl}\n{tr}")
@@ -6085,6 +6270,10 @@ class PlaytesterBugOracle:
     _MODULE_FIT_FAILED_DICT_START_RE = re.compile(
         r"(?:UserError\s*:?\s*\(\s*u?['\"]ModuleFitFailed['\"]\s*,\s*"
         r"|msg\s*=\s*u?['\"]?ModuleFitFailed\b[^\r\n{]*,\s*dict\s*=\s*)(?=\{)",
+        re.IGNORECASE,
+    )
+    _MODULE_FIT_MISSING_SKILL_RE = re.compile(
+        r"^Missing required skill (\d+) level (\d+) \(trained:\s*(\d+)\)(?:\s|$)",
         re.IGNORECASE,
     )
     _WINDOW_OPEN_FRAME_RE = re.compile(
@@ -6240,53 +6429,154 @@ class PlaytesterBugOracle:
                 return hl_key, hl_text
         return None, ""
 
+    @staticmethod
+    def _extract_trained_skill_levels(
+        ui_state: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, int]]:
+        """Extract `{skill_id_str: trained_level}` from live `ui_state.skills_state`, else `None`."""
+        if not isinstance(ui_state, dict):
+            return None
+        skills_state = ui_state.get("skills_state")
+        if isinstance(skills_state, dict) and "trained_skill_levels" in skills_state:
+            raw_map = skills_state.get("trained_skill_levels")
+        elif "trained_skill_levels" in ui_state:
+            raw_map = ui_state.get("trained_skill_levels")
+        else:
+            return None
+        if not isinstance(raw_map, dict) or len(raw_map) == 0:
+            return None
+        parsed: Dict[str, int] = {}
+        for k, v in raw_map.items():
+            if isinstance(v, bool):
+                return None
+            try:
+                sk_id = str(int(k))
+                lvl = int(v)
+            except (TypeError, ValueError):
+                return None
+            parsed[sk_id] = lvl
+        return parsed
+
     @classmethod
-    def _has_nonempty_module_fit_failed(cls, raw_text: str) -> bool:
-        """Return True iff the raised `ModuleFitFailed` payload dict has non-empty `moduleName` and `reason`."""
+    def _verify_module_fit_failed_precondition(
+        cls,
+        raw_text: str,
+        ui_state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """Exempt `ModuleFitFailed` ONLY when the stated precondition is verified against live state."""
         text = str(raw_text or "")
         if "modulefitfailed" not in text.lower():
-            return False
+            return False, None
         if sync_bugs_to_github._RE_TRACEBACK_INDICATORS.search(text):
             ue_key, raised = cls._extract_raised_user_error("", text)
             if not ue_key or ue_key.lower() != "modulefitfailed" or not raised:
-                return False
+                return False, None
             text = raised
         else:
             outer_key = cls.extract_client_user_error_key(text)
             if not outer_key or outer_key.lower() != "modulefitfailed":
-                return False
+                return False, None
         dict_match = cls._MODULE_FIT_FAILED_DICT_START_RE.search(text)
         if not dict_match:
-            return False
+            return False, None
         dict_repr = cls._extract_balanced_dict_repr(text[dict_match.end() :])
         if not dict_repr:
-            return False
+            return False, None
         top_strs = cls._parse_top_level_dict_str_values(dict_repr)
         name_val = (top_strs.get("modulename") or "").strip()
         reason_val = (top_strs.get("reason") or "").strip()
-        return bool(name_val and reason_val)
+        if not name_val or not reason_val:
+            return False, None
+
+        # Only exempt `Missing required skill ...` when live `skills_state.trained_skill_levels`
+        # confirms the skill is genuinely untrained / below the required level. Fail closed on
+        # CPU, PG, capacitor, calibration, hardpoint, slot, and generic reasons.
+        skill_m = cls._MODULE_FIT_MISSING_SKILL_RE.match(reason_val)
+        if not skill_m:
+            return False, None
+        trained_levels = cls._extract_trained_skill_levels(ui_state)
+        if trained_levels is None:
+            return False, None
+        req_skill_id = int(skill_m.group(1))
+        req_level = int(skill_m.group(2))
+        reported_trained = int(skill_m.group(3))
+        live_trained = trained_levels.get(str(req_skill_id), 0)
+        if req_level < 1 or live_trained >= req_level or live_trained != reported_trained:
+            return False, None
+
+        return True, {
+            "key": "ModuleFitFailed",
+            "mechanism": "precondition_verified",
+            "precondition": "missing_required_skill",
+            "verified": True,
+            "module_name": name_val,
+            "skill_id": req_skill_id,
+            "required_level": req_level,
+            "trained_level": live_trained,
+            "detail": f"{name_val}: {reason_val}"[:240],
+        }
 
     @classmethod
-    def is_ignorable_client_traceback(cls, headline: str, trace: str = "", expected_text: str = "") -> bool:
-        """Return True iff traceback is a benign client-only race or expected game-rule UserError."""
+    def classify_ignorable_client_traceback(
+        cls,
+        headline: str,
+        trace: str = "",
+        expected_text: str = "",
+        *,
+        ui_state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """Return `(ignorable, user_error_exemption_detail)` for a client traceback."""
         blocks = cls.parse_tb_blocks(trace) if trace else []
         if len(blocks) > 1:
-            return all(
-                cls.is_ignorable_client_traceback(
+            first_detail: Optional[Dict[str, Any]] = None
+            for blk in blocks:
+                ok_blk, det_blk = cls.classify_ignorable_client_traceback(
                     str(blk.get("headline") or ""),
                     str(blk.get("trace") or ""),
                     expected_text,
+                    ui_state=ui_state,
                 )
-                for blk in blocks
-            )
+                if not ok_blk:
+                    return False, None
+                if first_detail is None and det_blk is not None:
+                    first_detail = det_blk
+            return True, first_detail
         if cls.is_benign_client_traceback(headline, trace):
-            return True
-        if cls._is_unhandled_tasklet_traceback(headline, trace):
-            return False
+            return True, None
+        is_unhandled, tasklet_det = cls._classify_tasklet_user_error(
+            headline, trace, ui_state=ui_state
+        )
+        if is_unhandled:
+            return False, None
         ue_key, raised_exc_text = cls._extract_raised_user_error(headline, trace)
         if not ue_key or not raised_exc_text:
-            return False
-        return cls.is_expected_user_error(raised_exc_text, expected_text)
+            return False, None
+        ok_exp, exp_det = cls.classify_expected_user_error(
+            raised_exc_text, expected_text, ui_state=ui_state
+        )
+        if not ok_exp:
+            return False, None
+        if tasklet_det is not None:
+            merged = dict(tasklet_det)
+            if isinstance(exp_det, dict) and exp_det.get("verified"):
+                merged["mechanism"] = exp_det.get("mechanism", merged.get("mechanism"))
+                merged["verified"] = True
+            return True, merged
+        return True, exp_det
+
+    @classmethod
+    def is_ignorable_client_traceback(
+        cls,
+        headline: str,
+        trace: str = "",
+        expected_text: str = "",
+        *,
+        ui_state: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Return True iff traceback is a benign client-only race or expected game-rule UserError."""
+        return cls.classify_ignorable_client_traceback(
+            headline, trace, expected_text, ui_state=ui_state
+        )[0]
 
     @classmethod
     def is_benign_client_traceback(cls, headline: str, trace: str = "") -> bool:
@@ -6306,115 +6596,174 @@ class PlaytesterBugOracle:
             return True
         return False
 
-    @classmethod
-    def _is_unhandled_tasklet_traceback(cls, headline: str, trace: str = "") -> bool:
-        """Background tasklet exceptions (e.g. autopilot UserError) are real crashes, not benign action rejections."""
-        blocks = cls.parse_tb_blocks(trace) if trace else []
-        if len(blocks) > 1:
-            return any(
-                cls._is_unhandled_tasklet_traceback(
-                    str(blk.get("headline") or ""),
-                    str(blk.get("trace") or ""),
-                )
-                for blk in blocks
-            )
-        raw_txt = f"{headline or ''}\n{trace or ''}".lower()
-        if "unhandled exception in" not in raw_txt:
-            return False
-        ue_key, raised_exc_text = cls._extract_raised_user_error(headline, trace)
-        if not ue_key:
-            return True
-        ue_key_low = ue_key.lower()
-        ue_subkey_low = ue_key_low.split(":", 1)[1] if ":" in ue_key_low else ue_key_low
-        txt = cls._strip_trace_frame_and_header_text(headline, trace)
-        # CarbonUI drag/drop inventory moves raise benign UserError (e.g. NotEnoughCargoSpace)
-        # out of BluepyTasklet::_MoveItems / _MoveItems so the client UI can show a modal popup (#1227).
-        if ("bluepytasklet::_moveitems" in txt or "in _moveitems" in txt) and ue_key_low == "notenoughcargospace":
-            return False
-        # CarbonUI drag-drop/fit rejections raise UserError('CustomInfo', {'info': 'FittingValidationFailed: ...'})
-        # out of fittingSlotController/invCache fitting tasklets (GH #1223) when a slot/hardpoint rule rejects the fit.
-        if (
-            ue_subkey_low.startswith("fittingvalidationfailed")
-            and (
-                "fittingslotcontroller" in txt
-                or "invcache" in txt
-                or "tryfit" in txt
-                or "ondropdata" in txt
-            )
-        ):
-            return False
-        # Fitting drag-drop/slot tasklets raise UserError('ModuleFitFailed', {'moduleName': ..., 'reason': ...})
-        # out of fittingSlotController/invCache/clientDogmaLocation when a skill/slot rule rejects the fit (#1576/#1578).
-        if (
-            ue_key_low == "modulefitfailed"
-            and cls._has_nonempty_module_fit_failed(raised_exc_text)
-            and (
-                "fittingslotcontroller" in txt
-                or "invcache" in txt
-                or "tryfit" in txt
-                or "ondropdata" in txt
-                or "clientdogmalocation" in txt
-                or "fitmodule" in txt
-            )
-        ):
-            return False
-        # Pre-queued module activation on target lock / UI triggers fires out of
-        # ModuleButton.OnStateChange -> ActivateEffect and shows a benign Information modal
-        # on rule rejections like NoAmmoLoaded, InsufficientFuel (#1230), NotEnoughCapacitor (#1231),
-        # or TargetNotLocked (#1566).
-        if (
-            "modulebutton.onstatechange" in txt
-            and "activateeffect" in txt
-            and ue_subkey_low
-            in (
+    _TASKLET_SIMPLE_USER_ERROR_RULES = (
+        (
+            "inventory_move_items",
+            ("notenoughcargospace",),
+            lambda ue_low, sub_low, txt, cls: (
+                "bluepytasklet::_moveitems" in txt or "in _moveitems" in txt
+            ),
+        ),
+        (
+            "fitting_validation_failed",
+            (),
+            lambda ue_low, sub_low, txt, cls: (
+                sub_low.startswith("fittingvalidationfailed")
+                and any(tok in txt for tok in ("fittingslotcontroller", "invcache", "tryfit", "ondropdata"))
+            ),
+        ),
+        (
+            "module_button_activate",
+            (
                 "noammoloaded",
                 "insufficientfuel",
                 "notenoughcapacitor",
                 "invalidtarget",
                 "targetnotlocked",
-            )
-        ):
-            return False
-        # RadialMenu stop-ship clicks issued during or right at warp transitions raise benign
-        # UserError(ShipInWarp) inside RadialMenu::ClickButton:OnButtonClick -> CmdStopShip (#1570).
-        if (
-            ue_key_low == "shipinwarp"
-            and ("radialmenu" in txt or "radialmenuactions.py" in txt)
-            and ("stopmyship" in txt or "cmdstopship" in txt)
-        ):
-            return False
-        # UI window opens (e.g. CargoHold command while docked/transitioning) raise benign
-        # UserError(WindowBlockedFromOpening) out of carbonui/control/window.py Open (#1575).
-        if (
-            ue_key_low == "windowblockedfromopening"
-            and bool(cls._WINDOW_OPEN_FRAME_RE.search(txt))
-        ):
-            return False
-        # Vanilla V24 ModuleButton/ModuleController AutoReload raises UserError(CannotLoadNotEnoughCharges)
-        # via clientDogmaLocation.LoadAmmoTypeToModule -> LoadChargesToModule when cargo has 0 spare
-        # charges; logmodule routes that UserError to the in-game notification toast.
-        if (
-            "autoreload" in txt
-            and "loadammotypetomodule" in txt
-            and ue_key_low == "cannotloadnotenoughcharges"
-        ):
-            return False
-        # Vanilla V24 UI drone helpers (e.g. LaunchDrones partial-stack capacity rejection)
-        # defer expected game-rule UserErrors onto a background tasklet via eveMisc.py:raise_.
-        if (
-            "evemisc.py" in txt
-            and ("in raise_" in txt or "function raise_" in txt)
-            and ue_key_low
-            in (
-                "nodronemanagementabilitiesleft",
-                "notenoughdronebayspace",
-            )
-        ):
-            return False
-        return True
+            ),
+            lambda ue_low, sub_low, txt, cls: (
+                "modulebutton.onstatechange" in txt and "activateeffect" in txt
+            ),
+        ),
+        (
+            "radial_menu_stop_ship",
+            ("shipinwarp",),
+            lambda ue_low, sub_low, txt, cls: (
+                ("radialmenu" in txt or "radialmenuactions.py" in txt)
+                and ("stopmyship" in txt or "cmdstopship" in txt)
+            ),
+        ),
+        (
+            "window_open",
+            ("windowblockedfromopening",),
+            lambda ue_low, sub_low, txt, cls: bool(cls._WINDOW_OPEN_FRAME_RE.search(txt)),
+        ),
+        (
+            "module_auto_reload",
+            ("cannotloadnotenoughcharges",),
+            lambda ue_low, sub_low, txt, cls: (
+                "autoreload" in txt and "loadammotypetomodule" in txt
+            ),
+        ),
+        (
+            "evemisc_drone_launch",
+            ("nodronemanagementabilitiesleft", "notenoughdronebayspace"),
+            lambda ue_low, sub_low, txt, cls: (
+                "evemisc.py" in txt and ("in raise_" in txt or "function raise_" in txt)
+            ),
+        ),
+    )
 
     @classmethod
-    def is_expected_user_error(cls, err_obj: Any, expected_text: str = "") -> bool:
+    def _classify_tasklet_user_error(
+        cls,
+        headline: str,
+        trace: str = "",
+        *,
+        ui_state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """Classify background tasklet tracebacks as `(is_unhandled_crash, exemption_detail)`."""
+        blocks = cls.parse_tb_blocks(trace) if trace else []
+        if len(blocks) > 1:
+            first_det: Optional[Dict[str, Any]] = None
+            for blk in blocks:
+                bad_blk, det_blk = cls._classify_tasklet_user_error(
+                    str(blk.get("headline") or ""),
+                    str(blk.get("trace") or ""),
+                    ui_state=ui_state,
+                )
+                if bad_blk:
+                    return True, None
+                if first_det is None and det_blk is not None:
+                    first_det = det_blk
+            return False, first_det
+
+        raw_txt = f"{headline or ''}\n{trace or ''}".lower()
+        if "unhandled exception in" not in raw_txt:
+            return False, None
+        ue_key, raised_exc_text = cls._extract_raised_user_error(headline, trace)
+        if not ue_key:
+            return True, None
+        ue_key_low = ue_key.lower()
+        ue_subkey_low = ue_key_low.split(":", 1)[1] if ":" in ue_key_low else ue_key_low
+        txt = cls._strip_trace_frame_and_header_text(headline, trace)
+
+        # Fitting drag-drop/slot tasklets raise UserError('ModuleFitFailed', ...) ONLY when the
+        # stated precondition is verified against live pilot state (e.g. missing skill).
+        if ue_key_low == "modulefitfailed" and any(
+            tok in txt
+            for tok in (
+                "fittingslotcontroller",
+                "invcache",
+                "tryfit",
+                "ondropdata",
+                "clientdogmalocation",
+                "fitmodule",
+            )
+        ):
+            ok_fit, fit_det = cls._verify_module_fit_failed_precondition(
+                raised_exc_text, ui_state=ui_state
+            )
+            if ok_fit and fit_det is not None:
+                enriched = dict(fit_det)
+                enriched["frame_rule"] = "fitting_tasklet"
+                return False, enriched
+            return True, None
+
+        for rule_name, keys, pred in cls._TASKLET_SIMPLE_USER_ERROR_RULES:
+            key_match = (not keys) or (ue_key_low in keys) or (ue_subkey_low in keys)
+            if key_match and pred(ue_key_low, ue_subkey_low, txt, cls):
+                return False, {
+                    "key": ue_key,
+                    "mechanism": "tasklet_user_error",
+                    "frame_rule": rule_name,
+                    "verified": False,
+                    "detail": raised_exc_text[:240],
+                }
+        return True, None
+
+    @classmethod
+    def _is_unhandled_tasklet_traceback(
+        cls,
+        headline: str,
+        trace: str = "",
+        *,
+        ui_state: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Background tasklet exceptions (e.g. autopilot UserError) are real crashes, not benign action rejections."""
+        return cls._classify_tasklet_user_error(headline, trace, ui_state=ui_state)[0]
+
+    @staticmethod
+    def _build_exemption_hit(
+        detail: Dict[str, Any],
+        *,
+        channel: str,
+        step_num: int = 0,
+        occ_idx: int = 0,
+        seq: Any = None,
+    ) -> Dict[str, Any]:
+        """Build a standardized exemption telemetry entry for `_UserErrorExemptionTracker`."""
+        hit = dict(detail)
+        hit["channel"] = str(channel or "unknown")
+        hit["step"] = int(step_num or 0)
+        hit["occ_idx"] = int(occ_idx)
+        if isinstance(seq, int) and not isinstance(seq, bool):
+            hit["seq"] = int(seq)
+        if hit["step"] > 0 and "seq" not in hit:
+            key_low = str(hit.get("key") or "unknown").lower()
+            hit["dedup_id"] = f"step:{hit['step']}:{hit['channel']}:{int(occ_idx)}:{key_low}"
+        hit.setdefault("ts", time.time())
+        return hit
+
+    @classmethod
+    def classify_expected_user_error(
+        cls,
+        err_obj: Any,
+        expected_text: str = "",
+        *,
+        ui_state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """Return `(is_expected, exemption_detail)` for a UserError string/dict/traceback."""
         if isinstance(err_obj, dict):
             raw_err = str(
                 err_obj.get("error")
@@ -6431,39 +6780,86 @@ class PlaytesterBugOracle:
         if sync_bugs_to_github._RE_TRACEBACK_INDICATORS.search(raw_err):
             blocks = cls.parse_tb_blocks(raw_err)
             if len(blocks) > 1:
-                return all(
-                    cls.is_expected_user_error(
+                first_det: Optional[Dict[str, Any]] = None
+                for blk in blocks:
+                    ok_blk, det_blk = cls.classify_expected_user_error(
                         str(blk.get("trace") or blk.get("headline") or ""),
                         expected_text,
+                        ui_state=ui_state,
                     )
-                    for blk in blocks
-                )
+                    if not ok_blk:
+                        return False, None
+                    if first_det is None and det_blk is not None:
+                        first_det = det_blk
+                return True, first_det
             ue_key, raised = cls._extract_raised_user_error("", raw_err)
             if not ue_key or not raised:
-                return False
+                return False, None
             raw_err = raised
         else:
             ue_key, non_ue = sync_bugs_to_github._inspect_client_headline_for_user_error(raw_err)
             if non_ue:
-                return False
+                return False, None
         err_low = raw_err.lower()
         if "usererror(" not in err_low and "usererror:" not in err_low:
-            return False
+            return False, None
         if "slasherror" in err_low:
             if "'reason'" not in err_low and '"reason"' not in err_low:
-                return False
+                return False, None
             if "not found in sde" in err_low:
-                return True
-        if "structurenotoperational" in err_low and "in state 'nocore'" in err_low and "cannot be controlled" in err_low:
-            return True
+                return True, {
+                    "key": ue_key or "SlashError",
+                    "mechanism": "custom_rule",
+                    "verified": False,
+                    "detail": raw_err[:240],
+                }
+        if (
+            "structurenotoperational" in err_low
+            and "in state 'nocore'" in err_low
+            and "cannot be controlled" in err_low
+        ):
+            return True, {
+                "key": ue_key or "StructureNotOperational",
+                "mechanism": "custom_rule",
+                "verified": False,
+                "detail": raw_err[:240],
+            }
         if "modulefitfailed" in err_low:
             if not ue_key or ue_key.lower() != "modulefitfailed":
-                return False
-            return cls._has_nonempty_module_fit_failed(raw_err)
+                return False, None
+            return cls._verify_module_fit_failed_precondition(raw_err, ui_state=ui_state)
         expected_low = (expected_text or "").lower()
-        if any(kw in expected_low for kw in cls.EXPECTED_USER_ERROR_KEYWORDS):
-            return True
-        return any(m in err_low for m in cls.BENIGN_USER_ERROR_MARKERS)
+        for kw in cls.EXPECTED_USER_ERROR_KEYWORDS:
+            if kw in expected_low:
+                return True, {
+                    "key": ue_key or "UserError",
+                    "mechanism": "expected_keyword",
+                    "marker": kw,
+                    "verified": False,
+                    "detail": raw_err[:240],
+                }
+        for m in cls.BENIGN_USER_ERROR_MARKERS:
+            if m in err_low:
+                return True, {
+                    "key": ue_key or m,
+                    "mechanism": "benign_marker",
+                    "marker": m,
+                    "verified": False,
+                    "detail": raw_err[:240],
+                }
+        return False, None
+
+    @classmethod
+    def is_expected_user_error(
+        cls,
+        err_obj: Any,
+        expected_text: str = "",
+        *,
+        ui_state: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        return cls.classify_expected_user_error(
+            err_obj, expected_text, ui_state=ui_state
+        )[0]
 
     @classmethod
     def _extract_log_exception_parts(
@@ -6499,15 +6895,35 @@ class PlaytesterBugOracle:
 
     @classmethod
     def partition_log_exceptions(
-        cls, entries: Any, expected_text: str = "", fallback_trace: str = ""
+        cls,
+        entries: Any,
+        expected_text: str = "",
+        fallback_trace: str = "",
+        *,
+        ui_state: Optional[Dict[str, Any]] = None,
+        exemptions_out: Optional[List[Dict[str, Any]]] = None,
+        channel: str = "log_exceptions",
+        step_num: int = 0,
     ) -> Tuple[List[Any], List[Any]]:
         """Split `log_exceptions` into `(non_benign, ignorable_benign)` via `is_ignorable_client_traceback`."""
         non_benign: List[Any] = []
         benign: List[Any] = []
-        for entry in entries or []:
+        for idx, entry in enumerate(entries or []):
             hl, _, full_tb = cls._extract_log_exception_parts(entry, fallback_trace=fallback_trace)
-            if cls.is_ignorable_client_traceback(hl, full_tb, expected_text):
+            ignorable, detail = cls.classify_ignorable_client_traceback(
+                hl, full_tb, expected_text, ui_state=ui_state
+            )
+            if ignorable:
                 benign.append(entry)
+                if exemptions_out is not None and detail is not None:
+                    exemptions_out.append(
+                        cls._build_exemption_hit(
+                            detail,
+                            channel=channel,
+                            step_num=step_num,
+                            occ_idx=idx,
+                        )
+                    )
             else:
                 non_benign.append(entry)
         return non_benign, benign
@@ -6528,7 +6944,12 @@ class PlaytesterBugOracle:
 
     @classmethod
     def partition_flight_recorder_exceptions(
-        cls, flight_recorder: Any, expected_text: str = ""
+        cls,
+        flight_recorder: Any,
+        expected_text: str = "",
+        *,
+        ui_state: Optional[Dict[str, Any]] = None,
+        step_num: int = 0,
     ) -> Any:
         """Return a non-mutating copy of `flight_recorder` moving benign `macho_exceptions` and `log_exceptions` out of hard lists."""
         if not isinstance(flight_recorder, dict):
@@ -6541,12 +6962,26 @@ class PlaytesterBugOracle:
             flight_recorder.get("expected_ui_and_state_change") or ""
         )
         out = dict(flight_recorder)
+        exemptions: List[Dict[str, Any]] = list(out.get("user_error_exemptions") or [])
         if raw_macho:
             non_benign_macho: List[Any] = []
             benign_macho: List[Any] = list(out.get("benign_macho_exceptions") or [])
-            for exc_item in raw_macho:
-                if cls.is_expected_user_error(exc_item, resolved_expected):
+            for idx, exc_item in enumerate(raw_macho):
+                ok_ex, det_ex = cls.classify_expected_user_error(
+                    exc_item, resolved_expected, ui_state=ui_state
+                )
+                if ok_ex:
                     benign_macho.append(exc_item)
+                    if det_ex is not None:
+                        exemptions.append(
+                            cls._build_exemption_hit(
+                                det_ex,
+                                channel="macho_exceptions",
+                                step_num=step_num,
+                                occ_idx=idx,
+                                seq=exc_item.get("seq") if isinstance(exc_item, dict) else None,
+                            )
+                        )
                 else:
                     non_benign_macho.append(exc_item)
             out["macho_exceptions"] = non_benign_macho
@@ -6554,13 +6989,79 @@ class PlaytesterBugOracle:
                 out["benign_macho_exceptions"] = benign_macho
         if raw_logs:
             non_benign_logs, benign_logs = cls.partition_log_exceptions(
-                raw_logs, expected_text=resolved_expected
+                raw_logs,
+                expected_text=resolved_expected,
+                ui_state=ui_state,
+                exemptions_out=exemptions,
+                channel="log_exceptions",
+                step_num=step_num,
             )
             combined_benign_logs = list(out.get("benign_log_exceptions") or []) + benign_logs
             out["log_exceptions"] = non_benign_logs
             if combined_benign_logs:
                 out["benign_log_exceptions"] = combined_benign_logs
+        if exemptions:
+            out["user_error_exemptions"] = exemptions
         return out
+
+    @classmethod
+    def collect_exec_res_user_error_exemptions(
+        cls,
+        exec_res: Any,
+        *,
+        expected_text: str = "",
+        ui_state: Optional[Dict[str, Any]] = None,
+        step_num: int = 0,
+        unseen_tracebacks: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Collect structured, deduplicated UserError exemption records for a step's `exec_res`."""
+        if not isinstance(exec_res, dict):
+            return []
+        collected: List[Dict[str, Any]] = []
+        fr = exec_res.get("flight_recorder")
+        if isinstance(fr, dict):
+            part = cls.partition_flight_recorder_exceptions(
+                fr,
+                expected_text=expected_text,
+                ui_state=ui_state,
+                step_num=step_num,
+            )
+            if isinstance(part, dict) and isinstance(part.get("user_error_exemptions"), list):
+                collected.extend(part["user_error_exemptions"])
+        for idx, tb_item in enumerate(unseen_tracebacks or ()):
+            if not isinstance(tb_item, dict):
+                continue
+            hl = str(tb_item.get("headline") or "")
+            tr = str(tb_item.get("trace") or "")
+            ignorable, det = cls.classify_ignorable_client_traceback(
+                hl, tr, expected_text, ui_state=ui_state
+            )
+            if ignorable and det is not None:
+                collected.append(
+                    cls._build_exemption_hit(
+                        det,
+                        channel="client_tracebacks.log",
+                        step_num=step_num,
+                        occ_idx=idx,
+                    )
+                )
+        step_act_err = str(exec_res.get("action_error") or "").strip()
+        if step_act_err:
+            ok_act, det_act = cls.classify_expected_user_error(
+                step_act_err, expected_text, ui_state=ui_state
+            )
+            if ok_act and det_act is not None:
+                seen_keys = {str(h.get("key") or "").lower() for h in collected}
+                if str(det_act.get("key") or "").lower() not in seen_keys:
+                    collected.append(
+                        cls._build_exemption_hit(
+                            det_act,
+                            channel="action_error",
+                            step_num=step_num,
+                            occ_idx=0,
+                        )
+                    )
+        return collected
 
     def evaluate_step(
         self,
@@ -6576,6 +7077,7 @@ class PlaytesterBugOracle:
         step_dir: Path,
         last_flight_recorder: Optional[Dict[str, Any]] = None,
         lazy_screenshot_fn: Optional[Any] = None,
+        post_state: Optional[Dict[str, Any]] = None,
     ) -> List[Path]:
         """
         Check all 5 oracle channels:
@@ -6600,19 +7102,35 @@ class PlaytesterBugOracle:
         fr_macho_excs = fr.get("macho_exceptions") or []
         self.record_session_flight_calls(fr.get("macho_calls") or [], server_log_chunk=new_srv)
         expected_text = str((decision.get("action") or {}).get("expected_ui_and_state_change") or "")
+        step_ui_state = _select_live_skill_state(post_state, ui_snapshot)
+        step_exemptions: List[Dict[str, Any]] = []
         fr_fallback_trace = new_tb if len(fr_log_excs) == 1 else ""
         fr_non_benign_log_excs, fr_ignorable_log_excs = self.partition_log_exceptions(
             fr_log_excs,
             expected_text=expected_text,
             fallback_trace=fr_fallback_trace,
+            ui_state=step_ui_state,
+            exemptions_out=step_exemptions,
+            channel="log_exceptions",
+            step_num=step_num,
         )
         warp_telemetry = exec_res.get("warp_telemetry") if isinstance(exec_res, dict) else None
 
         prev_fr = last_flight_recorder if isinstance(last_flight_recorder, dict) else {}
         prev_expected_text = str(prev_fr.get("expected_ui_and_state_change") or "")
+        prev_skills_snap = (
+            {"skills_state": prev_fr["skills_state"]}
+            if isinstance(prev_fr.get("skills_state"), dict)
+            else None
+        )
+        prev_ui_state = _select_live_skill_state(
+            prev_skills_snap,
+            getattr(self, "_last_step_ui_state", None) or step_ui_state,
+        )
         prev_log_excs, prev_ignorable_log_excs = self.partition_log_exceptions(
             prev_fr.get("log_exceptions") or [],
             expected_text=prev_expected_text,
+            ui_state=prev_ui_state,
         )
         prev_all_benign_logs = list(prev_fr.get("benign_log_exceptions") or []) + prev_ignorable_log_excs
         prev_suppressed_log_excs = prev_fr.get("suppressed_log_exceptions") or []
@@ -6620,11 +7138,14 @@ class PlaytesterBugOracle:
         prev_non_benign_macho_excs = [
             e
             for e in (prev_fr.get("macho_exceptions") or [])
-            if isinstance(e, dict) and not self.is_expected_user_error(e, prev_expected_text)
+            if isinstance(e, dict)
+            and not self.is_expected_user_error(e, prev_expected_text, ui_state=prev_ui_state)
         ]
         prev_tb_parts: List[str] = []
         raw_prev_tb = str(prev_fr.get("traceback") or "").strip()
-        if raw_prev_tb and not self.is_ignorable_client_traceback("", raw_prev_tb, prev_expected_text):
+        if raw_prev_tb and not self.is_ignorable_client_traceback(
+            "", raw_prev_tb, prev_expected_text, ui_state=prev_ui_state
+        ):
             prev_tb_parts.append(raw_prev_tb)
         for ple in prev_log_excs:
             if isinstance(ple, dict):
@@ -6640,6 +7161,7 @@ class PlaytesterBugOracle:
             prev_log_excs,
             prev_non_benign_macho_excs,
             prev_expected_text,
+            ui_state=prev_ui_state,
         )
         prev_action_err = str(prev_fr.get("action_error") or "").strip()
 
@@ -6656,7 +7178,9 @@ class PlaytesterBugOracle:
                 sig = self._tb_frame_sig(full_tb)
                 if sig:
                     self._seen_tb_sigs.add(sig)
-                if self.is_ignorable_client_traceback(hl, full_tb, expected_text):
+                if self.is_ignorable_client_traceback(
+                    hl, full_tb, expected_text, ui_state=step_ui_state
+                ):
                     continue
                 item_key = (hl[:120], sig)
                 if item_key in seen_item_keys:
@@ -6676,14 +7200,26 @@ class PlaytesterBugOracle:
                     }
                 )
         if new_tb:
-            unseen_tbs = [
-                u for u in self._extract_unseen_tb_blocks(new_tb)
-                if not self.is_ignorable_client_traceback(
+            unseen_tbs = []
+            for tb_idx, u in enumerate(self._extract_unseen_tb_blocks(new_tb)):
+                ignorable_tb, tb_det = self.classify_ignorable_client_traceback(
                     u.get("headline", ""),
                     u.get("trace", ""),
                     expected_text,
+                    ui_state=step_ui_state,
                 )
-            ]
+                if ignorable_tb:
+                    if tb_det is not None:
+                        step_exemptions.append(
+                            self._build_exemption_hit(
+                                tb_det,
+                                channel="client_tracebacks.log",
+                                step_num=step_num,
+                                occ_idx=tb_idx,
+                            )
+                        )
+                    continue
+                unseen_tbs.append(u)
             if unseen_tbs:
                 self.last_unseen_tracebacks = unseen_tbs
                 for u in unseen_tbs[:4]:
@@ -6702,10 +7238,24 @@ class PlaytesterBugOracle:
         # 2. Quasar / MachoNet timeout or error
         if fr_quasar_errs or fr_macho_excs:
             expected_text = str((decision.get("action") or {}).get("expected_ui_and_state_change") or "")
-            non_benign_macho_excs = [
-                e for e in fr_macho_excs
-                if not self.is_expected_user_error(e, expected_text)
-            ]
+            non_benign_macho_excs = []
+            for m_idx, e in enumerate(fr_macho_excs):
+                ok_m, det_m = self.classify_expected_user_error(
+                    e, expected_text, ui_state=step_ui_state
+                )
+                if ok_m:
+                    if det_m is not None:
+                        step_exemptions.append(
+                            self._build_exemption_hit(
+                                det_m,
+                                channel="macho_exceptions",
+                                step_num=step_num,
+                                occ_idx=m_idx,
+                                seq=e.get("seq") if isinstance(e, dict) else None,
+                            )
+                        )
+                    continue
+                non_benign_macho_excs.append(e)
             if fr_quasar_errs or non_benign_macho_excs:
                 sample = (fr_quasar_errs + non_benign_macho_excs)[0]
                 is_quasar_err = bool(fr_quasar_errs) or (
@@ -7125,6 +7675,27 @@ class PlaytesterBugOracle:
         )
         self._prev_step_dropped_all_log_excs = bool(fr_log_excs) and not captured_client_tb
 
+        step_act_err = str(exec_res.get("action_error") or "").strip() if isinstance(exec_res, dict) else ""
+        if step_act_err:
+            ok_act, det_act = self.classify_expected_user_error(
+                step_act_err, expected_text, ui_state=step_ui_state
+            )
+            if ok_act and det_act is not None:
+                seen_keys = {str(h.get("key") or "").lower() for h in step_exemptions}
+                if str(det_act.get("key") or "").lower() not in seen_keys:
+                    step_exemptions.append(
+                        self._build_exemption_hit(
+                            det_act,
+                            channel="action_error",
+                            step_num=step_num,
+                            occ_idx=0,
+                        )
+                    )
+        self.last_user_error_exemptions = list(step_exemptions)
+        if getattr(self, "_exemption_tracker", None) is not None and step_exemptions:
+            self._exemption_tracker.absorb_hits(step_exemptions, step_num=step_num)
+        self._last_step_ui_state = step_ui_state
+
         return created_files
 
     BENIGN_FLIGHT_FLOW_MARKERS = BENIGN_USER_ERROR_MARKERS + (
@@ -7144,6 +7715,8 @@ class PlaytesterBugOracle:
         min_calls: int = 3,
         error_rate_threshold: float = 0.80,
         polling_storm_per_min: float = 200.0,
+        ui_state: Optional[Dict[str, Any]] = None,
+        exemptions_out: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Inspect session flight-recorder RPC calls for:
@@ -7198,11 +7771,38 @@ class PlaytesterBugOracle:
                     continue
                 combined_err = f"{status_up} {err_txt}".lower()
                 call_err = err_txt or str(item.get("status") or "").strip()
-                if (
-                    "modulefitfailed" not in combined_err
-                    and any(tok in combined_err for tok in cls.BENIGN_FLIGHT_FLOW_MARKERS)
-                ) or (call_err and cls.is_expected_user_error({"error": call_err})):
+                ok_ex, ex_det = (
+                    cls.classify_expected_user_error({"error": call_err}, ui_state=ui_state)
+                    if call_err
+                    else (False, None)
+                )
+                matched_flow = None
+                if not ok_ex and "modulefitfailed" not in combined_err:
+                    for tok in cls.BENIGN_FLIGHT_FLOW_MARKERS:
+                        if tok in combined_err:
+                            matched_flow = tok
+                            break
+                if ok_ex or matched_flow:
                     benign_errors += 1
+                    if exemptions_out is not None:
+                        if not ok_ex or ex_det is None:
+                            ue_k = cls.extract_user_error_key({"error": call_err}) or matched_flow or "UserError"
+                            ex_det = {
+                                "key": ue_k,
+                                "mechanism": "benign_flight_flow_marker",
+                                "marker": matched_flow,
+                                "verified": False,
+                                "detail": call_err[:240],
+                            }
+                        exemptions_out.append(
+                            cls._build_exemption_hit(
+                                ex_det,
+                                channel="flight_recorder_harvester",
+                                step_num=0,
+                                occ_idx=len(exemptions_out),
+                                seq=item.get("seq"),
+                            )
+                        )
                     continue
                 unexpected_errors.append(item)
 
@@ -7297,15 +7897,25 @@ class PlaytesterBugOracle:
         min_calls: int = 3,
         error_rate_threshold: float = 0.80,
         polling_storm_per_min: float = 200.0,
+        ui_state: Optional[Dict[str, Any]] = None,
+        exemption_tracker: Optional[_UserErrorExemptionTracker] = None,
     ) -> List[Path]:
         """Harvest flight-recorder anomalies at session end and write deduplicated bug bundles."""
         self.record_session_flight_calls(calls)
+        harvester_exemptions: List[Dict[str, Any]] = []
         anomalies = self.analyze_flight_recorder_anomalies(
             calls,
             min_calls=min_calls,
             error_rate_threshold=error_rate_threshold,
             polling_storm_per_min=polling_storm_per_min,
+            ui_state=ui_state if ui_state is not None else getattr(self, "_last_step_ui_state", None),
+            exemptions_out=harvester_exemptions,
         )
+        if harvester_exemptions:
+            if getattr(self, "_exemption_tracker", None) is not None:
+                self._exemption_tracker.absorb_hits(harvester_exemptions, step_num=step_num)
+            if exemption_tracker is not None:
+                exemption_tracker.absorb_hits(harvester_exemptions, step_num=step_num)
         if not anomalies:
             return []
 
@@ -7587,6 +8197,9 @@ class PlaytesterRunner:
         self._refresh_oracle_handshake_builds()
         self._guard_tracker = _GuardHitTracker(retain_all=False, max_recent=100)
         self._sim_time_tracker = _SimTimeTracker(retain_events=False, max_recent=200)
+        self._user_error_exemption_tracker = _UserErrorExemptionTracker(
+            retain_all=False, max_recent=100
+        )
 
     def _peek_new_log_text(self, path: Optional[Path], offset_attr: str) -> str:
         if path is None or not path.exists():
@@ -7764,6 +8377,13 @@ class PlaytesterRunner:
             self._sim_time_tracker = tracker
         return tracker
 
+    def _ensure_user_error_exemption_state(self) -> _UserErrorExemptionTracker:
+        tracker = getattr(self, "_user_error_exemption_tracker", None)
+        if tracker is None:
+            tracker = _UserErrorExemptionTracker(retain_all=False, max_recent=100)
+            self._user_error_exemption_tracker = tracker
+        return tracker
+
     def _get_gm_bridge_lock(self) -> threading.RLock:
         lock = getattr(self, "_gm_bridge_lock", None)
         if lock is None:
@@ -7877,12 +8497,45 @@ class PlaytesterRunner:
             exec_res["guard_summary"] = run_summary
         return run_summary
 
+    def _record_step_user_error_exemptions(
+        self,
+        step_num: int,
+        exec_res: Any,
+        *,
+        expected_text: str = "",
+        ui_state: Optional[Dict[str, Any]] = None,
+        extra_hits: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Record exempted UserError / tasklet-traceback hits into `exec_res` and run tracker."""
+        tracker = self._ensure_user_error_exemption_state()
+        candidates = PlaytesterBugOracle.collect_exec_res_user_error_exemptions(
+            exec_res,
+            expected_text=expected_text,
+            ui_state=ui_state,
+            step_num=step_num,
+        )
+        if extra_hits:
+            candidates.extend(extra_hits)
+        added = tracker.absorb_hits(candidates, step_num=step_num)
+        run_summary = tracker.summary()
+        if isinstance(exec_res, dict):
+            existing = list(exec_res.get("user_error_exemptions") or [])
+            merged = existing + added if added else existing
+            step_summary = summarize_user_error_exemptions(merged)
+            exec_res["user_error_exemptions"] = merged
+            exec_res["user_error_exemption_count"] = len(merged)
+            exec_res["user_error_exemptions_by_key"] = step_summary["user_error_exemptions_by_key"]
+            exec_res["user_error_exemption_summary"] = run_summary
+        return added, run_summary
+
     def _write_run_summary(
         self, step_num: int = 0, final: bool = False
     ) -> Optional[Dict[str, Any]]:
         tracker = self._ensure_run_guard_state()
         sim_tracker = self._ensure_sim_time_state()
+        ex_tracker = self._ensure_user_error_exemption_state()
         sim_summary = sim_tracker.summary()
+        ex_summary = ex_tracker.summary()
         summary = tracker.summary(default_guards_off=False)
         summary["step"] = int(step_num)
         summary["final"] = bool(final)
@@ -7891,6 +8544,16 @@ class PlaytesterRunner:
         summary["total_sim_time_injected_sec"] = sim_summary["total_sim_time_injected_sec"]
         summary["total_sim_time_injection_count"] = sim_summary["total_sim_time_injection_count"]
         summary["recent_sim_time_injections"] = list(sim_tracker.recent_events)
+        summary["user_error_exemptions_count"] = ex_summary["user_error_exemptions_count"]
+        summary["user_error_exemptions_by_key"] = ex_summary["user_error_exemptions_by_key"]
+        summary["user_error_exemptions_by_mechanism"] = ex_summary["user_error_exemptions_by_mechanism"]
+        summary["precondition_verified_user_error_exemptions"] = ex_summary[
+            "precondition_verified_user_error_exemptions"
+        ]
+        summary["unverified_user_error_exemptions"] = ex_summary[
+            "unverified_user_error_exemptions"
+        ]
+        summary["recent_user_error_exemptions"] = list(ex_tracker.recent_hits)
         run_dir = getattr(self, "current_run_dir", None)
         if isinstance(run_dir, Path):
             try:
@@ -8114,6 +8777,8 @@ class PlaytesterRunner:
             step_num=step_num,
             git_head=self.cached_git_head,
             session=sess or {},
+            ui_state=self.last_ui_snapshot if isinstance(self.last_ui_snapshot, dict) else None,
+            exemption_tracker=self._ensure_user_error_exemption_state(),
         )
 
     def write_server_config(self) -> Path:
@@ -9134,6 +9799,8 @@ class PlaytesterRunner:
             self._session_flight_seqs.clear()
         if getattr(self, "_guard_tracker", None) is not None:
             self._guard_tracker.reset_client_session()
+        if getattr(self, "_user_error_exemption_tracker", None) is not None:
+            self._user_error_exemption_tracker.reset_client_session()
         oracle = getattr(self, "oracle", None)
         if oracle is not None:
             oracle.reset_session_telemetry(
@@ -9259,8 +9926,13 @@ class PlaytesterRunner:
         need_planner = False
         next_step_spec: Dict[str, Any] = {}
         if self.hybrid_mode:
+            prev_ui_for_fr = (
+                getattr(getattr(self, "oracle", None), "_last_step_ui_state", None)
+                or ui_snapshot
+            )
             sanitized_prev_fr = PlaytesterBugOracle.partition_flight_recorder_exceptions(
-                last_flight_recorder
+                last_flight_recorder,
+                ui_state=prev_ui_for_fr,
             )
             if isinstance(sanitized_prev_fr, dict):
                 non_benign_log_excs = list(sanitized_prev_fr.get("log_exceptions") or [])
@@ -9834,8 +10506,18 @@ class PlaytesterRunner:
                     burst_paths.append(bp)
                 time.sleep(0.35)
 
+        post_fr = (exec_res.get("flight_recorder") or {}) if isinstance(exec_res, dict) else {}
+        post_expected_text = str(action.get("expected_ui_and_state_change") or "")
+        step_eval_state = _select_live_skill_state(post_state_raw, ui_snapshot)
+
         self._record_step_guard_hits(step_num, exec_res)
         self._absorb_step_sim_time(exec_res)
+        self._record_step_user_error_exemptions(
+            step_num,
+            exec_res,
+            expected_text=post_expected_text,
+            ui_state=step_eval_state,
+        )
         self._write_run_summary(step_num=step_num, final=False)
         (step_dir / "exec_result.json").write_text(
             json.dumps(exec_res, indent=2), encoding="utf-8"
@@ -9843,11 +10525,11 @@ class PlaytesterRunner:
         log_step_execution_outcome(step_num, exec_res, decision)
 
         # Fast post-action assertion & error check for deterministic escalation
-        post_fr = (exec_res.get("flight_recorder") or {}) if isinstance(exec_res, dict) else {}
-        post_expected_text = str(action.get("expected_ui_and_state_change") or "")
         sanitized_post_fr = PlaytesterBugOracle.partition_flight_recorder_exceptions(
             post_fr,
             expected_text=post_expected_text,
+            ui_state=step_eval_state,
+            step_num=step_num,
         )
         post_non_benign_logs = (
             list(sanitized_post_fr.get("log_exceptions") or [])
@@ -9871,7 +10553,7 @@ class PlaytesterRunner:
         )
         step_act_err = str(exec_res.get("action_error") or "").strip() if isinstance(exec_res, dict) else ""
         benign_reject = PlaytesterBugOracle.is_expected_user_error(
-            step_act_err, post_expected_text
+            step_act_err, post_expected_text, ui_state=step_eval_state
         )
         if not assert_ok and not benign_reject:
             log_warn(f"Step {step_num}: post-action assertion failed -> {assert_err}")
@@ -10007,7 +10689,28 @@ class PlaytesterRunner:
                 step_dir=step_dir,
                 last_flight_recorder=last_flight_recorder,
                 lazy_screenshot_fn=_ensure_screenshot_captured,
+                post_state=post_state_raw if isinstance(post_state_raw, dict) else None,
             )
+            oracle_exemptions = list(getattr(self.oracle, "last_user_error_exemptions", None) or [])
+            if oracle_exemptions:
+                extra_added, _ = self._record_step_user_error_exemptions(
+                    step_num,
+                    exec_res,
+                    expected_text=post_expected_text,
+                    ui_state=step_eval_state,
+                    extra_hits=oracle_exemptions,
+                )
+                if extra_added:
+                    if self.memory.data.get("recent_actions"):
+                        last_ra = self.memory.data["recent_actions"][-1]
+                        if isinstance(last_ra, dict) and last_ra.get("step") == step_num and isinstance(exec_res, dict):
+                            last_ra["user_error_exemption_count"] = exec_res.get("user_error_exemption_count", 0)
+                            last_ra["user_error_exemptions"] = list(exec_res.get("user_error_exemptions") or [])[:25]
+                    self._write_run_summary(step_num=step_num, final=False)
+                    if isinstance(exec_res, dict):
+                        (step_dir / "exec_result.json").write_text(
+                            json.dumps(exec_res, indent=2), encoding="utf-8"
+                        )
 
         fr_delta = dict((exec_res.get("flight_recorder") or {}) if isinstance(exec_res, dict) else {})
         if self.oracle.last_unseen_tracebacks and not fr_delta.get("log_exceptions"):
@@ -10031,6 +10734,8 @@ class PlaytesterRunner:
         fr_delta = PlaytesterBugOracle.partition_flight_recorder_exceptions(
             fr_delta,
             expected_text=str(action.get("expected_ui_and_state_change") or ""),
+            ui_state=step_eval_state,
+            step_num=step_num,
         )
         return fr_delta, burst_paths
 
@@ -11015,6 +11720,7 @@ def evaluate_scenario_checks(
     pre = pre_state if isinstance(pre_state, dict) else {}
     post = post_state if isinstance(post_state, dict) else {}
     expected_text = str(ctx.get("expected_text") or "")
+    scen_ui_state = _select_live_skill_state(post, pre)
 
     # 1. Existing scene-graph / window / modal / ball / session assertions
     base_ok, base_msg = _evaluate_step_assertions(chk, res, post)
@@ -11046,7 +11752,9 @@ def evaluate_scenario_checks(
             return False, "no_error_reply", f"quasar_errors observed: {q_errs[:3]}"
         m_excs = [
             e for e in (fr.get("macho_exceptions") or [])
-            if not PlaytesterBugOracle.is_expected_user_error(e, expected_text)
+            if not PlaytesterBugOracle.is_expected_user_error(
+                e, expected_text, ui_state=scen_ui_state
+            )
         ]
         if m_excs:
             return False, "no_error_reply", f"macho_exceptions observed: {m_excs[:3]}"
@@ -11054,7 +11762,9 @@ def evaluate_scenario_checks(
             c for c in (fr.get("macho_calls") or [])
             if isinstance(c, dict)
             and str(c.get("status") or "").upper() == "ERR"
-            and not PlaytesterBugOracle.is_expected_user_error(c.get("error") or c, expected_text)
+            and not PlaytesterBugOracle.is_expected_user_error(
+                c.get("error") or c, expected_text, ui_state=scen_ui_state
+            )
         ]
         if err_calls:
             return False, "no_error_reply", f"failed RPC call(s) recorded: {err_calls[:3]}"
@@ -11069,12 +11779,16 @@ def evaluate_scenario_checks(
             else:
                 hl = str(le or "")
                 tr = ""
-            if not PlaytesterBugOracle.is_ignorable_client_traceback(hl, tr, expected_text):
+            if not PlaytesterBugOracle.is_ignorable_client_traceback(
+                hl, tr, expected_text, ui_state=scen_ui_state
+            ):
                 bad_excs.append(hl or tr[:120] or repr(le))
         for u in (ctx.get("unseen_tracebacks") or []):
             hl = str(u.get("headline") or "")
             tr = str(u.get("trace") or "")
-            if not PlaytesterBugOracle.is_ignorable_client_traceback(hl, tr, expected_text):
+            if not PlaytesterBugOracle.is_ignorable_client_traceback(
+                hl, tr, expected_text, ui_state=scen_ui_state
+            ):
                 bad_excs.append(hl or tr[:120])
         if bad_excs:
             return False, "no_client_exception", f"client exception(s): {bad_excs[:2]}"
@@ -11415,6 +12129,10 @@ def scan_scenario_logs_for_errors(
     client_log_paths: List[Path],
     traceback_log_path: Optional[Path] = None,
     log_offsets: Optional[Dict[str, int]] = None,
+    *,
+    ui_state: Optional[Dict[str, Any]] = None,
+    exemptions_out: Optional[List[Dict[str, Any]]] = None,
+    step_num: int = 0,
 ) -> List[str]:
     """Scan server and client logs cleanly from optional byte offsets, honoring known benign V24 tracebacks."""
     errors: List[str] = []
@@ -11460,22 +12178,58 @@ def scan_scenario_logs_for_errors(
                     errors.append(f"[{clp.name}] destiny desync: {desync_ln[:240]}")
                 else:
                     hl = PlaytesterBugOracle._extract_tb_headline(blk_txt, default=ln.strip())
-                    if not PlaytesterBugOracle.is_ignorable_client_traceback(hl, blk_txt):
+                    ign_blk, det_blk = PlaytesterBugOracle.classify_ignorable_client_traceback(
+                        hl, blk_txt, ui_state=ui_state
+                    )
+                    if not ign_blk:
                         errors.append(f"[{clp.name}] {hl[:240]}")
+                    elif exemptions_out is not None and det_blk is not None:
+                        exemptions_out.append(
+                            PlaytesterBugOracle._build_exemption_hit(
+                                det_blk,
+                                channel=f"scenario_log:{clp.name}",
+                                step_num=step_num,
+                                occ_idx=len(exemptions_out),
+                            )
+                        )
                 idx = next_idx
                 continue
             if _SCENARIO_DESYNC_LINE_RE.search(ln):
                 errors.append(f"[{clp.name}] destiny desync: {ln.strip()[:240]}")
             elif _SCENARIO_ERROR_LINE_RE.search(ln) or (seen_started and "#nolog: An exception has occurred" in ln):
-                if not PlaytesterBugOracle.is_ignorable_client_traceback(ln, ln):
+                ign_ln, det_ln = PlaytesterBugOracle.classify_ignorable_client_traceback(
+                    ln, ln, ui_state=ui_state
+                )
+                if not ign_ln:
                     errors.append(f"[{clp.name}] {ln.strip()[:280]}")
+                elif exemptions_out is not None and det_ln is not None:
+                    exemptions_out.append(
+                        PlaytesterBugOracle._build_exemption_hit(
+                            det_ln,
+                            channel=f"scenario_log:{clp.name}",
+                            step_num=step_num,
+                            occ_idx=len(exemptions_out),
+                        )
+                    )
             idx += 1
 
     raw_tb, _ = _read_log_chunk_from_offset(traceback_log_path, log_offsets)
     if raw_tb:
         for u in PlaytesterBugOracle.parse_tb_blocks(raw_tb):
-            if not PlaytesterBugOracle.is_ignorable_client_traceback(u.get("headline", ""), u.get("trace", "")):
+            ign_tb, det_tb = PlaytesterBugOracle.classify_ignorable_client_traceback(
+                u.get("headline", ""), u.get("trace", ""), ui_state=ui_state
+            )
+            if not ign_tb:
                 errors.append(f"[client_tracebacks.log] {u.get('headline', '')[:240]}")
+            elif exemptions_out is not None and det_tb is not None:
+                exemptions_out.append(
+                    PlaytesterBugOracle._build_exemption_hit(
+                        det_tb,
+                        channel="scenario_client_tracebacks",
+                        step_num=step_num,
+                        occ_idx=len(exemptions_out),
+                    )
+                )
 
     return errors
 
@@ -12465,6 +13219,7 @@ class ScenarioRunner(PlaytesterRunner):
         t_scen_start = time.time()
         guard_tracker = _GuardHitTracker(retain_all=True, max_recent=500)
         sim_tracker = _SimTimeTracker(retain_events=True, max_recent=500)
+        exemption_tracker = _UserErrorExemptionTracker(retain_all=True, max_recent=500)
         self._drain_host_gm_sim_events()
         step_records: List[Dict[str, Any]] = []
         step_timings_ms: Dict[str, float] = {}
@@ -12690,11 +13445,16 @@ class ScenarioRunner(PlaytesterRunner):
                                 fail_chk = "ui_delta_without_relog"
                                 fail_msg = f"Client cache diverged from server SQLite after 2.0s without relog: {delta_msg}"
                         cur_logs, cur_tb_path = _gather_client_logs()
+                        step_log_exemptions: List[Dict[str, Any]] = []
+                        scen_step_state = _select_live_skill_state(post_state, pre_state)
                         step_log_errs = scan_scenario_logs_for_errors(
                             slog_path,
                             cur_logs,
                             traceback_log_path=cur_tb_path,
                             log_offsets=step_log_offsets,
+                            ui_state=scen_step_state,
+                            exemptions_out=step_log_exemptions,
+                            step_num=step_num,
                         )
                         if step_chk_cfg.get("no_client_exception") is False:
                             step_log_errs = [
@@ -12724,6 +13484,16 @@ class ScenarioRunner(PlaytesterRunner):
                                 guard_tracker.poll_rpc(getattr(self, "rpc", None), timeout=1.0)
                             )
                         step_sim = self._absorb_step_sim_time(exec_res, tracker=sim_tracker)
+                        step_ex_candidates = PlaytesterBugOracle.collect_exec_res_user_error_exemptions(
+                            exec_res,
+                            expected_text=str(ctx.get("expected_text") or ""),
+                            ui_state=scen_step_state,
+                            step_num=step_num,
+                        )
+                        step_ex_candidates.extend(step_log_exemptions)
+                        step_ex_hits = exemption_tracker.absorb_hits(
+                            step_ex_candidates, step_num=step_num
+                        )
                         step_records.append({
                             "step_index": step_num,
                             "step_id": step_id,
@@ -12737,6 +13507,8 @@ class ScenarioRunner(PlaytesterRunner):
                             "time_control": bool(step.get("time_control", False)),
                             "guard_hits": step_guard_hits,
                             "guard_hits_count": len(step_guard_hits),
+                            "user_error_exemptions": step_ex_hits,
+                            "user_error_exemption_count": len(step_ex_hits),
                             "sim_time_injected_sec": step_sim["sim_time_injected_sec"],
                             "sim_time_injection_count": step_sim["sim_time_injection_count"],
                             "sim_time_injections": step_sim["sim_time_injections"],
@@ -12768,14 +13540,22 @@ class ScenarioRunner(PlaytesterRunner):
             log_errors.append(
                 f"[classify_client_log] destiny desync detected: stale_at_action={destiny_cls.get('stale_at_action')}"
             )
+        tail_log_exemptions: List[Dict[str, Any]] = []
         log_errors.extend(
             scan_scenario_logs_for_errors(
                 slog_path,
                 client_logs,
                 traceback_log_path=tb_log_path,
                 log_offsets=step_log_offsets,
+                ui_state=pre_state if "pre_state" in locals() else None,
+                exemptions_out=tail_log_exemptions,
+                step_num=len(step_records),
             )
         )
+        if tail_log_exemptions:
+            exemption_tracker.absorb_hits(
+                tail_log_exemptions, step_num=len(step_records)
+            )
 
         if failure_info is None and log_errors:
             failure_info = {
@@ -12813,6 +13593,7 @@ class ScenarioRunner(PlaytesterRunner):
         }
         guard_summary = guard_tracker.summary(default_guards_off=False)
         sim_summary = sim_tracker.summary()
+        ex_summary = exemption_tracker.summary()
         journey_entry["client_guards_off"] = guard_summary["client_guards_off"]
         journey_entry["guard_hits"] = list(guard_tracker.hits)
         journey_entry["guard_hits_count"] = guard_summary["guard_hits_count"]
@@ -12820,6 +13601,18 @@ class ScenarioRunner(PlaytesterRunner):
         journey_entry["client_only_guard_hits"] = guard_summary["client_only_guard_hits"]
         journey_entry["client_only_guard_hits_by_guard"] = guard_summary[
             "client_only_guard_hits_by_guard"
+        ]
+        journey_entry["user_error_exemptions"] = list(exemption_tracker.hits)
+        journey_entry["user_error_exemptions_count"] = ex_summary["user_error_exemptions_count"]
+        journey_entry["user_error_exemptions_by_key"] = ex_summary["user_error_exemptions_by_key"]
+        journey_entry["user_error_exemptions_by_mechanism"] = ex_summary[
+            "user_error_exemptions_by_mechanism"
+        ]
+        journey_entry["precondition_verified_user_error_exemptions"] = ex_summary[
+            "precondition_verified_user_error_exemptions"
+        ]
+        journey_entry["unverified_user_error_exemptions"] = ex_summary[
+            "unverified_user_error_exemptions"
         ]
         journey_entry["sim_time_injected_sec"] = sim_summary["total_sim_time_injected_sec"]
         journey_entry["sim_time_injection_count"] = sim_summary["total_sim_time_injection_count"]
@@ -12881,6 +13674,11 @@ class ScenarioRunner(PlaytesterRunner):
         for entry_item in journeys.values():
             sim_rollup_tracker.absorb_payload(entry_item)
         sim_rollup = sim_rollup_tracker.summary()
+        all_exemptions: List[Dict[str, Any]] = []
+        for entry_item in journeys.values():
+            if isinstance(entry_item.get("user_error_exemptions"), list):
+                all_exemptions.extend(entry_item["user_error_exemptions"])
+        ex_rollup = summarize_user_error_exemptions(all_exemptions)
 
         result_payload = {
             "journeys": journeys,
@@ -12896,6 +13694,13 @@ class ScenarioRunner(PlaytesterRunner):
             "guard_hits_by_guard": guard_rollup["guard_hits_by_guard"],
             "client_only_guard_hits": guard_rollup["client_only_guard_hits"],
             "client_only_guard_hits_by_guard": guard_rollup["client_only_guard_hits_by_guard"],
+            "user_error_exemptions_count": ex_rollup["user_error_exemptions_count"],
+            "user_error_exemptions_by_key": ex_rollup["user_error_exemptions_by_key"],
+            "user_error_exemptions_by_mechanism": ex_rollup["user_error_exemptions_by_mechanism"],
+            "precondition_verified_user_error_exemptions": ex_rollup[
+                "precondition_verified_user_error_exemptions"
+            ],
+            "unverified_user_error_exemptions": ex_rollup["unverified_user_error_exemptions"],
             "total_sim_time_injected_sec": sim_rollup["total_sim_time_injected_sec"],
             "total_sim_time_injection_count": sim_rollup["total_sim_time_injection_count"],
         }
