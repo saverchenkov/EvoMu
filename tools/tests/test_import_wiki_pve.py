@@ -2995,7 +2995,8 @@ class TestWikiPveImporter(unittest.TestCase):
                     }
                 )
 
-        # R2 P2: --tighten-ratchet --verify leaves ratchet file untouched when --verify fails
+        # R2 P2 / R3 P2-01: --tighten-ratchet --verify leaves ratchet file untouched when --verify fails
+        # All ratchet floors <= actual metrics and resolved threshold=0.0 so invalid override is sole failure mode.
         tmp_dir_r3 = Path(tempfile.mkdtemp(prefix="wiki_pve_t2_r3_"))
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp_dir_r3, ignore_errors=True))
         sde_r3 = tmp_dir_r3 / "sde.sqlite"
@@ -3010,14 +3011,14 @@ class TestWikiPveImporter(unittest.TestCase):
             "schema_version": 1,
             "min_corpus_pages": 1,
             "floors": {
-                "g1_wave_links_classified_percent": 50.0,
-                "g1_wave_links_explicit_percent": 50.0,
-                "g1_triggers_classified_percent": 50.0,
+                "g1_wave_links_classified_percent": 0.0,
+                "g1_wave_links_explicit_percent": 0.0,
+                "g1_triggers_classified_percent": 0.0,
                 "g1_spawn_triggers_target_wired_percent": 0.0,
-                "g2_missions_structured_percent": 50.0,
-                "g2_all_units_structured_percent": 50.0,
-                "g4_npc_concrete_resolved_percent": 50.0,
-                "g4_npc_candidate_mapped_percent": 50.0,
+                "g2_missions_structured_percent": 0.0,
+                "g2_all_units_structured_percent": 0.0,
+                "g4_npc_concrete_resolved_percent": 0.0,
+                "g4_npc_candidate_mapped_percent": 0.0,
                 "g5_waves_with_distance_m_percent": 0.0,
             },
         }
@@ -3040,12 +3041,219 @@ class TestWikiPveImporter(unittest.TestCase):
                     "--coverage-ratchet", str(ratchet_r3),
                     "--tighten-ratchet",
                     "--verify",
-                    "--min-resolved-percent", "100.0",
-                    "--min-candidate-mapped-percent", "100.0",
+                    "--min-resolved-percent", "0.0",
+                    "--min-candidate-mapped-percent", "0.0",
                 ]
             )
         self.assertEqual(rc_r3, 1)
         self.assertEqual(ratchet_r3.read_text(encoding="utf-8"), ratchet_before)
+
+    def test_track_b_r4_bf01_and_p2_regressions(self) -> None:
+        # BF-01(1): State-only overrides cannot turn a kind=None unclassified wave_trigger into explicit/inferred
+        wiki_untrig = (
+            "{{CMBSiteInfo|name=R4 State Guard|type=unrated|faction=Serpentis}}\n"
+            "{{NPCTableHead|Static Structures}}\n"
+            "{{NPCTableRow|Structure|1|Angel Bunker}}\n"
+            "{{NPCTableHead|Wave 2 (Triggered by mystery ship)}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}\n"
+            "|}\n"
+        )
+        for bad_state_w in (
+            {"classification_state": "explicit"},
+            {"classification_state": "inferred", "inference_rule": "custom_rule"},
+        ):
+            p_st = imp.parse_wiki_page("R4 State Guard", ["Unrated Complexes"], wiki_untrig, self.sde)
+            assert p_st is not None
+            w2_st = p_st["units"][0]["rooms"][0]["waves"][1]
+            ovr_st = imp.validate_overrides_doc(
+                {"schema_version": 1, "entries": {"R4 State Guard#1": {"waves": {"2": bad_state_w}}}}
+            )
+            sum_st = imp.apply_overrides(p_st["units"], ovr_st)
+            self.assertEqual(sum_st["applied_waves"], 0, bad_state_w)
+            self.assertEqual(sum_st["applied_entries"], 0, bad_state_w)
+            self.assertIsNone(w2_st["wave_trigger"]["kind"])
+            self.assertEqual(w2_st["wave_trigger"]["classification_state"], "unclassified")
+            self.assertEqual(w2_st["wave_link"]["classification_state"], "unclassified")
+            self.assertFalse(w2_st["wave_link"].get("override_applied", False))
+            self.assertEqual(sum_st["unmatched_targets"][0]["reason"], "missing_trigger_kind")
+
+        # BF-01(2): Dual target_wave_indices + target_wave_index validates BOTH against waves_by_idx & targetability
+        wiki_dual = (
+            "{{Missiondetails\n|Type=Encounter\n|Objective=Destroy\n}}\n"
+            "{{NPCTableHead|Initial Group}}\n"
+            "{{NPCTableRow|Cruiser|1|Synth Corelatis Squad Leader}}\n"
+            "{{NPCTableRow|Cruiser|1|Synth Corelatis Wing Leader}}\n"
+            "{{NPCTableHead|Wave 2}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}\n"
+            "{{NPCTableHead|Wave 3}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Raider}}\n"
+            "{{NPCTableHead|Wave 4 (Triggered when Synth Corelatis Wing Leader destroyed)}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Outlaw}}\n"
+            "|}\n"
+        )
+        for bad_t_spec, expected_reason in (
+            ({"trigger_kind": "timed", "time_seconds": 30, "target_wave_indices": [2], "target_wave_index": 99}, "missing_target_wave"),
+            ({"trigger_kind": "timed", "time_seconds": 30, "target_wave_indices": [2], "target_wave_index": 1}, "non_targetable_wave"),
+        ):
+            p_dual = imp.parse_wiki_page("R4 Dual Target Mission", ["Level 1 Missions"], wiki_dual, self.sde)
+            assert p_dual is not None
+            w2_dual = p_dual["units"][0]["rooms"][0]["waves"][1]
+            ovr_dual = imp.validate_overrides_doc(
+                {"schema_version": 1, "entries": {"R4 Dual Target Mission#1": {"waves": {"2": bad_t_spec}}}}
+            )
+            sum_dual = imp.apply_overrides(p_dual["units"], ovr_dual)
+            self.assertEqual(sum_dual["applied_waves"], 0, expected_reason)
+            self.assertIsNone(w2_dual["wave_trigger"])
+            self.assertEqual(sum_dual["unmatched_targets"][0]["reason"], expected_reason)
+
+        # BF-01(3): source_wave_index changes validate inherited source_spawn_index and clear/re-resolve stale trigger_ship_*
+        # Wave 4 header back-resolves to Wave 1 (2 spawns) Spawn 2 ("Synth Corelatis Wing Leader", 10004).
+        # Redirecting source_wave_index -> 2 (1 spawn, "Synth Gistii Ambusher") with inherited source_spawn_index=2 fails missing_source_spawn.
+        p_src_bad = imp.parse_wiki_page("R4 Dual Target Mission", ["Level 1 Missions"], wiki_dual, self.sde)
+        assert p_src_bad is not None
+        w4_bad = p_src_bad["units"][0]["rooms"][0]["waves"][3]
+        self.assertEqual(w4_bad["wave_trigger"]["source_wave_index"], 1)
+        self.assertEqual(w4_bad["wave_trigger"]["source_spawn_index"], 2)
+        ovr_src_bad = imp.validate_overrides_doc(
+            {"schema_version": 1, "entries": {"R4 Dual Target Mission#1": {"waves": {"4": {"source_wave_index": 2}}}}}
+        )
+        sum_src_bad = imp.apply_overrides(p_src_bad["units"], ovr_src_bad)
+        self.assertEqual(sum_src_bad["applied_waves"], 0)
+        self.assertEqual(sum_src_bad["unmatched_targets"][0]["reason"], "missing_source_spawn")
+        self.assertEqual(w4_bad["wave_trigger"]["source_wave_index"], 1)
+        self.assertEqual(w4_bad["wave_trigger"]["trigger_ship_name"], "Synth Corelatis Wing Leader")
+
+        # Redirecting source_wave_index -> 2 WITH explicit source_spawn_index=1 clears old Wing Leader metadata & resolves Ambusher
+        p_src_ok = imp.parse_wiki_page("R4 Dual Target Mission", ["Level 1 Missions"], wiki_dual, self.sde)
+        assert p_src_ok is not None
+        w4_ok = p_src_ok["units"][0]["rooms"][0]["waves"][3]
+        ovr_src_ok = imp.validate_overrides_doc(
+            {
+                "schema_version": 1,
+                "entries": {"R4 Dual Target Mission#1": {"waves": {"4": {"source_wave_index": 2, "source_spawn_index": 1}}}},
+            }
+        )
+        sum_src_ok = imp.apply_overrides(p_src_ok["units"], ovr_src_ok)
+        self.assertEqual(sum_src_ok["applied_waves"], 1)
+        self.assertEqual(w4_ok["wave_trigger"]["source_wave_index"], 2)
+        self.assertEqual(w4_ok["wave_trigger"]["source_spawn_index"], 1)
+        self.assertEqual(w4_ok["wave_trigger"]["trigger_ship_tag"], "r1_w2_s1")
+        self.assertEqual(w4_ok["wave_trigger"]["trigger_ship_name"], "Synth Gistii Ambusher")
+        self.assertEqual(w4_ok["wave_trigger"]["trigger_type_ids"], [10005])
+
+        # Changing source_wave_index from single-spawn Wave 2 -> multi-spawn Wave 1 WITHOUT source_spawn_index rejects ambiguous_source_spawn
+        sum_src_ambig = imp.apply_overrides(
+            p_src_ok["units"],
+            imp.validate_overrides_doc(
+                {"schema_version": 1, "entries": {"R4 Dual Target Mission#1": {"waves": {"4": {"source_wave_index": 1}}}}}
+            ),
+        )
+        self.assertEqual(sum_src_ambig["applied_waves"], 0)
+        self.assertEqual(sum_src_ambig["unmatched_targets"][0]["reason"], "ambiguous_source_spawn")
+        self.assertEqual(w4_ok["wave_trigger"]["source_wave_index"], 2)
+
+        # Changing source_wave_index -> single-spawn Wave 3 (inherited source_spawn_index=1) cleanly re-resolves trigger_ship_*
+        sum_src_inh = imp.apply_overrides(
+            p_src_ok["units"],
+            imp.validate_overrides_doc(
+                {"schema_version": 1, "entries": {"R4 Dual Target Mission#1": {"waves": {"4": {"source_wave_index": 3}}}}}
+            ),
+        )
+        self.assertEqual(sum_src_inh["applied_waves"], 1)
+        self.assertEqual(w4_ok["wave_trigger"]["source_wave_index"], 3)
+        self.assertEqual(w4_ok["wave_trigger"]["source_spawn_index"], 1)
+        self.assertEqual(w4_ok["wave_trigger"]["trigger_ship_tag"], "r1_w3_s1")
+        self.assertEqual(w4_ok["wave_trigger"]["trigger_ship_name"], "Synth Gistii Raider")
+        self.assertEqual(w4_ok["wave_trigger"]["trigger_type_ids"], [10006])
+
+        # Setting source_wave_index on trigger with missing inherited source_spawn_index rejects cleanly
+        sum_src_miss = imp.apply_overrides(
+            p_src_ok["units"],
+            imp.validate_overrides_doc(
+                {
+                    "schema_version": 1,
+                    "entries": {"R4 Dual Target Mission#1": {"waves": {"3": {"trigger_kind": "this_ship_destroyed", "source_wave_index": 1}}}},
+                }
+            ),
+        )
+        self.assertEqual(sum_src_miss["applied_waves"], 0)
+        self.assertEqual(sum_src_miss["unmatched_targets"][0]["reason"], "ambiguous_source_spawn")
+
+        # BF-01(4): Pass 2 pre-validates targets BEFORE mutating sp["trigger"], clearing old targets, or counting applied_spawns
+        wiki_p2_pre = (
+            "{{Missiondetails\n|Type=Encounter\n|Objective=Destroy\n}}\n"
+            "{{NPCTableHead|Initial Group}}\n"
+            "{{NPCTableRow|Cruiser|1|Synth Corelatis Wing Leader|trigger=Destroying this triggers Wave 2}}\n"
+            "{{NPCTableHead|Wave 2}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}\n"
+            "|}\n"
+        )
+        for bad_t_idx, exp_sp_reason in ((99, "missing_target_wave"), (1, "non_targetable_wave")):
+            p_sp_fail = imp.parse_wiki_page("R4 Pass2 Guard", ["Level 1 Missions"], wiki_p2_pre, self.sde)
+            assert p_sp_fail is not None
+            w1_sp = p_sp_fail["units"][0]["rooms"][0]["waves"][0]["spawns"][0]
+            w2_obj = p_sp_fail["units"][0]["rooms"][0]["waves"][1]
+            ovr_sp_fail = imp.validate_overrides_doc(
+                {
+                    "schema_version": 1,
+                    "entries": {
+                        "R4 Pass2 Guard#1": {
+                            "waves": {
+                                "1": {
+                                    "spawns": {
+                                        "1": {
+                                            "kind": "this_ship_destroyed",
+                                            "condition": "on_attack",
+                                            "target_wave_index": bad_t_idx,
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            )
+            sum_sp_fail = imp.apply_overrides(p_sp_fail["units"], ovr_sp_fail)
+            self.assertEqual(sum_sp_fail["applied_spawns"], 0, exp_sp_reason)
+            self.assertEqual(sum_sp_fail["applied_entries"], 0, exp_sp_reason)
+            self.assertEqual(sum_sp_fail["unmatched_targets"][0]["reason"], exp_sp_reason)
+            self.assertEqual(w1_sp["trigger"]["condition"], "on_destroy")
+            self.assertEqual(w1_sp["trigger"]["target_wave_index"], 2)
+            self.assertFalse(w1_sp["trigger"].get("override_applied", False))
+            self.assertIsNotNone(w2_obj["wave_trigger"])
+            self.assertEqual(w2_obj["wave_trigger"]["source_wave_index"], 1)
+            self.assertEqual(w2_obj["wave_trigger"]["source_spawn_index"], 1)
+
+        # P2-02 & P2-03: Comma-free spatial + incoming triggers keep triggers; ~ and en-dash distances keep initial groups
+        wiki_p2_02_03 = (
+            "{{Missiondetails\n|Type=Encounter\n|Objective=Destroy pirates\n}}\n"
+            "{{NPCTableHead|Initial Group}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}\n"
+            "{{NPCTableSeparator|Group 2 (spawns ~20 km)}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Raider}}\n"
+            "{{NPCTableSeparator|Group 3 (spawns 20–30 km)}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Outlaw}}\n"
+            "{{NPCTableHead|Wave 2 (Spawns at 50km when Barracks destroyed)}}\n"
+            "{{NPCTableRow|Cruiser|1|Synth Corelatis Squad Leader}}\n"
+            "{{NPCTableHead|Wave 3 (Spawns 50km after 2 minutes)}}\n"
+            "{{NPCTableRow|Cruiser|1|Synth Corelatis Wing Leader}}\n"
+            "|}\n"
+        )
+        p_0203 = imp.parse_wiki_page("R4 Spatial Header Clauses", ["Level 1 Missions"], wiki_p2_02_03, self.sde)
+        assert p_0203 is not None
+        w_0203 = p_0203["units"][0]["rooms"][0]["waves"]
+        self.assertEqual(w_0203[0]["timing"], "initial_spawn")
+        self.assertEqual(w_0203[1]["timing"], "simultaneous_initial_group")
+        self.assertIsNone(w_0203[1]["wave_trigger"])
+        self.assertEqual(w_0203[2]["timing"], "simultaneous_initial_group")
+        self.assertIsNone(w_0203[2]["wave_trigger"])
+        self.assertEqual(w_0203[3]["timing"], "sequential_wave")
+        self.assertEqual(w_0203[3]["wave_trigger"]["kind"], "this_ship_destroyed")
+        self.assertEqual(w_0203[3]["wave_trigger"]["classification_state"], "explicit")
+        self.assertEqual(w_0203[4]["timing"], "sequential_wave")
+        self.assertEqual(w_0203[4]["wave_trigger"]["kind"], "timed")
+        self.assertEqual(w_0203[4]["wave_trigger"]["time_seconds"], 120)
+        self.assertEqual(w_0203[4]["wave_trigger"]["classification_state"], "explicit")
 
 
 if __name__ == "__main__":
