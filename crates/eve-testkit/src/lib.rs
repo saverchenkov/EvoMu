@@ -13,6 +13,7 @@ pub mod destiny_invariants;
 pub mod legal_fixture;
 pub mod notify_ratchet;
 pub mod pre_check;
+pub mod process_global_ratchet;
 pub mod quasar_tap;
 pub mod scenario;
 pub mod shadow_client;

@@ -863,3 +863,105 @@ pub fn assert_it_legal_fixture(
     });
 }
 
+/// Side-by-side pair of completely isolated [`eve_server::router::TestContext`] instances
+/// (`left` and `right`) in the same OS process (`#1583` Track 1).
+///
+/// Reuses [`eve_testkit::process_global_ratchet::TwoContextPair`] and lives under `tests/it/`
+/// because `eve-server` depends on `eve-testkit` in `[dev-dependencies]`, so `eve-testkit` itself
+/// cannot expose `ServerContext`-typed helpers without a dependency cycle.
+#[allow(dead_code)]
+pub struct TwoServerContexts {
+    pair: eve_testkit::process_global_ratchet::TwoContextPair<eve_server::router::TestContext>,
+}
+
+#[allow(dead_code)]
+impl TwoServerContexts {
+    /// Constructs two independent demo-seeded `TestContext` instances with pinned virtual clocks
+    /// and verifies distinct `ServerContext::instance_id` and `WorldRepository::instance_id`.
+    pub fn new() -> Self {
+        let pair = eve_testkit::process_global_ratchet::TwoContextPair::from_factory(|| {
+            let ctx = eve_server::router::TestContext::new();
+            pin_clock(&ctx);
+            ctx
+        });
+        Self::from_pair(pair)
+    }
+
+    /// Constructs two empty in-memory `TestContext` instances backed by distinct empty
+    /// `WorldRepository`s and default `SdeRegistry` instances.
+    pub fn new_empty() -> Self {
+        let repos = eve_testkit::process_global_ratchet::TwoRepositoryPair::new_empty_isolated();
+        let left = eve_server::router::TestContext::with_sde_and_repository(
+            std::sync::Arc::clone(repos.left_sde()),
+            std::sync::Arc::clone(repos.left_repo()),
+        );
+        let right = eve_server::router::TestContext::with_sde_and_repository(
+            std::sync::Arc::clone(repos.right_sde()),
+            std::sync::Arc::clone(repos.right_repo()),
+        );
+        pin_clock(&left);
+        pin_clock(&right);
+        Self::from_pair(eve_testkit::process_global_ratchet::TwoContextPair::from_parts(left, right))
+    }
+
+    /// Constructs two independent `TestContext` instances with caller-supplied `SdeRegistry`s and
+    /// separate `WorldRepository::with_demo_seed()` databases (`#1583` SdeRegistry cache isolation).
+    pub fn with_sdes(
+        left_sde: std::sync::Arc<eve_sde::SdeRegistry>,
+        right_sde: std::sync::Arc<eve_sde::SdeRegistry>,
+    ) -> Self {
+        let repos = eve_testkit::process_global_ratchet::TwoRepositoryPair::with_sdes(
+            left_sde,
+            right_sde,
+            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed()),
+            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed()),
+        );
+        let left = eve_server::router::TestContext::with_sde_and_repository(
+            std::sync::Arc::clone(repos.left_sde()),
+            std::sync::Arc::clone(repos.left_repo()),
+        );
+        let right = eve_server::router::TestContext::with_sde_and_repository(
+            std::sync::Arc::clone(repos.right_sde()),
+            std::sync::Arc::clone(repos.right_repo()),
+        );
+        pin_clock(&left);
+        pin_clock(&right);
+        Self::from_pair(eve_testkit::process_global_ratchet::TwoContextPair::from_parts(left, right))
+    }
+
+    fn from_pair(
+        pair: eve_testkit::process_global_ratchet::TwoContextPair<eve_server::router::TestContext>,
+    ) -> Self {
+        assert_ne!(
+            pair.left.instance_id, pair.right.instance_id,
+            "TwoServerContexts must allocate distinct ServerContext instance_id values"
+        );
+        assert_ne!(
+            pair.left.db.instance_id(),
+            pair.right.db.instance_id(),
+            "TwoServerContexts must allocate distinct WorldRepository instance_id values"
+        );
+        Self { pair }
+    }
+
+    /// Borrows the left [`eve_server::router::TestContext`].
+    pub fn left(&self) -> &eve_server::router::TestContext {
+        self.pair.left()
+    }
+
+    /// Borrows the right [`eve_server::router::TestContext`].
+    pub fn right(&self) -> &eve_server::router::TestContext {
+        self.pair.right()
+    }
+
+    /// Borrows both `(left, right)` test contexts.
+    pub fn both(&self) -> (&eve_server::router::TestContext, &eve_server::router::TestContext) {
+        self.pair.both()
+    }
+
+    /// Runs [`assert_teardown_invariants`] on both contexts.
+    pub fn assert_teardown_invariants(&self) {
+        assert_teardown_invariants(self.left());
+        assert_teardown_invariants(self.right());
+    }
+}
