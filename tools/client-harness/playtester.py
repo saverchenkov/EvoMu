@@ -104,7 +104,6 @@ if str(TOOLS_DIR) not in sys.path:
 import guard_registry  # noqa: E402
 import gm_slash_utils  # noqa: E402
 import sync_bugs_to_github  # noqa: E402
-import sync_bugs_to_github  # noqa: E402
 
 
 class _GuardHitTracker:
@@ -3158,7 +3157,9 @@ def _is_persona_cleanup_false_desync(
         tok in combined for tok in ("disappear", "vanish", "absent", "missing", "closed", "transient")
     ):
         return f"opened window(s) {overlap} were closed by harness persona_rotation_cleanup"
-    if deleted_contracts and any(cid in combined for cid in deleted_contracts):
+    if deleted_contracts and any(
+        re.search(rf"(?<!\d){re.escape(cid)}(?!\d)", combined) for cid in deleted_contracts
+    ):
         return f"contract(s) {deleted_contracts} were deleted by harness persona_rotation_cleanup"
     if stacked_targets and any(
         tok in combined for tok in ("stack", "stacked", "merged")
@@ -7837,7 +7838,8 @@ class PlaytesterBugOracle:
                 continue
             manual_sem_entry: Optional[Dict[str, Any]] = None
             known_manual = self.memory.data.setdefault("filed_manual_signatures", [])
-            if not chosen_frames and inc.get("kind") not in ("client_traceback", "client_crash"):
+            inc_kind = str(inc.get("kind") or "").strip().lower()
+            if not chosen_frames and inc_kind in sync_bugs_to_github._MANUAL_SYMPTOM_KINDS:
                 sem_tokens = sync_bugs_to_github.extract_manual_semantic_tokens(norm_title)
                 if len(sem_tokens) >= 3:
                     sem_group = sync_bugs_to_github.manual_semantic_group(
@@ -7926,6 +7928,7 @@ class PlaytesterBugOracle:
                 "subsystem": inc["subsystem"],
                 "summary": inc["summary"],
                 "traceback": inc["traceback"],
+                "action_error": act_err_txt,
                 "action": decision.get("action"),
                 "previous_action_verification": pav,
                 "state_diff": exec_res.get("state_diff") if isinstance(exec_res, dict) else None,

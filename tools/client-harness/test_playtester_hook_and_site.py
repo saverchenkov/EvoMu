@@ -9020,6 +9020,16 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         self.assertEqual(res_merged["stacked_targets"], ["cargo:90001001"])
         self.assertEqual(remote_getattr_calls, [])
 
+        # BPC (singleton=2) and boolean singleton=True items do not count as stackable duplicates,
+        # and bytes contract status b"outstanding" matches cleanly
+        bpc_cargo = {
+            1: {"itemID": 1, "typeID": 587, "flagID": 5, "singleton": 2},
+            2: {"itemID": 2, "typeID": 587, "flagID": 5, "singleton": True},
+        }
+        ic_v24.inventories = {(90001001, 5): _V24InvCacheContainer(cached_items=bpc_cargo, listed={5}, moniker=valid_moniker)}
+        self.assertFalse(hook._has_cached_unstacked_cargo(ic_v24, sess_space, 90001001))
+        self.assertTrue(hook._is_outstanding_contract_status(b"outstanding"))
+
     def test_hook_type_text_clear_with_command_preserves_text_and_avoids_clear_filter(self):
         hook = _load_hook_with_py2_stubs()
         sess = types.SimpleNamespace(userid=100, charid=90000001, stationid=60003760, shipid=90001001)

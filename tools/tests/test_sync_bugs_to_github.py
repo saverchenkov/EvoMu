@@ -2020,6 +2020,94 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
             self.assertEqual(len(fake_gh.comments), 1)
             self.assertEqual(fake_gh.comments[0]["number"], issue_num)
 
+            # F-2 regression: heuristic manual_recent match must NOT pollute issue_cache.json["repos"] with b_1592's hash
+            cache_data = json.loads((root / "issue_cache.json").read_text(encoding="utf-8"))
+            repo_cache = cache_data["repos"]["saverchenkov/EvoMu"]
+            self.assertIn(sync_mod._issue_cache_key(sync_mod._effective_bundle_hash(b_1591)), repo_cache)
+            self.assertNotIn(sync_mod._issue_cache_key(sync_mod._effective_bundle_hash(b_1592)), repo_cache)
+
+            # F-1 regression: non-symptom protocol_error and server_error bundles must NEVER fuzzy-merge by title tokens
+            gw_ok_fr = [{"kind": "quasar", "service": "quasar", "method": "Ping", "status": "OK"}]
+            proto_a = {
+                "report_source": "f12_manual",
+                "fingerprint": "aaaa000000000001",
+                "stack_hash": 100000000000001,
+                "stack_key": "playtester:quasar:protocol_error",
+                "trace": "",
+                "kind": "protocol_error",
+                "subsystem": "quasar",
+                "action_error": "BalanceTimeout",
+                "flight_recorder": gw_ok_fr,
+                "manual_report": {
+                    "report_key": "playtester_step102201_aaaa000000000001",
+                    "category_id": "quasar",
+                    "category_name": "protocol_error",
+                    "title": "Quasar error on open_neocom (BalanceRequest): TimeoutException",
+                    "description": "BalanceRequest timed out",
+                },
+            }
+            proto_b = {
+                "report_source": "f12_manual",
+                "fingerprint": "aaaa000000000002",
+                "stack_hash": 100000000000002,
+                "stack_key": "playtester:quasar:protocol_error",
+                "trace": "",
+                "kind": "protocol_error",
+                "subsystem": "quasar",
+                "action_error": "CatalogTimeout",
+                "flight_recorder": gw_ok_fr,
+                "manual_report": {
+                    "report_key": "playtester_step102202_aaaa000000000002",
+                    "category_id": "quasar",
+                    "category_name": "protocol_error",
+                    "title": "Quasar error on open_neocom (CatalogRequest): TimeoutException",
+                    "description": "CatalogRequest timed out",
+                },
+            }
+            srv_a = {
+                "report_source": "f12_manual",
+                "fingerprint": "bbbb000000000001",
+                "stack_hash": 200000000000001,
+                "stack_key": "playtester:eve-server:server_error",
+                "trace": "",
+                "kind": "server_error",
+                "subsystem": "eve-server",
+                "manual_report": {
+                    "report_key": "playtester_step102203_bbbb000000000001",
+                    "category_id": "eve-server",
+                    "category_name": "server_error",
+                    "title": "Server ERROR on click_widget (market.GetOrders)",
+                    "description": "GetOrders failed",
+                },
+            }
+            srv_b = {
+                "report_source": "f12_manual",
+                "fingerprint": "bbbb000000000002",
+                "stack_hash": 200000000000002,
+                "stack_key": "playtester:eve-server:server_error",
+                "trace": "",
+                "kind": "server_error",
+                "subsystem": "eve-server",
+                "manual_report": {
+                    "report_key": "playtester_step102204_bbbb000000000002",
+                    "category_id": "eve-server",
+                    "category_name": "server_error",
+                    "title": "Server ERROR on click_widget (market.PlaceOrder)",
+                    "description": "PlaceOrder failed",
+                },
+            }
+            (qdir / "04_proto_a.json").write_text(json.dumps(proto_a), encoding="utf-8")
+            (qdir / "05_proto_b.json").write_text(json.dumps(proto_b), encoding="utf-8")
+            (qdir / "06_srv_a.json").write_text(json.dumps(srv_a), encoding="utf-8")
+            (qdir / "07_srv_b.json").write_text(json.dumps(srv_b), encoding="utf-8")
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=fake_gh
+            ):
+                rc3 = sync_mod.main(["--queue-dir", str(qdir), "--uploaded-dir", str(udir)])
+            self.assertEqual(rc3, 0)
+            self.assertEqual(len(fake_gh.created_issues), 6)
+            self.assertEqual(len(fake_gh.comments), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8395,6 +8395,14 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
                     False,
                 )
             )
+            self.assertIsNone(
+                playtester._is_persona_cleanup_false_desync(
+                    {"persona_rotation_cleanup": {"deleted_contracts": [75]}},
+                    {"should_file": True, "category": "ui_state_desync", "title": "Item 1750 disappeared"},
+                    {},
+                    False,
+                )
+            )
             self.assertIsNotNone(
                 playtester._is_persona_cleanup_false_desync(
                     {"persona_rotation_cleanup": {"stacked_targets": ["hangar:60003760"]}},
@@ -8403,6 +8411,107 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
                     False,
                 )
             )
+
+            # Distinct non-symptom protocol_error and server_error reports sharing boilerplate wording
+            # must NEVER be semantically dropped by PlaytesterBugOracle, and action_error must be serialized.
+            err_shot_1 = root / "err_1.png"
+            err_shot_2 = root / "err_2.png"
+            srv_shot_1 = root / "srv_1.png"
+            srv_shot_2 = root / "srv_2.png"
+            for sp in (err_shot_1, err_shot_2, srv_shot_1, srv_shot_2):
+                sp.write_bytes(b"\x89PNG\r\n\x1a\n")
+            no_bug_dec = {
+                "action": {"type": "click_widget", "target": "open_btn"},
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {"should_file": False, "category": "none"},
+            }
+            proto_1 = oracle.evaluate_step(
+                step_num=102201,
+                git_head="bbbb2222",
+                decision=no_bug_dec,
+                exec_res={
+                    "ok": False,
+                    "action_error": "BalanceTimeout",
+                    "flight_recorder": {
+                        "macho_calls": [],
+                        "quasar_errors": [{"status": "ERR", "service": "quasar", "method": "BalanceRequest", "error": "TimeoutException"}],
+                    },
+                    "state_diff": {},
+                },
+                ui_snapshot=ui_snap,
+                screenshot_path=err_shot_1,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            proto_2 = oracle.evaluate_step(
+                step_num=102202,
+                git_head="bbbb2222",
+                decision=no_bug_dec,
+                exec_res={
+                    "ok": False,
+                    "action_error": "CatalogTimeout",
+                    "flight_recorder": {
+                        "macho_calls": [],
+                        "quasar_errors": [{"status": "ERR", "service": "quasar", "method": "CatalogRequest", "error": "TimeoutException"}],
+                    },
+                    "state_diff": {},
+                },
+                ui_snapshot=ui_snap,
+                screenshot_path=err_shot_2,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            self.assertEqual(len(proto_1), 1)
+            self.assertEqual(len(proto_2), 1)
+            self.assertEqual(
+                json.loads(proto_1[0].read_text(encoding="utf-8")).get("action_error"),
+                "quasar.BalanceRequest: TimeoutException",
+            )
+            self.assertEqual(
+                json.loads(proto_2[0].read_text(encoding="utf-8")).get("action_error"),
+                "quasar.CatalogRequest: TimeoutException",
+            )
+
+            srv_log.write_text("ERROR eve_server::market: GetOrders panicked\n", encoding="utf-8")
+            srv_1 = oracle.evaluate_step(
+                step_num=102203,
+                git_head="bbbb2222",
+                decision=no_bug_dec,
+                exec_res=step_exec,
+                ui_snapshot=ui_snap,
+                screenshot_path=srv_shot_1,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            srv_log.write_text(
+                "ERROR eve_server::market: GetOrders panicked\n"
+                "ERROR eve_server::market: PlaceOrder panicked\n",
+                encoding="utf-8",
+            )
+            srv_2 = oracle.evaluate_step(
+                step_num=102204,
+                git_head="bbbb2222",
+                decision=no_bug_dec,
+                exec_res=step_exec,
+                ui_snapshot=ui_snap,
+                screenshot_path=srv_shot_2,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            self.assertEqual(len(srv_1), 1)
+            self.assertEqual(len(srv_2), 1)
 
 
 if __name__ == "__main__":

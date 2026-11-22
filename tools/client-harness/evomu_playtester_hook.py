@@ -5615,7 +5615,7 @@ def _is_outstanding_contract_status(status):
     if status is None or isinstance(status, bool):
         return False
     if isinstance(status, _TEXT_TYPES):
-        return status.strip().lower() in ("0", "outstanding")
+        return _coerce_text(status, 32).lower() in ("0", "outstanding")
     try:
         return int(status) == 0
     except Exception:
@@ -5745,9 +5745,14 @@ def _has_cached_unstacked_cargo(ic_svc, sess, ship_id):
             flag_id = _coerce_optional_int(_row_field(it, "flagID", "flag_id"))
             if flag_id is not None and flag_id != 5:
                 continue
-            singleton = _coerce_optional_int(_row_field(it, "singleton"))
-            if singleton == 1:
-                continue
+            singleton_raw = _row_field(it, "singleton")
+            if isinstance(singleton_raw, bool):
+                if singleton_raw:
+                    continue
+            else:
+                singleton = _coerce_optional_int(singleton_raw)
+                if singleton is not None and singleton != 0:
+                    continue
             tid = _coerce_optional_int(_row_field(it, "typeID", "type_id")) or 0
             if tid <= 0:
                 continue

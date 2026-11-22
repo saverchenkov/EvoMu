@@ -1998,7 +1998,9 @@ def _bundle_manual_semantic_sig(bundle: Dict[str, Any]) -> Optional[Tuple[str, L
         return None
     manual = bundle.get("manual_report") or {}
     subsystem = str(manual.get("category_id") or bundle.get("subsystem") or "client-ui")
-    kind = str(manual.get("category_name") or bundle.get("kind") or "")
+    kind = str(manual.get("category_name") or bundle.get("kind") or "").strip().lower()
+    if kind not in _MANUAL_SYMPTOM_KINDS:
+        return None
     title = str(manual.get("title") or bundle.get("title") or "")
     action_err = str(bundle.get("action_error") or "")
     tokens = extract_manual_semantic_tokens(title)
@@ -2414,8 +2416,11 @@ def create_or_update_issue(
         cache_file=None if dry_run else cache_file,
         cache_hashes=canonical_hashes,
     )
+    matched_via_manual_recent = False
     if existing is None and manual_sig is not None and not dry_run and cache_file:
         existing = _lookup_recent_manual_issue(cache_file, repo, manual_sig)
+        if existing is not None:
+            matched_via_manual_recent = True
 
     if existing:
         existing_number, existing_state = existing
@@ -2426,7 +2431,8 @@ def create_or_update_issue(
         )
         if comment_ok:
             if not dry_run and cache_file:
-                _record_issue_cache(cache_file, repo, canonical_hashes, existing_number, result_state)
+                if not matched_via_manual_recent:
+                    _record_issue_cache(cache_file, repo, canonical_hashes, existing_number, result_state)
                 if manual_sig is not None:
                     _record_recent_manual_issue(cache_file, repo, manual_sig, existing_number, result_state)
             return existing_number
