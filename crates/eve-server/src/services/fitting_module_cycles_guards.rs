@@ -125,9 +125,150 @@ pub(crate) async fn check_space_module_cloak_and_warp_readonly(
     Ok(())
 }
 
+fn finalize_atomic_protection_break(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    location_change_invuln: Option<crate::system_actor::LocationInvulnToken>,
+    real_now_unix: u64,
+    protection_events: &mut crate::system_actor::ProtectionBreakEvents,
+) {
+    if ship_id <= 0 {
+        return;
+    }
+    crate::services::space_destiny::finalize_committed_location_change_invuln(
+        ctx,
+        char_id,
+        location_change_invuln,
+        real_now_unix,
+        protection_events,
+    );
+    crate::services::space_destiny::emit_protection_break_notifications(
+        ctx,
+        char_id,
+        ship_id,
+        protection_events,
+    );
+}
+
+/// Atomically validates warp/cloak/cap/tackle preconditions inside the system actor, commits `cycle`,
+/// breaks ship protection if `break_protection`, and finalizes `location_change_invuln` plus
+/// protection-break notifications on commit (`#1486`).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn commit_module_cycle_atomic_with_notifications(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    cycle: crate::system_actor::ActiveModuleCycle,
+    allow_while_warping: bool,
+    allow_while_cloaked: bool,
+    break_protection: bool,
+    break_reason: crate::system_actor::ProtectionBreakReason,
+) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
+    commit_module_cycle_atomic_with_replace_notifications(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        cycle,
+        allow_while_warping,
+        allow_while_cloaked,
+        false,
+        break_protection,
+        break_reason,
+    )
+    .await
+}
+
+/// Variant of [`commit_module_cycle_atomic_with_notifications`] allowing atomic replacement of an
+/// active cycle on `(ship_id, module_id)` inside the system actor (`#1486`).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn commit_module_cycle_atomic_with_replace_notifications(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    cycle: crate::system_actor::ActiveModuleCycle,
+    allow_while_warping: bool,
+    allow_while_cloaked: bool,
+    replace_existing_cycle: bool,
+    break_protection: bool,
+    break_reason: crate::system_actor::ProtectionBreakReason,
+) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
+    let real_now_unix = ctx.now_unix();
+    let location_change_invuln = (break_protection && ship_id > 0)
+        .then(|| crate::services::space_destiny::peek_active_location_change_invuln(ctx, char_id))
+        .flatten();
+    let mut outcome = sys
+        .activate_module_cycle_atomic(crate::system_actor::AtomicActivateCycleRequest {
+            char_id,
+            cycle,
+            allow_while_warping,
+            allow_while_cloaked,
+            replace_existing_cycle,
+            break_protection,
+            break_reason,
+            location_change_invuln,
+            real_now_unix,
+        })
+        .await?;
+    if break_protection {
+        finalize_atomic_protection_break(
+            ctx,
+            char_id,
+            ship_id,
+            location_change_invuln,
+            real_now_unix,
+            &mut outcome.protection_events,
+        );
+    }
+    Ok(outcome)
+}
+
+/// Atomically verifies `ship_id` is in space, no active lance cycle exists on `(ship_id, module_id)`,
+/// non-warp, non-cloak, and sufficient capacitor, deducts `cap_cost`, breaks ship protection, and
+/// finalizes `location_change_invuln` plus notifications on commit (`#1486`).
+#[inline(never)]
+pub(crate) async fn commit_lancer_activation_atomic_with_notifications(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    cap_cost: f64,
+) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
+    let real_now_unix = ctx.now_unix();
+    let location_change_invuln = (ship_id > 0)
+        .then(|| crate::services::space_destiny::peek_active_location_change_invuln(ctx, char_id))
+        .flatten();
+    let mut outcome = sys
+        .commit_lancer_activation_atomic(crate::system_actor::AtomicLancerActivationRequest {
+            char_id,
+            ship_id,
+            module_id,
+            cap_cost,
+            location_change_invuln,
+            real_now_unix,
+        })
+        .await?;
+    finalize_atomic_protection_break(
+        ctx,
+        char_id,
+        ship_id,
+        location_change_invuln,
+        real_now_unix,
+        &mut outcome.protection_events,
+    );
+    Ok(outcome)
+}
+
 /// Breaks any active gate cloak, undock invulnerability, and post-jump
 /// `location_change_invuln` when a space action commits, emitting
-/// `OnInvulnCancelled` at most once (`#494`, `#1351`, `#1403`).
+/// `OnInvulnCancelled` at most once (`#494`, `#1351`, `#1403`, `#1486`).
+#[inline(never)]
 pub(crate) async fn break_gate_cloak_on_space_action(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
@@ -322,6 +463,57 @@ pub(crate) fn is_slot_loaded_charge_or_script_item(
     module_item_id: i64,
 ) -> bool {
     is_slot_loaded_charge_item_inner(ctx, mod_type, item, ship_id, slot_flag_u16, module_item_id, true)
+}
+
+/// Maps `SystemActor` atomic activation rejection messages to structured `BridgeRpcError`s (`#1486`).
+pub(crate) fn map_atomic_cycle_activation_error(
+    ctx: &ServerContext,
+    module_type_id: u32,
+    err: String,
+) -> BridgeRpcError {
+    if err.contains("ModuleAlreadyActive") {
+        return super::module_already_active_rpc_error(ctx, Some(module_type_id), err);
+    }
+    if err.contains("not in space") {
+        let custom = format!("ShipNotInSpace: {err}");
+        return BridgeRpcError::with_client_error(
+            "ShipNotInSpace",
+            err,
+            eve_proto::ClientError::CustomInfo(custom),
+        );
+    }
+    if err.contains("CannotActivateCloaked") {
+        return BridgeRpcError::with_client_error(
+            "CannotActivateCloaked",
+            "CannotActivateCloaked",
+            eve_proto::ClientError::CustomInfo("CannotActivateCloaked: CannotActivateCloaked".into()),
+        );
+    }
+    if err.contains("WarpScrambled") {
+        return BridgeRpcError::with_client_error(
+            "WarpScrambled",
+            err,
+            eve_proto::ClientError::user(eve_proto::UserErrorKey::WarpScrambled),
+        );
+    }
+    if err.contains("CantActivateInWarp") {
+        let custom = format!("CantActivateInWarp: {err}");
+        return BridgeRpcError::with_client_error(
+            "CantActivateInWarp",
+            err,
+            eve_proto::ClientError::CustomInfo(custom),
+        );
+    }
+    if err.contains("capacitor") || err.contains("Capacitor") {
+        let custom = format!("NotEnoughCapacitor: {err}");
+        return BridgeRpcError::with_client_error(
+            "NotEnoughCapacitor",
+            err,
+            eve_proto::ClientError::CustomInfo(custom),
+        );
+    }
+    let custom = format!("ModuleActivationFailed: {err}");
+    BridgeRpcError::with_client_error("ModuleActivationFailed", err, eve_proto::ClientError::CustomInfo(custom))
 }
 
 #[cfg(test)]

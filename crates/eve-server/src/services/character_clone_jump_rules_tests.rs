@@ -1699,6 +1699,251 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     let nongate_notifs = ctx.drain_notifications_for_char(host_cid);
     assert!(!nongate_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"));
     assert_eq!(nongate_notifs.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+
+    // Concurrent warp rejection after DB fuel reservation refunds exact Liquid Ozone and restores CloneVatBayState/module_active_states intact.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_clone_vat_bay_state(snap);
+        st.active_by_ship.remove(&titan_id);
+        save_clone_vat_bay_state(snap, &st);
+        snap.module_active_states.remove(&vat_id);
+        snap.items.retain(|_, i| !(i.location_id == titan_id && i.type_id == ozone_tid));
+        put_item(
+            snap,
+            ozone_tid,
+            host_cid,
+            titan_id,
+            InventoryFlag::SpecializedFuelBay,
+            300,
+            false,
+        );
+    });
+    let _ = sys_h.remove_module_cycle(titan_id, vat_id).await;
+    sys_h
+        .set_movement_mode(
+            titan_id,
+            eve_destiny::MovementMode::Warp {
+                origin: DVec3::ZERO,
+                destination: DVec3::new(1_000_000.0, 0.0, 0.0),
+                warp_speed_au_s: 3.0,
+                total_distance: 1_000_000.0,
+                phase: eve_destiny::WarpPhase::Cruising,
+                elapsed_warp_time: 5.0,
+            },
+        )
+        .await
+        .unwrap();
+    sys_h
+        .set_combat_state(
+            titan_id,
+            CombatState {
+                is_cloaked: false,
+                gate_cloak_remaining_ticks: 0,
+                undock_invulnerable_remaining_ticks: 15,
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, host_cid, ctx.now_unix() + 60);
+    let _ = ctx.drain_notifications_for_char(host_cid);
+    let warp_err = activate_clone_vat_bay(&ctx, &sys_h, host_cid, titan_id, vat_id)
+        .await
+        .expect_err("warping Titan must reject Clone Vat Bay and refund Liquid Ozone");
+    assert_eq!(warp_err.code, "CantActivateInWarp");
+    let fuel_left: i32 = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|i| i.location_id == titan_id && i.type_id == ozone_tid)
+            .map(|i| i.quantity)
+            .sum()
+    });
+    assert_eq!(fuel_left, 300, "actor rejection must refund full reserved Liquid Ozone");
+    assert!(ctx.db.with_snapshot(|s| !s.module_active_states.contains(&vat_id) && load_clone_vat_bay_state(s).active_by_ship.get(&titan_id).is_none()));
+    assert_eq!(sys_h.get_combat_state(titan_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    assert!(!ctx.drain_notifications_for_char(host_cid).iter().any(|n| n.event == "OnInvulnCancelled"));
+}
+
+#[tokio::test]
+async fn clone_vat_bay_exact_stack_preserves_id_ship_not_in_space_and_claim_guard_r6() {
+    let mut ctx = test_ctx();
+    let (titan_tid, vat_tid, ozone_tid, sys_id) = (99_601_u32, 99_602_u32, 16_273_u32, 30_000_142_u32);
+    clone_type_with(&mut ctx.sde, 670, titan_tid, 30, 6, &[]);
+    clone_type_with(
+        &mut ctx.sde,
+        670,
+        vat_tid,
+        815,
+        7,
+        &[(73, 300_000.0), (713, ozone_tid as f64), (714, 250.0)],
+    );
+
+    let (host_uid, host_cid, titan_id, vat_id, fuel_id, v0) = ctx.db.with_mut_snapshot(|snap| {
+        let (uid, cid) = {
+            let ch = snap.characters.get_mut(&90_000_001).expect("demo char");
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            (ch.user_id, ch.character_id)
+        };
+        let titan = put_item(snap, titan_tid, cid, sys_id as i64, InventoryFlag::None, 1, true);
+        let vat = put_item(snap, vat_tid, cid, titan, InventoryFlag::HiSlot0, 1, true);
+        let fuel = put_item(
+            snap,
+            ozone_tid,
+            cid,
+            titan,
+            InventoryFlag::SpecializedFuelBay,
+            250,
+            false,
+        );
+        snap.characters.get_mut(&cid).unwrap().active_ship_id = titan;
+        snap.module_online_states.insert(vat, true);
+        let fuel_ver = snap.items[&fuel].version;
+        (uid, cid, titan, vat, fuel, fuel_ver)
+    });
+    ctx.db
+        .acquire_online_lock(host_uid, 999_601, Some(host_cid), true, ctx.now_unix())
+        .unwrap();
+
+    // 1. P2-4 + F1486-2B-R5-01: absent ball fails with ShipNotInSpace, restores exact fuel_id (monotonic version > v0) with 0 OnItemChange.
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball_with_meta(
+            Ball {
+                id: titan_id,
+                type_id: titan_tid,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 60.0,
+                inertia: 1.0,
+                mass: 2_400_000_000.0,
+                radius: 6_500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+            SlimItemMeta {
+                owner_id: host_cid,
+                char_id: Some(host_cid),
+                group_id: 30,
+                category_id: 6,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let _ = sys_h.remove_ball(titan_id).await;
+    let _ = ctx.drain_notifications_for_char(host_cid);
+
+    let err = activate_clone_vat_bay(&ctx, &sys_h, host_cid, titan_id, vat_id)
+        .await
+        .expect_err("missing Titan ball must fail with ShipNotInSpace and restore exact fuel stack");
+    assert_eq!(err.code, "ShipNotInSpace");
+    assert!(
+        !ctx.drain_notifications_for_char(host_cid)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "exact in-place fuel_id rollback must emit 0 OnItemChange notifications"
+    );
+    ctx.db.with_snapshot(|s| {
+        let f = &s.items[&fuel_id];
+        assert_eq!(f.quantity, 250);
+        assert!(f.version > v0);
+        assert!(load_clone_vat_bay_state(s).active_by_ship.get(&titan_id).is_none());
+        assert!(!s.module_active_states.contains(&vat_id));
+    });
+
+    // 2. P2-1 + diverged rollback + destroyed Titan orphan prevention.
+    let (other_vat_id, my_until, other_until) = (vat_id + 99, ctx.now_unix() + 300, ctx.now_unix() + 600);
+    ctx.db
+        .tx::<(), eve_db::TxError>("test_clone_vat_bay_diverged_rollback", |wtx| {
+            wtx.snap.items.get_mut(&fuel_id).unwrap().quantity = 300;
+            let res = wtx
+                .snap
+                .reserve_consume_stack_for_rollback(fuel_id, 250)
+                .unwrap();
+            wtx.snap.items.get_mut(&fuel_id).unwrap().singleton = true;
+            let mut st = load_clone_vat_bay_state(wtx.snap);
+            st.active_by_ship
+                .insert(titan_id, (other_vat_id, other_until));
+            save_clone_vat_bay_state(wtx.snap, &st);
+
+            let diffs = wtx.snap.rollback_restore_consumed_stacks(&[res]);
+            let mut st_after = load_clone_vat_bay_state(wtx.snap);
+            if st_after.active_by_ship.get(&titan_id).copied() == Some((vat_id, my_until)) {
+                st_after.active_by_ship.remove(&titan_id);
+            }
+            save_clone_vat_bay_state(wtx.snap, &st_after);
+            crate::router::delta_projection::push_item_diffs_tx_effects(
+                wtx.snap,
+                wtx.effects,
+                &ctx.sde,
+                host_cid,
+                &diffs,
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        ctx.drain_notifications_for_char(host_cid)
+            .iter()
+            .filter(|n| n.event == "OnItemChange")
+            .count(),
+        2,
+        "diverged rollback must emit both reserved and minted OnItemChange notifications"
+    );
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(
+            load_clone_vat_bay_state(s).active_by_ship.get(&titan_id).copied(),
+            Some((other_vat_id, other_until)),
+            "guarded claim cleanup must preserve newer active CloneVatBayState owner"
+        );
+    });
+
+    ctx.db
+        .tx::<(), eve_db::TxError>("test_clone_vat_bay_dead_ship_rollback", |wtx| {
+            let extra = put_item(
+                wtx.snap,
+                ozone_tid,
+                host_cid,
+                titan_id,
+                InventoryFlag::Cargo,
+                250,
+                false,
+            );
+            let res = wtx
+                .snap
+                .reserve_consume_stack_for_rollback(extra, 250)
+                .unwrap();
+            wtx.snap.items.remove(&titan_id);
+            let dead_diffs = wtx.snap.rollback_restore_consumed_stacks(&[res]);
+            crate::router::delta_projection::push_item_diffs_tx_effects(
+                wtx.snap,
+                wtx.effects,
+                &ctx.sde,
+                host_cid,
+                &dead_diffs,
+            );
+            Ok(())
+        })
+        .unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert!(
+            !s.items
+                .values()
+                .any(|i| i.location_id == titan_id && i.flag == InventoryFlag::Cargo),
+            "destroyed Titan rollback must not leave orphaned fuel in snap.items"
+        );
+    });
+    assert!(
+        ctx.drain_notifications_for_char(host_cid)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "destroyed Titan tombstone diff must emit OnItemChange deletion"
+    );
 }
 
 #[cfg(test)]

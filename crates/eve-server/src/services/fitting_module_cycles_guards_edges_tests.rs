@@ -377,6 +377,109 @@ fn fallback_fitted_weapon_module_covers_missing_unloaded_and_charged_cases() {
     assert_eq!(with_charge.charge_type_id, Some(232));
 }
 
+#[tokio::test]
+async fn commit_module_cycle_atomic_with_replace_replaces_active_cycle_p2_r8_03() {
+    let ctx = make_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 990_811_001_i64;
+    let mod_id = 990_811_002_i64;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    fmc_spawn_target_ball(&ctx, sys_id, ship_id, 587, 25, 6, char_id, DVec3::ZERO, 1_000.0, 1_000.0).await;
+
+    let first_cycle = crate::system_actor::ActiveModuleCycle {
+        ship_id,
+        module_id: mod_id,
+        module_type_id: 21_096,
+        owner_char_id: Some(char_id),
+        effect_name: "effects.First".to_string(),
+        repeat: 0,
+        duration_s: 20.0,
+        cap_need_per_cycle: 100.0,
+        immobilize_self: true,
+        started_at_unix: ctx.now_unix(),
+        ..Default::default()
+    };
+    let out1 = commit_module_cycle_atomic_with_notifications(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        first_cycle.clone(),
+        false,
+        false,
+        true,
+        crate::system_actor::ProtectionBreakReason::ModuleActivation,
+    )
+    .await
+    .expect("initial cycle activation must succeed");
+    assert!((out1.capacitor_after - 900.0).abs() < 1e-6);
+    assert!(sys.has_module_cycle(ship_id, mod_id).await);
+
+    // Non-replacing call (`replace_existing_cycle == false`) must fail with ModuleAlreadyActive.
+    let err = commit_module_cycle_atomic_with_notifications(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        first_cycle,
+        false,
+        false,
+        true,
+        crate::system_actor::ProtectionBreakReason::ModuleActivation,
+    )
+    .await
+    .expect_err("duplicate cycle without replacement must fail");
+    assert!(err.contains("ModuleAlreadyActive"));
+
+    // Replacing call (`replace_existing_cycle == true`) swaps the active cycle atomically and charges cap once.
+    let replacement = crate::system_actor::ActiveModuleCycle {
+        ship_id,
+        module_id: mod_id,
+        module_type_id: 21_096,
+        owner_char_id: Some(char_id),
+        effect_name: "effects.Replaced".to_string(),
+        repeat: 0,
+        duration_s: 4.0,
+        cap_need_per_cycle: 50.0,
+        immobilize_self: false,
+        started_at_unix: ctx.now_unix(),
+        ..Default::default()
+    };
+    let out2 = commit_module_cycle_atomic_with_replace_notifications(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        replacement,
+        false,
+        false,
+        true,
+        true,
+        crate::system_actor::ProtectionBreakReason::ModuleActivation,
+    )
+    .await
+    .expect("replace_existing_cycle=true must replace active cycle");
+    assert!((out2.capacitor_after - 850.0).abs() < 1e-6);
+    assert!(sys.has_module_cycle(ship_id, mod_id).await);
+
+    let remaining = sys
+        .remove_module_cycle(ship_id, mod_id)
+        .await
+        .expect("remove cycle")
+        .expect("replaced cycle must be active");
+    assert!(
+        remaining <= 4.1,
+        "replaced cycle must carry new 4.0s duration instead of old 20.0s duration (got {remaining})"
+    );
+    assert_eq!(
+        sys.remove_module_cycle(ship_id, mod_id).await.unwrap(),
+        None,
+        "exactly one cycle must have existed after replacement"
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fmc_custom_type(
     sde: &SdeRegistry,

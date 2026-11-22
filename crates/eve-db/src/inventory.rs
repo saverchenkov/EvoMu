@@ -2000,6 +2000,208 @@ impl WorldStateSnapshot {
         }
         changed
     }
+
+    /// Consumes up to `quantity` units from `item_id`, returning `(pre_record, taken)`
+    /// for transactional rollback via [`Self::rollback_restore_consumed_stacks`].
+    pub fn reserve_consume_stack_for_rollback(
+        &mut self,
+        item_id: i64,
+        quantity: i32,
+    ) -> Option<(InventoryItemRecord, i32)> {
+        if quantity <= 0 {
+            return None;
+        }
+        let pre = self.items.get(&item_id)?.clone();
+        let take = quantity.min(pre.quantity);
+        if take <= 0 {
+            return None;
+        }
+        if take >= pre.quantity {
+            self.items.remove(&item_id);
+        } else if let Some(entry) = self.items.get_mut(&item_id) {
+            entry.quantity -= take;
+            entry.version = entry.version.saturating_add(1);
+        }
+        Some((pre, take))
+    }
+
+    fn is_rollback_destination_alive(&self, location_id: i64) -> bool {
+        let mut cur = location_id;
+        for _ in 0..16 {
+            if cur <= 0 {
+                return false;
+            }
+            if (30_000_000..=39_999_999).contains(&cur)
+                || (60_000_000..=69_999_999).contains(&cur)
+                || self
+                    .structures
+                    .get(&cur)
+                    .is_some_and(|st| st.state != "Destroyed")
+            {
+                return true;
+            }
+            let Some(parent) = self.items.get(&cur) else {
+                return false;
+            };
+            if parent.location_id <= 0 {
+                return true;
+            }
+            cur = parent.location_id;
+        }
+        false
+    }
+
+    fn is_eligible_rollback_stack_target(
+        &self,
+        existing: &InventoryItemRecord,
+        pre: &InventoryItemRecord,
+        take: i32,
+    ) -> bool {
+        existing.owner_id == pre.owner_id
+            && existing.location_id == pre.location_id
+            && existing.flag == pre.flag
+            && existing.type_id == pre.type_id
+            && self.is_clean_stackable_item(existing)
+            && !Self::has_locked_flag_or_wrap_type(existing)
+            && !self.is_item_or_ancestor_locked_or_impounded(existing.item_id)
+            && existing.quantity.checked_add(take).is_some()
+    }
+
+    /// Restores stack quantities previously reserved by [`Self::reserve_consume_stack_for_rollback`],
+    /// validating destination existence, ownership, location, flag, type, clean/unlocked state,
+    /// and checked arithmetic. Returns `(pre, post)` item-mutation diffs for any stack whose
+    /// restored state diverged from `pre` (`invCache` sync on fallback merge/mint/disappearance).
+    pub fn rollback_restore_consumed_stacks(
+        &mut self,
+        consumed: &[(InventoryItemRecord, i32)],
+    ) -> Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)> {
+        self.rollback_restore_consumed_stacks_if_exposed(consumed, |_, _, _| false)
+    }
+
+    /// Variant of [`Self::rollback_restore_consumed_stacks`] taking `should_emit_exact(pre, existing_opt, restored)`
+    /// so callers tracking interleaved client notifications (`commit-before-rollback`) can still
+    /// emit convergence diffs even when the DB state returns to `pre` (`BF-1486-2B-R7-01`).
+    pub fn rollback_restore_consumed_stacks_if_exposed<F>(
+        &mut self,
+        consumed: &[(InventoryItemRecord, i32)],
+        mut should_emit_exact: F,
+    ) -> Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)>
+    where
+        F: FnMut(&InventoryItemRecord, Option<&InventoryItemRecord>, &InventoryItemRecord) -> bool,
+    {
+        let mut diffs = Vec::new();
+        for (pre, take) in consumed {
+            if *take <= 0 {
+                continue;
+            }
+            if !self.is_rollback_destination_alive(pre.location_id) {
+                diffs.push((
+                    Some(pre.clone()),
+                    self.items
+                        .get(&pre.item_id)
+                        .filter(|e| e.owner_id == pre.owner_id)
+                        .cloned(),
+                ));
+                continue;
+            }
+            let dest_locked = self.is_item_or_ancestor_locked_or_impounded(pre.location_id);
+
+            if let Some(existing) = self.items.get(&pre.item_id).cloned() {
+                if self.is_eligible_rollback_stack_target(&existing, pre, *take) {
+                    if let Some(entry) = self.items.get_mut(&pre.item_id) {
+                        if let Some(new_qty) = entry.quantity.checked_add(*take) {
+                            entry.quantity = new_qty;
+                            entry.version = entry
+                                .version
+                                .saturating_add(1)
+                                .max(self.wal_seq.saturating_add(1));
+                            let post = entry.clone();
+                            let same_identity_state = post.owner_id == pre.owner_id
+                                && post.location_id == pre.location_id
+                                && post.flag == pre.flag
+                                && post.quantity == pre.quantity
+                                && post.singleton == pre.singleton;
+                            if !same_identity_state || should_emit_exact(pre, Some(&existing), &post) {
+                                diffs.push((Some(existing), Some(post)));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                if existing.owner_id != pre.owner_id {
+                    // Scope clearance only to `pre`'s owner so an unrelated new owner never receives
+                    // a cross-owner diff with stale `pre` attributes (`BF-1486-2B-R7-02`).
+                    diffs.push((Some(pre.clone()), None));
+                } else {
+                    diffs.push((Some(pre.clone()), Some(existing)));
+                }
+            } else if !dest_locked
+                && !Self::has_locked_flag_or_wrap_type(pre)
+                && (!pre.singleton || *take == 1)
+            {
+                let mut restored = pre.clone();
+                restored.quantity = *take;
+                restored.version = pre
+                    .version
+                    .saturating_add(1)
+                    .max(self.wal_seq.saturating_add(1));
+                self.items.insert(pre.item_id, restored.clone());
+                if *take != pre.quantity || should_emit_exact(pre, None, &restored) {
+                    diffs.push((None, Some(restored)));
+                }
+                continue;
+            } else {
+                diffs.push((Some(pre.clone()), None));
+            }
+
+            if dest_locked || pre.singleton || Self::has_locked_flag_or_wrap_type(pre) {
+                continue;
+            }
+
+            let sibling_id = if self.is_clean_stackable_item(pre) {
+                self.items
+                    .values()
+                    .find(|existing| {
+                        existing.item_id != pre.item_id
+                            && self.is_eligible_rollback_stack_target(existing, pre, *take)
+                    })
+                    .map(|existing| existing.item_id)
+            } else {
+                None
+            };
+            if let Some(target_id) = sibling_id {
+                if let Some(existing) = self.items.get_mut(&target_id) {
+                    if let Some(new_qty) = existing.quantity.checked_add(*take) {
+                        let sib_pre = existing.clone();
+                        existing.quantity = new_qty;
+                        existing.version = existing.version.saturating_add(1);
+                        let sib_post = existing.clone();
+                        diffs.push((Some(sib_pre), Some(sib_post)));
+                        continue;
+                    }
+                }
+            }
+
+            let mut item_id = self.alloc_entity_id();
+            while self.items.contains_key(&item_id) {
+                item_id = self.alloc_entity_id();
+            }
+            let new_item = InventoryItemRecord {
+                item_id,
+                type_id: pre.type_id,
+                owner_id: pre.owner_id,
+                location_id: pre.location_id,
+                flag: pre.flag,
+                quantity: *take,
+                singleton: false,
+                version: 1,
+                ..InventoryItemRecord::default()
+            };
+            self.items.insert(item_id, new_item.clone());
+            diffs.push((None, Some(new_item)));
+        }
+        diffs
+    }
 }
 #[cfg(test)] #[path = "inventory_unit_tests.rs"] mod inventory_unit_tests;
 

@@ -506,8 +506,12 @@ async fn test_clone_vat_bay_target_only_and_psychology_cap() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(cvb_id, true);
         if let Some(c) = snap.characters.get_mut(&p1) {
+            c.solar_system_id = 30_000_142;
+            c.station_id = None;
+            c.structure_id = None;
             c.active_ship_id = rorq_id;
         }
+        snap.item_positions.insert(rorq_id, [0.0, 0.0, 0.0]);
         snap.fleets.insert(5001, eve_db::FleetRecord {
             fleet_id: 5001,
             boss_id: p1,
@@ -515,6 +519,7 @@ async fn test_clone_vat_bay_target_only_and_psychology_cap() {
             ..Default::default()
         });
     });
+    spawn_ship_ball(&ctx, 30_000_142, p1, rorq_id, 28352, DVec3::ZERO).await;
 
     let mut s1 = SessionState::new(7007);
     s1.user_id = Some(1);

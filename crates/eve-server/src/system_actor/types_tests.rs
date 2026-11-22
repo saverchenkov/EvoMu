@@ -467,6 +467,8 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::GetProtectionSnapshot { .. } => "GetProtectionSnapshot",
             SystemCommand::SyncLocationChangeInvuln { .. } => "SyncLocationChangeInvuln",
             SystemCommand::ActivateModuleCycleAtomic { .. } => "ActivateModuleCycleAtomic",
+            SystemCommand::CommitLancerActivationAtomic { .. } => "CommitLancerActivationAtomic",
+            SystemCommand::AddCapacitorClamped { .. } => "AddCapacitorClamped",
             SystemCommand::SetMovementModeBreakingProtection { .. } => "SetMovementModeBreakingProtection",
             SystemCommand::SetWarpMovementModeBreakingProtection { .. } => "SetWarpMovementModeBreakingProtection",
             SystemCommand::GotoPointBreakingProtection { .. } => "GotoPointBreakingProtection",

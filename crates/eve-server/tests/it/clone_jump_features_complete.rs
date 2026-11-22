@@ -22,6 +22,15 @@ async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &s
     ctx.dispatch_rpc(sess, svc, None, method, &args, &HashMap::new(), None).await
 }
 
+async fn spawn_rorq_in_space(ctx: &ServerContext, sys_id: u32, ship_id: i64) {
+    let b = eve_destiny::Ball {
+        id: ship_id, type_id: 28352, position: glam::DVec3::ZERO, velocity: glam::DVec3::ZERO,
+        max_velocity: 100.0, inertia: 1.0, mass: 1_000_000.0, radius: 1_000.0,
+        speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+    };
+    let _ = ctx.systems.get_or_spawn(sys_id).spawn_ball(b).await;
+}
+
 fn make_session(char_id: i64, station_id: Option<i64>, structure_id: Option<i64>, ship_id: Option<i64>) -> SessionState {
     let mut s = SessionState::new((char_id as u64) + 50000);
     s.user_id = Some((char_id as u64) + 1000);
@@ -453,6 +462,7 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
         });
     });
 
+    spawn_rorq_in_space(&ctx, 30_000_142, rorq_id).await;
     let mut sess_rorq = make_session(pilot1, None, None, Some(rorq_id));
     sess_rorq.solar_system_id = Some(30_000_142);
     rpc(&ctx, &mut sess_rorq, "dogmaIM", "Activate", vec![PyRep::Integer(cvb_mod_id)]).await.expect("Activate CVB");
@@ -482,6 +492,7 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
             ch.active_ship_id = rorq_no_oz;
         }
     });
+    spawn_rorq_in_space(&ctx, 30_000_142, rorq_no_oz).await;
     let mut sess_no_oz = make_session(pilot1, None, None, Some(rorq_no_oz));
     sess_no_oz.solar_system_id = Some(30_000_142);
     let err_oz = rpc(&ctx, &mut sess_no_oz, "dogmaIM", "Activate", vec![PyRep::Integer(cvb_no_oz)]).await.unwrap_err();

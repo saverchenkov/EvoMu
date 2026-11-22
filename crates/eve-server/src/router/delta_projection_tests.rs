@@ -1371,3 +1371,215 @@ fn items_only_and_wallets_and_items_projectors_respect_domain_masks() {
     assert!(both.iter().any(|n| n.event == "OnItemChange"));
     assert!(both.iter().any(|n| n.event == "OnBlueprintsUpdated"));
 }
+
+#[test]
+fn push_item_diffs_tx_effects_notifies_both_targets_on_owner_and_corp_hangar_transfer_r7_02() {
+    let sde = shared_sde();
+    let db = WorldRepository::with_demo_seed();
+    let char_a = 90_000_001_i64;
+    let char_b = 90_000_002_i64;
+    let corp_id = 98_000_301_i64;
+    let station_id = 60_003_760_i64;
+    let bp_type_id = *sde
+        .blueprints
+        .keys()
+        .next()
+        .expect("SDE must include at least one blueprint type");
+
+    let snap = db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::new(corp_id, "Transfer Corp", "TRNS", char_a);
+        corp.members.insert(char_a);
+        snap.corporations.insert(corp_id, corp);
+        if !snap.characters.contains_key(&char_b) {
+            let mut ch = snap.characters[&char_a].clone();
+            ch.character_id = char_b;
+            ch.name = "Char B".into();
+            snap.characters.insert(char_b, ch);
+        }
+        snap.clone()
+    });
+
+    let base_item = InventoryItemRecord {
+        item_id: 990_888_010,
+        type_id: 34,
+        owner_id: char_a,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 250,
+        singleton: false,
+        ..Default::default()
+    };
+    let mut owner_xfer_post = base_item.clone();
+    owner_xfer_post.owner_id = char_b;
+    owner_xfer_post.version = 2;
+
+    let corp_hangar_pre = InventoryItemRecord {
+        item_id: 990_888_011,
+        type_id: 34,
+        owner_id: corp_id,
+        location_id: station_id,
+        flag: InventoryFlag::CorpSAG1,
+        quantity: 500,
+        singleton: false,
+        ..Default::default()
+    };
+    let mut personal_post = corp_hangar_pre.clone();
+    personal_post.owner_id = char_a;
+    personal_post.flag = InventoryFlag::Hangar;
+    personal_post.version = 2;
+
+    let bp_pre = InventoryItemRecord {
+        item_id: 990_888_012,
+        type_id: bp_type_id,
+        owner_id: char_a,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        ..Default::default()
+    };
+    let mut bp_post = bp_pre.clone();
+    bp_post.owner_id = char_b;
+    bp_post.version = 2;
+
+    let bp_to_plain_pre = InventoryItemRecord {
+        item_id: 990_888_013,
+        type_id: bp_type_id,
+        owner_id: corp_id,
+        location_id: station_id,
+        flag: InventoryFlag::CorpSAG1,
+        quantity: 1,
+        singleton: true,
+        ..Default::default()
+    };
+    let mut bp_to_plain_post = bp_to_plain_pre.clone();
+    bp_to_plain_post.type_id = 34;
+    bp_to_plain_post.version = 2;
+
+    let mut effects = eve_db::Effects::default();
+    push_item_diffs_tx_effects(
+        &snap,
+        &mut effects,
+        &sde,
+        char_a,
+        &[
+            (Some(base_item), Some(owner_xfer_post)),
+            (Some(corp_hangar_pre), Some(personal_post)),
+            (Some(bp_pre), Some(bp_post)),
+            (Some(bp_to_plain_pre), Some(bp_to_plain_post)),
+        ],
+    );
+
+    let item_notifs_for = |target: eve_db::TxNotificationTarget| -> usize {
+        effects
+            .notifications
+            .iter()
+            .filter(|n| n.event == "OnItemChange" && n.target == target)
+            .count()
+    };
+    assert_eq!(item_notifs_for(eve_db::TxNotificationTarget::Character(char_a)), 3);
+    assert_eq!(item_notifs_for(eve_db::TxNotificationTarget::Character(char_b)), 2);
+    assert_eq!(item_notifs_for(eve_db::TxNotificationTarget::Corporation(corp_id)), 1);
+
+    let bp_targets: BTreeSet<i64> = effects
+        .notifications
+        .iter()
+        .filter(|n| n.event == "OnBlueprintsUpdated")
+        .filter_map(|n| n.args.first().and_then(|v| v.as_i64()))
+        .collect();
+    assert!(bp_targets.contains(&char_a), "old blueprint owner must receive OnBlueprintsUpdated");
+    assert!(bp_targets.contains(&char_b), "new blueprint owner must receive OnBlueprintsUpdated");
+    assert!(bp_targets.contains(&corp_id), "pre blueprint type owner must receive OnBlueprintsUpdated");
+}
+
+#[test]
+fn concurrent_cross_owner_fuel_rollback_never_notifies_unrelated_new_owner_r7_02() {
+    let ctx = ServerContext::new();
+    let char_a = 90_000_001_i64;
+    let char_b = 90_000_002_i64;
+    let ship_id = 990_888_100_i64;
+    let stack_id = 990_888_101_i64;
+
+    let (uid_a, uid_b) = ctx.db.with_mut_snapshot(|snap| {
+        let uid_a = snap.characters[&char_a].user_id;
+        let uid_b = uid_a.saturating_add(1_000);
+        if !snap.characters.contains_key(&char_b) {
+            let mut ch = snap.characters[&char_a].clone();
+            ch.character_id = char_b;
+            ch.user_id = uid_b;
+            ch.name = "Char B".into();
+            snap.characters.insert(char_b, ch);
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 11_567,
+                owner_id: char_a,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            stack_id,
+            InventoryItemRecord {
+                item_id: stack_id,
+                type_id: 16_274,
+                owner_id: char_a,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 100,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        (uid_a, snap.characters[&char_b].user_id)
+    });
+    let _ = ctx.db.acquire_online_lock(uid_a, 1, Some(char_a), false, ctx.now_unix());
+    let _ = ctx.db.acquire_online_lock(uid_b, 2, Some(char_b), false, ctx.now_unix());
+
+    let mut shadow_a = ShadowClient::from_world(char_a, &ctx.db, Some(&ctx.sde));
+    let _ = ctx.drain_notifications_for_char(char_a);
+    let _ = ctx.drain_notifications_for_char(char_b);
+
+    let reserved = ctx.db.with_mut_snapshot(|snap| {
+        snap.reserve_consume_stack_for_rollback(stack_id, 40)
+            .expect("reserve must succeed")
+    });
+    // Transfer remaining stack to char_b and notify both owners just like an inventory transfer.
+    let (pre_xfer, post_xfer) = ctx.db.with_mut_snapshot(|snap| {
+        let item = snap.items.get_mut(&stack_id).unwrap();
+        let pre = item.clone();
+        item.owner_id = char_b;
+        item.version += 1;
+        (pre, item.clone())
+    });
+    ctx.notify_item_mutation(char_a, Some(&pre_xfer), Some(&post_xfer));
+    for n in ctx.drain_notifications_for_char(char_a) {
+        shadow_a.apply_notification(&n.event, &n.args);
+    }
+    let shadow_b = ShadowClient::from_world(char_b, &ctx.db, Some(&ctx.sde));
+    let _ = ctx.drain_notifications_for_char(char_b);
+
+    ctx.rollback_consumed_items_tx(char_a, &[reserved], None);
+
+    let notifs_b = ctx.drain_notifications_for_char(char_b);
+    assert!(
+        notifs_b.iter().all(|n| n.event != "OnItemChange"),
+        "unrelated new owner char_b must never receive cross-owner rollback OnItemChange: {notifs_b:?}"
+    );
+    let notifs_a = ctx.drain_notifications_for_char(char_a);
+    assert_eq!(
+        notifs_a.iter().filter(|n| n.event == "OnItemChange").count(),
+        2,
+        "char_a must receive tombstone for transferred id and creation for minted fallback stack"
+    );
+    for n in notifs_a {
+        shadow_a.apply_notification(&n.event, &n.args);
+    }
+    shadow_a.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+    shadow_b.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+}

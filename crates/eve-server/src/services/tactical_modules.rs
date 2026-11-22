@@ -6,11 +6,13 @@ use crate::router::notify_registry::OnDbuffUpdated;
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::inventory_fitting::{scanners_superweapons_state, ActiveDbuffEntry};
 use crate::system_actor::SystemHandle;
+use eve_db::lock_rank::{RankedMutex, RANK_LEAF};
 use eve_destiny::{Ball, DamageVector, DVec3, TargetLock};
 use eve_dogma::{DogmaItemState, ShipFittingEngine};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{attr_ids, InvType, TypeId};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub use super::tactical_modules_probes::*;
@@ -42,6 +44,197 @@ pub struct ActiveEntosisLinkState {
     pub is_capital: bool,
 }
 
+#[derive(Debug, Default)]
+struct ActiveFuelReserveEntry {
+    in_flight_reserves: usize,
+    exposed_seq: u64,
+}
+
+#[derive(Debug, Default)]
+struct ActiveFuelReserveMap {
+    next_exposed_seq: u64,
+    by_item: HashMap<(usize, i64), ActiveFuelReserveEntry>,
+}
+
+/// Leaf lock rank strictly above `RANK_WORLD_INNER` (40), `RANK_LEAF` (60), and
+/// `RANK_TRANSITION_GRACE` (65), and strictly below `RANK_CLOCK` (70), with zero inner locks
+/// acquired while held so `notify_inner` can observe exposure even when a caller holds a `RANK_LEAF` lock.
+const RANK_FUEL_RESERVE: u16 = RANK_LEAF + 6;
+
+/// Bounded, refcounted tracker of currently in-flight silent fuel reservations
+/// (`BF-1486-2B-R8-01`, `BF-1486-2B-R8-02`). Tracks only item IDs with at least one
+/// active reservation so steady-state `OnItemChange` traffic performs a single atomic load
+/// with zero DB snapshot reads or mutex/map work.
+#[derive(Debug)]
+pub struct ActiveFuelReserveTracker {
+    active_reserve_count: AtomicUsize,
+    inner: RankedMutex<ActiveFuelReserveMap, RANK_FUEL_RESERVE>,
+}
+
+impl Default for ActiveFuelReserveTracker {
+    fn default() -> Self {
+        Self {
+            active_reserve_count: AtomicUsize::new(0),
+            inner: RankedMutex::new(ActiveFuelReserveMap::default()),
+        }
+    }
+}
+
+/// RAII guard for one active silent fuel reservation across pre-commit async awaits and rollback.
+pub struct ActiveFuelReserveGuard {
+    tracker: Arc<ActiveFuelReserveTracker>,
+    db_key: usize,
+    item_seqs: Vec<(i64, u64)>,
+}
+
+fn item_row_id(row: &PyRep) -> Option<i64> {
+    match row {
+        PyRep::DBRow { columns, .. } => columns
+            .iter()
+            .find(|(name, _)| name == "itemID")
+            .and_then(|(_, v)| v.as_i64()),
+        PyRep::KeyVal(map) => map.get("itemID").and_then(PyRep::as_i64),
+        PyRep::Dict(entries) => entries.iter().find_map(|(k, v)| match k {
+            PyRep::String(s) | PyRep::Token(s) if s == "itemID" => v.as_i64(),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+impl ActiveFuelReserveTracker {
+    pub fn begin_reserve(
+        self: &Arc<Self>,
+        db_key: usize,
+        item_ids: impl IntoIterator<Item = i64>,
+    ) -> ActiveFuelReserveGuard {
+        let mut unique_ids: Vec<i64> = item_ids.into_iter().collect();
+        unique_ids.sort_unstable();
+        unique_ids.dedup();
+        if unique_ids.is_empty() {
+            return ActiveFuelReserveGuard {
+                tracker: Arc::clone(self),
+                db_key,
+                item_seqs: Vec::new(),
+            };
+        }
+        let mut item_seqs = Vec::with_capacity(unique_ids.len());
+        {
+            let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            for item_id in unique_ids {
+                let entry = map.by_item.entry((db_key, item_id)).or_default();
+                entry.in_flight_reserves += 1;
+                item_seqs.push((item_id, entry.exposed_seq));
+            }
+            self.active_reserve_count
+                .fetch_add(item_seqs.len(), Ordering::Release);
+        }
+        ActiveFuelReserveGuard {
+            tracker: Arc::clone(self),
+            db_key,
+            item_seqs,
+        }
+    }
+
+    fn bump_item(map: &mut ActiveFuelReserveMap, db_key: usize, item_id: i64) {
+        let Some(entry) = map.by_item.get_mut(&(db_key, item_id)) else {
+            return;
+        };
+        map.next_exposed_seq = map.next_exposed_seq.saturating_add(1);
+        entry.exposed_seq = map.next_exposed_seq;
+    }
+
+    /// Bumps `exposed_seq` for any currently tracked active-reservation item IDs present in
+    /// `"OnItemChange"` / `"OnMultipleItemChange"` BEFORE notification dispatch/staging.
+    pub fn observe_pre_emit_event(&self, db_key: usize, event: &str, payload_args: &[PyRep]) {
+        if self.active_reserve_count.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        if !matches!(event, "OnItemChange" | "OnMultipleItemChange") {
+            return;
+        }
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if map.by_item.is_empty() {
+            return;
+        }
+        match event {
+            "OnItemChange" => {
+                if let [row, ..] = payload_args {
+                    if let Some(id) = item_row_id(row) {
+                        Self::bump_item(&mut map, db_key, id);
+                    }
+                }
+            }
+            "OnMultipleItemChange" => {
+                if let [PyRep::List(rows) | PyRep::Tuple(rows), ..] = payload_args {
+                    for entry in rows {
+                        let id_opt = match entry {
+                            PyRep::Tuple(pair) | PyRep::List(pair) => {
+                                if let [row, ..] = pair.as_slice() {
+                                    item_row_id(row)
+                                } else {
+                                    None
+                                }
+                            }
+                            other => item_row_id(other),
+                        };
+                        if let Some(id) = id_opt {
+                            Self::bump_item(&mut map, db_key, id);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn has_exposed_since(&self, guard: &ActiveFuelReserveGuard, item_id: i64) -> bool {
+        let Some(&(_, reserve_seq)) = guard.item_seqs.iter().find(|&&(id, _)| id == item_id) else {
+            return false;
+        };
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        map.by_item
+            .get(&(guard.db_key, item_id))
+            .is_some_and(|entry| entry.exposed_seq > reserve_seq)
+    }
+
+    pub fn active_item_count(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).by_item.len()
+    }
+
+    pub fn active_reserve_count(&self) -> usize {
+        self.active_reserve_count.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for ActiveFuelReserveGuard {
+    fn drop(&mut self) {
+        if self.item_seqs.is_empty() {
+            return;
+        }
+        let mut map = self.tracker.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut decremented = 0usize;
+        for &(item_id, _) in &self.item_seqs {
+            if let std::collections::hash_map::Entry::Occupied(mut occ) =
+                map.by_item.entry((self.db_key, item_id))
+            {
+                decremented += 1;
+                let entry = occ.get_mut();
+                if entry.in_flight_reserves <= 1 {
+                    occ.remove();
+                } else {
+                    entry.in_flight_reserves -= 1;
+                }
+            }
+        }
+        if decremented > 0 {
+            self.tracker
+                .active_reserve_count
+                .fetch_sub(decremented, Ordering::Release);
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct TacticalModulesState {
     pub remote_assistance: HashMap<(usize, i64), Vec<ProjectedRemoteAssistance>>,
@@ -56,6 +249,7 @@ pub struct TacticalModulesState {
     pub active_interdiction_probes: HashMap<(usize, i64), super::tactical_module_mechanics::ActiveInterdictionProbe>,
     pub launcher_last_fire: HashMap<(usize, i64), super::tactical_module_mechanics::LauncherFireStamp>,
     pub system_sim_time_s: HashMap<(usize, u32), f64>,
+    pub(crate) in_flight_superweapons: std::collections::HashSet<(usize, i64)>,
 }
 
 pub fn is_clone_vat_bay_active_required(ctx: &ServerContext, ship_id: i64) -> bool {

@@ -1600,3 +1600,462 @@ async fn cyno_light_relocate_ship_relocate_caller_and_caller_in_space_pin_mutant
     );
 }
 
+#[tokio::test]
+async fn cyno_expiry_clears_actor_cycle_and_allows_same_module_relight_f04() {
+    let (lowsec, char_id, ship_id, mod_id, fuel_id, fleet_id) = (30_002_505_u32, 94_590_001_i64, 94_590_101_i64, 94_590_201_i64, 94_590_301_i64, 77_590_i64);
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(lowsec, custom_system(sde, lowsec, 10_000_030, 0.2, [0.0, 0.0, 0.0]));
+        sde.types.insert(21_096, custom_inv_type(sde, 21_096, 658, 7, 20.0, "Cynosural Field Generator I", &[(73, 600_000.0), (713, 16_273.0), (714, 500.0), (182, 21_603.0), (277, 1.0)]));
+        sde.types.insert(21_094, custom_inv_type(sde, 21_094, 2020, 2, 100.0, "Cynosural Field", &[]));
+        sde.type_lists.insert(99_317, eve_sde::TypeListInfo { type_list_id: 99_317, name: "Standard Cyno Beacons".into(), included_type_ids: vec![21_094, 21_096, 57_425], ..Default::default() });
+    });
+    ensure_char(&ctx, char_id, 98_590_001, lowsec, ship_id, Some(fleet_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(fleet_id, FleetRecord { fleet_id, boss_id: char_id, members: vec![char_id], ..Default::default() });
+        for (id, tid, loc, flg, qty, sgl) in [
+            (ship_id, 587_u32, lowsec as i64, InventoryFlag::None, 1, true),
+            (mod_id, 21_096_u32, ship_id, InventoryFlag::HiSlot0, 1, true),
+            (fuel_id, 16_273_u32, ship_id, InventoryFlag::Cargo, 5_000, false),
+        ] {
+            snap.items.insert(id, InventoryItemRecord {
+                item_id: id, type_id: tid, owner_id: char_id, location_id: loc, flag: flg, quantity: qty, singleton: sgl, ..Default::default()
+            });
+        }
+        snap.skills.entry(char_id).or_default().insert(21_603, TrainedSkillRecord {
+            type_id: 21_603, level: 5, skill_points: 256_000.0,
+        });
+    });
+    let sys = ctx.systems.get_or_spawn(lowsec);
+    sys.spawn_ball_with_meta(
+        eve_destiny::Ball { id: ship_id, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
+        eve_destiny::CombatState { capacitor: 50_000.0, max_capacitor: 50_000.0, ..Default::default() },
+        eve_destiny::SlimItemMeta::default(),
+    ).await.unwrap();
+
+    let cyno_mod = ctx.sde.types.get(&21_096).unwrap().clone();
+    let first = super::super::light_cyno(&ctx, &sys, char_id, ship_id, lowsec, mod_id, &cyno_mod).await.unwrap();
+    let dur_s = first.dict_get("durationSeconds").and_then(PyRep::as_f64).unwrap_or(600.0).ceil() as u64;
+    assert!(sys.has_module_cycle(ship_id, mod_id).await);
+
+    // 1. Advance virtual clock WITHOUT stepping actor, then sweep -> actor cycle cleared, relight succeeds.
+    ctx.db.clock().advance_secs(dur_s + 5);
+    super::super::sweep_expired_cyno_beacons(&ctx);
+    assert!(!sys.has_module_cycle(ship_id, mod_id).await);
+    assert!(super::super::light_cyno(&ctx, &sys, char_id, ship_id, lowsec, mod_id, &cyno_mod).await.unwrap().dict_get("beaconID").is_some());
+
+    // 2. Advance virtual clock WITHOUT sweeping -> repeat=0 + started_at_unix lets same module relight cleanly.
+    ctx.db.clock().advance_secs(dur_s + 5);
+    assert!(super::super::light_cyno(&ctx, &sys, char_id, ship_id, lowsec, mod_id, &cyno_mod).await.unwrap().dict_get("beaconID").is_some());
+    super::super::on_cyno_ship_destroyed(&ctx, ship_id);
+}
+
+#[tokio::test]
+async fn light_cyno_slot_reject_still_cleans_up_other_ships_expired_beacon_and_cycle_bf1486_2b_01() {
+    let (lowsec, fleet_id) = (30_002_506_u32, 77_591_i64);
+    let (char_a, ship_a, mod_a, fuel_a) = (94_591_001_i64, 94_591_101_i64, 94_591_201_i64, 94_591_301_i64);
+    let (char_b, ship_b, mod_b, fuel_b) = (94_592_001_i64, 94_592_101_i64, 94_592_201_i64, 94_592_301_i64);
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(lowsec, custom_system(sde, lowsec, 10_000_030, 0.2, [0.0, 0.0, 0.0]));
+        sde.types.insert(21_096, custom_inv_type(sde, 21_096, 658, 7, 20.0, "Cynosural Field Generator I", &[(73, 600_000.0), (713, 16_273.0), (714, 500.0), (182, 21_603.0), (277, 1.0)]));
+        sde.types.insert(21_094, custom_inv_type(sde, 21_094, 2020, 2, 100.0, "Cynosural Field", &[]));
+        sde.type_lists.insert(99_317, eve_sde::TypeListInfo { type_list_id: 99_317, name: "Standard Cyno Beacons".into(), included_type_ids: vec![21_094, 21_096, 57_425], ..Default::default() });
+    });
+    for (cid, sid, mid, fid) in [(char_a, ship_a, mod_a, fuel_a), (char_b, ship_b, mod_b, fuel_b)] {
+        ensure_char(&ctx, cid, 98_591_001, lowsec, sid, Some(fleet_id));
+        ctx.db.with_mut_snapshot(|snap| {
+            for (id, tid, loc, flg, qty, sgl) in [
+                (sid, 587_u32, lowsec as i64, InventoryFlag::None, 1, true),
+                (mid, 21_096_u32, sid, InventoryFlag::HiSlot0, 1, true),
+                (fid, 16_273_u32, sid, InventoryFlag::Cargo, 5_000, false),
+            ] {
+                snap.items.insert(id, InventoryItemRecord { item_id: id, type_id: tid, owner_id: cid, location_id: loc, flag: flg, quantity: qty, singleton: sgl, ..Default::default() });
+            }
+            snap.skills.entry(cid).or_default().insert(21_603, TrainedSkillRecord { type_id: 21_603, level: 5, skill_points: 256_000.0 });
+        });
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(fleet_id, FleetRecord { fleet_id, boss_id: char_a, members: vec![char_a, char_b], ..Default::default() });
+        snap.characters.get_mut(&char_a).unwrap().user_id = 1;
+    });
+    ctx.db.acquire_online_lock(1, 1, Some(char_a), true, ctx.now_unix_secs()).unwrap();
+    let sys = ctx.systems.get_or_spawn(lowsec);
+    for sid in [ship_a, ship_b] {
+        sys.spawn_ball_with_meta(
+            eve_destiny::Ball { id: sid, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
+            eve_destiny::CombatState { capacitor: 50_000.0, max_capacitor: 50_000.0, ..Default::default() },
+            eve_destiny::SlimItemMeta::default(),
+        ).await.unwrap();
+    }
+
+    let cyno_mod = ctx.sde.types.get(&21_096).unwrap().clone();
+    let rep_b = super::super::light_cyno(&ctx, &sys, char_b, ship_b, lowsec, mod_b, &cyno_mod).await.unwrap();
+    let beacon_b = rep_b.dict_get("beaconID").and_then(PyRep::as_i64).unwrap();
+    let dur_s = rep_b.dict_get("durationSeconds").and_then(PyRep::as_f64).unwrap_or(600.0).ceil() as u64;
+
+    ctx.db.clock().advance_secs(dur_s.saturating_sub(10));
+    let rep_a = super::super::light_cyno(&ctx, &sys, char_a, ship_a, lowsec, mod_a, &cyno_mod).await.unwrap();
+    let beacon_a = rep_a.dict_get("beaconID").and_then(PyRep::as_i64).unwrap();
+
+    // Expire ship_b while ship_a remains active; a rejected slot reservation on ship_a must still clean up ship_b.
+    ctx.db.clock().advance_secs(20);
+    assert!(sys.get_ball_snapshot(beacon_b).await.unwrap().is_some());
+    assert!(sys.has_module_cycle(ship_b, mod_b).await);
+    let _ = ctx.drain_notifications_for_char(char_a);
+
+    let err = super::super::reserve_cyno_beacon_slot_and_cleanup_expired(
+        &ctx, char_a, ship_a, 21_094, lowsec, Some(DVec3::ZERO), ctx.now_unix_secs(), dur_s as f64,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "CannotLightCynoInSystem");
+
+    assert!(sys.get_ball_snapshot(beacon_b).await.unwrap().is_none(), "expired beacon ball must be removed even on rejected slot");
+    assert!(!sys.has_module_cycle(ship_b, mod_b).await, "expired actor cycle must be removed even on rejected slot");
+    assert!(sys.get_ball_snapshot(beacon_a).await.unwrap().is_some(), "active ship_a beacon must stay alive");
+    assert!(sys.has_module_cycle(ship_a, mod_a).await, "active ship_a cycle must stay alive");
+    assert!(ctx.drain_notifications_for_char(char_a).iter().any(|n| n.event == "OnFleetJumpBeaconModuleChange"));
+    super::super::on_cyno_ship_destroyed(&ctx, ship_a);
+}
+
+#[tokio::test]
+async fn cyno_exact_stack_rollback_preserves_id_and_diverged_or_destroyed_ship_r6() {
+    let (lowsec, char_a, ship_a, ship_b, mod_a, fuel_id, fleet_id) = (
+        30_002_505_u32,
+        94_595_001_i64,
+        94_595_101_i64,
+        94_595_102_i64,
+        94_595_201_i64,
+        94_595_301_i64,
+        77_595_i64,
+    );
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(
+            lowsec,
+            custom_system(sde, lowsec, 10_000_030, 0.2, [0.0, 0.0, 0.0]),
+        );
+        sde.types.insert(
+            21_096,
+            custom_inv_type(
+                sde,
+                21_096,
+                658,
+                7,
+                20.0,
+                "Cynosural Field Generator I",
+                &[
+                    (73, 600_000.0),
+                    (713, 16_273.0),
+                    (714, 500.0),
+                    (182, 21_603.0),
+                    (277, 1.0),
+                ],
+            ),
+        );
+        sde.types.insert(
+            21_094,
+            custom_inv_type(sde, 21_094, 2020, 2, 100.0, "Cynosural Field", &[]),
+        );
+        sde.type_lists.insert(
+            99_317,
+            eve_sde::TypeListInfo {
+                type_list_id: 99_317,
+                name: "Standard Cyno Beacons".into(),
+                included_type_ids: vec![21_094, 21_096, 57_425],
+                ..Default::default()
+            },
+        );
+    });
+    ensure_char(&ctx, char_a, 98_595_001, lowsec, ship_a, Some(fleet_id));
+    let v0 = ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_a).unwrap().user_id = 1;
+        snap.fleets.insert(
+            fleet_id,
+            FleetRecord {
+                fleet_id,
+                boss_id: char_a,
+                members: vec![char_a],
+                ..Default::default()
+            },
+        );
+        for (id, tid, loc, flg, qty, sgl) in [
+            (ship_a, 587_u32, lowsec as i64, InventoryFlag::None, 1, true),
+            (ship_b, 587_u32, lowsec as i64, InventoryFlag::None, 1, true),
+            (mod_a, 21_096_u32, ship_a, InventoryFlag::HiSlot0, 1, true),
+            (fuel_id, 16_273_u32, ship_a, InventoryFlag::Cargo, 250, false),
+        ] {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_a,
+                    location_id: loc,
+                    flag: flg,
+                    quantity: qty,
+                    singleton: sgl,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.skills.entry(char_a).or_default().insert(
+            21_603,
+            TrainedSkillRecord {
+                type_id: 21_603,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        snap.items[&fuel_id].version
+    });
+    ctx.db
+        .acquire_online_lock(1, 1, Some(char_a), true, ctx.now_unix())
+        .unwrap();
+
+    let sys = ctx.systems.get_or_spawn(lowsec);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_a,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Warp {
+                origin: DVec3::ZERO,
+                destination: DVec3::new(1_000_000.0, 0.0, 0.0),
+                warp_speed_au_s: 3.0,
+                total_distance: 1_000_000.0,
+                phase: eve_destiny::WarpPhase::Cruising,
+                elapsed_warp_time: 5.0,
+            },
+        },
+        CombatState {
+            capacitor: 50_000.0,
+            max_capacitor: 50_000.0,
+            ..Default::default()
+        },
+        SlimItemMeta::default(),
+    )
+    .await
+    .unwrap();
+    let cyno_mod = ctx.sde.types.get(&21_096).unwrap().clone();
+    let _ = ctx.drain_notifications_for_char(char_a);
+
+    // 1. Exact full-stack warp rejection restores fuel_id in place (monotonic version > v0) with 0 OnItemChange.
+    let warp_err = super::super::light_cyno(&ctx, &sys, char_a, ship_a, lowsec, mod_a, &cyno_mod)
+        .await
+        .expect_err("warping ship must reject cyno and preserve exact fuel_id");
+    assert_eq!(warp_err.code, "CantActivateInWarp");
+    assert!(
+        !ctx.drain_notifications_for_char(char_a)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "exact pre.item_id rollback must emit 0 OnItemChange notifications"
+    );
+    ctx.db.with_snapshot(|s| {
+        let f = &s.items[&fuel_id];
+        assert_eq!(f.quantity, 250);
+        assert!(f.version > v0);
+    });
+    {
+        let ck = super::super::ctx_key(&ctx);
+        let st = super::super::cyno_state().read().unwrap();
+        assert!(!st.beacons.contains_key(&(ck, ship_a)));
+        assert!(!st.beacon_cycles.contains_key(&(ck, ship_a)));
+    }
+
+    // 2. Active cyno + P2-2 guard: rejected duplicate relight leaves active beacon_cycles intact.
+    let _ = sys.remove_ball(ship_a).await;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_a,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            capacitor: 50_000.0,
+            max_capacitor: 50_000.0,
+            ..Default::default()
+        },
+        SlimItemMeta::default(),
+    )
+    .await
+    .unwrap();
+    super::super::light_cyno(&ctx, &sys, char_a, ship_a, lowsec, mod_a, &cyno_mod)
+        .await
+        .expect("stopped ship lights cyno after exact fuel_id rollback");
+    assert_eq!(
+        super::super::light_cyno(&ctx, &sys, char_a, ship_a, lowsec, mod_a, &cyno_mod)
+            .await
+            .unwrap_err()
+            .code,
+        "CannotLightCynoInSystem"
+    );
+    {
+        let ck = super::super::ctx_key(&ctx);
+        let st = super::super::cyno_state().read().unwrap();
+        assert_eq!(st.beacon_cycles.get(&(ck, ship_a)).copied(), Some((lowsec, mod_a)));
+    }
+    super::super::on_cyno_ship_destroyed(&ctx, ship_a);
+    let _ = ctx.drain_notifications_for_char(char_a);
+
+    // 3. Diverged refund emits 2 OnItemChange notifications and preserves non-mergeable remainder.
+    let (div_id, div_reserved) = ctx.db.with_mut_snapshot(|snap| {
+        let id = snap.alloc_entity_id();
+        snap.items.insert(
+            id,
+            InventoryItemRecord {
+                item_id: id,
+                type_id: 16_273,
+                owner_id: char_a,
+                location_id: ship_b,
+                flag: InventoryFlag::Cargo,
+                quantity: 600,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let reserved = super::super::consume_from_ship(snap, ship_b, 16_273, 500).unwrap();
+        snap.items.get_mut(&id).unwrap().singleton = true;
+        (id, reserved)
+    });
+    super::super::refund_ship_fuel_items(&ctx, char_a, &div_reserved, None);
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_a)
+            .iter()
+            .filter(|n| n.event == "OnItemChange")
+            .count(),
+        2,
+        "diverged cyno fuel rollback must emit both OnItemChange diffs"
+    );
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&div_id].quantity, 100);
+        let total: i32 = s
+            .items
+            .values()
+            .filter(|i| i.location_id == ship_b && i.type_id == 16_273)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(total, 600);
+    });
+
+    // 4. Destroyed ship refund skips orphan insertion and emits deletion OnItemChange.
+    let dead_reserved = ctx.db.with_mut_snapshot(|snap| {
+        snap.items.retain(|_, i| !(i.location_id == ship_b && i.type_id == 16_273));
+        let dead_fid = snap.alloc_entity_id();
+        snap.items.insert(
+            dead_fid,
+            InventoryItemRecord {
+                item_id: dead_fid,
+                type_id: 16_273,
+                owner_id: char_a,
+                location_id: ship_b,
+                flag: InventoryFlag::Cargo,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let reserved = super::super::consume_from_ship(snap, ship_b, 16_273, 500).unwrap();
+        snap.items.remove(&ship_b);
+        reserved
+    });
+    let _ = ctx.drain_notifications_for_char(char_a);
+    super::super::refund_ship_fuel_items(&ctx, char_a, &dead_reserved, None);
+    ctx.db.with_snapshot(|s| {
+        assert!(
+            !s.items
+                .values()
+                .any(|i| i.location_id == ship_b && i.type_id == 16_273),
+            "destroyed ship rollback must not insert orphaned cyno fuel"
+        );
+    });
+    assert!(
+        ctx.drain_notifications_for_char(char_a)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "destroyed ship cyno refund must emit OnItemChange tombstone"
+    );
+
+    // 5. P2-R6-01 & P2-R6-03: singleton/locked fuel is ignored; absent ball maps ShipNotInSpace and rolls back fuel.
+    let (ship_c, mod_c, locked_fid, singleton_fid, valid_fid) = ctx.db.with_mut_snapshot(|snap| {
+        let sc = snap.alloc_entity_id();
+        let mc = snap.alloc_entity_id();
+        let lf = snap.alloc_entity_id();
+        let sf = snap.alloc_entity_id();
+        let vf = snap.alloc_entity_id();
+        for (id, tid, loc, flg, qty, sgl) in [
+            (sc, 587_u32, lowsec as i64, InventoryFlag::None, 1, true),
+            (mc, 21_096_u32, sc, InventoryFlag::HiSlot0, 1, true),
+            (lf, 16_273_u32, sc, InventoryFlag::Locked, 1_000, false),
+            (sf, 16_273_u32, sc, InventoryFlag::Cargo, 1_000, true),
+        ] {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_a,
+                    location_id: loc,
+                    flag: flg,
+                    quantity: qty,
+                    singleton: sgl,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            vf,
+            InventoryItemRecord {
+                item_id: vf,
+                type_id: 16_273,
+                owner_id: char_a,
+                location_id: sc,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (sc, mc, lf, sf, vf)
+    });
+    let _ = ctx.drain_notifications_for_char(char_a);
+    let nis_err = super::super::light_cyno(&ctx, &sys, char_a, ship_c, lowsec, mod_c, &cyno_mod)
+        .await
+        .expect_err("ship_c without spawned ball must reject with ShipNotInSpace");
+    assert_eq!(nis_err.code, "ShipNotInSpace");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&valid_fid].quantity, 500);
+        assert_eq!(s.items[&locked_fid].quantity, 1_000);
+        assert_eq!(s.items[&singleton_fid].quantity, 1_000);
+    });
+    assert!(
+        !ctx.drain_notifications_for_char(char_a)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "exact ShipNotInSpace fuel rollback must emit 0 OnItemChange"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_c).unwrap().flag = InventoryFlag::Locked;
+        let (_, avail) = super::super::ship_fuel_stacks_and_available(snap, ship_c, 16_273);
+        assert_eq!(
+            avail, 0,
+            "ancestor-locked and singleton cyno fuel stacks must never satisfy fuel availability"
+        );
+    });
+}
+

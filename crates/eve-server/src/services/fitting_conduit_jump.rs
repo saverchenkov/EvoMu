@@ -94,15 +94,7 @@ pub(super) fn is_covert_ops_cloak_capable(ctx: &ServerContext, ship_type: &eve_s
 pub fn sweep_expired_cyno_beacons(ctx: &ServerContext) {
     let (now, ctx_k) = (ctx.now_unix_secs(), ctx_key(ctx));
     let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-    let mut expired_beacons = Vec::new();
-    st.beacons.retain(|&(k, _), b| {
-        if k == ctx_k && b.expires_at_unix <= now {
-            expired_beacons.push((b.char_id, b.solar_system_id, b.beacon_id, b.beacon_type_id));
-            false
-        } else {
-            true
-        }
-    });
+    let (expired_beacons, expired_cycles) = drain_expired_beacons(&mut st, ctx_k, now);
     let mut expired_bridges = Vec::new();
     st.bridges.retain(|&(k, _), br| {
         if k == ctx_k && br.expires_at_unix <= now {
@@ -113,7 +105,7 @@ pub fn sweep_expired_cyno_beacons(ctx: &ServerContext) {
         }
     });
     drop(st);
-    cleanup_expired_beacons(ctx, expired_beacons);
+    cleanup_expired_beacons_and_cycles(ctx, expired_beacons, expired_cycles);
     for (sys_id, bridger_ship_id, portal_mod_id, ball_id) in expired_bridges {
         let sys = ctx.systems.get_or_spawn(sys_id);
         if ball_id != 0 {
