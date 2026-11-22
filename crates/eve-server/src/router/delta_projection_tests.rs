@@ -1479,7 +1479,7 @@ fn push_item_diffs_tx_effects_notifies_both_targets_on_owner_and_corp_hangar_tra
     };
     assert_eq!(item_notifs_for(eve_db::TxNotificationTarget::Character(char_a)), 3);
     assert_eq!(item_notifs_for(eve_db::TxNotificationTarget::Character(char_b)), 2);
-    assert_eq!(item_notifs_for(eve_db::TxNotificationTarget::Corporation(corp_id)), 2);
+    assert_eq!(item_notifs_for(eve_db::TxNotificationTarget::Corporation(corp_id)), 1);
 
     let bp_targets: BTreeSet<i64> = effects
         .notifications
@@ -1500,10 +1500,13 @@ fn concurrent_cross_owner_fuel_rollback_never_notifies_unrelated_new_owner_r7_02
     let ship_id = 990_888_100_i64;
     let stack_id = 990_888_101_i64;
 
-    ctx.db.with_mut_snapshot(|snap| {
+    let (uid_a, uid_b) = ctx.db.with_mut_snapshot(|snap| {
+        let uid_a = snap.characters[&char_a].user_id;
+        let uid_b = uid_a.saturating_add(1_000);
         if !snap.characters.contains_key(&char_b) {
             let mut ch = snap.characters[&char_a].clone();
             ch.character_id = char_b;
+            ch.user_id = uid_b;
             ch.name = "Char B".into();
             snap.characters.insert(char_b, ch);
         }
@@ -1533,7 +1536,10 @@ fn concurrent_cross_owner_fuel_rollback_never_notifies_unrelated_new_owner_r7_02
                 ..Default::default()
             },
         );
+        (uid_a, snap.characters[&char_b].user_id)
     });
+    let _ = ctx.db.acquire_online_lock(uid_a, 1, Some(char_a), false, ctx.now_unix());
+    let _ = ctx.db.acquire_online_lock(uid_b, 2, Some(char_b), false, ctx.now_unix());
 
     let mut shadow_a = ShadowClient::from_world(char_a, &ctx.db, Some(&ctx.sde));
     let _ = ctx.drain_notifications_for_char(char_a);

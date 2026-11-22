@@ -1357,6 +1357,9 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
     let dd_tid = find_doomsday_type_id(&ctx.sde);
 
     setup_ship_and_module(&ctx, null_sys, char_id, titan_id, titan_tid, mod_id, dd_tid, DVec3::ZERO);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
 
     // 1. 2x full depletion (`50_000 -> 25_000 + 25_000 -> None`), Call A commits tombstone BEFORE Call B rolls back.
     ctx.db.with_mut_snapshot(|snap| {
@@ -1524,6 +1527,9 @@ async fn titan_doomsday_and_slash_serialize_concurrent_inflight_activations_bf14
     }
 
     setup_ship_and_module(&ctx, null_sys, char_id, titan_id, titan_tid, mod_dd, dd_tid, DVec3::ZERO);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
     setup_ship_and_module(
         &ctx,
         null_sys,
