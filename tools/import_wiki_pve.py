@@ -27,6 +27,7 @@ import difflib
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import sqlite3
@@ -936,7 +937,13 @@ _HDR_AGGRO_GUARD_RE = re.compile(
 _HDR_NON_TRIGGER_NOTE_RE = re.compile(
     r"^(?:triggers?\s*:.*|triggers?\b(?!ed)\b.*|hair[-\s]?trigger\b.*|"
     r"(?:high|low|null)[-\s]?sec\b.*|"
-    r"spawns?\s+(?:(?:the|a|an|next|more|additional)\s+){0,2}(?:waves?|reinforcements?|groups?|as\s+(?:\d+\s+|a\s+single\s+)?groups?)\b.*)$",
+    r"spawns?\s+(?:"
+    r"(?:(?:the|a|an|next|more|additional|\d+(?:st|nd|rd|th)|"
+    r"first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+){0,2}"
+    r"(?:waves?|reinforcements?|groups?|as\s+(?:\d+\s+|a\s+single\s+)?groups?)\b.*|"
+    r"(?:at|near|around|from|by)\b.*|"
+    r"\d[\d.,\s-]*\s*(?:km|m\b|au).*|"
+    r"in\s+(?!the\s+next\b)(?!(?:waves?|reinforcements?|\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?))\b).*))$",
     re.I,
 )
 _HDR_PREVENTIVE_OR_DIST_RE = re.compile(
@@ -1292,13 +1299,13 @@ def extract_item_objective_payload(objective_raw: str, sde: "SdeIndex") -> dict[
         r"place|manufacture|build|produce|reprocess)\s*:?\s*(?:the\s+)?"
         r"(\d[\d,]*)(?:\s*x\s+|\s+(?:units?\s+(?:of\s+)?)?)"
         r"([A-Za-z][A-Za-z0-9' \-/“”\"]+?)"
-        r"(?:\s+(?:from|and\s+return|and\s+bring|to\s+the|to\s+your|dropped\s+by)\b|[.;()]|$)",
+        r"(?:\s+(?:from|and\s+return|and\s+bring|to\s+(?:the|your|agent|station|destination|dropoff)|dropped\s+by)\b|[.;()]|$)",
         s_no_vol,
         re.I,
     ) or re.search(
         r"^\s*(\d[\d,]*)\s*x\s+(?:units?\s+(?:of\s+)?)?"
         r"([A-Za-z][A-Za-z0-9' \-/“”\"]+?)"
-        r"(?:\s+(?:from|and\s+return|and\s+bring|to\s+the|to\s+your|dropped\s+by)\b|[.;()]|$)",
+        r"(?:\s+(?:from|and\s+return|and\s+bring|to\s+(?:the|your|agent|station|destination|dropoff)|dropped\s+by)\b|[.;()]|$)",
         s_no_vol,
         re.I,
     )
@@ -1308,9 +1315,12 @@ def extract_item_objective_payload(objective_raw: str, sde: "SdeIndex") -> dict[
     else:
         m_noun = re.search(
             r"\b(?:retrieve|acquire(?:\s+these\s+goods)?|recover|bring(?:\s+back)?|fetch|loot|steal|"
-            r"obtain|collect|rescue|save|pick\s+up|provide|buy|return|gather)\s+"
-            r"(?:the\s+|some\s+|all\s+)?([A-Za-z][A-Za-z0-9' \-/“”\"]+?)"
-            r"(?:\s+(?:from|and\s+return|and\s+bring|to\s+the|to\s+your|dropped\s+by|in\s+the)\b|[.;()]|$)",
+            r"obtain|collect|rescue|save|pick\s+up|provide|buy|return|gather|"
+            r"deliver|transport|haul|move|place|manufacture|build|produce)\s+"
+            r"(?:the\s+|some\s+|all\s+)?"
+            r"(?!(?:to|into|onto|from|at|in|on|with|near|around|away|back)\b)"
+            r"([A-Za-z][A-Za-z0-9' \-/“”\"]+?)"
+            r"(?:\s+(?:from|and\s+return|and\s+bring|to\s+(?:the|your|agent|station|destination|dropoff)|dropped\s+by|in\s+the)\b|[.;()]|$)",
             s_no_vol,
             re.I,
         )
@@ -1431,6 +1441,8 @@ def build_structured_objective(
         ]
         if not ptoks:
             return None, []
+        min_score = 2 if len(ptoks) >= 2 else 1
+        best_any_score = 0
         best_score = 0
         best_name: str | None = None
         best_ids: list[int] = []
@@ -1438,16 +1450,20 @@ def build_structured_objective(
             for w in r["waves"]:
                 for sp in w["spawns"]:
                     rname = sp.get("raw_name") or ""
-                    ids = sp["resolution"].get("type_ids") or []
-                    if not rname or not ids:
+                    if not rname:
                         continue
                     rwords = set(re.findall(r"[a-z0-9]+", rname.lower()))
                     score = sum(1 for tk in ptoks if tk in rwords)
+                    if score > best_any_score:
+                        best_any_score = score
+                    ids = sp["resolution"].get("type_ids") or []
+                    if not ids:
+                        continue
                     if score > best_score:
                         best_score = score
                         best_name = rname
                         best_ids = ids
-        if best_ids:
+        if best_ids and best_score >= min_score and best_score >= best_any_score:
             return best_name, best_ids
         return target_phrase, sde.lookup_item_type_ids(target_phrase)
 
@@ -3666,7 +3682,7 @@ _SEQ_SEPARATOR_RE = re.compile(
     r"triggered\s+(?:by|when)\b|"
     r"next\s+(?:waves?|reinforcements?|spawns?)\b|"
     r"(?:first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))\s+(?:waves?|reinforcements?|spawns?)\b|"
-    r"spawns?\b(?!\s+(?:(?:at|near|around|from|by)\b|"
+    r"spawns?\b(?!\s+(?:(?:at|near|around|from|by)\b|\d[\d.,\s-]*\s*(?:km|m\b|au)\b|"
     r"in\s+(?!the\s+next\b)(?!(?:waves?|reinforcements?|\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?))\b)|"
     r"as\s+\d+\s+groups?\b))|"
     r"\d+\s*%)",
@@ -5244,7 +5260,15 @@ def _validate_waves_override_map(waves_spec: Any, ctx: str, *, allow_room_index:
                 raise ValueError(f"Initial/static timing {timing!r} cannot set trigger_kind {tk!r} in {wctx}")
         if "condition" in w_spec and w_spec["condition"] not in _ALLOWED_TRIGGER_CONDITIONS:
             raise ValueError(f"Invalid condition {w_spec['condition']!r} in {wctx}")
+        has_mut_keys = any(
+            k in w_spec
+            for k in ("condition", "time_seconds", "source_wave_index", "source_spawn_index", "target_wave_index", "target_wave_indices")
+        )
+        if timing in (*_INITIAL_WAVE_TIMINGS, "static_structures") and has_mut_keys:
+            raise ValueError(f"Initial/static timing {timing!r} cannot set trigger mutation keys in {wctx}")
         if "trigger_kind" in w_spec and w_spec["trigger_kind"] is None:
+            if has_mut_keys:
+                raise ValueError(f"trigger_kind=None cannot be combined with trigger mutation keys in {wctx}")
             if timing in (*_INITIAL_WAVE_TIMINGS, "static_structures") and any(
                 k in w_spec for k in ("classification_state", "inference_rule")
             ):
@@ -5345,7 +5369,7 @@ def validate_overrides_doc(doc: Any) -> dict[str, Any]:
                     raise ValueError(f"Invalid item_quantity {iq!r} in {octx}")
             if "volume_m3" in obj and obj["volume_m3"] is not None:
                 vm = obj["volume_m3"]
-                if not isinstance(vm, (int, float)) or isinstance(vm, bool) or vm < 0:
+                if not isinstance(vm, (int, float)) or isinstance(vm, bool) or not math.isfinite(float(vm)) or vm < 0:
                     raise ValueError(f"Invalid volume_m3 {vm!r} in {octx}")
         if "waves" in spec:
             _validate_waves_override_map(spec["waves"], ectx)
@@ -5420,6 +5444,8 @@ def apply_overrides(units: list[dict[str, Any]], overrides_doc: dict[str, Any]) 
                 wave_tasks.append((r_idx, int(w_key), w_spec))
 
         rooms_by_idx = {r["room_index"]: r for r in unit.get("rooms", [])}
+        wave_level_overridden: set[tuple[int, int]] = set()
+        valid_wave_tasks: list[tuple[int, int, dict[str, Any], dict[str, Any], dict[int, dict[str, Any]]]] = []
         for r_idx, w_idx, w_spec in sorted(wave_tasks, key=lambda item: (item[0], item[1])):
             room = rooms_by_idx.get(r_idx)
             if room is None:
@@ -5430,9 +5456,7 @@ def apply_overrides(units: list[dict[str, Any]], overrides_doc: dict[str, Any]) 
             if wave is None:
                 unmatched_targets.append({"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "reason": "missing_wave"})
                 continue
-
-            if "timing" in w_spec:
-                wave["timing"] = w_spec["timing"]
+            valid_wave_tasks.append((r_idx, w_idx, w_spec, wave, waves_by_idx))
 
             has_explicit_clear_tkind = "trigger_kind" in w_spec and w_spec["trigger_kind"] is None
             has_trigger_mutation = (
@@ -5442,63 +5466,141 @@ def apply_overrides(units: list[dict[str, Any]], overrides_doc: dict[str, Any]) 
                     for k in ("condition", "time_seconds", "source_wave_index", "source_spawn_index", "target_wave_index", "target_wave_indices")
                 )
             )
-            if wave["timing"] in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+            has_state_or_rule = any(k in w_spec for k in ("classification_state", "inference_rule"))
+            has_wave_keys = (
+                "timing" in w_spec
+                or has_explicit_clear_tkind
+                or has_trigger_mutation
+                or has_state_or_rule
+            )
+            if not has_wave_keys:
+                continue
+
+            eff_timing = w_spec.get("timing", wave["timing"])
+            prev_wt = wave.get("wave_trigger") or {}
+            if eff_timing in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
                 if w_spec.get("trigger_kind") is not None:
-                    wave["timing"] = "sequential_wave"
+                    eff_timing = "sequential_wave"
                 elif has_trigger_mutation:
                     unmatched_targets.append(
                         {"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "reason": "trigger_field_without_trigger_kind_on_initial_wave"}
                     )
-                elif has_explicit_clear_tkind or any(
-                    k in w_spec for k in ("timing", "classification_state", "inference_rule")
-                ):
-                    wave["wave_trigger"] = None
-                    rule_ovr = w_spec.get("inference_rule") if w_spec.get("classification_state") == "inferred" else None
-                    _refresh_wave_link(wave, rule_ovr)
-                    wave["wave_link"]["override_applied"] = True
-                    applied_waves += 1
-                    entry_touched = True
-            if wave["timing"] not in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
-                if has_explicit_clear_tkind:
-                    wave["wave_trigger"] = None
-                    _refresh_wave_link(wave)
-                    wave["wave_link"]["override_applied"] = True
-                    applied_waves += 1
-                    entry_touched = True
-                elif has_trigger_mutation or any(
-                    k in w_spec for k in ("timing", "classification_state", "inference_rule")
-                ):
-                    prev_wt = wave.get("wave_trigger") or {}
-                    tkind = w_spec["trigger_kind"] if "trigger_kind" in w_spec else prev_wt.get("kind")
-                    if tkind is not None:
-                        orig_text = prev_wt.get("original_text") or wave["wave_name"]
-                        state, rule = _validate_state_and_rule(w_spec, f"{eid}.waves[{w_idx}]")
-                        new_wt: dict[str, Any] = {
-                            "kind": tkind,
-                            "classification_state": state,
-                            "inference_rule": rule,
-                            "original_text": orig_text,
-                            "condition": w_spec.get("condition") or prev_wt.get("condition") or "on_destroy",
-                            "target_wave_index": w_spec.get("target_wave_index", w_idx),
-                            "override_applied": True,
-                        }
-                        for opt_k in ("time_seconds", "source_wave_index", "source_spawn_index", "target_wave_indices", "from_wave_header"):
-                            val = w_spec.get(opt_k) if opt_k in w_spec else prev_wt.get(opt_k)
-                            if val is not None:
-                                new_wt[opt_k] = val
-                        wave["wave_trigger"] = new_wt
-                        _refresh_wave_link(wave)
-                    else:
-                        if has_trigger_mutation:
-                            unmatched_targets.append(
-                                {"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "reason": "missing_trigger_kind"}
-                            )
-                        rule_ovr = w_spec.get("inference_rule") if w_spec.get("classification_state") == "inferred" else None
-                        _refresh_wave_link(wave, rule_ovr)
-                    wave["wave_link"]["override_applied"] = True
-                    applied_waves += 1
-                    entry_touched = True
+                    continue
 
+            if eff_timing not in (*_INITIAL_WAVE_TIMINGS, "static_structures") and not has_explicit_clear_tkind:
+                tkind = w_spec["trigger_kind"] if "trigger_kind" in w_spec else prev_wt.get("kind")
+                if has_trigger_mutation and tkind is None:
+                    unmatched_targets.append(
+                        {"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "reason": "missing_trigger_kind"}
+                    )
+                    continue
+                if "source_wave_index" in w_spec and w_spec["source_wave_index"] is not None:
+                    sw_idx = w_spec["source_wave_index"]
+                    if sw_idx not in waves_by_idx:
+                        unmatched_targets.append(
+                            {"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "source_wave_index": sw_idx, "reason": "missing_source_wave"}
+                        )
+                        continue
+                if "source_spawn_index" in w_spec and w_spec["source_spawn_index"] is not None:
+                    sw_idx = w_spec.get("source_wave_index") if "source_wave_index" in w_spec else prev_wt.get("source_wave_index")
+                    src_w = waves_by_idx.get(sw_idx) if sw_idx is not None else None
+                    if src_w is None:
+                        unmatched_targets.append(
+                            {"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "source_wave_index": sw_idx, "reason": "missing_source_wave"}
+                        )
+                        continue
+                    ss_idx = w_spec["source_spawn_index"]
+                    if not (1 <= ss_idx <= len(src_w.get("spawns", []))):
+                        unmatched_targets.append(
+                            {
+                                "entry_id": eid,
+                                "room_index": r_idx,
+                                "wave_index": w_idx,
+                                "source_wave_index": sw_idx,
+                                "source_spawn_index": ss_idx,
+                                "reason": "missing_source_spawn",
+                            }
+                        )
+                        continue
+                t_refs = (
+                    list(w_spec["target_wave_indices"])
+                    if w_spec.get("target_wave_indices") is not None
+                    else ([w_spec["target_wave_index"]] if w_spec.get("target_wave_index") is not None else [])
+                )
+                missing_tref = next((tw_idx for tw_idx in t_refs if tw_idx not in waves_by_idx), None)
+                if missing_tref is not None:
+                    unmatched_targets.append(
+                        {
+                            "entry_id": eid,
+                            "room_index": r_idx,
+                            "wave_index": w_idx,
+                            "target_wave_index": missing_tref,
+                            "reason": "missing_target_wave",
+                        }
+                    )
+                    continue
+
+            wave["timing"] = eff_timing
+            if eff_timing in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+                wave["wave_trigger"] = None
+                rule_ovr = w_spec.get("inference_rule") if w_spec.get("classification_state") == "inferred" else None
+                _refresh_wave_link(wave, rule_ovr)
+            elif has_explicit_clear_tkind:
+                wave["wave_trigger"] = None
+                _refresh_wave_link(wave)
+            elif not has_trigger_mutation and not has_state_or_rule:
+                _refresh_wave_link(wave)
+            elif not has_trigger_mutation and has_state_or_rule and not prev_wt:
+                rule_ovr = w_spec.get("inference_rule") if w_spec.get("classification_state") == "inferred" else None
+                _refresh_wave_link(wave, rule_ovr)
+            else:
+                tkind = w_spec["trigger_kind"] if "trigger_kind" in w_spec else prev_wt.get("kind")
+                orig_text = prev_wt.get("original_text") or wave["wave_name"]
+                if has_state_or_rule:
+                    state, rule = _validate_state_and_rule(w_spec, f"{eid}.waves[{w_idx}]")
+                elif prev_wt.get("classification_state") in ("explicit", "inferred"):
+                    state = prev_wt["classification_state"]
+                    rule = prev_wt.get("inference_rule") if state == "inferred" else None
+                else:
+                    state, rule = "explicit", None
+                new_wt = dict(prev_wt)
+                new_wt["kind"] = tkind
+                new_wt["classification_state"] = state
+                new_wt["inference_rule"] = rule
+                new_wt["original_text"] = orig_text
+                new_wt["condition"] = w_spec.get("condition") or prev_wt.get("condition") or "on_destroy"
+                if "target_wave_indices" in w_spec and w_spec["target_wave_indices"] is not None:
+                    new_wt["target_wave_indices"] = list(w_spec["target_wave_indices"])
+                    new_wt["target_wave_index"] = (
+                        w_spec["target_wave_index"]
+                        if "target_wave_index" in w_spec and w_spec["target_wave_index"] is not None
+                        else w_spec["target_wave_indices"][0]
+                    )
+                elif "target_wave_index" in w_spec and w_spec["target_wave_index"] is not None:
+                    new_wt["target_wave_index"] = w_spec["target_wave_index"]
+                    new_wt.pop("target_wave_indices", None)
+                elif prev_wt.get("target_wave_index") is not None:
+                    new_wt["target_wave_index"] = prev_wt["target_wave_index"]
+                else:
+                    new_wt["target_wave_index"] = w_idx
+                new_wt["override_applied"] = True
+                for opt_k in ("time_seconds", "source_wave_index", "source_spawn_index", "from_wave_header"):
+                    if opt_k in w_spec:
+                        if w_spec[opt_k] is None:
+                            new_wt.pop(opt_k, None)
+                        else:
+                            new_wt[opt_k] = w_spec[opt_k]
+                if tkind != "timed" and "time_seconds" not in w_spec:
+                    new_wt.pop("time_seconds", None)
+                wave["wave_trigger"] = new_wt
+                _refresh_wave_link(wave)
+
+            wave["wave_link"]["override_applied"] = True
+            wave_level_overridden.add((r_idx, w_idx))
+            applied_waves += 1
+            entry_touched = True
+
+        for r_idx, w_idx, w_spec, wave, waves_by_idx in valid_wave_tasks:
             for s_key in sorted((w_spec.get("spawns") or {}).keys(), key=int):
                 s_idx = int(s_key)
                 s_spec = w_spec["spawns"][s_key]
@@ -5510,6 +5612,12 @@ def apply_overrides(units: list[dict[str, Any]], overrides_doc: dict[str, Any]) 
                     continue
                 sp = spawns[s_idx - 1]
                 prev_tr = sp.get("trigger") or {}
+                prev_targets: list[int] = []
+                if prev_tr.get("target_wave_indices"):
+                    prev_targets = list(prev_tr["target_wave_indices"])
+                elif prev_tr.get("target_wave_index") is not None:
+                    prev_targets = [prev_tr["target_wave_index"]]
+
                 orig_text = prev_tr.get("original_text") or wave["wave_name"]
                 s_state, s_rule = _validate_state_and_rule(s_spec, f"{eid}.waves[{w_idx}].spawns[{s_idx}]")
                 new_tr: dict[str, Any] = {
@@ -5542,6 +5650,22 @@ def apply_overrides(units: list[dict[str, Any]], overrides_doc: dict[str, Any]) 
                     targets = [prev_tr["target_wave_index"]]
                     new_tr["target_wave_index"] = targets[0]
                 sp["trigger"] = new_tr
+
+                for old_t_idx in prev_targets:
+                    if old_t_idx in targets or (r_idx, old_t_idx) in wave_level_overridden:
+                        continue
+                    old_w = waves_by_idx.get(old_t_idx)
+                    if old_w is None:
+                        continue
+                    old_wt = old_w.get("wave_trigger")
+                    if (
+                        old_wt is not None
+                        and old_wt.get("source_wave_index") == w_idx
+                        and old_wt.get("source_spawn_index") == s_idx
+                    ):
+                        old_w["wave_trigger"] = None
+                        _refresh_wave_link(old_w)
+
                 for t_idx in targets:
                     tgt_w = waves_by_idx.get(t_idx)
                     if tgt_w is None:
@@ -5556,11 +5680,20 @@ def apply_overrides(units: list[dict[str, Any]], overrides_doc: dict[str, Any]) 
                             }
                         )
                         continue
+                    if (r_idx, t_idx) in wave_level_overridden:
+                        continue
+                    if tgt_w["timing"] in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+                        continue
                     cur_wt = tgt_w.get("wave_trigger")
-                    if (
-                        (cur_wt is None or cur_wt.get("classification_state") == "unclassified")
-                        and tgt_w["timing"] not in (*_INITIAL_WAVE_TIMINGS, "static_structures")
-                    ):
+                    can_propagate = (
+                        cur_wt is None
+                        or cur_wt.get("classification_state") in ("unclassified", "inferred")
+                        or (
+                            cur_wt.get("source_wave_index") == w_idx
+                            and cur_wt.get("source_spawn_index") == s_idx
+                        )
+                    )
+                    if can_propagate:
                         wt_payload: dict[str, Any] = {
                             "kind": new_tr["kind"],
                             "classification_state": s_state,
@@ -5766,7 +5899,7 @@ def validate_coverage_ratchet_doc(doc: Any) -> dict[str, Any]:
     for k, v in floors.items():
         if k not in _RATCHET_METRIC_PATHS:
             raise ValueError(f"Unknown coverage ratchet metric {k!r}")
-        if not isinstance(v, (int, float)) or isinstance(v, bool) or not (0.0 <= float(v) <= 100.0):
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(float(v)) or not (0.0 <= float(v) <= 100.0):
             raise ValueError(f"Invalid floor value {v!r} for metric {k!r}")
     return doc
 
@@ -6335,15 +6468,6 @@ def main(argv: list[str] | None = None) -> int:
         f"unparsed_distances={totals['unparsed_distances_total']}"
     )
 
-    if args.tighten_ratchet:
-        r_target = args.coverage_ratchet or default_coverage_ratchet_path()
-        try:
-            updated = tighten_coverage_ratchet(report, r_target)
-        except ValueError as exc:
-            print(f"TIGHTEN FAIL: {exc}", file=sys.stderr)
-            return 1
-        print(f"Tightened coverage ratchet in {r_target}: {updated['floors']}")
-
     if args.verify:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_root = Path(tmpdir)
@@ -6552,6 +6676,15 @@ def main(argv: list[str] | None = None) -> int:
             f"({totals['npc_rows_candidate_mapped_percent']}% >= {args.min_candidate_mapped_percent}%) "
             f"content_sha256={sha_c1} report_sha256={sha_r1}"
         )
+
+    if args.tighten_ratchet:
+        r_target = args.coverage_ratchet or default_coverage_ratchet_path()
+        try:
+            updated = tighten_coverage_ratchet(report, r_target)
+        except ValueError as exc:
+            print(f"TIGHTEN FAIL: {exc}", file=sys.stderr)
+            return 1
+        print(f"Tightened coverage ratchet in {r_target}: {updated['floors']}")
     return 0
 
 
