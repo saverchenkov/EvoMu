@@ -1498,11 +1498,15 @@ async fn superweapon_concurrent_lancer_fob_precheck_and_reserved_fuel_f01_f05() 
     assert_eq!((tcs.capacitor, tcs.undock_invulnerable_remaining_ticks, ctx.db.with_snapshot(|s| s.items[&f.titan_fuel].quantity), ctx.db.with_snapshot(|s| s.structures[&fob_id].shield_hp)), (200_000.0, 9, 500, 2_500.0));
     assert!(ctx.drain_notifications_for_char(f.char_id).is_empty());
 
-    // 3. Superweapon fuel reservation rollback mints clean stack when source stack locks/moves (F-01).
+    // 3. Superweapon fuel reservation rollback mints clean stack when source stack locks/moves (F-01) and emits OnItemChange diffs (F1486-2B-R5-01).
+    let _ = ctx.db.acquire_online_lock(1, 1, Some(f.char_id), true, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(f.char_id);
     let (_, _, reserved, _) = deduct_superweapon_fuel_with_diffs(&ctx, f.titan_id, 16_274, 100, "superweapon").unwrap();
     ctx.db.with_mut_snapshot(|snap| { snap.items.get_mut(&f.titan_fuel).unwrap().flag = InventoryFlag::Locked; });
-    refund_superweapon_fuel_reserved(&ctx, &reserved);
+    refund_superweapon_fuel_reserved(&ctx, f.char_id, &reserved);
     let (lq, tq) = ctx.db.with_snapshot(|s| (s.items[&f.titan_fuel].quantity, s.items.values().filter(|i| i.location_id == f.titan_id && i.type_id == 16_274).map(|i| i.quantity).sum::<i32>()));
     assert_eq!((lq, tq), (400, 500));
+    let diverged_notifs = ctx.drain_notifications_for_char(f.char_id);
+    assert_eq!(diverged_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 2, "diverged rollback must sync both reserved and minted stacks");
 }
 

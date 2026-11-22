@@ -594,13 +594,12 @@ fn consume_from_ship(
     Ok(consumed)
 }
 
-fn refund_ship_fuel_items(ctx: &ServerContext, consumed: &[(eve_db::InventoryItemRecord, i32)]) {
-    if consumed.is_empty() {
-        return;
-    }
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.rollback_restore_consumed_stacks(consumed);
-    });
+fn refund_ship_fuel_items(
+    ctx: &ServerContext,
+    char_id: i64,
+    consumed: &[(eve_db::InventoryItemRecord, i32)],
+) {
+    ctx.rollback_consumed_items_and_notify(char_id, consumed);
 }
 
 fn consume_or_err(
@@ -804,8 +803,8 @@ async fn light_cyno(
         let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
         if st.beacons.get(&(ctx_key(ctx), ship_id)).is_some_and(|b| b.beacon_id == -ship_id) {
             st.beacons.remove(&(ctx_key(ctx), ship_id));
+            st.beacon_cycles.remove(&(ctx_key(ctx), ship_id));
         }
-        st.beacon_cycles.remove(&(ctx_key(ctx), ship_id));
     };
     let reserved_fuel = if fuel_qty > 0 {
         match consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
@@ -844,7 +843,7 @@ async fn light_cyno(
     .await
     {
         clear_cyno_claim();
-        refund_ship_fuel_items(ctx, &reserved_fuel);
+        refund_ship_fuel_items(ctx, char_id, &reserved_fuel);
         let code = if e.contains("ModuleAlreadyActive") {
             "ModuleAlreadyActive"
         } else if e.contains("CantActivateInWarp") {

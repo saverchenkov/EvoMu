@@ -838,4 +838,35 @@ impl ServerContext {
             },
         )
     }
+
+    /// Emits `OnItemChange` notifications for inventory rollback mutation diffs (`#1486`).
+    /// Callers must collect `diffs` under `ctx.db` and invoke this AFTER releasing the DB lock.
+    pub fn emit_rollback_item_diffs(
+        &self,
+        fallback_char_id: i64,
+        diffs: &[(
+            Option<eve_db::InventoryItemRecord>,
+            Option<eve_db::InventoryItemRecord>,
+        )],
+    ) {
+        for (pre, post) in diffs {
+            self.notify_item_mutation(fallback_char_id, pre.as_ref(), post.as_ref());
+        }
+    }
+
+    /// Restores previously reserved stack quantities in DB and emits `OnItemChange` diffs
+    /// whenever any stack diverged from an exact in-place restore (`#1486`).
+    pub fn rollback_consumed_items_and_notify(
+        &self,
+        fallback_char_id: i64,
+        reserved: &[(eve_db::InventoryItemRecord, i32)],
+    ) {
+        if reserved.is_empty() {
+            return;
+        }
+        let diffs = self
+            .db
+            .with_mut_snapshot(|snap| snap.rollback_restore_consumed_stacks(reserved));
+        self.emit_rollback_item_diffs(fallback_char_id, &diffs);
+    }
 }

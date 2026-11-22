@@ -219,7 +219,7 @@ fn deduct_superweapon_fuel_with_diffs(
                 }
             }
             if remaining > 0 {
-                snap.rollback_restore_consumed_stacks(&reserved_stacks);
+                let _ = snap.rollback_restore_consumed_stacks(&reserved_stacks);
                 return Err(format!("Insufficient {kind} fuel (type {fuel_tid})"));
             }
             Ok((fuel_qty, consumed_by_flag, reserved_stacks, item_diffs))
@@ -243,14 +243,10 @@ fn emit_superweapon_fuel_item_diffs(
 
 fn refund_superweapon_fuel_reserved(
     ctx: &ServerContext,
+    char_id: i64,
     reserved: &[(eve_db::InventoryItemRecord, i32)],
 ) {
-    if reserved.is_empty() {
-        return;
-    }
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.rollback_restore_consumed_stacks(reserved);
-    });
+    ctx.rollback_consumed_items_and_notify(char_id, reserved);
 }
 
 #[cfg(test)]
@@ -780,7 +776,7 @@ async fn activate_superweapon_with_args_inner(
         )
         .await
         {
-            refund_superweapon_fuel_reserved(ctx, &fuel_reserved);
+            refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved);
             restore_lance_lock();
             return Err(err);
         }
@@ -809,7 +805,7 @@ async fn activate_superweapon_with_args_inner(
             Ok(hits) => hits,
             Err(err) => {
                 restore_lance_lock();
-                refund_superweapon_fuel_reserved(ctx, &fuel_reserved);
+                refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved);
                 if lancer_cap_cost > 0.0 {
                     let _ = sys.add_capacitor_clamped(ship_id, lancer_cap_cost).await;
                 }
@@ -1080,7 +1076,7 @@ async fn activate_superweapon_with_args_inner(
         )
         .await
         {
-            refund_superweapon_fuel_reserved(ctx, &fuel_reserved);
+            refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved);
             return Err(err);
         }
         emit_superweapon_fuel_item_diffs(ctx, char_id, &fuel_diffs);
@@ -1113,7 +1109,7 @@ async fn activate_superweapon_with_args_inner(
         )
         .await
         {
-            refund_superweapon_fuel_reserved(ctx, &fuel_reserved);
+            refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved);
             return Err(err);
         }
         let (app, destroyed) =
@@ -1128,7 +1124,7 @@ async fn activate_superweapon_with_args_inner(
                     if dd_cap_cycle_need > 0.0 {
                         let _ = sys.add_capacitor_clamped(ship_id, dd_cap_cycle_need).await;
                     }
-                    refund_superweapon_fuel_reserved(ctx, &fuel_reserved);
+                    refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved);
                     return Err(err);
                 }
             };

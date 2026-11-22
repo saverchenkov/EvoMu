@@ -3485,3 +3485,190 @@ fn rollback_restore_consumed_stacks_prevents_overwrite_and_duplication_f01() {
     });
 }
 
+#[test]
+fn rollback_restore_consumed_stacks_exact_id_dead_ship_and_diverged_diffs_r5() {
+    let repo = WorldRepository::with_demo_seed();
+    let cid = 90_000_001_i64;
+    let station_id = repo.get_character(cid).unwrap().station_id.unwrap();
+
+    let (live_ship_id, dead_ship_id, dead_box_id) = repo.with_mut_snapshot(|snap| {
+        let live = snap.alloc_entity_id();
+        let dead = snap.alloc_entity_id();
+        let dbox = snap.alloc_entity_id();
+        for (item_id, type_id, location_id, flag) in [
+            (live, 587_u32, station_id, InventoryFlag::Hangar),
+            (dead, 587_u32, station_id, InventoryFlag::Hangar),
+            (dbox, 23_u32, dead, InventoryFlag::Cargo),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: cid,
+                    location_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        (live, dead, dbox)
+    });
+
+    // 1. Exact full-stack depletion + partial depletion must restore in place under pre.item_id with 0 diffs.
+    let s_exact = repo
+        .add_or_stack_item(cid, live_ship_id, InventoryFlag::Cargo, 16_273, 500)
+        .unwrap();
+    repo.with_mut_snapshot(|snap| {
+        let res_full = snap
+            .reserve_consume_stack_for_rollback(s_exact.item_id, 500)
+            .unwrap();
+        assert!(!snap.items.contains_key(&s_exact.item_id));
+        let diffs_full = snap.rollback_restore_consumed_stacks(&[res_full]);
+        assert!(diffs_full.is_empty(), "exact pre.item_id restore must emit no spurious diffs");
+        let restored = &snap.items[&s_exact.item_id];
+        assert_eq!(restored.quantity, 500);
+        assert_eq!(restored.version, s_exact.version + 1);
+
+        let pre_partial = restored.clone();
+        let res_part = snap
+            .reserve_consume_stack_for_rollback(s_exact.item_id, 200)
+            .unwrap();
+        assert_eq!(snap.items[&s_exact.item_id].quantity, 300);
+        let diffs_part = snap.rollback_restore_consumed_stacks(&[res_part]);
+        assert!(diffs_part.is_empty(), "clean partial merge back into pre.item_id needs no diff");
+        assert_eq!(snap.items[&s_exact.item_id].quantity, pre_partial.quantity);
+    });
+
+    // 2. P2-3: non-clean siblings (BPC / mutated) must never absorb rollback, and divergence must emit both diffs.
+    let (bpc_id, mut_id, src_id) = repo.with_mut_snapshot(|snap| {
+        let bpc = snap.alloc_entity_id();
+        let mutated = snap.alloc_entity_id();
+        let src = snap.alloc_entity_id();
+        snap.items.insert(
+            bpc,
+            InventoryItemRecord {
+                item_id: bpc,
+                type_id: 16_274,
+                owner_id: cid,
+                location_id: live_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 10,
+                singleton: false,
+                is_blueprint_copy: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mutated,
+            InventoryItemRecord {
+                item_id: mutated,
+                type_id: 16_274,
+                owner_id: cid,
+                location_id: live_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 10,
+                singleton: false,
+                source_mutaplasmid_id: Some(47_730),
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            src,
+            InventoryItemRecord {
+                item_id: src,
+                type_id: 16_274,
+                owner_id: cid,
+                location_id: live_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (bpc, mutated, src)
+    });
+    repo.with_mut_snapshot(|snap| {
+        let res = snap.reserve_consume_stack_for_rollback(src_id, 40).unwrap();
+        // Diverge remaining stack so rollback cannot merge back into src_id.
+        snap.items.get_mut(&src_id).unwrap().singleton = true;
+        let diffs = snap.rollback_restore_consumed_stacks(&[res]);
+        assert_eq!(snap.items[&bpc_id].quantity, 10, "BPC sibling must not absorb rollback");
+        assert_eq!(snap.items[&mut_id].quantity, 10, "mutated sibling must not absorb rollback");
+        assert_eq!(snap.items[&src_id].quantity, 60);
+        let minted: Vec<&InventoryItemRecord> = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == live_ship_id
+                    && i.type_id == 16_274
+                    && !matches!(i.item_id, x if x == bpc_id || x == mut_id || x == src_id)
+            })
+            .collect();
+        assert_eq!(minted.len(), 1);
+        assert_eq!(minted[0].quantity, 40);
+        assert_eq!(diffs.len(), 2, "diverged rollback must emit reservation + minted diffs");
+        assert!(diffs.iter().any(|(pre, cur)| {
+            pre.as_ref().is_some_and(|p| p.item_id == src_id)
+                && cur.as_ref().is_some_and(|c| c.item_id == src_id && c.quantity == 60)
+        }));
+        assert!(diffs.iter().any(|(pre, cur)| {
+            pre.is_none()
+                && cur.as_ref().is_some_and(|c| c.item_id == minted[0].item_id && c.quantity == 40)
+        }));
+    });
+
+    // 3. F1486-2B-R5-01: destroyed ship and nested container must emit deletion tombstones and zero orphans.
+    let (ship_fuel_id, box_fuel_id) = repo.with_mut_snapshot(|snap| {
+        let f1 = snap.alloc_entity_id();
+        let f2 = snap.alloc_entity_id();
+        snap.items.insert(
+            f1,
+            InventoryItemRecord {
+                item_id: f1,
+                type_id: 16_275,
+                owner_id: cid,
+                location_id: dead_ship_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            f2,
+            InventoryItemRecord {
+                item_id: f2,
+                type_id: 16_275,
+                owner_id: cid,
+                location_id: dead_box_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (f1, f2)
+    });
+    repo.with_mut_snapshot(|snap| {
+        let r1 = snap.reserve_consume_stack_for_rollback(ship_fuel_id, 100).unwrap();
+        let r2 = snap.reserve_consume_stack_for_rollback(box_fuel_id, 100).unwrap();
+        snap.items.remove(&dead_ship_id);
+        let dead_diffs = snap.rollback_restore_consumed_stacks(&[r1, r2]);
+        assert!(
+            !snap.items.values().any(|i| i.type_id == 16_275),
+            "destroyed ship/ancestor rollback must not insert orphaned fuel stacks"
+        );
+        assert_eq!(dead_diffs.len(), 2);
+        assert!(dead_diffs.iter().all(|(pre, cur)| pre.is_some() && cur.is_none()));
+    });
+}
+

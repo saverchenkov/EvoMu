@@ -1078,34 +1078,23 @@ pub async fn activate_clone_vat_bay(
     )
     .await
     {
-        ctx.db.with_mut_snapshot(|s| {
-            s.rollback_restore_consumed_stacks(&reserved.consumed_items);
+        let diffs = ctx.db.with_mut_snapshot(|s| {
+            let diffs = s.rollback_restore_consumed_stacks(&reserved.consumed_items);
             let mut st = load_clone_vat_bay_state(s);
-            match reserved.prev_active_by_ship {
-                Some(prev) => {
-                    st.active_by_ship.insert(ship_id, prev);
+            if st.active_by_ship.get(&ship_id).copied() == Some((module_id, until_unix)) {
+                match reserved.prev_active_by_ship {
+                    Some(prev) => {
+                        st.active_by_ship.insert(ship_id, prev);
+                    }
+                    None => {
+                        st.active_by_ship.remove(&ship_id);
+                    }
                 }
-                None => {
-                    st.active_by_ship.remove(&ship_id);
-                }
+                save_clone_vat_bay_state(s, &st);
             }
-            save_clone_vat_bay_state(s, &st);
+            diffs
         });
-        if e.contains("ModuleAlreadyActive") {
-            return Err(BridgeRpcError::with_client_error(
-                "ModuleAlreadyActive",
-                e.clone(),
-                eve_proto::ClientError::user(eve_proto::UserErrorKey::ModuleAlreadyActive),
-            ));
-        }
-        if e.contains("CantActivateInWarp") {
-            let custom = format!("CantActivateInWarp: {e}");
-            return Err(BridgeRpcError::with_client_error(
-                "CantActivateInWarp",
-                e,
-                eve_proto::ClientError::CustomInfo(custom),
-            ));
-        }
+        ctx.emit_rollback_item_diffs(char_id, &diffs);
         if e.contains("CannotActivateCloaked") {
             return Err(BridgeRpcError::with_client_error(
                 "ShipCloaked",
@@ -1113,11 +1102,10 @@ pub async fn activate_clone_vat_bay(
                 eve_proto::ClientError::user(eve_proto::UserErrorKey::ShipCloaked),
             ));
         }
-        let custom = format!("ModuleActivationFailed: {e}");
-        return Err(BridgeRpcError::with_client_error(
-            "ModuleActivationFailed",
+        return Err(crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error(
+            ctx,
+            mod_type.type_id,
             e,
-            eve_proto::ClientError::CustomInfo(custom),
         ));
     }
 
