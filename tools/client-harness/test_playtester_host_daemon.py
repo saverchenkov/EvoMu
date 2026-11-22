@@ -6528,6 +6528,118 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
         self.assertEqual(anoms[0]["kind"], "flight_recorder_rpc_anomaly")
         self.assertEqual(anoms[0]["non_ok_calls"], 4)
 
+    def test_oracle_wrapper_callstack_isolation_and_flight_recorder_guard_order(self):
+        oracle_cls = playtester.PlaytesterBugOracle
+
+        # BF-USERERR-02: LogTraceback / LogException wrapper traces must never leak CALLSTACK: lines
+        # containing benign markers or ModuleFitFailed dicts into downstream UserError checks.
+        logtraceback_unexpected_tb = (
+            'log.LogTraceback args=("UserError(\'UnexpectedServerBug\', {})",) kwargs={}\n'
+            "None\n"
+            "\n"
+            "CALLSTACK:\n"
+            '  File "eve/client/script/fitting.py", line 10, in Foo\n'
+            "    # NotEnoughCPU\n"
+            "    # UserError('ModuleFitFailed', {'reason': 'Missing skill', 'moduleName': 'Miner I'})\n"
+        )
+        ue_key, raised_txt = oracle_cls._extract_raised_user_error("", logtraceback_unexpected_tb)
+        self.assertEqual(ue_key, "UnexpectedServerBug")
+        self.assertNotIn("CALLSTACK:", raised_txt)
+        self.assertNotIn("NotEnoughCPU", raised_txt)
+        self.assertFalse(oracle_cls.is_expected_user_error({"trace": logtraceback_unexpected_tb, "headline": ""}))
+        self.assertFalse(oracle_cls.is_ignorable_client_traceback("", logtraceback_unexpected_tb))
+
+        logexception_wrapper_tb = (
+            'logmodule.LogException args=("Unhandled exception in <TaskletExt object at 0x9, ctxt=\'fittingSlotController\'>",) kwargs={}\n'
+            "None\n"
+            "\n"
+            "CALLSTACK:\n"
+            '  File "eve/client/script/ui/shared/fittingScreen/fittingSlotController.py", line 50, in Add\n'
+            "    # UserError('ModuleFitFailed', {'reason': 'Missing skill', 'moduleName': 'Miner I'})\n"
+            "    # NotEnoughCPU\n"
+        )
+        self.assertFalse(oracle_cls.is_ignorable_client_traceback("", logexception_wrapper_tb))
+        self.assertTrue(oracle_cls._is_unhandled_tasklet_traceback("", logexception_wrapper_tb))
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=UnexpectedServerBug, dict={}",
+                logexception_wrapper_tb,
+            )
+        )
+
+        # Positive control: LogTraceback directly carrying a valid ModuleFitFailed payload is expected.
+        logtraceback_valid_mff = (
+            "log.LogTraceback args=(\"UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412', 'moduleName': 'Miner I'})\",) kwargs={}\n"
+            "None\n"
+            "\n"
+            "CALLSTACK:\n"
+            '  File "eve/client/script/fitting.py", line 10, in Foo\n'
+        )
+        self.assertTrue(oracle_cls.is_expected_user_error({"trace": logtraceback_valid_mff, "headline": ""}))
+
+        # BF-USERERR-03: BENIGN_FLIGHT_FLOW_MARKERS must not short-circuit missing-moduleName ModuleFitFailed.
+        for reason in (
+            "FittingValidationFailed: missing skill",
+            "NotEnoughCPU: 10 required",
+        ):
+            bad_mff_calls = [
+                {
+                    "service": "invbroker",
+                    "method": "MultiAdd",
+                    "seq": idx,
+                    "ts": 300.0 + idx,
+                    "status": f"ERR(UserError('ModuleFitFailed', {{'reason': '{reason}'}}))",
+                    "error": f"UserError('ModuleFitFailed', {{'reason': '{reason}'}})",
+                }
+                for idx in range(4)
+            ]
+            anoms = oracle_cls.analyze_flight_recorder_anomalies(bad_mff_calls)
+            self.assertEqual(len(anoms), 1, reason)
+            self.assertEqual(anoms[0]["kind"], "flight_recorder_rpc_anomaly", reason)
+
+        # P2 hardening: unexpected outer UserError or nested/string-embedded keys cannot spoof ModuleFitFailed;
+        # Py2 long suffixes (483L) in sibling keys still validate top-level strings; CCP pre-frame open works.
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {
+                    "error": (
+                        "UserError('UnexpectedServerBug', {'detail': "
+                        "\"UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': 'Miner I'})\"})"
+                    )
+                }
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {
+                    "error": (
+                        "UserError('ModuleFitFailed', {'reason': \"Missing 'moduleName': 'Fake'\", "
+                        "'nested': {'moduleName': 'Fake', 'reason': 'Fake'}})"
+                    )
+                }
+            )
+        )
+        self.assertTrue(
+            oracle_cls.is_expected_user_error(
+                {
+                    "error": (
+                        "UserError('ModuleFitFailed', {'typeID': 483L, "
+                        "'reason': 'Insufficient turret hardpoints', 'moduleName': 'Miner I'})"
+                    )
+                }
+            )
+        )
+        window_pre_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x9, ctxt='Window.Open'>\",) kwargs={}\n"
+            "  <pre>packages/carbonui/control/window.py(4164) Open</pre>\n"
+            "UserError: User error, msg=WindowBlockedFromOpening, dict={}\n"
+        )
+        self.assertFalse(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=WindowBlockedFromOpening", window_pre_tb
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6079,21 +6079,16 @@ class PlaytesterBugOracle:
         "windowblockedfromopening",
     )
 
-    _MODULE_FIT_FAILED_NAME_RE = re.compile(
-        r"""['"]modulename['"]\s*:\s*u?(?:'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)")""",
-        re.IGNORECASE,
-    )
-    _MODULE_FIT_FAILED_REASON_RE = re.compile(
-        r"""['"]reason['"]\s*:\s*u?(?:'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)")""",
-        re.IGNORECASE,
-    )
     _MODULE_FIT_FAILED_DICT_START_RE = re.compile(
         r"(?:UserError\s*:?\s*\(\s*u?['\"]ModuleFitFailed['\"]\s*,\s*"
         r"|msg\s*=\s*u?['\"]?ModuleFitFailed\b[^\r\n{]*,\s*dict\s*=\s*"
         r"|['\"]ModuleFitFailed['\"]\s*,\s*)(?=\{)",
         re.IGNORECASE,
     )
-    _WINDOW_OPEN_FN_RE = re.compile(r"\bin\s+(?:open|toggleopenclose)\b", re.IGNORECASE)
+    _WINDOW_OPEN_FN_RE = re.compile(
+        r"(?:\bin\s+|\bwindow\.py\(\d+\)\s+)(?:open|toggleopenclose)\b",
+        re.IGNORECASE,
+    )
 
     @staticmethod
     def _extract_balanced_dict_repr(text: str) -> str:
@@ -6122,6 +6117,81 @@ class PlaytesterBugOracle:
                     return text[: idx + 1]
         return ""
 
+    @staticmethod
+    def _parse_top_level_dict_str_values(dict_repr: str) -> Dict[str, str]:
+        """Parse top-level string key/value pairs from a `{...}` repr without descending into nested dicts."""
+        if len(dict_repr) < 2 or dict_repr[0] != "{" or dict_repr[-1] != "}":
+            return {}
+        try:
+            parsed = ast.literal_eval(dict_repr)
+        except (ValueError, SyntaxError):
+            parsed = None
+        if isinstance(parsed, dict):
+            return {
+                k.lower(): v
+                for k, v in parsed.items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
+        inner = dict_repr[1:-1]
+        entries: List[str] = []
+        depth = 0
+        quote: Optional[str] = None
+        escaped = False
+        start = 0
+        for idx, ch in enumerate(inner):
+            if quote is not None:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == quote:
+                    quote = None
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+            elif ch in ("{", "[", "("):
+                depth += 1
+            elif ch in ("}", "]", ")") and depth > 0:
+                depth -= 1
+            elif ch == "," and depth == 0:
+                entries.append(inner[start:idx])
+                start = idx + 1
+        entries.append(inner[start:])
+        result: Dict[str, str] = {}
+        for entry in entries:
+            colon_idx = -1
+            e_depth = 0
+            e_quote: Optional[str] = None
+            e_escaped = False
+            for idx, ch in enumerate(entry):
+                if e_quote is not None:
+                    if e_escaped:
+                        e_escaped = False
+                    elif ch == "\\":
+                        e_escaped = True
+                    elif ch == e_quote:
+                        e_quote = None
+                    continue
+                if ch in ("'", '"'):
+                    e_quote = ch
+                elif ch in ("{", "[", "("):
+                    e_depth += 1
+                elif ch in ("}", "]", ")") and e_depth > 0:
+                    e_depth -= 1
+                elif ch == ":" and e_depth == 0:
+                    colon_idx = idx
+                    break
+            if colon_idx < 0:
+                continue
+            try:
+                key_obj = ast.literal_eval(entry[:colon_idx].strip())
+                val_obj = ast.literal_eval(entry[colon_idx + 1 :].strip())
+            except (ValueError, SyntaxError):
+                continue
+            if isinstance(key_obj, str) and isinstance(val_obj, str):
+                result[key_obj.lower()] = val_obj
+        return result
+
     @classmethod
     def _strip_trace_frame_and_header_text(cls, headline: str, trace: str = "") -> str:
         """Return lowercased headline + primary traceback text stripped of locals, callstack, and footer."""
@@ -6136,15 +6206,33 @@ class PlaytesterBugOracle:
         if not ue_key:
             return None, ""
         stripped_trace = sync_bugs_to_github._strip_trace_locals_and_end(str(trace or "")).strip()
+        primary_lines, _ = sync_bugs_to_github._split_trace_sections(stripped_trace)
+        primary_text = "\n".join(primary_lines).strip()
         if stripped_trace and sync_bugs_to_github._RE_TRACEBACK_INDICATORS.search(stripped_trace):
             exc_class, exc_msg, _ = sync_bugs_to_github.parse_traceback_summary(stripped_trace, "")
             cls_short = exc_class.split(".")[-1].strip()
             if cls_short == "UserError" or exc_class.strip().lower().startswith("user error"):
                 raised = f"{exc_class}: {exc_msg}" if exc_msg else exc_class
                 return ue_key, raised
+            if (
+                cls_short in sync_bugs_to_github._WRAPPER_EXC_CLASSES
+                or not cls_short
+                or exc_class.startswith(("blue.pyos.", "logmodule.", "log.", "stdlogutils.", "[evomu_site]"))
+            ):
+                target = f"{exc_class}: {exc_msg}" if exc_msg else exc_class
+                target_ue_key, target_non_ue = sync_bugs_to_github._inspect_client_headline_for_user_error(
+                    target
+                )
+                if target_ue_key and not target_non_ue:
+                    return ue_key, target
         if headline and sync_bugs_to_github.extract_client_user_error_key(headline):
             return ue_key, str(headline).strip()
-        return ue_key, stripped_trace or str(headline or "").strip()
+        if primary_text:
+            # Never leak CALLSTACK: frames into `raised`; require primary_text itself to carry a UserError key.
+            if sync_bugs_to_github.extract_client_user_error_key(primary_text):
+                return ue_key, primary_text
+            return None, ""
+        return ue_key, str(headline or "").strip()
 
     @classmethod
     def _has_nonempty_module_fit_failed(cls, raw_text: str) -> bool:
@@ -6157,18 +6245,19 @@ class PlaytesterBugOracle:
             if not ue_key or ue_key.lower() != "modulefitfailed" or not raised:
                 return False
             text = raised
+        else:
+            outer_key = cls.extract_client_user_error_key(text)
+            if not outer_key or outer_key.lower() != "modulefitfailed":
+                return False
         dict_match = cls._MODULE_FIT_FAILED_DICT_START_RE.search(text)
         if not dict_match:
             return False
         dict_repr = cls._extract_balanced_dict_repr(text[dict_match.end() :])
         if not dict_repr:
             return False
-        name_m = cls._MODULE_FIT_FAILED_NAME_RE.search(dict_repr)
-        reason_m = cls._MODULE_FIT_FAILED_REASON_RE.search(dict_repr)
-        if not name_m or not reason_m:
-            return False
-        name_val = (name_m.group(1) if name_m.group(1) is not None else name_m.group(2) or "").strip()
-        reason_val = (reason_m.group(1) if reason_m.group(1) is not None else reason_m.group(2) or "").strip()
+        top_strs = cls._parse_top_level_dict_str_values(dict_repr)
+        name_val = (top_strs.get("modulename") or "").strip()
+        reason_val = (top_strs.get("reason") or "").strip()
         return bool(name_val and reason_val)
 
     @classmethod
@@ -6333,6 +6422,7 @@ class PlaytesterBugOracle:
             )
         else:
             raw_err = str(err_obj)
+        ue_key: Optional[str] = None
         if sync_bugs_to_github._RE_TRACEBACK_INDICATORS.search(raw_err):
             blocks = cls.parse_tb_blocks(raw_err)
             if len(blocks) > 1:
@@ -6348,7 +6438,7 @@ class PlaytesterBugOracle:
                 return False
             raw_err = raised
         else:
-            _, non_ue = sync_bugs_to_github._inspect_client_headline_for_user_error(raw_err)
+            ue_key, non_ue = sync_bugs_to_github._inspect_client_headline_for_user_error(raw_err)
             if non_ue:
                 return False
         err_low = raw_err.lower()
@@ -6362,6 +6452,8 @@ class PlaytesterBugOracle:
         if "structurenotoperational" in err_low and "in state 'nocore'" in err_low and "cannot be controlled" in err_low:
             return True
         if "modulefitfailed" in err_low:
+            if not ue_key or ue_key.lower() != "modulefitfailed":
+                return False
             return cls._has_nonempty_module_fit_failed(raw_err)
         expected_low = (expected_text or "").lower()
         if any(kw in expected_low for kw in cls.EXPECTED_USER_ERROR_KEYWORDS):
@@ -7101,9 +7193,10 @@ class PlaytesterBugOracle:
                     continue
                 combined_err = f"{status_up} {err_txt}".lower()
                 call_err = err_txt or str(item.get("status") or "").strip()
-                if any(tok in combined_err for tok in cls.BENIGN_FLIGHT_FLOW_MARKERS) or (
-                    call_err and cls.is_expected_user_error({"error": call_err})
-                ):
+                if (
+                    "modulefitfailed" not in combined_err
+                    and any(tok in combined_err for tok in cls.BENIGN_FLIGHT_FLOW_MARKERS)
+                ) or (call_err and cls.is_expected_user_error({"error": call_err})):
                     benign_errors += 1
                     continue
                 unexpected_errors.append(item)
