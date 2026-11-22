@@ -78,6 +78,13 @@ fn two_server_contexts_stay_in_memory_under_env_path_overrides() {
         }
     }
 
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     let _lock = eve_db::lock_test_env_write();
     let keys = ["EVOMU_DB_PATH", "EVOMU_SNAPSHOT_PATH", "EVOMU_DISABLE_DEMO_SEED"];
     let _restore = EnvRestore(keys.iter().map(|&k| (k, std::env::var_os(k))).collect());
@@ -85,6 +92,7 @@ fn two_server_contexts_stay_in_memory_under_env_path_overrides() {
     let tmp_dir = std::env::temp_dir().join(format!("eve_it_two_ctx_env_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
+    let _tmp_guard = TempDirGuard(tmp_dir.clone());
     let db_path = tmp_dir.join("shared.sqlite");
     let snap_path = tmp_dir.join("shared_snap.json");
     std::env::set_var("EVOMU_DB_PATH", &db_path);
@@ -102,5 +110,4 @@ fn two_server_contexts_stay_in_memory_under_env_path_overrides() {
     assert!(seeded.left().db.with_snapshot(|s| s.characters.contains_key(&90_000_001)));
     assert!(seeded.right().db.with_snapshot(|s| !s.accounts.contains_key("seeded_left")));
     assert!(!snap_path.exists());
-    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

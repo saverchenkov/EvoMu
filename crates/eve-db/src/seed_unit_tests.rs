@@ -354,6 +354,13 @@ fn with_demo_seed_in_memory_ignores_env_db_and_snapshot_paths() {
         }
     }
 
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     let _lock = crate::lock_test_env_write();
     let keys = ["EVOMU_DB_PATH", "EVOMU_SNAPSHOT_PATH", "EVOMU_DISABLE_DEMO_SEED"];
     let _restore = EnvRestore(
@@ -365,6 +372,7 @@ fn with_demo_seed_in_memory_ignores_env_db_and_snapshot_paths() {
     let tmp_dir = std::env::temp_dir().join(format!("eve_seed_mem_env_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
+    let _tmp_guard = TempDirGuard(tmp_dir.clone());
     let db_path = tmp_dir.join("shared.sqlite");
     let snap_path = tmp_dir.join("shared_snap.json");
     std::env::set_var("EVOMU_DB_PATH", &db_path);
@@ -377,6 +385,5 @@ fn with_demo_seed_in_memory_ignores_env_db_and_snapshot_paths() {
     assert!(!db_path.exists());
     assert!(!snap_path.exists());
     assert_eq!(left.with_snapshot(|s| s.characters.len()), 2);
-    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 

@@ -3624,11 +3624,7 @@ impl ServerContext {
     }
 }
 
-#[cfg(all(not(test), feature = "testkit"))]
-#[inline]
-fn acquire_test_env_read_guard() {}
-
-#[cfg(test)]
+#[cfg(any(test, feature = "testkit"))]
 fn acquire_test_env_read_guard() -> crate::TestEnvReadGuard {
     crate::lock_test_env_read()
 }

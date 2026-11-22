@@ -35,10 +35,10 @@ pub mod warn_limiter;
 
 pub use services::inventory_fitting::{dna_to_fitting, fitting_to_dna, saved_fitting_to_dna};
 
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) use eve_db::{lock_test_env_read, TestEnvReadGuard};
 #[cfg(test)]
-pub(crate) use eve_db::{
-    lock_test_env_read, lock_test_env_write, TestEnvReadGuard, TestEnvWriteGuard,
-};
+pub(crate) use eve_db::{lock_test_env_write, TestEnvWriteGuard};
 
 #[cfg(test)]
 mod config_starter_state_deep_extra_unit_tests;

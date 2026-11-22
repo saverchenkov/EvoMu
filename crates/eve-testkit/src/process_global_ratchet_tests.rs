@@ -305,6 +305,11 @@ fn scanner_depth_aware_cfg_test_handles_struct_fields_variants_match_arms_and_ar
                     99
                 }
                 #[cfg(test)]
+                Foo { a: _ } => {
+                    static INSIDE_STRUCT_ARM: OnceLock<u64> = OnceLock::new();
+                    100
+                }
+                #[cfg(test)]
                 2 => 0,
                 _ => code,
             }

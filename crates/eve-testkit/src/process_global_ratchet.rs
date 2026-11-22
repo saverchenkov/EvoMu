@@ -4,9 +4,8 @@
 //! comments, string/char literals, `#[cfg(test)]` items, and test-only / `#[cfg(test)] mod`
 //! files) for:
 //! - `static mut`
-//! - `static` items using interior mutability / once-initialization primitives (`OnceLock`,
-//!   `LazyLock`, `OnceCell`, `LazyCell`, `Mutex`, `RwLock`, `RankedMutex`, `RankedRwLock`,
-//!   `Atomic*`, `Cell`, `RefCell`, `UnsafeCell`, `SyncUnsafeCell`, `Once`)
+//! - All non-`mut` `static` declarations except provably immutable scalar, reference, slice, array,
+//!   or tuple types and the explicitly audited read-only tables in `IMMUTABLE_STATIC_TABLES`
 //! - `thread_local!` / `std::thread_local!` blocks
 //! - `tokio::task_local!` / `task_local!` blocks
 //!
@@ -609,6 +608,12 @@ fn find_attributed_item_end_depth_aware(bytes: &[u8], start: usize) -> usize {
                     }
                     if matches!(mode, AttributedItemMode::FieldVariantOrArm) {
                         let after_ws = skip_ws(bytes, pos);
+                        if !seen_fat_arrow
+                            && (bytes.get(after_ws..).is_some_and(|rest| rest.starts_with(b"=>"))
+                                || starts_with_word(bytes, after_ws, b"if"))
+                        {
+                            continue;
+                        }
                         if bytes.get(after_ws) == Some(&b',') {
                             return after_ws + 1;
                         }
@@ -766,9 +771,12 @@ fn collect_contiguous_outer_attrs(
                 has_cfg_test = true;
             }
             let attr_end = find_matching_delim_end(clean_bytes, attr_start + 2, b'[', b']');
-            if let Ok(raw_attr) =
-                std::str::from_utf8(&raw_bytes[attr_start + 2..attr_end.saturating_sub(1)])
-            {
+            let slice_start = (attr_start + 2).min(raw_bytes.len());
+            let slice_end = attr_end
+                .saturating_sub(1)
+                .min(raw_bytes.len())
+                .max(slice_start);
+            if let Ok(raw_attr) = std::str::from_utf8(&raw_bytes[slice_start..slice_end]) {
                 if let Some(p) = extract_path_attr_value(raw_attr) {
                     path_override = Some(p);
                 }
