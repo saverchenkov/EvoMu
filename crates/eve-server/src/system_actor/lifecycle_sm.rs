@@ -1382,6 +1382,7 @@ impl SystemRegistry {
                 ..
             }) => {
                 let stale_gen = *stale_gen;
+                self.clear_system_seed_markers(solar_system_id);
                 let mut telem = self
                     .lifecycle_telemetry
                     .write()
@@ -1403,6 +1404,7 @@ impl SystemRegistry {
             }) => {
                 let dead_gen = *dead_gen;
                 self.clear_db_ballpark_for_handle(solar_system_id, handle);
+                self.clear_system_seed_markers(solar_system_id);
                 let mut telem = self
                     .lifecycle_telemetry
                     .write()
@@ -1645,6 +1647,7 @@ impl SystemRegistry {
                 };
                 if handle.cmd_tx.is_closed() {
                     self.clear_db_ballpark_for_handle(solar_system_id, &handle);
+                    self.clear_system_seed_markers(solar_system_id);
                     if let Ok(mut telem) = self.lifecycle_telemetry.write() {
                         telem.record_settled_cold(
                             solar_system_id,
@@ -1701,23 +1704,7 @@ impl SystemRegistry {
         ))
     }
 
-    fn finish_stopping_slot(
-        &self,
-        solar_system_id: SolarSystemId,
-        generation: u64,
-        gate: &Arc<LifecycleGate>,
-        detail: &'static str,
-    ) {
-        {
-            let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
-            remove_matching_stopping_slot(
-                &mut guard,
-                &self.lifecycle_telemetry,
-                solar_system_id,
-                generation,
-                detail,
-            );
-        }
+    fn clear_system_seed_markers(&self, solar_system_id: SolarSystemId) {
         {
             let mut spawned = self
                 .special_site_spawned_balls
@@ -1731,6 +1718,27 @@ impl SystemRegistry {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             wh_ore.retain(|(sid, _)| *sid != solar_system_id);
+        }
+    }
+
+    fn finish_stopping_slot(
+        &self,
+        solar_system_id: SolarSystemId,
+        generation: u64,
+        gate: &Arc<LifecycleGate>,
+        detail: &'static str,
+    ) {
+        {
+            let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
+            if remove_matching_stopping_slot(
+                &mut guard,
+                &self.lifecycle_telemetry,
+                solar_system_id,
+                generation,
+                detail,
+            ) {
+                self.clear_system_seed_markers(solar_system_id);
+            }
         }
         gate.resolve(GateResolution::SettledToCold);
     }

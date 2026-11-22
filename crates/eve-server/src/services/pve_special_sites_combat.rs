@@ -1401,8 +1401,10 @@ pub(crate) fn active_season_in_snapshot(
 }
 
 pub(crate) use crate::services::pve_special_sites_seasonal::{
-    active_seasonal_anomaly_instances_readonly, sync_seasonal_event_sites_in_seed_ctx,
+    active_seasonal_anomaly_instances_readonly, ensure_seasonal_event_sites_if_live_for_system,
+    sync_seasonal_event_sites_in_seed_ctx,
 };
+#[cfg(any(test, feature = "testkit"))]
 pub use crate::services::pve_special_sites_seasonal::ensure_seasonal_event_sites_for_system;
 
 #[cfg(test)]

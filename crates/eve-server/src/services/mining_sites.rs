@@ -711,6 +711,63 @@ pub(crate) fn tick_sov_prospecting_deposit_respawn_core(
     }
     let sov_pos = derive_system_site_position(sde, sys_id, 3, 5.0);
 
+    let needs_mut = db.with_snapshot(|snap| {
+        if live_ast_states.iter().any(|&(aid, rem)| {
+            snap.asteroids.get(&aid).is_some_and(|a| a.quantity != rem)
+        }) {
+            return true;
+        }
+        let installed_upgrade = snap
+            .structures
+            .values()
+            .filter(|s| s.solar_system_id == sys_id)
+            .find_map(|s| {
+                snap.items.values().find_map(|it| {
+                    if it.location_id == s.structure_id
+                        && it.flag == eve_db::InventoryFlag::SubSystemSlot0
+                    {
+                        modelled.get(&it.type_id)
+                    } else {
+                        None
+                    }
+                })
+            });
+        let anoms = snap
+            .cosmic_anomalies
+            .get(&sys_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let needs_clear = anoms.iter().any(|anom| {
+            if anom.anomaly_type != "SovOre" {
+                return false;
+            }
+            let anom_pos = DVec3::from_array(anom.position);
+            let any_remaining = snap.asteroids.values().any(|a| {
+                a.solar_system_id == sys_id
+                    && a.quantity > 0
+                    && DVec3::new(a.position.0, a.position.1, a.position.2).distance(anom_pos)
+                        <= 50_000.0
+            });
+            !any_remaining && (!anom.cleared || anom.lifetime_seconds == 0)
+        });
+        if needs_clear {
+            return true;
+        }
+        let Some((respawn_secs, _)) = installed_upgrade else {
+            return false;
+        };
+        let has_uncleared = anoms.iter().any(|a| a.anomaly_type == "SovOre" && !a.cleared);
+        !has_uncleared
+            && anoms.iter().any(|a| {
+                a.anomaly_type == "SovOre"
+                    && a.cleared
+                    && now >= a.created_unix.saturating_add(a.lifetime_seconds.max(*respawn_secs))
+            })
+    });
+    if !needs_mut {
+        return Vec::new();
+    }
+
     db.with_mut_snapshot(|snap| {
         for &(aid, rem) in &live_ast_states {
             if let Some(ast) = snap.asteroids.get_mut(&aid) {
@@ -1315,24 +1372,20 @@ pub(crate) fn seed_resource_sites_in_activation(
     combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<
         crate::services::combat_crimewatch::CombatRuntimeState,
     >,
-    mechanic_rng: &crate::rng::MechanicRng,
+    _mechanic_rng: &crate::rng::MechanicRng,
     phased_fields: &dyn eve_db::lock_rank::AnyRwLock<HashMap<u32, PhasedAsteroidFieldState>>,
 ) {
     if !seed_ctx.db_read_safe {
         return;
     }
     let sys_id = seed_ctx.solar_system_id;
-    let now = seed_ctx.now_unix_secs();
 
     tick_sov_prospecting_deposit_respawn_in_seed_ctx(seed_ctx, sde, db);
     super::space_mining_harvest::tick_ice_belt_respawn_in_seed_ctx(seed_ctx, sde, db);
-
-    let seeded_res = plan_and_seed_mining_sites_in_db(sde, db, mechanic_rng, sys_id, now);
-    let _ = super::mining_phased_autotarget::maybe_spawn_phased_asteroid_field_in_seed_ctx(
+    super::mining_phased_autotarget::rehydrate_phased_asteroid_field_in_seed_ctx(
         seed_ctx,
         sde,
         db,
-        mechanic_rng,
         phased_fields,
     );
 
@@ -1345,7 +1398,10 @@ pub(crate) fn seed_resource_sites_in_activation(
     });
     for rec in persisted_non_belt_asteroids {
         if !seed_ctx.ballpark.balls.contains_key(&rec.asteroid_id) {
-            let (uvol, default_rad) = type_vol_rad_from_sde(sde, rec.type_id);
+            let Some(t) = sde.types.get(&rec.type_id) else {
+                continue;
+            };
+            let (uvol, default_rad) = (t.volume.max(0.001), t.radius.max(50.0));
             let rad = if rec.radius > 0.0 {
                 rec.radius
             } else {
@@ -1373,44 +1429,56 @@ pub(crate) fn seed_resource_sites_in_activation(
         .get(&sys_id)
         .is_some_and(|s| s.region_id == 10_000_070);
     if is_pochven {
-        let pochven_sites: Vec<(u32, [f64; 3])> = match seeded_res {
-            Some(res) if !res.was_already_seeded => res.pochven_ore_sites,
-            _ => {
-                let existing_positions: Vec<DVec3> = {
-                    let rt = combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
-                    rt.npc_entities
-                        .values()
-                        .filter(|n| {
-                            n.solar_system_id == sys_id && n.archetype == "PochvenHypnosianSleeper"
-                        })
-                        .filter_map(|n| seed_ctx.ballpark.balls.get(&n.ball_id).map(|b| b.position))
-                        .collect()
-                };
-                db.with_snapshot(|snap| {
-                    snap.cosmic_anomalies
-                        .get(&sys_id)
-                        .map(|list| {
-                            list.iter()
-                                .filter(|a| a.anomaly_type == "OreAnomaly" && !a.cleared)
-                                .filter_map(|a| {
-                                    let did = a
-                                        .anomaly_id
-                                        .strip_prefix("DNG-")?
-                                        .split('-')
-                                        .next()?
-                                        .parse::<u32>()
-                                        .ok()?;
-                                    let c = DVec3::from_array(a.position);
-                                    let guarded =
-                                        existing_positions.iter().any(|p| p.distance(c) <= 30_000.0);
-                                    (!guarded).then_some((did, a.position))
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                })
-            }
+        // Prune stale Hypnosian AI entries from a prior evicted actor generation (`F-06`).
+        let has_stale_ai = {
+            let rt = combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+            rt.npc_entities.iter().any(|(bid, n)| {
+                n.solar_system_id == sys_id
+                    && n.archetype == "PochvenHypnosianSleeper"
+                    && !seed_ctx.ballpark.balls.contains_key(bid)
+            })
         };
+        if has_stale_ai {
+            let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+            rt.npc_entities.retain(|bid, n| {
+                !(n.solar_system_id == sys_id
+                    && n.archetype == "PochvenHypnosianSleeper"
+                    && !seed_ctx.ballpark.balls.contains_key(bid))
+            });
+        }
+
+        let existing_positions: Vec<DVec3> = {
+            let rt = combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+            rt.npc_entities
+                .values()
+                .filter(|n| {
+                    n.solar_system_id == sys_id && n.archetype == "PochvenHypnosianSleeper"
+                })
+                .filter_map(|n| seed_ctx.ballpark.balls.get(&n.ball_id).map(|b| b.position))
+                .collect()
+        };
+        let pochven_sites: Vec<(u32, [f64; 3])> = db.with_snapshot(|snap| {
+            snap.cosmic_anomalies
+                .get(&sys_id)
+                .map(|list| {
+                    list.iter()
+                        .filter(|a| a.anomaly_type == "OreAnomaly" && !a.cleared)
+                        .filter_map(|a| {
+                            let did = a
+                                .anomaly_id
+                                .strip_prefix("DNG-")?
+                                .split('-')
+                                .next()?
+                                .parse::<u32>()
+                                .ok()?;
+                            let c = DVec3::from_array(a.position);
+                            let guarded = existing_positions.iter().any(|p| p.distance(c) <= 30_000.0);
+                            (!guarded).then_some((did, a.position))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
         if !pochven_sites.is_empty() {
             let specs = collect_pochven_hypnosian_defender_specs(&pochven_sites);
             if !specs.is_empty() {

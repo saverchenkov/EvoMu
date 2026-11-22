@@ -1502,7 +1502,7 @@ impl SystemHandle {
             .iter()
             .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
         {
-            let mut bp = match self.ballpark.try_write_unranked() {
+            let mut bp = match self.ballpark.try_write_unranked_untracked() {
                 Ok(g) => g,
                 Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => return,
@@ -1514,10 +1514,31 @@ impl SystemHandle {
             };
             apply_spawn(&mut bp);
             super::protection::sync_ball_protection_in_actor(&bp, &mut st, ball_id);
+            self.publish_view_from(&bp, Some(&st));
         } else {
-            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
             apply_spawn(&mut bp);
             super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
+            self.publish_view_from(&bp, None);
+        }
+    }
+
+    pub(crate) fn try_mark_ball_non_free(&self, ball_id: BallId, is_free: bool) {
+        if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
+        {
+            let mut bp = match self.ballpark.try_write_unranked_untracked() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return,
+            };
+            bp.mark_ball_non_free(ball_id, is_free);
+            self.publish_view_from(&bp, None);
+        } else {
+            let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
+            bp.mark_ball_non_free(ball_id, is_free);
+            self.publish_view_from(&bp, None);
         }
     }
 

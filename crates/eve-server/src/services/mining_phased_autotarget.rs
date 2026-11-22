@@ -257,31 +257,27 @@ fn reserve_maybe_phased_asteroid_field(
     Some((state, ast_id, pos))
 }
 
-/// Seeds a Phased Asteroid Field during `Cold -> Loading -> Live` activation (`#1542`).
-pub(crate) fn maybe_spawn_phased_asteroid_field_in_seed_ctx(
+/// Rehydrates an already-persisted Phased Asteroid Field memory cache during activation without
+/// rolling or persisting any new field (`#1542`).
+pub(crate) fn rehydrate_phased_asteroid_field_in_seed_ctx(
     seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
     sde: &SdeRegistry,
     db: &eve_db::WorldRepository,
-    mechanic_rng: &crate::rng::MechanicRng,
     phased_fields: &dyn eve_db::lock_rank::AnyRwLock<HashMap<u32, PhasedAsteroidFieldState>>,
-) -> Option<PhasedAsteroidFieldState> {
+) {
     if !seed_ctx.db_read_safe {
-        return None;
+        return;
     }
-    let now = seed_ctx.now_unix_secs();
-    let (state, ast_id, pos) = reserve_maybe_phased_asteroid_field(
-        sde,
-        db,
-        mechanic_rng,
-        phased_fields,
-        seed_ctx.solar_system_id,
-        now,
-    )?;
-    if !seed_ctx.ballpark.balls.contains_key(&ast_id) {
-        let (st, ball) = build_phased_asteroid_ball_and_state(sde, ast_id, pos);
-        seed_ctx.spawn_asteroid(st, ball);
+    let sys_id = seed_ctx.solar_system_id;
+    let fields_opt = db.with_snapshot(|snap| {
+        let fields = load_phased_fields(snap);
+        let active = fields.get(&sys_id).filter(|f| !f.collapsed).cloned();
+        active.map(|f| (f, fields))
+    });
+    if let Some((_field, fields)) = fields_opt {
+        let _ = sde;
+        sync_phased_fields_lock(phased_fields, fields);
     }
-    Some(state)
 }
 
 /// Live spawner hook called when a low-sec or null-sec K-space system is seeded.

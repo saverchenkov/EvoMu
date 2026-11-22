@@ -303,6 +303,7 @@ fn ice_belt_needs_clear_or_respawn(
     snap: &eve_db::WorldStateSnapshot,
     sys_id: u32,
     now: u64,
+    seed_if_missing: bool,
 ) -> bool {
     let anoms = snap
         .cosmic_anomalies
@@ -323,7 +324,7 @@ fn ice_belt_needs_clear_or_respawn(
         return true;
     }
     let has_any_ice = anoms.iter().any(|a| a.anomaly_type == "IceBelt");
-    !has_any_ice || ice_belt_ready_for_respawn(anoms, now)
+    (!has_any_ice && seed_if_missing) || ice_belt_ready_for_respawn(anoms, now)
 }
 
 pub(crate) fn build_ice_belt_asteroid_ball_and_state(
@@ -372,6 +373,16 @@ pub(crate) fn tick_ice_belt_respawn_core(
     sys_id: u32,
     now: u64,
 ) -> IceBeltRespawnDelta {
+    tick_ice_belt_respawn_core_with_mode(sde, db, sys_id, now, true)
+}
+
+pub(crate) fn tick_ice_belt_respawn_core_with_mode(
+    sde: &eve_sde::SdeRegistry,
+    db: &eve_db::WorldRepository,
+    sys_id: u32,
+    now: u64,
+    seed_if_missing: bool,
+) -> IceBeltRespawnDelta {
     if !crate::services::mining_sites::is_designated_ice_system(sys_id) {
         return (Vec::new(), Vec::new());
     }
@@ -386,7 +397,8 @@ pub(crate) fn tick_ice_belt_respawn_core(
     {
         return (Vec::new(), Vec::new());
     }
-    if !db.with_snapshot(|snap| ice_belt_needs_clear_or_respawn(snap, sys_id, now)) {
+    if !db.with_snapshot(|snap| ice_belt_needs_clear_or_respawn(snap, sys_id, now, seed_if_missing))
+    {
         return (Vec::new(), Vec::new());
     }
     let type_vol_rad = |tid: u32| -> (f64, f64) {
@@ -429,7 +441,9 @@ pub(crate) fn tick_ice_belt_respawn_core(
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         let has_any_ice = anoms.iter().any(|a| a.anomaly_type == "IceBelt");
-        if has_any_ice && !ice_belt_ready_for_respawn(anoms, now) {
+        if (!has_any_ice && !seed_if_missing)
+            || (has_any_ice && !ice_belt_ready_for_respawn(anoms, now))
+        {
             return (Vec::new(), Vec::new());
         }
 
@@ -531,7 +545,7 @@ pub(crate) fn tick_ice_belt_respawn_with_handle(
     sys_id: u32,
     now: u64,
 ) {
-    let (old_ids, newly_spawned) = tick_ice_belt_respawn_core(sde, db, sys_id, now);
+    let (old_ids, newly_spawned) = tick_ice_belt_respawn_core_with_mode(sde, db, sys_id, now, false);
     if !old_ids.is_empty() || !newly_spawned.is_empty() {
         for old_id in old_ids {
             handle.try_remove_ball(old_id);
@@ -553,11 +567,12 @@ pub(crate) fn tick_ice_belt_respawn_in_seed_ctx(
     if !seed_ctx.db_read_safe {
         return;
     }
-    let (old_ids, newly_spawned) = tick_ice_belt_respawn_core(
+    let (old_ids, newly_spawned) = tick_ice_belt_respawn_core_with_mode(
         sde,
         db,
         seed_ctx.solar_system_id,
         seed_ctx.now_unix_secs(),
+        false,
     );
     for old_id in old_ids {
         let _ = seed_ctx.ballpark.remove_ball(old_id);

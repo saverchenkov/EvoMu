@@ -1194,9 +1194,12 @@ pub fn compute_homefront_combat_pilot_isk(
     cents.raw_cents() / 100
 }
 
-/// Seeds all 5 Drifter Hives from V24 SDE `sde.dungeons` (`5642, 5648..=5651`), localized names,
-/// Drifter NPC types (`sde.types`), and Antikythera Elements (`34556..=34560`).
-pub fn init_drifter_hives_from_sde(sde: &SdeRegistry, reg: &mut PveSpecialSitesRegistry) {
+/// Seeds a single Drifter Hive for `target_sys_id` from V24 SDE (`#1542`).
+pub(crate) fn init_drifter_hive_for_system_from_sde(
+    sde: &SdeRegistry,
+    reg: &mut PveSpecialSitesRegistry,
+    target_sys_id: SolarSystemId,
+) {
     let defs: &[(SolarSystemId, u32, &str, TypeId, &str)] = &[
         (31_000_001, 5648, "Barbican Hive", 34_557, "Barbican Element"),
         (31_000_002, 5649, "Vidette Hive", 34_558, "Vidette Element"),
@@ -1204,6 +1207,14 @@ pub fn init_drifter_hives_from_sde(sde: &SdeRegistry, reg: &mut PveSpecialSitesR
         (31_000_004, 5651, "Redoubt Hive", 34_560, "Redoubt Element"),
         (31_000_005, 5642, "Sentinel Hive", 34_556, "Sentinel Element"),
     ];
+    let Some(&(sys_id, did, fallback_dname, elem_tid, fallback_elem_name)) =
+        defs.iter().find(|&&(sid, ..)| sid == target_sys_id)
+    else {
+        return;
+    };
+    if reg.drifter_hives.contains_key(&sys_id) {
+        return;
+    }
 
     let r1_a = sde.types.get(&47_958).map(|t| t.type_id).unwrap_or(47_958);
     let r1_b = sde.types.get(&47_959).map(|t| t.type_id).unwrap_or(47_959);
@@ -1216,70 +1227,73 @@ pub fn init_drifter_hives_from_sde(sde: &SdeRegistry, reg: &mut PveSpecialSitesR
         .map(|t| t.type_id)
         .unwrap_or(37_473);
 
-    for &(sys_id, did, fallback_dname, elem_tid, fallback_elem_name) in defs {
-        if reg.drifter_hives.contains_key(&sys_id) {
-            continue;
-        }
-        let dname = sde
-            .dungeons
-            .get(&did)
-            .map(|d| d.name.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| fallback_dname.to_string());
-        let elem_name = sde
-            .types
-            .get(&elem_tid)
-            .map(|t| t.name.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| fallback_elem_name.to_string());
+    let dname = sde
+        .dungeons
+        .get(&did)
+        .map(|d| d.name.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback_dname.to_string());
+    let elem_name = sde
+        .types
+        .get(&elem_tid)
+        .map(|t| t.name.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback_elem_name.to_string());
 
-        let base_ball = 1_898_000_000 + ((did as i64) * 100);
-        let warden_npc_ball_id = base_ball + 30;
-        let rooms = vec![
-            DrifterHiveRoom {
-                room_index: 1,
-                room_name: format!("{dname} — Exterior Perimeter"),
-                npc_ball_ids: vec![base_ball + 11, base_ball + 12],
-                npc_type_ids: vec![r1_a, r1_b],
-                beacon_ball_id: base_ball + 10,
-                cleared: false,
-                destroyed_npc_ball_ids: Vec::new(),
-            },
-            DrifterHiveRoom {
-                room_index: 2,
-                room_name: format!("{dname} — Tactical Muster"),
-                npc_ball_ids: vec![base_ball + 21, base_ball + 22],
-                npc_type_ids: vec![r2_a, r2_b],
-                beacon_ball_id: base_ball + 20,
-                cleared: false,
-                destroyed_npc_ball_ids: Vec::new(),
-            },
-            DrifterHiveRoom {
-                room_index: 3,
-                room_name: format!("{dname} — Inner Sanctuary"),
-                npc_ball_ids: vec![warden_npc_ball_id],
-                npc_type_ids: vec![warden_tid],
-                beacon_ball_id: base_ball + 31,
-                cleared: false,
-                destroyed_npc_ball_ids: Vec::new(),
-            },
-        ];
-        reg.drifter_hives.insert(
-            sys_id,
-            DrifterHiveRecord {
-                site_id: format!("DRIFTER-HIVE-{did}"),
-                dungeon_id: did,
-                dungeon_name: dname,
-                solar_system_id: sys_id,
-                element_type_id: elem_tid,
-                element_name: elem_name,
-                current_room: 1,
-                total_rooms: 3,
-                warden_npc_ball_id,
-                cleared: false,
-                rooms,
-            },
-        );
+    let base_ball = 1_898_000_000 + ((did as i64) * 100);
+    let warden_npc_ball_id = base_ball + 30;
+    let rooms = vec![
+        DrifterHiveRoom {
+            room_index: 1,
+            room_name: format!("{dname} — Exterior Perimeter"),
+            npc_ball_ids: vec![base_ball + 11, base_ball + 12],
+            npc_type_ids: vec![r1_a, r1_b],
+            beacon_ball_id: base_ball + 10,
+            cleared: false,
+            destroyed_npc_ball_ids: Vec::new(),
+        },
+        DrifterHiveRoom {
+            room_index: 2,
+            room_name: format!("{dname} — Tactical Muster"),
+            npc_ball_ids: vec![base_ball + 21, base_ball + 22],
+            npc_type_ids: vec![r2_a, r2_b],
+            beacon_ball_id: base_ball + 20,
+            cleared: false,
+            destroyed_npc_ball_ids: Vec::new(),
+        },
+        DrifterHiveRoom {
+            room_index: 3,
+            room_name: format!("{dname} — Inner Sanctuary"),
+            npc_ball_ids: vec![warden_npc_ball_id],
+            npc_type_ids: vec![warden_tid],
+            beacon_ball_id: base_ball + 31,
+            cleared: false,
+            destroyed_npc_ball_ids: Vec::new(),
+        },
+    ];
+    reg.drifter_hives.insert(
+        sys_id,
+        DrifterHiveRecord {
+            site_id: format!("DRIFTER-HIVE-{did}"),
+            dungeon_id: did,
+            dungeon_name: dname,
+            solar_system_id: sys_id,
+            element_type_id: elem_tid,
+            element_name: elem_name,
+            current_room: 1,
+            total_rooms: 3,
+            warden_npc_ball_id,
+            cleared: false,
+            rooms,
+        },
+    );
+}
+
+/// Seeds all 5 Drifter Hives from V24 SDE `sde.dungeons` (`5642, 5648..=5651`), localized names,
+/// Drifter NPC types (`sde.types`), and Antikythera Elements (`34556..=34560`).
+pub fn init_drifter_hives_from_sde(sde: &SdeRegistry, reg: &mut PveSpecialSitesRegistry) {
+    for sys_id in 31_000_001..=31_000_005 {
+        init_drifter_hive_for_system_from_sde(sde, reg, sys_id);
     }
 }
 

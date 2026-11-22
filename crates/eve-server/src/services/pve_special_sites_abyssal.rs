@@ -898,13 +898,32 @@ pub async fn handle_abyssal_entrance_deployment(
     let cur_sys = session
         .solar_system_id
         .ok_or_else(|| rpc_err("NoSolarSystem", "Session has no active solar system"))?;
-    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
     let Some(filament_arg) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
         return Err(rpc_err(
             "MissingRequiredArgument",
             "AbyssalEntranceDeployment requires a valid filament itemID (> 0)",
         ));
     };
+
+    let Some(sys_handle) = ctx.systems.get_handle(cur_sys) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(cur_sys),
+            "handle_abyssal_entrance_deployment",
+            format!("Solar system {cur_sys} is not active"),
+        ));
+    };
+    if sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().is_none() {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(cur_sys),
+            "handle_abyssal_entrance_deployment",
+            format!("Ship {ship_id} is not present in ballpark {cur_sys}"),
+        ));
+    }
+    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
 
     let ConsumedAbyssalFilament {
         filament_type_id,
@@ -938,15 +957,6 @@ pub async fn handle_abyssal_entrance_deployment(
         tid
     });
 
-    let Some(sys_handle) = ctx.systems.get_handle(cur_sys) else {
-        return Err(BridgeRpcError::ship_not_in_space(
-            ship_id,
-            Some(char_id),
-            Some(cur_sys),
-            "handle_abyssal_entrance_deployment",
-            format!("Solar system {cur_sys} is not active"),
-        ));
-    };
     let _ = sys_handle
         .spawn_ball(make_site_npc_ball(
             trace_ball_id,

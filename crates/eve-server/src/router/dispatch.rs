@@ -1597,6 +1597,10 @@ impl ServerContext {
                     .filter(|&id| self.sde.solar_systems.contains_key(&id));
                 if let Some(sys_id) = session.solar_system_id {
                     if requested_sys.is_none_or(|req_id| req_id == sys_id) {
+                        crate::services::mining_sites::seed_system_mining_sites_from_sde(
+                            self, sys_id,
+                        )
+                        .await;
                         crate::services::combat_crimewatch::combat_npc_ai::ensure_zarzakh_patrols_and_gate_guns(
                             self, sys_id,
                         )

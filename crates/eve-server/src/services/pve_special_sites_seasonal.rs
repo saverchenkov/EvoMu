@@ -105,7 +105,10 @@ impl SeasonalBallTarget<'_, '_> {
                 s.spawn_ball_with_meta(ball, cs, meta);
                 s.ballpark.mark_ball_non_free(bid, false);
             }
-            Self::LiveHandle(h) => h.try_spawn_ball_with_meta(ball, cs, meta),
+            Self::LiveHandle(h) => {
+                h.try_spawn_ball_with_meta(ball, cs, meta);
+                h.try_mark_ball_non_free(bid, false);
+            }
         }
     }
 
@@ -1015,6 +1018,96 @@ fn reserve_seasonal_site_in_snap(
     })
 }
 
+fn seasonal_system_needs_sync_ro<F>(
+    db: &WorldRepository,
+    combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<
+        crate::services::combat_crimewatch::CombatRuntimeState,
+    >,
+    sys_id: SolarSystemId,
+    now_ft: i64,
+    now_sec: u64,
+    has_ball: F,
+) -> bool
+where
+    F: Fn(i64) -> bool,
+{
+    let check = db.with_snapshot(|snap| {
+        let sites = snap.pve_special_sites.seasonal_event_sites.get(&sys_id)?;
+        if sites.is_empty() {
+            return None;
+        }
+        let active_season_id = active_season_in_snapshot(snap, now_ft).map(|a| a.season_id);
+        let details_map = load_seasonal_site_details_map(snap);
+        let exp_reg_sites = snap
+            .owner_notes
+            .get(&crate::services::pve_exploration::PVE_EXPLORATION_NOTE_ID)
+            .and_then(|note| {
+                serde_json::from_str::<crate::services::pve_exploration::PveExplorationRegistry>(
+                    &note.note,
+                )
+                .ok()
+            })
+            .and_then(|mut exp_reg| exp_reg.sites_by_system.remove(&sys_id));
+
+        let mut surviving_npcs = Vec::new();
+        let mut defeated_npcs = Vec::new();
+
+        for s in sites {
+            if !seasonal_site_valid_in_snap(snap, sys_id, s, active_season_id, now_ft, now_sec) {
+                return Some((true, Vec::new(), Vec::new()));
+            }
+            let Some(d) = details_map.get(&s.instance_id) else {
+                return Some((true, Vec::new(), Vec::new()));
+            };
+            if d.relay_ball_id != 0 && d.relay_type_id != 0 {
+                if (!snap.transient_items.contains_key(&d.relay_ball_id)
+                    && !snap.items.contains_key(&d.relay_ball_id))
+                    || !snap.item_positions.contains_key(&d.relay_ball_id)
+                    || !has_ball(d.relay_ball_id)
+                {
+                    return Some((true, Vec::new(), Vec::new()));
+                }
+                if !d.exploration_site_id.is_empty()
+                    && exp_reg_sites.as_ref().is_none_or(|l| {
+                        !l.iter().any(|es| es.site_id == d.exploration_site_id)
+                    })
+                {
+                    return Some((true, Vec::new(), Vec::new()));
+                }
+            }
+            if d.boss_defeated {
+                defeated_npcs.push(s.boss_npc_ball_id);
+            } else {
+                if !has_ball(s.boss_npc_ball_id) {
+                    return Some((true, Vec::new(), Vec::new()));
+                }
+                surviving_npcs.push(s.boss_npc_ball_id);
+            }
+            for &ebid in &s.escort_ball_ids {
+                if d.defeated_escort_ball_ids.contains(&ebid) {
+                    defeated_npcs.push(ebid);
+                } else {
+                    if !has_ball(ebid) {
+                        return Some((true, Vec::new(), Vec::new()));
+                    }
+                    surviving_npcs.push(ebid);
+                }
+            }
+        }
+        Some((false, surviving_npcs, defeated_npcs))
+    });
+
+    let Some((needs_sync, surviving_npcs, defeated_npcs)) = check else {
+        return false;
+    };
+    if needs_sync {
+        return true;
+    }
+    let rt = combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+    surviving_npcs.iter().any(|bid| !rt.npc_entities.contains_key(bid))
+        || defeated_npcs.iter().any(|bid| rt.npc_entities.contains_key(bid))
+}
+
 fn sync_seasonal_event_sites_with_target(
     sde: &eve_sde::SdeRegistry,
     db: &WorldRepository,
@@ -1026,6 +1119,11 @@ fn sync_seasonal_event_sites_with_target(
     now_sec: u64,
 ) {
     let now_ft = db.clock().now_blueos_filetime_ticks();
+    if !seasonal_system_needs_sync_ro(db, combat_ephemeral, sys_id, now_ft, now_sec, |bid| {
+        target.has_ball(bid)
+    }) {
+        return;
+    }
     let prepared = expire_and_prepare_seasonal_sites_in_locks(
         db, combat_ephemeral, sys_id, now_ft, now_sec,
     );
@@ -1053,43 +1151,14 @@ fn sync_seasonal_event_sites_with_target(
             target.spawn_npc(ball, cs, npc_meta);
             npc_checks.push((iid, bid, Some(entity)));
         }
-        let (stale_balls, _) = reconcile_post_spawn_seasonal_balls_with_locks(
-            db,
-            combat_ephemeral,
-            sys_id,
-            |bid| target.has_ball(bid),
-            npc_checks,
-            &spawned_relays,
-        );
-        for bid in stale_balls {
-            target.remove_ball(bid);
-        }
-        return;
-    }
-
-    if let Some(season) = prepared.active_season {
-        if let SeasonalSpawnReservation::Created {
-            instance_id,
-            relay_bid,
-            relay_type_id,
-            relay_pos,
-            npc_spawns,
-        } = reserve_seasonal_site_in_snap(sde, db, sys_id, &season, now_sec)
-        {
-            let mut npc_checks = Vec::with_capacity(npc_spawns.len());
-            for (ball, cs, npc_meta, entity) in npc_spawns {
-                let bid = ball.id;
-                target.spawn_npc(ball, cs, npc_meta);
-                npc_checks.push((instance_id, bid, Some(entity)));
-            }
-            target.spawn_relay(sde, relay_bid, relay_type_id, relay_pos);
+        if !npc_checks.is_empty() || !spawned_relays.is_empty() {
             let (stale_balls, _) = reconcile_post_spawn_seasonal_balls_with_locks(
                 db,
                 combat_ephemeral,
                 sys_id,
                 |bid| target.has_ball(bid),
                 npc_checks,
-                &[(instance_id, relay_bid)],
+                &spawned_relays,
             );
             for bid in stale_balls {
                 target.remove_ball(bid);
@@ -1179,16 +1248,13 @@ pub(crate) fn tick_seasonal_event_sites_for_system_sync(
     sys_id: SolarSystemId,
     now_sec: u64,
 ) {
-    let now_ft = db.clock().now_blueos_filetime_ticks();
-    let needs_work = db.with_snapshot(|snap| {
-        active_season_in_snapshot(snap, now_ft).is_some()
-            || snap
-                .pve_special_sites
-                .seasonal_event_sites
-                .get(&sys_id)
-                .is_some_and(|list| !list.is_empty())
+    let has_sites = db.with_snapshot(|snap| {
+        snap.pve_special_sites
+            .seasonal_event_sites
+            .get(&sys_id)
+            .is_some_and(|list| !list.is_empty())
     });
-    if !needs_work {
+    if !has_sites {
         return;
     }
     sync_seasonal_event_sites_with_target(
@@ -1201,31 +1267,79 @@ pub(crate) fn tick_seasonal_event_sites_for_system_sync(
     );
 }
 
+/// Ensures seasonal event sites for `sys_id` ONLY when `sys_id` is already loaded/live; fails
+/// closed with no actor wake and no DB write if `sys_id` is cold (`#1542`).
+pub(crate) async fn ensure_seasonal_event_sites_if_live_for_system(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+) -> Vec<SeasonalEventSiteRecord> {
+    ensure_seasonal_event_sites_inner(ctx, sys_id, false).await
+}
+
 /// Spawns seasonal event sites in `sys_id` during an active seasonal event window (subject to
 /// persisted per-system cooldown) and despawns completed, expired, or out-of-window ones.
+#[cfg(any(test, feature = "testkit"))]
 pub async fn ensure_seasonal_event_sites_for_system(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
 ) -> Vec<SeasonalEventSiteRecord> {
+    ensure_seasonal_event_sites_inner(ctx, sys_id, true).await
+}
+
+async fn ensure_seasonal_event_sites_inner(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    allow_wake: bool,
+) -> Vec<SeasonalEventSiteRecord> {
+    if !allow_wake && ctx.systems.get_handle(sys_id).is_none() {
+        return Vec::new();
+    }
     let sys_lock = seasonal_system_lock(&ctx.db, sys_id);
     let _sys_guard = sys_lock.lock().await;
 
     let now_ft = ctx.now_blueos_filetime_ticks();
     let now_sec = ctx.now_unix();
 
+    let (has_sites, has_active_season) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.pve_special_sites
+                .seasonal_event_sites
+                .get(&sys_id)
+                .is_some_and(|list| !list.is_empty()),
+            active_season_in_snapshot(snap, now_ft).is_some(),
+        )
+    });
+    if !has_sites && !has_active_season {
+        return Vec::new();
+    }
+
+    let sys_handle = if allow_wake {
+        let Ok(h) = ctx
+            .systems
+            .wake_for_gm_command_async(sys_id, "EnsureSeasonalEventSites")
+            .await
+        else {
+            return Vec::new();
+        };
+        h
+    } else {
+        let Some(h) = ctx.systems.get_handle(sys_id) else {
+            return Vec::new();
+        };
+        h
+    };
+
     let prepared = expire_and_prepare_seasonal_sites_in_locks(
         &ctx.db, &*ctx.combat_ephemeral, sys_id, now_ft, now_sec,
     );
 
     if !prepared.expired_balls.is_empty() || !prepared.expired_relay_balls.is_empty() {
-        if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
-            for bid in prepared
-                .expired_balls
-                .iter()
-                .chain(prepared.expired_relay_balls.iter())
-            {
-                sys_handle.try_remove_ball(*bid);
-            }
+        for bid in prepared
+            .expired_balls
+            .iter()
+            .chain(prepared.expired_relay_balls.iter())
+        {
+            sys_handle.try_remove_ball(*bid);
         }
     }
 
@@ -1233,13 +1347,6 @@ pub async fn ensure_seasonal_event_sites_for_system(
     // missing from `rt.npc_entities` or Ballpark, re-validating against live DB state before
     // writing AI/Ballpark state so killed NPCs never resurrect.
     if !prepared.active_sites.is_empty() {
-        let Ok(sys_handle) = ctx
-            .systems
-            .wake_for_gm_command_async(sys_id, "EnsureSeasonalEventSites")
-            .await
-        else {
-            return prepared.active_sites;
-        };
         let mut candidate_positions: HashMap<i64, DVec3> = HashMap::new();
         for site in &prepared.active_sites {
             if let Some(d) = prepared.details_by_iid.get(&site.instance_id) {
@@ -1272,6 +1379,9 @@ pub async fn ensure_seasonal_event_sites_for_system(
             let _ = sys_handle.spawn_ball_with_meta(ball, cs, npc_meta).await;
             spawned_npc_checks.push((iid, bid, Some(entity)));
         }
+        if spawned_npc_checks.is_empty() && spawned_relay_checks.is_empty() {
+            return prepared.active_sites;
+        }
         return reconcile_post_spawn_seasonal_balls(
             ctx, &sys_handle, sys_id, spawned_npc_checks, &spawned_relay_checks,
         )
@@ -1279,6 +1389,9 @@ pub async fn ensure_seasonal_event_sites_for_system(
     }
 
     if let Some(season) = prepared.active_season {
+        if !allow_wake && ctx.systems.get_handle(sys_id).is_none() {
+            return prepared.active_sites;
+        }
         match reserve_seasonal_site_in_snap(&ctx.sde, &ctx.db, sys_id, &season, now_sec) {
             SeasonalSpawnReservation::AlreadyPresent(existing) => return existing,
             SeasonalSpawnReservation::CooldownBlocked | SeasonalSpawnReservation::Inactive => {
@@ -1291,13 +1404,6 @@ pub async fn ensure_seasonal_event_sites_for_system(
                 relay_pos,
                 npc_spawns,
             } => {
-                let Ok(sys_handle) = ctx
-                    .systems
-                    .wake_for_gm_command_async(sys_id, "EnsureSeasonalEventSites")
-                    .await
-                else {
-                    return Vec::new();
-                };
                 let mut check_npcs = Vec::with_capacity(npc_spawns.len());
                 let check_relays = [(instance_id, relay_bid)];
                 for (ball, cs, npc_meta, entity) in npc_spawns {
