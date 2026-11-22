@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::quasar_sov_equinox_hub::{drain, id_req, rpc, sess, structure as make_structure, subscribe};
+use crate::quasar_sov_equinox_hub::{drain, id_req, legal_sess, rpc, sess, structure as make_structure, subscribe};
 use eve_db::{corp_roles, InventoryItemRecord, PersistedMercenaryDen};
 use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field, WireMessage};
 use eve_server::quasar_gateway::{
@@ -92,8 +92,8 @@ async fn test_b22_quasar_sov_hub_and_star_resources() {
         );
     });
 
-    let mut s = sess(61_001, PILOT, CORP, NULLSEC_A, corp_roles::ROLE_DIRECTOR);
-    let mut outsider = sess(61_002, OTHER, 98_000_002, NULLSEC_A, 0);
+    let mut s = legal_sess(&ctx, 61_001, PILOT, CORP, NULLSEC_A, corp_roles::ROLE_DIRECTOR);
+    let mut outsider = legal_sess(&ctx, 61_002, OTHER, 98_000_002, NULLSEC_A, 0);
 
     // 1. Star & Planet resource configurations from SDE
     let star_rsp = rpc(&ctx, &mut s, "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest", Vec::new()).await;
@@ -189,7 +189,7 @@ async fn test_b22_quasar_sov_hub_upgrades_and_workforce() {
         );
     });
 
-    let mut s = sess(61_003, PILOT, CORP, NULLSEC_A, corp_roles::ROLE_DIRECTOR);
+    let mut s = legal_sess(&ctx, 61_003, PILOT, CORP, NULLSEC_A, corp_roles::ROLE_DIRECTOR);
     let mut rx = subscribe(&ctx, &mut s).await;
 
     // Fuel Hub A first

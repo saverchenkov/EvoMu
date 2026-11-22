@@ -359,11 +359,30 @@ async fn grpc_auth_expired_ban_revocation_gm_demotion_and_subscriber_guard_drop_
 #[tokio::test]
 async fn c9_audit_member_and_dev_index_direct_handler_wire_shapes() {
     let ctx = crate::router::ServerContext::new();
-    let (uid, corp_id) = ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get(&90_000_001).unwrap();
-        let uid = ch.user_id;
-        let cid = ch.corporation_id;
-        snap.corp_governance.entry(cid).or_default().role_audit_log.push((
+    let corp_id = 98_000_001_i64;
+    eve_testkit::legal_fixture::seed_legal_corp_member(
+        &ctx.db,
+        90_000_001,
+        corp_id,
+        "C9 Audit Corp",
+        "C9AC",
+        false,
+        u64::MAX,
+        None,
+    );
+    eve_testkit::legal_fixture::seed_legal_corp_member(
+        &ctx.db,
+        90_000_002,
+        corp_id,
+        "C9 Audit Corp",
+        "C9AC",
+        false,
+        0,
+        None,
+    );
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let uid = snap.characters.get(&90_000_001).unwrap().user_id;
+        snap.corp_governance.entry(corp_id).or_default().role_audit_log.push((
             90_000_002,
             90_000_001,
             0,
@@ -374,15 +393,12 @@ async fn c9_audit_member_and_dev_index_direct_handler_wire_shapes() {
         st.military_index = 4;
         st.industrial_index = 5;
         st.strategic_index = 1;
-        (uid, cid)
+        uid
     });
-    let mut sess = eve_machonet::SessionState {
-        user_id: Some(uid),
-        character_id: Some(90_000_001),
-        corporation_id: Some(corp_id),
-        corp_role: u64::MAX,
-        ..Default::default()
-    };
+    let mut sess = eve_machonet::SessionState::new(93_601);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(90_000_001);
+    ctx.sync_session(&mut sess);
     let kw = std::collections::HashMap::new();
 
     let audit = ctx

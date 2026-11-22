@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, rpc, sess, structure, subscribe, varint};
+use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, legal_sess, rpc, sess, structure, subscribe, varint};
 use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
@@ -534,7 +534,7 @@ async fn test_skyhook_admin_auth_window_and_star_resources() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let (sys_id, skyhook_id) = (30_000_142u32, 1_000_000_050i64);
-    let mut s = sess(60_006, PILOT, 98_000_001, sys_id, eve_db::corp_roles::ROLE_DIRECTOR);
+    let mut s = legal_sess(&ctx, 60_006, PILOT, 98_000_001, sys_id, eve_db::corp_roles::ROLE_DIRECTOR);
     let mut rx = subscribe(&ctx, &mut s).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(skyhook_id, structure(skyhook_id, 98_000_001, sys_id, TYPE_ORBITAL_SKYHOOK));
@@ -563,20 +563,8 @@ async fn test_skyhook_admin_auth_window_and_star_resources() {
     let mut mod_req = id_req(1, skyhook_id as u64);
     encode_bytes_field(2, &reag, &mut mod_req);
     let no_role_cid = 90_000_003_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(mut base_ch) = snap.characters.get(&PILOT).cloned() {
-            base_ch.character_id = no_role_cid;
-            base_ch.name = "NoRolePilot".into();
-            base_ch.corporation_id = 98_000_001;
-            snap.characters.insert(no_role_cid, base_ch);
-        }
-        if let Some(corp) = snap.corporations.get_mut(&98_000_001) {
-            corp.members.insert(no_role_cid);
-            corp.member_roles.insert(no_role_cid, 0);
-        }
-    });
-    let mut other = sess(60_007, OTHER, 98_000_002, sys_id, eve_db::corp_roles::ROLE_DIRECTOR);
-    let mut no_role = sess(60_008, no_role_cid, 98_000_001, sys_id, 0);
+    let mut other = legal_sess(&ctx, 60_007, OTHER, 98_000_002, sys_id, eve_db::corp_roles::ROLE_DIRECTOR);
+    let mut no_role = legal_sess(&ctx, 60_008, no_role_cid, 98_000_001, sys_id, 0);
     // `.admin.` packages are GM-gated by the gateway; give every session GM bits so the
     // handler's own ownership + director checks are what reject `other` / `no_role`.
     for x in [&mut s, &mut other, &mut no_role] {

@@ -1065,7 +1065,18 @@ async fn test_structure_auto_defense_round_robin_no_volley_multiplication() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut dir_sess = login(&ctx, 560, "demo", "demo-secret", 90_000_001).await;
-    dir_sess.corp_role = 1;
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut dir_sess,
+        90_000_001,
+        98_000_560,
+        "AutoDefense Corp",
+        "ADFC",
+        true,
+        1,
+        None,
+    );
+    crate::common::assert_it_legal_fixture(&ctx, "structure_auto_defense_round_robin", &dir_sess, true, 1);
     let corp_id = ctx.db.with_snapshot(|s| s.characters[&90_000_001].corporation_id);
     let (lowsec_sys, h1, h2) = (30_002_718u32, 90_000_021i64, 90_000_022i64);
     ctx.db.with_mut_snapshot(|snap| {

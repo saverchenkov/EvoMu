@@ -48,6 +48,79 @@ pub(crate) fn sess(sid: u64, cid: i64, corp: i64, sys: u32, corp_role: u64) -> S
     s
 }
 
+type LegalSession = SessionState;
+
+/// Builds a DB-backed legal player session and verifies `assert_it_legal_fixture`.
+pub(crate) fn legal_sess(
+    ctx: &ServerContext,
+    sid: u64,
+    cid: i64,
+    corp: i64,
+    sys: u32,
+    corp_role: u64,
+) -> LegalSession {
+    let mut uid = 1_u64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if !snap.characters.contains_key(&cid) {
+            let mut base = snap.characters.get(&PILOT).cloned().expect("PILOT seeded");
+            base.character_id = cid;
+            base.name = format!("Equinox Pilot {cid}");
+            let clone_ship_id = 100_100_000 + cid.rem_euclid(1_000_000);
+            if let Some(mut ship) = snap.items.get(&base.active_ship_id).cloned() {
+                ship.item_id = clone_ship_id;
+                ship.owner_id = cid;
+                snap.items.insert(clone_ship_id, ship);
+                base.active_ship_id = clone_ship_id;
+            }
+            snap.characters.insert(cid, base);
+        }
+        let ch = snap.characters.get_mut(&cid).expect("character present");
+        ch.solar_system_id = sys;
+        if sys != JITA {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        let dock_id = ch.station_id.or(ch.structure_id);
+        let ship_id = ch.active_ship_id;
+        uid = ch.user_id;
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            match dock_id {
+                Some(dock) => {
+                    sh.location_id = dock;
+                    sh.flag = eve_db::InventoryFlag::Hangar;
+                }
+                None => {
+                    sh.location_id = i64::from(sys);
+                    sh.flag = eve_db::InventoryFlag::None;
+                }
+            }
+        }
+    });
+    let mut s = sess(sid, cid, corp, sys, corp_role);
+    s.user_id = Some(uid);
+    s.character_id = Some(cid);
+    crate::common::sync_legal_corp_member(
+        ctx,
+        &mut s,
+        cid,
+        corp,
+        &format!("Equinox Corp {corp}"),
+        &format!("EQ{:02}", corp.rem_euclid(100)),
+        false,
+        corp_role,
+        None,
+    );
+    s.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    crate::common::assert_it_legal_fixture(
+        ctx,
+        "quasar_sov_equinox_hub::legal_sess",
+        &s,
+        !eve_db::is_npc_corporation(&ctx.sde, corp),
+        corp_role,
+    );
+    s
+}
+
 pub(crate) async fn rpc(ctx: &ServerContext, s: &mut SessionState, ty: &str, value: Vec<u8>) -> EvePublicResponse {
     let req = EvePublicRequest {
         issued: Some(GoogleTimestamp { seconds: ctx.now_unix() as i64, nanos: 0 }),
@@ -172,8 +245,6 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
     ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let mut s = sess(61_001, PILOT, CORP, NULL_A, corp_roles::ROLE_DIRECTOR);
-    let mut rx = subscribe(&ctx, &mut s).await;
     const STABILITY_GEN: u64 = 87_950; // Electric Stability Generator: 200 power, 2,700 workforce, 7 Magmatic Gas/hr
     let null_planets: Vec<i64> = ctx
         .sde
@@ -188,24 +259,6 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
             ch.station_id = None;
             ch.structure_id = None;
         }
-        let mut base_ch = snap.characters[&PILOT].clone();
-        base_ch.character_id = 90_000_003;
-        base_ch.corporation_id = CORP;
-        snap.characters.insert(90_000_003, base_ch);
-        let mut c = { let mut __corp = eve_db::CorporationRecord::default();
-            __corp.corporation_id = CORP;
-            __corp.ceo_id = 99_999_001;
-            __corp };
-        c.members.extend([PILOT, 90_000_003]);
-        c.member_roles.insert(PILOT, corp_roles::ROLE_DIRECTOR);
-        snap.corporations.insert(CORP, c);
-        snap.corporations.insert(
-            98_000_002,
-            { let mut __corp = eve_db::CorporationRecord::default();
-                __corp.corporation_id = 98_000_002;
-                __corp.ceo_id = OTHER;
-                __corp },
-        );
         snap.structures.insert(HUB_A, structure(HUB_A, CORP, NULL_A, TYPE_SOVEREIGNTY_HUB));
         // Fuel in the pilot's active ship (pilot is in the hub's system), upgrade inside the hub,
         // plus decoy stacks left in a Jita station hangar that must not be consumable.
@@ -218,6 +271,8 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
             snap.items.insert(id, InventoryItemRecord { item_id: id, type_id: ty, owner_id: PILOT, location_id: loc, quantity: qty, ..Default::default() });
         }
     });
+    let mut s = legal_sess(&ctx, 61_001, PILOT, CORP, NULL_A, corp_roles::ROLE_DIRECTOR);
+    let mut rx = subscribe(&ctx, &mut s).await;
 
     // Definitions enumerate exact V24 SDE upgrade types (`Minor Threat Detection Array 1` = 200 power, 1,800 wf, 0 fuel;
     // `Electric Stability Generator` = 200 power, 2,700 wf, 7 Magmatic Gas/hr).
@@ -253,9 +308,9 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
     assert_eq!(resources(&res), (exp_total_p, 0, exp_planet_w, 0));
 
     // Fuel: ownership, role and inventory are enforced; fuel is deducted from the caller's stack.
-    let mut other = sess(61_002, OTHER, 98_000_002, NULL_A, corp_roles::ROLE_DIRECTOR);
+    let mut other = legal_sess(&ctx, 61_002, OTHER, 98_000_002, NULL_A, corp_roles::ROLE_DIRECTOR);
     assert_eq!(rpc(&ctx, &mut other, "eve_public.sovereignty.hub.fuel.api.AddRequest", fuel_add(GAS_ITEM, 10, HUB_A)).await.status_code, STATUS_FORBIDDEN);
-    let mut no_role = sess(61_003, 90_000_003, CORP, NULL_A, 0);
+    let mut no_role = legal_sess(&ctx, 61_003, 90_000_003, CORP, NULL_A, 0);
     assert_eq!(rpc(&ctx, &mut no_role, "eve_public.sovereignty.hub.fuel.api.AddRequest", fuel_add(GAS_ITEM, 10, HUB_A)).await.status_code, STATUS_FORBIDDEN);
     assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.fuel.api.AddRequest", fuel_add(GAS_ITEM, 5_000, HUB_A)).await.status_code, STATUS_BAD_REQUEST);
     assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.fuel.api.AddRequest", fuel_add(STATION_GAS, 10, HUB_A)).await.status_code, STATUS_BAD_REQUEST, "fuel in a station hangar is not at the hub");
@@ -348,38 +403,20 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
 async fn test_equinox_hub_workforce_transfer_network_state_backed() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let mut s = sess(61_011, PILOT, CORP, NULL_A, corp_roles::ROLE_STATION_MANAGER);
-    let mut rx = subscribe(&ctx, &mut s).await;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT) {
             ch.solar_system_id = NULL_A;
             ch.station_id = None;
             ch.structure_id = None;
         }
-        let mut base_ch = snap.characters[&PILOT].clone();
-        base_ch.character_id = 90_000_003;
-        base_ch.corporation_id = CORP;
-        snap.characters.insert(90_000_003, base_ch);
-        let mut c = { let mut __corp = eve_db::CorporationRecord::default();
-            __corp.corporation_id = CORP;
-            __corp.ceo_id = 99_999_001;
-            __corp };
-        c.members.extend([PILOT, 90_000_003]);
-        c.member_roles.insert(PILOT, corp_roles::ROLE_DIRECTOR);
-        snap.corporations.insert(CORP, c);
-        snap.corporations.insert(
-            98_000_002,
-            { let mut __corp = eve_db::CorporationRecord::default();
-                __corp.corporation_id = 98_000_002;
-                __corp.ceo_id = OTHER;
-                __corp },
-        );
         snap.structures.insert(HUB_A, structure(HUB_A, CORP, NULL_A, TYPE_SOVEREIGNTY_HUB));
         snap.structures.insert(HUB_B, structure(HUB_B, CORP, NULL_B, TYPE_SOVEREIGNTY_HUB));
         snap.structures.insert(1_000_000_301, structure(1_000_000_301, CORP, NULL_A, eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK));
         snap.sov_runtime.skyhook_planets.insert(1_000_000_301, 40_042_173); // N3-JBX V (Temperate)
         snap.sov_runtime.skyhook_active.insert(1_000_000_301, true);
     });
+    let mut s = legal_sess(&ctx, 61_011, PILOT, CORP, NULL_A, corp_roles::ROLE_STATION_MANAGER);
+    let mut rx = subscribe(&ctx, &mut s).await;
 
     let net = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest", id_req(1, HUB_A as u64)).await);
     let hubs = fields(&net, 1);
@@ -403,7 +440,7 @@ async fn test_equinox_hub_workforce_transfer_network_state_backed() {
     let mut too_much_cfg = Vec::new();
     encode_bytes_field(3, &too_much, &mut too_much_cfg);
     assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", configure(HUB_A, too_much_cfg)).await.status_code, STATUS_BAD_REQUEST);
-    let mut other = sess(61_012, OTHER, 98_000_002, NULL_A, corp_roles::ROLE_DIRECTOR);
+    let mut other = legal_sess(&ctx, 61_012, OTHER, 98_000_002, NULL_A, corp_roles::ROLE_DIRECTOR);
     assert_eq!(rpc(&ctx, &mut other, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", configure(HUB_A, export_cfg.clone())).await.status_code, STATUS_FORBIDDEN);
     ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", configure(HUB_A, export_cfg)).await);
     let n = drain(&mut rx);

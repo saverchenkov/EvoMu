@@ -711,6 +711,9 @@ fn market_info_info_window_get_member_and_member_tracking_edge_cases() {
         npc_self.dict_get("corporationID"),
         Some(&PyRep::Integer(1_000_125))
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&ceo_id).unwrap().corporation_id = corp_id;
+    });
 
     // GetMemberTrackingInfo: filter_char_id + GetMemberTrackingInfoSimple non-director hides loc/ship
     let filtered = handle_get_member_tracking_info(

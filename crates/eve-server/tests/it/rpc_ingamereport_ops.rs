@@ -65,7 +65,24 @@ async fn test_ingame_reports_submission_and_persistence() {
     let mut sess = SessionState::new(35_002);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_1)]).await.expect("SelectCharacterID");
-    sess.corporation_id = Some(CORP_1);
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        PILOT_1,
+        CORP_1,
+        "Report Test Corp",
+        "RPTC",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    common::assert_it_legal_fixture(
+        &ctx,
+        "rpc_ingamereport_ops",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
 
     // 1. report_macro_use
     let r1 = rpc(

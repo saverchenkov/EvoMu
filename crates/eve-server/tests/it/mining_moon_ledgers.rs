@@ -625,14 +625,27 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     let wh_structure_id = 1_000_000_001_005i64;
     let auto_structure_id = 1_000_000_001_006i64;
     let char_corp_id = 98_000_777i64;
-    session.corporation_id = Some(char_corp_id);
-    session.corp_role = eve_db::corp_roles::ROLE_STATION_MANAGER;
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut session,
+        char_id,
+        char_corp_id,
+        "Moon Test Corp",
+        "MTC",
+        false,
+        eve_db::corp_roles::ROLE_STATION_MANAGER,
+        None,
+    );
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "mining_moon_ledgers",
+        &session,
+        true,
+        eve_db::corp_roles::ROLE_STATION_MANAGER,
+    );
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = eve_db::CorporationRecord::new(char_corp_id, "Moon Test Corp", "MTC", 90_000_002);
-        corp.members.extend([char_id, 90_000_002]);
-        snap.corporations.insert(char_corp_id, corp);
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.corporation_id = char_corp_id;
+        if let Some(corp) = snap.corporations.get_mut(&char_corp_id) {
+            corp.members.insert(90_000_002);
         }
         for (idx, (sid, sys_id, st_type, name)) in [
             (structure_id, 30000142u32, 35835u32, "Moon Mining Athanor (Jita High-Sec)"),
@@ -849,14 +862,20 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     assert_eq!(get_dict_val(&details_2h, "harvestedUnitsInBay").unwrap().as_i64(), Some(hourly_yield * 2));
 
     // 6. Corporate Mining Ledger (`feat:mining.corp-ledger`):
-    session.corp_role = 0;
+    crate::common::set_legal_corp_roles(&ctx, &mut session, char_id, char_corp_id, 0);
     let unpriv_err = ctx
         .dispatch_rpc(&mut session, "corpMiningLedger", None, "GetObserversWithMiningEvents", &[], &kw, None)
         .await
         .expect_err("Unprivileged pilot must be denied corpMiningLedger access");
     assert_eq!(unpriv_err.code, "CrpAccessDenied");
 
-    session.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
+    crate::common::set_legal_corp_roles(
+        &ctx,
+        &mut session,
+        char_id,
+        char_corp_id,
+        eve_db::corp_roles::ROLE_ACCOUNTANT,
+    );
     let corp_ledger = ctx
         .dispatch_rpc(&mut session, "corpMiningLedger", None, "GetObserversWithMiningEvents", &[], &kw, None)
         .await

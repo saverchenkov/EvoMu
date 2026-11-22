@@ -712,6 +712,17 @@ async fn peace_treaties_expiry_alliance_and_client_compat_boundaries() {
         zero_macho,
         PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::List(vec![])])
     );
+    eve_testkit::legal_fixture::seed_legal_corp_member(
+        &ctx.db,
+        char_id,
+        98_000_777,
+        "Peace Alliance Corp",
+        "PEAC",
+        true,
+        u64::MAX,
+        Some(my_ally),
+    );
+    ctx.sync_session(&mut sess_ally);
     let ally_macho = ctx
         .dispatch_rpc(
             &mut sess_ally,
@@ -1037,21 +1048,25 @@ async fn agent_mission_objective_compat_and_aggression_settings_all_combinations
     let corp_id = 98_700_001_i64;
     let ceo_id = 90_000_001_i64;
     let now_unix = 1_800_050_000_u64;
+    eve_testkit::legal_fixture::seed_legal_corp_member(
+        &ctx.db,
+        ceo_id,
+        corp_id,
+        "Agg Test Corp",
+        "AGGT",
+        true,
+        u64::MAX,
+        None,
+    );
     ctx.db.with_mut_snapshot(|snap| {
-        let mut c = CorporationRecord::new(corp_id, "Agg Test Corp", "AGGT", ceo_id);
-        c.hq_station_id = Some(60_003_760);
-        c.members = [ceo_id].into_iter().collect();
-        c.member_roles = [(ceo_id, u64::MAX)].into_iter().collect();
-        snap.corporations.insert(corp_id, c);
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.hq_station_id = Some(60_003_760);
+        }
     });
-    let mut sess = SessionState {
-        session_id: 1,
-        user_id: Some(ceo_id as u64),
-        character_id: Some(ceo_id),
-        corporation_id: Some(corp_id),
-        corp_role: u64::MAX,
-        ..Default::default()
-    };
+    let mut sess = SessionState::new(94_601);
+    sess.user_id = Some(1);
+    sess.character_id = Some(ceo_id);
+    ctx.sync_session(&mut sess);
     let eff_ft = crate::sp6_lifecycle::unix_to_filetime(now_unix + 86_400);
 
     for (current_ff, new_ff, exp_en, exp_dis) in [

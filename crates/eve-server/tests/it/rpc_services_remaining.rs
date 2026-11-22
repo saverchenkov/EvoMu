@@ -2283,8 +2283,26 @@ async fn test_rpc_sweep_group2_beyonce_commands() {
     let loot_id = 1_920_000_001i64;
     let loot_hangar_id = 1_920_000_005i64;
     let st_id = 1_920_000_002i64;
-    let corp_id = s1.corporation_id.unwrap_or(1_000_170);
+    let corp_id = 98_000_002i64;
     let target_player_corp = 98_000_001i64;
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut s1,
+        P1,
+        corp_id,
+        "Fleet Mover Corp",
+        "FLMC",
+        false,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    common::assert_it_legal_fixture(
+        &ctx,
+        "test_rpc_sweep_group2_beyonce_commands",
+        &s1,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(loot_id, mk_item(loot_id, 23, P1, JITA_SYS as i64, InventoryFlag::None, 1, true));
@@ -2314,17 +2332,17 @@ async fn test_rpc_sweep_group2_beyonce_commands() {
 
     // Exploit regression tests for CmdTransferCorpAssetOwnership:
     // 1. Caller docked in station must fail with NotInSpace (P2 #97)
-    s1.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    common::set_legal_corp_roles(&ctx, &mut s1, P1, corp_id, eve_db::corp_roles::ROLE_DIRECTOR);
     assert_eq!(call_err(&ctx, &mut s1, "beyonce", "CmdTransferCorpAssetOwnership", &[PyRep::Integer(st_id), PyRep::Integer(target_player_corp)]).await, "NotInSpace");
 
     // Undock into space
     call(&ctx, &mut s1, "stationSvc", "Undock", &[]).await;
 
     // 2. Unprivileged member (non-director) must fail with CrpAccessDenied
-    s1.corp_role = 0;
+    common::set_legal_corp_roles(&ctx, &mut s1, P1, corp_id, 0);
     assert_eq!(call_err(&ctx, &mut s1, "beyonce", "CmdTransferCorpAssetOwnership", &[PyRep::Integer(st_id), PyRep::Integer(target_player_corp)]).await, "CrpAccessDenied");
     // 3. Transfer to NPC corporation (e.g. 1_000_045) must fail with InvalidTargetCorporation
-    s1.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    common::set_legal_corp_roles(&ctx, &mut s1, P1, corp_id, eve_db::corp_roles::ROLE_DIRECTOR);
     assert_eq!(call_err(&ctx, &mut s1, "beyonce", "CmdTransferCorpAssetOwnership", &[PyRep::Integer(st_id), PyRep::Integer(1_000_045)]).await, "InvalidTargetCorporation");
     // 4. Legitimate transfer by Director in space to player corp succeeds
     assert_eq!(

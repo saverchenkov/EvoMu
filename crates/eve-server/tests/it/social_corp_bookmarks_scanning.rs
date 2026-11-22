@@ -724,8 +724,25 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
     }
 
     // Create shared folders (is_personal = false) up to 30 and verify 31st fails with MaxSharedFoldersReached
-    let prev_role = sess1.corp_role;
-    sess1.corp_role |= eve_db::corp_roles::ROLE_DIRECTOR;
+    let temp_corp_id = 98_000_040;
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess1,
+        90_000_001,
+        temp_corp_id,
+        "Bookmark Limit Corp",
+        "BMLC",
+        false,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "social_corp_bookmarks_shared_limit",
+        &sess1,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     let mut shared_folders = Vec::new();
     for idx in 1..=30 {
         let sf_rep = ctx
@@ -760,7 +777,18 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
     for sf_id in shared_folders {
         ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "DeleteFolder", &[PyRep::Integer(sf_id)], &kw, None).await.expect("Delete shared folder");
     }
-    sess1.corp_role = prev_role;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&temp_corp_id) {
+            corp.members.remove(&90_000_001);
+            corp.member_roles.remove(&90_000_001);
+        }
+        snap.corp_role_assignments.remove(&(temp_corp_id, 90_000_001));
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = 1_000_170;
+            ch.alliance_id = None;
+        }
+    });
+    ctx.sync_session(&mut sess1);
 
     // 2. Create Bookmark in Folder (`BookmarkLocation` & `accessGroupBookmarkMgr.BookmarkStaticLocation`) and verify stored coordinates, item, subfolder, and expiry
     let ship_id = sess1.ship_id.expect("Pilot 1 ship_id");

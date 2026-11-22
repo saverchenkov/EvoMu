@@ -415,7 +415,25 @@ async fn test_lp_wallet_balances_and_transfers() {
     let mut sess = setup_pilot_session(&ctx).await;
 
     // Seed pilot with LP: 40,000 Caldari Navy + 15,000 CONCORD
-    let player_corp_id = ctx.db.with_snapshot(|s| s.characters.get(&CHAR_ID).unwrap().corporation_id);
+    let player_corp_id = 98_000_002;
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        CHAR_ID,
+        player_corp_id,
+        "LP Test Corp",
+        "LPTC",
+        false,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    common::assert_it_legal_fixture(
+        &ctx,
+        "test_lp_wallet_balances_and_transfers",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
             ch.loyalty_points.insert(CALDARI_NAVY_CORP, 40_000);
@@ -647,11 +665,7 @@ async fn test_lp_wallet_balances_and_transfers() {
 
     // 7. Unprivileged caller (corp_role == 0) is rejected by GetAllMyCorporationWalletLPBalances,
     // TakeOfferForCorporation, and TransferLPFromMyCorpWalletToOtherCorp.
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.remove(&player_corp_id);
-        snap.corp_role_assignments.remove(&(player_corp_id, CHAR_ID));
-    });
-    sess.corp_role = 0;
+    common::set_legal_corp_roles(&ctx, &mut sess, CHAR_ID, player_corp_id, 0);
     let err_unpriv_view = rpc(&ctx, &mut sess, "LPSvc", "GetAllMyCorporationWalletLPBalances", &[PyRep::Integer(player_corp_id)])
         .await
         .expect_err("Unprivileged caller must be rejected by GetAllMyCorporationWalletLPBalances");

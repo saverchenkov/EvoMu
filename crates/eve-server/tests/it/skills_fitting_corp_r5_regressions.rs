@@ -247,6 +247,36 @@ async fn r5_228_229_230_233_fleet_warp_conduit_hierarchy_trash_and_alsc_cache() 
         snap.characters.insert(boss_id, clone_seeded_char(&base, boss_id, corp_id, None, sys_jita, boss_ship));
         snap.characters.insert(sc_id, clone_seeded_char(&base, sc_id, corp_id, None, sys_jita, sc_ship));
         snap.characters.insert(target_id, clone_seeded_char(&base, target_id, corp_id, Some(station_id), sys_jita, 0));
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            snap,
+            boss_id,
+            corp_id,
+            "R5 Fleet Corp",
+            "R5FC",
+            true,
+            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG,
+            None,
+        );
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            snap,
+            sc_id,
+            corp_id,
+            "R5 Fleet Corp",
+            "R5FC",
+            false,
+            0,
+            None,
+        );
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            snap,
+            target_id,
+            corp_id,
+            "R5 Fleet Corp",
+            "R5FC",
+            false,
+            eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG,
+            None,
+        );
         for &(iid, tid, owner, loc, flag, qty) in &[
             (boss_ship, 23757_u32, boss_id, sys_jita as i64, InventoryFlag::None, 1_i32),
             (890_002_090, 16274_u32, boss_id, boss_ship, InventoryFlag::Cargo, 100_000_i32),
@@ -455,8 +485,20 @@ async fn r5_228_229_230_233_fleet_warp_conduit_hierarchy_trash_and_alsc_cache() 
             },
         );
     });
-    sess_boss.corp_role = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
-    sess_target.corp_role = eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
+    crate::common::set_legal_corp_roles(
+        &ctx,
+        &mut sess_boss,
+        boss_id,
+        corp_id,
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG,
+    );
+    crate::common::set_legal_corp_roles(
+        &ctx,
+        &mut sess_target,
+        target_id,
+        corp_id,
+        eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG,
+    );
     let err_dir_personal = ctx
         .dispatch_rpc(&mut sess_target, "invbroker", None, "ALSCLogGet", &[PyRep::Integer(alsc_id)], &kw, None)
         .await
