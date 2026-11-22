@@ -9,7 +9,6 @@
         "router/binding.rs": 2,
         "router/dispatch.rs": 2,
         "router/mod.rs": 1,
-        "services/agents_missions.rs": 10,
         "services/crimewatch_timers.rs": 2,
         "services/inventory_bound.rs": 1,
         "services/nav_warp_interdiction.rs": 3
@@ -21,7 +20,6 @@
         "router/binding.rs": 4,
         "router/dispatch.rs": 2,
         "services/account_services.rs": 1,
-        "services/agents_missions.rs": 1,
         "services/campaigns_and_milestones.rs": 1,
         "services/campaigns_milestones_playtime.rs": 1,
         "services/character_lifecycle.rs": 1,
@@ -102,7 +100,6 @@
       "files": {
         "router/binding.rs": 1,
         "services/account_services.rs": 1,
-        "services/agents_missions.rs": 1,
         "services/campaigns_and_milestones.rs": 1,
         "services/campaigns_milestones_playtime.rs": 1,
         "services/character_lifecycle.rs": 1,
@@ -171,7 +168,6 @@
       "description": "Same-file call sites of local string-code BridgeRpcError helper wrappers (#1195).",
       "files": {
         "services/account_services.rs": 16,
-        "services/agents_missions.rs": 29,
         "services/campaigns_and_milestones.rs": 29,
         "services/campaigns_milestones_playtime.rs": 5,
         "services/character_lifecycle.rs": 23,
