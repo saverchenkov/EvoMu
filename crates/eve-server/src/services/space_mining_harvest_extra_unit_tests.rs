@@ -274,6 +274,9 @@ async fn hydrate_wormhole_guards_adopts_nearby_balls_and_spawns_unpersisted_anom
     // Empty guard_waves is a no-op
     spawn_wormhole_ore_guards(&ctx, sys_id, Vec::new()).await;
 
+    // Activate the system before adding synthetic post-seed test anomalies and nearby guard ball.
+    let handle = ctx.systems.get_or_spawn(sys_id);
+
     let def = WORMHOLE_ORE_SITES[1]; // Common Perimeter Deposit (5 guards of 30209)
     ctx.db.with_mut_snapshot(|snap| {
         let anoms = snap.cosmic_anomalies.entry(sys_id).or_default();
@@ -307,7 +310,6 @@ async fn hydrate_wormhole_guards_adopts_nearby_balls_and_spawns_unpersisted_anom
         });
     });
 
-    let handle = ctx.systems.get_or_spawn(sys_id);
     let existing_guard_id = 77_000_001_i64;
     let _ = handle
         .spawn_ball(Ball {
@@ -684,6 +686,7 @@ async fn tick_all_ice_belt_respawns_matrix_and_wormhole_ore_guard_slim_meta() {
     }
     let g0_id = 77_900_001_i64;
     let g510_id = 77_900_002_i64;
+    let g_handle = ctx.systems.get_or_spawn(g_sys);
     spawn_wormhole_ore_guards(
         &ctx,
         g_sys,
@@ -694,7 +697,6 @@ async fn tick_all_ice_belt_respawns_matrix_and_wormhole_ore_guard_slim_meta() {
     )
     .await;
 
-    let g_handle = ctx.systems.get_or_spawn(g_sys);
     let bp = g_handle.ballpark.read().unwrap();
     let m0 = bp.ball_slim_meta.get(&g0_id).expect("f0 guard meta");
     assert_eq!(m0.group_id, 551);

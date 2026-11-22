@@ -21,8 +21,9 @@ pub(crate) const AU_METERS: f64 = 149_597_870_700.0;
 pub mod fw_insurgency;
 pub use fw_insurgency::*;
 
-pub fn derive_system_site_position_from_sde(ctx: &ServerContext, sys_id: u32, slot: usize, au_scale: f64) -> [f64; 3] {
-    let mut cels = ctx.sde.celestials_in_system(sys_id);
+/// Derives a deterministic site coordinate in `sys_id` directly from an [`eve_sde::SdeRegistry`].
+pub fn derive_system_site_position(sde: &eve_sde::SdeRegistry, sys_id: u32, slot: usize, au_scale: f64) -> [f64; 3] {
+    let mut cels = sde.celestials_in_system(sys_id);
     cels.sort_by_key(|c| c.celestial_id);
     let base_dir = if !cels.is_empty() {
         let v = cels[slot % cels.len()].position;
@@ -41,6 +42,10 @@ pub fn derive_system_site_position_from_sde(ctx: &ServerContext, sys_id: u32, sl
     [pos.x, pos.y, pos.z]
 }
 
+pub fn derive_system_site_position_from_sde(ctx: &ServerContext, sys_id: u32, slot: usize, au_scale: f64) -> [f64; 3] {
+    derive_system_site_position(&ctx.sde, sys_id, slot, au_scale)
+}
+
 /// Evaluates server-clock respawn timers for depleted Sovereignty Hub prospecting deposits in `sys_id`.
 pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u32) {
     let has_sov_anom = ctx.db.with_snapshot(|snap| {
@@ -48,14 +53,16 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
     });
     if !has_sov_anom { return; }
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
     let sov_asteroid_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
         snap.asteroids.values().filter(|a| a.solar_system_id == sys_id && a.belt_id == 0).map(|a| a.asteroid_id).collect()
     });
     let mut live_ast_states = Vec::with_capacity(sov_asteroid_ids.len());
-    for aid in sov_asteroid_ids {
-        if let Ok(Some(st)) = sys_handle.get_asteroid_state(aid).await {
-            live_ast_states.push((aid, if st.depleted { 0_i64 } else { st.remaining_units as i64 }));
+    if let Some(ref sys_handle) = sys_handle_opt {
+        for aid in sov_asteroid_ids {
+            if let Ok(Some(st)) = sys_handle.get_asteroid_state(aid).await {
+                live_ast_states.push((aid, if st.depleted { 0_i64 } else { st.remaining_units as i64 }));
+            }
         }
     }
 
@@ -224,30 +231,32 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
         ctx, sys_id, &added_sigs, &cleared_anom_ids,
     );
 
-    for (aid, tid, units, uvol, rad, pos) in newly_spawned {
-        let ball = Ball {
-            id: aid,
-            type_id: tid,
-            position: pos,
-            velocity: DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 1.0,
-            mass: 80_000.0,
-            radius: rad,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        };
-        let st = AsteroidState {
-            asteroid_id: aid,
-            belt_id: 0,
-            type_id: tid,
-            initial_units: units,
-            remaining_units: units,
-            unit_volume: uvol,
-            depleted: false,
-            respawn_at_tick: None,
-        };
-        let _ = sys_handle.spawn_asteroid(st, ball).await;
+    if let Some(ref sys_handle) = sys_handle_opt {
+        for (aid, tid, units, uvol, rad, pos) in newly_spawned {
+            let ball = Ball {
+                id: aid,
+                type_id: tid,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 80_000.0,
+                radius: rad,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            };
+            let st = AsteroidState {
+                asteroid_id: aid,
+                belt_id: 0,
+                type_id: tid,
+                initial_units: units,
+                remaining_units: units,
+                unit_volume: uvol,
+                depleted: false,
+                respawn_at_tick: None,
+            };
+            let _ = sys_handle.spawn_asteroid(st, ball).await;
+        }
     }
 }
 
@@ -436,31 +445,32 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
     });
 
     if !newly_spawned.is_empty() {
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        for (aid, tid, units, uvol, rad, pos) in newly_spawned {
-            let ball = Ball {
-                id: aid,
-                type_id: tid,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 50_000.0,
-                radius: rad,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            };
-            let st = AsteroidState {
-                asteroid_id: aid,
-                belt_id: 0,
-                type_id: tid,
-                initial_units: units,
-                remaining_units: units,
-                unit_volume: uvol,
-                depleted: false,
-                respawn_at_tick: None,
-            };
-            let _ = handle.spawn_asteroid(st, ball).await;
+        if let Some(handle) = ctx.systems.get_handle(sys_id) {
+            for (aid, tid, units, uvol, rad, pos) in newly_spawned {
+                let ball = Ball {
+                    id: aid,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 50_000.0,
+                    radius: rad,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                };
+                let st = AsteroidState {
+                    asteroid_id: aid,
+                    belt_id: 0,
+                    type_id: tid,
+                    initial_units: units,
+                    remaining_units: units,
+                    unit_volume: uvol,
+                    depleted: false,
+                    respawn_at_tick: None,
+                };
+                let _ = handle.spawn_asteroid(st, ball).await;
+            }
         }
     }
 }
@@ -658,49 +668,50 @@ pub async fn handle(
 
             // Proximity check for compatibility with space proximity test if in space
             if let Some(ship_id) = session.ship_id {
-                let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                if let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await {
-                    let friendly_structs: Vec<[f64; 3]> = ctx.db.with_snapshot(|snap| {
-                        let caller_corp_id = snap
-                            .characters
-                            .get(&char_id)
-                            .map(|c| c.corporation_id)
-                            .unwrap_or(0);
-                        let caller_alliance_id = snap
-                            .characters
-                            .get(&char_id)
-                            .and_then(|c| c.alliance_id)
-                            .or(session.alliance_id);
-                        snap.structures
-                            .values()
-                            .filter(|s| {
-                                s.solar_system_id == sys_id
-                                    && (s.owner_corp_id == caller_corp_id
-                                        || (caller_alliance_id.is_some()
-                                            && snap
-                                                .corporations
-                                                .get(&s.owner_corp_id)
-                                                .and_then(|c| c.alliance_id)
-                                                == caller_alliance_id))
-                                    && s.state == "ShieldVulnerable"
-                            })
-                            .map(|s| s.position)
-                            .collect()
-                    });
-                    if !friendly_structs.is_empty() {
-                        let min_dist = friendly_structs
-                            .iter()
-                            .map(|pos| ship_ball.position.distance(glam::DVec3::from_array(*pos)))
-                            .fold(f64::INFINITY, f64::min);
-                        if min_dist > 50_000.0 {
-                            return Some(Err(BridgeRpcError {
-                                code: "OutsideSovStructureProximity".into(),
-                                message: format!(
-                                    "Ship is {:.1} m from nearest friendly sovereignty structure (must be <= 50000 m)",
-                                    min_dist
-                                ),
-                                client_error: None,
-                            }));
+                if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+                    if let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+                        let friendly_structs: Vec<[f64; 3]> = ctx.db.with_snapshot(|snap| {
+                            let caller_corp_id = snap
+                                .characters
+                                .get(&char_id)
+                                .map(|c| c.corporation_id)
+                                .unwrap_or(0);
+                            let caller_alliance_id = snap
+                                .characters
+                                .get(&char_id)
+                                .and_then(|c| c.alliance_id)
+                                .or(session.alliance_id);
+                            snap.structures
+                                .values()
+                                .filter(|s| {
+                                    s.solar_system_id == sys_id
+                                        && (s.owner_corp_id == caller_corp_id
+                                            || (caller_alliance_id.is_some()
+                                                && snap
+                                                    .corporations
+                                                    .get(&s.owner_corp_id)
+                                                    .and_then(|c| c.alliance_id)
+                                                    == caller_alliance_id))
+                                        && s.state == "ShieldVulnerable"
+                                })
+                                .map(|s| s.position)
+                                .collect()
+                        });
+                        if !friendly_structs.is_empty() {
+                            let min_dist = friendly_structs
+                                .iter()
+                                .map(|pos| ship_ball.position.distance(glam::DVec3::from_array(*pos)))
+                                .fold(f64::INFINITY, f64::min);
+                            if min_dist > 50_000.0 {
+                                return Some(Err(BridgeRpcError {
+                                    code: "OutsideSovStructureProximity".into(),
+                                    message: format!(
+                                        "Ship is {:.1} m from nearest friendly sovereignty structure (must be <= 50000 m)",
+                                        min_dist
+                                    ),
+                                    client_error: None,
+                                }));
+                            }
                         }
                     }
                 }

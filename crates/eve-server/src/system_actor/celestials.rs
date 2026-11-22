@@ -1376,7 +1376,7 @@ impl SystemHandle {
 
     /// Inserts a rigid static asteroid ball and neutral `SlimItemMeta` into `bp` without adding it
     /// to dynamic `grids`/`ball_grid_ids`, and broadcasts `AddBalls2` to all grid observers.
-    pub(super) fn spawn_asteroid_ball_in_ballpark(
+    pub(crate) fn spawn_asteroid_ball_in_ballpark(
         bp: &mut Ballpark,
         sde_opt: &Option<Arc<SdeRegistry>>,
         ast_ball: &mut Ball,

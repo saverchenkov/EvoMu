@@ -48,16 +48,20 @@ pub fn faction_damage_vector(faction_id: u32, total_dps: f64) -> DamageVector {
 // DERIVED: Region-to-pirate-faction table mapped from EVE regional pirate rat distribution
 // (Guristas, Blood Raiders, Sansha's Nation, Serpentis, Angel Cartel); client FSD static data
 // does not ship server-side regional pirate spawn tables.
-pub fn regional_pirate_faction_id(ctx: &ServerContext, solar_system_id: u32) -> u32 {
-    let Some(sys) = ctx.sde.solar_systems.get(&solar_system_id) else {
+/// Resolves the regional pirate faction ID directly from an [`eve_sde::SdeRegistry`]
+/// without requiring a full [`ServerContext`].
+pub fn regional_pirate_faction_id_for_sde(
+    sde: &eve_sde::SdeRegistry,
+    solar_system_id: u32,
+) -> u32 {
+    let Some(sys) = sde.solar_systems.get(&solar_system_id) else {
         return 500_010;
     };
-    let sde_faction = ctx
-        .sde
+    let sde_faction = sde
         .constellations
         .get(&sys.constellation_id)
         .and_then(|c| c.faction_id)
-        .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.faction_id));
+        .or_else(|| sde.regions.get(&sys.region_id).and_then(|r| r.faction_id));
     if let Some(fid) = sde_faction {
         match fid {
             500_010 | 500_001 => return 500_010, // Guristas / Caldari State
@@ -82,6 +86,10 @@ pub fn regional_pirate_faction_id(ctx: &ServerContext, solar_system_id: u32) -> 
         | 10_000_012 | 10_000_014 | 10_000_025 | 10_000_028 | 10_000_030 | 10_000_042 => 500_011, // Angel Cartel
         _ => 500_010,
     }
+}
+
+pub fn regional_pirate_faction_id(ctx: &ServerContext, solar_system_id: u32) -> u32 {
+    regional_pirate_faction_id_for_sde(&ctx.sde, solar_system_id)
 }
 
 /// Returns the Clone Soldier tier name for a low-sec system security status (`0.05..0.45`), or `None` outside low-sec (`feat:npc.clone-soldier-spawns`).

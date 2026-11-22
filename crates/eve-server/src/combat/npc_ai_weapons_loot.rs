@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::combat::npc_ai::{faction_damage_vector, regional_pirate_faction_id};
+use crate::combat::npc_ai::{faction_damage_vector, regional_pirate_faction_id_for_sde};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{with_combat_ephemeral, ExtendedNpcEntity};
 use crate::services::wormhole_pve_seeding::is_any_capital_group;
@@ -1019,9 +1019,128 @@ fn specialized_profile_shot_damage(profile: &NpcCombatProfile) -> DamageVector {
     sum_damage_vectors(turret_shot, missile_shot)
 }
 
+fn is_empire_sentry_faction(faction_id: u32) -> bool {
+    matches!(faction_id, 500_001..=500_004 | 500_006..=500_008)
+}
+
+/// Resolves an empire faction ID from an NPC type name or Navy archetype when SDE `faction_id` is absent.
+fn resolve_empire_faction_from_name(type_name: &str, archetype: &str) -> Option<u32> {
+    if type_name.contains("Republic Fleet")
+        || type_name.contains("Minmatar")
+        || archetype == "MinmatarNavy"
+    {
+        Some(500_002)
+    } else if type_name.contains("Imperial Navy")
+        || type_name.contains("Amarr")
+        || archetype == "AmarrNavy"
+    {
+        Some(500_003)
+    } else if type_name.contains("Federal Navy")
+        || type_name.contains("Gallente")
+        || archetype == "GallenteNavy"
+    {
+        Some(500_004)
+    } else if type_name.contains("Caldari")
+        || type_name.contains("State Navy")
+        || type_name.contains("State Police")
+        || type_name.contains("State Peacekeeper")
+        || archetype == "CaldariNavy"
+    {
+        Some(500_001)
+    } else if type_name.contains("CONCORD") {
+        Some(500_006)
+    } else if type_name.contains("Ammatar") {
+        Some(500_007)
+    } else if type_name.contains("Khanid") {
+        Some(500_008)
+    } else {
+        None
+    }
+}
+
+/// Resolves a system's governing empire faction from station, constellation, or region SDE ownership.
+fn resolve_system_empire_faction_sde(sde: &SdeRegistry, solar_system_id: u32) -> u32 {
+    sde.solar_systems
+        .get(&solar_system_id)
+        .and_then(|sys| {
+            sys.stations
+                .iter()
+                .find_map(|st| {
+                    st.owner_faction_id
+                        .filter(|&f| f > 0)
+                        .map(|f| f as u32)
+                        .filter(|&f| is_empire_sentry_faction(f))
+                })
+                .or_else(|| {
+                    sde.constellations
+                        .get(&sys.constellation_id)
+                        .and_then(|c| c.faction_id.filter(|&f| is_empire_sentry_faction(f)))
+                })
+                .or_else(|| {
+                    sde.regions
+                        .get(&sys.region_id)
+                        .and_then(|r| r.faction_id.filter(|&f| is_empire_sentry_faction(f)))
+                })
+        })
+        .unwrap_or(500_001)
+}
+
+/// Builds `(Ball, CombatState, ExtendedNpcEntity)` directly from [`SdeRegistry`] for activation-time spawning.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn build_specialized_npc_components_with_empire_hint(
-    ctx: &ServerContext,
+pub(crate) fn build_specialized_npc_components_for_sde(
+    sde: &SdeRegistry,
+    solar_system_id: u32,
+    ball_id: i64,
+    npc_type_id: u32,
+    archetype: &str,
+    spawn_group_id: u32,
+    pos: DVec3,
+    rng_seed: u64,
+) -> (Ball, CombatState, ExtendedNpcEntity) {
+    let type_name = sde
+        .types
+        .get(&npc_type_id)
+        .map(|t| t.name.as_str())
+        .unwrap_or("");
+    let empire_faction_override = match archetype {
+        "Navy"
+        | "FactionPolice"
+        | "Police"
+        | "CaldariNavy"
+        | "MinmatarNavy"
+        | "AmarrNavy"
+        | "GallenteNavy" => Some(
+            resolve_empire_faction_from_name(type_name, archetype).unwrap_or(500_001),
+        ),
+        // Gate/station sentry types in EVE SDE omit `faction_id`; resolve empire sovereignty
+        // rather than falling back to regional pirate factions.
+        "EmpireSentry" => Some(
+            resolve_empire_faction_from_name(type_name, archetype).unwrap_or_else(|| {
+                if is_empire_sentry_faction(spawn_group_id) {
+                    spawn_group_id
+                } else {
+                    resolve_system_empire_faction_sde(sde, solar_system_id)
+                }
+            }),
+        ),
+        _ => None,
+    };
+    build_specialized_npc_components_for_sde_with_empire_hint(
+        sde,
+        solar_system_id,
+        ball_id,
+        npc_type_id,
+        archetype,
+        spawn_group_id,
+        pos,
+        empire_faction_override,
+        rng_seed,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_specialized_npc_components_for_sde_with_empire_hint(
+    sde: &SdeRegistry,
     solar_system_id: u32,
     ball_id: i64,
     npc_type_id: u32,
@@ -1029,8 +1148,9 @@ pub(crate) fn build_specialized_npc_components_with_empire_hint(
     spawn_group_id: u32,
     pos: DVec3,
     empire_faction_override: Option<u32>,
+    rng_seed: u64,
 ) -> (Ball, CombatState, ExtendedNpcEntity) {
-    let sde_type = ctx.sde.types.get(&npc_type_id);
+    let sde_type = sde.types.get(&npc_type_id);
     let attr = |aid: u16| -> Option<f64> {
         sde_type.and_then(|t| t.default_attributes.get(&aid).copied())
     };
@@ -1071,7 +1191,7 @@ pub(crate) fn build_specialized_npc_components_with_empire_hint(
                         if (500_001..=500_030).contains(&spawn_group_id) {
                             spawn_group_id
                         } else {
-                            regional_pirate_faction_id(ctx, solar_system_id)
+                            regional_pirate_faction_id_for_sde(sde, solar_system_id)
                         }
                     }
                 })
@@ -1085,7 +1205,7 @@ pub(crate) fn build_specialized_npc_components_with_empire_hint(
     } else {
         attr(481).unwrap_or(0.0)
     };
-    let profile = resolve_npc_combat_profile(&ctx.sde, npc_type_id, Some(bounty), resolved_faction_id);
+    let profile = resolve_npc_combat_profile(sde, npc_type_id, Some(bounty), resolved_faction_id);
 
     let max_vel = if is_static_structure {
         0.0
@@ -1098,7 +1218,7 @@ pub(crate) fn build_specialized_npc_components_with_empire_hint(
     let (opt_range, orb_range, damage_vector) = if archetype == "TransmissionRelay" {
         (0.0, 0.0, DamageVector::default())
     } else if !profile.is_synthetic_fallback {
-        let opt = expected_specialized_optimal_range(&ctx.sde, npc_type_id, archetype, &profile);
+        let opt = expected_specialized_optimal_range(sde, npc_type_id, archetype, &profile);
         let orb = if is_static_structure {
             0.0
         } else {
@@ -1166,8 +1286,7 @@ pub(crate) fn build_specialized_npc_components_with_empire_hint(
         } else {
             "Negotiator"
         };
-        ctx.sde
-            .types
+        sde.types
             .values()
             .find(|t| {
                 t.group_id == 1206
@@ -1235,7 +1354,7 @@ pub(crate) fn build_specialized_npc_components_with_empire_hint(
             (wf, wr, ss, sr)
         };
 
-    let mut cs = ctx.build_type_combat_state(npc_type_id);
+    let mut cs = ServerContext::build_type_combat_state_from_sde_seeded(sde, npc_type_id, rng_seed);
     if cs.max_structure_hp <= 0.0 {
         cs.max_shield_hp = 2_000.0;
         cs.shield_hp = 2_000.0;
@@ -1256,19 +1375,16 @@ pub(crate) fn build_specialized_npc_components_with_empire_hint(
         }
     }
 
-    let ball = build_npc_ball_from_sde(&ctx.sde, ball_id, npc_type_id, pos, max_vel, 0.0);
-    let wh_class = ctx
-        .sde
+    let ball = build_npc_ball_from_sde(sde, ball_id, npc_type_id, pos, max_vel, 0.0);
+    let wh_class = sde
         .solar_systems
         .get(&solar_system_id)
         .and_then(|s| {
-            ctx.sde
-                .constellations
+            sde.constellations
                 .get(&s.constellation_id)
                 .and_then(|c| c.wormhole_class_id)
                 .or_else(|| {
-                    ctx.sde
-                        .regions
+                    sde.regions
                         .get(&s.region_id)
                         .and_then(|r| r.wormhole_class_id)
                 })
@@ -1336,6 +1452,32 @@ pub(crate) fn build_specialized_npc_components_with_empire_hint(
         custom_cargo_loot: None,
     };
     (ball, cs, entity)
+}
+
+pub(crate) fn build_specialized_npc_components_with_empire_hint(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    ball_id: i64,
+    npc_type_id: u32,
+    archetype: &str,
+    spawn_group_id: u32,
+    pos: DVec3,
+    empire_faction_override: Option<u32>,
+) -> (Ball, CombatState, ExtendedNpcEntity) {
+    let seq = ctx
+        .combat_rng_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    build_specialized_npc_components_for_sde_with_empire_hint(
+        &ctx.sde,
+        solar_system_id,
+        ball_id,
+        npc_type_id,
+        archetype,
+        spawn_group_id,
+        pos,
+        empire_faction_override,
+        seq ^ (u64::from(npc_type_id) << 32),
+    )
 }
 
 pub(crate) fn emit_npc_special_fx(
@@ -1571,19 +1713,32 @@ pub(crate) fn finalize_system_weapon_runtime_step(
     }
 }
 
-pub(crate) fn clear_extended_npc_weapon_runtime(
-    ctx: &ServerContext,
+pub(crate) fn clear_extended_npc_weapon_runtime_with_rt(
+    combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<
+        crate::services::combat_crimewatch::CombatRuntimeState,
+    >,
     solar_system_id: u32,
     ball_ids: &[i64],
 ) {
     if ball_ids.is_empty() {
         return;
     }
-    with_mut_extended_npc_weapon_runtime(ctx, |wrt| {
-        for &bid in ball_ids {
-            wrt.remove(&(solar_system_id, bid));
-        }
-    });
+    let shared = {
+        let guard = combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+        guard.extended_npc_weapon_runtime.clone()
+    };
+    let mut wrt = shared.map.write().unwrap_or_else(|e| e.into_inner());
+    for &bid in ball_ids {
+        wrt.remove(&(solar_system_id, bid));
+    }
+}
+
+pub(crate) fn clear_extended_npc_weapon_runtime(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    ball_ids: &[i64],
+) {
+    clear_extended_npc_weapon_runtime_with_rt(ctx.combat_ephemeral.as_ref(), solar_system_id, ball_ids);
 }
 
 pub(crate) fn take_or_init_extended_npc_weapon_runtime(

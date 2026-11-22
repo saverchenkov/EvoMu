@@ -18,6 +18,15 @@ fn shared_sde() -> Arc<SdeRegistry> {
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
 }
 
+fn build_default_triglavian_sites_for_system(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    edencom_mv: &[SolarSystemId],
+    trig_mv: &[SolarSystemId],
+) -> Vec<TriglavianSiteRecord> {
+    build_default_triglavian_sites_for_system_sde(&ctx.sde, sys_id, edencom_mv, trig_mv)
+}
+
 fn find_highsec_system(sde: &SdeRegistry) -> SolarSystemId {
     for &preferred in crate::services::pve_homefront_sites::HOMEFRONT_SYSTEMS {
         if sde.solar_systems.contains_key(&preferred) {
@@ -484,12 +493,29 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
     });
 
     let trig_sys: SolarSystemId = 30_000_012;
+    let (cold_trig_ctx, mut cold_trig_sess, _, _) = make_ctx_and_pilot(trig_sys, true);
+    let trig_res_cold = handle_pve_special_sites(
+        &cold_trig_ctx, &mut cold_trig_sess, "dungeonInstanceCacheMgr", "GetTriglavianSiteInstances", &[], &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("cold trig dict");
+    let PyRep::Dict(ref trig_cold_outer) = trig_res_cold else {
+        panic!("expected cold trig outer dict, got {trig_res_cold:?}");
+    };
+    let (_, PyRep::List(ref trig_cold_entries)) = trig_cold_outer[0] else {
+        panic!("expected cold trig list, got {trig_cold_outer:?}");
+    };
+    assert!(trig_cold_entries.is_empty(), "cold GetTriglavianSiteInstances must not lazy-seed");
+    assert!(cold_trig_ctx.systems.get_handle(trig_sys).is_none());
+
     session.solar_system_id = Some(trig_sys);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&char_id) {
             c.solar_system_id = trig_sys;
         }
     });
+    let trig_handle = ctx.systems.get_or_spawn(trig_sys);
     let trig_res = handle_pve_special_sites(
         &ctx, &mut session, "dungeonInstanceCacheMgr", "GetTriglavianSiteInstances", &[], &HashMap::new(),
     )
@@ -511,8 +537,6 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
         reg.triglavian_sites.get(&trig_sys).and_then(|v| v.first().cloned())
     })
     .expect("seeded trig site");
-
-    let trig_handle = ctx.systems.get_or_spawn(trig_sys);
     ctx.db.with_mut_snapshot(|snap| {
         snap.item_positions.insert(ship_id_hf, [10_500.0, 0.0, 0.0]);
     });
@@ -591,6 +615,14 @@ async fn rpc_dispatch_interference_storms_and_errors() {
     .expect("storms list");
     assert!(matches!(storms, PyRep::List(_)));
 
+    let sig_hive_cold = handle_pve_special_sites(
+        &ctx, &mut session, "dungeonInstanceCacheMgr", "GetSignatureInstances", &[PyRep::Integer(31_000_002)], &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("cold sig dict");
+    assert!(matches!(sig_hive_cold, PyRep::Dict(ref d) if d.is_empty()));
+    let _ = ctx.systems.get_or_spawn(31_000_002);
     let sig_hive = handle_pve_special_sites(
         &ctx, &mut session, "dungeonInstanceCacheMgr", "GetSignatureInstances", &[PyRep::Integer(31_000_002)], &HashMap::new(),
     )
@@ -774,7 +806,8 @@ async fn special_site_queries_do_not_spawn_unvisited_system_actors() {
         "remote Triglavian query must not spawn unvisited 30000012 (`#1159`)"
     );
 
-    // Entering the active Triglavian system spawns only that system, still leaving others unspawned.
+    // Querying GetTriglavianSiteInstances in 30000012 stays read-pure; only explicit system
+    // activation spawns 30000012 while leaving unvisited special-site systems unspawned.
     let trig_sys: SolarSystemId = 30_000_012;
     session.solar_system_id = Some(trig_sys);
     ctx.db.with_mut_snapshot(|snap| {
@@ -792,8 +825,13 @@ async fn special_site_queries_do_not_spawn_unvisited_system_actors() {
     )
     .await;
     assert!(
+        ctx.systems.get_handle(trig_sys).is_none(),
+        "read-only GetTriglavianSiteInstances must not spawn caller system 30000012"
+    );
+    let _ = ctx.systems.get_or_spawn(trig_sys);
+    assert!(
         ctx.systems.get_handle(trig_sys).is_some(),
-        "active caller system 30000012 should spawn its special sites lazily"
+        "explicit activation of 30000012 should spawn its special sites"
     );
     assert!(
         ctx.systems.get_handle(31_000_005).is_none(),
@@ -850,7 +888,8 @@ async fn special_sites_map_tales_and_interference_queries_are_read_pure_and_auth
     assert_eq!(ctx.db.tx_commit_count(), commits0, "unauthenticated reads must not bump tx_commit_count");
     assert!(read_pve_special_reg(&ctx, |reg| !reg.initialized));
 
-    // 2. Authenticated read-only queries on a cold DB must return expected data with ZERO DB writes.
+    // 2. Authenticated read-only queries on a cold DB must return empty/static data with ZERO DB writes.
+    // Note: Homefront retains HEAD cold behavior until Track 2b migrates HomefrontContentProvider.
     let hf = ctx
         .dispatch_rpc(&mut session, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[], &kw, None)
         .await
@@ -871,7 +910,7 @@ async fn special_sites_map_tales_and_interference_queries_are_read_pure_and_auth
         .expect("GetTriglavianSiteInstances remote");
     let PyRep::Dict(ref trig_d) = trig_remote else { panic!("expected dict") };
     let PyRep::List(ref trig_items) = trig_d[0].1 else { panic!("expected list") };
-    assert_eq!(trig_items.len(), 2, "cold remote Triglavian query must compute 2 deterministic sites");
+    assert!(trig_items.is_empty(), "cold remote Triglavian query must stay empty without lazy seeding");
 
     let drifter_sig = ctx
         .dispatch_rpc(
@@ -885,7 +924,7 @@ async fn special_sites_map_tales_and_interference_queries_are_read_pure_and_auth
         )
         .await
         .expect("GetSignatureInstances Drifter Hive");
-    assert!(matches!(drifter_sig, PyRep::Dict(ref d) if !d.is_empty()));
+    assert!(matches!(drifter_sig, PyRep::Dict(ref d) if d.is_empty()));
 
     let mv = ctx
         .dispatch_rpc(&mut session, "dungeonInstanceCacheMgr", None, "GetTriglavianMinorVictorySystems", &[], &kw, None)
@@ -997,7 +1036,7 @@ async fn drifter_hive_in_system_signature_query_is_read_pure_and_pochven_boss_ki
 
     let d_epoch0 = drifter_ctx.db.state_epoch();
     let d_commits0 = drifter_ctx.db.tx_commit_count();
-    let in_sys_sig = drifter_ctx
+    let in_sys_sig_cold = drifter_ctx
         .dispatch_rpc(
             &mut drifter_sess,
             "dungeonInstanceCacheMgr",
@@ -1008,11 +1047,26 @@ async fn drifter_hive_in_system_signature_query_is_read_pure_and_pochven_boss_ki
             None,
         )
         .await
-        .expect("in-system GetSignatureInstances");
-    assert!(matches!(in_sys_sig, PyRep::Dict(ref d) if !d.is_empty()));
+        .expect("cold in-system GetSignatureInstances");
+    assert!(matches!(in_sys_sig_cold, PyRep::Dict(ref d) if d.is_empty()));
     assert_eq!(drifter_ctx.db.state_epoch(), d_epoch0, "in-system Drifter Hive query must not bump state_epoch");
     assert_eq!(drifter_ctx.db.tx_commit_count(), d_commits0, "in-system Drifter Hive query must not bump tx_commit_count");
     assert!(drifter_ctx.systems.get_handle(drifter_sys).is_none(), "in-system GetSignatureInstances must not spawn system actor");
+
+    let _ = drifter_ctx.systems.get_or_spawn(drifter_sys);
+    let in_sys_sig_seeded = drifter_ctx
+        .dispatch_rpc(
+            &mut drifter_sess,
+            "dungeonInstanceCacheMgr",
+            None,
+            "GetSignatureInstances",
+            &[PyRep::Integer(i64::from(drifter_sys))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("seeded in-system GetSignatureInstances");
+    assert!(matches!(in_sys_sig_seeded, PyRep::Dict(ref d) if !d.is_empty()));
 
     let pochven_sys = shared_sde()
         .solar_systems
@@ -1043,9 +1097,29 @@ async fn drifter_hive_in_system_signature_query_is_read_pure_and_pochven_boss_ki
     assert_eq!(ctx.db.tx_commit_count(), commits0);
     assert!(ctx.systems.get_handle(pochven_sys).is_none());
 
-    // Undocked in-system Pochven query persists reg.triglavian_sites FIRST before spawning NPC balls,
-    // so both boss-kill events and complete_special_dungeon_instance succeed on a cold DB.
+    // Cold undocked in-system Pochven query stays read-pure without seeding DB or waking the system.
     session.station_id = None;
+    let cold_in_sys = handle_pve_special_sites(
+        &ctx,
+        &mut session,
+        "dungeonInstanceCacheMgr",
+        "GetTriglavianSiteInstances",
+        &[PyRep::Integer(i64::from(pochven_sys))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("cold undocked Pochven query succeeds");
+    assert!(matches!(
+        cold_in_sys,
+        PyRep::Dict(ref d) if d.len() == 1 && matches!(&d[0].1, PyRep::List(items) if items.is_empty())
+    ));
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(ctx.systems.get_handle(pochven_sys).is_none());
+
+    // Activating the Pochven system runs SpecialSitesContentProvider, persisting sites and spawning NPC balls.
+    let sys_handle = ctx.systems.get_or_spawn(pochven_sys);
     let in_sys_res = handle_pve_special_sites(
         &ctx,
         &mut session,
@@ -1060,7 +1134,7 @@ async fn drifter_hive_in_system_signature_query_is_read_pure_and_pochven_boss_ki
     assert!(matches!(in_sys_res, PyRep::Dict(ref d) if !d.is_empty()));
 
     let sites = read_pve_special_reg(&ctx, |reg| reg.triglavian_sites.get(&pochven_sys).cloned())
-        .expect("Pochven triglavian_sites must be persisted when spawning balls");
+        .expect("Pochven triglavian_sites must be persisted when activating system");
     assert_eq!(sites.len(), 2);
 
     // Repeated in-system read skips unnecessary DB write commits.
@@ -1078,7 +1152,6 @@ async fn drifter_hive_in_system_signature_query_is_read_pure_and_pochven_boss_ki
     .expect("repeat Pochven query succeeds");
     assert_eq!(ctx.db.tx_commit_count(), commits_after_seed);
 
-    let sys_handle = ctx.systems.get_handle(pochven_sys).expect("Pochven system actor spawned");
     let site0 = &sites[0];
     assert!(sys_handle.get_ball_snapshot(site0.boss_npc_ball_id).await.ok().flatten().is_some());
 
@@ -1178,7 +1251,8 @@ async fn triglavian_site_concurrent_completion_pays_exactly_once() {
     sess2.solar_system_id = Some(pochven_sys);
     sess2.ship_id = Some(ship2);
 
-    // Seed and spawn Pochven Triglavian sites undocked in-system.
+    // Activate Pochven system via lifecycle provider and confirm GetTriglavianSiteInstances exposes it.
+    let sys_handle = ctx.systems.get_or_spawn(pochven_sys);
     let _ = handle_pve_special_sites(
         &ctx,
         &mut sess1,
@@ -1189,10 +1263,9 @@ async fn triglavian_site_concurrent_completion_pays_exactly_once() {
     )
     .await
     .expect("handled")
-    .expect("seed Pochven sites");
+    .expect("read Pochven sites");
 
     let site0 = read_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&pochven_sys][0].clone());
-    let sys_handle = ctx.systems.get_or_spawn(pochven_sys);
     for (sid, bid) in [(ship1, ship1), (ship2, ship2)] {
         let _ = sid;
         sys_handle
@@ -1285,7 +1358,7 @@ async fn triglavian_site_cannot_complete_unspawned_or_remotely_queried_without_k
     let (ctx, mut session, char_id, ship_id) = make_ctx_and_pilot(jita_sys, true);
     let kw = HashMap::new();
 
-    // 1. Remote query from Jita returns site metadata read-only without seeding DB or spawning balls.
+    // 1. Cold remote query from Jita stays strictly read-only without seeding DB or waking Pochven.
     let epoch0 = ctx.db.state_epoch();
     let commits0 = ctx.db.tx_commit_count();
     let remote_rep = handle_pve_special_sites(
@@ -1305,22 +1378,19 @@ async fn triglavian_site_cannot_complete_unspawned_or_remotely_queried_without_k
     let (_, PyRep::List(ref site_list)) = outer[0] else {
         panic!("expected site list");
     };
-    let remote_inst_id = site_list[0]
-        .dict_get("instanceID")
-        .and_then(|v| v.as_i64())
-        .expect("remote query returns instanceID");
+    assert!(site_list.is_empty(), "cold remote Triglavian read must not predict unseeded sites");
     assert_eq!(ctx.db.state_epoch(), epoch0);
     assert_eq!(ctx.db.tx_commit_count(), commits0);
     assert!(read_pve_special_reg(&ctx, |reg| !reg.triglavian_sites.contains_key(&pochven_sys)));
     assert!(ctx.systems.get_handle(pochven_sys).is_none());
 
-    // Remote completion attempt fails.
-    let remote_complete = complete_special_dungeon_instance(&ctx, &mut session, remote_inst_id, 1)
+    // Completion of an unseeded site fails.
+    let remote_complete = complete_special_dungeon_instance(&ctx, &mut session, 999_888_001, 1)
         .await
-        .expect_err("remote completion must fail");
+        .expect_err("unseeded completion must fail");
     assert_eq!(remote_complete.code, "DungeonNotFound");
 
-    // 2. Arriving in Pochven on-grid without killing NPCs fails (spawns NPCs -> WaveNpcsRemaining).
+    // 2. Activating Pochven seeds sites and spawns NPCs; arriving on-grid without killing NPCs fails (WaveNpcsRemaining).
     let ship_tid = find_ship_type_id(&sde);
     session.solar_system_id = Some(pochven_sys);
     ctx.db.with_mut_snapshot(|snap| {
@@ -1330,6 +1400,7 @@ async fn triglavian_site_cannot_complete_unspawned_or_remotely_queried_without_k
         snap.item_positions.insert(ship_id, [10_500.0, 0.0, 0.0]);
     });
     let sys_handle = ctx.systems.get_or_spawn(pochven_sys);
+    let active_inst_id = read_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&pochven_sys][0].instance_id);
     sys_handle
         .spawn_ball(eve_destiny::Ball {
             id: ship_id,
@@ -1346,7 +1417,7 @@ async fn triglavian_site_cannot_complete_unspawned_or_remotely_queried_without_k
         .await
         .expect("spawn pilot ship");
 
-    let live_err = complete_special_dungeon_instance(&ctx, &mut session, remote_inst_id, 1)
+    let live_err = complete_special_dungeon_instance(&ctx, &mut session, active_inst_id, 1)
         .await
         .expect_err("site with live NPCs must reject completion");
     assert_eq!(live_err.code, "WaveNpcsRemaining");
@@ -1412,21 +1483,30 @@ async fn triglavian_site_cannot_complete_unspawned_or_remotely_queried_without_k
         .await
         .expect("spawn pilot ship in sys2");
 
-    // Persist sys2 Triglavian sites directly into the registry (simulating an unspawned
-    // persisted site before `spawn_special_site_balls` runs) and inject a transient actor panic on
-    // command 2 (`spawn_ball_with_combat` of boss NPC after `get_ball_snapshot`).
-    let sys2_sites = build_default_triglavian_sites_for_system(
+    // Persist a genuinely unspawned sys2 Triglavian site directly into the registry (with
+    // non-colliding IDs because `get_or_spawn` already seeded & spawned the system defaults)
+    // and inject a transient actor panic on command 2 (`spawn_ball_with_combat` of boss NPC).
+    let mut sys2_sites = build_default_triglavian_sites_for_system(
         &ctx,
         pochven_sys_2,
         &edencom_minor_victory_systems(),
         &triglavian_minor_victory_systems(),
     );
     assert!(!sys2_sites.is_empty());
-    let sys2_inst = sys2_sites[0].instance_id;
-    let sys2_boss = sys2_sites[0].boss_npc_ball_id;
-    let sys2_escorts = sys2_sites[0].escort_ball_ids.clone();
+    let mut test_site = sys2_sites.remove(0);
+    test_site.instance_id += 50_000;
+    test_site.boss_npc_ball_id += 5_000_000;
+    for ebid in &mut test_site.escort_ball_ids {
+        *ebid += 5_000_000;
+    }
+    let sys2_inst = test_site.instance_id;
+    let sys2_boss = test_site.boss_npc_ball_id;
+    let sys2_escorts = test_site.escort_ball_ids.clone();
     with_pve_special_reg(&ctx, |reg| {
-        reg.triglavian_sites.insert(pochven_sys_2, sys2_sites);
+        reg.triglavian_sites
+            .entry(pochven_sys_2)
+            .or_default()
+            .push(test_site);
     });
 
     sys2_handle
@@ -1479,7 +1559,6 @@ async fn triglavian_cold_system_concurrent_spawn_synchronizes_via_notify() {
     let (ctx, sess1, _char1, ship1) = make_ctx_and_pilot(mv_sys, true);
     ensure_special_sites_initialized(&ctx);
 
-    let site0 = read_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&mv_sys][0].clone());
     let ship_tid = find_ship_type_id(&sde);
     let char2: i64 = 90_010_003;
     let ship2: i64 = 1_010_000_003;
@@ -1537,6 +1616,21 @@ async fn triglavian_cold_system_concurrent_spawn_synchronizes_via_notify() {
             .expect("spawn pilot ship");
     }
 
+    // Construct and persist an isolated unspawned site after `get_or_spawn` finished
+    // lifecycle seeding so `begin_special_site_ball_spawn` below starts from `Unspawned`.
+    let mut site0 = read_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&mv_sys][0].clone());
+    site0.instance_id += 60_000;
+    site0.boss_npc_ball_id += 6_000_000;
+    for ebid in &mut site0.escort_ball_ids {
+        *ebid += 6_000_000;
+    }
+    with_pve_special_reg(&ctx, |reg| {
+        reg.triglavian_sites
+            .entry(mv_sys)
+            .or_default()
+            .push(site0.clone());
+    });
+
     // 1. Hold active `Spawning` guard on boss NPC to simulate an in-flight cold-system spawner,
     //    and launch concurrent `GetTriglavianSiteInstances` and `complete_special_dungeon_instance`.
     let hold_guard = ctx
@@ -1565,18 +1659,22 @@ async fn triglavian_cold_system_concurrent_spawn_synchronizes_via_notify() {
         complete_special_dungeon_instance(&ctx_comp, &mut sess2, comp_inst, 1).await
     });
 
+    let get_res = tokio::time::timeout(std::time::Duration::from_secs(3), get_task)
+        .await
+        .expect("GetTriglavianSiteInstances stays non-blocking read-only during Spawning")
+        .expect("get task join ok")
+        .expect("rpc handled")
+        .expect("GetTriglavianSiteInstances succeeds");
+    assert!(matches!(get_res, PyRep::Dict(ref d) if !d.is_empty()));
+
     tokio::task::yield_now().await;
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    assert!(
-        !get_task.is_finished(),
-        "concurrent GetTriglavianSiteInstances must wait on Notify rather than returning before boss spawns"
-    );
     assert!(
         !comp_task.is_finished(),
         "concurrent completion must wait on Notify rather than skipping ahead to SiteNotSpawned"
     );
 
-    // Finish spawning boss NPC and confirm the guard -> both waiters unblock cleanly.
+    // Finish spawning boss NPC and confirm the guard -> completion waiter unblocks cleanly.
     let boss_tid = if site0.boss_type_id != 0 { site0.boss_type_id } else { 48_122 };
     let cs = build_special_site_npc_combat_state(&ctx.sde, boss_tid);
     sys_handle
@@ -1587,14 +1685,6 @@ async fn triglavian_cold_system_concurrent_spawn_synchronizes_via_notify() {
         .await
         .expect("spawn held boss NPC");
     hold_guard.confirm();
-
-    let get_res = tokio::time::timeout(std::time::Duration::from_secs(3), get_task)
-        .await
-        .expect("GetTriglavianSiteInstances wakes after confirm()")
-        .expect("get task join ok")
-        .expect("rpc handled")
-        .expect("GetTriglavianSiteInstances succeeds");
-    assert!(matches!(get_res, PyRep::Dict(ref d) if !d.is_empty()));
 
     let comp_err = tokio::time::timeout(std::time::Duration::from_secs(3), comp_task)
         .await

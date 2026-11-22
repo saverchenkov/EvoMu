@@ -1718,6 +1718,20 @@ impl SystemRegistry {
                 detail,
             );
         }
+        {
+            let mut spawned = self
+                .special_site_spawned_balls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            spawned.retain(|&(sid, _), _| sid != solar_system_id);
+        }
+        {
+            let mut wh_ore = self
+                .hydrated_wh_ore_anomalies
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            wh_ore.retain(|(sid, _)| *sid != solar_system_id);
+        }
         gate.resolve(GateResolution::SettledToCold);
     }
 

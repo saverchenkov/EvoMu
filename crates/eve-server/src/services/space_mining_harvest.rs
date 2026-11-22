@@ -326,42 +326,80 @@ fn ice_belt_needs_clear_or_respawn(
     !has_any_ice || ice_belt_ready_for_respawn(anoms, now)
 }
 
-pub fn tick_ice_belt_respawn_sync(ctx: &ServerContext, sys_id: u32) {
+pub(crate) fn build_ice_belt_asteroid_ball_and_state(
+    aid: i64,
+    tid: eve_sde::TypeId,
+    units: u64,
+    uvol: f64,
+    rad: f64,
+    pos: glam::DVec3,
+    mass: f64,
+) -> (crate::system_actor::AsteroidState, eve_destiny::Ball) {
+    (
+        crate::system_actor::AsteroidState {
+            asteroid_id: aid,
+            belt_id: 0,
+            type_id: tid,
+            initial_units: units,
+            remaining_units: units,
+            unit_volume: uvol,
+            depleted: false,
+            respawn_at_tick: None,
+        },
+        eve_destiny::Ball {
+            id: aid,
+            type_id: tid,
+            position: pos,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass,
+            radius: rad,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Rigid,
+        },
+    )
+}
+
+pub(crate) type IceBeltRespawnDelta = (
+    Vec<i64>,
+    Vec<(i64, eve_sde::TypeId, u64, f64, f64, glam::DVec3)>,
+);
+
+pub(crate) fn tick_ice_belt_respawn_core(
+    sde: &eve_sde::SdeRegistry,
+    db: &eve_db::WorldRepository,
+    sys_id: u32,
+    now: u64,
+) -> IceBeltRespawnDelta {
     if !crate::services::mining_sites::is_designated_ice_system(sys_id) {
-        return;
+        return (Vec::new(), Vec::new());
     }
-    let Some(Ok(site)) = crate::services::mining_sites::resolve_regional_ice_belt(&ctx.sde, sys_id)
+    let Some(Ok(site)) = crate::services::mining_sites::resolve_regional_ice_belt(sde, sys_id)
     else {
-        return;
+        return (Vec::new(), Vec::new());
     };
     if !site
         .asteroids
         .iter()
-        .all(|a| ctx.sde.types.contains_key(&a.type_id))
+        .all(|a| sde.types.contains_key(&a.type_id))
     {
-        return;
+        return (Vec::new(), Vec::new());
     }
-    let now = ctx.now_unix_secs();
-    // Read-only pre-check avoids opening a write transaction on idle ticks when the ice belt
-    // already exists (either active with asteroids remaining or waiting on its 4h respawn delay).
-    if !ctx
-        .db
-        .with_snapshot(|snap| ice_belt_needs_clear_or_respawn(snap, sys_id, now))
-    {
-        return;
+    if !db.with_snapshot(|snap| ice_belt_needs_clear_or_respawn(snap, sys_id, now)) {
+        return (Vec::new(), Vec::new());
     }
     let type_vol_rad = |tid: u32| -> (f64, f64) {
-        ctx.sde
-            .types
+        sde.types
             .get(&tid)
             .map(|t| (t.volume.max(0.001), t.radius.max(50.0)))
             .unwrap_or((0.001, 50.0))
     };
     let ice_pos =
-        crate::services::mining_sites::derive_system_site_position_from_sde(ctx, sys_id, 4, 10.5);
+        crate::services::sov_fw_insurgency::derive_system_site_position(sde, sys_id, 4, 10.5);
     let ice_pos_vec = glam::DVec3::from_array(ice_pos);
 
-    let (old_ids, newly_spawned) = ctx.db.with_mut_snapshot(|snap| {
+    db.with_mut_snapshot(|snap| {
         let mut newly_cleared_ids = Vec::new();
         if let Some(anoms) = snap.cosmic_anomalies.get_mut(&sys_id) {
             for anom in anoms.iter_mut().filter(|a| a.anomaly_type == "IceBelt" && !a.cleared) {
@@ -483,37 +521,68 @@ pub fn tick_ice_belt_respawn_sync(ctx: &ServerContext, sys_id: u32) {
                 collapsed: false,
             });
         (old_ids, spawned)
-    });
+    })
+}
 
+pub(crate) fn tick_ice_belt_respawn_with_handle(
+    sde: &eve_sde::SdeRegistry,
+    db: &eve_db::WorldRepository,
+    handle: &crate::system_actor::SystemHandle,
+    sys_id: u32,
+    now: u64,
+) {
+    let (old_ids, newly_spawned) = tick_ice_belt_respawn_core(sde, db, sys_id, now);
     if !old_ids.is_empty() || !newly_spawned.is_empty() {
-        let handle = ctx.systems.get_or_spawn(sys_id);
         for old_id in old_ids {
             handle.try_remove_ball(old_id);
         }
         for (aid, tid, units, uvol, rad, pos) in newly_spawned {
-            let ball = eve_destiny::Ball {
-                id: aid,
-                type_id: tid,
-                position: pos,
-                velocity: glam::DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 80_000.0,
-                radius: rad,
-                speed_fraction: 0.0,
-                mode: eve_destiny::MovementMode::Stop,
-            };
-            let st = crate::system_actor::AsteroidState {
-                asteroid_id: aid,
-                belt_id: 0,
-                type_id: tid,
-                initial_units: units,
-                remaining_units: units,
-                unit_volume: uvol,
-                depleted: false,
-                respawn_at_tick: None,
-            };
+            let (st, ball) = build_ice_belt_asteroid_ball_and_state(
+                aid, tid, units, uvol, rad, pos, 80_000.0,
+            );
             handle.try_spawn_asteroid(st, ball);
+        }
+    }
+}
+
+pub(crate) fn tick_ice_belt_respawn_in_seed_ctx(
+    seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+    sde: &eve_sde::SdeRegistry,
+    db: &eve_db::WorldRepository,
+) {
+    if !seed_ctx.db_read_safe {
+        return;
+    }
+    let (old_ids, newly_spawned) = tick_ice_belt_respawn_core(
+        sde,
+        db,
+        seed_ctx.solar_system_id,
+        seed_ctx.now_unix_secs(),
+    );
+    for old_id in old_ids {
+        let _ = seed_ctx.ballpark.remove_ball(old_id);
+    }
+    for (aid, tid, units, uvol, rad, pos) in newly_spawned {
+        let (st, ball) =
+            build_ice_belt_asteroid_ball_and_state(aid, tid, units, uvol, rad, pos, 80_000.0);
+        seed_ctx.spawn_asteroid(st, ball);
+    }
+}
+
+pub fn tick_ice_belt_respawn_sync(ctx: &ServerContext, sys_id: u32) {
+    let (old_ids, newly_spawned) =
+        tick_ice_belt_respawn_core(&ctx.sde, &ctx.db, sys_id, ctx.now_unix_secs());
+    if !old_ids.is_empty() || !newly_spawned.is_empty() {
+        if let Some(handle) = ctx.systems.get_handle(sys_id) {
+            for old_id in old_ids {
+                handle.try_remove_ball(old_id);
+            }
+            for (aid, tid, units, uvol, rad, pos) in newly_spawned {
+                let (st, ball) = build_ice_belt_asteroid_ball_and_state(
+                    aid, tid, units, uvol, rad, pos, 80_000.0,
+                );
+                handle.try_spawn_asteroid(st, ball);
+            }
         }
     }
 }
@@ -888,6 +957,60 @@ pub fn build_wormhole_guard_wave(
     }
 }
 
+pub(crate) fn build_wh_ore_guard_ball_and_meta(
+    sde: &eve_sde::SdeRegistry,
+    npc_tid: eve_sde::TypeId,
+    gid: i64,
+    gpos: glam::DVec3,
+) -> (eve_destiny::Ball, eve_destiny::CombatState, eve_destiny::SlimItemMeta) {
+    let npc_rec = sde.types.get(&npc_tid);
+    let npc_rad = npc_rec.map(|t| t.radius.max(25.0)).unwrap_or(45.0);
+    let npc_mass = npc_rec.map(|t| t.mass.max(10_000.0)).unwrap_or(1_200_000.0);
+    let max_vel = npc_rec
+        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY))
+        .copied()
+        .unwrap_or(320.0);
+    // DERIVED: Sleeper NPC types lack dogma attr 70 (agility) in SDE; default 1.0 matches space_destiny.rs.
+    let inertia = npc_rec
+        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::AGILITY))
+        .copied()
+        .unwrap_or(1.0);
+    let ball = eve_destiny::Ball {
+        id: gid,
+        type_id: npc_tid,
+        position: gpos,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: max_vel,
+        inertia,
+        mass: npc_mass,
+        radius: npc_rad,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    let fac_owner = npc_rec
+        .and_then(|t| t.faction_id)
+        .filter(|&f| f > 0)
+        .map(i64::from)
+        .unwrap_or(500_021);
+    let npc_meta = eve_destiny::SlimItemMeta {
+        group_id: npc_rec.map(|t| t.group_id).unwrap_or(301),
+        category_id: npc_rec.map(|t| t.category_id).unwrap_or(11),
+        owner_id: fac_owner,
+        char_id: None,
+        corp_id: crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_sde_faction(
+            sde,
+            fac_owner,
+        ),
+        alliance_id: -1,
+        security_status: -1.0,
+        is_cloaked: false,
+        name: npc_rec.and_then(|t| (!t.name.is_empty()).then(|| t.name.clone())),
+        ..Default::default()
+    };
+    let cs = crate::services::pve_exploration_seeding::build_type_combat_state_from_sde(sde, npc_tid);
+    (ball, cs, npc_meta)
+}
+
 pub async fn spawn_wormhole_ore_guards(
     ctx: &ServerContext,
     sys_id: u32,
@@ -896,46 +1019,12 @@ pub async fn spawn_wormhole_ore_guards(
     if guard_waves.is_empty() {
         return;
     }
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     for (gid, npc_tid, gpos) in guard_waves {
-        let npc_rec = ctx.sde.types.get(&npc_tid);
-        let npc_rad = npc_rec.map(|t| t.radius.max(25.0)).unwrap_or(45.0);
-        let npc_mass = npc_rec.map(|t| t.mass.max(10_000.0)).unwrap_or(1_200_000.0);
-        let max_vel = npc_rec
-            .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY))
-            .copied()
-            .unwrap_or(320.0);
-        // DERIVED: Sleeper NPC types lack dogma attr 70 (agility) in SDE; default 1.0 matches space_destiny.rs.
-        let inertia = npc_rec
-            .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::AGILITY))
-            .copied()
-            .unwrap_or(1.0);
-        let ball = eve_destiny::Ball {
-            id: gid, type_id: npc_tid, position: gpos, velocity: glam::DVec3::ZERO,
-            max_velocity: max_vel, inertia, mass: npc_mass, radius: npc_rad,
-            speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
-        };
-        let fac_owner = npc_rec
-            .and_then(|t| t.faction_id)
-            .filter(|&f| f > 0)
-            .map(i64::from)
-            .unwrap_or(500_021);
-        let npc_meta = eve_destiny::SlimItemMeta {
-            group_id: npc_rec.map(|t| t.group_id).unwrap_or(301),
-            category_id: npc_rec.map(|t| t.category_id).unwrap_or(11),
-            owner_id: fac_owner,
-            char_id: None,
-            corp_id: crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_faction(
-                ctx,
-                fac_owner,
-            ),
-            alliance_id: -1,
-            security_status: -1.0,
-            is_cloaked: false,
-            name: npc_rec.and_then(|t| (!t.name.is_empty()).then(|| t.name.clone())),
-            ..Default::default()
-        };
-        let _ = handle.spawn_ball_with_meta(ball, ctx.build_type_combat_state(npc_tid), npc_meta).await;
+        let (ball, cs, npc_meta) = build_wh_ore_guard_ball_and_meta(&ctx.sde, npc_tid, gid, gpos);
+        let _ = handle.spawn_ball_with_meta(ball, cs, npc_meta).await;
     }
 }
 
@@ -1013,8 +1102,12 @@ pub fn on_wormhole_ore_guard_destroyed_db(db: &eve_db::WorldRepository, npc_ball
     });
 }
 
-pub async fn hydrate_wormhole_ore_guards_if_needed(ctx: &ServerContext, sys_id: u32) {
-    let anoms: Vec<(String, [f64; 3], &'static WormholeOreSiteDef)> = ctx.db.with_snapshot(|snap| {
+fn collect_unhydrated_wh_ore_anoms(
+    db: &eve_db::WorldRepository,
+    systems: &crate::system_actor::SystemRegistry,
+    sys_id: u32,
+) -> Vec<(String, [f64; 3], &'static WormholeOreSiteDef)> {
+    let anoms: Vec<(String, [f64; 3], &'static WormholeOreSiteDef)> = db.with_snapshot(|snap| {
         snap.cosmic_anomalies
             .get(&sys_id)
             .map(|list| {
@@ -1030,17 +1123,19 @@ pub async fn hydrate_wormhole_ore_guards_if_needed(ctx: &ServerContext, sys_id: 
             })
             .unwrap_or_default()
     });
-    let unhydrated: Vec<(String, [f64; 3], &'static WormholeOreSiteDef)> = anoms
+    anoms
         .into_iter()
-        .filter(|(aid, _, _)| ctx.systems.claim_wh_ore_anomaly_hydration(sys_id, aid))
-        .collect();
-    if unhydrated.is_empty() {
-        return;
-    }
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    let existing = handle.list_balls().await.unwrap_or_default();
-    let existing_ids: std::collections::HashSet<i64> = existing.iter().map(|b| b.id).collect();
-    let waves = ctx.db.with_mut_snapshot(|snap| {
+        .filter(|(aid, _, _)| systems.claim_wh_ore_anomaly_hydration(sys_id, aid))
+        .collect()
+}
+
+fn plan_wh_ore_guard_hydration_waves(
+    db: &eve_db::WorldRepository,
+    unhydrated: Vec<(String, [f64; 3], &'static WormholeOreSiteDef)>,
+    existing_balls: &[eve_destiny::Ball],
+) -> Vec<(i64, eve_sde::TypeId, glam::DVec3)> {
+    let existing_ids: std::collections::HashSet<i64> = existing_balls.iter().map(|b| b.id).collect();
+    db.with_mut_snapshot(|snap| {
         let mut states = load_wh_ore_guard_states(snap);
         let mut states_dirty = false;
         let mut out = Vec::new();
@@ -1054,27 +1149,78 @@ pub async fn hydrate_wormhole_ore_guards_if_needed(ctx: &ServerContext, sys_id: 
                 continue;
             }
             let c_vec = glam::DVec3::from_array(centre);
-            let nearby: Vec<(i64, eve_sde::TypeId, [f64; 3])> = existing
+            let nearby: Vec<(i64, eve_sde::TypeId, [f64; 3])> = existing_balls
                 .iter()
-                .filter(|b| WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id) && b.position.distance(c_vec) <= 15_000.0)
+                .filter(|b| {
+                    WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id)
+                        && b.position.distance(c_vec) <= 15_000.0
+                })
                 .map(|b| (b.id, b.type_id, b.position.to_array()))
                 .collect();
             if !nearby.is_empty() {
-                states.insert(aid, WhOreAnomalyGuardState { guards_spawned: true, surviving_guards: nearby });
+                states.insert(
+                    aid,
+                    WhOreAnomalyGuardState {
+                        guards_spawned: true,
+                        surviving_guards: nearby,
+                    },
+                );
                 states_dirty = true;
                 continue;
             }
             let start_len = out.len();
             build_wormhole_guard_wave(&mut snap.next_entity_id, centre, def.guards, &mut out);
-            let surviving = out[start_len..].iter().map(|&(gid, tid, p)| (gid, tid, p.to_array())).collect();
-            states.insert(aid, WhOreAnomalyGuardState { guards_spawned: true, surviving_guards: surviving });
+            let surviving = out[start_len..]
+                .iter()
+                .map(|&(gid, tid, p)| (gid, tid, p.to_array()))
+                .collect();
+            states.insert(
+                aid,
+                WhOreAnomalyGuardState {
+                    guards_spawned: true,
+                    surviving_guards: surviving,
+                },
+            );
             states_dirty = true;
         }
         if states_dirty {
             save_wh_ore_guard_states(snap, &states);
         }
         out
-    });
+    })
+}
+
+pub(crate) fn hydrate_wormhole_ore_guards_in_seed_ctx(
+    seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+    sde: &eve_sde::SdeRegistry,
+    db: &eve_db::WorldRepository,
+) {
+    if !seed_ctx.db_read_safe {
+        return;
+    }
+    let sys_id = seed_ctx.solar_system_id;
+    let unhydrated = collect_unhydrated_wh_ore_anoms(db, seed_ctx.registry, sys_id);
+    if unhydrated.is_empty() {
+        return;
+    }
+    let existing: Vec<eve_destiny::Ball> = seed_ctx.ballpark.balls.values().cloned().collect();
+    let waves = plan_wh_ore_guard_hydration_waves(db, unhydrated, &existing);
+    for (gid, npc_tid, gpos) in waves {
+        let (ball, cs, npc_meta) = build_wh_ore_guard_ball_and_meta(sde, npc_tid, gid, gpos);
+        seed_ctx.spawn_ball_with_meta(ball, cs, npc_meta);
+    }
+}
+
+pub async fn hydrate_wormhole_ore_guards_if_needed(ctx: &ServerContext, sys_id: u32) {
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
+    let unhydrated = collect_unhydrated_wh_ore_anoms(&ctx.db, &ctx.systems, sys_id);
+    if unhydrated.is_empty() {
+        return;
+    }
+    let existing = handle.list_balls().await.unwrap_or_default();
+    let waves = plan_wh_ore_guard_hydration_waves(&ctx.db, unhydrated, &existing);
     spawn_wormhole_ore_guards(ctx, sys_id, waves).await;
 }
 
@@ -1093,41 +1239,27 @@ pub async fn spawn_seeded_site_entities(
     guard_waves: Vec<(i64, u32, glam::DVec3)>,
 ) {
     if !newly_spawned.is_empty() {
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        for (aid, tid, units, uvol, rad, pos) in newly_spawned {
-            let ball = eve_destiny::Ball {
-                id: aid,
-                type_id: tid,
-                position: pos,
-                velocity: glam::DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 50_000.0,
-                radius: rad,
-                speed_fraction: 0.0,
-                mode: eve_destiny::MovementMode::Stop,
-            };
-            let st = crate::system_actor::AsteroidState {
-                asteroid_id: aid,
-                belt_id: 0,
-                type_id: tid,
-                initial_units: units,
-                remaining_units: units,
-                unit_volume: uvol,
-                depleted: false,
-                respawn_at_tick: None,
-            };
-            let _ = handle.spawn_asteroid(st, ball).await;
+        if let Some(handle) = ctx.systems.get_handle(sys_id) {
+            for (aid, tid, units, uvol, rad, pos) in newly_spawned {
+                let (st, ball) = build_ice_belt_asteroid_ball_and_state(
+                    aid, tid, units, uvol, rad, pos, 50_000.0,
+                );
+                let _ = handle.spawn_asteroid(st, ball).await;
+            }
         }
     }
-    if !guard_waves.is_empty() {
+    if !guard_waves.is_empty() && ctx.systems.get_handle(sys_id).is_some() {
         let seeded_anom_ids: Vec<String> = ctx.db.with_snapshot(|snap| {
             let states = load_wh_ore_guard_states(snap);
             snap.cosmic_anomalies
                 .get(&sys_id)
                 .map(|list| {
                     list.iter()
-                        .filter(|a| a.anomaly_type == "OreAnomaly" && !a.cleared && states.contains_key(&a.anomaly_id))
+                        .filter(|a| {
+                            a.anomaly_type == "OreAnomaly"
+                                && !a.cleared
+                                && states.contains_key(&a.anomaly_id)
+                        })
                         .map(|a| a.anomaly_id.clone())
                         .collect()
                 })
@@ -1136,8 +1268,8 @@ pub async fn spawn_seeded_site_entities(
         for aid in seeded_anom_ids {
             let _ = ctx.systems.claim_wh_ore_anomaly_hydration(sys_id, &aid);
         }
+        spawn_wormhole_ore_guards(ctx, sys_id, guard_waves).await;
     }
-    spawn_wormhole_ore_guards(ctx, sys_id, guard_waves).await;
 }
 
 pub use eve_db::PhasedAsteroidFieldState;
