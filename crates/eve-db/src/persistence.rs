@@ -6,7 +6,9 @@ use crate::cow_collections::CowVecDiff;
 use crate::cow_collections::{CowActiveMissions, CowIdVec};
 #[cfg(any(test, feature = "legacy-json-snapshot"))]
 use crate::lock_rank::RANK_WAL_LOCK;
-use crate::lock_rank::{RankedMutex, RankedRwLock, RANK_CLOCK, RANK_LEAF, RANK_WORLD_INNER};
+use crate::lock_rank::{
+    RankedMutex, RankedRwLock, RANK_CLOCK, RANK_LEAF, RANK_TRANSITION_GRACE, RANK_WORLD_INNER,
+};
 use crate::sqlite_store;
 use crate::tx_engine::{
     apply_changeset_to_sqlite, validate_changeset, ChangeSet, Effects, EntityIdAllocator,
@@ -536,6 +538,7 @@ pub struct WorldRepository {
     pub(crate) entity_ids: std::sync::Arc<EntityIdAllocator>,
     pub(crate) sqlite_path: Option<std::path::PathBuf>,
     pub(crate) auth_runtime: RankedRwLock<AuthRuntimeState, RANK_LEAF>,
+    pub(crate) session_scene_epochs: RankedRwLock<HashMap<u64, u64>, RANK_TRANSITION_GRACE>,
     pub(crate) clock: RankedRwLock<std::sync::Arc<dyn crate::clock::ServerClock>, RANK_CLOCK>,
     #[cfg(any(test, feature = "legacy-json-snapshot"))]
     pub(crate) wal_lock: RankedMutex<(), RANK_WAL_LOCK>,
@@ -601,6 +604,7 @@ impl WorldRepository {
             entity_ids,
             sqlite_path,
             auth_runtime: RankedRwLock::new(auth_runtime),
+            session_scene_epochs: RankedRwLock::new(HashMap::new()),
             clock: RankedRwLock::new(std::sync::Arc::new(
                 crate::clock::VirtualServerClock::new(),
             )),
@@ -628,6 +632,52 @@ impl WorldRepository {
     /// Returns the process-unique monotonic instance ID of this [`WorldRepository`].
     pub fn instance_id(&self) -> u64 {
         self.instance_id
+    }
+
+    /// Updates the cached live scene epoch for `session_id` (`#1190`).
+    pub fn set_session_scene_epoch(&self, session_id: u64, epoch: u64) {
+        if session_id == 0 {
+            return;
+        }
+        let mut epochs = self
+            .session_scene_epochs
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        epochs
+            .entry(session_id)
+            .and_modify(|cur| *cur = (*cur).max(epoch))
+            .or_insert(epoch);
+    }
+
+    /// Removes cached live scene epoch tracking when `session_id` disconnects (`#1190`).
+    pub fn clear_session_scene_epoch(&self, session_id: u64) {
+        if session_id == 0 {
+            return;
+        }
+        let mut epochs = self
+            .session_scene_epochs
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        epochs.remove(&session_id);
+    }
+
+    /// Returns the cached live scene epoch for `session_id` (0 if unset) (`#1190`).
+    pub fn session_scene_epoch(&self, session_id: u64) -> u64 {
+        if session_id == 0 {
+            return 0;
+        }
+        let epochs = self
+            .session_scene_epochs
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        epochs.get(&session_id).copied().unwrap_or(0)
+    }
+
+    /// Returns `char_id`'s active session `scene_epoch` for `user_id` if currently logged into `char_id`.
+    /// Callers must NOT hold `RANK_LEAF` or higher except inside callers permitted for `get_online_session` (`#1190`).
+    pub fn active_scene_epoch_for_char_and_user(&self, char_id: i64, user_id: u64) -> Option<u64> {
+        let os = self.get_online_session(user_id)?;
+        (os.character_id == Some(char_id)).then(|| self.session_scene_epoch(os.session_id))
     }
 
     /// Allocates a monotonically increasing, non-zero lifecycle generation scoped to this repository.

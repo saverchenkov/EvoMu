@@ -2445,3 +2445,119 @@ fn transition_grace_store_is_isolated_across_independent_server_contexts() {
     assert!(ctx_a_weak.upgrade().is_none());
     assert_eq!(store_weak.strong_count(), 0);
 }
+
+#[test]
+fn emit_typed_to_solar_system_in_space_stamps_epoch_and_drops_same_system_stale_epoch() {
+    use crate::outbound_sequencer::{
+        sequence_tick, DestinyBatch, GateNotificationOutcome, OutboundSceneScope, SessionWireState,
+        TypedNotification,
+    };
+    use crate::router::notify_registry::{emit_typed_to_solar_system_in_space_core, OnTarget};
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let sid = 91_101_u64;
+
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).expect("demo char");
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.user_id
+    });
+    ctx.db
+        .acquire_online_lock(uid, sid, Some(char_id), true, 1_800_000_000)
+        .unwrap();
+
+    let ep1 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: sid,
+        user_id: Some(uid),
+        char_id,
+        kind_label: "undock",
+        reason: "undock",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_id),
+        prev_dock: Some(60_003_760),
+        next_sys: Some(sys_id),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: Vec::new(),
+    });
+    assert_eq!(ep1, 1);
+    assert_eq!(ctx.db.session_scene_epoch(sid), 1);
+    assert_eq!(
+        ctx.db.active_scene_epoch_for_char_and_user(char_id, uid),
+        Some(1)
+    );
+
+    emit_typed_to_solar_system_in_space_core(
+        &ctx.db,
+        &ctx.pending_notifications,
+        &ctx.notify_tx,
+        sys_id,
+        OnTarget {
+            arg0: PyRep::Integer(700_001),
+            arg1: PyRep::String("lost".into()),
+            reason: None,
+        },
+    );
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(notifs.len(), 1);
+    assert_eq!(
+        notifs[0].scene_scope,
+        Some(OutboundSceneScope::space(Some(sys_id), Some(1)))
+    );
+
+    // Same-system transition advances scene epoch 1 -> 2; pre-transition epoch-1 solar-system
+    // notification must drop as stale_scene_epoch on the wire.
+    let ep2 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: sid,
+        user_id: Some(uid),
+        char_id,
+        kind_label: "jump_system",
+        reason: "same_sys_reentry",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_id),
+        prev_dock: None,
+        next_sys: Some(sys_id),
+        next_dock: None,
+        can_record_departed: true,
+        removed_bindings: Vec::new(),
+    });
+    assert_eq!(ep2, 2);
+    assert_eq!(ctx.db.session_scene_epoch(sid), 2);
+
+    let mut wire = SessionWireState::new(sid, char_id as u64).with_scene_epoch(2);
+    let ep = wire.enter_space(Some(sys_id));
+    assert!(sequence_tick(
+        &mut wire,
+        DestinyBatch::new(
+            ep,
+            10,
+            true,
+            crate::outbound_sequencer::tests::dummy_updates("SetState", 10),
+        )
+        .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(2)))),
+    )
+    .is_some());
+    let notif = &notifs[0];
+    match wire.gate_typed_notification(
+        TypedNotification::new(notif.event.clone(), notif.args.clone())
+            .with_scene_scope(notif.scene_scope),
+    ) {
+        GateNotificationOutcome::Dropped(ev) => {
+            assert!(
+                ev.reason.starts_with("stale_scene_epoch:1<2"),
+                "expected stale_scene_epoch:1<2, got {}",
+                ev.reason
+            );
+        }
+        other => panic!("expected stale solar-system notif to drop at epoch 2, got {other:?}"),
+    }
+
+    ctx.clear_session_scene_epoch(sid);
+    assert_eq!(ctx.db.session_scene_epoch(sid), 0);
+}

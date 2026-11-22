@@ -85,6 +85,8 @@ pub mod combat_weapons_spool;
 pub mod combat_wrecks_killmails;
 #[path = "crimewatch_bounty.rs"]
 pub mod crimewatch_bounty;
+#[path = "crimewatch_scene_notify.rs"]
+mod crimewatch_scene_notify;
 #[path = "crimewatch_timers.rs"]
 pub mod crimewatch_timers;
 
@@ -100,6 +102,7 @@ pub use combat_weapons::*;
 pub use combat_weapons_spool::*;
 pub use combat_wrecks_killmails::*;
 pub use crimewatch_bounty::*;
+pub(crate) use crimewatch_scene_notify::emit_combat_log_and_damage_state;
 pub use crimewatch_timers::*;
 
 /// Wreck lifetime in seconds (2 hours = 7,200s per EVE wiki `Wrecks.md`).
@@ -1710,20 +1713,35 @@ pub async fn step_passive_shield_recharge(
         .await;
     if delta > 0.0 {
         if let Some(cid) = char_id_opt {
-            let _ = ctx.notify_damage_state_change(
-                NotificationTarget::Character(cid),
-                ball_id,
-                shield_ratio,
-                armor_ratio,
-                hull_ratio,
-            );
-            crate::services::fleet_social::stream_fleet_watchlist_damage(
-                ctx,
-                cid,
-                shield_ratio,
-                armor_ratio,
-                hull_ratio,
-            );
+            let (in_combat_space, hit_piloted_ship) = ctx.db.with_snapshot(|snap| {
+                let in_sys = ctx.space_char_sys_in_snapshot(snap, cid) == Some(solar_system_id);
+                let piloted = in_sys
+                    && snap
+                        .characters
+                        .get(&cid)
+                        .is_some_and(|ch| ball_id == ch.active_ship_id || ball_id == ch.character_id);
+                (in_sys, piloted)
+            });
+            if in_combat_space {
+                crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
+                    ctx,
+                    cid,
+                    ball_id,
+                    shield_ratio,
+                    armor_ratio,
+                    hull_ratio,
+                    Some(ctx.character_space_scene_scope(cid, Some(solar_system_id))),
+                );
+                if hit_piloted_ship {
+                    crate::services::fleet_social::stream_fleet_watchlist_damage(
+                        ctx,
+                        cid,
+                        shield_ratio,
+                        armor_ratio,
+                        hull_ratio,
+                    );
+                }
+            }
         }
     }
     Some((after, delta))
@@ -1733,181 +1751,6 @@ pub async fn step_passive_shield_recharge(
 /// with time constant `recharge_time_s` (`feat:dogma.shield-recharge`).
 pub fn passive_shield_recharge_rate_hps(current_shield: f64, max_shield: f64, recharge_time_s: f64) -> f64 {
     eve_dogma::compute_passive_recharge_rate(current_shield, max_shield, recharge_time_s)
-}
-
-/// Emits `OnDamageMessage`, `OnDamageMessages`, and `OnDamageStateChange` notifications to both attacker and victim (`feat:combat.damage-log`).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_combat_log_and_damage_state(
-    ctx: &ServerContext,
-    attacker_char_id: i64,
-    victim_char_opt: Option<i64>,
-    attacker_ship_id: i64,
-    target_ball_id: i64,
-    weapon_type_id: u32,
-    applied_dmg: f64,
-    is_wrecking: bool,
-    shield_ratio: f64,
-    armor_ratio: f64,
-    hull_ratio: f64,
-) {
-    let hit_quality = if applied_dmg <= 0.0 {
-        "miss"
-    } else if is_wrecking {
-        "wrecking"
-    } else {
-        "hit"
-    };
-    let hit_quality_code = if applied_dmg <= 0.0 {
-        0
-    } else if is_wrecking {
-        6
-    } else {
-        3
-    };
-    let dmg_dict = PyRep::Dict(vec![
-        (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
-        (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
-        (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
-        (PyRep::String("target".into()), PyRep::Integer(target_ball_id)),
-        (PyRep::String("target_ID".into()), PyRep::Integer(target_ball_id)),
-        (
-            PyRep::String("owner".into()),
-            PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(attacker_char_id)]),
-        ),
-        (
-            PyRep::String("weapon".into()),
-            PyRep::Integer(weapon_type_id as i64),
-        ),
-        (PyRep::String("hitQuality".into()), PyRep::Integer(hit_quality_code)),
-        (PyRep::String("attackType".into()), PyRep::String("me".into())),
-        (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
-        (PyRep::String("isBanked".into()), PyRep::Bool(false)),
-    ]);
-    let msg_tuple = vec![PyRep::String(hit_quality.into()), dmg_dict.clone()];
-    ctx.emit_typed(
-        NotificationTarget::Character(attacker_char_id),
-        crate::router::notify_registry::OnDamageMessage {
-            damage_messages_args: dmg_dict,
-        },
-    );
-    ctx.emit_typed(
-        NotificationTarget::Character(attacker_char_id),
-        crate::router::notify_registry::OnDamageMessages {
-            dmgmsgs: vec![PyRep::Tuple(msg_tuple)],
-        },
-    );
-    let _ = ctx.notify_damage_state_change(
-        NotificationTarget::Character(attacker_char_id),
-        target_ball_id,
-        shield_ratio,
-        armor_ratio,
-        hull_ratio,
-    );
-    super::notify_emitters_ess_bounties::emit_combat_message(
-        ctx,
-        attacker_char_id,
-        if applied_dmg > 0.0 { "AttackHit" } else { "AttackMiss" },
-        target_ball_id,
-        applied_dmg,
-        weapon_type_id,
-        is_wrecking,
-    );
-    // Temporary stop-gap for #1565: block victim notifications for abandoned drones/fighters,
-    // unpiloted stale items, or docked/out-of-system pilots. Remove when #1190 Track 3
-    // (`outbound_sequencer.rs` epoch/scene-scoped outbound frames) lands.
-    let active_drone = with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.get(&target_ball_id).map(|d| (!d.is_abandoned && d.owner_char_id > 0, d.owner_char_id, d.solar_system_id))
-    });
-    let active_fighter = ctx.active_fighters.read().ok().and_then(|fs| {
-        fs.get(&target_ball_id).map(|sq| (!sq.is_abandoned && sq.owner_char_id > 0, sq.owner_char_id, sq.item_id))
-    });
-    let resolved_victim = if matches!(active_drone, Some((false, _, _))) || matches!(active_fighter, Some((false, _, _))) {
-        None
-    } else {
-        ctx.db.with_snapshot(|snap| {
-            let cid = match (active_drone, active_fighter) {
-                (Some((true, oid, _)), _) | (_, Some((true, oid, _))) => Some(oid),
-                _ => victim_char_opt.or_else(|| {
-                    snap.characters.get(&target_ball_id).or_else(|| snap.characters.values().find(|c| c.active_ship_id == target_ball_id)).map(|c| c.character_id)
-                }),
-            }?;
-            let vic = snap.characters.get(&cid).filter(|c| c.station_id.is_none() && c.structure_id.is_none_or(|st_id| c.active_ship_id == st_id))?;
-            let active_craft = active_drone.is_some() || active_fighter.is_some() || target_ball_id == vic.character_id || target_ball_id == vic.active_ship_id;
-            if !active_craft && snap.items.contains_key(&target_ball_id) {
-                return None;
-            }
-            let item_sys = |id: i64| snap.items.get(&id).and_then(|i| (30_000_000..40_000_000).contains(&i.location_id).then_some(i.location_id as u32));
-            let combat_sys = active_drone.map(|(_, _, sys)| sys)
-                .or_else(|| item_sys(attacker_ship_id))
-                .or_else(|| snap.structures.get(&attacker_ship_id).map(|s| s.solar_system_id))
-                .or_else(|| snap.characters.get(&attacker_char_id).map(|a| a.solar_system_id))
-                .or_else(|| active_fighter.and_then(|(_, _, iid)| item_sys(iid)))
-                .or_else(|| item_sys(target_ball_id))
-                .or_else(|| snap.structures.get(&target_ball_id).map(|s| s.solar_system_id));
-            combat_sys.map_or(Some(cid), |sys| (vic.solar_system_id == sys).then_some(cid))
-        })
-    };
-    if let Some(vic_id) = resolved_victim {
-        if vic_id != attacker_char_id {
-            super::notify_emitters_combat_ess_progression::emit_damage_state_change(
-                ctx,
-                vic_id,
-                target_ball_id,
-                shield_ratio,
-                armor_ratio,
-                hull_ratio,
-            );
-        }
-        crate::services::fleet_social::stream_fleet_watchlist_damage(
-            ctx,
-            vic_id,
-            shield_ratio,
-            armor_ratio,
-            hull_ratio,
-        );
-    }
-    if let Some(vic_id) = resolved_victim.filter(|&v| v != attacker_char_id) {
-        super::notify_emitters_ess_bounties::emit_combat_message(
-            ctx,
-            vic_id,
-            if applied_dmg > 0.0 { "AttackedBy" } else { "AttackMissBy" },
-            attacker_ship_id,
-            applied_dmg,
-            weapon_type_id,
-            is_wrecking,
-        );
-        let vic_dict = PyRep::Dict(vec![
-            (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
-            (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
-            (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
-            (PyRep::String("target".into()), PyRep::Integer(target_ball_id)),
-            (PyRep::String("target_ID".into()), PyRep::Integer(target_ball_id)),
-            (
-                PyRep::String("owner".into()),
-                PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(attacker_char_id)]),
-            ),
-            (
-                PyRep::String("weapon".into()),
-                PyRep::Integer(weapon_type_id as i64),
-            ),
-            (PyRep::String("hitQuality".into()), PyRep::Integer(hit_quality_code)),
-            (PyRep::String("attackType".into()), PyRep::String("other".into())),
-            (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
-            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
-        ]);
-        ctx.emit_typed(
-            NotificationTarget::Character(vic_id),
-            crate::router::notify_registry::OnDamageMessage {
-                damage_messages_args: vic_dict.clone(),
-            },
-        );
-        ctx.emit_typed(
-            NotificationTarget::Character(vic_id),
-            crate::router::notify_registry::OnDamageMessages {
-                dmgmsgs: vec![PyRep::Tuple(vec![PyRep::String(hit_quality.into()), vic_dict])],
-            },
-        );
-    }
 }
 
 pub fn is_legal_war_or_suspect_target(

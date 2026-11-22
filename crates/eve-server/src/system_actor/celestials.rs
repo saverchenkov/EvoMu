@@ -1589,6 +1589,7 @@ impl SystemHandle {
         bp.add_ball(ball);
         bp.combat_states.insert(ball_id, combat_state);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        self.publish_view_from(&bp, None);
         super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
         let dyn_count = bp.balls.keys().filter(|&&bid| !bp.is_static_ball(bid)).count();
         self.dynamic_ball_count

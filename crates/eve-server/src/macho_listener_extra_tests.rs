@@ -981,6 +981,7 @@ fn test_1147_strip_self_non_dock_warp_stop_fx_and_build_destiny_batch_contexts()
         mixed_updates,
         &[ego_ship],
         SelfDestinyWireContext::NonDock,
+        None,
     )
     .expect("mixed NonDock batch must remain non-empty");
     let non_dock_actions = collect_destiny_actions_from_list(&non_dock_batch.updates);
@@ -1011,6 +1012,7 @@ fn test_1147_strip_self_non_dock_warp_stop_fx_and_build_destiny_batch_contexts()
             stop_only_updates,
             &[ego_ship],
             SelfDestinyWireContext::NonDock,
+            None,
         )
         .is_none(),
         "NonDock batch consisting solely of ego warp-stop FX should collapse to None"
@@ -1081,6 +1083,7 @@ fn test_1147_strip_self_non_dock_warp_stop_fx_and_build_destiny_batch_contexts()
         dock_updates,
         &[ego_ship],
         SelfDestinyWireContext::DockSettle,
+        None,
     )
     .expect("DockSettle batch must preserve dock-settle events");
     let dock_names: Vec<String> = collect_destiny_actions_from_list(&dock_batch.updates)
@@ -1399,6 +1402,7 @@ async fn build_destiny_batch_and_sequencer_deliver_fx_floor_damage_state_without
         init_pyrep,
         &[],
         SelfDestinyWireContext::NonDock,
+        None,
     )
     .expect("SetState batch");
     for sub in normalize_server_destiny_batch(&mut wire, set_state_batch) {
@@ -1425,6 +1429,7 @@ async fn build_destiny_batch_and_sequencer_deliver_fx_floor_damage_state_without
         fx_pyrep,
         &[],
         SelfDestinyWireContext::NonDock,
+        None,
     )
     .expect("FX batch");
     assert_eq!(fx_batch.stamp, fx_floor as u32);
@@ -1461,6 +1466,7 @@ async fn build_destiny_batch_and_sequencer_deliver_fx_floor_damage_state_without
         dmg_pyrep,
         &[],
         SelfDestinyWireContext::NonDock,
+        None,
     )
     .expect("OnDamageStateChange batch");
     assert_eq!(
@@ -2804,6 +2810,7 @@ fn test_1531_canonical_ballpark_and_sequencer_emit_remove_balls() {
         bridge_pyrep,
         &[observer_ship_id],
         SelfDestinyWireContext::NonDock,
+        None,
     )
     .expect("destruction batch must not collapse");
     assert_eq!(
@@ -3160,5 +3167,309 @@ async fn test_1531_wire_live_ball_removal_and_destruction_with_active_fx_emit_re
             vec![PyRep::List(vec![PyRep::Integer(scooped_drone)])],
         )]
     );
+}
+
+#[tokio::test]
+async fn bf03_safe_logoff_to_charsel_clears_held_frames_and_scene_wire_state() {
+    use crate::outbound_sequencer::{
+        GateNotificationOutcome, OutboundSceneScope, SessionWireState, TypedNotification,
+    };
+
+    let ctx = ServerContext::new();
+    let now_unix = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+    let sid = 91_401_u64;
+    let uid = 1_u64;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.db
+        .acquire_online_lock(uid, sid, Some(char_id), true, now_unix)
+        .expect("acquire online lock");
+    let ep = ctx.record_atomic_session_transition(
+        crate::router::binding_transition_policy::AtomicSceneTransitionRecord {
+            session_id: sid,
+            user_id: Some(uid),
+            char_id,
+            kind_label: "undock",
+            reason: "bf03_test",
+            is_logout: false,
+            is_login: false,
+            prev_sys: None,
+            prev_dock: None,
+            next_sys: Some(sys_id),
+            next_dock: None,
+            can_record_departed: false,
+            removed_bindings: Vec::new(),
+        },
+    );
+
+    let mut session = SessionState::new(sid);
+    session.user_id = Some(uid);
+    session.character_id = Some(char_id);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+
+    let mut sys_rx = Some(ctx.systems.get_or_spawn(sys_id).subscribe());
+    let mut notify_rx = ctx.notify_tx.subscribe();
+    let mut subscribed_sys_id = Some(sys_id);
+    let mut wire_state = SessionWireState::new(sid, 1_000_000_914_011);
+    assert!(wire_state
+        .sync_scene_with_ballpark(ep, Some(sys_id), true, true)
+        .is_empty());
+
+    let held_outcome = wire_state.gate_typed_notification(
+        TypedNotification::new(
+            "OnDamageStateChange",
+            vec![PyRep::Integer(ship_id), PyRep::None],
+        )
+        .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(ep)))),
+    );
+    assert_eq!(held_outcome, GateNotificationOutcome::Held(None));
+    let held_future_outcome = wire_state.gate_typed_notification(
+        TypedNotification::new("OnCombatMessage", vec![PyRep::String("future".into())])
+            .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(ep + 1)))),
+    );
+    assert_eq!(held_future_outcome, GateNotificationOutcome::Held(None));
+    assert_eq!(wire_state.held_scene_frame_count(), 2);
+    assert!(wire_state.in_space);
+
+    // Safe logoff drops active character ownership on the account's online lock (`character_id = None`)
+    // before dispatching `SafeLogoffCharsel` to the listener loop.
+    ctx.db
+        .acquire_online_lock(uid, sid, None, false, now_unix + 1)
+        .expect("transition online lock to charsel");
+
+    let mut deferred_ship_id = None;
+    let mut pending_dock = None;
+    let mut safe_logoff_teardown = None;
+    let (_client_rd, mut server_wr) = tokio::io::duplex(4096);
+    {
+        let mut wire = SafeLogoffWireContext {
+            client_id: 1_000_000_914_011,
+            sys_rx: &mut sys_rx,
+            notify_rx: &mut notify_rx,
+            subscribed_sys_id: &mut subscribed_sys_id,
+            wire_state: &mut wire_state,
+            deferred_ship_id: &mut deferred_ship_id,
+            pending_dock: &mut pending_dock,
+            safe_logoff_teardown: &mut safe_logoff_teardown,
+        };
+        handle_safe_logoff_to_charsel(
+            &ctx,
+            &mut session,
+            &mut wire,
+            &mut server_wr,
+            &char_id.to_string(),
+        )
+        .await
+        .expect("handle_safe_logoff_to_charsel");
+    }
+
+    assert!(session.character_id.is_none());
+    assert!(session.solar_system_id.is_none());
+    assert!(sys_rx.is_none());
+    assert!(subscribed_sys_id.is_none());
+    assert!(!wire_state.in_space);
+    assert!(wire_state.solar_system_id.is_none());
+    assert_eq!(wire_state.scene_epoch, ep);
+    assert_eq!(wire_state.held_scene_frame_count(), 0);
+    assert_eq!(wire_state.scene_drop_count(), 2);
+    let ledger = ctx.flight_recorder.get_outbound_ledger(sid, 16);
+    assert!(
+        ledger.iter().any(|entry| {
+            entry.disposition == crate::flight_recorder::OutboundDisposition::Dropped
+                && entry.reason == "safe_logoff_charsel"
+                && entry.packet_kind == "OnCombatMessage"
+        }),
+        "P2-03: expected safe_logoff_charsel drop in outbound ledger, got {ledger:?}"
+    );
+
+    let late_outcome = wire_state.gate_typed_notification(
+        TypedNotification::new(
+            "OnDamageStateChange",
+            vec![PyRep::Integer(ship_id), PyRep::None],
+        )
+        .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(ep)))),
+    );
+    assert!(
+        matches!(late_outcome, GateNotificationOutcome::Dropped(_)),
+        "BF-03: late space notification after charsel logoff must drop, got {late_outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn bf03_detach_structure_view_outside_and_rejected_resync_preserve_gunner_scene_and_drop_non_gunner() {
+    use crate::outbound_sequencer::{
+        DestinyStream, GateNotificationOutcome, OutFrame, OutboundSceneScope, SessionWireState,
+        TypedNotification,
+    };
+
+    let ctx = ServerContext::new();
+    let now_unix = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+    let uid = 1_u64;
+    let char_id = 90_000_001_i64;
+    let pod_ship_id = 100_000_001_i64;
+    let struct_id = 1_000_000_000_777_i64;
+    let sys_id = 30_000_142_u32;
+
+    // 1. Direct helper checks for docked non-gunner vs active structure gunner on View Outside detach.
+    let mut non_gunner = SessionState::new(91_402);
+    non_gunner.user_id = Some(uid);
+    non_gunner.character_id = Some(char_id);
+    non_gunner.solar_system_id = Some(sys_id);
+    non_gunner.structure_id = Some(struct_id);
+    non_gunner.ship_id = Some(pod_ship_id);
+
+    let mut gunner = non_gunner.clone();
+    gunner.ship_id = Some(struct_id);
+
+    let mut non_gunner_wire = SessionWireState::new(91_402, 1_000_000_914_021);
+    assert!(non_gunner_wire
+        .sync_scene_with_ballpark(1, Some(sys_id), true, true)
+        .is_empty());
+    assert!(matches!(
+        non_gunner_wire.gate_typed_notification(
+            TypedNotification::new("OnTarget", vec![PyRep::Integer(pod_ship_id)])
+                .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(1)))),
+        ),
+        GateNotificationOutcome::Held(None)
+    ));
+    let mut sys_rx_ng = Some(ctx.systems.get_or_spawn(sys_id).subscribe());
+    let mut sub_ng = Some(sys_id);
+    detach_structure_view_outside_on_beyonce_release(
+        &ctx,
+        &non_gunner,
+        &mut non_gunner_wire,
+        &mut TickRxSlot::Optional(&mut sys_rx_ng),
+        &mut sub_ng,
+    );
+    assert!(sys_rx_ng.is_none());
+    assert!(sub_ng.is_none());
+    assert!(!non_gunner_wire.in_space);
+    assert_eq!(non_gunner_wire.held_scene_frame_count(), 0);
+    assert_eq!(non_gunner_wire.scene_drop_count(), 1);
+
+    let mut gunner_wire = SessionWireState::new(91_403, 1_000_000_914_031);
+    gunner_wire.enter_space(Some(sys_id));
+    assert!(gunner_wire
+        .sync_scene_with_ballpark(1, Some(sys_id), true, true)
+        .is_empty());
+    let mut sys_rx_g = Some(ctx.systems.get_or_spawn(sys_id).subscribe());
+    let mut sub_g = Some(sys_id);
+    detach_structure_view_outside_wire_state(
+        &ctx,
+        &gunner,
+        &mut gunner_wire,
+        &mut TickRxSlot::Optional(&mut sys_rx_g),
+        &mut sub_g,
+    );
+    assert!(sys_rx_g.is_none());
+    assert!(sub_g.is_none());
+    assert!(matches!(gunner_wire.destiny, DestinyStream::Detached));
+    assert!(
+        gunner_wire.in_space && gunner_wire.scene_entered,
+        "BF-03: active gunner must keep scene_in_space without ballpark after View Outside detach"
+    );
+    assert!(matches!(
+        gunner_wire.gate_typed_notification(
+            TypedNotification::new(
+                "OnCombatMessage",
+                vec![PyRep::String("StructureAttack".into()), PyRep::Integer(struct_id)],
+            )
+            .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), None))),
+        ),
+        GateNotificationOutcome::Emit(_)
+    ));
+
+    // 2. Real execute_call_req_wire path on rejected structure resync (`!allow_structure_resync`):
+    // structure ballpark is NOT bootstrapped on `ctx`, yet wire starts in AwaitingSetState.
+    for (sid, is_gunner) in [(91_404_u64, false), (91_405_u64, true)] {
+        let active_ship = if is_gunner { struct_id } else { pod_ship_id };
+        ctx.clear_notifications_for_char(char_id);
+        ctx.clear_space_ballpark_bootstrapped_for_session(sid, char_id);
+        ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&char_id).expect("seeded character");
+            ch.user_id = uid;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = Some(struct_id);
+            ch.active_ship_id = active_ship;
+        });
+        ctx.db
+            .acquire_online_lock(uid, sid, Some(char_id), true, now_unix)
+            .expect("acquire lock for rejected structure resync test");
+
+        let mut sess = SessionState::new(sid);
+        sess.user_id = Some(uid);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(sys_id);
+        sess.station_id = None;
+        sess.structure_id = Some(struct_id);
+        sess.ship_id = Some(active_ship);
+
+        let mut sys_rx = ctx.systems.get_or_spawn(sys_id).subscribe();
+        let mut sub_sys = Some(sys_id);
+        let mut wire_state = SessionWireState::new(sid, sid * 10);
+        let ep = wire_state.enter_space(Some(sys_id));
+        wire_state.destiny = DestinyStream::AwaitingSetState { epoch: ep };
+        let mut deferred_ship_id = None;
+        let mut wire_refs = CallReqWireRefs {
+            client_id: sid * 10,
+            sys_rx: &mut sys_rx,
+            subscribed_sys_id: &mut sub_sys,
+            wire_state: &mut wire_state,
+            deferred_ship_id: &mut deferred_ship_id,
+        };
+
+        ctx.notify_in_scene(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnCombatMessage",
+            "charid",
+            vec![PyRep::String("StructureAttack".into()), PyRep::Integer(struct_id)],
+            Some(OutboundSceneScope::space(Some(sys_id), None)),
+        );
+
+        let req_source = MachoAddress::Client {
+            client_id: sid * 10,
+            call_id: 21,
+            service: None,
+        };
+        let req_dest = MachoAddress::Node {
+            node_id: eve_machonet::MACHO_PROXY_NODE_ID,
+            service: Some("account".to_string()),
+            call_id: 0,
+        };
+        let kwargs = HashMap::new();
+        let outcome = execute_call_req_wire(
+            &ctx,
+            &mut sess,
+            &mut wire_refs,
+            &req_source,
+            &req_dest,
+            "account",
+            None,
+            "GetCashBalance",
+            &[],
+            &kwargs,
+        )
+        .await;
+
+        assert!(sub_sys.is_none());
+        assert!(matches!(wire_state.destiny, DestinyStream::Detached));
+        assert_eq!(wire_state.in_space, is_gunner);
+        let emitted_combat = outcome.out_frames.iter().any(|f| {
+            matches!(
+                f,
+                OutFrame::Notification { event, .. } if event == "OnCombatMessage"
+            )
+        });
+        assert_eq!(
+            emitted_combat, is_gunner,
+            "BF-03: rejected structure resync emitted_combat={emitted_combat} vs expected is_gunner={is_gunner}"
+        );
+    }
 }
 

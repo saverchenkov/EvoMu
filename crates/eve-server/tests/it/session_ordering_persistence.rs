@@ -2124,6 +2124,7 @@ async fn test_1085_reconnect_do_sim_clock_rebase_and_attach_ordering() {
             PyRep::Tuple(vec![PyRep::String("SetState".into())]),
         ])]),
         wait_for_bubble: false,
+        scene_scope: None,
     };
     let outcomes = sequence_with_events(
         &mut seq_state,
@@ -2141,6 +2142,7 @@ async fn test_1085_reconnect_do_sim_clock_rebase_and_attach_ordering() {
                     event: "OnCharNoLongerInStation".into(),
                     args: Vec::new(),
                     service: None,
+                    scene_scope: None,
                 },
                 eve_server::outbound_sequencer::TypedNotification {
                     event: "DoSimClockRebase".into(),
@@ -2149,6 +2151,7 @@ async fn test_1085_reconnect_do_sim_clock_rebase_and_attach_ordering() {
                         PyRep::Integer(new_sim_time),
                     ])],
                     service: None,
+                    scene_scope: None,
                 },
             ],
             item_change_before_session_change: false,

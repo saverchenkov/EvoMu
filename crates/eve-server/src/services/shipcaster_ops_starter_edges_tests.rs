@@ -263,6 +263,7 @@ fn emit_shipcaster_target_state_changed_core_handles_none_empty_and_overflow() {
                 packet: pkt,
                 marshaled_packet: marsh,
                 created_filetime: 0,
+                scene_scope: None,
             });
         }
     }

@@ -126,6 +126,7 @@ async fn drifter_hive_lookup_and_notify_account_changes() {
                 packet: pkt.clone(),
                 marshaled_packet: marsh.clone(),
                 created_filetime: 0,
+                scene_scope: None,
             });
         }
     }

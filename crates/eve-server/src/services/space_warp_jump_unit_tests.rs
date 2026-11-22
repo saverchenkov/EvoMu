@@ -2145,11 +2145,13 @@ async fn stargate_jump_negative_paths_and_outbound_tidi_rebase_order() {
                     event: "OnWarpFinished".into(),
                     args: vec![PyRep::Integer(101)],
                     service: None,
+                    scene_scope: None,
                 },
                 TypedNotification {
                     event: "DoSimClockRebase".into(),
                     args: vec![PyRep::Tuple(vec![PyRep::Integer(100), PyRep::Integer(100)])],
                     service: None,
+                    scene_scope: None,
                 },
             ],
             item_change_before_session_change: false,

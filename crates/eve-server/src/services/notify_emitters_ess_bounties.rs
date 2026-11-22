@@ -111,6 +111,7 @@ pub(crate) fn emit_progression_task_completed_with_db(
 /// Emits `OnCombatMessage(messageName, messageArgs)` (`id_type = "charid"`).
 /// Matches `eve/client/script/parklife/tactical.pyj:TacticalSvc.OnCombatMessage(self, messageName, messageArgs)`
 /// where `messageArgs` contains `"specialObject"`, `"damage"`, `"type"`, `"weapon"`, `"hitQualityText"`, and `"isWrecking"`.
+#[cfg(test)]
 pub(crate) fn emit_combat_message(
     ctx: &ServerContext,
     char_id: i64,
@@ -119,6 +120,30 @@ pub(crate) fn emit_combat_message(
     damage: f64,
     weapon_type_id: u32,
     is_wrecking: bool,
+) {
+    emit_combat_message_in_scene(
+        ctx,
+        char_id,
+        message_name,
+        special_object_id,
+        damage,
+        weapon_type_id,
+        is_wrecking,
+        None,
+    );
+}
+
+/// Scene-scoped variant of [`emit_combat_message`] attaching [`crate::outbound_sequencer::OutboundSceneScope`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_combat_message_in_scene(
+    ctx: &ServerContext,
+    char_id: i64,
+    message_name: &str,
+    special_object_id: i64,
+    damage: f64,
+    weapon_type_id: u32,
+    is_wrecking: bool,
+    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
 ) {
     let hit_quality_text = if damage <= 0.0 {
         "misses"
@@ -147,8 +172,9 @@ pub(crate) fn emit_combat_message(
         ),
         (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
     ]);
-    ctx.emit_typed(
+    ctx.emit_typed_in_scene(
         NotificationTarget::Character(char_id),
+        scene_scope,
         OnCombatMessage {
             message_name: message_name.into(),
             message_args,

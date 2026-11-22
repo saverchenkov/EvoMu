@@ -143,7 +143,7 @@ async fn defaults_ephemeral_accessors_and_signature_radius_shield_recharge_edges
 
 #[test]
 fn emit_combat_log_variants_and_legal_war_alliance_and_fw_wars() {
-    let (ctx, _session, att_id, ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let (ctx, _session, att_id, ship_id, sys_id) = make_fighter_ctx_and_session();
     let vic_id = 90_000_077_i64;
     let vic_ship_id = 720_001_i64;
     let now = 1_750_000_000_u64;
@@ -177,6 +177,7 @@ fn emit_combat_log_variants_and_legal_war_alliance_and_fw_wars() {
         1.0,
         1.0,
         1.0,
+        Some(sys_id),
     );
     emit_combat_log_and_damage_state(
         &ctx,
@@ -190,6 +191,7 @@ fn emit_combat_log_variants_and_legal_war_alliance_and_fw_wars() {
         0.9,
         1.0,
         1.0,
+        Some(sys_id),
     );
 
     // 2. Missing character in is_legal_war_or_suspect_target -> false

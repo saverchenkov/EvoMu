@@ -69,7 +69,7 @@
       "files": {
         "bug_reporting.rs": 3,
         "combat/crimewatch.rs": 1,
-        "outbound_sequencer.rs": 4,
+        "outbound_sequencer.rs": 1,
         "quasar_gateway.rs": 1,
         "router/binding.rs": 3,
         "router/cache_notifications.rs": 3,

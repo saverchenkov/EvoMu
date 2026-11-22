@@ -323,15 +323,18 @@ fn emit_cycle_weapon_log_pair(
     recipient_cid: i64,
     msg_key: &str,
     dict: PyRep,
+    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
 ) {
-    ctx.emit_typed(
+    ctx.emit_typed_in_scene(
         crate::router::NotificationTarget::Character(recipient_cid),
+        scene_scope,
         crate::router::notify_registry::OnDamageMessage {
             damage_messages_args: dict.clone(),
         },
     );
-    ctx.emit_typed(
+    ctx.emit_typed_in_scene(
         crate::router::NotificationTarget::Character(recipient_cid),
+        scene_scope,
         crate::router::notify_registry::OnDamageMessages {
             dmgmsgs: vec![PyRep::Tuple(vec![
                 PyRep::String(msg_key.into()),
@@ -341,8 +344,10 @@ fn emit_cycle_weapon_log_pair(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_cycle_weapon_log_entries(
     ctx: &ServerContext,
+    sys_id: u32,
     attacker_char_id: Option<i64>,
     attacker_ship_id: i64,
     target_id: i64,
@@ -365,7 +370,8 @@ fn emit_cycle_weapon_log_entries(
             hit_quality,
             "me",
         );
-        emit_cycle_weapon_log_pair(ctx, acid, attacker_msg_key, dmg_dict);
+        let scope = Some(ctx.character_space_scene_scope(acid, Some(sys_id)));
+        emit_cycle_weapon_log_pair(ctx, acid, attacker_msg_key, dmg_dict, scope);
     }
     if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
         let vic_dict = crate::system_actor::build_cycle_damage_message_dict(
@@ -377,7 +383,8 @@ fn emit_cycle_weapon_log_entries(
             hit_quality,
             "other",
         );
-        emit_cycle_weapon_log_pair(ctx, vcid, victim_msg_key, vic_dict);
+        let scope = Some(ctx.character_space_scene_scope(vcid, Some(sys_id)));
+        emit_cycle_weapon_log_pair(ctx, vcid, victim_msg_key, vic_dict, scope);
     }
 }
 
@@ -449,13 +456,15 @@ fn handle_lance_beam_fired_action(
             module_type_id,
             "me",
         );
-        ctx.emit_typed(
+        let attacker_scope = Some(ctx.character_space_scene_scope(attacker_char_id, Some(sys_id)));
+        ctx.emit_typed_in_scene(
             crate::router::NotificationTarget::Character(attacker_char_id),
+            attacker_scope,
             crate::router::notify_registry::OnDamageMessage {
                 damage_messages_args: dmg_dict.clone(),
             },
         );
-        crate::services::notify_emitters_ess_bounties::emit_combat_message(
+        crate::services::notify_emitters_ess_bounties::emit_combat_message_in_scene(
             ctx,
             attacker_char_id,
             if applied_dmg > 0.0 {
@@ -467,6 +476,7 @@ fn handle_lance_beam_fired_action(
             applied_dmg,
             module_type_id,
             false,
+            attacker_scope,
         );
         msg_tuples.push(PyRep::Tuple(vec![
             PyRep::String("AttackHit".into()),
@@ -485,7 +495,8 @@ fn handle_lance_beam_fired_action(
                 })
         });
         if let Some(victim_char_id) = victim_char_opt {
-            crate::services::notify_emitters_ess_bounties::emit_combat_message(
+            let victim_scope = Some(ctx.character_space_scene_scope(victim_char_id, Some(sys_id)));
+            crate::services::notify_emitters_ess_bounties::emit_combat_message_in_scene(
                 ctx,
                 victim_char_id,
                 if applied_dmg > 0.0 {
@@ -497,6 +508,7 @@ fn handle_lance_beam_fired_action(
                 applied_dmg,
                 module_type_id,
                 false,
+                victim_scope,
             );
             let vic_dict = build_lance_beam_damage_dict(
                 applied_dmg,
@@ -506,14 +518,16 @@ fn handle_lance_beam_fired_action(
                 module_type_id,
                 "other",
             );
-            ctx.emit_typed(
+            ctx.emit_typed_in_scene(
                 crate::router::NotificationTarget::Character(victim_char_id),
+                victim_scope,
                 crate::router::notify_registry::OnDamageMessage {
                     damage_messages_args: vic_dict.clone(),
                 },
             );
-            ctx.emit_typed(
+            ctx.emit_typed_in_scene(
                 crate::router::NotificationTarget::Character(victim_char_id),
+                victim_scope,
                 crate::router::notify_registry::OnDamageMessages {
                     dmgmsgs: vec![PyRep::Tuple(vec![
                         PyRep::String("AttackedBy".into()),
@@ -524,8 +538,10 @@ fn handle_lance_beam_fired_action(
         }
     }
     if !msg_tuples.is_empty() {
-        ctx.emit_typed(
+        let attacker_scope = Some(ctx.character_space_scene_scope(attacker_char_id, Some(sys_id)));
+        ctx.emit_typed_in_scene(
             crate::router::NotificationTarget::Character(attacker_char_id),
+            attacker_scope,
             crate::router::notify_registry::OnDamageMessages {
                 dmgmsgs: msg_tuples,
             },
@@ -579,21 +595,32 @@ async fn handle_cycle_weapon_damage_action(
             (0.0, 0.0, 0.0)
         };
         if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
-            let _ = ctx.notify_damage_state_change(
-                crate::router::NotificationTarget::Character(acid),
+            let attacker_scope = Some(ctx.character_space_scene_scope(acid, Some(sys_id)));
+            crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
+                ctx,
+                acid,
                 target_id,
                 sr,
                 ar,
                 hr,
+                attacker_scope,
             );
         }
         if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
-            crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change(
-                ctx, vcid, target_id, sr, ar, hr,
+            let victim_scope = Some(ctx.character_space_scene_scope(vcid, Some(sys_id)));
+            crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
+                ctx,
+                vcid,
+                target_id,
+                sr,
+                ar,
+                hr,
+                victim_scope,
             );
         }
         emit_cycle_weapon_log_entries(
             ctx,
+            sys_id,
             attacker_char_id,
             attacker_ship_id,
             target_id,
@@ -946,6 +973,7 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                 if !notified {
                     emit_cycle_weapon_log_entries(
                         ctx,
+                        sys_id,
                         attacker_char_id,
                         attacker_ship_id,
                         target_id,

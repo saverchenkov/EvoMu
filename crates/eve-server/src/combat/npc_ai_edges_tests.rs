@@ -243,14 +243,26 @@ async fn step_ai_chase_idle_threat_weights_and_ball_destructions() {
             ch.active_ship_id = ship_ewar;
             ch.solar_system_id = sys_id;
         }
-        // Active EWAR module (group 201 / ECM or Warp Scrambler 52) on ship_ewar
-        let ewar_mod_tid = ctx
-            .sde
-            .types
-            .values()
-            .find(|t| t.group_id == 52)
-            .map(|t| t.type_id)
-            .unwrap_or(3242);
+        // Pick Rifter-fittable active EWAR (group 52) & Logi (group 41) modules deterministically
+        // rather than iterating `HashMap::values()` (which can select Heavy/Capital modules whose
+        // CPU/PG exceed a Rifter and get auto-offlined by `fit()`, dropping `module_active_states`).
+        let pick_group_module = |preferred_tid: u32, group_id: u32, fallback_tid: u32| -> u32 {
+            ctx.sde
+                .types
+                .get(&preferred_tid)
+                .filter(|t| t.group_id == group_id)
+                .map(|t| t.type_id)
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .values()
+                        .filter(|t| t.group_id == group_id)
+                        .min_by_key(|t| t.type_id)
+                        .map(|t| t.type_id)
+                })
+                .unwrap_or(fallback_tid)
+        };
+        let ewar_mod_tid = pick_group_module(3242, 52, 3242);
         snap.items.insert(
             100_950_101,
             InventoryItemRecord {
@@ -266,13 +278,7 @@ async fn step_ai_chase_idle_threat_weights_and_ball_destructions() {
         );
         snap.module_active_states.insert(100_950_101);
         // Active Logi module (group 41) on ship_logi
-        let logi_mod_tid = ctx
-            .sde
-            .types
-            .values()
-            .find(|t| t.group_id == 41)
-            .map(|t| t.type_id)
-            .unwrap_or(3581);
+        let logi_mod_tid = pick_group_module(3586, 41, 3581);
         snap.items.insert(
             100_950_102,
             InventoryItemRecord {
@@ -753,6 +759,21 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         );
     };
     spawn_drone(abandoned_drone);
+    sys_handle.try_spawn_ball_with_combat(
+        Ball {
+            id: owner_ship,
+            type_id: 587,
+            position: DVec3::new(60_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        ctx.build_type_combat_state(587),
+    );
 
     let mut mgr = NpcSpawnManager::new();
     mgr.entities.insert(
@@ -786,6 +807,30 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
             "{label}: unexpected combat/damage notifications: {:?}",
             notifs.iter().map(|n| &n.event).collect::<Vec<_>>()
         );
+    };
+    let drain_owner_wire_combat_events = || {
+        let mut sess = eve_machonet::SessionState::new(99_565);
+        sess.user_id = Some(owner_uid);
+        sess.character_id = Some(owner_char);
+        ctx.sync_session(&mut sess);
+        let mut wire = crate::router::client_wire::ClientWireSession::from_session(&ctx, sess);
+        let (frames, _) = wire.drain_pending_frames();
+        let events = frames
+            .into_iter()
+            .filter_map(|f| match f {
+                crate::outbound_sequencer::OutFrame::Notification { event, .. }
+                | crate::outbound_sequencer::OutFrame::ServiceCall { method: event, .. }
+                    if matches!(
+                        event.as_str(),
+                        "OnDamageMessage" | "OnDamageMessages" | "OnCombatMessage" | "OnDamageStateChange"
+                    ) =>
+                {
+                    Some(event)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        (events, wire.wire_state.scene_drop_count())
     };
 
     // 1. NPC attacks abandoned drone while owner is docked in another system -> hits drone, zero notifications
@@ -824,8 +869,7 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
     assert_no_combat_notifs("untracked orphaned drone in snap.items");
 
     // 4. Replace target with actively controlled drone (`is_abandoned=false`):
-    //    - while owner is in `other_sys` -> zero notifications
-    //    - while owner is docked in `combat_sys` -> zero notifications
+    //    - outbound scene scoping (`#1190` / `#1565`) drops frames on the wire when owner is in `other_sys` or docked
     //    - while owner is undocked in `combat_sys` -> receives OnDamageMessage + OnDamageStateChange!
     let _ = sys_handle.ballpark.write().unwrap().remove_ball(untracked_drone);
     ctx.db.with_mut_snapshot(|snap| {
@@ -834,6 +878,8 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
     spawn_drone(active_drone);
     mgr.entities.get_mut(&npc_ball).unwrap().target_id = Some(active_drone);
 
+    // 4a. Under BF-01, if the active drone owner is already out-of-system or docked at hit time,
+    // no combat notification is enqueued at all (`events == []`, `drops == 0`).
     let shield_before_oos = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&owner_char) {
@@ -844,7 +890,11 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
     mgr.step_ai_sync(&ctx, combat_sys, 17, 1.0);
     let shield_after_oos = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
     assert!(shield_after_oos < shield_before_oos, "NPC should damage active drone (oos)");
-    assert_no_combat_notifs("active drone owned by out-of-system pilot");
+    let (oos_events, oos_drops) = drain_owner_wire_combat_events();
+    assert!(
+        oos_events.is_empty() && oos_drops == 0,
+        "active drone hit while owner already out-of-system must not enqueue: events={oos_events:?}, drops={oos_drops}"
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&owner_char) {
@@ -855,7 +905,55 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
     mgr.step_ai_sync(&ctx, combat_sys, 20, 1.0);
     let shield_after_docked = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
     assert!(shield_after_docked < shield_after_oos, "NPC should damage active drone (docked)");
-    assert_no_combat_notifs("active drone owned by docked pilot");
+    let (docked_events, docked_drops) = drain_owner_wire_combat_events();
+    assert!(
+        docked_events.is_empty() && docked_drops == 0,
+        "active drone hit while owner already docked must not enqueue: events={docked_events:?}, drops={docked_drops}"
+    );
+
+    // 4b. If the owner WAS undocked in combat_sys when the active drone was hit, and then leaves
+    // combat_sys or docks before wire flush, the wire gate drops the stale scene notification.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner_char) {
+            ch.solar_system_id = combat_sys;
+            ch.station_id = None;
+        }
+    });
+    mgr.step_ai_sync(&ctx, combat_sys, 23, 1.0);
+    let shield_after_post_hit_oos = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    assert!(shield_after_post_hit_oos < shield_after_docked, "NPC should damage active drone (post-hit oos)");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner_char) {
+            ch.solar_system_id = other_sys;
+            ch.station_id = None;
+        }
+    });
+    let (wire_oos_events, wire_oos_drops) = drain_owner_wire_combat_events();
+    assert!(
+        wire_oos_events.is_empty() && wire_oos_drops > 0,
+        "stale queued drone hit after owner jumps to other_sys must drop on wire: events={wire_oos_events:?}, drops={wire_oos_drops}"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner_char) {
+            ch.solar_system_id = combat_sys;
+            ch.station_id = None;
+        }
+    });
+    mgr.step_ai_sync(&ctx, combat_sys, 26, 1.0);
+    let shield_after_post_hit_dock = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    assert!(shield_after_post_hit_dock < shield_after_post_hit_oos, "NPC should damage active drone (post-hit dock)");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner_char) {
+            ch.solar_system_id = combat_sys;
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    let (wire_dock_events, wire_dock_drops) = drain_owner_wire_combat_events();
+    assert!(
+        wire_dock_events.is_empty() && wire_dock_drops > 0,
+        "stale queued drone hit after owner docks must drop on wire: events={wire_dock_events:?}, drops={wire_dock_drops}"
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&owner_char) {
@@ -864,14 +962,41 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
             ch.structure_id = None;
         }
     });
-    mgr.step_ai_sync(&ctx, combat_sys, 23, 1.0);
-    let ok_notifs = ctx.drain_notifications_for_char(owner_char);
+    mgr.step_ai_sync(&ctx, combat_sys, 29, 1.0);
+    let (ok_events, _) = drain_owner_wire_combat_events();
     assert!(
-        ok_notifs.iter().any(|n| n.event == "OnDamageMessage"),
+        ok_events.iter().any(|ev| ev == "OnDamageMessage"),
         "undocked owner in matching system must receive OnDamageMessage for active drone"
     );
     assert!(
-        ok_notifs.iter().any(|n| n.event == "OnDamageStateChange"),
-        "undocked owner in matching system must receive OnDamageStateChange for active drone"
+        ok_events.iter().any(|ev| ev == "OnDamageMessages"),
+        "undocked owner in matching system must receive OnDamageMessages for active drone"
     );
+
+    // 5. Persistent wire transition (`#1565`): undocked -> station dock immediately suppresses queued/post-dock combat hits
+    let mut live_sess = eve_machonet::SessionState::new(99_565);
+    live_sess.user_id = Some(owner_uid);
+    live_sess.character_id = Some(owner_char);
+    ctx.sync_session(&mut live_sess);
+    let mut live_wire = crate::router::client_wire::ClientWireSession::from_session(&ctx, live_sess);
+    mgr.step_ai_sync(&ctx, combat_sys, 32, 1.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner_char) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    let (post_dock_frames, _) = live_wire.drain_pending_frames();
+    assert!(
+        !post_dock_frames.iter().any(|f| matches!(
+            f,
+            crate::outbound_sequencer::OutFrame::Notification { event, .. }
+            | crate::outbound_sequencer::OutFrame::ServiceCall { method: event, .. }
+                if matches!(
+                    event.as_str(),
+                    "OnDamageMessage" | "OnDamageMessages" | "OnCombatMessage" | "OnDamageStateChange"
+                )
+        )),
+        "live wire docking must suppress stale combat frames emitted right before dock"
+    );
+    assert!(live_wire.wire_state.scene_drop_count() > 0);
 }

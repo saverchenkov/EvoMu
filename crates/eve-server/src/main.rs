@@ -727,6 +727,95 @@ fn partition_bridge_sys_rx_with_watermark(
     (pre_ticks, post_ticks, post_loss)
 }
 
+const MAX_BRIDGE_HELD_NOTIFICATIONS: usize = 256;
+
+fn bridge_scene_in_space(ctx: &ServerContext, session: &SessionState) -> bool {
+    let Some(cid) = session.character_id else {
+        return false;
+    };
+    if session.station_id.is_some() || session.solar_system_id.is_none() {
+        return false;
+    }
+    if session.structure_id.is_none()
+        || eve_server::outbound_scene_scope::is_active_structure_gunner(session)
+    {
+        return true;
+    }
+    session
+        .solar_system_id
+        .is_some_and(|sys_id| ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id))
+}
+
+fn filter_bridge_notifications_for_scene(
+    bridge_scene_epoch: u64,
+    bridge_in_space: bool,
+    session: &SessionState,
+    held: &mut std::collections::VecDeque<eve_server::router::PendingMachoNotification>,
+    incoming: Vec<eve_server::router::PendingMachoNotification>,
+    suppress_session_changed: bool,
+) -> Vec<BridgeEnvelope> {
+    if session.character_id.is_none() {
+        held.clear();
+        return Vec::new();
+    }
+    let mut combined = std::collections::VecDeque::with_capacity(held.len() + incoming.len());
+    combined.append(held);
+    combined.extend(incoming);
+
+    let mut ready = Vec::new();
+    for notif in combined {
+        if suppress_session_changed && notif.event == "OnSessionChanged" {
+            continue;
+        }
+        if let Some(scope) = notif.scene_scope {
+            if let Some(ep) = scope.scene_epoch {
+                if ep < bridge_scene_epoch {
+                    continue;
+                }
+                if ep > bridge_scene_epoch {
+                    if held.len() >= MAX_BRIDGE_HELD_NOTIFICATIONS {
+                        let _ = held.pop_front();
+                    }
+                    held.push_back(notif);
+                    continue;
+                }
+            }
+            let wrong_space = scope.requires_in_space && !bridge_in_space;
+            let wrong_sys = scope
+                .scene_sys_id
+                .is_some_and(|sys| session.solar_system_id != Some(sys));
+            if wrong_space || wrong_sys {
+                continue;
+            }
+        }
+        ready.push(BridgeEnvelope::ServerEvent {
+            tick: 0,
+            event: notif.event,
+            args: notif.args,
+        });
+    }
+    ready
+}
+
+fn filter_bridge_notifications(
+    ctx: &ServerContext,
+    session: &SessionState,
+    held: &mut std::collections::VecDeque<eve_server::router::PendingMachoNotification>,
+    incoming: Vec<eve_server::router::PendingMachoNotification>,
+    suppress_session_changed: bool,
+) -> Vec<BridgeEnvelope> {
+    let bridge_in_space = bridge_scene_in_space(ctx, session);
+    let bridge_scene_epoch = ctx.session_scene_epoch(session.session_id);
+    filter_bridge_notifications_for_scene(
+        bridge_scene_epoch,
+        bridge_in_space,
+        session,
+        held,
+        incoming,
+        suppress_session_changed,
+    )
+}
+
 /// Handles connections from the Python Client Bridge (`evomu_bridge.py`) using length-prefixed JSON.
 /// Uses a dedicated reader task feeding a cancel-safe `mpsc::channel` so 1 Hz `sys_rx` broadcast ticks
 /// inside `tokio::select!` can never cancel an in-flight `read_exact` call.
@@ -742,6 +831,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     session.live_notify_listener = true;
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
     let mut notify_rx = ctx.notify_tx.subscribe();
+    let mut held_bridge_notifs = std::collections::VecDeque::new();
 
     let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     ctx.register_session_closer(session_id, close_tx);
@@ -838,15 +928,13 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                         if let Some(cid) = session.character_id {
                             pre_rpc_notifs.extend(ctx.drain_notifications_for_char(cid));
                         }
-                        for notif in pre_rpc_notifs {
-                            if sess_diff_sent && notif.event == "OnSessionChanged" {
-                                continue;
-                            }
-                            let server_event = BridgeEnvelope::ServerEvent {
-                                tick: 0,
-                                event: notif.event,
-                                args: notif.args,
-                            };
+                        for server_event in filter_bridge_notifications(
+                            &ctx,
+                            &session,
+                            &mut held_bridge_notifs,
+                            pre_rpc_notifs,
+                            sess_diff_sent,
+                        ) {
                             if let Ok(out_bytes) = serde_json::to_vec(&server_event) {
                                 let _ = write_bounded_frame(&mut writer, &out_bytes).await;
                             }
@@ -959,12 +1047,14 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
                         };
                         if should_drain {
-                            for notif in ctx.drain_notifications_for_char(cid) {
-                                let server_event = BridgeEnvelope::ServerEvent {
-                                    tick: 0,
-                                    event: notif.event,
-                                    args: notif.args,
-                                };
+                            ctx.sync_session(&mut session);
+                            for server_event in filter_bridge_notifications(
+                                &ctx,
+                                &session,
+                                &mut held_bridge_notifs,
+                                ctx.drain_notifications_for_char(cid),
+                                false,
+                            ) {
                                 if let Ok(out_bytes) = serde_json::to_vec(&server_event) {
                                     let _ = write_bounded_frame(&mut writer, &out_bytes).await;
                                 }

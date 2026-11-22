@@ -390,6 +390,7 @@ async fn bounties_kill_rights_gm_actions_and_dynamic_bounty_rpc() {
         0.8,
         1.0,
         1.0,
+        Some(sys_id),
     );
     update_crimewatch_engagement_timers(&ctx, char_id, victim_id);
 

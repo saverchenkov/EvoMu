@@ -79,6 +79,7 @@ async fn corrupt_reg_clock_clamp_fleet_notifications_and_queue_eviction() {
                 packet: pkt,
                 marshaled_packet: mpkt,
                 created_filetime: 1,
+                scene_scope: None,
             });
         }
     }

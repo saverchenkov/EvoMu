@@ -196,6 +196,7 @@ fn notification_guards_offline_skip_queue_cap_and_empty_pilots() {
                 packet: pkt,
                 marshaled_packet: mpkt,
                 created_filetime: i as i64,
+                scene_scope: None,
             });
         }
     }

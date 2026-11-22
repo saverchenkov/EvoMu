@@ -171,6 +171,7 @@ pub struct PendingMachoNotification {
     pub packet: MachoPacket,
     pub marshaled_packet: Vec<u8>,
     pub created_filetime: i64,
+    pub scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
 }
 
 impl PendingMachoNotification {
@@ -193,6 +194,7 @@ impl PendingMachoNotification {
             packet,
             marshaled_packet,
             created_filetime,
+            scene_scope: None,
         }
     }
 }
@@ -1230,7 +1232,22 @@ impl ServerContext {
         id_type: &str,
         args: Vec<PyRep>,
     ) -> Vec<PendingMachoNotification> {
-        self.notify_inner(target, event, id_type, args, false)
+        let default_scope = self.default_notify_scene_scope(&target);
+        self.notify_in_scene(target, event, id_type, args, default_scope)
+    }
+
+    /// Scene-scoped variant of [`Self::notify`], tagging emitted notifications with
+    /// [`crate::outbound_sequencer::OutboundSceneScope`] so `outbound_sequencer` drops stale-epoch
+    /// or mismatched-scene frames and holds newer-epoch frames until scene entry (`#1190` RB3).
+    pub fn notify_in_scene(
+        &self,
+        target: NotificationTarget,
+        event: &str,
+        id_type: &str,
+        args: Vec<PyRep>,
+        scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
+    ) -> Vec<PendingMachoNotification> {
+        self.notify_inner(target, event, id_type, args, false, scene_scope)
     }
 
     fn notify_inner(
@@ -1240,6 +1257,7 @@ impl ServerContext {
         id_type: &str,
         args: Vec<PyRep>,
         already_switch_checked: bool,
+        scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
     ) -> Vec<PendingMachoNotification> {
         let recipients = self.resolve_notification_recipients(&target);
         let now_ft = self.now_blueos_filetime_ticks();
@@ -1289,14 +1307,18 @@ impl ServerContext {
                     Some(&self.sde),
                 );
             }
-            emitted.push(assemble_pending_notification(
-                cid,
-                uid,
-                event,
-                id_type,
-                recipient_args,
-                now_ft,
-            ));
+            let recipient_scope = self.bind_recipient_scene_scope(scene_scope, cid, uid);
+            emitted.push(
+                assemble_pending_notification(
+                    cid,
+                    uid,
+                    event,
+                    id_type,
+                    recipient_args,
+                    now_ft,
+                )
+                .with_scene_scope(recipient_scope),
+            );
         }
         if !emitted.is_empty() {
             if is_staging_dispatch_notifications(Some(&*self.pending_notifications), Some(&self.notify_tx)) {
@@ -1323,7 +1345,7 @@ impl ServerContext {
         source: &'static str,
     ) -> Vec<PendingMachoNotification> {
         let _scope = super::delta_item_compare::push_compare_source_scope(self, source);
-        self.notify_inner(target, event, id_type, args, true)
+        self.notify_inner(target, event, id_type, args, true, None)
     }
 
     /// Returns the highest queued `seq_id` for `char_id` (or `0` when empty).
@@ -1585,7 +1607,7 @@ impl ServerContext {
         let dmg = crate::services::notify_emitters_space_dungeons::build_damage_state_tuple(
             self, item_id, shield, armor, structure,
         );
-        self.notify(target, "OnDamageStateChange", "itemid", vec![PyRep::Integer(item_id), dmg])
+        self.notify_damage_state_change_in_scene(target, item_id, dmg)
     }
 
     /// Emits an `OnGodmaShipEffect` notification for active module cycle events (`Z-2`).
@@ -1598,33 +1620,7 @@ impl ServerContext {
         duration_ms: i64,
         repeat: i32,
     ) -> Vec<PendingMachoNotification> {
-        let sys_opt = match target {
-            NotificationTarget::SolarSystem(sid) => Some(sid),
-            NotificationTarget::Character(cid) => self.db.with_snapshot(|s| {
-                s.characters
-                    .get(&cid)
-                    .filter(|c| c.station_id.is_none() && c.structure_id.is_none())
-                    .map(|c| c.solar_system_id)
-            }),
-            _ => None,
-        };
-        let now_ticks = self.now_system_sim_filetime_ticks(sys_opt);
-        let flag = if active { 1 } else { 0 };
-        let env = PyRep::Tuple(vec![
-            PyRep::Integer(item_id), PyRep::None, PyRep::Integer(item_id),
-            PyRep::None, PyRep::None, PyRep::List(Vec::new()), PyRep::Integer(effect_id as i64),
-        ]);
-        self.notify(
-            target,
-            "OnGodmaShipEffect",
-            "charid",
-            vec![
-                PyRep::Integer(item_id), PyRep::Integer(effect_id as i64), PyRep::Integer(now_ticks),
-                PyRep::Integer(flag), PyRep::Integer(flag), env, PyRep::Integer(now_ticks),
-                PyRep::Real((duration_ms.max(0)) as f64), PyRep::Integer(repeat as i64),
-                PyRep::Integer(0), PyRep::None,
-            ],
-        )
+        self.notify_godma_ship_effect_in_scene(target, item_id, effect_id, active, duration_ms, repeat)
     }
 
     /// Emits an `OnFleetBroadcast` notification (`broadcastName`, `senderID`, `targetID`, `fleetID`) (`Z-2`).
@@ -2073,10 +2069,7 @@ impl ServerContext {
                 PyRep::Real(duration_ms), PyRep::Integer(i64::from(repeat)), PyRep::Integer(now),
                 PyRep::Real(0.0), PyRep::None,
             ];
-            self.notify(NotificationTarget::Character(char_id), "OnSpecialFX", "charid", sfx_args.clone());
-            for (obs_cid, _) in self.space_observer_chars_for_ship(ship_id, char_id) {
-                self.notify(NotificationTarget::Character(obs_cid), "OnSpecialFX", "charid", sfx_args.clone());
-            }
+            self.emit_special_fx_in_scene(char_id, ship_id, sfx_args);
         }
     }
 
@@ -2446,12 +2439,7 @@ impl ServerContext {
                 ])
             })
             .collect();
-        self.notify(
-            NotificationTarget::Character(char_id),
-            "OnMultiEvent",
-            "charid",
-            vec![PyRep::List(list)],
-        )
+        self.notify_target_events_in_scene(char_id, list)
     }
 
     pub fn notify_system_criminal_flag_updates(

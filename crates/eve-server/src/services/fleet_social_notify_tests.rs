@@ -383,3 +383,75 @@ async fn fleet_notify_emitters_disconnect_all_boss_fallback_and_corp_contact_edg
     };
     emit_fleet_member_removed(&ctx, &outcome);
 }
+
+#[tokio::test]
+async fn stream_fleet_watchlist_damage_skips_docked_target_and_scopes_watcher_wire_1565() {
+    use crate::outbound_sequencer::{
+        GateNotificationOutcome, OutboundSceneScope, SessionWireState, TypedNotification,
+    };
+
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let (_fleet_id, _) = seed_multi_member_fleet(&ctx).await;
+    let c1 = 90_000_001_i64;
+    let c2 = 90_000_002_i64;
+    let sys_a = 30_000_142_u32;
+
+    ctx.fleet_extras
+        .lock()
+        .unwrap()
+        .watchlist
+        .entry(c1)
+        .or_default()
+        .insert(c2);
+    let _ = ctx.drain_notifications_for_char(c1);
+
+    // 1. Target docked in station -> stream_fleet_watchlist_damage emits nothing
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&c2).unwrap();
+        ch.solar_system_id = sys_a;
+        ch.station_id = Some(60_003_760);
+        ch.structure_id = None;
+    });
+    stream_fleet_watchlist_damage(&ctx, c2, 0.5, 0.8, 1.0);
+    assert!(
+        ctx.drain_notifications_for_char(c1).is_empty(),
+        "docked target must emit zero watchlist damage notifications"
+    );
+
+    // 2. Target undocked in sys_a -> notifications carry space scene_scope for sys_a,
+    //    and drop on a docked watcher wire
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&c2).unwrap();
+        ch.station_id = None;
+        ch.active_ship_id = 100_000_002;
+        if let Some(mut acct) = snap.accounts.values().next().cloned() {
+            acct.user_id = c1 as u64;
+            acct.username = "watchlist_c1".into();
+            snap.accounts.insert(acct.username.clone(), acct);
+        }
+    });
+    ctx.db
+        .acquire_online_lock(c1 as u64, 901, Some(c1), true, 1_700_000_000)
+        .unwrap();
+    stream_fleet_watchlist_damage(&ctx, c2, 0.5, 0.8, 1.0);
+    let notifs = ctx.drain_notifications_for_char(c1);
+    assert!(notifs.iter().any(|n| n.event == "OnDamageStateChange"));
+    assert!(notifs.iter().any(|n| n.event == "OnFleetStateChange"));
+    for n in &notifs {
+        assert_eq!(
+            n.scene_scope,
+            Some(OutboundSceneScope::space(Some(sys_a), Some(0)))
+        );
+    }
+
+    let mut docked_wire = SessionWireState::new(901, c1 as u64);
+    docked_wire.leave_space();
+    for n in notifs {
+        match docked_wire.gate_typed_notification(
+            TypedNotification::new(n.event, n.args).with_scene_scope(n.scene_scope),
+        ) {
+            GateNotificationOutcome::Dropped(_) => {}
+            other => panic!("docked watcher wire must drop watchlist damage notif, got {other:?}"),
+        }
+    }
+}

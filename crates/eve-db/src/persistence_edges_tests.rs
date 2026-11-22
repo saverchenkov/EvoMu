@@ -388,3 +388,17 @@ fn try_with_snapshot_and_try_with_mut_snapshot_rollback_edges() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn session_scene_epoch_is_monotonic_under_stale_writes() {
+    let repo = WorldRepository::new_empty();
+    repo.set_session_scene_epoch(77, 5);
+    assert_eq!(repo.session_scene_epoch(77), 5);
+    // Out-of-order / stale transition thread writing a lower epoch must not regress epoch.
+    repo.set_session_scene_epoch(77, 3);
+    assert_eq!(repo.session_scene_epoch(77), 5);
+    repo.set_session_scene_epoch(77, 7);
+    assert_eq!(repo.session_scene_epoch(77), 7);
+    repo.clear_session_scene_epoch(77);
+    assert_eq!(repo.session_scene_epoch(77), 0);
+}

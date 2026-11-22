@@ -949,9 +949,7 @@ fn authorize_trade_binding(ctx: &ServerContext, session: &SessionState, object_i
 }
 
 pub(super) fn is_solar_system_id(ctx: &ServerContext, object_id: i64) -> bool {
-    u32::try_from(object_id)
-        .ok()
-        .is_some_and(|id| ctx.sde.solar_systems.contains_key(&id))
+    ctx.resolve_solar_system_location_id(object_id).is_some()
 }
 
 fn is_authorized_crimewatch_target(

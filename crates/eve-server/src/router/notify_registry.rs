@@ -155,7 +155,6 @@ impl ServerContext {
     ) -> Vec<PendingMachoNotification> {
         self.notify_with_source(target, N::EVENT, N::DEFAULT_ID_TYPE, notif.into_args(), source)
     }
-
     /// Emits a typed notification with an explicit MachoNet `id_type` override (for events whose
     /// scope varies by dispatch target, e.g. `"allianceid"` vs `"corpid"`).
     pub fn emit_typed_with_id_type<N: TypedNotification>(
@@ -313,6 +312,7 @@ pub fn emit_typed_to_fleet_members_core<N: TypedNotification>(
             packet: packet.clone(),
             marshaled_packet: marshaled_packet.clone(),
             created_filetime: now_ft,
+            scene_scope: None,
         };
         push_or_stage_pending_notification(
             pending_notifications,
@@ -365,6 +365,12 @@ pub fn emit_typed_to_solar_system_in_space_core<N: TypedNotification>(
             packet,
             marshaled_packet,
             created_filetime: now_ft,
+            scene_scope: crate::outbound_scene_scope::bind_db_recipient_scene_scope(
+                db,
+                crate::outbound_scene_scope::space_scope(Some(solar_system_id), None),
+                cid,
+                uid,
+            ),
         };
         push_or_stage_pending_notification(
             Some(pending_notifications),
@@ -428,6 +434,7 @@ fn build_pending_notification_for_event(
         packet,
         marshaled_packet,
         created_filetime,
+        scene_scope: None,
     }
 }
 
@@ -449,6 +456,8 @@ pub fn build_pending_typed_notification<N: TypedNotification>(
         created_filetime,
     )
 }
+
+pub use crate::outbound_scene_scope::build_pending_typed_notification_in_scene;
 
 /// Pushes a prebuilt notification into `pend` with a 256-entry FIFO bound and broadcasts on `notify_tx`.
 pub fn push_pending_char_notification_256(

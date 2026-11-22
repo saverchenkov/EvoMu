@@ -793,6 +793,7 @@ async fn coverage_sweep_scanning_probes_dscan_wh_gates_and_delta_edge_cases() {
                 packet: pkt,
                 marshaled_packet: mpkt,
                 created_filetime: 0,
+                scene_scope: None,
             });
         }
     }

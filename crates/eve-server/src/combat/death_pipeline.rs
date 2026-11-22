@@ -1595,13 +1595,14 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
                 ],
             );
         }
-        crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change(
+        crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
             ctx,
             victim_char_id,
             cid,
             1.0,
             1.0,
             1.0,
+            Some(ctx.character_space_scene_scope(victim_char_id, Some(sys_id))),
         );
     }
 

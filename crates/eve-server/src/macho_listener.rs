@@ -148,6 +148,7 @@ fn tick_broadcast_batch_for_observer(
                 updates_pyrep.clone(),
                 observer_ids,
                 SelfDestinyWireContext::NonDock,
+                crate::outbound_scene_scope::space_scope(Some(tick_out.solar_system_id), None),
             ) {
                 return Some(batch);
             }
@@ -516,6 +517,10 @@ async fn sync_in_space_ship_swap_destiny(
             updates_pyrep,
             &suppressed_ids,
             SelfDestinyWireContext::NonDock,
+            crate::outbound_scene_scope::space_scope(
+                Some(sys_id),
+                Some(ctx.session_scene_epoch(session_id)),
+            ),
         )
     };
     Some(ShipSwapDestinySync {
@@ -967,6 +972,78 @@ fn record_sequencer_events(
     }
 }
 
+fn sync_wire_scene_with_events(
+    ctx: &ServerContext,
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    session: &SessionState,
+    is_scene_in_space: bool,
+    is_in_space: bool,
+) {
+    let evs = wire_state.sync_scene_with_ballpark(
+        ctx.session_scene_epoch(session.session_id),
+        session.solar_system_id,
+        is_scene_in_space,
+        is_in_space,
+    );
+    if !evs.is_empty() {
+        record_sequencer_events(ctx, session.session_id, &evs, None, false);
+    }
+}
+
+fn drain_ready_held_frames_recorded(
+    ctx: &ServerContext,
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    session_id: u64,
+    events_sink: Option<&mut Vec<crate::outbound_sequencer::SequencerLedgerEvent>>,
+) -> Vec<crate::outbound_sequencer::OutFrame> {
+    if wire_state.held_scene_frame_count() == 0 {
+        return Vec::new();
+    }
+    let mut held_outcome = crate::outbound_scene_scope::drain_ready_held_frames(wire_state);
+    if let Some(sink) = events_sink {
+        sink.append(&mut held_outcome.events);
+    } else if !held_outcome.events.is_empty() {
+        record_sequencer_events(ctx, session_id, &held_outcome.events, None, false);
+    }
+    held_outcome.frames
+}
+
+async fn emit_ready_held_frames_with_observability<W: AsyncWriteExt + Unpin>(
+    ctx: &ServerContext,
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    writer: &mut W,
+    client_id: u64,
+    session: &SessionState,
+    reason: &str,
+) -> Result<()> {
+    let frames = drain_ready_held_frames_recorded(ctx, wire_state, session.session_id, None);
+    if !frames.is_empty() {
+        for held_frame in &frames {
+            record_out_frame_observability(
+                ctx,
+                session.session_id,
+                MACHO_PROXY_NODE_ID,
+                client_id,
+                session.user_id,
+                wire_state.last_client_tick,
+                held_frame,
+                None,
+                false,
+                reason,
+            );
+        }
+        write_out_frames(
+            writer,
+            MACHO_PROXY_NODE_ID,
+            client_id,
+            session.user_id,
+            &frames,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn emit_tick_batch_with_observability<W: AsyncWriteExt + Unpin>(
     ctx: &ServerContext,
     wire_state: &mut crate::outbound_sequencer::SessionWireState,
@@ -1002,6 +1079,17 @@ async fn emit_tick_batch_with_observability<W: AsyncWriteExt + Unpin>(
                 client_id,
                 session.user_id,
                 &[frame],
+            )
+            .await?;
+        }
+        if wire_state.held_scene_frame_count() > 0 {
+            emit_ready_held_frames_with_observability(
+                ctx,
+                wire_state,
+                writer,
+                client_id,
+                session,
+                reason,
             )
             .await?;
         }
@@ -1192,6 +1280,7 @@ fn build_destiny_batch(
     updates_pyrep: PyRep,
     suppressed_ship_ids: &[i64],
     wire_ctx: SelfDestinyWireContext,
+    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
 ) -> Option<crate::outbound_sequencer::DestinyBatch> {
     if events.is_empty() {
         return None;
@@ -1263,6 +1352,7 @@ fn build_destiny_batch(
         has_set_state,
         updates,
         wait_for_bubble,
+        scene_scope,
     })
 }
 
@@ -1271,6 +1361,7 @@ fn build_typed_notification(
     event: String,
     id_type: Option<&str>,
     args: Vec<PyRep>,
+    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
 ) -> Option<crate::outbound_sequencer::TypedNotification> {
     if crate::router::client_compat::should_suppress_macho_notification(&event, &args) {
         return None;
@@ -1286,6 +1377,7 @@ fn build_typed_notification(
         service: id_type
             .and_then(|s| s.strip_prefix("service:"))
             .map(ToOwned::to_owned),
+        scene_scope,
     })
 }
 
@@ -1367,12 +1459,13 @@ fn is_structure_view_outside_bootstrapped(ctx: &ServerContext, session: &Session
 /// `station_structure::handle` already minted a fresh post-undock `"beyonce"` object).
 fn detach_structure_view_outside_wire_state(
     ctx: &ServerContext,
-    session_id: u64,
-    char_id: Option<i64>,
+    session: &SessionState,
     wire_state: &mut crate::outbound_sequencer::SessionWireState,
     sys_rx: &mut TickRxSlot<'_>,
     subscribed_sys_id: &mut Option<u32>,
 ) {
+    let session_id = session.session_id;
+    let char_id = session.character_id;
     sys_rx.detach();
     *subscribed_sys_id = None;
     wire_state.leave_space();
@@ -1383,6 +1476,8 @@ fn detach_structure_view_outside_wire_state(
         ctx.clear_space_ballpark_bootstrapped_for_session(session_id, cid);
         crate::services::space_destiny::reset_update_state_rate_limit(ctx, session_id, cid);
     }
+    let is_gunner = crate::outbound_scene_scope::is_active_structure_gunner(session);
+    sync_wire_scene_with_events(ctx, wire_state, session, is_gunner, false);
     ctx.flight_recorder.record_wire_state(wire_state);
 }
 
@@ -1390,21 +1485,13 @@ fn detach_structure_view_outside_wire_state(
 /// binding while still structure-docked (`Enter Hangar`, `#1448` / `#1461`).
 fn detach_structure_view_outside_on_beyonce_release(
     ctx: &ServerContext,
-    session_id: u64,
-    char_id: Option<i64>,
+    session: &SessionState,
     wire_state: &mut crate::outbound_sequencer::SessionWireState,
     sys_rx: &mut TickRxSlot<'_>,
     subscribed_sys_id: &mut Option<u32>,
 ) {
-    detach_structure_view_outside_wire_state(
-        ctx,
-        session_id,
-        char_id,
-        wire_state,
-        sys_rx,
-        subscribed_sys_id,
-    );
-    ctx.prune_bound_service_without_notify(session_id, "beyonce");
+    detach_structure_view_outside_wire_state(ctx, session, wire_state, sys_rx, subscribed_sys_id);
+    ctx.prune_bound_service_without_notify(session.session_id, "beyonce");
 }
 
 #[cfg(test)]
@@ -1672,8 +1759,7 @@ async fn execute_call_req_wire_inner(
     {
         detach_structure_view_outside_on_beyonce_release(
             ctx,
-            session.session_id,
-            session.character_id,
+            session,
             wire.wire_state,
             &mut wire.sys_rx,
             wire.subscribed_sys_id,
@@ -1788,8 +1874,7 @@ async fn execute_call_req_wire_inner(
     {
         detach_structure_view_outside_on_beyonce_release(
             ctx,
-            session.session_id,
-            session.character_id,
+            session,
             wire.wire_state,
             &mut wire.sys_rx,
             wire.subscribed_sys_id,
@@ -1823,8 +1908,7 @@ async fn execute_call_req_wire_inner(
     {
         detach_structure_view_outside_wire_state(
             ctx,
-            session.session_id,
-            session.character_id,
+            session,
             wire.wire_state,
             &mut wire.sys_rx,
             wire.subscribed_sys_id,
@@ -1859,7 +1943,9 @@ async fn execute_call_req_wire_inner(
             && prev_session.structure_id == session.structure_id
             && prev_session.solar_system_id == session.solar_system_id)
             || (is_beyonce_ballpark_rpc && rpc_res.is_ok()));
-    let is_in_space = is_undocked_space || is_structure_view_outside;
+    let mut is_in_space = is_undocked_space || is_structure_view_outside;
+    let mut is_scene_in_space =
+        is_in_space || crate::outbound_scene_scope::is_active_structure_gunner(session);
     let is_upwell_undock = rpc_res.is_ok()
         && matches!(
             (effective_service, method),
@@ -1927,6 +2013,10 @@ async fn execute_call_req_wire_inner(
                                 updates_pyrep,
                                 &[old_obs_id],
                                 SelfDestinyWireContext::NonDock,
+                                crate::outbound_scene_scope::space_scope(
+                                    prev_session.solar_system_id,
+                                    Some(wire.wire_state.scene_epoch),
+                                ),
                             );
                         } else {
                             cross_sys_pre_ticks.clear();
@@ -2101,6 +2191,10 @@ async fn execute_call_req_wire_inner(
                             updates_pyrep,
                             &[obs_id],
                             SelfDestinyWireContext::DockSettle,
+                            crate::outbound_scene_scope::space_scope(
+                                prev_session.solar_system_id,
+                                Some(wire.wire_state.scene_epoch),
+                            ),
                         );
                     } else {
                         pre_dock_ticks.clear();
@@ -2215,6 +2309,9 @@ async fn execute_call_req_wire_inner(
                         wire.wire_state.leave_space();
                         wire.sys_rx.detach();
                         *wire.subscribed_sys_id = None;
+                        is_in_space = false;
+                        is_scene_in_space =
+                            crate::outbound_scene_scope::is_active_structure_gunner(session);
                     } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
                         let ep = wire.wire_state.current_epoch();
                         if let Some(resynced) = resync_structure_set_state_with_sys_rx(
@@ -2237,6 +2334,7 @@ async fn execute_call_req_wire_inner(
                                 resynced.updates_pyrep,
                                 lookup_ids,
                                 SelfDestinyWireContext::NonDock,
+                                crate::outbound_scene_scope::session_space_scope(ctx, session),
                             );
                         }
                     }
@@ -2363,6 +2461,9 @@ async fn execute_call_req_wire_inner(
                     wire.wire_state.leave_space();
                     wire.sys_rx.detach();
                     *wire.subscribed_sys_id = None;
+                    is_in_space = false;
+                    is_scene_in_space =
+                        crate::outbound_scene_scope::is_active_structure_gunner(session);
                 } else if !obs_evs.is_empty() {
                     post_rpc_direct_batch = build_destiny_batch(
                         ctx,
@@ -2372,6 +2473,7 @@ async fn execute_call_req_wire_inner(
                         updates_pyrep,
                         lookup_ids,
                         SelfDestinyWireContext::NonDock,
+                        crate::outbound_scene_scope::session_space_scope(ctx, session),
                     );
                 }
             }
@@ -2425,7 +2527,13 @@ async fn execute_call_req_wire_inner(
         if sess_change_sent && notif.event == "OnSessionChanged" {
             continue;
         }
-        if let Some(tn) = build_typed_notification(ctx, notif.event, Some(&notif.id_type), notif.args) {
+        if let Some(tn) = build_typed_notification(
+            ctx,
+            notif.event,
+            Some(&notif.id_type),
+            notif.args,
+            notif.scene_scope,
+        ) {
             typed_notifications.push(tn);
         }
     }
@@ -2433,7 +2541,7 @@ async fn execute_call_req_wire_inner(
         if sess_change_sent && event == "OnSessionChanged" {
             continue;
         }
-        if let Some(tn) = build_typed_notification(ctx, event, None, args) {
+        if let Some(tn) = build_typed_notification(ctx, event, None, args, None) {
             typed_notifications.push(tn);
         }
     }
@@ -2472,7 +2580,7 @@ async fn execute_call_req_wire_inner(
             method,
             "Board" | "BoardStoredShip" | "LeaveShip" | "Eject" | "AssembleShip"
         );
-    let sequence_outcome = crate::outbound_sequencer::sequence_server_rpc_with_events(
+    let sequence_outcome = crate::outbound_sequencer::sequence_server_rpc_in_scene_with_events(
         wire.wire_state,
         RpcCompletion {
             call_id: 0,
@@ -2483,6 +2591,12 @@ async fn execute_call_req_wire_inner(
             notifications: typed_notifications,
             item_change_before_session_change,
         },
+        Some(crate::outbound_scene_scope::session_scene_sync(
+            ctx,
+            session,
+            is_scene_in_space,
+            is_in_space,
+        )),
     );
     let mut seq_events = sequence_outcome.events;
     let mut out_frames = sequence_outcome.frames;
@@ -2500,6 +2614,12 @@ async fn execute_call_req_wire_inner(
             }
         }
     }
+    out_frames.extend(drain_ready_held_frames_recorded(
+        ctx,
+        wire.wire_state,
+        session.session_id,
+        Some(&mut seq_events),
+    ));
     ctx.flight_recorder.record_wire_state(wire.wire_state);
     if let Some(flush_frame) = deferred_flush_frame {
         out_frames.push(crate::outbound_sequencer::OutFrame::SessionChange { frame: flush_frame });
@@ -2762,26 +2882,16 @@ async fn emit_typed_notifications<W: AsyncWriteExt + Unpin>(
         if !session_owns_char_notifications(ctx, session) {
             break;
         }
-        if let Some(drop_ev) = wire_state.gate_notification(&typed_notif.event, &typed_notif.args)
-        {
-            record_sequencer_events(ctx, session.session_id, &[drop_ev], None, false);
-            continue;
+        let (frame_opt, ev_opt) =
+            crate::outbound_scene_scope::gate_typed_notification_to_out_frame(wire_state, typed_notif);
+        if let Some(ev) = ev_opt {
+            record_sequencer_events(ctx, session.session_id, &[ev], None, false);
         }
-        let frame = if let Some(service) = typed_notif.service {
-            crate::outbound_sequencer::OutFrame::ServiceCall {
-                service,
-                method: typed_notif.event,
-                args: typed_notif.args,
-            }
-        } else {
-            crate::outbound_sequencer::OutFrame::Notification {
-                event: typed_notif.event,
-                args: typed_notif.args,
-            }
-        };
-        let wire_pyrep =
-            out_frame_to_wire_pyrep(MACHO_PROXY_NODE_ID, client_id, session.user_id, &frame);
-        write_framed_pyrep(writer, &wire_pyrep).await?;
+        if let Some(frame) = frame_opt {
+            let wire_pyrep =
+                out_frame_to_wire_pyrep(MACHO_PROXY_NODE_ID, client_id, session.user_id, &frame);
+            write_framed_pyrep(writer, &wire_pyrep).await?;
+        }
     }
     Ok(())
 }
@@ -2815,7 +2925,13 @@ async fn handle_safe_logoff_to_charsel<W: AsyncWriteExt + Unpin>(
             .into_iter()
             .filter(|notif| notif.event != "OnSessionChanged")
             .filter_map(|notif| {
-                build_typed_notification(ctx, notif.event, Some(&notif.id_type), notif.args)
+                build_typed_notification(
+                    ctx,
+                    notif.event,
+                    Some(&notif.id_type),
+                    notif.args,
+                    notif.scene_scope,
+                )
             })
             .collect()
     } else {
@@ -2838,6 +2954,19 @@ async fn handle_safe_logoff_to_charsel<W: AsyncWriteExt + Unpin>(
     ctx.clear_notifications_for_char(cid);
     let _ = session.drain_notifications();
 
+    let pre_charsel_epoch = ctx.session_scene_epoch(session.session_id);
+    let charsel_evs =
+        wire.wire_state
+            .sync_scene_with_ballpark(pre_charsel_epoch, None, false, false);
+    if !charsel_evs.is_empty() {
+        record_sequencer_events(ctx, session.session_id, &charsel_evs, None, false);
+    }
+    let cleared_evs = wire
+        .wire_state
+        .clear_held_scene_frames("safe_logoff_charsel");
+    if !cleared_evs.is_empty() {
+        record_sequencer_events(ctx, session.session_id, &cleared_evs, None, false);
+    }
     wire.wire_state.leave_space();
     ctx.systems
         .clear_explicit_update_state_guards_for_session(session.session_id);
@@ -3189,8 +3318,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     let mut sys_rx_slot = TickRxSlot::Optional(&mut sys_rx);
                     detach_structure_view_outside_on_beyonce_release(
                         &ctx,
-                        session_id,
-                        session.character_id,
+                        &session,
                         &mut wire_state,
                         &mut sys_rx_slot,
                         &mut subscribed_sys_id,
@@ -3265,6 +3393,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                             resynced.updates_pyrep,
                                             &[observer_id],
                                             SelfDestinyWireContext::NonDock,
+                                            crate::outbound_scene_scope::space_scope(
+                                                session.solar_system_id,
+                                                Some(wire_state.scene_epoch),
+                                            ),
                                         ) {
                                             emit_tick_batch_with_observability(
                                                 &ctx,
@@ -3315,7 +3447,16 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         .map(Vec::as_slice)
                                         .unwrap_or(&tick_msg.events);
                                     let ep = wire_state.current_epoch();
-                                    if let Some(batch) = build_destiny_batch(&ctx, ep, tick_msg.tick, evs, updates_pyrep.clone(), &[observer_id], SelfDestinyWireContext::NonDock) {
+                                    if let Some(batch) = build_destiny_batch(
+                                        &ctx,
+                                        ep,
+                                        tick_msg.tick,
+                                        evs,
+                                        updates_pyrep.clone(),
+                                        &[observer_id],
+                                        SelfDestinyWireContext::NonDock,
+                                        crate::outbound_scene_scope::space_scope(Some(tick_msg.solar_system_id), None),
+                                    ) {
                                         if emit_tick_batch_with_observability(
                                             &ctx,
                                             &mut wire_state,
@@ -3367,6 +3508,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     notif.event,
                                     Some(&notif.id_type),
                                     notif.args,
+                                    notif.scene_scope,
                                 ) {
                                     pending_notifs.push(typed_notif);
                                 }
@@ -3402,6 +3544,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             && session.station_id.is_none()
                             && session.solar_system_id.is_some()
                             && (session.structure_id.is_none() || same_structure_view_outside);
+                        let is_scene_in_space = is_in_space
+                            || (!charsel_transition
+                                && crate::outbound_scene_scope::is_active_structure_gunner(&session));
                         let target_sys_id = is_in_space.then_some(session.solar_system_id).flatten();
                         let docking_transition = was_in_space && !is_in_space;
                         let structure_mode_changed =
@@ -3474,6 +3619,14 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 }
                             }
                         }
+                        sync_wire_scene_with_events(
+                            &ctx,
+                            &mut wire_state,
+                            &session,
+                            is_scene_in_space,
+                            is_in_space,
+                        );
+                        ctx.flight_recorder.record_wire_state(&wire_state);
 
                         if !session_owns_char_notifications(&ctx, &session) {
                             sys_rx = None;
@@ -3580,6 +3733,22 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             if write_framed_pyrep(&mut writer, &sess_frame).await.is_err() {
                                 break;
                             }
+                        }
+                        if wire_state.held_scene_frame_count() > 0 {
+                            if emit_ready_held_frames_with_observability(
+                                &ctx,
+                                &mut wire_state,
+                                &mut writer,
+                                client_id,
+                                &session,
+                                "notify_scene_ready_held",
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            ctx.flight_recorder.record_wire_state(&wire_state);
                         }
                         let sent_safe_logoff = pending_notifs
                             .iter()
@@ -4016,8 +4185,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     let mut sys_rx_slot = TickRxSlot::Optional(&mut sys_rx);
                     detach_structure_view_outside_on_beyonce_release(
                         &ctx,
-                        session_id,
-                        session.character_id,
+                        &session,
                         &mut wire_state,
                         &mut sys_rx_slot,
                         &mut subscribed_sys_id,
@@ -4161,6 +4329,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                                     updates_pyrep,
                                                     &[plan.ship_id],
                                                     SelfDestinyWireContext::DockSettle,
+                                                    crate::outbound_scene_scope::space_scope(
+                                                        session.solar_system_id,
+                                                        Some(wire_state.scene_epoch),
+                                                    ),
                                                 ) {
                                                     emit_tick_batch_with_observability(
                                                         &ctx,
@@ -4817,6 +4989,7 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
         && session.station_id.is_none()
         && session.solar_system_id.is_some()
         && (session.structure_id.is_none() || same_structure_view_outside);
+    let is_scene_in_space = is_in_space || crate::outbound_scene_scope::is_active_structure_gunner(session);
     if was_in_space
         && (!is_in_space
             || prev_session.solar_system_id != session.solar_system_id
@@ -4827,6 +5000,7 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
             .clear_explicit_update_state_guards_for_session(session.session_id);
         ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
     }
+    sync_wire_scene_with_events(ctx, wire.wire_state, session, is_scene_in_space, is_in_space);
     if !is_in_space {
         if wire.subscribed_sys_id.is_some() {
             let (_tx, closed_rx) = tokio::sync::broadcast::channel(1);
@@ -4881,43 +5055,43 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
             }
         }
     }
-    ctx.flight_recorder.record_wire_state(wire.wire_state);
+    out_frames.extend(drain_ready_held_frames_recorded(
+        ctx,
+        wire.wire_state,
+        session.session_id,
+        None,
+    ));
     let mut notifs = Vec::new();
     if session_owns_char_notifications(ctx, session) {
         if let Some(cid) = session.character_id {
             for n in ctx.drain_notifications_for_char(cid) {
-                notifs.push((n.event, Some(n.id_type), n.args));
+                notifs.push((n.event, Some(n.id_type), n.args, n.scene_scope));
             }
         }
     }
     for (ev, args) in session.drain_notifications() {
-        if !notifs.iter().any(|(e, _, a)| e == &ev && a == &args) {
-            notifs.push((ev, None, args));
+        if !notifs.iter().any(|(e, _, a, _)| e == &ev && a == &args) {
+            notifs.push((ev, None, args, None));
         }
     }
-    for (event, id_type, args) in notifs {
+    for (event, id_type, args, scene_scope) in notifs {
         if sess_change_sent && event == "OnSessionChanged" {
             continue;
         }
-        if let Some(tn) = build_typed_notification(ctx, event, id_type.as_deref(), args) {
-            if let Some(drop_ev) = wire.wire_state.gate_notification(&tn.event, &tn.args) {
-                record_sequencer_events(ctx, session.session_id, &[drop_ev], None, false);
-                continue;
+        if let Some(tn) =
+            build_typed_notification(ctx, event, id_type.as_deref(), args, scene_scope)
+        {
+            let (frame_opt, ev_opt) =
+                crate::outbound_scene_scope::gate_typed_notification_to_out_frame(wire.wire_state, tn);
+            if let Some(ev) = ev_opt {
+                record_sequencer_events(ctx, session.session_id, &[ev], None, false);
             }
-            if let Some(service) = tn.service {
-                out_frames.push(crate::outbound_sequencer::OutFrame::ServiceCall {
-                    service,
-                    method: tn.event,
-                    args: tn.args,
-                });
-            } else {
-                out_frames.push(crate::outbound_sequencer::OutFrame::Notification {
-                    event: tn.event,
-                    args: tn.args,
-                });
+            if let Some(frame) = frame_opt {
+                out_frames.push(frame);
             }
         }
     }
+    ctx.flight_recorder.record_wire_state(wire.wire_state);
     let wire_packets = out_frames
         .iter()
         .map(|frame| {

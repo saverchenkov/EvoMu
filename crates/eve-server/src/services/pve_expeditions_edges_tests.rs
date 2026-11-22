@@ -243,6 +243,7 @@ async fn escalation_create_advance_notifications_expiry_and_fallbacks() {
                 packet: dummy_pkt,
                 marshaled_packet: vec![],
                 created_filetime: 0,
+                scene_scope: None,
             };
             512
         ],

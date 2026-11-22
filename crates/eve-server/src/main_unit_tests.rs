@@ -303,6 +303,7 @@ async fn handle_bridge_client_handles_errors_notifications_ticks_and_kick() -> R
             packet: pkt_ign,
             marshaled_packet: marsh_ign,
             created_filetime: 0,
+            scene_scope: None,
         },
     ));
     let emitted = ctx3.notify(
@@ -1601,5 +1602,183 @@ fn test_1172_partition_bridge_sys_rx_with_watermark_continuity() {
     let (_pre2, post2, loss2) = partition_bridge_sys_rx_with_watermark(&mut rx2, 4);
     assert!(loss2);
     assert!(post2.is_empty());
+}
+
+#[test]
+fn p2_02_bridge_scene_in_space_tracks_undocked_gunner_and_view_outside() {
+    let ctx = ServerContext::new();
+    let sid = 77_701_u64;
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let pod_ship_id = 100_000_001_i64;
+    let struct_id = 1_000_000_000_777_i64;
+
+    let mut sess = SessionState::new(sid);
+    assert!(!bridge_scene_in_space(&ctx, &sess));
+
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(pod_ship_id);
+    assert!(bridge_scene_in_space(&ctx, &sess));
+
+    sess.station_id = Some(60_003_760);
+    assert!(!bridge_scene_in_space(&ctx, &sess));
+
+    sess.station_id = None;
+    sess.structure_id = Some(struct_id);
+    assert!(
+        !bridge_scene_in_space(&ctx, &sess),
+        "P2-02: docked structure pilot without View Outside ballpark must not be treated as in_space"
+    );
+
+    ctx.mark_space_ballpark_bootstrapped(sid, char_id, sys_id);
+    assert!(
+        bridge_scene_in_space(&ctx, &sess),
+        "P2-02: View Outside bootstrapped structure pilot is in_space"
+    );
+
+    ctx.clear_space_ballpark_bootstrapped_for_session(sid, char_id);
+    assert!(!bridge_scene_in_space(&ctx, &sess));
+
+    sess.ship_id = Some(struct_id);
+    assert!(
+        bridge_scene_in_space(&ctx, &sess),
+        "P2-02: active structure gunner is scene_in_space even without View Outside ballpark"
+    );
+}
+
+#[test]
+fn p2_02_filter_bridge_notifications_holds_future_epoch_drops_stale_and_clears_on_charsel() {
+    use eve_server::outbound_sequencer::OutboundSceneScope;
+    use std::collections::VecDeque;
+
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let other_sys_id = 30_000_144_u32;
+    let mk_notif = |event: &str, tag: i64, scope: Option<OutboundSceneScope>| {
+        let args = vec![PyRep::Integer(tag)];
+        let (packet, marshaled_packet) =
+            ServerContext::build_macho_notification_packet(char_id, Some(1), event, "charid", args.clone());
+        PendingMachoNotification {
+            seq_id: tag as u64,
+            recipient_char_id: char_id,
+            event: event.to_string(),
+            id_type: "charid".to_string(),
+            args,
+            packet,
+            marshaled_packet,
+            created_filetime: 0,
+            scene_scope: scope,
+        }
+    };
+
+    let mut sess = SessionState::new(77_702);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(100_000_001);
+
+    let mut held = VecDeque::new();
+    let incoming = vec![
+        mk_notif("OnSessionChanged", 1, None),
+        mk_notif(
+            "OnDamageStateChange",
+            2,
+            Some(OutboundSceneScope::space(Some(sys_id), Some(1))),
+        ),
+        mk_notif(
+            "OnTarget",
+            3,
+            Some(OutboundSceneScope::space(Some(other_sys_id), Some(2))),
+        ),
+        mk_notif(
+            "OnCombatMessage",
+            4,
+            Some(OutboundSceneScope::space(Some(sys_id), Some(3))),
+        ),
+        mk_notif(
+            "OnGodmaShipEffect",
+            5,
+            Some(OutboundSceneScope::space(Some(sys_id), Some(2))),
+        ),
+    ];
+
+    // At epoch 2 in space: ep 1 drops (stale), other_sys drops, ep 3 holds, OnSessionChanged suppressed, ep 2 emits.
+    let emitted =
+        filter_bridge_notifications_for_scene(2, true, &sess, &mut held, incoming, true);
+    let emitted_events: Vec<_> = emitted
+        .into_iter()
+        .map(|env| match env {
+            BridgeEnvelope::ServerEvent { event, args, .. } => (event, args),
+            other => panic!("unexpected envelope {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        emitted_events,
+        vec![("OnGodmaShipEffect".to_string(), vec![PyRep::Integer(5)])]
+    );
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].event, "OnCombatMessage");
+
+    // Advance scene epoch 2 -> 3: held ep 3 notification drains BEFORE new ep 3 notification.
+    let next_batch = vec![mk_notif(
+        "OnTarget",
+        6,
+        Some(OutboundSceneScope::space(Some(sys_id), Some(3))),
+    )];
+    let released =
+        filter_bridge_notifications_for_scene(3, true, &sess, &mut held, next_batch, false);
+    assert!(held.is_empty());
+    let released_events: Vec<_> = released
+        .into_iter()
+        .map(|env| match env {
+            BridgeEnvelope::ServerEvent { event, args, .. } => (event, args),
+            other => panic!("unexpected envelope {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        released_events,
+        vec![
+            ("OnCombatMessage".to_string(), vec![PyRep::Integer(4)]),
+            ("OnTarget".to_string(), vec![PyRep::Integer(6)]),
+        ]
+    );
+
+    // Held queue is bounded at MAX_BRIDGE_HELD_NOTIFICATIONS (evicting oldest future-epoch frames).
+    let overflow_batch: Vec<_> = (0..(MAX_BRIDGE_HELD_NOTIFICATIONS as i64 + 5))
+        .map(|idx| {
+            mk_notif(
+                "OnTarget",
+                100 + idx,
+                Some(OutboundSceneScope::space(Some(sys_id), Some(9))),
+            )
+        })
+        .collect();
+    let _ = filter_bridge_notifications_for_scene(3, true, &sess, &mut held, overflow_batch, false);
+    assert_eq!(held.len(), MAX_BRIDGE_HELD_NOTIFICATIONS);
+    assert_eq!(held.front().map(|n| n.args.clone()), Some(vec![PyRep::Integer(105)]));
+
+    // Returning to character selection clears held frames and emits nothing.
+    sess.character_id = None;
+    let at_charsel =
+        filter_bridge_notifications_for_scene(9, false, &sess, &mut held, Vec::new(), false);
+    assert!(at_charsel.is_empty());
+    assert!(held.is_empty());
+
+    // Real ctx wrapper drops requires_in_space when structure-docked non-gunner without View Outside.
+    let ctx = ServerContext::new();
+    sess.character_id = Some(char_id);
+    sess.structure_id = Some(1_000_000_000_777);
+    let docked_filtered = filter_bridge_notifications(
+        &ctx,
+        &sess,
+        &mut held,
+        vec![mk_notif(
+            "OnDamageStateChange",
+            7,
+            Some(OutboundSceneScope::space(Some(sys_id), None)),
+        )],
+        false,
+    );
+    assert!(docked_filtered.is_empty());
 }
 
