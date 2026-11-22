@@ -370,18 +370,17 @@ fn handle_war_registry_gm_rpc(
                     return Err(WarGmError::InvalidArgument
                         .with_message("GMSetDeclareTime requires a valid timestamp"));
                 };
-                let prev_declared =
-                    wars::set_declare_time(snap, war_id, declared_unix).map_err(rpc_err)?;
+                let upd = wars::set_declare_time(snap, war_id, declared_unix).map_err(rpc_err)?;
                 Ok(vec![
                     (
                         "timeDeclared",
-                        PyRep::Integer(unix_to_filetime(prev_declared)),
+                        PyRep::Integer(unix_to_filetime(upd.prev_declared_unix)),
                         PyRep::Integer(unix_to_filetime(declared_unix)),
                     ),
                     (
                         "timeStarted",
-                        PyRep::Integer(unix_to_filetime(prev_declared + WAR_TIMER_SECS)),
-                        PyRep::Integer(unix_to_filetime(declared_unix + WAR_TIMER_SECS)),
+                        PyRep::Integer(unix_to_filetime(upd.prev_started_unix)),
+                        PyRep::Integer(unix_to_filetime(upd.new_started_unix)),
                     ),
                 ])
             }
@@ -709,7 +708,7 @@ pub(super) fn handle_wars(
             let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&wid).cloned()) else {
                 return err("WarNotFound", format!("War {wid} not found"));
             };
-            Some(Ok(PyRep::Integer(unix_to_filetime(w.started_unix + WAR_TIMER_SECS))))
+            Some(Ok(PyRep::Integer(unix_to_filetime(wars::war_started_unix(&w)))))
         }
 
         ("warRegistry", "timeFinished") => {
@@ -935,16 +934,8 @@ pub(super) fn handle_wars(
             }
             let status = if accepting { "Accepted" } else { "Declined" };
             let outcome = match ctx.db.try_with_mut_snapshot(|snap| {
-                wars::resolve_surrender_negotiation(
-                    snap,
-                    neg_id,
-                    my_corp,
-                    w.aggressor_corp_id,
-                    w.defender_corp_id,
-                    accepting,
-                    now,
-                )
-                .map_err(rpc_err)
+                wars::resolve_surrender_negotiation(snap, neg_id, my_corp, accepting, now)
+                    .map_err(rpc_err)
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

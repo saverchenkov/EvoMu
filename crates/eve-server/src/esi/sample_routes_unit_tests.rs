@@ -588,13 +588,11 @@ fn esi_war_and_killmails_support_mutual_start_at_t0_and_exclude_warmup_and_expir
         resolve_ally_negotiation(snap, neg_id, def_corp, AllyNegotiationAction::Accept, t0)
             .expect("accept ally");
         gm_extend_ally_contract(snap, war_id, ally_corp, ally_exp, t0).expect("extend ally");
+        war_id
+    });
 
-        for (kill_id, killed_unix, vc, ac) in [
-            (992_001_i64, t0, def_corp, corp_id),
-            (992_002_i64, t0, ally_corp, corp_id),
-            (992_003_i64, eff + 10, ally_corp, corp_id),
-            (992_004_i64, ally_exp, ally_corp, corp_id),
-        ] {
+    let insert_km = |kill_id: i64, killed_unix: u64, vc: i64| {
+        ctx.db.with_mut_snapshot(|snap| {
             snap.killmails.insert(
                 kill_id,
                 eve_db::KillmailRecord {
@@ -607,13 +605,14 @@ fn esi_war_and_killmails_support_mutual_start_at_t0_and_exclude_warmup_and_expir
                     killed_unix,
                     victim_corp_id: vc,
                     victim_alliance_id: None,
-                    attacker_corp_id: ac,
+                    attacker_corp_id: corp_id,
                     attacker_alliance_id: None,
                 },
             );
-        }
-        war_id
-    });
+        });
+    };
+    insert_km(992_001, t0, def_corp);
+    insert_km(992_002, t0, ally_corp);
 
     let p = params(&[("war_id", &mwar_id.to_string())]);
     // At t0: mutual war started immediately (`declared == started`), while ally is still warming up (`allies == []`).
@@ -646,6 +645,7 @@ fn esi_war_and_killmails_support_mutual_start_at_t0_and_exclude_warmup_and_expir
 
     // After ally effective_unix: `/wars/{war_id}` lists the active ally and `/killmails` includes active ally kill 992_003.
     clock.advance_secs_and_read_offset(WAR_TIMER_SECS + 10);
+    insert_km(992_003, eff + 10, ally_corp);
     let w_act = dispatch_operation(&ctx, eff + 10, "GET", "/wars/{war_id}", &p, &empty_q, None, 1, b"")
         .body
         .unwrap();
@@ -672,6 +672,7 @@ fn esi_war_and_killmails_support_mutual_start_at_t0_and_exclude_warmup_and_expir
 
     // At ally expiry: `/wars/{war_id}` omits expired ally; post-expiry kill 992_004 remains excluded.
     clock.advance_secs_and_read_offset(3_590);
+    insert_km(992_004, ally_exp, ally_corp);
     let w_exp = dispatch_operation(&ctx, ally_exp, "GET", "/wars/{war_id}", &p, &empty_q, None, 1, b"")
         .body
         .unwrap();

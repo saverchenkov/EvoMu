@@ -252,7 +252,9 @@ pub(super) fn opt_unix_to_filetime_py(unix_secs: Option<u64>) -> PyRep {
 }
 
 pub(super) fn war_row(w: &WarRecord, meta: &WarMeta, now: u64) -> Vec<PyRep> {
-    let started = w.started_unix + WAR_TIMER_SECS;
+    let started = crate::domain::wars::war_started_unix(w);
+    let combat_active =
+        w.active && now >= started && meta.finish_at_unix.is_none_or(|f| now < f);
     vec![
         PyRep::Integer(w.war_id),
         PyRep::Integer(w.aggressor_corp_id),
@@ -264,7 +266,7 @@ pub(super) fn war_row(w: &WarRecord, meta: &WarMeta, now: u64) -> Vec<PyRep> {
         PyRep::Bool(meta.open_for_allies),
         meta.war_hq_id.map(PyRep::Integer).unwrap_or(PyRep::None),
         PyRep::Bool(w.active),
-        PyRep::Bool(w.active && now >= started),
+        PyRep::Bool(combat_active),
     ]
 }
 
