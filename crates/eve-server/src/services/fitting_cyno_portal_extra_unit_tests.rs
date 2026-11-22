@@ -1649,3 +1649,70 @@ async fn cyno_expiry_clears_actor_cycle_and_allows_same_module_relight_f04() {
     super::super::on_cyno_ship_destroyed(&ctx, ship_id);
 }
 
+#[tokio::test]
+async fn light_cyno_slot_reject_still_cleans_up_other_ships_expired_beacon_and_cycle_bf1486_2b_01() {
+    let (lowsec, fleet_id) = (30_002_506_u32, 77_591_i64);
+    let (char_a, ship_a, mod_a, fuel_a) = (94_591_001_i64, 94_591_101_i64, 94_591_201_i64, 94_591_301_i64);
+    let (char_b, ship_b, mod_b, fuel_b) = (94_592_001_i64, 94_592_101_i64, 94_592_201_i64, 94_592_301_i64);
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(lowsec, custom_system(sde, lowsec, 10_000_030, 0.2, [0.0, 0.0, 0.0]));
+        sde.types.insert(21_096, custom_inv_type(sde, 21_096, 658, 7, 20.0, "Cynosural Field Generator I", &[(73, 600_000.0), (713, 16_273.0), (714, 500.0), (182, 21_603.0), (277, 1.0)]));
+        sde.types.insert(21_094, custom_inv_type(sde, 21_094, 2020, 2, 100.0, "Cynosural Field", &[]));
+        sde.type_lists.insert(99_317, eve_sde::TypeListInfo { type_list_id: 99_317, name: "Standard Cyno Beacons".into(), included_type_ids: vec![21_094, 21_096, 57_425], ..Default::default() });
+    });
+    for (cid, sid, mid, fid) in [(char_a, ship_a, mod_a, fuel_a), (char_b, ship_b, mod_b, fuel_b)] {
+        ensure_char(&ctx, cid, 98_591_001, lowsec, sid, Some(fleet_id));
+        ctx.db.with_mut_snapshot(|snap| {
+            for (id, tid, loc, flg, qty, sgl) in [
+                (sid, 587_u32, lowsec as i64, InventoryFlag::None, 1, true),
+                (mid, 21_096_u32, sid, InventoryFlag::HiSlot0, 1, true),
+                (fid, 16_273_u32, sid, InventoryFlag::Cargo, 5_000, false),
+            ] {
+                snap.items.insert(id, InventoryItemRecord { item_id: id, type_id: tid, owner_id: cid, location_id: loc, flag: flg, quantity: qty, singleton: sgl, ..Default::default() });
+            }
+            snap.skills.entry(cid).or_default().insert(21_603, TrainedSkillRecord { type_id: 21_603, level: 5, skill_points: 256_000.0 });
+        });
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(fleet_id, FleetRecord { fleet_id, boss_id: char_a, members: vec![char_a, char_b], ..Default::default() });
+        snap.characters.get_mut(&char_a).unwrap().user_id = 1;
+    });
+    ctx.db.acquire_online_lock(1, 1, Some(char_a), true, ctx.now_unix_secs()).unwrap();
+    let sys = ctx.systems.get_or_spawn(lowsec);
+    for sid in [ship_a, ship_b] {
+        sys.spawn_ball_with_meta(
+            eve_destiny::Ball { id: sid, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
+            eve_destiny::CombatState { capacitor: 50_000.0, max_capacitor: 50_000.0, ..Default::default() },
+            eve_destiny::SlimItemMeta::default(),
+        ).await.unwrap();
+    }
+
+    let cyno_mod = ctx.sde.types.get(&21_096).unwrap().clone();
+    let rep_b = super::super::light_cyno(&ctx, &sys, char_b, ship_b, lowsec, mod_b, &cyno_mod).await.unwrap();
+    let beacon_b = rep_b.dict_get("beaconID").and_then(PyRep::as_i64).unwrap();
+    let dur_s = rep_b.dict_get("durationSeconds").and_then(PyRep::as_f64).unwrap_or(600.0).ceil() as u64;
+
+    ctx.db.clock().advance_secs(dur_s.saturating_sub(10));
+    let rep_a = super::super::light_cyno(&ctx, &sys, char_a, ship_a, lowsec, mod_a, &cyno_mod).await.unwrap();
+    let beacon_a = rep_a.dict_get("beaconID").and_then(PyRep::as_i64).unwrap();
+
+    // Expire ship_b while ship_a remains active; a rejected slot reservation on ship_a must still clean up ship_b.
+    ctx.db.clock().advance_secs(20);
+    assert!(sys.get_ball_snapshot(beacon_b).await.unwrap().is_some());
+    assert!(sys.has_module_cycle(ship_b, mod_b).await);
+    let _ = ctx.drain_notifications_for_char(char_a);
+
+    let err = super::super::reserve_cyno_beacon_slot_and_cleanup_expired(
+        &ctx, char_a, ship_a, 21_094, lowsec, Some(DVec3::ZERO), ctx.now_unix_secs(), dur_s as f64,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "CannotLightCynoInSystem");
+
+    assert!(sys.get_ball_snapshot(beacon_b).await.unwrap().is_none(), "expired beacon ball must be removed even on rejected slot");
+    assert!(!sys.has_module_cycle(ship_b, mod_b).await, "expired actor cycle must be removed even on rejected slot");
+    assert!(sys.get_ball_snapshot(beacon_a).await.unwrap().is_some(), "active ship_a beacon must stay alive");
+    assert!(sys.has_module_cycle(ship_a, mod_a).await, "active ship_a cycle must stay alive");
+    assert!(ctx.drain_notifications_for_char(char_a).iter().any(|n| n.event == "OnFleetJumpBeaconModuleChange"));
+    super::super::on_cyno_ship_destroyed(&ctx, ship_a);
+}
+

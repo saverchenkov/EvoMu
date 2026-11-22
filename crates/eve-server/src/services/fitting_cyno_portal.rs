@@ -790,30 +790,16 @@ async fn light_cyno(
             })?;
     }
     let now_reserve = ctx.now_unix_secs();
-    let (pre_expired_beacons, pre_expired_cycles) = {
-        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-        let drained = drain_expired_beacons(&mut st, ctx_key(ctx), now_reserve);
-        if st.beacons.contains_key(&(ctx_key(ctx), ship_id)) {
-            return Err(err(
-                "CannotLightCynoInSystem",
-                "A cynosural field is already active on this ship",
-            ));
-        }
-        st.beacons.insert(
-            (ctx_key(ctx), ship_id),
-            FleetModuleBeacon {
-                beacon_id: -ship_id,
-                char_id,
-                ship_id,
-                beacon_type_id,
-                solar_system_id: sys_id,
-                position: ship_pos.unwrap_or(DVec3::ZERO),
-                expires_at_unix: now_reserve + duration_s.round() as u64 + 60,
-            },
-        );
-        drained
-    };
-    cleanup_expired_beacons_and_cycles(ctx, pre_expired_beacons, pre_expired_cycles);
+    reserve_cyno_beacon_slot_and_cleanup_expired(
+        ctx,
+        char_id,
+        ship_id,
+        beacon_type_id,
+        sys_id,
+        ship_pos,
+        now_reserve,
+        duration_s,
+    )?;
     let clear_cyno_claim = || {
         let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
         if st.beacons.get(&(ctx_key(ctx), ship_id)).is_some_and(|b| b.beacon_id == -ship_id) {
@@ -957,6 +943,49 @@ async fn light_cyno(
         ("durationSeconds", PyRep::Real(duration_s)),
         ("expiresAtUnix", PyRep::Integer(expires_at_unix as i64)),
     ]))
+}
+
+/// Reserves the per-ship cyno slot in `cyno_state()` while draining expired beacons/cycles,
+/// cleaning up drained beacons and actor cycles even if `ship_id` already holds an active slot (`#1486`).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reserve_cyno_beacon_slot_and_cleanup_expired(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    beacon_type_id: TypeId,
+    sys_id: u32,
+    ship_pos: Option<DVec3>,
+    now_reserve: u64,
+    duration_s: f64,
+) -> Result<(), BridgeRpcError> {
+    let (already_active, pre_expired_beacons, pre_expired_cycles) = {
+        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+        let (exp_beacons, exp_cycles) = drain_expired_beacons(&mut st, ctx_key(ctx), now_reserve);
+        let already_active = st.beacons.contains_key(&(ctx_key(ctx), ship_id));
+        if !already_active {
+            st.beacons.insert(
+                (ctx_key(ctx), ship_id),
+                FleetModuleBeacon {
+                    beacon_id: -ship_id,
+                    char_id,
+                    ship_id,
+                    beacon_type_id,
+                    solar_system_id: sys_id,
+                    position: ship_pos.unwrap_or(DVec3::ZERO),
+                    expires_at_unix: now_reserve + duration_s.round() as u64 + 60,
+                },
+            );
+        }
+        (already_active, exp_beacons, exp_cycles)
+    };
+    cleanup_expired_beacons_and_cycles(ctx, pre_expired_beacons, pre_expired_cycles);
+    if already_active {
+        return Err(err(
+            "CannotLightCynoInSystem",
+            "A cynosural field is already active on this ship",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn cleanup_expired_beacons_and_cycles(
