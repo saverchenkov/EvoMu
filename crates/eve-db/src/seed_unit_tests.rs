@@ -453,3 +453,113 @@ fn with_demo_seed_in_memory_for_sde_ignores_evomu_sde_path_and_seeds_caller_sde(
     assert!(!right.with_snapshot(|s| s.skills[&90_000_001].contains_key(&999_001)));
 }
 
+#[test]
+fn seeded_demo_pilots_satisfy_transitive_sde_item_requirements_and_fallback() {
+    let sde = {
+        let _env_guard = crate::lock_test_env_read();
+        eve_sde::SdeRegistry::with_canonical_seed()
+    };
+
+    let default_snap = WorldRepository::create_demo_snapshot();
+    let explicit_snap = WorldRepository::create_demo_snapshot_with_sde(Some(&sde));
+    let mut populated = WorldStateSnapshot::default();
+    WorldRepository::populate_demo_snapshot_with_sde(&mut populated, &sde);
+
+    // Every seeded demo pilot must satisfy all transitive SDE skill prerequisites for every owned
+    // ship and module across default-SDE, explicit-SDE, and populate_with_sde entry points.
+    for snap in [&default_snap, &explicit_snap, &populated] {
+        for char_id in [90_000_001_i64, 90_000_002_i64] {
+            let owned_type_ids: Vec<TypeId> = snap
+                .items
+                .values()
+                .filter(|item| item.owner_id == char_id)
+                .map(|item| item.type_id)
+                .collect();
+            let required = WorldRepository::collect_transitive_required_skills_for_types(
+                &sde,
+                owned_type_ids,
+            );
+            assert!(
+                required.get(&3312) == Some(&3),
+                "expected 2889 -> 11084 -> 3312 level 3 transitive requirement for pilot {char_id}"
+            );
+            assert_eq!(required.get(&3327), Some(&1));
+            assert_eq!(required.get(&3329), Some(&1));
+
+            let skills = &snap.skills[&char_id];
+            assert_eq!(skills[&3312].level, 3);
+            assert_eq!(skills[&3312].skill_points, 16_000.0);
+
+            for (skill_id, req_lvl) in required {
+                let trained = skills.get(&skill_id).unwrap_or_else(|| {
+                    panic!("pilot {char_id} missing derived skill {skill_id} (req L{req_lvl})")
+                });
+                assert!(
+                    trained.level >= req_lvl,
+                    "pilot {char_id} skill {skill_id} L{} < required L{req_lvl}",
+                    trained.level
+                );
+                let min_expected = WorldRepository::trained_skill_record(skill_id, req_lvl, &sde);
+                assert!(trained.skill_points >= min_expected.skill_points);
+            }
+
+            let hist = &snap.skill_history[&char_id];
+            assert_eq!(hist.len(), skills.len());
+            let hist_by_skill: HashMap<TypeId, &SkillHistoryEntry> =
+                hist.iter().map(|h| (h.skill_type_id, h)).collect();
+            for (&skill_id, rec) in skills {
+                let entry = hist_by_skill[&skill_id];
+                assert_eq!(entry.skill_level, rec.level);
+                assert_eq!(entry.absolute_points, rec.skill_points);
+            }
+        }
+    }
+
+    // Mutation-killing dynamic derivation proof: clone SDE and add a cyclic + zero-level transitive
+    // chain on 2889 -> 99_901 (L2) -> 99_902 (L4, rank 3) -> back-edge 99_901 (L1) + ignored L0 99_903.
+    let mut custom_sde = sde.clone();
+    let mut syn_skill_1 = sde.types[&3312].clone();
+    syn_skill_1.type_id = 99_901;
+    syn_skill_1.default_attributes = HashMap::from([(275, 1.0), (182, 99_902.0), (277, 4.0)]);
+    let mut syn_skill_2 = sde.types[&3312].clone();
+    syn_skill_2.type_id = 99_902;
+    syn_skill_2.default_attributes = HashMap::from([
+        (275, 3.0),
+        (182, 99_901.0),
+        (277, 1.0),
+        (183, 99_903.0),
+        (278, 0.0),
+    ]);
+    custom_sde.types.insert(99_901, syn_skill_1);
+    custom_sde.types.insert(99_902, syn_skill_2);
+    let turret = custom_sde.types.get_mut(&2889).unwrap();
+    turret.default_attributes.insert(1285, 99_901.0);
+    turret.default_attributes.insert(1286, 2.0);
+
+    let custom_snap = WorldRepository::create_demo_snapshot_with_sde(Some(&custom_sde));
+    for char_id in [90_000_001_i64, 90_000_002_i64] {
+        let skills = &custom_snap.skills[&char_id];
+        assert_eq!(skills[&99_901].level, 2);
+        assert_eq!(skills[&99_901].skill_points, 1_415.0);
+        assert_eq!(skills[&99_902].level, 4);
+        assert_eq!(skills[&99_902].skill_points, 135_765.0);
+        assert!(!skills.contains_key(&99_903));
+        assert_eq!(custom_snap.skill_history[&char_id].len(), skills.len());
+    }
+
+    // Offline / missing-SDE fallback still satisfies canonical seeded ship/module prerequisites.
+    let offline_snap = crate::without_default_sde(WorldRepository::create_demo_snapshot);
+    for char_id in [90_000_001_i64, 90_000_002_i64] {
+        let skills = &offline_snap.skills[&char_id];
+        assert_eq!(skills[&3312].level, 3);
+        assert_eq!(skills[&3312].skill_points, 16_000.0);
+        assert_eq!(skills[&3392].level, 1);
+        assert_eq!(skills[&3392].skill_points, 250.0);
+        assert_eq!(skills[&3302].level, 5);
+        assert_eq!(skills[&11084].level, 1);
+        assert_eq!(skills[&3327].level, 4);
+        assert_eq!(skills[&3329].level, 4);
+        assert_eq!(skills[&3450].level, 4);
+        assert_eq!(offline_snap.skill_history[&char_id].len(), skills.len());
+    }
+}

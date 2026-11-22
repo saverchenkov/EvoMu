@@ -281,6 +281,34 @@ pub fn lock_test_env_read() -> TestEnvReadGuard {
     TestEnvReadGuard(g)
 }
 
+#[cfg(test)]
+thread_local! {
+    static FORCE_MISSING_DEFAULT_SDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn default_sde_suppressed_for_test() -> bool {
+    FORCE_MISSING_DEFAULT_SDE.with(|f| f.get())
+}
+
+#[cfg(test)]
+pub(crate) fn without_default_sde<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCE_MISSING_DEFAULT_SDE.with(|flag| flag.set(self.0));
+        }
+    }
+
+    let prev = FORCE_MISSING_DEFAULT_SDE.with(|flag| {
+        let old = flag.get();
+        flag.set(true);
+        old
+    });
+    let _restore = Restore(prev);
+    f()
+}
+
 #[cfg(test)] mod db_lib_extra_tests;
 #[cfg(test)] mod db_deep_extra_unit_tests;
 #[cfg(test)]

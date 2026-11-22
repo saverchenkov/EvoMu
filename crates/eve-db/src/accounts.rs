@@ -323,6 +323,29 @@ impl WorldRepository {
             return;
         }
         let hashed_token = Self::hash_password_token(username, password_token);
+        // Resolve SDE outside `try_with_mut_snapshot` to preserve lock ordering with test env guards.
+        let gm_ship_skills = if let Some(sde) = Self::open_default_sde_shared() {
+            Self::derived_skills_for_types(&sde, [587])
+        } else {
+            HashMap::from([
+                (
+                    3327,
+                    TrainedSkillRecord {
+                        type_id: 3327,
+                        level: 1,
+                        skill_points: 250.0,
+                    },
+                ),
+                (
+                    3329,
+                    TrainedSkillRecord {
+                        type_id: 3329,
+                        level: 1,
+                        skill_points: 500.0,
+                    },
+                ),
+            ])
+        };
         let _ = self.try_with_mut_snapshot(|snap| {
             let user_id = if let Some(existing) = snap.accounts.get_mut(username) {
                 existing.password_token = hashed_token;
@@ -382,6 +405,10 @@ impl WorldRepository {
                         is_blueprint_copy: false, blueprint_runs_remaining: None,
                     },
                 );
+                let char_skills = snap.skills.entry(char_id).or_default();
+                Self::merge_skill_records_max(char_skills, gm_ship_skills);
+                let history = Self::char_creation_skill_history(char_skills);
+                snap.skill_history.entry(char_id).or_insert(history);
                 snap.account_plex_vault.insert(user_id, 10_000);
             } else if let Some(existing_char) = snap.characters.get_mut(&char_id) {
                 if existing_char.race_id == 0 || existing_char.bloodline_id == 0 {

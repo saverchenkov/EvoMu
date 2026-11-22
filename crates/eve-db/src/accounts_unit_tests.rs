@@ -309,3 +309,74 @@ fn auth_sqlite_dedicated_connection_fail_closed_persistence_and_lock_ordering_83
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn provision_gm_account_seeds_legal_ship_skills_and_preserves_idempotency() {
+    let sde = {
+        let _env_guard = crate::lock_test_env_read();
+        eve_sde::SdeRegistry::with_canonical_seed()
+    };
+
+    let repo = WorldRepository::new_empty();
+    repo.provision_gm_account("isd_legal", "gm-pass", 90_000_099, "ISD Treasury");
+
+    let gm_char = repo.get_character(90_000_099).expect("GM character seeded");
+    let gm_items = repo.get_items_for_character(90_000_099);
+    assert_eq!(gm_items.len(), 1);
+    let active_ship = gm_items
+        .iter()
+        .find(|it| it.item_id == gm_char.active_ship_id)
+        .expect("active ship item present");
+    assert_eq!(active_ship.type_id, 587);
+
+    let required =
+        WorldRepository::collect_transitive_required_skills_for_types(&sde, [active_ship.type_id]);
+    assert_eq!(required.get(&3327), Some(&1));
+    assert_eq!(required.get(&3329), Some(&1));
+
+    repo.with_snapshot(|snap| {
+        let gm_skills = &snap.skills[&90_000_099];
+        assert_eq!(gm_skills[&3327].level, 1);
+        assert_eq!(gm_skills[&3327].skill_points, 250.0);
+        assert_eq!(gm_skills[&3329].level, 1);
+        assert_eq!(gm_skills[&3329].skill_points, 500.0);
+        assert!(
+            !gm_skills.contains_key(&3363),
+            "GM ship seeding must not implicitly train Corporation Management (3363)"
+        );
+        for (skill_id, req_lvl) in &required {
+            assert!(gm_skills[skill_id].level >= *req_lvl);
+        }
+        let hist = &snap.skill_history[&90_000_099];
+        assert_eq!(hist.len(), gm_skills.len());
+        assert!(hist.windows(2).all(|w| w[0].skill_type_id < w[1].skill_type_id));
+    });
+
+    // Idempotent re-provisioning must preserve custom GM skill edits.
+    repo.with_mut_snapshot(|snap| {
+        snap.skills
+            .get_mut(&90_000_099)
+            .unwrap()
+            .get_mut(&3327)
+            .unwrap()
+            .level = 5;
+    });
+    repo.provision_gm_account("isd_legal", "gm-pass", 90_000_099, "ISD Treasury");
+    repo.with_snapshot(|snap| {
+        assert_eq!(snap.skills[&90_000_099][&3327].level, 5);
+    });
+
+    // Offline / missing-SDE fallback also provisions Rifter (587) required skills cleanly.
+    let offline_repo = crate::without_default_sde(|| {
+        let offline = WorldRepository::new_empty();
+        offline.provision_gm_account("isd_offline", "gm-pass", 90_000_098, "ISD Offline");
+        offline
+    });
+    offline_repo.with_snapshot(|snap| {
+        assert_eq!(snap.skills[&90_000_098][&3327].level, 1);
+        assert_eq!(snap.skills[&90_000_098][&3327].skill_points, 250.0);
+        assert_eq!(snap.skills[&90_000_098][&3329].level, 1);
+        assert_eq!(snap.skills[&90_000_098][&3329].skill_points, 500.0);
+        assert_eq!(snap.skill_history[&90_000_098].len(), 2);
+    });
+}

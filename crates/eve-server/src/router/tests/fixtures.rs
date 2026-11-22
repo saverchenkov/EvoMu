@@ -170,7 +170,7 @@ pub(crate) fn seed_test_expansion_assets(ctx: &ServerContext) {
                 21924,
                 100_000_001,
                 InventoryFlag::HiSlot0,
-                2_000,
+                120,
                 false,
             ),
             (
@@ -178,7 +178,7 @@ pub(crate) fn seed_test_expansion_assets(ctx: &ServerContext) {
                 21924,
                 100_000_029,
                 InventoryFlag::HiSlot0,
-                2_000,
+                120,
                 false,
             ),
         ];
@@ -210,7 +210,7 @@ pub(crate) fn seed_test_expansion_assets(ctx: &ServerContext) {
                 owner_id: 90_000_002,
                 location_id: 100_000_002,
                 flag: InventoryFlag::HiSlot0,
-                quantity: 2_000,
+                quantity: 120,
                 singleton: false,
                 version: 1,
                 dynamic_attributes: HashMap::new(),
