@@ -3455,23 +3455,22 @@ def _is_node_inside_modal(node):
         if callable(get_modal):
             try:
                 cur_modal = get_modal()
-                if cur_modal is not None and not getattr(cur_modal, "destroyed", False) and _is_under_widget(node, cur_modal):
+                if H._is_widget_visible(cur_modal) and _is_under_widget(node, cur_modal):
                     return True
             except Exception:
                 pass
         for mw in list(getattr(reg, "modals", None) or []):
-            if mw is not None and not getattr(mw, "destroyed", False) and _is_under_widget(node, mw):
+            if H._is_widget_visible(mw) and _is_under_widget(node, mw):
                 return True
     lyr = getattr(uic, "layer", None) if uic is not None else None
     modal_lyr = getattr(lyr, "modal", None) if lyr is not None else None
-    if modal_lyr is not None and _is_under_widget(node, modal_lyr):
+    if H._is_widget_visible(modal_lyr) and _is_under_widget(node, modal_lyr):
         return True
     cur = node
     for _ in range(20):
         if cur is None:
             break
-        cname = getattr(getattr(cur, "__class__", None), "__name__", "")
-        if getattr(cur, "isModal", False) or "MessageBox" in str(cname) or "Modal" in str(cname):
+        if H._is_modal_dialog_root(cur):
             return True
         cur = getattr(cur, "parent", None)
     return False
@@ -3502,62 +3501,14 @@ def _active_disconnect_modal_tag():
     uic = _get_uicore()
     if uic is None:
         return ""
-    roots = []
-    reg = getattr(uic, "registry", None)
-    if reg is not None:
-        get_modal = getattr(reg, "GetModalWindow", None)
-        if callable(get_modal):
-            try:
-                mw = get_modal()
-                if mw is not None:
-                    roots.append(mw)
-            except Exception:
-                pass
-        for mw in list(getattr(reg, "modals", None) or []):
-            if mw is not None:
-                roots.append(mw)
-    lyr = getattr(uic, "layer", None)
-    if lyr is not None:
-        for lname in ("modal", "abovemain"):
-            lobj = getattr(lyr, lname, None)
-            if lobj is not None:
-                for ch in list(getattr(lobj, "children", None) or []):
-                    if ch is not None:
-                        roots.append(ch)
-    for root in roots:
-        if getattr(root, "destroyed", False):
-            continue
-        queue = [root]
-        visited = set()
-        frags = []
-        while queue and len(visited) < 30:
-            obj = queue.pop(0)
-            if obj is None or id(obj) in visited or getattr(obj, "destroyed", False):
-                continue
-            visited.add(id(obj))
-            for attr in ("msgKey", "caption", "text"):
-                val = getattr(obj, attr, None)
-                if isinstance(val, _HOOK_STR_TYPES):
-                    s = _safe_str(val, 160).strip()
-                    if s:
-                        frags.append(s)
-            msg_lbl = getattr(obj, "_message_label", None)
-            if msg_lbl is not None and id(msg_lbl) not in visited:
-                queue.append(msg_lbl)
-            children = getattr(obj, "children", None)
-            if children:
-                try:
-                    for ch in list(children)[:12]:
-                        if ch is not None and id(ch) not in visited:
-                            queue.append(ch)
-                except Exception:
-                    pass
+    for root in H._iter_visible_modal_roots(uic):
+        frags = H._collect_widget_text_fragments(root, max_nodes=30)
         if not frags:
             continue
         low = " ".join(frags).lower()
         for marker in _DISCONNECT_MODAL_MARKERS:
             if marker in low:
-                if "shutdown" in marker:
+                if "shutdown" in marker or "shuttingdown" in marker:
                     return "ClusterShuttingDown"
                 return "ConnectionLost"
     return ""
@@ -3577,13 +3528,19 @@ def _preclick_block_reason(node):
         if isinstance(cid_val, _HOOK_INT_TYPES) and not isinstance(cid_val, bool) and int(cid_val) == 0:
             if not _is_node_inside_login_or_charsel(node):
                 return "SessionDisconnected(clientID=0)"
-    if hasattr(sess, "charid") and (hasattr(sess, "stationid") or hasattr(sess, "solarsystemid2")):
+    if hasattr(sess, "charid") and (
+        hasattr(sess, "stationid")
+        or hasattr(sess, "structureid")
+        or hasattr(sess, "solarsystemid2")
+        or hasattr(sess, "solarsystemid")
+    ):
         has_world = bool(
             getattr(sess, "charid", None)
             and (
                 getattr(sess, "stationid", None)
                 or getattr(sess, "structureid", None)
                 or getattr(sess, "solarsystemid2", None)
+                or getattr(sess, "solarsystemid", None)
             )
         )
         if not has_world and not _is_node_inside_login_or_charsel(node):
@@ -4650,7 +4607,12 @@ def _get_state_snapshot(sm):
     cid_live = getattr(sess_live, "clientID", 1) if sess_live is not None else 0
     has_world_session = bool(
         sess_dict.get("charid")
-        and (sess_dict.get("stationid") or sess_dict.get("structureid") or sess_dict.get("solarsystemid2"))
+        and (
+            sess_dict.get("stationid")
+            or sess_dict.get("structureid")
+            or sess_dict.get("solarsystemid2")
+            or sess_dict.get("solarsystemid")
+        )
         and (not isinstance(cid_live, _HOOK_INT_TYPES) or isinstance(cid_live, bool) or int(cid_live) != 0)
     )
     try:
@@ -5626,14 +5588,24 @@ def _click_top_tabs_in_window(target="", max_tabs=6, require_match=False):
             )
         ).strip()
         try:
+            tab_click_res = None
             if callable(getattr(tab, "OnClick", None)) or callable(getattr(tab, "on_click", None)):
-                _invoke_widget_click(tab)
+                tab_click_res = _invoke_widget_click(tab)
             elif hasattr(tab_group, "SelectByIdx"):
                 tab_group.SelectByIdx(idx)
             elif callable(getattr(tab, "Select", None)):
                 tab.Select()
             else:
-                _invoke_widget_click(tab)
+                tab_click_res = _invoke_widget_click(tab)
+            rej_err = _click_rejection_error(tab_click_res) if tab_click_res is not None else None
+            if rej_err:
+                return {
+                    "ok": False,
+                    "error": rej_err,
+                    "tabs_clicked": len(clicked_tabs),
+                    "clicked_tabs": clicked_tabs,
+                    "window": chosen_id,
+                }
             H._sleep_ms(120)
             clicked_tabs.append(lbl or ("tab_%d" % idx))
         except Exception as exc:

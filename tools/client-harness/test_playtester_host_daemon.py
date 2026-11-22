@@ -7828,7 +7828,13 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
                     "session": {"charid": 90000001, "stationid": 60003760},
                     "open_windows": [],
                     "modals": [],
-                    "ui": {"modals": [], "open_windows": [], "clickable_widgets": []},
+                    "ui": {
+                        "modals": [],
+                        "open_windows": [],
+                        "clickable_widgets": [
+                            {"name": "ItemHangar", "path": "ItemHangar", "label": "Item Hangar", "x": 100, "y": 200, "w": 80, "h": 24}
+                        ],
+                    },
                 }
                 disconnect_exec = {
                     "ok": False,
@@ -7851,7 +7857,10 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
                     },
                 }
 
+                rpc_calls = []
+
                 def fake_rpc_call(method, params=None, timeout=15.0):
+                    rpc_calls.append((method, params))
                     if method == "get_state":
                         return pre_snap
                     if method == "execute_action":
@@ -7866,17 +7875,51 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
                 decision = {
                     "thought": "click hangar item",
                     "persona_check": "ok",
-                    "action": {"type": "click_widget", "target": "ItemHangar"},
+                    "delegated_plan": {
+                        "batch_goal": "Click ItemHangar",
+                        "routine_name": "click_hangar",
+                        "max_batch_steps": 1,
+                        "horizon_rationale": "Test disconnect bug suppression",
+                        "success_criteria": "Attempt click",
+                        "abort_conditions": [],
+                        "steps": [
+                            {
+                                "step_number": 1,
+                                "exec_mode": "direct",
+                                "capture_screenshot": False,
+                                "action_type_hint": "click_widget",
+                                "target_or_command_hint": "ItemHangar",
+                                "instruction": "Click ItemHangar",
+                                "expected_outcome": "ItemHangar clicked",
+                                "action": {"type": "click_widget", "target": "ItemHangar"},
+                                "assertions": {},
+                            }
+                        ],
+                    },
                 }
                 with mock.patch("playtester.time.time", fake_time), \
                      mock.patch("playtester.get_git_head", return_value="f249af816"), \
                      mock.patch("playtester.capture_window_screenshot", side_effect=fake_cap), \
                      mock.patch("playtester.invoke_agy_planner", return_value=(decision, "test-model", 0.1)), \
+                     mock.patch("playtester.invoke_agy_executor", side_effect=AssertionError("unexpected invoke_agy_executor")) as m_exec, \
+                     mock.patch("playtester.subprocess.run", side_effect=AssertionError("unexpected subprocess.run")) as m_subproc, \
                      mock.patch.object(runner, "_drain_host_gm_sim_events", return_value=None), \
                      mock.patch.object(runner.rpc, "call", side_effect=fake_rpc_call):
                     runner.execute_step(1, {}, [])
                 runner.oracle.flush(timeout=5.0)
 
+                m_exec.assert_not_called()
+                m_subproc.assert_not_called()
+                self.assertTrue(
+                    any(
+                        method == "execute_action"
+                        and isinstance(params, dict)
+                        and isinstance(params.get("action"), dict)
+                        and params["action"].get("type") == "click_widget"
+                        and params["action"].get("target") == "ItemHangar"
+                        for method, params in rpc_calls
+                    )
+                )
                 self.assertTrue(runner._downtime_pause_requested)
                 self.assertEqual(list(runner.bug_queue_dir.glob("*.json")), [])
             finally:

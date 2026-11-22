@@ -754,7 +754,7 @@ def _read_world_downtime_state(world_db_path: Any) -> tuple[int, Optional[int]]:
     clock_offset_secs = 0
     downtime_until_unix: Optional[int] = None
     try:
-        conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=1.0)
+        conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
         row = conn.execute(
             "SELECT meta_value FROM world_meta WHERE meta_key = 'clock_offset_secs'"
         ).fetchone()
