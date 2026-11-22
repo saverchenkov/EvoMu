@@ -5200,22 +5200,23 @@ def _find_widget_in_pools(
         for w in pool:
             p = str(w.get("path") or "")
             n = str(w.get("name") or "")
-            if p.lower() == t_low or n.lower() == t_low or p.lower().endswith("/" + t_low):
+            if (
+                p.lower() == t_low
+                or n.lower() == t_low
+                or p.lower().endswith(t_low if t_low.startswith("/") else "/" + t_low)
+            ):
                 return w
         pool_paths = [(w, str(w.get("path") or "").lower()) for w in pool]
         # `clickable_widgets` paths are truncated to `cur_path[-120:]` by the client hook,
-        # so an untruncated >120-char target ends with the widget's truncated path.
+        # so an untruncated >120-char target ends with the widget's 120-char truncated path
+        # (including when truncation lands cleanly on a `/` segment boundary).
         trunc_hits = [
-            w for w, p_low in pool_paths if len(p_low) >= 60 and "/" in p_low and t_low.endswith(p_low)
+            w for w, p_low in pool_paths if len(p_low) >= 120 and "/" in p_low and t_low.endswith(p_low)
         ]
         if trunc_hits:
             return trunc_hits[0] if len(trunc_hits) == 1 else None
         if before_slash and len(after_slash) >= 40 and "/" in after_slash:
-            clip_hits = [
-                w
-                for w, p_low in pool_paths
-                if p_low.endswith(t_low) or (len(p_low) >= 120 and p_low == after_slash)
-            ]
+            clip_hits = [w for w, p_low in pool_paths if p_low.endswith(t_low)]
             if clip_hits:
                 return clip_hits[0] if len(clip_hits) == 1 else None
         sub_hits = [
