@@ -1,12 +1,12 @@
 {
   "description": "Monotonic coverage percentage floors for wiki PvE importer.",
   "floors": {
-    "g1_spawn_triggers_target_wired_percent": 87.94,
-    "g1_triggers_classified_percent": 93.95,
-    "g1_wave_links_classified_percent": 68.98,
-    "g1_wave_links_explicit_percent": 12.22,
-    "g2_all_units_structured_percent": 56.33,
-    "g2_missions_structured_percent": 76.74,
+    "g1_spawn_triggers_target_wired_percent": 87.98,
+    "g1_triggers_classified_percent": 94.32,
+    "g1_wave_links_classified_percent": 69.13,
+    "g1_wave_links_explicit_percent": 12.31,
+    "g2_all_units_structured_percent": 56.41,
+    "g2_missions_structured_percent": 76.85,
     "g4_npc_candidate_mapped_percent": 91.16,
     "g4_npc_concrete_resolved_percent": 86.03,
     "g5_waves_with_distance_m_percent": 23.58

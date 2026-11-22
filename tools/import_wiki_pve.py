@@ -782,7 +782,10 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
         }
 
     condition = "on_destroy"
-    if re.search(r"\battack(?:ed|ing|ign|s)?\b|\baggress(?:ed|ing)?\b|\bagress(?:ed|ing)?\b|\bshoot(?:ing)?\b|\bharm(?:ed|ing)?\b", low):
+    if re.search(
+        r"\battack(?:ed|ing|ign|s)?\b|\baggress(?:ed|ing)?\b|\bagress(?:ed|ing)?\b|\bshoot(?:ing)?\b|\bharm(?:ed|ing)?\b|\bhair[-\s]?trigger\b",
+        low,
+    ):
         condition = "on_attack"
     elif _DAMAGE_CONDITION_RE.search(low) or re.search(r"\b(?:low|at|on)\s+(?:shields?|armor|hull|structure)\b", low):
         condition = "on_damage"
@@ -878,7 +881,7 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
         _DAMAGE_CONDITION_RE.search(low)
         or re.search(r"\b(?:low|at|on)\s+(?:shields?|armor|hull|structure)\b", low)
         or re.search(
-            r"\b(?:attack(?:ed|ing|ign|s)?|shoot(?:ing)?|aggress(?:ed|ing)?|agress(?:ed|ing)?|harm(?:ed|ing)?|"
+            r"\b(?:hair[-\s]?trigger|attack(?:ed|ing|ign|s)?|shoot(?:ing)?|aggress(?:ed|ing)?|agress(?:ed|ing)?|harm(?:ed|ing)?|"
             r"escall?ations?|triggers?\s+(?:for\s+)?(?:(?:(?!\?\b|possible\b|unconfirmed\b|if\b|prevents?\b)[a-z0-9#-]+)\s+){0,4}"
             r"(?:waves?|reinforcements?|spawns?|groups?|fleets?|frigates?|destroyers?|cruisers?|battlecruisers?|battleships?|neuting\b|chain\b)|"
             r"spawns?\s+(?:next|waves?|reinforcements?|defenders?|group|two|more)|"
@@ -962,12 +965,8 @@ def _is_non_trigger_header_clause(text: str) -> bool:
     no_dist = _HDR_LEADING_DIST_RE.sub("", text).strip()
     if not no_dist:
         return True
-    if _HDR_NON_TRIGGER_NOTE_RE.match(no_dist) and not (
-        re.match(r"^triggers?\s*:.*(?:destroyed|killed|attacked|damaged|approached)\b", no_dist, re.I)
-        or (
-            re.match(r"^spawns?\b", no_dist, re.I)
-            and re.search(r"\b(?:when|upon|after\s+\d+|attacked|destroyed|killed|damaged|aggressed|approached)\b", no_dist, re.I)
-        )
+    if _HDR_NON_TRIGGER_NOTE_RE.match(no_dist) and not re.match(
+        r"^triggers?\s*:.*(?:destroyed|killed|attacked|damaged|approached)\b", no_dist, re.I
     ):
         return True
     if not re.search(r"\btriggered\b", no_dist, re.I) and _HDR_PREVENTIVE_OR_DIST_RE.search(no_dist):
@@ -977,7 +976,6 @@ def _is_non_trigger_header_clause(text: str) -> bool:
 
 def _extract_header_trigger_probe(cleaned: str) -> str | None:
     """Extract the incoming-trigger clause from an NPCTableHead/Separator label, skipping outgoing/spatial/aggro parens."""
-    kept_parens: list[str] = []
     for m_paren in re.finditer(r"\(([^()]+)\)", cleaned):
         inner = m_paren.group(1).strip()
         kept_clauses = [
@@ -990,7 +988,6 @@ def _extract_header_trigger_probe(cleaned: str) -> str | None:
         inner_eff = ", ".join(kept_clauses)
         if _is_non_trigger_header_clause(inner_eff):
             continue
-        kept_parens.append(inner_eff)
         if _HDR_INCOMING_HINT_RE.search(inner_eff):
             return inner_eff
 
@@ -1292,8 +1289,15 @@ def extract_item_objective_payload(objective_raw: str, sde: "SdeIndex") -> dict[
     m_num = re.search(
         r"(?:^|\b)(?:retrieve|acquire(?:\s+these\s+goods)?|recover|bring(?:\s+back)?|fetch|loot|steal|"
         r"obtain|collect|find|pick\s+up|provide|buy|return|gather|trade|deliver|transport|haul|move|"
-        r"place|manufacture|build|produce|reprocess)?\s*:?\s*"
-        r"(\d[\d,]*)\s*(?:x\s+)?(?:units?\s+(?:of\s+)?)?([A-Za-z][A-Za-z0-9' \-/“”\"]+?)"
+        r"place|manufacture|build|produce|reprocess)\s*:?\s*(?:the\s+)?"
+        r"(\d[\d,]*)(?:\s*x\s+|\s+(?:units?\s+(?:of\s+)?)?)"
+        r"([A-Za-z][A-Za-z0-9' \-/“”\"]+?)"
+        r"(?:\s+(?:from|and\s+return|and\s+bring|to\s+the|to\s+your|dropped\s+by)\b|[.;()]|$)",
+        s_no_vol,
+        re.I,
+    ) or re.search(
+        r"^\s*(\d[\d,]*)\s*x\s+(?:units?\s+(?:of\s+)?)?"
+        r"([A-Za-z][A-Za-z0-9' \-/“”\"]+?)"
         r"(?:\s+(?:from|and\s+return|and\s+bring|to\s+the|to\s+your|dropped\s+by)\b|[.;()]|$)",
         s_no_vol,
         re.I,
@@ -1525,7 +1529,7 @@ def build_structured_objective(
     if mtype_low in ("talk to agent", "report to agent", "agent interaction"):
         return _result("talk_to_agent", "inferred", "missiondetails_mission_type")
 
-    if re.search(r"\b(?:manufacture|build|produce)\b", obj_low):
+    if not combat_lead and not re.search(r"\b(?:kill|destroy)\b", obj_low) and re.search(r"\b(?:manufacture|build|produce)\b", obj_low):
         item_pay = extract_item_objective_payload(obj_text, sde)
         return _result(
             "manufacture",
@@ -1590,9 +1594,12 @@ def build_structured_objective(
     if "trade" in mtype_low or "bring item" in mtype_low:
         return _result("retrieve_item", "inferred", "missiondetails_mission_type")
 
+    combat_obj_text = re.sub(r"\b(?:do\s+not|don't|never|avoid)\s+[^.;,)]*", "", obj_text, flags=re.I)
+    combat_obj_low = combat_obj_text.lower()
+
     m_struct = re.search(
         r"\b(?:destroy|blow\s+up|demolish|level|eliminate|take\s+out)\s+(?:the\s+|all\s+(?:the\s+)?)?([^.;,]+)",
-        obj_text,
+        combat_obj_text,
         re.I,
     )
     if m_struct:
@@ -1612,17 +1619,17 @@ def build_structured_objective(
                 target_type_ids=t_ids or None,
             )
 
-    if re.search(r"\b(?:kill|destroy|eliminate|defeat|clear|wipe\s+out)\s+(?:all\b|everything\b|every\b)", obj_low) or re.search(
+    if re.search(r"\b(?:kill|destroy|eliminate|defeat|clear|wipe\s+out)\s+(?:all\b|everything\b|every\b)", combat_obj_low) or re.search(
         r"\b(?:clear\s+(?:out\s+)?(?:the\s+|this\s+|all\s+|any\s+|remaining\s+)?(?:site|room|pocket|area|deadspace|zone|system|belt|outpost|base|complex|depot|station|facility|habitat|stronghold|sector|camp|bunker|pirates|enemies|hostiles|npcs|rats|drones|rogue\s+drones|waves?|spawns?|forces|defenders)|"
         r"(?:kill|destroy|eliminate|defeat)\s+(?:all\s+|any\s+)?(?:the\s+)?(?:(?:[a-z]+\s+)?ships\b|pirates|enemies|hostiles|defenders|guards|rats|drones|rogue\s+drones|merc(?:enary|enaries)|forces))\b",
-        obj_low,
+        combat_obj_low,
     ):
         return _result("kill_all", "explicit")
 
     m_kill = re.search(
         r"\b(?:kill|destroy|eliminate|defeat|assassinate|neutralize|take\s+out|deal\s+with|terminate|intercept|engage|ambush)\s+"
         r"(?:the\s+)?([^.;,]+)",
-        obj_text,
+        combat_obj_text,
         re.I,
     )
     if m_kill:
@@ -2069,8 +2076,15 @@ class SdeIndex:
         self.missions_by_id: dict[int, dict[str, Any]] = {}
         self.missions_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.missions_by_strict_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        mission_cols = {
+            str(r[1])
+            for r in conn.execute("PRAGMA table_info(sde_missions)").fetchall()
+        }
+        sel_cols = "mission_id, name, is_courier, lp_alpha, lp_omega, has_standing_rewards"
+        if "content_template" in mission_cols:
+            sel_cols += ", content_template"
         for row in conn.execute(
-            "SELECT mission_id, name, is_courier, lp_alpha, lp_omega, has_standing_rewards FROM sde_missions ORDER BY mission_id"
+            f"SELECT {sel_cols} FROM sde_missions ORDER BY mission_id"
         ):
             m = dict(row)
             self.missions_by_id[int(m["mission_id"])] = m
@@ -3729,6 +3743,9 @@ _TRIGGER_SHIP_STOPWORDS = frozenset(
         "initial", "backup", "assault", "ship", "ships", "class", "type",
         "pirate", "pirates", "angel", "guristas", "serpentis", "sansha",
         "blood", "mercenary", "mercenaries", "rogue",
+        "the", "and", "for", "all", "are", "not", "may", "can", "you",
+        "off", "out", "has", "was", "get", "its", "one", "two", "six",
+        "ten", "iii", "bay", "red", "low", "top",
     }
 )
 _TRIGGER_TARGET_STRIP_RE = re.compile(
@@ -3804,8 +3821,12 @@ def _match_wave_targets_with_provenance(
         w_hit = _find_by_label_num(kind_words, num)
         if w_hit is not None:
             return w_hit, None
-        if kw_root == "wave" and num in targetable_idxs:
-            return num, None
+        if kw_root == "wave" and num >= 1 and not _has_earlier_label("wave", num):
+            pos = num - 1
+            if 0 <= pos < len(combat_seq):
+                cand = combat_seq[pos]
+                if cand in targetable_idxs:
+                    return cand, "positional_wave_index"
         if kw_root in ("reinforcement", "spawn", "fleet", "battery") and not _has_earlier_label(kw_root, num):
             pos = init_pos + num
             if 0 <= pos < len(combat_seq):
@@ -3922,7 +3943,7 @@ def _identify_trigger_ship(
             tokens = [
                 t.lower()
                 for t in re.findall(r"[A-Za-z0-9'-]+", nm)
-                if len(t) >= 4 and t.lower() not in _TRIGGER_SHIP_STOPWORDS
+                if len(t) >= 3 and t.lower() not in _TRIGGER_SHIP_STOPWORDS
             ]
             # Score against all discriminating name tokens so shared rank words (Chief/Leader/Admiral) never eclipse a specific match
             score = sum(1 for tok in set(tokens) if re.search(rf"\b{re.escape(tok)}\b", subject_trig))
@@ -4044,7 +4065,11 @@ def wire_room_waves_and_triggers(rooms: list[dict[str, Any]]) -> None:
             _refresh_wave_link(w)
 
         def _maybe_link_wave(tgt_w: dict[str, Any], payload: dict[str, Any]) -> None:
-            if tgt_w.get("wave_trigger") is None and tgt_w["timing"] not in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+            cur_wt = tgt_w.get("wave_trigger")
+            if (
+                (cur_wt is None or cur_wt.get("classification_state") == "unclassified")
+                and tgt_w["timing"] not in (*_INITIAL_WAVE_TIMINGS, "static_structures")
+            ):
                 tgt_w["wave_trigger"] = dict(payload, target_wave_index=tgt_w["wave_index"])
                 _refresh_wave_link(tgt_w)
 
@@ -4138,10 +4163,6 @@ def wire_room_waves_and_triggers(rooms: list[dict[str, Any]]) -> None:
                     else:
                         break
             _wire_target_waves(tr, w_idx, s_idx, ship_meta, targets_for_next)
-
-        for w in waves:
-            for sp in w["spawns"]:
-                sp["resolution"].pop("_name_to_type_ids", None)
 
 
 def _classify_wave_timing(
@@ -5186,14 +5207,16 @@ def _validate_state_and_rule(spec: dict[str, Any], ctx: str) -> tuple[str, str |
     return state, rule
 
 
-def _validate_waves_override_map(waves_spec: Any, ctx: str) -> None:
+def _validate_waves_override_map(waves_spec: Any, ctx: str, *, allow_room_index: bool = True) -> None:
     if not isinstance(waves_spec, dict):
         raise ValueError(f"Expected dict for waves in {ctx}")
     allowed_wave_keys = {
-        "room_index", "timing", "trigger_kind", "condition", "time_seconds",
+        "timing", "trigger_kind", "condition", "time_seconds",
         "source_wave_index", "source_spawn_index", "target_wave_index", "target_wave_indices",
         "classification_state", "inference_rule", "spawns", "notes",
     }
+    if allow_room_index:
+        allowed_wave_keys.add("room_index")
     allowed_spawn_keys = {
         "kind", "condition", "time_seconds", "target_wave_index", "target_wave_indices",
         "classification_state", "inference_rule", "notes",
@@ -5221,7 +5244,16 @@ def _validate_waves_override_map(waves_spec: Any, ctx: str) -> None:
                 raise ValueError(f"Initial/static timing {timing!r} cannot set trigger_kind {tk!r} in {wctx}")
         if "condition" in w_spec and w_spec["condition"] not in _ALLOWED_TRIGGER_CONDITIONS:
             raise ValueError(f"Invalid condition {w_spec['condition']!r} in {wctx}")
-        if any(k in w_spec for k in ("trigger_kind", "classification_state", "inference_rule")):
+        if "trigger_kind" in w_spec and w_spec["trigger_kind"] is None:
+            if timing in (*_INITIAL_WAVE_TIMINGS, "static_structures") and any(
+                k in w_spec for k in ("classification_state", "inference_rule")
+            ):
+                _validate_state_and_rule(w_spec, wctx)
+            elif any(k in w_spec for k in ("classification_state", "inference_rule")):
+                raise ValueError(
+                    f"Cannot set classification_state/inference_rule when clearing trigger_kind=None on non-initial wave in {wctx}"
+                )
+        elif any(k in w_spec for k in ("trigger_kind", "classification_state", "inference_rule")):
             _validate_state_and_rule(w_spec, wctx)
         for idx_k in ("source_wave_index", "source_spawn_index", "target_wave_index", "time_seconds"):
             if idx_k in w_spec:
@@ -5303,6 +5335,18 @@ def validate_overrides_doc(doc: Any) -> dict[str, Any]:
                 tids = obj["target_type_ids"]
                 if not isinstance(tids, list) or not all(isinstance(t, int) and not isinstance(t, bool) and t > 0 for t in tids):
                     raise ValueError(f"Invalid target_type_ids {tids!r} in {octx}")
+            if "target_name" in obj and obj["target_name"] is not None:
+                tn = obj["target_name"]
+                if not isinstance(tn, str) or not tn.strip():
+                    raise ValueError(f"Invalid target_name {tn!r} in {octx}")
+            if "item_quantity" in obj and obj["item_quantity"] is not None:
+                iq = obj["item_quantity"]
+                if not isinstance(iq, int) or isinstance(iq, bool) or iq < 1:
+                    raise ValueError(f"Invalid item_quantity {iq!r} in {octx}")
+            if "volume_m3" in obj and obj["volume_m3"] is not None:
+                vm = obj["volume_m3"]
+                if not isinstance(vm, (int, float)) or isinstance(vm, bool) or vm < 0:
+                    raise ValueError(f"Invalid volume_m3 {vm!r} in {octx}")
         if "waves" in spec:
             _validate_waves_override_map(spec["waves"], ectx)
         if "rooms" in spec:
@@ -5315,7 +5359,7 @@ def validate_overrides_doc(doc: Any) -> dict[str, Any]:
                 if not isinstance(r_spec, dict) or set(r_spec.keys()) - {"waves", "notes"}:
                     raise ValueError(f"Room override in {rctx} may only contain 'waves'/'notes'")
                 if "waves" in r_spec:
-                    _validate_waves_override_map(r_spec["waves"], rctx)
+                    _validate_waves_override_map(r_spec["waves"], rctx, allow_room_index=False)
     return doc
 
 
@@ -5390,38 +5434,67 @@ def apply_overrides(units: list[dict[str, Any]], overrides_doc: dict[str, Any]) 
             if "timing" in w_spec:
                 wave["timing"] = w_spec["timing"]
 
-            if wave["timing"] in (*_INITIAL_WAVE_TIMINGS, "static_structures") and any(
-                k in w_spec for k in ("timing", "classification_state", "inference_rule")
-            ):
-                wave["wave_trigger"] = None
-                rule_ovr = w_spec.get("inference_rule") if w_spec.get("classification_state") == "inferred" else None
-                _refresh_wave_link(wave, rule_ovr)
-                wave["wave_link"]["override_applied"] = True
-                applied_waves += 1
-                entry_touched = True
-            elif "trigger_kind" in w_spec or any(
-                k in w_spec for k in ("condition", "time_seconds", "source_wave_index", "source_spawn_index")
-            ):
-                prev_wt = wave.get("wave_trigger") or {}
-                orig_text = prev_wt.get("original_text") or wave["wave_name"]
-                state, rule = _validate_state_and_rule(w_spec, f"{eid}.waves[{w_idx}]")
-                tkind = w_spec.get("trigger_kind") or prev_wt.get("kind")
-                if tkind:
-                    new_wt: dict[str, Any] = {
-                        "kind": tkind,
-                        "classification_state": state,
-                        "inference_rule": rule,
-                        "original_text": orig_text,
-                        "condition": w_spec.get("condition") or prev_wt.get("condition") or "on_destroy",
-                        "target_wave_index": w_spec.get("target_wave_index", w_idx),
-                        "override_applied": True,
-                    }
-                    for opt_k in ("time_seconds", "source_wave_index", "source_spawn_index", "target_wave_indices", "from_wave_header"):
-                        val = w_spec.get(opt_k) if opt_k in w_spec else prev_wt.get(opt_k)
-                        if val is not None:
-                            new_wt[opt_k] = val
-                    wave["wave_trigger"] = new_wt
+            has_explicit_clear_tkind = "trigger_kind" in w_spec and w_spec["trigger_kind"] is None
+            has_trigger_mutation = (
+                w_spec.get("trigger_kind") is not None
+                or any(
+                    k in w_spec
+                    for k in ("condition", "time_seconds", "source_wave_index", "source_spawn_index", "target_wave_index", "target_wave_indices")
+                )
+            )
+            if wave["timing"] in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+                if w_spec.get("trigger_kind") is not None:
+                    wave["timing"] = "sequential_wave"
+                elif has_trigger_mutation:
+                    unmatched_targets.append(
+                        {"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "reason": "trigger_field_without_trigger_kind_on_initial_wave"}
+                    )
+                elif has_explicit_clear_tkind or any(
+                    k in w_spec for k in ("timing", "classification_state", "inference_rule")
+                ):
+                    wave["wave_trigger"] = None
+                    rule_ovr = w_spec.get("inference_rule") if w_spec.get("classification_state") == "inferred" else None
+                    _refresh_wave_link(wave, rule_ovr)
+                    wave["wave_link"]["override_applied"] = True
+                    applied_waves += 1
+                    entry_touched = True
+            if wave["timing"] not in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+                if has_explicit_clear_tkind:
+                    wave["wave_trigger"] = None
                     _refresh_wave_link(wave)
+                    wave["wave_link"]["override_applied"] = True
+                    applied_waves += 1
+                    entry_touched = True
+                elif has_trigger_mutation or any(
+                    k in w_spec for k in ("timing", "classification_state", "inference_rule")
+                ):
+                    prev_wt = wave.get("wave_trigger") or {}
+                    tkind = w_spec["trigger_kind"] if "trigger_kind" in w_spec else prev_wt.get("kind")
+                    if tkind is not None:
+                        orig_text = prev_wt.get("original_text") or wave["wave_name"]
+                        state, rule = _validate_state_and_rule(w_spec, f"{eid}.waves[{w_idx}]")
+                        new_wt: dict[str, Any] = {
+                            "kind": tkind,
+                            "classification_state": state,
+                            "inference_rule": rule,
+                            "original_text": orig_text,
+                            "condition": w_spec.get("condition") or prev_wt.get("condition") or "on_destroy",
+                            "target_wave_index": w_spec.get("target_wave_index", w_idx),
+                            "override_applied": True,
+                        }
+                        for opt_k in ("time_seconds", "source_wave_index", "source_spawn_index", "target_wave_indices", "from_wave_header"):
+                            val = w_spec.get(opt_k) if opt_k in w_spec else prev_wt.get(opt_k)
+                            if val is not None:
+                                new_wt[opt_k] = val
+                        wave["wave_trigger"] = new_wt
+                        _refresh_wave_link(wave)
+                    else:
+                        if has_trigger_mutation:
+                            unmatched_targets.append(
+                                {"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "reason": "missing_trigger_kind"}
+                            )
+                        rule_ovr = w_spec.get("inference_rule") if w_spec.get("classification_state") == "inferred" else None
+                        _refresh_wave_link(wave, rule_ovr)
                     wave["wave_link"]["override_applied"] = True
                     applied_waves += 1
                     entry_touched = True
@@ -5471,9 +5544,21 @@ def apply_overrides(units: list[dict[str, Any]], overrides_doc: dict[str, Any]) 
                 sp["trigger"] = new_tr
                 for t_idx in targets:
                     tgt_w = waves_by_idx.get(t_idx)
+                    if tgt_w is None:
+                        unmatched_targets.append(
+                            {
+                                "entry_id": eid,
+                                "room_index": r_idx,
+                                "wave_index": w_idx,
+                                "spawn_index": s_idx,
+                                "target_wave_index": t_idx,
+                                "reason": "missing_target_wave",
+                            }
+                        )
+                        continue
+                    cur_wt = tgt_w.get("wave_trigger")
                     if (
-                        tgt_w is not None
-                        and tgt_w.get("wave_trigger") is None
+                        (cur_wt is None or cur_wt.get("classification_state") == "unclassified")
                         and tgt_w["timing"] not in (*_INITIAL_WAVE_TIMINGS, "static_structures")
                     ):
                         wt_payload: dict[str, Any] = {
@@ -5702,17 +5787,33 @@ def check_coverage_ratchet(report: dict[str, Any], ratchet_doc: dict[str, Any]) 
     return errors
 
 
-def tighten_coverage_ratchet(report: dict[str, Any], ratchet_path: Path) -> dict[str, Any]:
+def tighten_coverage_ratchet(
+    report: dict[str, Any],
+    ratchet_path: Path,
+    *,
+    min_corpus_pages: int | None = None,
+) -> dict[str, Any]:
     """Verify existing ratchet floors pass, then raise floors monotonically to current report metrics."""
+    pages_scanned = int((report.get("totals") or {}).get("pages_scanned", 0))
     if ratchet_path.exists():
         doc = load_coverage_ratchet(ratchet_path)
+        req_min = int(doc.get("min_corpus_pages", 100)) if min_corpus_pages is None else min_corpus_pages
+        if pages_scanned < req_min:
+            raise ValueError(
+                f"Refusing to tighten coverage ratchet from small corpus: pages_scanned={pages_scanned} < min_corpus_pages={req_min}"
+            )
         errs = check_coverage_ratchet(report, doc)
         if errs:
             raise ValueError("; ".join(errs))
     else:
+        req_min = 100 if min_corpus_pages is None else min_corpus_pages
+        if pages_scanned < req_min:
+            raise ValueError(
+                f"Refusing to create coverage ratchet from small corpus: pages_scanned={pages_scanned} < min_corpus_pages={req_min}"
+            )
         doc = {
             "schema_version": 1,
-            "min_corpus_pages": 100,
+            "min_corpus_pages": req_min,
             "floors": {k: 0.0 for k in _RATCHET_METRIC_PATHS},
         }
     updated_floors: dict[str, float] = {}
@@ -5723,7 +5824,7 @@ def tighten_coverage_ratchet(report: dict[str, Any], ratchet_path: Path) -> dict
     out = {
         "schema_version": 1,
         "description": doc.get("description", "Monotonic coverage percentage floors for wiki PvE importer."),
-        "min_corpus_pages": doc.get("min_corpus_pages", 100),
+        "min_corpus_pages": doc.get("min_corpus_pages", req_min),
         "floors": updated_floors,
     }
     ratchet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5789,6 +5890,12 @@ def run_import(
         }
     if overrides_source is not None:
         override_summary["source"] = overrides_source
+
+    for u in all_units:
+        for r in u.get("rooms", []):
+            for w in r.get("waves", []):
+                for sp in w.get("spawns", []):
+                    sp.get("resolution", {}).pop("_name_to_type_ids", None)
 
     status_counts: Counter[str] = Counter()
     trigger_counts: Counter[str] = Counter()
@@ -6305,18 +6412,30 @@ def main(argv: list[str] | None = None) -> int:
             errors.append("objective_classification_state_counts accounting mismatch")
 
         ratchet_path = None
+        min_pages_for_stale = 100
         if not args.no_coverage_ratchet:
             if args.coverage_ratchet is not None:
                 ratchet_path = args.coverage_ratchet
                 r_doc = load_coverage_ratchet(ratchet_path)
-                errors.extend(check_coverage_ratchet(report, r_doc))
+                min_pages_for_stale = int(r_doc.get("min_corpus_pages", 100))
+                if totals["pages_scanned"] < min_pages_for_stale:
+                    errors.append(
+                        f"pages_scanned {totals['pages_scanned']} < coverage ratchet min_corpus_pages {min_pages_for_stale}"
+                    )
+                else:
+                    errors.extend(check_coverage_ratchet(report, r_doc))
             elif default_coverage_ratchet_path().exists():
                 ratchet_path = default_coverage_ratchet_path()
                 r_doc = load_coverage_ratchet(ratchet_path)
-                if totals["pages_scanned"] >= r_doc.get("min_corpus_pages", 0):
+                min_pages_for_stale = int(r_doc.get("min_corpus_pages", 100))
+                if totals["pages_scanned"] >= min_pages_for_stale:
                     errors.extend(check_coverage_ratchet(report, r_doc))
-                    if report["overrides"].get("unmatched_targets"):
-                        errors.append(f"stale override targets: {report['overrides']['unmatched_targets']}")
+
+        if totals["pages_scanned"] >= min_pages_for_stale or (args.overrides is not None and not args.no_overrides):
+            if report["overrides"].get("unmatched_targets"):
+                errors.append(f"stale override targets: {report['overrides']['unmatched_targets']}")
+            if report["overrides"].get("unmatched_entries"):
+                errors.append(f"stale override entries: {report['overrides']['unmatched_entries']}")
 
         verified_concrete = 0
         verified_candidate_mapped = 0

@@ -1964,7 +1964,10 @@ class TestWikiPveImporter(unittest.TestCase):
             self.assertEqual(got.get("time_seconds"), exp_sec, raw)
 
         header_matrix = [
-            ("Reinforcements (Spawns the next wave when attacked)", "this_ship_destroyed", "explicit", "on_attack", None),
+            ("Reinforcements (Spawns the next wave when attacked)", None, None, None, None),
+            ("Initial Group (Spawns reinforcements when attacked)", None, None, None, None),
+            ("Wave 2 (Spawns when Barracks destroyed)", "this_ship_destroyed", "explicit", "on_destroy", None),
+            ("Wave 2 (Spawns after 2 minutes)", "timed", "explicit", "on_destroy", 120),
             ("Wave 2 (Trigger: Barracks destroyed)", "this_ship_destroyed", "explicit", "on_destroy", None),
             ("Wave 2 (50km and 80km, Trigger: Gate approached)", "ship_approached", "explicit", "on_destroy", None),
             ("Timed Reinforcements - 3 minutes after warp-in", "timed", "explicit", "on_destroy", 180),
@@ -2047,7 +2050,7 @@ class TestWikiPveImporter(unittest.TestCase):
         rooms = parsed["units"][0]["rooms"]
         self.assertEqual(len(rooms), 3)
 
-        # Room 1: sequential Wave 2 never inherits Wave 1 trigger; triggered Reinforcements stays explicit;
+        # Room 1: sequential Wave 2 never inherits Wave 1 trigger; outgoing "Spawns the next wave when attacked" on Reinforcements stays non-trigger (unclassified incoming link);
         # zero default last_in_group_destroyed anywhere.
         r1_waves = rooms[0]["waves"]
         self.assertEqual(r1_waves[0]["timing"], "sequential_wave")
@@ -2055,9 +2058,9 @@ class TestWikiPveImporter(unittest.TestCase):
         self.assertIsNone(r1_waves[1]["wave_trigger"])
         self.assertEqual(r1_waves[1]["wave_link"]["classification_state"], "unclassified")
         self.assertIsNone(r1_waves[1]["wave_link"]["trigger_kind"])
-        self.assertEqual(r1_waves[2]["wave_trigger"]["kind"], "this_ship_destroyed")
-        self.assertEqual(r1_waves[2]["wave_trigger"]["condition"], "on_attack")
-        self.assertEqual(r1_waves[2]["wave_link"]["classification_state"], "explicit")
+        self.assertIsNone(r1_waves[2]["wave_trigger"])
+        self.assertEqual(r1_waves[2]["wave_link"]["classification_state"], "unclassified")
+        self.assertIsNone(r1_waves[2]["wave_link"]["trigger_kind"])
 
         # Room 2: first_combat_wave_initial promotion, F-04 A/B narrowing, uncertain trigger excluded, and F-01 sub-separator non-leakage onto Group 2 & Lootable Structures
         r2_waves = rooms[1]["waves"]
@@ -2230,7 +2233,7 @@ class TestWikiPveImporter(unittest.TestCase):
         # propagates time_seconds onto target wave, and records unmatched entries/targets.
         wikitext = (
             "{{Missiondetails\n"
-            "|Mission type=Encounter\n"
+            "|Type=Encounter\n"
             "|Objective=Confiscated item crate\n"
             "}}\n"
             "{{NPCTableHead|Initial Group}}\n"
@@ -2311,7 +2314,7 @@ class TestWikiPveImporter(unittest.TestCase):
 
         (wiki_dir / "Synthetic Supply Run.wiki").write_text(
             "{{Missiondetails\n"
-            "|Mission type=Courier\n"
+            "|Type=Courier\n"
             "|Objective=Deliver 1x Crate of Synth Supplies\n"
             "}}\n"
             "{{NPCTableHead|Initial Group}}\n"
@@ -2321,7 +2324,7 @@ class TestWikiPveImporter(unittest.TestCase):
         )
         (wiki_dir / "Synthetic Multi-Part (1 of 3).wiki").write_text(
             "{{Missiondetails\n"
-            "|Mission type=Encounter\n"
+            "|Type=Encounter\n"
             "|Objective=Destroy\n"
             "}}\n"
             "{{NPCTableHead|Initial Group}}\n"
@@ -2349,9 +2352,9 @@ class TestWikiPveImporter(unittest.TestCase):
             apply_default_overrides=False,
         )
         cov = report["coverage"]
-        # 2 missions: 1 explicit (deliver_item), 1 unclassified ("Destroy") -> 50.0%
+        # 2 missions: 1 inferred (deliver_item via missiondetails_courier_payload), 1 unclassified ("Destroy") -> 50.0%
         self.assertEqual(cov["g2_objectives"]["missions"]["total"], 2)
-        self.assertEqual(cov["g2_objectives"]["missions"]["explicit_count"], 1)
+        self.assertEqual(cov["g2_objectives"]["missions"]["inferred_count"], 1)
         self.assertEqual(cov["g2_objectives"]["missions"]["unclassified_count"], 1)
         self.assertEqual(cov["g2_objectives"]["missions"]["structured_percent"], 50.0)
         # 4 waves total: 2 initial (inferred), 1 triggered by spawn (inferred), 1 unannotated Wave 3 (unclassified) -> 75.0%
@@ -2362,8 +2365,11 @@ class TestWikiPveImporter(unittest.TestCase):
         self.assertEqual(cov["g1_triggers"]["spawn_triggers_target_wired_percent"], 100.0)
 
         ratchet_path = tmp_dir / "ratchet.json"
-        # Tighten creates monotonic floors from current run
-        tightened = imp.tighten_coverage_ratchet(report, ratchet_path)
+        # Small-corpus guard refuses default min_corpus_pages=100
+        with self.assertRaises(ValueError):
+            imp.tighten_coverage_ratchet(report, ratchet_path)
+        # Tighten with explicit min_corpus_pages creates monotonic floors from current run
+        tightened = imp.tighten_coverage_ratchet(report, ratchet_path, min_corpus_pages=2)
         self.assertEqual(tightened["floors"]["g2_missions_structured_percent"], 50.0)
         self.assertEqual(tightened["floors"]["g1_wave_links_classified_percent"], 75.0)
 
@@ -2414,6 +2420,310 @@ class TestWikiPveImporter(unittest.TestCase):
                 ]
             )
         self.assertEqual(rc_fail, 1)
+
+    def test_track_b_r2_bf01_through_bf05_and_p2_regressions(self) -> None:
+        # BF-01: Outgoing "Spawns ..." notes remain initial/unclassified while incoming "Spawns when/after..." classifies.
+        wiki_bf01 = (
+            "{{Missiondetails\n|Type=Encounter\n|Objective=Destroy all hostiles\n}}\n"
+            "{{NPCTableHead|Initial Group (Spawns reinforcements when attacked)}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}\n"
+            "{{NPCTableHead|Wave 2 (Spawns when Barracks destroyed)}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Raider}}\n"
+            "{{NPCTableHead|Wave 3 (Spawns after 2 minutes)}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}\n"
+            "|}\n"
+        )
+        p_bf01 = imp.parse_wiki_page("Outgoing Header Site", ["Level 1 Missions"], wiki_bf01, self.sde)
+        assert p_bf01 is not None
+        bf01_waves = p_bf01["units"][0]["rooms"][0]["waves"]
+        self.assertEqual(bf01_waves[0]["timing"], "initial_spawn")
+        self.assertIsNone(bf01_waves[0]["wave_trigger"])
+        self.assertEqual(bf01_waves[1]["wave_trigger"]["kind"], "this_ship_destroyed")
+        self.assertEqual(bf01_waves[1]["wave_trigger"]["condition"], "on_destroy")
+        self.assertEqual(bf01_waves[2]["wave_trigger"]["kind"], "timed")
+        self.assertEqual(bf01_waves[2]["wave_trigger"]["time_seconds"], 120)
+
+        # BF-02: Hair-Trigger maps to on_attack, and committed overrides match wiki semantics.
+        for trig_txt in ("Hair-Trigger", "1A Reinforcement (Hair-Trigger)"):
+            ct = imp.classify_trigger(trig_txt)
+            self.assertEqual(ct["kind"], "this_ship_destroyed", trig_txt)
+            self.assertEqual(ct["condition"], "on_attack", trig_txt)
+            self.assertEqual(ct["classification_state"], "explicit", trig_txt)
+
+        repo_ovr = imp.load_overrides(imp.default_overrides_path())
+        self.assertNotIn("Lafuni Oduntra#2", repo_ovr["entries"])
+        halt_obj = repo_ovr["entries"]["Halt the Invasion (Minmatar Republic)#1"]["objective"]
+        self.assertEqual(halt_obj["kind"], "destroy_structure")
+        self.assertEqual(halt_obj["target_name"], "Minmatar Occupied Stargate")
+        self.assertEqual(halt_obj["target_type_ids"], [93960])
+        lunuin_obj = repo_ovr["entries"]["Lunuin Eurek#2"]["objective"]
+        self.assertEqual(lunuin_obj["kind"], "kill_target")
+        self.assertEqual(lunuin_obj["target_name"], "Abufyr Joek")
+        self.assertEqual(lunuin_obj["target_type_ids"], [26119])
+        self.assertEqual(
+            repo_ovr["entries"]["Guristas Strike - Final Battle#1"]["objective"]["kind"],
+            "destroy_structure",
+        )
+        mh_sp = repo_ovr["entries"]["The Mordus Headhunters (Level 5)#1"]["rooms"]["1"]["waves"]["1"]["spawns"]
+        self.assertEqual(mh_sp["3"]["condition"], "on_attack")
+        self.assertEqual(mh_sp["4"]["condition"], "on_attack")
+
+        # BF-04: Positional Wave N uses combat_seq + positional_wave_index, respects earlier label guard,
+        # and spawn links replace unclassified header wave_trigger.
+        wiki_bf04 = (
+            "{{CMBSiteInfo|name=Positional Wave Site|type=unrated|faction=Serpentis}}\n"
+            "{{NPCTableHead|Static Structures}}\n"
+            "{{NPCTableRow|Structure|1|Angel Bunker}}\n"
+            "{{NPCTableHead|Initial Group}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Ambusher|trigger=Triggers Wave 2}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Raider|trigger=Triggers Backup Wave}}\n"
+            "{{NPCTableHead|Backup Wave (Triggered by Synth Gistii Raider)}}\n"
+            "{{NPCTableRow|Cruiser|1|Synth Corelatis Squad Leader}}\n"
+            "{{NPCTableHead|Wave 2}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Outlaw|trigger=Triggers Wave 2}}\n"
+            "|}\n"
+        )
+        p_bf04 = imp.parse_wiki_page("Positional Wave Site", ["Unrated Complexes"], wiki_bf04, self.sde)
+        assert p_bf04 is not None
+        bf04_waves = p_bf04["units"][0]["rooms"][0]["waves"]
+        # Spawn 2 in wave 2 ("Initial Group") triggers wave 3 ("Backup Wave") explicitly, replacing unclassified header trigger
+        self.assertEqual(bf04_waves[2]["wave_trigger"]["classification_state"], "explicit")
+        self.assertEqual(bf04_waves[2]["wave_trigger"]["source_wave_index"], 2)
+        self.assertEqual(bf04_waves[2]["wave_trigger"]["source_spawn_index"], 2)
+        # Wave 4 ("Wave 2") self-triggering "Triggers Wave 2" is blocked by earlier_label / forward-only guard
+        self.assertNotIn("target_wave_index", bf04_waves[3]["spawns"][0]["trigger"])
+
+        wiki_bf04_pos = (
+            "{{CMBSiteInfo|name=Positional CombatSeq Site|type=unrated|faction=Serpentis}}\n"
+            "{{NPCTableHead|Static Structures}}\n"
+            "{{NPCTableRow|Structure|1|Angel Bunker}}\n"
+            "{{NPCTableHead|Initial Group}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Ambusher|trigger=Triggers Wave 2}}\n"
+            "{{NPCTableHead|Ambush Wave (Triggered by Synth Gistii Ambusher)}}\n"
+            "{{NPCTableRow|Cruiser|1|Synth Corelatis Squad Leader}}\n"
+            "|}\n"
+        )
+        p_pos = imp.parse_wiki_page("Positional CombatSeq Site", ["Unrated Complexes"], wiki_bf04_pos, self.sde)
+        assert p_pos is not None
+        pos_waves = p_pos["units"][0]["rooms"][0]["waves"]
+        self.assertEqual(pos_waves[1]["spawns"][0]["trigger"]["target_wave_index"], 3)
+        self.assertEqual(pos_waves[2]["wave_trigger"]["classification_state"], "inferred")
+        self.assertEqual(pos_waves[2]["wave_trigger"]["inference_rule"], "positional_wave_index")
+        self.assertEqual(pos_waves[2]["wave_link"]["classification_state"], "inferred")
+        self.assertEqual(pos_waves[2]["wave_link"]["inference_rule"], "positional_wave_index")
+
+        # BF-05 & P2-02: Item payload extraction rejects ordinals/system names/preceding combat counts;
+        # manufacture does not hijack combat_lead + build; negation guards suppress "Do not destroy/kill".
+        self.assertIsNone(imp.extract_item_objective_payload("2nd pocket of pirates", self.sde))
+        self.assertIsNone(imp.extract_item_objective_payload("Go to 3L-Y9M and destroy 5 ships", self.sde))
+        pay_ret = imp.extract_item_objective_payload("Destroy 5 ships and retrieve 3x Reports", self.sde)
+        assert pay_ret is not None
+        self.assertEqual(pay_ret["quantity"], 3)
+        self.assertEqual(pay_ret["item"], "Reports")
+
+        obj_build = imp.build_structured_objective(
+            {"objective": "Kill the pirates before they build a fortress", "mission_type": "Encounter"},
+            None, None, [], {}, self.sde, [],
+        )
+        self.assertNotEqual(obj_build["kind"], "manufacture")
+        obj_neg = imp.build_structured_objective(
+            {"objective": "Do not destroy the warehouse", "mission_type": ""},
+            None, None, [], {}, self.sde, [],
+        )
+        self.assertEqual(obj_neg["classification_state"], "unclassified")
+        obj_mixed = imp.build_structured_objective(
+            {"objective": "Do not kill the Admiral; destroy the Bunker", "mission_type": "Encounter"},
+            None, None, [], {}, self.sde, [],
+        )
+        self.assertEqual(obj_mixed["kind"], "destroy_structure")
+        self.assertEqual(obj_mixed["target_name"], "Bunker")
+
+        # P2-04: Overrides validator rejects room_index under rooms.<r>.waves and invalid objective scalar types.
+        for bad_ovr in (
+            {
+                "schema_version": 1,
+                "entries": {"M#1": {"rooms": {"1": {"waves": {"1": {"room_index": 1, "timing": "initial_spawn"}}}}}},
+            },
+            {"schema_version": 1, "entries": {"M#1": {"objective": {"kind": "kill_target", "target_name": ""}}}},
+            {"schema_version": 1, "entries": {"M#1": {"objective": {"kind": "deliver_item", "item_quantity": True}}}},
+            {"schema_version": 1, "entries": {"M#1": {"objective": {"kind": "deliver_item", "item_quantity": 0}}}},
+            {"schema_version": 1, "entries": {"M#1": {"objective": {"kind": "deliver_item", "volume_m3": -1.0}}}},
+        ):
+            with self.assertRaises(ValueError):
+                imp.validate_overrides_doc(bad_ovr)
+
+        # BF-03, BF-05 (content_template), P2-03 (3-char NPC token), P2-06 (small-corpus ratchet guard) via run_import & --verify
+        tmp_dir = Path(tempfile.mkdtemp(prefix="wiki_pve_t2_r2_"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp_dir, ignore_errors=True))
+        sde_db2 = tmp_dir / "sde.sqlite"
+        ext_json2 = tmp_dir / "ext.json"
+        _build_synthetic_sde(sde_db2, ext_json2)
+        conn = sqlite3.connect(str(sde_db2))
+        conn.executescript(
+            """
+            ALTER TABLE sde_missions ADD COLUMN content_template TEXT;
+            INSERT INTO sde_types VALUES (10031, 601, 11, 'Gistii Spy', NULL, 50.0);
+            INSERT INTO sde_types VALUES (10032, 601, 11, 'Gistii Oni', NULL, 50.0);
+            INSERT INTO sde_missions VALUES (9901, 'Synthetic Trade Template', 0, 100, 200, 1, 'agent.missionTemplatizedContent_StorylineTradeMission');
+            INSERT INTO sde_missions VALUES (9902, 'Override Wave Edge Case', 0, 100, 200, 1, 'agent.missionTemplatizedContent_BasicKillMission');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        wiki_dir2 = tmp_dir / "wiki"
+        wiki_dir2.mkdir()
+        (wiki_dir2 / "Manifest.txt").write_text(
+            "Synthetic Trade Template\nOverride Wave Edge Case\n", encoding="utf-8"
+        )
+        (wiki_dir2 / "Synthetic Trade Template.wiki").write_text(
+            "{{Missiondetails\n|Type=\n|Objective=\n}}\n"
+            "{{NPCTableHead|Initial Group}}\n"
+            "{{NPCTableRow|Frigate|1|Gistii Spy/Oni|trigger=Oni destruction triggers Wave 2}}\n"
+            "{{NPCTableHead|Wave 2}}\n"
+            "{{NPCTableRow|Frigate|1|Gistii Spy}}\n"
+            "|}\n",
+            encoding="utf-8",
+        )
+        (wiki_dir2 / "Override Wave Edge Case.wiki").write_text(
+            "{{Missiondetails\n|Type=Encounter\n|Objective=Destroy\n}}\n"
+            "{{NPCTableHead|Initial Group}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Corelatis Squad Leader/Wing Leader|trigger=Wing Leader triggers reinforcement?}}\n"
+            "{{NPCTableHead|Reinforcement Group (Triggered by mystery ship)}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}\n"
+            "{{NPCTableHead|Bonus Group (60 seconds after warp-in)}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Raider}}\n"
+            "|}\n",
+            encoding="utf-8",
+        )
+
+        ovr2_path = tmp_dir / "ovr2.json"
+        ovr2_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "entries": {
+                        "Override Wave Edge Case#1": {
+                            "objective": {"kind": "kill_all", "classification_state": "explicit"},
+                            "waves": {
+                                "1": {
+                                    "spawns": {
+                                        "1": {
+                                            "kind": "this_ship_destroyed",
+                                            "target_wave_index": 2,
+                                            "classification_state": "explicit",
+                                        }
+                                    }
+                                },
+                                "3": {
+                                    "trigger_kind": None,
+                                },
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        out_c2 = tmp_dir / "content2.json"
+        out_r2 = tmp_dir / "report2.json"
+        cdoc2, rpt2 = imp.run_import(
+            wiki_dir=wiki_dir2,
+            sde_db_path=sde_db2,
+            mission_ext_path=ext_json2,
+            out_content_path=out_c2,
+            out_report_path=out_r2,
+            overrides_path=ovr2_path,
+            apply_default_overrides=False,
+        )
+        by_eid2 = {e["entry_id"]: e for e in cdoc2["entries"]}
+        tr_e = by_eid2["Synthetic Trade Template#1"]
+        self.assertEqual(tr_e["objective"]["kind"], "retrieve_item")
+        self.assertEqual(tr_e["objective"]["classification_state"], "inferred")
+        self.assertEqual(tr_e["objective"]["inference_rule"], "sde_mission_template")
+        oni_trig = tr_e["rooms"][0]["waves"][0]["spawns"][0]["trigger"]
+        self.assertEqual(oni_trig["trigger_ship_name"], "Gistii Oni")
+        self.assertEqual(oni_trig["trigger_type_ids"], [10032])
+
+        edge_e = by_eid2["Override Wave Edge Case#1"]
+        edge_waves = edge_e["rooms"][0]["waves"]
+        # Narrowed trigger_type_ids preserved after parsing & applied to BOTH spawn and target wave_trigger (replacing unclassified), while _name_to_type_ids stripped
+        self.assertNotIn("_name_to_type_ids", edge_waves[0]["spawns"][0]["resolution"])
+        self.assertEqual(edge_waves[0]["spawns"][0]["trigger"]["trigger_ship_name"], "Synth Corelatis Wing Leader")
+        self.assertEqual(edge_waves[0]["spawns"][0]["trigger"]["trigger_type_ids"], [10004])
+        self.assertEqual(edge_waves[1]["wave_trigger"]["kind"], "this_ship_destroyed")
+        self.assertEqual(edge_waves[1]["wave_trigger"]["trigger_ship_name"], "Synth Corelatis Wing Leader")
+        self.assertEqual(edge_waves[1]["wave_trigger"]["trigger_type_ids"], [10004])
+        self.assertEqual(edge_waves[1]["wave_trigger"]["classification_state"], "explicit")
+        self.assertIsNone(edge_waves[2]["wave_trigger"])
+        self.assertEqual(edge_waves[2]["wave_link"]["classification_state"], "unclassified")
+        self.assertTrue(edge_waves[2]["wave_link"]["override_applied"])
+
+        # Also test wave overrides: initial_spawn + trigger_kind promotion & timing-only refresh,
+        # plus narrowed Wing Leader multi-ship trigger_type_ids preservation
+        ovr3 = imp.validate_overrides_doc(
+            {
+                "schema_version": 1,
+                "entries": {
+                    "Override Wave Edge Case#1": {
+                        "waves": {
+                            "1": {"trigger_kind": "timed", "time_seconds": 30, "classification_state": "explicit"},
+                            "2": {"timing": "sequential_wave"},
+                        }
+                    }
+                },
+            }
+        )
+        p_edge = imp.parse_wiki_page(
+            "Override Wave Edge Case",
+            ["Level 1 Missions"],
+            (wiki_dir2 / "Override Wave Edge Case.wiki").read_text(encoding="utf-8"),
+            imp.SdeIndex(sde_db2, ext_json2),
+        )
+        assert p_edge is not None
+        sum3 = imp.apply_overrides(p_edge["units"], ovr3)
+        self.assertEqual(sum3["applied_waves"], 2)
+        w1_3 = p_edge["units"][0]["rooms"][0]["waves"][0]
+        w2_3 = p_edge["units"][0]["rooms"][0]["waves"][1]
+        self.assertEqual(w1_3["timing"], "sequential_wave")
+        self.assertEqual(w1_3["wave_trigger"]["kind"], "timed")
+        self.assertEqual(w1_3["wave_trigger"]["time_seconds"], 30)
+        self.assertTrue(w2_3["wave_link"]["override_applied"])
+
+        # Dangling target_wave_index & unmatched_entries fail --verify cleanly when --overrides is supplied
+        ovr_bad_tgt = tmp_dir / "ovr_bad_tgt.json"
+        ovr_bad_tgt.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "entries": {
+                        "Override Wave Edge Case#1": {
+                            "waves": {"1": {"spawns": {"1": {"kind": "this_ship_destroyed", "target_wave_index": 99}}}}
+                        },
+                        "Nonexistent Mission#1": {"objective": {"kind": "kill_all"}},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        ratchet2 = tmp_dir / "ratchet2.json"
+        imp.tighten_coverage_ratchet(rpt2, ratchet2, min_corpus_pages=2)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc_bad_ovr = imp.main(
+                [
+                    "--wiki-dir", str(wiki_dir2),
+                    "--sde-db", str(sde_db2),
+                    "--mission-ext", str(ext_json2),
+                    "--out-content", str(out_c2),
+                    "--out-report", str(out_r2),
+                    "--overrides", str(ovr_bad_tgt),
+                    "--coverage-ratchet", str(ratchet2),
+                    "--verify",
+                    "--min-resolved-percent", "100.0",
+                    "--min-candidate-mapped-percent", "100.0",
+                ]
+            )
+        self.assertEqual(rc_bad_ovr, 1)
 
 
 if __name__ == "__main__":

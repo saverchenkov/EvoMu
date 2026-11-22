@@ -69,25 +69,30 @@
         "classification_state": "explicit"
       }
     },
-    "Lafuni Oduntra#2": {
-      "notes": "generic_targets_objective",
+    "Guristas Strike - Final Battle#1": {
+      "notes": "central_control_hub_structure_objective",
       "objective": {
-        "kind": "kill_all",
-        "classification_state": "explicit"
+        "kind": "destroy_structure",
+        "classification_state": "explicit",
+        "target_name": "Central Control Hub"
       }
     },
     "Lunuin Eurek#2": {
-      "notes": "generic_targets_objective",
+      "notes": "named_boss_kill_objective",
       "objective": {
-        "kind": "kill_all",
-        "classification_state": "explicit"
+        "kind": "kill_target",
+        "classification_state": "explicit",
+        "target_name": "Abufyr Joek",
+        "target_type_ids": [26119]
       }
     },
     "Halt the Invasion (Minmatar Republic)#1": {
-      "notes": "bare_destroy_objective",
+      "notes": "stargate_structure_objective",
       "objective": {
-        "kind": "kill_all",
-        "classification_state": "explicit"
+        "kind": "destroy_structure",
+        "classification_state": "explicit",
+        "target_name": "Minmatar Occupied Stargate",
+        "target_type_ids": [93960]
       }
     },
     "Hidden Camera#1": {
@@ -313,13 +318,13 @@
               "spawns": {
                 "3": {
                   "kind": "this_ship_destroyed",
-                  "condition": "on_destroy",
+                  "condition": "on_attack",
                   "target_wave_index": 2,
                   "classification_state": "explicit"
                 },
                 "4": {
                   "kind": "this_ship_destroyed",
-                  "condition": "on_destroy",
+                  "condition": "on_attack",
                   "target_wave_index": 4,
                   "classification_state": "explicit"
                 }
