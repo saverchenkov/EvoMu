@@ -520,9 +520,9 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
         ch.clone_grade = 1;
         ch.station_id = Some(station_id);
         ch.home_station_id = station_id;
+        let mut ch_alt = ch.clone();
         snap.characters.insert(cid, ch);
 
-        let mut ch_alt = ch.clone();
         ch_alt.character_id = 94_400_002;
         snap.characters.insert(ch_alt.character_id, ch_alt);
 
