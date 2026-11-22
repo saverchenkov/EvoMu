@@ -5,6 +5,10 @@
 use crate::formulas::abyssal_attribute_roll;
 use crate::router::notify_registry::{OnModuleFitted, ProcessInventoryChange};
 use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
+use crate::services::notify_emitters_skills_trade_godma::{
+    emit_ship_fitting_attr_changes_for_ship, emit_ship_fitting_attr_changes_from_fit,
+    snapshot_ship_fitting_attrs_for_ship,
+};
 use eve_db::{InventoryFlag, IskCents, SavedFittingRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
@@ -736,6 +740,8 @@ async fn handle_invbroker_add(
                         return Some(Err(e));
                     }
                     let old_loc = src_item.location_id;
+                    let old_rig_ship_attrs =
+                        snapshot_ship_fitting_attrs_for_ship(ctx, char_id, old_loc);
                     if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
                         let Some(it) = snap.items.get(&item_id) else {
                             return Err(BridgeRpcError {
@@ -767,7 +773,7 @@ async fn handle_invbroker_add(
                         return Some(Err(e));
                     }
                     ctx.invalidate_ship_fitting(old_loc);
-                    let _ = ctx.get_or_rebuild_ship_fitting(char_id, old_loc);
+                    let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, old_loc).ok();
                     // Rigs are destroyed on removal; the V24 client derives `OnModuleUnfitted`
                     // from this `OnItemChange` (`ixFlag` left a fitting flag).
                     let _ = ctx.notify_fitted_item_trashed(
@@ -778,6 +784,16 @@ async fn handle_invbroker_add(
                         old_loc,
                         src_item.flag as i64,
                     );
+                    if let Some(ref new_fit) = new_fit_opt {
+                        emit_ship_fitting_attr_changes_from_fit(
+                            ctx,
+                            char_id,
+                            old_loc,
+                            old_rig_ship_attrs.as_ref(),
+                            new_fit,
+                            false,
+                        );
+                    }
                     return Some(Ok(PyRep::keyval([
                         ("itemID", PyRep::Integer(item_id)),
                         ("destroyed", PyRep::Bool(true)),
@@ -1508,22 +1524,10 @@ async fn handle_invbroker_add(
                 .map(|src| src.location_id);
             let old_src_ship_attrs = unfit_ship_id
                 .filter(|&sid| sid != new_loc)
-                .and_then(|sid| {
-                    crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs_for_ship(
-                        ctx, char_id, sid,
-                    )
-                });
-            let old_ship_attrs = if is_fitting_slot {
-                crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs_for_ship(
-                    ctx, char_id, new_loc,
-                )
-            } else if let Some(src_ship_id) = unfit_ship_id {
-                crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs_for_ship(
-                    ctx, char_id, src_ship_id,
-                )
-            } else {
-                None
-            };
+                .and_then(|sid| snapshot_ship_fitting_attrs_for_ship(ctx, char_id, sid));
+            let attr_ship_id = if is_fitting_slot { Some(new_loc) } else { unfit_ship_id };
+            let old_ship_attrs =
+                attr_ship_id.and_then(|sid| snapshot_ship_fitting_attrs_for_ship(ctx, char_id, sid));
 
             #[allow(clippy::large_enum_variant)]
             enum AddTxOutcome {
@@ -2461,12 +2465,8 @@ async fn handle_invbroker_add(
                     if is_fitting_slot {
                         if old_was_fitted && old_loc_id != new_loc {
                             ctx.invalidate_ship_fitting(old_loc_id);
-                            crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_for_ship(
-                                ctx,
-                                char_id,
-                                old_loc_id,
-                                old_src_ship_attrs.as_ref(),
-                                false,
+                            emit_ship_fitting_attr_changes_for_ship(
+                                ctx, char_id, old_loc_id, old_src_ship_attrs.as_ref(), false,
                             );
                         }
                         ctx.invalidate_ship_fitting(new_loc);
@@ -2488,13 +2488,8 @@ async fn handle_invbroker_add(
                         );
                         let _ = ctx.notify_module_online_state(char_id, item_id, online);
                         if let Some(ref new_fit) = new_fit_opt {
-                            crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_from_fit(
-                                ctx,
-                                char_id,
-                                new_loc,
-                                old_ship_attrs.as_ref(),
-                                new_fit,
-                                false,
+                            emit_ship_fitting_attr_changes_from_fit(
+                                ctx, char_id, new_loc, old_ship_attrs.as_ref(), new_fit, false,
                             );
                         }
                     } else if old_was_fitted {
@@ -2513,13 +2508,8 @@ async fn handle_invbroker_add(
                             0,
                         );
                         if let Some(ref new_fit) = new_fit_opt {
-                            crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_from_fit(
-                                ctx,
-                                char_id,
-                                old_loc_id,
-                                old_ship_attrs.as_ref(),
-                                new_fit,
-                                false,
+                            emit_ship_fitting_attr_changes_from_fit(
+                                ctx, char_id, old_loc_id, old_ship_attrs.as_ref(), new_fit, false,
                             );
                         }
                     } else {

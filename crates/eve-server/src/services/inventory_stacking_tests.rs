@@ -5903,3 +5903,89 @@ async fn gh1545_destroy_fitting_gm_fit_strip_and_saved_apply_sync_capacity() {
         "DestroyFitting Medium Cargohold Optimization I",
     );
 }
+
+#[tokio::test]
+async fn gh1545_rig_autofit_and_invbroker_add_unfit_sync_capacity() {
+    let ctx = test_ctx();
+    let char_id = 90_000_947_i64;
+    let corp_id = 98_000_002_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 1_000_947_001_i64;
+    let rig_id = 1_000_947_002_i64;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), 30_000_142, ship_id);
+    insert_item(&ctx, ship_id, 649, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, rig_id, 31119, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    grant_tayra_cargo_skills(&ctx, char_id);
+
+    let kw = HashMap::new();
+    let mut sess = make_session(char_id, corp_id, Some(station_id), None, Some(ship_id));
+    let ship_bound = make_bound(ship_id, char_id);
+    let hangar_bound = make_bound(station_id, char_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // BF-1545-02: MultiAdd flagAutoFit fits Medium Cargohold Optimization I (31119) online and
+    // emits CAPACITY 9125.0 -> 10493.75 in OnModuleAttributeChanges.
+    let fit_rep = handle_multi_add(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        &[
+            PyRep::List(vec![PyRep::Integer(rig_id)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .await
+    .expect("MultiAdd autofit Medium Cargohold Optimization I");
+    assert_eq!(fit_rep.dict_get("movedCount").and_then(PyRep::as_i64), Some(1));
+    let PyRep::List(fitted_items) = fit_rep.dict_get("items").expect("items list") else {
+        panic!("expected items list");
+    };
+    let fitted_rig_id = fitted_items[0].as_i64().expect("fitted rig id");
+    ctx.db.with_snapshot(|snap| {
+        let rig = snap.items.get(&fitted_rig_id).expect("fitted rig row");
+        assert_eq!(rig.location_id, ship_id);
+        assert_eq!(rig.flag, InventoryFlag::RigSlot0);
+        assert_eq!(snap.module_online_states.get(&fitted_rig_id), Some(&true));
+    });
+    let autofit_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_has_ship_attr_delta(
+        &autofit_notifs,
+        ship_id,
+        eve_sde::attr_ids::CAPACITY,
+        10_493.75,
+        9_125.0,
+        "MultiAdd autofit Medium Cargohold Optimization I",
+    );
+
+    // BF-1545-01: Removing fitted rig to Hangar via invbroker.Add destroys the rig and emits
+    // CAPACITY 10493.75 -> 9125.0 before its early return.
+    let unfit_rep = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        Some(&hangar_bound),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(fitted_rig_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("invbroker.Add unfit Medium Cargohold Optimization I");
+    assert_eq!(unfit_rep.dict_get("destroyed").and_then(|v| match v { PyRep::Bool(b) => Some(*b), _ => None }), Some(true));
+    let unfit_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_has_ship_attr_delta(
+        &unfit_notifs,
+        ship_id,
+        eve_sde::attr_ids::CAPACITY,
+        9_125.0,
+        10_493.75,
+        "invbroker.Add unfit Medium Cargohold Optimization I",
+    );
+}

@@ -1052,7 +1052,7 @@ async fn handle_multi_add_auto_fit(
             } else if mod_t.effect_ids.contains(&11) {
                 ((11_u16..=18).collect(), true)
             } else if mod_t.effect_ids.contains(&2663) {
-                ((92_u16..=94).collect(), false)
+                ((92_u16..=94).collect(), true)
             } else if mod_t.effect_ids.contains(&3772) {
                 if let Some(&req_slot_f) = mod_t.default_attributes.get(&1366) {
                     (vec![req_slot_f as u16], true)
