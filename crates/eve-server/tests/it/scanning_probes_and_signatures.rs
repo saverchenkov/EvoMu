@@ -7,7 +7,8 @@
 
 #![forbid(unsafe_code)]
 
-use crate::common;
+use crate::common::ServerWireTransport;
+use crate::scenario_common::ServerScenarioBackend;
 use eve_db::types::{CosmicSignatureRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
@@ -19,6 +20,10 @@ use eve_server::services::space_destiny::space_probe_scanning::{
     signature_difficulty_level_and_min_strength,
 };
 use eve_server::services::space_destiny::wormhole_item_id_for_signature;
+use eve_testkit::legal_fixture::assert_legal_fixture;
+use eve_testkit::scenario::{
+    ActorSpec, BuiltActor, ScenarioBuilder, ScenarioWorldBackend, ShipLoadoutSpec,
+};
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -78,54 +83,46 @@ async fn spawn_test_ball(
         .await;
 }
 
-async fn setup_pilot_in_space(
-    ctx: &ServerContext,
-    session_id: u64,
-    char_id: i64,
-    solar_system_id: u32,
-    ship_id: i64,
-    ship_type_id: u32,
-) -> SessionState {
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(session_id);
-    common::login_pilot(ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
-    sess.solar_system_id = Some(solar_system_id);
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.ship_id = Some(ship_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = solar_system_id;
-            ch.active_ship_id = ship_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-        }
-        snap.items.insert(
-            ship_id,
-            make_item(
-                ship_id,
-                ship_type_id,
-                char_id,
-                solar_system_id as i64,
-                InventoryFlag::Hangar,
-                1,
-                true,
-            ),
-        );
+async fn assert_scan_actor_legal(ctx: &ServerContext, actor: &mut BuiltActor<ServerWireTransport<'_>>, label: &str) {
+    let mut backend = ServerScenarioBackend::new(ctx);
+    actor.expectation.ship_in_space_ballpark = match (actor.station_id, actor.ship_id) {
+        (None, Some(sid)) => backend.ship_in_space_ballpark(actor.solar_system_id, sid).await,
+        (None, None) => Some(false),
+        _ => None,
+    };
+    let view = backend.actor_session_view(actor.harness.transport());
+    ctx.db.with_snapshot(|snap| assert_legal_fixture(label, snap, &ctx.sde, &view, &actor.expectation));
+}
+
+async fn build_scan_actor<'c>(ctx: &'c ServerContext, seed: u64, label: &str, ship_type_id: u32, extra_skills: &[u32], in_space: bool) -> BuiltActor<ServerWireTransport<'c>> {
+    let mut actor = ScenarioBuilder::with_seed(seed).add_actor(ActorSpec {
+        label: label.into(), username: format!("scan_{label}"), character_name: format!("Scanner {}", label.replace('_', "")),
+        require_omega: true, extra_skills: extra_skills.to_vec(), in_space,
+        ship: Some(ShipLoadoutSpec { hull_type_id: ship_type_id, ..Default::default() }), ..Default::default()
+    }).build(&mut ServerScenarioBackend::new(ctx)).await.actors.into_iter().next().expect("built scan actor");
+    assert_scan_actor_legal(ctx, &mut actor, label).await;
+    actor
+}
+
+async fn place_actor_in_jita<'c>(ctx: &'c ServerContext, actor: &mut BuiltActor<ServerWireTransport<'c>>, station_id: Option<i64>, solar_system_id: u32) {
+    let (char_id, orig_sys_id, ship_id) = (actor.character_id, actor.solar_system_id, actor.ship_id.expect("actor ship_id"));
+    if let Some(h) = ctx.systems.get_handle(orig_sys_id) { let _ = h.remove_ball(ship_id).await; }
+    let (st, sys) = (station_id.and_then(|s| ctx.sde.stations.get(&s)), ctx.sde.solar_systems.get(&solar_system_id));
+    let (reg_id, const_id) = (st.map(|s| s.region_id).or_else(|| sys.map(|s| s.region_id)).unwrap_or(10_000_002), st.map(|s| s.constellation_id).or_else(|| sys.map(|s| s.constellation_id)).unwrap_or(20_000_001));
+    let flag = if station_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None };
+    let ship_type_id = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) { (ch.solar_system_id, ch.constellation_id, ch.region_id, ch.station_id, ch.structure_id, ch.active_ship_id) = (solar_system_id, const_id, reg_id, station_id, None, ship_id); }
+        let ship = snap.items.get_mut(&ship_id).expect("ship item");
+        (ship.location_id, ship.flag) = (station_id.unwrap_or(i64::from(solar_system_id)), flag);
+        if station_id.is_none() { snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]); } else { snap.item_positions.remove(&ship_id); }
+        ship.type_id
     });
-    spawn_test_ball(ctx, solar_system_id, ship_id, ship_type_id, DVec3::ZERO, 1_200_000.0, false).await;
-    sess
+    (actor.station_id, actor.solar_system_id, actor.expectation.expect_in_space, actor.expectation.expected_dock_location_id) = (station_id, solar_system_id, Some(station_id.is_none()), station_id);
+    let s = &mut actor.harness.transport_mut().inner.session;
+    (s.solar_system_id, s.constellation_id, s.region_id, s.station_id, s.structure_id, s.ship_id) = (Some(solar_system_id), Some(const_id), Some(reg_id), station_id, None, Some(ship_id));
+    if station_id.is_none() { spawn_test_ball(ctx, solar_system_id, ship_id, ship_type_id, DVec3::ZERO, 1_200_000.0, false).await; }
+    let label = format!("{}_relocated", actor.label);
+    assert_scan_actor_legal(ctx, actor, &label).await;
 }
 
 // parity: feat:scanning.moon-survey-probe-launch-rules
@@ -135,45 +132,29 @@ async fn test_scanning_moon_survey_probe_launch_rules() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let char_id = 90_000_001;
     let kw = HashMap::new();
     let station_id = 60_003_760i64;
-    let mut session = SessionState::new(1001);
-    common::login_pilot(&ctx, &mut session, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut session,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    let mut actor = build_scan_actor(&ctx, 0x5C01, "moon_survey", 32880, &[3412, 3402, 3410, 25810, 25811], false).await;
+    place_actor_in_jita(&ctx, &mut actor, Some(station_id), 30_000_142).await;
+    let char_id = actor.character_id;
+    let ship_id = actor.ship_id.expect("Venture ship_id");
+    let session = &mut actor.harness.transport_mut().inner.session;
 
     // 1. Launcher: 1 per ship, needs no hardpoint, auto-reloads, does not auto-repeat
-    let ship_id = ctx.db.with_mut_snapshot(|snap| {
-        let sk = snap.skills.entry(char_id).or_default();
-        for tid in [3412, 3402, 3410, 25810, 25811] {
-            sk.insert(tid, TrainedSkillRecord { type_id: tid, level: 5, skill_points: 256_000.0 });
-        }
-        let sid = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(100_000_001);
-        if let Some(ship) = snap.items.get_mut(&sid) {
-            ship.type_id = 32880; // Venture (0 launcher hardpoints)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
             ship.dynamic_attributes.insert(48, 500.0);
             ship.dynamic_attributes.insert(11, 500.0);
         }
-        snap.items.retain(|_, item| item.location_id != sid);
+        snap.items.retain(|_, item| item.location_id != ship_id);
         snap.items.insert(800_000_301, make_item(800_000_301, 33270, char_id, station_id, InventoryFlag::Hangar, 1, true));
         snap.items.insert(800_000_302, make_item(800_000_302, 33272, char_id, station_id, InventoryFlag::Hangar, 1, true));
-        snap.items.insert(800_000_303, make_item(800_000_303, 18635, char_id, sid, InventoryFlag::Cargo, 3, false));
-        sid
+        snap.items.insert(800_000_303, make_item(800_000_303, 18635, char_id, ship_id, InventoryFlag::Cargo, 3, false));
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
     ctx.dispatch_rpc(
-        &mut session,
+        session,
         "invbroker",
         None,
         "Add",
@@ -186,7 +167,7 @@ async fn test_scanning_moon_survey_probe_launch_rules() {
 
     let second_launcher_err = ctx
         .dispatch_rpc(
-            &mut session,
+            session,
             "invbroker",
             None,
             "Add",
@@ -200,7 +181,7 @@ async fn test_scanning_moon_survey_probe_launch_rules() {
     assert!(second_launcher_err.message.contains("MaxGroupFittedExceeded"));
 
     // 2. Launching: must be launched aligned at moon within 100,000 km; misses return no result; probe consumed
-    ctx.dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &kw, None)
+    ctx.dispatch_rpc(session, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock");
     let _ = session.drain_notifications();
@@ -217,7 +198,7 @@ async fn test_scanning_moon_survey_probe_launch_rules() {
     }
     let miss_unaligned = ctx
         .dispatch_rpc(
-            &mut session,
+            session,
             "dogmaIM",
             None,
             "Activate",
@@ -233,14 +214,14 @@ async fn test_scanning_moon_survey_probe_launch_rules() {
     assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&800_000_301)));
 
     let miss_probe_id = miss_unaligned.dict_get("probeID").unwrap().as_i64().unwrap();
-    let launch_notifs = session.drain_notifications();
-    assert!(launch_notifs.iter().any(|n| n.0 == "OnNewMoonProbe"));
-    assert!(!launch_notifs.iter().any(|n| n.0 == "OnMoonScanComplete"));
+    let launch_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(launch_notifs.iter().any(|n| n.event == "OnNewMoonProbe"));
+    assert!(!launch_notifs.iter().any(|n| n.event == "OnMoonScanComplete"));
 
     // Probes are consumed and cannot be recalled
     let recover_res = ctx
         .dispatch_rpc(
-            &mut session,
+            session,
             "scanMgr",
             None,
             "RecoverProbes",
@@ -266,7 +247,7 @@ async fn test_scanning_moon_survey_probe_launch_rules() {
     }
     let miss_range = ctx
         .dispatch_rpc(
-            &mut session,
+            session,
             "dogmaIM",
             None,
             "Activate",
@@ -299,7 +280,7 @@ async fn test_scanning_moon_survey_probe_launch_rules() {
     }
     let gaze_launch = ctx
         .dispatch_rpc(
-            &mut session,
+            session,
             "dogmaIM",
             None,
             "Activate",
@@ -314,7 +295,7 @@ async fn test_scanning_moon_survey_probe_launch_rules() {
     assert_eq!(gaze_launch.dict_get("flightTimeSec").and_then(|v| v.as_i64()), Some(135));
 
     // If pilot docks before arrival, results are not delivered
-    ctx.dispatch_rpc(&mut session, "stationSvc", None, "Dock", &[PyRep::Integer(station_id)], &kw, None)
+    ctx.dispatch_rpc(session, "stationSvc", None, "Dock", &[PyRep::Integer(station_id)], &kw, None)
         .await
         .expect("Dock before probe arrives");
     let _ = session.drain_notifications();
@@ -323,7 +304,7 @@ async fn test_scanning_moon_survey_probe_launch_rules() {
     assert!(!docked_notifs.iter().any(|n| n.event == "OnMoonScanComplete"));
 
     // Now launch aligned and stay undocked in system: results delivered
-    ctx.dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &kw, None)
+    ctx.dispatch_rpc(session, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock again");
     let _ = session.drain_notifications();
@@ -336,7 +317,7 @@ async fn test_scanning_moon_survey_probe_launch_rules() {
     }
     let aligned_launch = ctx
         .dispatch_rpc(
-            &mut session,
+            session,
             "dogmaIM",
             None,
             "Activate",
@@ -378,8 +359,11 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let (char_id, sys_id, ship_id, launcher_id) = (90_000_001, 30_000_142u32, 610_000_001i64, 610_000_010i64);
-    let mut sess = setup_pilot_in_space(&ctx, 701, char_id, sys_id, ship_id, 606).await;
+    let (sys_id, launcher_id) = (30_000_142u32, 610_000_010i64);
+    let mut actor = build_scan_actor(&ctx, 0x5C02, "range_dev", 606, &[], true).await;
+    place_actor_in_jita(&ctx, &mut actor, None, sys_id).await;
+    let (char_id, ship_id) = (actor.character_id, actor.ship_id.expect("built ship_id"));
+    let sess = &mut actor.harness.transport_mut().inner.session;
 
     // 1. Core vs Combat probe range steps (0.25..=32 AU vs 0.5..=64 AU) & flight time from SDE
     assert_eq!(probe_allowed_ranges_au(&ctx.sde, 30013), [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]);
@@ -407,7 +391,7 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
     ctx.invalidate_ship_fitting(ship_id);
 
     let launch_rss = ctx
-        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None)
+        .dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None)
         .await
         .expect("Launch RSS");
     assert_eq!(launch_rss.dict_get("maxFlightTimeS").and_then(|v| v.as_f64()), Some(1_000.0));
@@ -426,7 +410,8 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
         snap.items.get_mut(&ship_id).unwrap().dynamic_attributes.insert(38, 0.1);
         snap.items.insert(610_000_012, make_item(610_000_012, 30013, char_id, ship_id, InventoryFlag::HiSlot0, 8, false));
     });
-    let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    let launch_std = ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    assert_eq!(launch_std.dict_get("launchedCount").and_then(|v| v.as_i64()), Some(8));
     ctx.advance_secs(4_001);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let std_in_cargo: i32 = ctx.db.with_snapshot(|snap| {
@@ -435,13 +420,15 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
     assert_eq!(std_in_cargo, 0, "Expired probes are lost when cargo hold is full");
 
     // 2. Live RPC range steps & deviation scaling + difficulty levels + reveal thresholds
-    let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[], &kw, None).await.unwrap();
+    let scan_mgr = ctx.dispatch_rpc(sess, "scanMgr", None, "GetSystemScanMgr", &[], &kw, None).await.unwrap();
+    assert_eq!(scan_mgr.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(i64::from(sys_id)));
     let sig_pos = [300_000.0, 0.0, 0.0];
     let now_u = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&ship_id).unwrap().dynamic_attributes.insert(38, 1_000.0);
         if let Some(sk) = snap.skills.get_mut(&char_id) {
             sk.remove(&3412);
+            sk.remove(&25739);
             sk.remove(&25810);
             sk.remove(&25811);
         }
@@ -477,7 +464,8 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
     assert_eq!(signature_difficulty_level_and_min_strength(&ctx.sde, sys_id, &sigs_snap[1]), (4, 72.0));
     assert_eq!(signature_difficulty_level_and_min_strength(&ctx.sde, sys_id, &sigs_snap[2]), (5, 104.0));
 
-    let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    let launch_lv = ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    assert_eq!(launch_lv.dict_get("launchedCount").and_then(|v| v.as_i64()), Some(8));
 
     let make_coords_step = |covering: usize, step: i64| -> PyRep {
         PyRep::List(
@@ -495,7 +483,7 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
     };
 
     // Untrained character (Astrometrics 0, Pinpointing 0) at step 4 (2.0 AU): maxDeviationAU = 1.0 AU
-    let scan_untrained_step4 = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[make_coords_step(2, 4)], &kw, None).await.unwrap();
+    let scan_untrained_step4 = ctx.dispatch_rpc(sess, "scanMgr", None, "RequestScans", &[make_coords_step(2, 4)], &kw, None).await.unwrap();
     let row_untrained = find_row(&scan_untrained_step4, "TST-LV1");
     assert_eq!(row_untrained.dict_get("scanRangeAU").and_then(|v| v.as_f64()), Some(2.0));
     assert!((row_untrained.dict_get("maxDeviationAU").and_then(|v| v.as_f64()).unwrap() - 1.0).abs() < 1e-9);
@@ -508,7 +496,7 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
         sk.insert(25811, TrainedSkillRecord { type_id: 25811, level: 3, skill_points: 16_000.0 });
     });
     let expected_dev_au = compute_probe_max_deviation_au(0.125, 2.0, 0.25, 4, 3);
-    let scan_trained_step4 = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[make_coords_step(2, 4)], &kw, None).await.unwrap();
+    let scan_trained_step4 = ctx.dispatch_rpc(sess, "scanMgr", None, "RequestScans", &[make_coords_step(2, 4)], &kw, None).await.unwrap();
     let row_trained = find_row(&scan_trained_step4, "TST-LV1");
     assert!((row_trained.dict_get("maxDeviationAU").and_then(|v| v.as_f64()).unwrap() - expected_dev_au).abs() < 1e-9);
     let sig_trained_s = row_trained.dict_get("signalStrength").and_then(|v| v.as_f64()).unwrap();
@@ -522,7 +510,7 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
     });
 
     // < 25%: only signature ID and deviation shown
-    let scan_1 = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[make_coords_step(1, 1)], &kw, None).await.unwrap();
+    let scan_1 = ctx.dispatch_rpc(sess, "scanMgr", None, "RequestScans", &[make_coords_step(1, 1)], &kw, None).await.unwrap();
     let lv1_r1 = find_row(&scan_1, "TST-LV1");
     assert!(lv1_r1.dict_get("signalStrength").and_then(|v| v.as_f64()).unwrap() < 0.25);
     assert_eq!(lv1_r1.dict_get("group").and_then(|v| v.as_str()), Some("Unknown"));
@@ -533,7 +521,7 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
     assert!(lv1_r1.dict_get("deviation").and_then(|v| v.as_f64()).unwrap() > 0.0);
 
     // 25%..75%: group shown, siteName hidden, not warpable
-    let scan_2 = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[make_coords_step(2, 1)], &kw, None).await.unwrap();
+    let scan_2 = ctx.dispatch_rpc(sess, "scanMgr", None, "RequestScans", &[make_coords_step(2, 1)], &kw, None).await.unwrap();
     let lv1_r2 = find_row(&scan_2, "TST-LV1");
     assert!((0.25..0.75).contains(&lv1_r2.dict_get("signalStrength").and_then(|v| v.as_f64()).unwrap()));
     assert_eq!(lv1_r2.dict_get("group").and_then(|v| v.as_str()), Some("Relic Site"));
@@ -541,7 +529,7 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
     assert_eq!(lv1_r2.dict_get("warpable"), Some(&PyRep::Bool(false)));
 
     // 75%..100% & strength-level gating: Lv I resolved (100%), Lv IV at 75-99% (unresolved)
-    let scan_low = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[make_coords_step(8, 1)], &kw, None).await.unwrap();
+    let scan_low = ctx.dispatch_rpc(sess, "scanMgr", None, "RequestScans", &[make_coords_step(8, 1)], &kw, None).await.unwrap();
     assert_eq!(find_row(&scan_low, "TST-LV1").dict_get("warpable"), Some(&PyRep::Bool(true)));
     let lv4_low = find_row(&scan_low, "TST-LV4");
     assert!((0.75..1.0).contains(&lv4_low.dict_get("signalStrength").and_then(|v| v.as_f64()).unwrap()));
@@ -549,34 +537,36 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
     assert_eq!(lv4_low.dict_get("warpable"), Some(&PyRep::Bool(false)));
 
     // Warping to unresolved Lv IV (<100%) fails; warping to resolved Lv I (100%) succeeds
-    let beyonce_bound = ctx.bind_object(&mut sess, "beyonce", sys_id as i64).unwrap();
+    let beyonce_bound = ctx.bind_object(sess, "beyonce", sys_id as i64).unwrap();
     let (lv4_ball_id, lv1_ball_id) = (wormhole_item_id_for_signature(sys_id, "TST-LV4"), wormhole_item_id_for_signature(sys_id, "TST-LV1"));
     for bid in [lv4_ball_id, lv1_ball_id] {
         spawn_test_ball(&ctx, sys_id, bid, 26272, DVec3::new(300_000.0, 0.0, 0.0), 1_000.0, false).await;
     }
     assert_eq!(
-        ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(lv4_ball_id)], &kw, None).await.unwrap_err().code,
+        ctx.dispatch_rpc(sess, "beyonce", Some(beyonce_bound), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(lv4_ball_id)], &kw, None).await.unwrap_err().code,
         "InvalidWarpDestination"
     );
-    assert!(ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(lv1_ball_id)], &kw, None).await.is_ok());
+    assert!(ctx.dispatch_rpc(sess, "beyonce", Some(beyonce_bound), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(lv1_ball_id)], &kw, None).await.is_ok());
 
     // Astrometrics V -> resolves Lv IV (>=72), fails Lv V (<104)
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(3412, TrainedSkillRecord { type_id: 3412, level: 5, skill_points: 256_000.0 });
     });
-    let scan_astro5 = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[make_coords_step(8, 1)], &kw, None).await.unwrap();
+    let scan_astro5 = ctx.dispatch_rpc(sess, "scanMgr", None, "RequestScans", &[make_coords_step(8, 1)], &kw, None).await.unwrap();
     assert_eq!(find_row(&scan_astro5, "TST-LV4").dict_get("warpable"), Some(&PyRep::Bool(true)));
     assert_eq!(find_row(&scan_astro5, "TST-LV5").dict_get("warpable"), Some(&PyRep::Bool(false)));
 
     // Sisters Core Probes + Astrometric Rangefinding V -> resolves Lv V (>=104)
-    let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
+    let rec_sis = ctx.dispatch_rpc(sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
+    assert_eq!(rec_sis.dict_get("recoveredCount").and_then(|v| v.as_i64()), Some(8));
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(25810, TrainedSkillRecord { type_id: 25810, level: 5, skill_points: 512_000.0 });
         snap.items.retain(|_, i| !(i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != launcher_id));
         snap.items.insert(610_000_015, make_item(610_000_015, 30488, char_id, ship_id, InventoryFlag::HiSlot0, 8, false));
     });
-    let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
-    let scan_105 = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[make_coords_step(8, 1)], &kw, None).await.unwrap();
+    let launch_sis = ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    assert_eq!(launch_sis.dict_get("launchedCount").and_then(|v| v.as_i64()), Some(8));
+    let scan_105 = ctx.dispatch_rpc(sess, "scanMgr", None, "RequestScans", &[make_coords_step(8, 1)], &kw, None).await.unwrap();
     assert_eq!(find_row(&scan_105, "TST-LV5").dict_get("warpable"), Some(&PyRep::Bool(true)));
 
     // 3. Target classes: Core probes resolve CosmicSignatures only; Combat probes also resolve Ships, Drones, Structures;
@@ -596,15 +586,16 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
     assert!(rows_105.iter().all(|r| r.dict_get("targetClass").and_then(|v| v.as_str()) == Some("CosmicSignature")));
 
     // Launch Combat Probes
-    let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
+    let rec_combat = ctx.dispatch_rpc(sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
+    assert_eq!(rec_combat.dict_get("recoveredCount").and_then(|v| v.as_i64()), Some(8));
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.retain(|_, i| !(i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != launcher_id));
         snap.items.insert(610_000_014, make_item(610_000_014, 30486, char_id, ship_id, InventoryFlag::HiSlot0, 8, false));
     });
-    let launch_combat = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
+    let launch_combat = ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())], &kw, None).await.unwrap();
     assert_eq!(launch_combat.dict_get("canScanShips"), Some(&PyRep::Bool(true)));
 
-    let combat_scan = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[make_coords_step(8, 1)], &kw, None).await.unwrap();
+    let combat_scan = ctx.dispatch_rpc(sess, "scanMgr", None, "RequestScans", &[make_coords_step(8, 1)], &kw, None).await.unwrap();
     let PyRep::List(combat_rows) = &combat_scan else { panic!() };
     let scanned_ids: Vec<i64> = combat_rows.iter().filter_map(|r| r.dict_get("itemID").and_then(|v| v.as_i64())).collect();
     assert!(scanned_ids.contains(&target_ship) && scanned_ids.contains(&drone_id) && scanned_ids.contains(&structure_id));
@@ -616,22 +607,10 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let mut sess = SessionState::new(7962);
-    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
-
-    let char_id = 90_000_001i64;
-    let ship_id = sess.ship_id.unwrap_or(100_000_001);
+    let mut actor = build_scan_actor(&ctx, 0x5C03, "gh962", 606, &[3412, 3426, 3413], false).await;
+    let char_id = actor.character_id;
+    let ship_id = actor.ship_id.expect("built ship_id");
+    let sess = &mut actor.harness.transport_mut().inner.session;
     let hi_slot = InventoryFlag::HiSlot0 as i64;
 
     let launcher_id = 610_962_010i64;
@@ -645,17 +624,6 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
         }
         snap.items
             .retain(|_, i| !(i.location_id == ship_id && matches!(i.flag, InventoryFlag::HiSlot0)));
-        let sk = snap.skills.entry(char_id).or_default();
-        for sid in [3412u32, 3426, 3413] {
-            sk.insert(
-                sid,
-                TrainedSkillRecord {
-                    type_id: sid,
-                    level: 5,
-                    skill_points: 256_000.0,
-                },
-            );
-        }
         // Expanded Probe Launcher I (18639, 8.0 m3 capacity) supports both Core and Combat Scanner Probes.
         snap.items.insert(
             launcher_id,
@@ -730,7 +698,7 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     // 1. Negative check: empty launcher must have empty `shipState[1]` for HiSlot0.
     let empty_all = ctx
         .dispatch_rpc(
-            &mut sess,
+            sess,
             "dogmaIM",
             None,
             "GetAllInfo",
@@ -746,11 +714,11 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
         panic!("shipState must be 4-tuple");
     };
     assert_ship_state_subloc(empty_ship_state, None);
-    let _ = collect_notes(&mut sess);
+    let _ = collect_notes(sess);
 
     // 2. Live `dogmaIM.LoadAmmo` (Core Scanner Probe I, 30013 x8): must prime sublocation BEFORE `OnChargeLoadedToModule`.
     ctx.dispatch_rpc(
-        &mut sess,
+        sess,
         "dogmaIM",
         None,
         "LoadAmmo",
@@ -764,7 +732,7 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     )
     .await
     .expect("LoadAmmo 30013");
-    let load_notes = collect_notes(&mut sess);
+    let load_notes = collect_notes(sess);
     let prime_idx = load_notes
         .iter()
         .position(|(ev, args)| {
@@ -799,7 +767,7 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     // 3. Cold reconnect `GetAllInfo`, `ItemGetInfo` sublocation key lookup, and `ship.Board` prime.
     let loaded_all = ctx
         .dispatch_rpc(
-            &mut sess,
+            sess,
             "dogmaIM",
             None,
             "GetAllInfo",
@@ -839,7 +807,7 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
 
     let get_info_sub = ctx
         .dispatch_rpc(
-            &mut sess,
+            sess,
             "dogmaIM",
             None,
             "ItemGetInfo",
@@ -868,16 +836,16 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
 
     // Re-board ship to verify `ship.Board` returns `shipState[1]` DBRow and emits `ProcessGodmaPrimeLocation`.
     ctx.advance_secs(31);
-    let _ = collect_notes(&mut sess);
+    let _ = collect_notes(sess);
     let board_rep = ctx
-        .dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None)
+        .dispatch_rpc(sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None)
         .await
         .expect("ship.Board");
     let PyRep::Tuple(ref board_ship_state) = board_rep else {
         panic!("ship.Board must return 4-tuple shipState");
     };
     assert_ship_state_subloc(board_ship_state, Some((30013, 8)));
-    let board_notes = collect_notes(&mut sess);
+    let board_notes = collect_notes(sess);
     let prime_loc = board_notes
         .iter()
         .find(|(ev, _)| ev == "ProcessGodmaPrimeLocation")
@@ -891,9 +859,9 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     );
 
     // 4. Probe type swap (`LoadAmmo` with 30028 Combat Scanner Probe I): must expel old 30013 (`attr 805 -> 0.0`) & prime 30028.
-    let _ = collect_notes(&mut sess);
+    let _ = collect_notes(sess);
     ctx.dispatch_rpc(
-        &mut sess,
+        sess,
         "dogmaIM",
         None,
         "LoadAmmo",
@@ -907,7 +875,7 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     )
     .await
     .expect("LoadAmmo swap to 30028");
-    let swap_notes = collect_notes(&mut sess);
+    let swap_notes = collect_notes(sess);
     let has_attr805_delta = |notes: &[(String, Vec<PyRep>)], charge_tid: u32, expected_new: f64| -> bool {
         let key = subloc_key(charge_tid);
         notes.iter().any(|(ev, args)| {
@@ -934,13 +902,13 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
 
     // 5. Undock -> `launchProbe` (`attr 805 -> 0.0`) -> `RecoverProbes` (`OnGodmaPrimeItem` + `OnChargeLoadedToModule`) -> `UnloadAmmo` (`attr 805 -> 0.0`).
     ctx.advance_secs(31);
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+    ctx.dispatch_rpc(sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock");
-    let _ = collect_notes(&mut sess);
+    let _ = collect_notes(sess);
 
     ctx.dispatch_rpc(
-        &mut sess,
+        sess,
         "dogmaIM",
         None,
         "Activate",
@@ -950,16 +918,16 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     )
     .await
     .expect("launchProbe");
-    let launch_notes = collect_notes(&mut sess);
+    let launch_notes = collect_notes(sess);
     assert!(
         has_attr805_delta(&launch_notes, 30028, 0.0),
         "launching last 8 probes must update sublocation attr 805 -> 0.0: {launch_notes:?}"
     );
 
-    ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None)
+    ctx.dispatch_rpc(sess, "scanMgr", None, "RecoverProbes", &[], &kw, None)
         .await
         .expect("RecoverProbes");
-    let recover_notes = collect_notes(&mut sess);
+    let recover_notes = collect_notes(sess);
     assert!(
         recover_notes.iter().any(|(ev, args)| {
             ev == "OnGodmaPrimeItem"
@@ -973,7 +941,7 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     );
 
     ctx.dispatch_rpc(
-        &mut sess,
+        sess,
         "dogmaIM",
         None,
         "UnloadAmmo",
@@ -983,7 +951,7 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     )
     .await
     .expect("UnloadAmmo");
-    let unload_notes = collect_notes(&mut sess);
+    let unload_notes = collect_notes(sess);
     assert!(
         has_attr805_delta(&unload_notes, 30028, 0.0),
         "UnloadAmmo must expel sublocation with attr 805 -> 0.0: {unload_notes:?}"
@@ -995,30 +963,21 @@ async fn test_gh1034_mining_anomaly_not_duplicated_in_signal_tracker_or_probe_sc
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let (char_id, sys_id, ship_id, launcher_id) =
-        (90_000_001_i64, 30_000_119_u32, 610_103_401_i64, 610_103_410_i64);
-    let mut sess = setup_pilot_in_space(&ctx, 71034, char_id, sys_id, ship_id, 606).await;
+    let (sys_id, launcher_id) = (30_000_119_u32, 610_103_410_i64);
+    let mut actor = build_scan_actor(&ctx, 0x5C04, "gh1034", 606, &[3412, 3426, 25810, 25811], true).await;
+    place_actor_in_jita(&ctx, &mut actor, None, sys_id).await;
+    let (char_id, ship_id) = (actor.character_id, actor.ship_id.expect("built ship_id"));
+    let mut harness = actor.harness;
 
     // Trigger real SDE mining-site seeding on sys 30000119 (the #1034 system),
     // which inserts DNG-* OreAnomaly records into both cosmic_anomalies and cosmic_signatures.
-    common::borrow_wire_harness(&ctx, &mut sess)
+    harness
         .call_ok("dungeonInstanceCacheMgr", None, "GetOreAnomalyInstances", &[], &kw)
         .await;
 
     let sig_pos = [1.0e9_f64, 0.0, 0.0];
     let now = ctx.now_unix();
     let seeded_ore_ids: Vec<String> = ctx.db.with_mut_snapshot(|snap| {
-        let sk = snap.skills.entry(char_id).or_default();
-        for tid in [3412_u32, 3426, 25810, 25811] {
-            sk.insert(
-                tid,
-                TrainedSkillRecord {
-                    type_id: tid,
-                    level: 5,
-                    skill_points: 256_000.0,
-                },
-            );
-        }
         if let Some(sh) = snap.items.get_mut(&ship_id) {
             sh.dynamic_attributes.insert(48, 2_000.0);
             sh.dynamic_attributes.insert(11, 2_000.0);
@@ -1100,9 +1059,9 @@ async fn test_gh1034_mining_anomaly_not_duplicated_in_signal_tracker_or_probe_sc
         seeded_ore_ids.iter().any(|id| id.starts_with("DNG-")) && seeded_ore_ids.iter().any(|id| id == "ICE-1034"),
         "expected seeded DNG-* OreAnomaly and ICE-1034 in sys {sys_id}, got {seeded_ore_ids:?}"
     );
-    let _ = sess.drain_notifications();
+    let _ = harness.drain_notifications();
+    let _ = harness.transport_mut().inner.session.drain_notifications();
     let _ = ctx.drain_notifications_for_char(char_id);
-    let mut harness = common::wrap_wire_harness(&ctx, sess);
 
     // 1. SignalTrackerRegister -> OnSignalTrackerFullState must have zero overlap between anomalies and signatures.
     harness
@@ -1137,6 +1096,10 @@ async fn test_gh1034_mining_anomaly_not_duplicated_in_signal_tracker_or_probe_sc
     let scan_mgr = harness
         .call_ok("scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(i64::from(sys_id))], &kw)
         .await;
+    assert!(
+        matches!(scan_mgr, PyRep::SubStruct(_)),
+        "scanMgr.GetSystemScanMgr on wire must return bound PyRep::SubStruct, got {scan_mgr:?}"
+    );
     let scan_mgr_oid = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&scan_mgr)
         .expect("GetSystemScanMgr must return bound SubStruct over wire");
 
@@ -1214,24 +1177,15 @@ async fn request_scans_started_stopped_payloads() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
-    let (char_id, sys_id, ship_id, launcher_id) =
-        (90_000_001_i64, 30_000_142_u32, 610_107_701_i64, 610_107_710_i64);
-    let mut sess = setup_pilot_in_space(&ctx, 71077, char_id, sys_id, ship_id, 606).await;
+    let (sys_id, launcher_id) = (30_000_142_u32, 610_107_710_i64);
+    let mut actor = build_scan_actor(&ctx, 0x5C05, "req_scans", 606, &[3412, 3402, 25810, 25811], true).await;
+    place_actor_in_jita(&ctx, &mut actor, None, sys_id).await;
+    let (char_id, ship_id) = (actor.character_id, actor.ship_id.expect("built ship_id"));
+    let mut harness = actor.harness;
 
     let sig_pos = [300_000.0, 0.0, 0.0];
     let now_u = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        let sk = snap.skills.entry(char_id).or_default();
-        for tid in [3412_u32, 3402, 25810, 25811] {
-            sk.insert(
-                tid,
-                TrainedSkillRecord {
-                    type_id: tid,
-                    level: 5,
-                    skill_points: 512_000.0,
-                },
-            );
-        }
         snap.items.insert(
             launcher_id,
             make_item(launcher_id, 17938, char_id, ship_id, InventoryFlag::HiSlot0, 1, true),
@@ -1263,18 +1217,16 @@ async fn request_scans_started_stopped_payloads() {
     ctx.invalidate_ship_fitting(ship_id);
 
     // Launch 8 probes and verify 8-probe cap on overflow launch
-    let _ = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let launch_rep = harness
+        .call_ok(
             "dogmaIM",
             None,
             "Activate",
             &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())],
             &kw,
-            None,
         )
-        .await
-        .expect("initial 8-probe launch");
+        .await;
+    assert_eq!(launch_rep.dict_get("launchedCount").and_then(|v| v.as_i64()), Some(8));
     let launched_count = ctx
         .active_scanner_probes
         .read()
@@ -1290,15 +1242,13 @@ async fn request_scans_started_stopped_payloads() {
             make_item(610_107_712, 30013, char_id, ship_id, InventoryFlag::HiSlot0, 8, false),
         );
     });
-    let cap_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let cap_err = harness
+        .call(
             "dogmaIM",
             None,
             "Activate",
             &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())],
             &kw,
-            None,
         )
         .await
         .expect_err("9th+ probe launch must reject with MaxProbesLaunched");
@@ -1313,11 +1263,15 @@ async fn request_scans_started_stopped_payloads() {
     assert_eq!(count_after_cap, 8, "8-probe cap rejection must not change active probe count");
 
     // RequestScans -> verify OnSystemScanStarted, OnSystemScanStopped, scanGroupID=3, groupID=502, strengthAttributeID=1908
-    let _ = ctx
-        .dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[], &kw, None)
-        .await
-        .expect("GetSystemScanMgr");
-    let _ = sess.drain_notifications();
+    let scan_mgr = harness
+        .call_ok("scanMgr", None, "GetSystemScanMgr", &[], &kw)
+        .await;
+    assert!(
+        matches!(scan_mgr, PyRep::SubStruct(_)),
+        "scanMgr.GetSystemScanMgr on wire must return bound PyRep::SubStruct, got {scan_mgr:?}"
+    );
+    let _ = harness.drain_notifications();
+    let _ = harness.transport_mut().inner.session.drain_notifications();
     let _ = ctx.drain_notifications_for_char(char_id);
 
     let coords_step1 = PyRep::List(
@@ -1332,7 +1286,6 @@ async fn request_scans_started_stopped_payloads() {
             })
             .collect(),
     );
-    let mut harness = common::wrap_wire_harness(&ctx, sess);
     let scan_ret = harness
         .call_ok("scanMgr", None, "RequestScans", &[coords_step1], &kw)
         .await;
@@ -1373,9 +1326,13 @@ async fn request_scans_started_stopped_payloads() {
 
     ctx.advance_secs(25);
     eve_server::services::space_probe_scanning::tick_probe_warp_end(&ctx);
-    let _ = harness
+    let full_state = harness
         .call_ok("scanMgr", None, "GetFullState", &[], &kw)
         .await;
+    let PyRep::Tuple(fs_parts) = full_state else {
+        panic!("expected GetFullState tuple, got {full_state:?}");
+    };
+    assert_eq!(fs_parts.len(), 4);
 
     let stopped_notes = harness.drain_notifications();
     let (_, stopped_args) = stopped_notes

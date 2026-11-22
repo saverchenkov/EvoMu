@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use eve_proto::PyRep;
 use eve_server::rng::MechanicRng;
+use eve_server::router::ServerContext;
 use eve_server::services::pve_crab_beacons::{
     get_system_interference_level_decayed, tick_crab_beacons_in_system, CrabBeaconPhase,
     CRAB_CEQ_COST, CRAB_INTERFERENCE_DELTA, CRAB_LINK_DURATION_SECS, TYPE_CARRIER_CRAB_BEACON,
@@ -17,16 +18,59 @@ use eve_server::services::pve_special_sites::with_pve_special_reg;
 use eve_server::services::pve_exploration::{
     ensure_system_pve_sites_seeded, with_pve_exploration_reg, HackingNodeKind,
 };
+use eve_testkit::legal_fixture::{assert_legal_fixture, FixtureSessionView, LegalFixtureExpectation};
+use eve_testkit::scenario::{ActorSpec, BuiltActor, BuiltScenario, FleetSetup, ScenarioBuilder, ScenarioWorldBackend};
+use crate::common::ServerWireTransport;
 use crate::pve_e2e_common::{
     bind_service, buy_fit_combat_ship, buy_item_at_station, configure_sqlite_blob_and_reload,
-    create_player_pilot, drain_all_notifications, ensure_skills_for_types, fly_stargates_to,
-    fresh_player_ctx, fund_pilot_isk, kv_get, login_existing_player, move_ship_to_ball,
-    reload_ctx_from_sqlite, rpc_err, rpc_ok, rpc_res, undock_from_station, wait_for_warp_end,
-    warp_and_engage_ball, JITA_STATION, JITA_SYS, LOWSEC_NOURVUKAIKEN_SYS,
+    drain_all_notifications, ensure_skills_for_types, fly_stargates_to, fresh_player_ctx, kv_get,
+    login_existing_player, move_ship_to_ball, reload_ctx_from_sqlite, rpc_err, rpc_ok, rpc_res,
+    undock_from_station, wait_for_warp_end, warp_and_dock_at_station, warp_and_engage_ball,
+    JITA_STATION, JITA_SYS, LOWSEC_NOURVUKAIKEN_SYS,
 };
+use crate::scenario_common::ServerScenarioBackend;
 
 fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     kv_get(rep, key)
+}
+
+fn session_view(s: &eve_machonet::SessionState) -> FixtureSessionView {
+    FixtureSessionView { session_id: s.session_id, user_id: s.user_id, character_id: s.character_id, corporation_id: s.corporation_id, alliance_id: s.alliance_id, station_id: s.station_id, structure_id: s.structure_id, solar_system_id: s.solar_system_id, ship_id: s.ship_id, corp_role: s.corp_role, fleet_id: s.fleet_id, role: s.role, now_unix: None }
+}
+
+async fn dock_actor_at_jita(ctx: &ServerContext, actor: &mut BuiltActor<ServerWireTransport<'_>>) {
+    let sess = &mut actor.harness.transport_mut().inner.session;
+    let cur_sys = actor.solar_system_id;
+    if cur_sys != JITA_SYS {
+        if sess.station_id.is_some() { undock_from_station(ctx, sess, cur_sys).await; }
+        fly_stargates_to(ctx, sess, JITA_SYS).await;
+    }
+    if sess.station_id != Some(JITA_STATION) {
+        let ship_id = sess.ship_id.expect("active ship");
+        warp_and_dock_at_station(ctx, sess, ship_id, JITA_SYS, JITA_STATION).await;
+    }
+    let view = session_view(&actor.harness.transport().inner.session);
+    let exp = LegalFixtureExpectation { expected_dock_location_id: Some(JITA_STATION), expect_in_space: Some(false), ..actor.expectation.clone() };
+    ctx.db.with_snapshot(|snap| assert_legal_fixture(&actor.label, snap, &ctx.sde, &view, &exp));
+}
+
+fn actor_spec(label: &str, username: &str, character_name: &str, starting_isk: f64, require_omega: bool, in_space: bool, fleet: FleetSetup) -> ActorSpec {
+    ActorSpec { label: label.into(), username: username.into(), password: format!("{username}-secret"), character_name: character_name.into(), starting_isk, require_omega, in_space, fleet, ..ActorSpec::default() }
+}
+
+async fn build_checked_scenario<'c>(ctx: &'c ServerContext, specs: Vec<ActorSpec>) -> BuiltScenario<ServerWireTransport<'c>> {
+    let mut backend = ServerScenarioBackend::new(ctx);
+    let b = specs.into_iter().fold(ScenarioBuilder::new(), |b, spec| b.add_actor(spec));
+    let scenario = b.build(&mut backend).await;
+    for actor in &scenario.actors {
+        let view = backend.actor_session_view(actor.harness.transport());
+        ctx.db.with_snapshot(|snap| assert_legal_fixture(&actor.label, snap, &ctx.sde, &view, &actor.expectation));
+    }
+    scenario
+}
+
+fn assert_sess_legal(ctx: &ServerContext, label: &str, sess: &eve_machonet::SessionState) {
+    ctx.db.with_snapshot(|snap| assert_legal_fixture(label, snap, &ctx.sde, &session_view(sess), &LegalFixtureExpectation::default()));
 }
 
 async fn scan_signature_to_resolved(
@@ -68,8 +112,10 @@ async fn scan_signature_to_resolved(
 #[tokio::test]
 async fn test_seasons_milestones_and_seasonal_campaigns_e2e() {
     let ctx = fresh_player_ctx();
-    let (mut sess, char_id, _ship_id) =
-        create_player_pilot(&ctx, 51_001, "season_pilot_u1", "Season Runner", 0).await;
+    let scenario = build_checked_scenario(&ctx, vec![actor_spec("season_pilot", "season_pilot_u1", "Season Runner", 50_000_000.0, false, false, FleetSetup::None)]).await;
+    let actor = scenario.actors.into_iter().next().expect("season_pilot");
+    let char_id = actor.character_id;
+    let mut sess = actor.harness.into_transport().inner.session;
 
     let max_active = rpc_ok(&ctx, &mut sess, "seasonManager", "get_max_active_challenges", &[])
         .await
@@ -136,7 +182,7 @@ async fn test_seasons_milestones_and_seasonal_campaigns_e2e() {
     assert!(exp_date > 0);
 
     for _ in 0..max_prog {
-        let _ = rpc_ok(
+        let ev_rep = rpc_ok(
             &ctx,
             &mut sess,
             "seasonManager",
@@ -144,12 +190,14 @@ async fn test_seasons_milestones_and_seasonal_campaigns_e2e() {
             &[PyRep::Integer(ch_id), PyRep::Integer(1), extra_data.clone()],
         )
         .await;
+        assert_eq!(ev_rep, PyRep::None);
     }
     let claim_rep = rpc_ok(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(ch_id)]).await;
     assert_ne!(claim_rep, PyRep::None);
 
     // Milestones: ProcessCharacterLogon starts 120-min timer; early ClaimRewards rejected
-    let _ = rpc_ok(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[]).await;
+    let logon_rep = rpc_ok(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[]).await;
+    assert_eq!(logon_rep, PyRep::None);
     let m_notes = drain_all_notifications(&ctx, &mut sess, char_id);
     assert!(
         m_notes.iter().any(|(e, _)| e == "OnMilestoneTimerStarted"),
@@ -160,7 +208,8 @@ async fn test_seasons_milestones_and_seasonal_campaigns_e2e() {
 
     ctx.advance_secs(120 * 60 + 5);
     let bal_before_ms = ctx.db.get_character(char_id).map(|c| c.balance.raw_cents()).unwrap_or(0);
-    rpc_ok(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)]).await;
+    let claim_ms = rpc_ok(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)]).await;
+    assert_eq!(claim_ms, PyRep::None);
     let bal_after_ms = ctx.db.get_character(char_id).map(|c| c.balance.raw_cents()).unwrap_or(0);
     assert!(bal_after_ms > bal_before_ms, "Milestone ClaimRewards must credit ISK reward");
 
@@ -175,6 +224,7 @@ async fn test_seasons_milestones_and_seasonal_campaigns_e2e() {
     );
     let ctx2 = configure_sqlite_blob_and_reload(&ctx, "seasonal_login_schedule", &sched_json);
     let (mut sess2, _) = login_existing_player(&ctx2, 51_003, "season_pilot_u1", "season_pilot_u1-secret", char_id).await;
+    assert_sess_legal(&ctx2, "season_pilot_reload_1", &sess2);
 
     let active_camp = rpc_ok(&ctx2, &mut sess2, "seasonalLoginCampaignManager", "get_active_campaign", &[]).await;
     match &active_camp {
@@ -186,6 +236,7 @@ async fn test_seasons_milestones_and_seasonal_campaigns_e2e() {
 
     let ctx3 = reload_ctx_from_sqlite(&ctx2);
     let (mut sess3, _) = login_existing_player(&ctx3, 51_004, "season_pilot_u1", "season_pilot_u1-secret", char_id).await;
+    assert_sess_legal(&ctx3, "season_pilot_reload_2", &sess3);
     let hist = rpc_ok(&ctx3, &mut sess3, "seasonalLoginCampaignManager", "get_claim_history", &[]).await;
     match &hist {
         PyRep::Dict(entries) => assert_eq!(entries.len(), 1, "SQLite reload must preserve 1 seasonal claim day"),
@@ -202,10 +253,19 @@ async fn test_seasons_milestones_and_seasonal_campaigns_e2e() {
 #[tokio::test]
 async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
     let ctx = fresh_player_ctx();
+    let scenario = build_checked_scenario(&ctx, vec![
+        actor_spec("hacker_exp", "hacker_exp_u1", "Explorer Ace", 500_000_000.0, true, false, FleetSetup::None),
+        actor_spec("hacker_obs", "hacker_obs_u2", "Observer Pilot", 50_000_000.0, false, true, FleetSetup::None),
+    ]).await;
     let low_seed = (1_u64..1000).find(|&s| MechanicRng::seeded(s).try_unit_f64().unwrap() < 0.05).unwrap_or(42);
     ctx.mechanic_rng.set_seed(Some(low_seed));
 
-    let (mut sess, char_id, _pod) = create_player_pilot(&ctx, 51_101, "hacker_exp_u1", "Explorer Ace", JITA_SYS).await;
+    let mut actors = scenario.actors.into_iter();
+    let (mut actor, obs_actor) = (actors.next().unwrap(), actors.next().unwrap());
+    dock_actor_at_jita(&ctx, &mut actor).await;
+    let (char_id, obs_cid) = (actor.character_id, obs_actor.character_id);
+    let mut sess = actor.harness.into_transport().inner.session;
+    let mut obs_sess = obs_actor.harness.into_transport().inner.session;
     let analyzer_tid = ctx
         .sde
         .types
@@ -254,7 +314,8 @@ async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
 
     let start_rep = rpc_ok(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(data_can_id)]).await;
     assert_eq!(dict_get(&start_rep, "status").and_then(|v| v.as_str()), Some("InProgress"));
-    let _ = rpc_ok(&ctx, &mut sess, "hackingMgr", "GetMyHackProgress", &[]).await;
+    let hack_prog = rpc_ok(&ctx, &mut sess, "hackingMgr", "GetMyHackProgress", &[]).await;
+    assert_eq!(dict_get(&hack_prog, "status").and_then(|v| v.as_str()), Some("InProgress"));
 
     let (has_core, has_def, has_util) = with_pve_exploration_reg(&ctx, |reg| {
         let g = &reg.hacking_games[&(char_id, data_can_id)];
@@ -265,12 +326,19 @@ async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
     });
     assert!(has_core && has_def && has_util, "hacking grid must spawn SystemCore, Defensive, and UtilitySubsystem nodes");
 
-    let _ = rpc_ok(&ctx, &mut sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(1)]).await;
-    let _ = rpc_res(&ctx, &mut sess, "hackingMgr", "UsedUtilityElement", &[PyRep::Integer(0)]).await;
-    let _ = rpc_res(&ctx, &mut sess, "hackingMgr", "UsedUtilityElementOnVirus", &[PyRep::Integer(0)]).await;
+    let click_rep = rpc_ok(&ctx, &mut sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(1)]).await;
+    assert_eq!(dict_get(&click_rep, "containerID").and_then(|v| v.as_i64()), Some(data_can_id));
+    match rpc_res(&ctx, &mut sess, "hackingMgr", "UsedUtilityElement", &[PyRep::Integer(0)]).await {
+        Ok(rep) => assert!(dict_get(&rep, "containerID").is_some() || rep != PyRep::None),
+        Err(e) => assert!(matches!(e.code.as_str(), "UtilitySlotEmpty" | "TargetTileNotRevealed" | "InvalidTileIndex"), "unexpected UsedUtilityElement err: {e:?}"),
+    }
+    match rpc_res(&ctx, &mut sess, "hackingMgr", "UsedUtilityElementOnVirus", &[PyRep::Integer(0)]).await {
+        Ok(rep) => assert!(dict_get(&rep, "containerID").is_some() || rep != PyRep::None),
+        Err(e) => assert!(matches!(e.code.as_str(), "UtilitySlotEmpty" | "TargetTileNotRevealed" | "InvalidTileIndex"), "unexpected UsedUtilityElementOnVirus err: {e:?}"),
+    }
 
     // 1st quit leaves container intact; 2nd failed attempt detonates standard container
-    let _ = rpc_ok(&ctx, &mut sess, "hackingMgr", "QuitHackingAttempt", &[PyRep::Integer(data_can_id)]).await;
+    assert_eq!(rpc_ok(&ctx, &mut sess, "hackingMgr", "QuitHackingAttempt", &[PyRep::Integer(data_can_id)]).await, PyRep::Bool(true));
     let (fc1, hacked1) = with_pve_exploration_reg(&ctx, |reg| {
         (
             reg.failure_counts.get(&(LOWSEC_NOURVUKAIKEN_SYS, data_can_id)).copied().unwrap_or(0),
@@ -279,8 +347,8 @@ async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
     });
     assert_eq!(fc1, 1, "1st fail records failure_counts=1");
     assert!(!hacked1, "1st fail keeps container intact");
-    let _ = rpc_ok(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(data_can_id)]).await;
-    let _ = rpc_ok(&ctx, &mut sess, "hackingMgr", "QuitHackingAttempt", &[PyRep::Integer(data_can_id)]).await;
+    assert_eq!(dict_get(&rpc_ok(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(data_can_id)]).await, "status").and_then(|v| v.as_str()), Some("InProgress"));
+    assert_eq!(rpc_ok(&ctx, &mut sess, "hackingMgr", "QuitHackingAttempt", &[PyRep::Integer(data_can_id)]).await, PyRep::Bool(true));
     let (fc2, hacked2) = with_pve_exploration_reg(&ctx, |reg| {
         (
             reg.failure_counts.get(&(LOWSEC_NOURVUKAIKEN_SYS, data_can_id)).copied().unwrap_or(0),
@@ -292,19 +360,23 @@ async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
 
     if let (Some(gsid), Some(gpos), Some(gcid)) = (ghost_site_id, ghost_pos, ghost_can_id) {
         scan_signature_to_resolved(&ctx, &mut sess, &gsid, gpos).await;
-        move_ship_to_ball(&ctx, &mut sess, LOWSEC_NOURVUKAIKEN_SYS, ship_id, "dungeon", PyRep::String(gsid)).await;
+        move_ship_to_ball(&ctx, &mut sess, LOWSEC_NOURVUKAIKEN_SYS, ship_id, "dungeon", PyRep::String(gsid.clone())).await;
         move_ship_to_ball(&ctx, &mut sess, LOWSEC_NOURVUKAIKEN_SYS, ship_id, "item", PyRep::Integer(gcid)).await;
-        let _ = rpc_res(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(gcid)]).await;
+        let gstart = rpc_ok(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(gcid)]).await;
+        assert_eq!(dict_get(&gstart, "status").and_then(|v| v.as_str()), Some("InProgress"), "ghost hack before 180s expiry must start InProgress: {gstart:?}");
         ctx.advance_secs(180);
-        let _ = rpc_res(&ctx, &mut sess, "hackingMgr", "QuitHackingAttempt", &[PyRep::Integer(gcid)]).await;
+        assert_eq!(rpc_ok(&ctx, &mut sess, "hackingMgr", "QuitHackingAttempt", &[PyRep::Integer(gcid)]).await, PyRep::Bool(true));
+        let detonated = with_pve_exploration_reg(&ctx, |reg| reg.sites_by_system[&LOWSEC_NOURVUKAIKEN_SYS].iter().find(|s| s.site_id == gsid).map(|s| s.ghost_detonated).unwrap_or(false));
+        assert!(detonated, "quitting ghost site hack after 180s expiry must detonate ghost site");
     }
 
     // Clear combat anomaly -> trigger Escalation -> OnDungeonInstanceAdded + GetMyEscalatingPathDetails + expedition chain
     let esc_dest_sys = eve_server::services::pve_expeditions::find_escalation_destination_system(&ctx, LOWSEC_NOURVUKAIKEN_SYS);
-    let (mut obs_sess, obs_cid, _) = create_player_pilot(&ctx, 51_102, "hacker_obs_u2", "Observer Pilot", 0).await;
     fly_stargates_to(&ctx, &mut obs_sess, esc_dest_sys).await;
-    let _ = drain_all_notifications(&ctx, &mut obs_sess, obs_cid);
-    let _ = drain_all_notifications(&ctx, &mut sess, char_id);
+    let pre_obs = drain_all_notifications(&ctx, &mut obs_sess, obs_cid);
+    assert!(pre_obs.iter().all(|(ev, _)| ev != "OnDungeonInstanceAdded"));
+    let pre_self = drain_all_notifications(&ctx, &mut sess, char_id);
+    assert!(pre_self.iter().all(|(ev, _)| ev != "OnDungeonInstanceAdded"));
     for _wave in 0..8 {
         let wave_npcs = with_pve_exploration_reg(&ctx, |reg| {
             reg.sites_by_system.get(&LOWSEC_NOURVUKAIKEN_SYS)
@@ -346,7 +418,8 @@ async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
         let dest_sys = entry.destination_solar_system_id;
         fly_stargates_to(&ctx, &mut sess, dest_sys).await;
         let b_oid = bind_service(&ctx, &mut sess, "beyonce", PyRep::Integer(i64::from(dest_sys))).await as u64;
-        ctx.dispatch_rpc(&mut sess, "beyonce", Some(b_oid), "CmdWarpToStuff", &[PyRep::String("epinstance".into()), PyRep::Integer(esc_inst_id)], &HashMap::new(), None).await.unwrap();
+        let warp_rep = ctx.dispatch_rpc(&mut sess, "beyonce", Some(b_oid), "CmdWarpToStuff", &[PyRep::String("epinstance".into()), PyRep::Integer(esc_inst_id)], &HashMap::new(), None).await.expect("CmdWarpToStuff epinstance");
+        assert!(warp_rep.as_i64().is_some(), "CmdWarpToStuff must return warp tick: {warp_rep:?}");
         wait_for_warp_end(&ctx, dest_sys, ship_id).await;
         let expected_site_id = format!("EXP-{}-{}", entry.instance_id, entry.step_index);
         for _wave in 0..8 {
@@ -376,11 +449,21 @@ async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
 #[tokio::test]
 async fn test_crab_beacon_activation_ceq_interference_notify_e2e() {
     let ctx = fresh_player_ctx();
-    let (mut sess, char_id, _pod) = create_player_pilot(&ctx, 51_201, "crab_carrier_u1", "Carrier Pilot", JITA_SYS).await;
-    let (mut escort_sess, escort_cid, _) = create_player_pilot(&ctx, 51_203, "crab_escort_u3", "Dread Escort", JITA_SYS).await;
-    let (mut cyno_sess, cyno_cid, _) = create_player_pilot(&ctx, 51_202, "crab_cyno_u2", "Cyno Pilot", JITA_SYS).await;
-    fund_pilot_isk(&ctx, &mut sess, 6).await;
-    fund_pilot_isk(&ctx, &mut escort_sess, 4).await;
+    let scenario = build_checked_scenario(&ctx, vec![
+        actor_spec("crab_carrier", "crab_carrier_u1", "Carrier Pilot", 50_000_000_000.0, true, false, FleetSetup::CreateFleet),
+        actor_spec("crab_escort", "crab_escort_u3", "Dread Escort", 50_000_000_000.0, true, false, FleetSetup::JoinActorFleet { leader_actor_index: 0 }),
+        actor_spec("crab_cyno", "crab_cyno_u2", "Cyno Pilot", 5_000_000_000.0, true, false, FleetSetup::JoinActorFleet { leader_actor_index: 0 }),
+    ]).await;
+
+    let mut actors = scenario.actors.into_iter();
+    let (mut carrier_actor, mut escort_actor, mut cyno_actor) = (actors.next().unwrap(), actors.next().unwrap(), actors.next().unwrap());
+    dock_actor_at_jita(&ctx, &mut carrier_actor).await;
+    dock_actor_at_jita(&ctx, &mut escort_actor).await;
+    dock_actor_at_jita(&ctx, &mut cyno_actor).await;
+    let (char_id, escort_cid, cyno_cid) = (carrier_actor.character_id, escort_actor.character_id, cyno_actor.character_id);
+    let mut sess = carrier_actor.harness.into_transport().inner.session;
+    let mut escort_sess = escort_actor.harness.into_transport().inner.session;
+    let mut cyno_sess = cyno_actor.harness.into_transport().inner.session;
 
     ensure_skills_for_types(&ctx, &mut sess, char_id, JITA_STATION, &[28_352, 17_887, 3_456, 1319, TYPE_CRAB_BEACON, 28_756]).await;
     let carrier_id = buy_item_at_station(&ctx, &mut sess, char_id, JITA_STATION, 28_352, 1).await;
@@ -415,12 +498,6 @@ async fn test_crab_beacon_activation_ceq_interference_notify_e2e() {
     let ozone = buy_item_at_station(&ctx, &mut cyno_sess, cyno_cid, JITA_STATION, 16_273, 1_500).await;
     rpc_ok(&ctx, &mut cyno_sess, "invbroker", "Add", &[PyRep::Integer(ozone), PyRep::Integer(cyno_ship), PyRep::Integer(5)]).await;
 
-    let _ = rpc_ok(&ctx, &mut sess, "fleetMgr", "CreateFleet", &[]).await;
-    for (fcid, fsess) in [(cyno_cid, &mut cyno_sess), (escort_cid, &mut escort_sess)] {
-        let _ = rpc_res(&ctx, &mut sess, "fleetMgr", "Invite", &[PyRep::Integer(fcid), PyRep::Integer(4)]).await;
-        let _ = rpc_res(&ctx, fsess, "fleetMgr", "AcceptInvite", &[]).await;
-    }
-
     let jita_pos = glam::DVec3::from_array(ctx.sde.solar_systems[&JITA_SYS].galactic_pos_ly);
     let crab_sys = ctx.sde.solar_systems.values()
         .filter(|s| s.solar_system_id < 31_000_000 && s.region_id != 10_000_070 && s.security_status < 0.45 && glam::DVec3::from_array(s.galactic_pos_ly).distance(jita_pos) <= 4.9)
@@ -441,11 +518,12 @@ async fn test_crab_beacon_activation_ceq_interference_notify_e2e() {
         })
         .expect("safe celestial in crab_sys");
     let cyno_b = bind_service(&ctx, &mut cyno_sess, "beyonce", PyRep::Integer(i64::from(crab_sys))).await as u64;
-    let _ = ctx.dispatch_rpc(
+    let cyno_warp = ctx.dispatch_rpc(
         &mut cyno_sess, "beyonce", Some(cyno_b), "CmdWarpToStuff",
         &[PyRep::String("item".into()), PyRep::Integer(safe_cel.celestial_id as i64)],
         &HashMap::new(), None,
-    ).await;
+    ).await.expect("cyno CmdWarpToStuff");
+    assert!(cyno_warp.as_i64().is_some(), "cyno warp must return tick: {cyno_warp:?}");
     wait_for_warp_end(&ctx, crab_sys, cyno_ship).await;
     ctx.advance_secs(35);
     let cyno_d = bind_service(&ctx, &mut cyno_sess, "dogmaIM", PyRep::Integer(cyno_ship)).await as u64;
@@ -459,27 +537,30 @@ async fn test_crab_beacon_activation_ceq_interference_notify_e2e() {
     undock_from_station(&ctx, &mut sess, JITA_SYS).await;
     ctx.advance_secs(35);
     let jita_b = bind_service(&ctx, &mut sess, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
-    ctx.dispatch_rpc(
+    let jump_rep = ctx.dispatch_rpc(
         &mut sess, "beyonce", Some(jita_b), "CmdJumpToFleetModuleBeacon",
         &[PyRep::Integer(cyno_cid), PyRep::Integer(i64::from(crab_sys)), PyRep::Integer(cyno_beacon_id)],
         &HashMap::new(), None,
     ).await.unwrap();
+    assert_eq!(dict_get(&jump_rep, "solarSystemID"), Some(&PyRep::Integer(i64::from(crab_sys))));
     sess.solar_system_id = Some(crab_sys);
-    let _ = bind_service(&ctx, &mut sess, "beyonce", PyRep::Integer(i64::from(crab_sys))).await;
+    assert!(bind_service(&ctx, &mut sess, "beyonce", PyRep::Integer(i64::from(crab_sys))).await > 0);
     fly_stargates_to(&ctx, &mut escort_sess, crab_sys).await;
     let nour_b_oid = bind_service(&ctx, &mut sess, "beyonce", PyRep::Integer(i64::from(crab_sys))).await as u64;
     let crab_sys_h = ctx.systems.get_or_spawn(crab_sys);
     for cap_sess in [&mut sess, &mut escort_sess] {
         let b = bind_service(&ctx, cap_sess, "beyonce", PyRep::Integer(i64::from(crab_sys))).await as u64;
-        let _ = ctx.dispatch_rpc(cap_sess, "beyonce", Some(b), "CmdSetSpeedFraction", &[PyRep::Real(0.1)], &HashMap::new(), None).await;
+        let spd = ctx.dispatch_rpc(cap_sess, "beyonce", Some(b), "CmdSetSpeedFraction", &[PyRep::Real(0.1)], &HashMap::new(), None).await.expect("CmdSetSpeedFraction");
+        assert!(spd.as_i64().is_some());
     }
-    let _ = crab_sys_h.step_manual(2.0).await;
+    crab_sys_h.step_manual(2.0).await.expect("step_manual");
     for cap_sess in [&mut sess, &mut escort_sess] {
         let b = bind_service(&ctx, cap_sess, "beyonce", PyRep::Integer(i64::from(crab_sys))).await as u64;
-        let _ = ctx.dispatch_rpc(cap_sess, "beyonce", Some(b), "CmdStop", &[], &HashMap::new(), None).await;
+        let stp = ctx.dispatch_rpc(cap_sess, "beyonce", Some(b), "CmdStop", &[], &HashMap::new(), None).await.expect("CmdStop");
+        assert!(stp.as_i64().is_some());
     }
-    let _ = crab_sys_h.step_manual(1.0).await;
-    let _ = drain_all_notifications(&ctx, &mut sess, char_id);
+    crab_sys_h.step_manual(1.0).await.expect("step_manual");
+    drop(drain_all_notifications(&ctx, &mut sess, char_id));
     let ship_pos = crab_sys_h.get_ball_position_sync(carrier_id).expect("carrier in crab_sys");
     let anchor_offsets = [(-4_500.0, 0.0), (0.0, 4_900.0), (2_000.0, 0.0), (0.0, -4_900.0)];
     let mut prev_mod = 1.0_f64;
@@ -504,7 +585,7 @@ async fn test_crab_beacon_activation_ceq_interference_notify_e2e() {
         let apos = PyRep::Tuple(vec![PyRep::Real(ship_pos.x + dx), PyRep::Real(ship_pos.y + dy), PyRep::Real(ship_pos.z)]);
         rpc_ok(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(bid), apos]).await;
         ctx.advance_secs(2);
-        let _ = crab_sys_h.step_manual(2.0).await;
+        crab_sys_h.step_manual(2.0).await.expect("step_manual");
         if idx < 3 {
             let link_rep = ctx.dispatch_rpc(
                 &mut sess, "beyonce", Some(nour_b_oid), "CallComponentFromClient",
