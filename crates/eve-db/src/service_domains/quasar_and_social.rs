@@ -306,6 +306,27 @@ pub struct QuasarAclRecord {
     pub everyone: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommittedStorePurchaseRecord {
+    pub buyer_user_id: u64,
+    pub channel: String,
+    pub idempotency_key: String,
+    pub offer_id: u64,
+    pub quantity: u32,
+    pub gift_char_id: Option<i64>,
+    pub active_char_id: Option<i64>,
+    pub payment_token_id: Option<u32>,
+    pub tx_id: u64,
+    pub plex_spent: i64,
+    pub plex_credited: i64,
+    pub is_free_mode_settlement: bool,
+    pub delivered_item_id: i64,
+    pub delivered_items_count: i64,
+    pub committed_unix: u64,
+    pub commit_seq: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QuasarCommerceStore {
@@ -323,6 +344,7 @@ pub struct QuasarCommerceStore {
     pub acl_registry: Option<Vec<QuasarAclRecord>>,
     #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub lp_asset_ops_completed: HashSet<String>,
+    pub store_purchase_idempotency: BTreeMap<String, CommittedStorePurchaseRecord>,
 }
 
 // ============================================================================

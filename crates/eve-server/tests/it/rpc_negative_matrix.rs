@@ -6892,6 +6892,7 @@ fn target_b_sub_stores_mutated(
             targeted_offers,
             acl_registry,
             lp_asset_ops_completed: _,
+            store_purchase_idempotency,
         } = qc;
         let char_b_u32 = u32::try_from(CHAR_B_ID).ok();
         (
@@ -6986,6 +6987,11 @@ fn target_b_sub_stores_mutated(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default(),
+            store_purchase_idempotency
+                .iter()
+                .filter(|(_, r)| r.buyer_user_id == USER_B_ID)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<_, _>>(),
         )
     };
     let fleet_ops_b = |fo: &eve_db::service_domains::FleetAndSocialOpsStore| {

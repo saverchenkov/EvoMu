@@ -1097,269 +1097,90 @@ fn register_payment_token_and_purchase_handlers(
     router.register_handler(
         "eve_public.payment.purchase.api.TokenRequest",
         Arc::new(move |ctx, any, dyn_msg| {
-            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
+            let uid = ctx
+                .effective_user_id()
+                .filter(|&u| u > 0)
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))?
+                as u64;
             let raw_fields = parse_raw_varints(&any.value);
             let offer_id_opt = if let Some(DynamicValue::Message(order)) = dyn_msg.get(1) {
                 if let Some(DynamicValue::Message(off)) = order.get(1) {
-                    off.get(1).and_then(|v| match v {
-                        DynamicValue::String(s) => s.trim_start_matches("VEVC-").parse::<u64>().ok(),
-                        DynamicValue::Uint32(u) => Some(*u as u64),
-                        DynamicValue::Uint64(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u64),
-                        DynamicValue::Int64(i) => Some(*i as u64),
-                        _ => None,
-                    })
+                    off.get(1).and_then(parse_quasar_positive_u64_id)
                 } else {
-                    order.get(1).and_then(|v| match v {
-                        DynamicValue::String(s) => s.trim_start_matches("VEVC-").parse::<u64>().ok(),
-                        DynamicValue::Uint32(u) => Some(*u as u64),
-                        DynamicValue::Uint64(u) => Some(*u),
-                        _ => None,
-                    })
+                    order.get(1).and_then(parse_quasar_positive_u64_id)
                 }
             } else {
-                dyn_msg.get(1).and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u as u64),
-                    DynamicValue::Uint64(u) => Some(*u),
-                    DynamicValue::String(s) => s.trim_start_matches("VEVC-").parse::<u64>().ok(),
-                    _ => None,
-                })
-            }.or_else(|| raw_fields.get(&1).copied());
-            let offer_id = offer_id_opt.ok_or_else(|| (STATUS_BAD_REQUEST, "Missing offer ID".to_string()))?;
+                dyn_msg
+                    .get(1)
+                    .and_then(parse_quasar_positive_u64_id)
+                    .or_else(|| raw_fields.get(&1).copied().filter(|&id| id > 0))
+            };
+            let offer_id =
+                offer_id_opt.ok_or_else(|| (STATUS_BAD_REQUEST, "Missing offer ID".to_string()))?;
 
-            let token_id_opt = dyn_msg.get(2).and_then(|v| match v {
-                DynamicValue::Uint32(u) => Some(*u),
-                DynamicValue::Uint64(u) => Some(*u as u32),
-                DynamicValue::Int32(i) => Some(*i as u32),
-                DynamicValue::Int64(i) => Some(*i as u32),
-                DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Uint64(u) => Some(*u as u32),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Int64(i) => Some(*i as u32),
-                    _ => None,
-                }),
-                _ => None,
-            }).or_else(|| raw_fields.get(&2).map(|v| *v as u32));
-            let tok_id = token_id_opt.ok_or_else(|| (STATUS_BAD_REQUEST, "Missing token ID".to_string()))?;
-
-            let qty = dyn_msg
-                .get(1)
+            let token_id_opt = dyn_msg
+                .get(2)
                 .and_then(|v| match v {
-                    DynamicValue::Message(order) => order.get(2).and_then(|qv| match qv {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Uint64(u) => Some(*u as u32),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Int64(i) => Some(*i as u32),
-                        _ => None,
-                    }),
-                    _ => None,
+                    DynamicValue::Message(m) => m.get(1).and_then(parse_quasar_positive_u32_checked),
+                    other => parse_quasar_positive_u32_checked(other),
                 })
                 .or_else(|| {
-                    dyn_msg.get(3).and_then(|qv| match qv {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Uint64(u) => Some(*u as u32),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Int64(i) => Some(*i as u32),
-                        _ => None,
-                    })
-                })
-                .or_else(|| raw_fields.get(&3).map(|v| *v as u32))
-                .unwrap_or(1)
-                .clamp(1, 10_000);
+                    raw_fields
+                        .get(&2)
+                        .copied()
+                        .and_then(|v| u32::try_from(v).ok())
+                        .filter(|&v| v > 0)
+                });
+            let tok_id =
+                token_id_opt.ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid token ID".to_string()))?;
+
+            ensure_quasar_wire_u32_quantity(&any.value, true)
+                .map_err(|msg| (STATUS_BAD_REQUEST, msg))?;
+            let qty = parse_quasar_clamped_token_quantity(dyn_msg, raw_fields.get(&3).copied())
+                .map_err(|msg| (STATUS_BAD_REQUEST, msg))?;
 
             let now_unix = ctx.now_unix();
-            let active_char_id = ctx.effective_character_id().map(|c| c as i64);
+            let idem_key = ctx
+                .idempotency_key
+                .clone()
+                .filter(|k| !k.is_empty())
+                .or_else(|| extract_quasar_store_idempotency_key(dyn_msg));
+            let input = StorePurchaseInput {
+                channel: StorePurchaseChannel::PaymentTokenQuasar,
+                buyer_user_id: uid,
+                active_char_id: ctx.effective_character_id().map(|c| c as i64),
+                gift_char_id: None,
+                session_station_id: None,
+                offer_id,
+                quantity: qty,
+                now_unix,
+                payment: StorePurchasePaymentSpec::PaymentTokenById {
+                    token_id: tok_id,
+                    create_omega_schedule: true,
+                },
+                fast_checkout_mode: false,
+                tx_description_mode: StoreTxDescriptionMode::NesOfferNameUpper,
+                idempotency_key: idem_key.as_deref(),
+            };
 
-            let (receipt_id, maybe_omega_notice, maybe_sched_id, delivered_mutations) = db_purchase
-                .try_with_mut_snapshot(|snap| -> Result<_, String> {
-                    let catalog = read_store_catalog(snap);
-                    let offer_tags = read_store_offer_tags(snap);
-                    let offer = catalog
-                        .offers
-                        .iter()
-                        .find(|o| o.id as u64 == offer_id)
-                        .cloned()
-                        .ok_or_else(|| format!("{STATUS_NOT_FOUND}:Store offer {offer_id} not found"))?;
-                    if offer.targeted
-                        && !is_user_eligible_for_targeted_offer(snap, &offer, uid, now_unix)
-                    {
-                        return Err(format!(
-                            "{STATUS_FORBIDDEN}:User {uid} is not eligible for targeted offer {offer_id}"
-                        ));
-                    }
-                    if offer.price_plex < 0 {
-                        return Err(format!("{STATUS_BAD_REQUEST}:Store offer {offer_id} has invalid negative PLEX price"));
-                    }
-                    let unit_cents = offer.price_cents.ok_or_else(|| {
-                        format!(
-                            "{STATUS_NOT_IMPLEMENTED}:DATA GAP: Real-money price_cents not configured for store offer {offer_id}"
-                        )
-                    })?;
-                    let amount_in_cents = (unit_cents.min(u64::from(u32::MAX)) as u32)
-                        .saturating_mul(qty);
-                    let currency = offer.currency.clone().unwrap_or_else(|| "USD".to_string());
+            let outcome = db_purchase
+                .try_with_mut_snapshot(|snap| purchase_store_offer_in_snapshot(snap, &input))
+                .map_err(store_purchase_error_to_quasar)?;
 
-                    let tok_idx = snap
-                        .quasar_commerce
-                        .payment_tokens
-                        .iter()
-                        .position(|t| t.id == tok_id)
-                        .ok_or_else(|| format!("{STATUS_NOT_FOUND}:Payment token {tok_id} not found"))?;
-                    {
-                        let tok = &snap.quasar_commerce.payment_tokens[tok_idx];
-                        if tok.user_id != uid {
-                            return Err(format!(
-                                "{STATUS_FORBIDDEN}:Forbidden: token belongs to another user"
-                            ));
-                        }
-                        if tok.consumed {
-                            return Err(format!(
-                                "{STATUS_BAD_REQUEST}:Payment token already consumed"
-                            ));
-                        }
-                        if !tok.is_quick_pay {
-                            return Err(format!(
-                                "{STATUS_BAD_REQUEST}:Payment token is not quick-pay enabled"
-                            ));
-                        }
-                    }
-
-                    let mut user_chars: Vec<_> = snap
-                        .characters
-                        .values()
-                        .filter(|c| c.user_id == uid)
-                        .cloned()
-                        .collect();
-                    user_chars.sort_by_key(|c| c.character_id);
-
-                    let chosen_char = if let Some(acid) = active_char_id {
-                        if let Some(ch) = snap.characters.get(&acid) {
-                            if ch.user_id == uid {
-                                Some(ch.clone())
-                            } else {
-                                return Err(format!("{STATUS_FORBIDDEN}:Target character {acid} does not belong to user"));
-                            }
-                        } else {
-                            return Err(format!("{STATUS_NOT_FOUND}:Target character {acid} not found"));
-                        }
-                    } else {
-                        user_chars.first().cloned()
-                    };
-
-                    let delivery_target = if !offer.product_ids.is_empty() {
-                        let mut items_to_deliver = Vec::new();
-                        for pid in &offer.product_ids {
-                            if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
-                                if prod.type_id > 0 && prod.quantity > 0 {
-                                    let deliver_qty = i32::try_from(prod.quantity.saturating_mul(qty))
-                                        .map_err(|_| format!("{STATUS_BAD_REQUEST}:Delivery quantity overflow"))?;
-                                    items_to_deliver.push((prod.type_id, deliver_qty));
-                                }
-                            }
-                        }
-                        if items_to_deliver.is_empty() {
-                            None
-                        } else {
-                            let ch = chosen_char.as_ref().ok_or_else(|| {
-                                format!("{STATUS_BAD_REQUEST}:No valid recipient character for purchase")
-                            })?;
-                            let target_station = ch
-                                .station_id
-                                .or(ch.structure_id)
-                                .or((ch.home_station_id > 0).then_some(ch.home_station_id))
-                                .ok_or_else(|| {
-                                    format!("{STATUS_BAD_REQUEST}:Target character has no valid station")
-                                })?;
-                            Some((ch.character_id, target_station, items_to_deliver))
-                        }
-                    } else {
-                        None
-                    };
-
-                    snap.quasar_commerce.payment_tokens[tok_idx].consumed = true;
-
-                    let delivered_mutations =
-                        if let Some((cid, target_station, items_to_deliver)) = delivery_target {
-                            deliver_store_hangar_items_in_snapshot(
-                                snap,
-                                cid,
-                                target_station,
-                                &items_to_deliver,
-                            )
-                        } else {
-                            Vec::new()
-                        };
-
-                    let tags = offer_tags.get(&offer.id).map(Vec::as_slice).unwrap_or(&[]);
-                    let mut omega_notice = None;
-                    let mut sched_id_opt = None;
-                    if let Some(duration_secs) =
-                        compute_omega_license_duration_secs(&offer, &catalog, tags, qty)
-                    {
-                        let (new_expiry, notice) = crate::services::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
-                            snap,
-                            uid,
-                            duration_secs,
-                            now_unix,
-                        );
-                        let interval_days =
-                            u32::try_from(duration_secs / 86_400).unwrap_or(u32::MAX);
-                        let sched_id = upsert_user_payment_schedule_in_snapshot(
-                            snap,
-                            uid,
-                            1,
-                            new_expiry,
-                            &format!("VEVC-{}", offer.id),
-                            interval_days,
-                            now_unix,
-                        );
-                        sched_id_opt = Some(sched_id);
-                        omega_notice = notice;
-                    }
-
-                    snap.next_entity_id += 1;
-                    let rid = snap.next_entity_id as u64;
-                    snap.quasar_commerce.payment_receipts.push(PaymentReceiptRecord {
-                        receipt_id: rid,
-                        user_id: uid,
-                        offer_id: offer.id.to_string(),
-                        amount_in_cents,
-                        currency,
-                        timestamp_unix: now_unix,
-                    });
-
-                    Ok((rid, omega_notice, sched_id_opt, delivered_mutations))
-                })
-                .map_err(|err_str| {
-                    if let Some((code_str, msg)) = err_str.split_once(':') {
-                        if let Ok(code) = code_str.parse::<u32>() {
-                            return (code, msg.to_string());
-                        }
-                    }
-                    (STATUS_BAD_REQUEST, err_str)
-                })?;
-
-            emit_store_item_mutations(
+            emit_store_purchase_notices(
                 &db_purchase,
                 &sde_purchase,
                 &macho_sink_purchase,
-                &delivered_mutations,
+                &router_pending_purchase,
+                &outcome,
+                false,
+                now_unix,
             );
-            if let Some(notice) = maybe_omega_notice {
-                router_pending_purchase
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((NoticeScope::User(uid as i32), notice));
-            }
-            if let Some(sched_id) = maybe_sched_id {
-                publish_schedule_set_notice(&router_pending_purchase, uid, sched_id, 1);
-            }
 
             pb::message("eve_public.payment.purchase.api.TokenResponse")
                 .set(
                     "receipt.payment_identifier.sequential",
-                    receipt_id.min(u64::from(u32::MAX)) as u32,
+                    outcome.tx_id.min(u64::from(u32::MAX)) as u32,
                 )
                 .set("receipt.payment_method", enum_name("PM_CREDIT_CARD"))
                 .set("receipt.description", "Payment completed successfully")

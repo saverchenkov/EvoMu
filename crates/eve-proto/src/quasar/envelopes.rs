@@ -78,6 +78,9 @@ pub struct AuthoritativeContext {
     /// Server-resolved corporation roles (`session.corp_role` / DB corp governance), never OR-ed with `service_role_mask`.
     #[serde(default)]
     pub corp_role_mask: u64,
+    /// Gateway-resolved idempotency key forwarded into handlers (server-internal, never wire-encoded).
+    #[serde(default, skip)]
+    pub idempotency_key: Option<String>,
 }
 
 impl AuthoritativeContext {
@@ -151,11 +154,17 @@ impl AuthoritativeContext {
             identity,
             service_role_mask: 0,
             corp_role_mask: resolved_corp_mask,
+            idempotency_key: None,
         }
     }
 
     pub fn with_service_roles(mut self, service_role_mask: u64) -> Self {
         self.service_role_mask = service_role_mask;
+        self
+    }
+
+    pub fn with_idempotency_key(mut self, idempotency_key: Option<String>) -> Self {
+        self.idempotency_key = idempotency_key;
         self
     }
 

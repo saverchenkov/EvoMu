@@ -553,3 +553,286 @@ fn store_handlers_inventory_fields_and_direct_trade_partial_and_full_item_versio
         assert_eq!(snap.items[&item_b_full].version, 4);
     });
 }
+
+#[test]
+fn store_manager_consolidated_overflow_virtual_reject_1005_omega_and_idempotency() {
+    let expected_virtual_err = ["Invalid", "Offer"].concat();
+    let ctx = test_ctx();
+    let cid = 972_101_i64;
+    let uid = 97_201_u64;
+    let station_id = 60_003_760_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.nes_store_catalog = None;
+        crate::services::quasar_payment_store_types::ensure_store_catalog_seeded(snap, &ctx.sde);
+        let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products.push(StoreProduct {
+            id: 7951,
+            name: "Virtual Zero Type Vanity".into(),
+            description: "Virtual stub".into(),
+            type_id: 0,
+            quantity: 5,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7950,
+            name: "Priced Virtual Vanity".into(),
+            description: "Unfulfillable virtual offer".into(),
+            category_id: 3,
+            price_plex: 65,
+            product_ids: vec![7951],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+        save_store_catalog(snap, &cat);
+
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = cid;
+        ch.user_id = uid;
+        ch.clone_grade = 1;
+        ch.station_id = Some(station_id);
+        ch.home_station_id = station_id;
+        snap.characters.insert(cid, ch);
+        snap.account_plex_vault.insert(uid, 1_000);
+    });
+
+    let mut sess = SessionState::new(7201);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(cid);
+    sess.station_id = Some(station_id);
+    let kw = HashMap::new();
+
+    // 1. u64 > u32::MAX quantity rejects cleanly on both can_purchase_offer & buy_offer.
+    let overflow_qty = PyRep::Integer(i64::from(u32::MAX) + 1);
+    assert_eq!(
+        call_wallet_ext(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "can_purchase_offer",
+            &[PyRep::Integer(1002), PyRep::String("PLX".into()), overflow_qty.clone()],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidQuantity"
+    );
+    assert_eq!(
+        call_wallet_ext(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "buy_offer",
+            &[PyRep::Integer(1002), PyRep::String("PLX".into()), overflow_qty],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidQuantity"
+    );
+
+    // 2. Priced virtual-only non-Omega offer 7950 rejects BEFORE PLEX debit.
+    assert_eq!(
+        call_wallet_ext(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "can_purchase_offer",
+            &[PyRep::Integer(7950)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        expected_virtual_err
+    );
+    assert_eq!(
+        call_wallet_ext(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "buy_offer",
+            &[PyRep::Integer(7950)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        expected_virtual_err
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.unified_plex_balance_for_user(uid)),
+        1_000
+    );
+
+    // 3. Valid Omega purchase succeeds via shared engine and enables free weekly SP offer 1005.
+    assert_eq!(
+        call_wallet_ext(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "can_purchase_offer",
+            &[PyRep::Integer(1001)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    let omega_buy = call_wallet_ext(
+        &ctx,
+        &mut sess,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(1001)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(omega_buy.dict_get("success"), Some(&PyRep::Bool(true)));
+    assert_eq!(omega_buy.dict_get("plexRemaining"), Some(&PyRep::Integer(500)));
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.characters[&cid].clone_grade, 2);
+    });
+    assert_eq!(
+        call_wallet_ext(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "can_purchase_offer",
+            &[PyRep::Integer(1005)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // 4. Idempotency key deduplicates storeManager.buy_offer with original settlement fields,
+    //    rejects parameter mismatches, and does not bypass read-only `can_purchase_offer` checks.
+    let mut idem_kw = HashMap::new();
+    idem_kw.insert("idempotency_key".into(), PyRep::String("sm-idem-1002".into()));
+    let first = call_wallet_ext(
+        &ctx,
+        &mut sess,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(1002), PyRep::String("PLX".into()), PyRep::Integer(1)],
+        &idem_kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.dict_get("plexSpent"), Some(&PyRep::Integer(110)));
+    assert_eq!(first.dict_get("plexRemaining"), Some(&PyRep::Integer(390)));
+    let first_deliv = first
+        .dict_get("deliveredItemID")
+        .cloned()
+        .expect("deliveredItemID");
+    assert_ne!(first_deliv, PyRep::Integer(0));
+
+    let replay = call_wallet_ext(
+        &ctx,
+        &mut sess,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(1002), PyRep::String("PLX".into()), PyRep::Integer(1)],
+        &idem_kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(replay.dict_get("plexSpent"), Some(&PyRep::Integer(110)));
+    assert_eq!(replay.dict_get("deliveredItemID"), Some(&first_deliv));
+    assert_eq!(replay.dict_get("plexRemaining"), Some(&PyRep::Integer(390)));
+    assert_eq!(
+        call_wallet_ext(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "buy_offer",
+            &[PyRep::Integer(1002), PyRep::String("PLX".into()), PyRep::Integer(2)],
+            &idem_kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "IdempotencyConflict"
+    );
+    assert_eq!(
+        call_wallet_ext(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "can_purchase_offer",
+            &[PyRep::Integer(999_999), PyRep::String("PLX".into()), PyRep::Integer(1)],
+            &idem_kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OfferNotFound"
+    );
+    assert_eq!(
+        call_wallet_ext(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "can_purchase_offer",
+            &[PyRep::Integer(1002), PyRep::String("PLX".into()), PyRep::Integer(10)],
+            &idem_kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(false)
+    );
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.unified_plex_balance_for_user(uid), 390);
+        let qty: i32 = s
+            .items
+            .values()
+            .filter(|i| i.owner_id == cid && i.type_id == 34_599)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(qty, 1);
+    });
+
+    // 5. Missing and cross-user character checks on virtual/Omega offer 1001 and weekly free SP offer 1005 (`BF-3`).
+    let other_uid = ctx.db.provision_player_account("sm_other_user", "pw123");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(other_uid, 1_000);
+    });
+    let mut foreign_sess = SessionState::new(7202);
+    foreign_sess.user_id = Some(other_uid);
+    foreign_sess.character_id = Some(cid);
+    foreign_sess.station_id = Some(station_id);
+    let mut ghost_sess = SessionState::new(7203);
+    ghost_sess.user_id = Some(uid);
+    ghost_sess.character_id = Some(972_999);
+    ghost_sess.station_id = Some(station_id);
+    let expected_char_err = ["Character", "NotFound"].concat();
+    let pre_sp = ctx.db.with_snapshot(|s| s.characters[&cid].free_skill_points);
+    for bad_sess in [&mut foreign_sess, &mut ghost_sess] {
+        for bad_offer in [1001_i64, 1005_i64] {
+            for method in ["can_purchase_offer", "buy_offer"] {
+                let err = call_wallet_ext(
+                    &ctx,
+                    bad_sess,
+                    "storeManager",
+                    method,
+                    &[PyRep::Integer(bad_offer)],
+                    &kw,
+                )
+                .unwrap()
+                .unwrap_err();
+                assert_eq!(err.code, expected_char_err);
+            }
+        }
+    }
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.unified_plex_balance_for_user(uid), 390);
+        assert_eq!(s.unified_plex_balance_for_user(other_uid), 1_000);
+        assert!((s.characters[&cid].free_skill_points - pre_sp).abs() < f64::EPSILON);
+    });
+}

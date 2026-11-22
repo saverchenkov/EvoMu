@@ -466,3 +466,841 @@ fn admin_store_proto_bytes_extraction_invoice_dedup_and_tag_filtering() {
     let _ = NoticeScope::User(1);
     let _ = STATUS_FORBIDDEN;
 }
+
+#[test]
+fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_item_change_key_9() {
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+    use eve_proto::quasar::{WireField, WireMessage, WireValue};
+    use eve_proto::PyRep;
+    use std::sync::atomic::Ordering;
+
+    let router = new_router();
+    let now = 1_820_000_000_u64;
+    let uid = 99_401_u64;
+    let cid = 94_400_001_i64;
+    let station_id = 60_003_760_i64;
+
+    let captured_notifs: Arc<std::sync::Mutex<Vec<(i64, String, Vec<PyRep>)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_log = Arc::clone(&captured_notifs);
+    *router.macho_notify_sink.write().unwrap() =
+        Some(Arc::new(move |target, event, _service, args| {
+            if let crate::router::NotificationTarget::Character(c) = target {
+                sink_log.lock().unwrap().push((c, event.to_string(), args));
+            }
+        }));
+
+    let mut sess = make_sess(Some(uid), Some(cid), 0);
+    sess.station_id = Some(station_id);
+
+    router.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.nes_store_catalog = None;
+        ensure_store_catalog_seeded(snap, &router.sde);
+        let mut cat = read_store_catalog(snap);
+        cat.offers.push(StoreOffer {
+            id: 9951,
+            name: "Unfulfillable Priced Virtual Vanity".into(),
+            description: "Zero deliverable vanity offer".into(),
+            category_id: 3,
+            price_plex: 150,
+            product_ids: Vec::new(),
+            targeted: false,
+            price_cents: Some(799),
+            currency: Some("USD".into()),
+        });
+        save_store_catalog(snap, &cat);
+
+        let mut ch = snap
+            .characters
+            .get(&90_000_001)
+            .cloned()
+            .expect("seed character");
+        ch.character_id = cid;
+        ch.user_id = uid;
+        ch.clone_grade = 1;
+        ch.station_id = Some(station_id);
+        ch.home_station_id = station_id;
+        let mut ch_alt = ch.clone();
+        snap.characters.insert(cid, ch);
+
+        ch_alt.character_id = 94_400_002;
+        snap.characters.insert(ch_alt.character_id, ch_alt);
+
+        snap.account_plex_vault.insert(uid, 2_000);
+        snap.quasar_commerce.payment_tokens = vec![
+            PaymentTokenRecord {
+                id: 9401,
+                user_id: uid,
+                token_str: "tok-9401".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 9403,
+                user_id: uid,
+                token_str: "tok-9403".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+        ];
+        snap.quasar_commerce.payment_receipts.clear();
+
+        snap.next_entity_id += 1;
+        let stack_id = snap.next_entity_id;
+        snap.items.insert(
+            stack_id,
+            InventoryItemRecord {
+                item_id: stack_id,
+                type_id: 40_519,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. u64 > u32::MAX quantity must reject cleanly (never truncate `(1 << 32) + 1` -> `1`).
+    let overflow_purch = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(1001),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint((1_u64 << 32) + 1),
+            },
+        ],
+    }
+    .encode();
+    assert_eq!(
+        call_gw(
+            &router,
+            &sess,
+            "eve_public.plex.vault.api.PurchaseRequest",
+            overflow_purch,
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+
+    let overflow_order = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(1001),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint((1_u64 << 32) + 1),
+            },
+        ],
+    }
+    .encode();
+    let overflow_tok = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::LengthDelimited(overflow_order),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint(9401),
+            },
+        ],
+    }
+    .encode();
+    assert_eq!(
+        call_gw(
+            &router,
+            &sess,
+            "eve_public.payment.purchase.api.TokenRequest",
+            overflow_tok,
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+
+    // 2. Priced virtual-only non-Omega offer 9951 rejected BEFORE PLEX debit or token consumption.
+    let bad_virtual_purch = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(9951),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint(1),
+            },
+        ],
+    }
+    .encode();
+    assert_eq!(
+        call_gw(
+            &router,
+            &sess,
+            "eve_public.plex.vault.api.PurchaseRequest",
+            bad_virtual_purch,
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    let bad_virtual_tok = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(9951),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint(9401),
+            },
+        ],
+    }
+    .encode();
+    assert_eq!(
+        call_gw(
+            &router,
+            &sess,
+            "eve_public.payment.purchase.api.TokenRequest",
+            bad_virtual_tok,
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    router.db.with_snapshot(|s| {
+        assert_eq!(s.unified_plex_balance_for_user(uid), 2_000);
+        assert!(!s.quasar_commerce.payment_tokens[0].consumed);
+        assert!(s.quasar_commerce.payment_receipts.is_empty());
+    });
+
+    // Free weekly SP offer 1005 (when free mode allows 0 PLEX) and valid Omega offer 1001 stay allowed.
+    router.free_fast_checkout_plex.store(true, Ordering::Relaxed);
+    let free_1005 = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(1005),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint(1),
+            },
+        ],
+    }
+    .encode();
+    assert_eq!(
+        call_gw(
+            &router,
+            &sess,
+            "eve_public.plex.vault.api.PurchaseRequest",
+            free_1005,
+            now,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    router.free_fast_checkout_plex.store(false, Ordering::Relaxed);
+
+    let ok_omega_tok = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(1001),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint(9401),
+            },
+        ],
+    }
+    .encode();
+    assert_eq!(
+        call_gw(
+            &router,
+            &sess,
+            "eve_public.payment.purchase.api.TokenRequest",
+            ok_omega_tok,
+            now,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    router.db.with_snapshot(|s| {
+        assert_eq!(s.characters[&cid].clone_grade, 2);
+        assert!(s.quasar_commerce.payment_tokens[0].consumed);
+        assert_eq!(s.quasar_commerce.payment_receipts.len(), 1);
+    });
+
+    // 3. OnItemChange emits key `9` (`ixStackSize`), NEVER key `6` (`ixGroupID`), when stacking.
+    let stack_purch = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(1003),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint(2),
+            },
+        ],
+    }
+    .encode();
+    assert_eq!(
+        call_gw(
+            &router,
+            &sess,
+            "eve_public.plex.vault.api.PurchaseRequest",
+            stack_purch,
+            now,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    {
+        let logs = captured_notifs.lock().unwrap();
+        let (_, _, args) = logs
+            .iter()
+            .find(|(c, ev, _)| *c == cid && ev == "OnItemChange")
+            .expect("expected OnItemChange notification");
+        let PyRep::Dict(entries) = &args[1] else {
+            panic!("expected OnItemChange change dict, got {:?}", args[1]);
+        };
+        assert!(
+            entries
+                .iter()
+                .any(|(k, v)| *k == PyRep::Integer(9) && *v == PyRep::Integer(1)),
+            "OnItemChange stack delta must emit key 9 (ixStackSize) -> old qty 1; got {entries:?}"
+        );
+        assert!(
+            !entries.iter().any(|(k, _)| *k == PyRep::Integer(6)),
+            "OnItemChange stack delta must never emit key 6 (ixGroupID); got {entries:?}"
+        );
+    }
+
+    // 4. Snapshot-persisted idempotency key deduplicates across fresh router instances, preserves settlement fields, and rejects mismatched parameters.
+    let mut tok_msg = DynamicQuasarMessage::new("eve.idempotency.Token");
+    tok_msg.set(1, DynamicValue::Bytes(b"snap-idem-1003".to_vec()));
+    let mut wrap = DynamicQuasarMessage::new("eve_public.plex.vault.api.PurchaseRequest");
+    wrap.set(4, DynamicValue::Message(Box::new(tok_msg)));
+    let extracted_key = extract_quasar_store_idempotency_key(&wrap).expect("idempotency key");
+    let idem_input = StorePurchaseInput {
+        channel: StorePurchaseChannel::PlexVaultQuasar,
+        buyer_user_id: uid,
+        active_char_id: Some(cid),
+        gift_char_id: None,
+        session_station_id: Some(station_id),
+        offer_id: 1003,
+        quantity: 1,
+        now_unix: now,
+        payment: StorePurchasePaymentSpec::PlexVault {
+            allow_free_when_zero: false,
+        },
+        fast_checkout_mode: false,
+        tx_description_mode: StoreTxDescriptionMode::NesOfferNameUpper,
+        idempotency_key: Some(&extracted_key),
+    };
+    let first_outcome = router
+        .db
+        .try_with_mut_snapshot(|snap| purchase_store_offer_in_snapshot(snap, &idem_input))
+        .unwrap();
+    assert!(!first_outcome.idempotent_replay);
+    assert!(first_outcome.tx_id > 0);
+    let replay_outcome = router
+        .db
+        .try_with_mut_snapshot(|snap| purchase_store_offer_in_snapshot(snap, &idem_input))
+        .unwrap();
+    assert!(replay_outcome.idempotent_replay);
+    assert_eq!(replay_outcome.tx_id, first_outcome.tx_id);
+    assert_eq!(replay_outcome.plex_spent, first_outcome.plex_spent);
+    assert_eq!(replay_outcome.delivered_item_id, first_outcome.delivered_item_id);
+    assert_eq!(
+        replay_outcome.delivered_items_count,
+        first_outcome.delivered_items_count
+    );
+
+    let mismatched_qty_input = StorePurchaseInput {
+        quantity: 2,
+        ..idem_input.clone()
+    };
+    assert!(matches!(
+        router
+            .db
+            .try_with_mut_snapshot(|snap| purchase_store_offer_in_snapshot(snap, &mismatched_qty_input)),
+        Err(StorePurchaseError::IdempotencyConflict(_))
+    ));
+    router.db.with_snapshot(|s| {
+        assert!(s.committed_idempotency_keys.is_empty());
+        assert_eq!(s.quasar_commerce.store_purchase_idempotency.len(), 1);
+    });
+
+    // Gateway-forwarded explicit idempotency key (`gw-idem-1003`): Call 1 on `router2`, Call 2 on fresh `router3` sharing the same DB.
+    let router2 = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&router.db),
+        shared_sde(),
+    );
+    let gw_idem_req = EvePublicRequest {
+        issued: Some(GoogleTimestamp {
+            seconds: now as i64,
+            nanos: 0,
+        }),
+        correlation_uuid: vec![7; 16],
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.PurchaseRequest"),
+            value: WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::Varint(1003),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::Varint(1),
+                    },
+                ],
+            }
+            .encode(),
+        }),
+        external_origin: "test".into(),
+        application_instance_uuid: Vec::new(),
+        authoritative_context: None,
+        trace_context: None,
+    };
+    assert_eq!(
+        router2
+            .handle_public_request(&sess, &gw_idem_req, Some(b"gw-idem-1003".to_vec()), false, now)
+            .status_code,
+        STATUS_OK
+    );
+    // Same-router replay deduplicates and enforces fingerprint conflicts cleanly (`BF-1`, P2).
+    assert_eq!(
+        router2
+            .handle_public_request(&sess, &gw_idem_req, Some(b"gw-idem-1003".to_vec()), false, now)
+            .status_code,
+        STATUS_OK
+    );
+    let router3 = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&router.db),
+        shared_sde(),
+    );
+    assert_eq!(
+        router3
+            .handle_public_request(&sess, &gw_idem_req, Some(b"gw-idem-1003".to_vec()), false, now)
+            .status_code,
+        STATUS_OK
+    );
+    let gw_mismatch_req = EvePublicRequest {
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.PurchaseRequest"),
+            value: WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::Varint(1003),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::Varint(2),
+                    },
+                ],
+            }
+            .encode(),
+        }),
+        ..gw_idem_req.clone()
+    };
+    assert_eq!(
+        router2
+            .handle_public_request(
+                &sess,
+                &gw_mismatch_req,
+                Some(b"gw-idem-1003".to_vec()),
+                false,
+                now,
+            )
+            .status_code,
+        STATUS_BAD_REQUEST
+    );
+    let mut sess_alt_char = sess.clone();
+    sess_alt_char.character_id = Some(94_400_002);
+    assert_eq!(
+        router2
+            .handle_public_request(
+                &sess_alt_char,
+                &gw_idem_req,
+                Some(b"gw-idem-1003".to_vec()),
+                false,
+                now,
+            )
+            .status_code,
+        STATUS_BAD_REQUEST
+    );
+    // Non-existent active character is rejected on virtual/Omega offer 1001 (`BF-3`).
+    let mut ghost_sess = sess.clone();
+    ghost_sess.character_id = Some(999_400_999);
+    let omega_virtual_req = EvePublicRequest {
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.PurchaseRequest"),
+            value: WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::Varint(1001),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::Varint(1),
+                    },
+                ],
+            }
+            .encode(),
+        }),
+        ..gw_idem_req.clone()
+    };
+    assert_eq!(
+        router2
+            .handle_public_request(&ghost_sess, &omega_virtual_req, None, false, now)
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    // Transient handler failure does not poison `router2.idempotency_cache`: retry succeeds after funding.
+    router.db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 10);
+    });
+    assert_eq!(
+        router2
+            .handle_public_request(&sess, &gw_idem_req, Some(b"gw-retry-1003".to_vec()), false, now)
+            .status_code,
+        STATUS_BAD_REQUEST
+    );
+    router.db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 1_440);
+    });
+    assert_eq!(
+        router2
+            .handle_public_request(&sess, &gw_idem_req, Some(b"gw-retry-1003".to_vec()), false, now)
+            .status_code,
+        STATUS_OK
+    );
+    router.db.with_snapshot(|s| {
+        // 1_440 before retry-test - 140 (gw-retry-1003) = 1_300.
+        assert_eq!(s.unified_plex_balance_for_user(uid), 1_300);
+        let qty: i32 = s
+            .items
+            .values()
+            .filter(|i| i.owner_id == cid && i.type_id == 40_519)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(qty, 6);
+    });
+
+    // Same-router & cross-router `TokenRequest` replay returns authentic `TokenResponse` sequential
+    // without double consumption, rejects offer/qty/token_id mismatches, and recovers after failure.
+    router.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.payment_tokens.push(PaymentTokenRecord {
+            id: 9402,
+            user_id: uid,
+            token_str: "tok-9402".into(),
+            is_quick_pay: true,
+            consumed: false,
+        });
+    });
+    let tok_order_1 = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(1001),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint(1),
+            },
+        ],
+    }
+    .encode();
+    let tok_req_1 = EvePublicRequest {
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.purchase.api.TokenRequest"),
+            value: WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(tok_order_1.clone()),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::Varint(9402),
+                    },
+                ],
+            }
+            .encode(),
+        }),
+        ..gw_idem_req.clone()
+    };
+    let tok_rsp_1 = router2.handle_public_request(
+        &sess,
+        &tok_req_1,
+        Some(b"gw-tok-9402".to_vec()),
+        false,
+        now,
+    );
+    assert_eq!(tok_rsp_1.status_code, STATUS_OK);
+    let tok_rsp_same = router2.handle_public_request(
+        &sess,
+        &tok_req_1,
+        Some(b"gw-tok-9402".to_vec()),
+        false,
+        now,
+    );
+    assert_eq!(tok_rsp_same.status_code, STATUS_OK);
+    assert_eq!(tok_rsp_1.payload, tok_rsp_same.payload);
+    let router4 = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&router.db),
+        shared_sde(),
+    );
+    let tok_rsp_2 = router4.handle_public_request(
+        &sess,
+        &tok_req_1,
+        Some(b"gw-tok-9402".to_vec()),
+        false,
+        now,
+    );
+    assert_eq!(tok_rsp_2.status_code, STATUS_OK);
+    assert_eq!(tok_rsp_1.payload, tok_rsp_2.payload);
+    assert_ne!(tok_rsp_1.payload.as_ref().unwrap().value, Vec::<u8>::new());
+    let tok_order_2 = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(1001),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint(2),
+            },
+        ],
+    }
+    .encode();
+    let tok_mismatch_req = EvePublicRequest {
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.purchase.api.TokenRequest"),
+            value: WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(tok_order_2),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::Varint(9402),
+                    },
+                ],
+            }
+            .encode(),
+        }),
+        ..gw_idem_req.clone()
+    };
+    assert_eq!(
+        router2
+            .handle_public_request(
+                &sess,
+                &tok_mismatch_req,
+                Some(b"gw-tok-9402".to_vec()),
+                false,
+                now,
+            )
+            .status_code,
+        STATUS_BAD_REQUEST
+    );
+    let tok_mismatch_token_req = EvePublicRequest {
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.purchase.api.TokenRequest"),
+            value: WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(tok_order_1.clone()),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::Varint(9403),
+                    },
+                ],
+            }
+            .encode(),
+        }),
+        ..gw_idem_req.clone()
+    };
+    assert_eq!(
+        router2
+            .handle_public_request(
+                &sess,
+                &tok_mismatch_token_req,
+                Some(b"gw-tok-9402".to_vec()),
+                false,
+                now,
+            )
+            .status_code,
+        STATUS_BAD_REQUEST
+    );
+    let tok_retry_req = EvePublicRequest {
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.purchase.api.TokenRequest"),
+            value: WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(tok_order_1),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::Varint(9404),
+                    },
+                ],
+            }
+            .encode(),
+        }),
+        ..gw_idem_req
+    };
+    assert_eq!(
+        router2
+            .handle_public_request(
+                &sess,
+                &tok_retry_req,
+                Some(b"gw-tok-retry-9404".to_vec()),
+                false,
+                now,
+            )
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    router.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.payment_tokens.push(PaymentTokenRecord {
+            id: 9404,
+            user_id: uid,
+            token_str: "tok-9404".into(),
+            is_quick_pay: true,
+            consumed: false,
+        });
+    });
+    assert_eq!(
+        router2
+            .handle_public_request(
+                &sess,
+                &tok_retry_req,
+                Some(b"gw-tok-retry-9404".to_vec()),
+                false,
+                now,
+            )
+            .status_code,
+        STATUS_OK
+    );
+    router.db.with_snapshot(|s| {
+        assert_eq!(s.quasar_commerce.payment_receipts.len(), 3);
+        let tok_rec = s
+            .quasar_commerce
+            .store_purchase_idempotency
+            .values()
+            .find(|r| r.channel == "payment_token")
+            .expect("persisted token purchase idempotency record");
+        assert!(tok_rec.tx_id > 0);
+    });
+
+    // 5. Bounded eviction drops only oldest per-user/global record (never mass-wipes other users),
+    //    and duplicate `type_id` entries across multi-product offers check aggregate `i32` overflow.
+    let mut bounded_map = std::collections::BTreeMap::new();
+    for (seq, (user_id, key, unix)) in [
+        (101_u64, "u1-old", now),
+        (102, "u2-keep", now + 1),
+        (101, "u1-new", now + 2),
+        (101, "u1-newest", now + 3),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        insert_bounded_store_purchase_idempotency(
+            &mut bounded_map,
+            format!("{user_id}:plex_vault:{key}"),
+            eve_db::service_domains::CommittedStorePurchaseRecord {
+                buyer_user_id: user_id,
+                channel: "plex_vault".into(),
+                idempotency_key: key.into(),
+                committed_unix: unix,
+                commit_seq: seq as u64 + 1,
+                ..Default::default()
+            },
+            2,
+            3,
+        );
+    }
+    assert_eq!(bounded_map.len(), 3);
+    assert!(!bounded_map.contains_key("101:plex_vault:u1-old"));
+    assert!(bounded_map.contains_key("102:plex_vault:u2-keep"));
+    assert!(bounded_map.contains_key("101:plex_vault:u1-new"));
+    assert!(bounded_map.contains_key("101:plex_vault:u1-newest"));
+
+    router.db.with_mut_snapshot(|snap| {
+        let mut cat = read_store_catalog(snap);
+        cat.products.push(StoreProduct {
+            id: 99521,
+            name: "Split Huge A".into(),
+            description: "Half A".into(),
+            type_id: 34,
+            quantity: i32::MAX as u32 - 5,
+        });
+        cat.products.push(StoreProduct {
+            id: 99522,
+            name: "Split Huge B".into(),
+            description: "Half B".into(),
+            type_id: 34,
+            quantity: 10,
+        });
+        cat.offers.push(StoreOffer {
+            id: 9952,
+            name: "Duplicate Type Overflow".into(),
+            description: "Aggregate overflows i32".into(),
+            category_id: 3,
+            price_plex: 10,
+            product_ids: vec![99521, 99522],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+        save_store_catalog(snap, &cat);
+    });
+    let dup_type_err = router
+        .db
+        .try_with_mut_snapshot(|snap| {
+            purchase_store_offer_in_snapshot(
+                snap,
+                &StorePurchaseInput {
+                    channel: StorePurchaseChannel::PlexVaultQuasar,
+                    buyer_user_id: uid,
+                    active_char_id: Some(cid),
+                    gift_char_id: None,
+                    session_station_id: Some(station_id),
+                    offer_id: 9952,
+                    quantity: 1,
+                    now_unix: now,
+                    payment: StorePurchasePaymentSpec::PlexVault {
+                        allow_free_when_zero: false,
+                    },
+                    fast_checkout_mode: false,
+                    tx_description_mode: StoreTxDescriptionMode::NesOfferNameUpper,
+                    idempotency_key: None,
+                },
+            )
+        })
+        .unwrap_err();
+    assert!(matches!(dup_type_err, StorePurchaseError::Overflow(_)));
+}

@@ -43,7 +43,7 @@ pub use eve_db::{
 enum FastCheckoutBilling {
     Free,
     Plex { plex_cost: i64 },
-    FiatUsd { unit_cents: u32, price_usd: f64 },
+    FiatUsd { price_usd: f64 },
 }
 
 impl FastCheckoutBilling {
@@ -60,20 +60,6 @@ impl FastCheckoutBilling {
             Self::Free => "FREE",
             Self::Plex { .. } => "PLX",
             Self::FiatUsd { .. } => "USD",
-        }
-    }
-
-    fn unit_cents(self) -> u32 {
-        match self {
-            Self::FiatUsd { unit_cents, .. } => unit_cents,
-            Self::Free | Self::Plex { .. } => 0,
-        }
-    }
-
-    fn unit_plex_cost(self) -> i64 {
-        match self {
-            Self::Plex { plex_cost } => plex_cost,
-            Self::Free | Self::FiatUsd { .. } => 0,
         }
     }
 }
@@ -125,7 +111,6 @@ fn resolve_fast_checkout_billing(
         Ok(FastCheckoutBilling::Free)
     } else {
         Ok(FastCheckoutBilling::FiatUsd {
-            unit_cents,
             price_usd: f64::from(unit_cents) / 100.0,
         })
     }
@@ -141,6 +126,8 @@ fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastChecko
             let tags = tags_map.get(&offer.id).cloned().unwrap_or_default();
             if !crate::services::quasar_payment_store_types::is_fast_checkout_catalog_offer(
                 offer, &catalog, &tags,
+            ) || !crate::services::quasar_payment_store_types::store_offer_has_deliverable_fulfillment(
+                offer, &catalog, &tags,
             ) {
                 return None;
             }
@@ -152,7 +139,7 @@ fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastChecko
                     if p.type_id == crate::services::market_contracts::PLEX_TYPE_ID
                         && p.quantity > 0
                     {
-                        plex_amount += i64::from(p.quantity);
+                        plex_amount = plex_amount.saturating_add(i64::from(p.quantity));
                     } else if p.quantity > 0 {
                         products.push(FastCheckoutProductRecord {
                             type_id: p.type_id,
@@ -160,9 +147,6 @@ fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastChecko
                         });
                     }
                 }
-            }
-            if plex_amount <= 0 && products.is_empty() {
-                return None;
             }
             Some(FastCheckoutOfferRecord {
                 offer_id: i64::from(offer.id),
@@ -179,7 +163,7 @@ fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastChecko
         .collect()
 }
 
-fn default_free_plex_pack_offers() -> Vec<FastCheckoutOfferRecord> {
+pub(crate) fn default_free_plex_pack_offers() -> Vec<FastCheckoutOfferRecord> {
     vec![
         FastCheckoutOfferRecord {
             offer_id: 1,
@@ -265,30 +249,13 @@ fn load_fast_checkout_offers_for_ctx(
 fn resolve_fast_checkout_offers_for_user(
     ctx: &ServerContext,
     user_id: u64,
-    cached_offers: Option<&Vec<FastCheckoutOfferRecord>>,
     free_plex_mode: bool,
 ) -> Vec<FastCheckoutOfferRecord> {
-    let mut offers = if let Some(cached) = cached_offers {
-        let usable = !cached.is_empty()
-            && if free_plex_mode {
-                cached.iter().any(|o| o.plex_amount > 0)
-            } else {
-                !cached.iter().any(is_synthetic_default_free_pack)
-            };
-        if usable {
-            cached.clone()
-        } else {
-            ctx.db
-                .with_snapshot(|snap| load_fast_checkout_offers_for_ctx(ctx, snap))
-        }
-    } else {
-        ctx.db
-            .with_snapshot(|snap| load_fast_checkout_offers_for_ctx(ctx, snap))
-    };
     let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let store_catalog = crate::services::quasar_payment_store::read_store_catalog(snap);
         let store_tags = crate::services::quasar_payment_store::read_store_offer_tags(snap);
+        let mut offers = load_fast_checkout_offers_for_ctx(ctx, snap);
         offers.retain(|fc_off| {
             match store_catalog
                 .offers
@@ -318,11 +285,11 @@ fn resolve_fast_checkout_offers_for_user(
                         true
                     }
                 }
-                None => true,
+                None => free_plex_mode && is_synthetic_default_free_pack(fc_off),
             }
         });
-    });
-    offers
+        offers
+    })
 }
 
 pub fn get_user_fast_checkout_state(ctx: &ServerContext, user_id: u64) -> UserFastCheckoutState {
@@ -975,19 +942,10 @@ fn handle_get_offers_for_user(
     }
     let free_plex_mode = ctx.feature_flags_snapshot().free_fast_checkout_plex;
     let mut st = get_user_fast_checkout_state(ctx, user_id);
-    let offers = resolve_fast_checkout_offers_for_user(
-        ctx,
-        user_id,
-        st.cached_offers.as_ref(),
-        free_plex_mode,
-    );
+    let offers = resolve_fast_checkout_offers_for_user(ctx, user_id, free_plex_mode);
     let session_token = format!("fc_token_{}_{}", user_id, ctx.now_unix());
     st.cached_session_token = Some(session_token);
-    if !offers.is_empty() {
-        st.cached_offers = Some(offers.clone());
-    } else if !free_plex_mode {
-        st.cached_offers = None;
-    }
+    st.cached_offers = (!offers.is_empty()).then(|| offers.clone());
     save_user_fast_checkout_state(ctx, user_id, &st);
 
     let plex_offers: Vec<PyRep> = offers
@@ -1113,7 +1071,7 @@ fn handle_buy_offer(
         }
     };
 
-    let (quantity, password_opt) = if args.len() >= 3 {
+    let (quantity_i64, password_opt) = if args.len() >= 3 {
         let q = args[1].as_i64().unwrap_or(1);
         let p = args[2].as_str();
         (q, p)
@@ -1129,367 +1087,189 @@ fn handle_buy_offer(
         (q, None)
     };
 
-    if quantity <= 0 {
-        return Err(BridgeRpcError {
-            code: "InvalidQuantity".into(),
-            message: "Quantity must be positive".into(),
-            client_error: None,
-        });
+    if quantity_i64 <= 0 {
+        return Err(fc_err("InvalidQuantity", "Quantity must be positive"));
     }
+    let quantity = u32::try_from(quantity_i64)
+        .map_err(|_| fc_err("ArithmeticOverflow", "Purchase quantity overflows u32"))?;
 
     let free_plex_mode = ctx.feature_flags_snapshot().free_fast_checkout_plex;
     let password = password_opt
         .or_else(|| kwargs.get("password").and_then(|a| a.as_str()))
         .unwrap_or("");
     if !free_plex_mode && password.is_empty() {
-        return Err(BridgeRpcError {
-            code: "InvalidPassword".into(),
-            message: "Password required for FastCheckout purchase".into(),
-            client_error: None,
-        });
+        return Err(fc_err(
+            "InvalidPassword",
+            "Password required for FastCheckout purchase",
+        ));
     }
 
-    let (account, active_char_id, active_station_id) = ctx.db.with_snapshot(|snap| {
-        let acc = snap.accounts.values().find(|a| a.user_id == user_id).cloned();
-        let cid = session.character_id.or_else(|| {
-            snap.characters
-                .values()
-                .find(|c| c.user_id == user_id)
-                .map(|c| c.character_id)
-        });
-        let st_id = cid.and_then(|id| snap.characters.get(&id)).map(|c| {
-            session.station_id.or(session.structure_id).unwrap_or(c.home_station_id)
-        });
-        (acc, cid, st_id)
-    });
-
+    let now_unix = ctx.now_unix();
+    let account = ctx
+        .db
+        .with_snapshot(|snap| snap.accounts.values().find(|a| a.user_id == user_id).cloned());
     let Some(acc) = account else {
-        return Err(BridgeRpcError {
-            code: "UserNotFound".into(),
-            message: format!("User account {user_id} not found"),
-            client_error: None,
-        });
+        return Err(fc_err(
+            "UserNotFound",
+            format!("User account {user_id} not found"),
+        ));
     };
 
-    if let Err(e) = acc.check_active_restriction(ctx.now_unix()) {
-        return Err(BridgeRpcError {
-            code: "AccountBanned".into(),
-            message: e.to_string(),
-            client_error: None,
-        });
+    if let Err(e) = acc.check_active_restriction(now_unix) {
+        return Err(fc_err("AccountBanned", e.to_string()));
     }
 
-    let st = get_user_fast_checkout_state(ctx, user_id);
-    let offers = resolve_fast_checkout_offers_for_user(
-        ctx,
-        user_id,
-        st.cached_offers.as_ref(),
-        free_plex_mode,
-    );
-    let Some(offer) = offers.iter().find(|o| o.offer_id == offer_id).cloned() else {
-        return Err(BridgeRpcError {
-            code: "OfferNotFound".into(),
-            message: format!("UserError: Offer {offer_id} not found in catalog"),
-            client_error: None,
-        });
+    let idem_key = crate::services::quasar_payment_store_types::extract_rpc_idempotency_key(kwargs);
+    let input = crate::services::quasar_payment_store_types::StorePurchaseInput {
+        channel: crate::services::quasar_payment_store_types::StorePurchaseChannel::FastCheckout,
+        buyer_user_id: user_id,
+        active_char_id: session.character_id,
+        gift_char_id: None,
+        session_station_id: session.station_id.or(session.structure_id),
+        offer_id: offer_id as u64,
+        quantity,
+        now_unix,
+        payment:
+            crate::services::quasar_payment_store_types::StorePurchasePaymentSpec::FastCheckoutAuto {
+                free_fast_checkout_mode: free_plex_mode,
+                allow_default_free_plex_packs: true,
+            },
+        fast_checkout_mode: true,
+        tx_description_mode:
+            crate::services::quasar_payment_store_types::StoreTxDescriptionMode::FastCheckoutFixed,
+        idempotency_key: idem_key.as_deref(),
     };
+
+    let map_fc_purchase_err = |err: crate::services::quasar_payment_store_types::StorePurchaseError| {
+        use crate::services::quasar_payment_store_types::StorePurchaseError as E;
+        match err {
+            E::OfferNotFound(message) | E::TargetedNotEligible(message) => BridgeRpcError {
+                code: "OfferNotFound".into(),
+                message,
+                client_error: None,
+            },
+            E::InvalidOffer(message)
+            | E::UnfulfillableVirtualOffer(message)
+            | E::TargetCharacterForbidden(message)
+            | E::PaymentUnavailable(message) => BridgeRpcError {
+                code: "InvalidOffer".into(),
+                message,
+                client_error: None,
+            },
+            E::InvalidQuantity(message) => BridgeRpcError {
+                code: "InvalidQuantity".into(),
+                message,
+                client_error: None,
+            },
+            E::Overflow(message) => BridgeRpcError {
+                code: "ArithmeticOverflow".into(),
+                message,
+                client_error: None,
+            },
+            E::GiftRecipientNotFound(message)
+            | E::NoDeliveryCharacter(message)
+            | E::TargetCharacterNotFound(message) => BridgeRpcError {
+                code: "CharacterNotFound".into(),
+                message,
+                client_error: None,
+            },
+            E::MissingDeliveryStation(message) => BridgeRpcError {
+                code: "InvalidLocation".into(),
+                message,
+                client_error: None,
+            },
+            E::PaymentTokenRequired(message)
+            | E::PaymentTokenNotFound(message)
+            | E::PaymentTokenForbidden(message)
+            | E::PaymentTokenInvalid(message) => BridgeRpcError {
+                code: "PaymentTokenRequired".into(),
+                message,
+                client_error: None,
+            },
+            E::InsufficientPlex { required, available } => BridgeRpcError {
+                code: "UserError".into(),
+                message: format!(
+                    "UserError: Insufficient balance: need {required} PLEX, have {available}"
+                ),
+                client_error: None,
+            },
+            E::IdempotencyConflict(message) => BridgeRpcError {
+                code: "IdempotencyConflict".into(),
+                message,
+                client_error: None,
+            },
+            E::PersistenceFailure(message) => BridgeRpcError {
+                code: "PersistenceFailure".into(),
+                message,
+                client_error: None,
+            },
+        }
+    };
+
+    ctx.db
+        .with_snapshot(|snap| {
+            crate::services::quasar_payment_store_types::validate_store_purchase_offer_in_snapshot(
+                snap, &input,
+            )
+        })
+        .map_err(map_fc_purchase_err)?;
 
     if (!free_plex_mode || !password.is_empty())
         && ctx
             .db
-            .authenticate_at(&acc.username, password, ctx.now_unix())
+            .authenticate_at(&acc.username, password, now_unix)
             .is_err()
     {
-        return Err(BridgeRpcError {
-            code: "InvalidPassword".into(),
-            message: "Incorrect password for fast checkout authorization".into(),
-            client_error: None,
-        });
+        return Err(fc_err(
+            "InvalidPassword",
+            "Incorrect password for fast checkout authorization",
+        ));
     }
 
-    let billing = resolve_fast_checkout_billing(&offer, free_plex_mode)?;
-
-    let total_plex = offer
-        .plex_amount
-        .checked_mul(quantity)
-        .filter(|&v| v >= 0)
-        .ok_or_else(|| BridgeRpcError {
-            code: "ArithmeticOverflow".into(),
-            message: "Total PLEX quantity overflows i64".into(),
-            client_error: None,
-        })?;
-    let total_cost_plex = billing
-        .unit_plex_cost()
-        .checked_mul(quantity)
-        .filter(|&v| v >= 0)
-        .ok_or_else(|| BridgeRpcError {
-            code: "ArithmeticOverflow".into(),
-            message: "Total PLEX price overflows i64".into(),
-            client_error: None,
-        })?;
-
-    let now_unix = ctx.now_unix();
-    let unit_cents = billing.unit_cents();
-    let amount_in_cents = u32::try_from(quantity)
-        .ok()
-        .and_then(|q| unit_cents.checked_mul(q))
-        .ok_or_else(|| BridgeRpcError {
-            code: "ArithmeticOverflow".into(),
-            message: "Payment amount overflows u32".into(),
-            client_error: None,
-        })?;
-
-    let has_physical_items = offer
-        .products
-        .iter()
-        .any(|p| p.type_id > 0 && p.quantity > 0);
-    let (tx_id, rem_plex, delivered_items_count, delivered_items, omega_notice) = ctx.db.try_with_mut_snapshot(|snap| {
-        let store_catalog = crate::services::quasar_payment_store::read_store_catalog(snap);
-        let store_tags = crate::services::quasar_payment_store::read_store_offer_tags(snap);
-        let store_offer_opt = store_catalog
-            .offers
-            .iter()
-            .find(|o| i64::from(o.id) == offer_id)
-            .cloned();
-        if let Some(ref store_off) = store_offer_opt {
-            if store_off.targeted
-                && !crate::services::quasar_payment_store_types::is_user_eligible_for_targeted_offer(
-                    snap,
-                    store_off,
-                    user_id,
-                    now_unix,
-                )
-            {
-                return Err(fc_err(
-                    "TargetedOfferNotEligible",
-                    format!("User {user_id} is not eligible for targeted offer {offer_id}"),
-                ));
-            }
-        }
-        let delivery_target = if has_physical_items {
-            let char_id = active_char_id.ok_or_else(|| {
-                fc_err(
-                    "CharacterNotFound",
-                    "Active character required for physical store item delivery",
-                )
-            })?;
-            let ch = snap.characters.get(&char_id).ok_or_else(|| {
-                fc_err("CharacterNotFound", format!("Character {char_id} not found"))
-            })?;
-            let station_id = active_station_id
-                .filter(|&id| id > 0)
-                .or_else(|| {
-                    ch.station_id
-                        .or(ch.structure_id)
-                        .or(Some(ch.home_station_id))
-                        .filter(|&id| id > 0)
-                })
-                .ok_or_else(|| {
-                    fc_err(
-                        "InvalidLocation",
-                        format!("Character {char_id} has no valid delivery station"),
-                    )
-                })?;
-            Some((char_id, station_id))
-        } else {
-            None
-        };
-        if amount_in_cents > 0 {
-            let Some(token) = snap
-                .quasar_commerce
-                .payment_tokens
-                .iter_mut()
-                .find(|t| t.user_id == user_id && t.is_quick_pay && !t.consumed)
-            else {
-                return Err(BridgeRpcError {
-                    code: "PaymentTokenRequired".into(),
-                    message: "No active quick-pay payment token for user".into(),
-                    client_error: None,
-                });
-            };
-            token.consumed = true;
-        }
-
-        let vault_uid = active_char_id
-            .and_then(|cid| snap.account_of_character(cid))
-            .unwrap_or(user_id);
-        let mut cur_rem = snap.unified_plex_balance_for_user(vault_uid);
-        if total_cost_plex > 0 {
-            cur_rem = snap
-                .adjust_unified_plex_for_user(vault_uid, -total_cost_plex)
-                .ok_or_else(|| BridgeRpcError {
-                    code: "UserError".into(),
-                    message: format!(
-                        "UserError: Insufficient balance: need {total_cost_plex} PLEX, have {cur_rem}"
-                    ),
-                    client_error: None,
-                })?;
-        }
-
-        if total_plex > 0 {
-            cur_rem = snap
-                .adjust_unified_plex_for_user(vault_uid, total_plex)
-                .ok_or_else(|| BridgeRpcError {
-                    code: "ArithmeticOverflow".into(),
-                    message: "Account PLEX vault overflows i64".into(),
-                    client_error: None,
-                })?;
-        }
-
-        snap.next_entity_id += 1;
-        let tid = snap.next_entity_id as u64;
-
-        if total_cost_plex > 0 || total_plex > 0 {
-            let delta = total_plex
-                .checked_sub(total_cost_plex)
-                .ok_or_else(|| BridgeRpcError {
-                    code: "ArithmeticOverflow".into(),
-                    message: "Net PLEX delta overflows i64".into(),
-                    client_error: None,
-                })?;
-            crate::services::quasar_payment_store::record_plex_transaction(
-                snap,
-                tid,
-                user_id,
-                delta,
-                cur_rem,
-                "FastCheckout Purchase",
-                now_unix,
-            );
-        }
-
-        let mut delivered_count = 0_i64;
-        let mut delivered_items: Vec<eve_db::InventoryItemRecord> = Vec::new();
-        if let Some((char_id, station_id)) = delivery_target {
-            for prod in &offer.products {
-                if prod.type_id > 0 && prod.quantity > 0 {
-                    let total_item_qty = i32::try_from(
-                        (prod.quantity as i64)
-                            .checked_mul(quantity)
-                            .ok_or_else(|| fc_err("ArithmeticOverflow", "Product quantity overflows i32"))?,
-                    )
-                    .map_err(|_| fc_err("ArithmeticOverflow", "Product quantity overflows i32"))?;
-                    snap.next_entity_id += 1;
-                    let item_id = snap.next_entity_id;
-                    let rec = eve_db::InventoryItemRecord {
-                        item_id,
-                        type_id: prod.type_id,
-                        owner_id: char_id,
-                        location_id: station_id,
-                        flag: eve_db::InventoryFlag::Hangar,
-                        quantity: total_item_qty,
-                        singleton: false,
-                        version: 1,
-                        ..Default::default()
-                    };
-                    snap.items.insert(item_id, rec.clone());
-                    delivered_items.push(rec);
-                    delivered_count += total_item_qty as i64;
-                }
-            }
-        }
-
-        let omega_duration_secs = if let Some(ref store_off) = store_offer_opt {
-            let tags = store_tags.get(&store_off.id).map(Vec::as_slice).unwrap_or(&[]);
-            crate::services::quasar_payment_store_types::compute_omega_license_duration_secs(
-                store_off,
-                &store_catalog,
-                tags,
-                u32::try_from(quantity).unwrap_or(1),
+    let outcome = ctx
+        .db
+        .try_with_mut_snapshot(|snap| {
+            crate::services::quasar_payment_store_types::purchase_store_offer_in_snapshot(
+                snap, &input,
             )
-        } else {
-            let offer_lc = offer.name.to_ascii_lowercase();
-            let is_standalone_omega = (offer.tags.iter().any(|t| {
-                let lc = t.to_ascii_lowercase();
-                lc == "omega" || lc == "upsellstarterpack"
-            }) || (offer_lc.contains("omega")
-                && !offer_lc.contains("skill point")
-                && !offer_lc.contains(" sp")))
-                || (offer.category_id == 1
-                    && offer.products.is_empty()
-                    && !offer_lc.contains("skin")
-                    && !offer_lc.contains("plex")
-                    && !offer_lc.contains("skill"));
-            is_standalone_omega.then(|| {
-                let months: u64 = offer
-                    .products
-                    .iter()
-                    .filter(|p| p.type_id == 0 && p.quantity > 0)
-                    .map(|p| u64::from(p.quantity))
-                    .sum::<u64>()
-                    .max(1);
-                months
-                    .saturating_mul(30 * 86_400)
-                    .saturating_mul(u64::try_from(quantity).unwrap_or(1))
-            })
-        };
-        let omega_notice = if let Some(duration_secs) = omega_duration_secs {
-            let (_, notice) =
-                crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
-                    snap,
-                    user_id,
-                    duration_secs,
-                    now_unix,
-                );
-            Some(notice)
-        } else {
-            None
-        };
+        })
+        .map_err(map_fc_purchase_err)?;
 
-        if amount_in_cents > 0 {
-            snap.quasar_commerce.payment_receipts.push(
-                crate::services::quasar_payment_store_types::PaymentReceiptRecord {
-                    receipt_id: tid,
-                    user_id,
-                    offer_id: offer_id.to_string(),
-                    amount_in_cents,
-                    currency: "USD".to_string(),
-                    timestamp_unix: now_unix,
-                },
-            );
-        }
+    let emit_balance = outcome.plex_credited > 0 || outcome.plex_spent > 0;
+    crate::services::quasar_payment_store_types::emit_store_purchase_notices(
+        &ctx.db,
+        &ctx.sde,
+        &ctx.quasar_gateway.macho_notify_sink,
+        &ctx.quasar_gateway.pending_notices,
+        &outcome,
+        emit_balance,
+        now_unix,
+    );
 
-        Ok::<_, BridgeRpcError>((tid, cur_rem, delivered_count, delivered_items, omega_notice))
-    })?;
-
-    for rec in &delivered_items {
-        ctx.notify_item_mutation(rec.owner_id, None, Some(rec));
-    }
-
-    if let Some(notice) = omega_notice {
-        ctx.quasar_gateway
-            .pending_notices
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((
-                crate::quasar_gateway::NoticeScope::User(user_id as i32),
-                notice,
-            ));
-    }
-
-    if total_plex > 0 {
-        crate::services::quasar_payment_store::emit_balance_changed_notice(
-            &ctx.quasar_gateway.pending_notices,
-            user_id,
-            tx_id,
-            total_plex,
-            rem_plex,
-            "FastCheckout Purchase",
-            ctx.now_unix(),
-        );
-    }
-    let status_str = if matches!(billing, FastCheckoutBilling::Free) {
+    let status_str = if outcome.is_free_mode_settlement {
         "COMPLETED"
     } else {
         "CONFIRMED"
     };
     Ok(PyRep::Dict(vec![
         (PyRep::String("status".into()), PyRep::String(status_str.into())),
-        (PyRep::String("transactionID".into()), PyRep::Integer(tx_id as i64)),
+        (
+            PyRep::String("transactionID".into()),
+            PyRep::Integer(outcome.tx_id as i64),
+        ),
         (PyRep::String("offerID".into()), PyRep::Integer(offer_id)),
-        (PyRep::String("plexAmount".into()), PyRep::Integer(total_plex)),
-        (PyRep::String("itemsDelivered".into()), PyRep::Integer(delivered_items_count)),
-        (PyRep::String("newPlexBalance".into()), PyRep::Integer(rem_plex)),
+        (
+            PyRep::String("plexAmount".into()),
+            PyRep::Integer(outcome.plex_credited),
+        ),
+        (
+            PyRep::String("itemsDelivered".into()),
+            PyRep::Integer(outcome.delivered_items_count),
+        ),
+        (
+            PyRep::String("newPlexBalance".into()),
+            PyRep::Integer(outcome.new_plex_balance),
+        ),
         (PyRep::String("Message".into()), PyRep::String("OK".into())),
     ]))
 }
