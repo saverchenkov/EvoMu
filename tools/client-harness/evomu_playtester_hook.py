@@ -1188,6 +1188,8 @@ def _is_tooltip_panel_trigger(node):
         return False
     if callable(getattr(node, "func", None)) or callable(getattr(node, "cmd", None)):
         return False
+    if callable(getattr(node, "on_click", None)) or _resolve_carbon_click_handler(node, "OnClick") is not None:
+        return False
     inst_dict = getattr(node, "__dict__", None) or {}
     for hname in ("OnClick", "Click", "OnMouseDown"):
         hv = inst_dict.get(hname)
@@ -2454,6 +2456,7 @@ def _inspect_uicore_tree():
                                 hint_str = _strip_tags(_safe_str(gh_val, 80))
                         except Exception:
                             pass
+                base_lbl = lbl
                 is_dis = False
                 if cls_name == "SelectedItemButton":
                     dis_hint = _strip_tags(_safe_str(getattr(node, "disabledHint", ""), 80))
@@ -2462,13 +2465,15 @@ def _inspect_uicore_tree():
                         hint_str = "DISABLED: %s" % (dis_hint,)
                 elif getattr(node, "enabled", None) is False:
                     is_dis = True
-                if is_dis and not lbl.startswith("[DISABLED]"):
-                    lbl = "[DISABLED] %s" % (lbl,)
-                if not hint_str and (not lbl or lbl in (cls_name, "[DISABLED] %s" % (cls_name,))):
+                if not hint_str and (not base_lbl or base_lbl == cls_name):
                     tex_obj = getattr(node, "texture_path", None) or getattr(node, "texturePath", None)
                     tex_name = getattr(tex_obj, "name", None) if tex_obj is not None else None
                     if isinstance(tex_name, _HOOK_STR_TYPES) and tex_name:
-                        hint_str = tex_name.replace("_", " ")
+                        tex_text = _strip_tags(_safe_str(tex_name, 80)).replace("_", " ").strip()
+                        if tex_text:
+                            hint_str = _safe_str(tex_text, 80)
+                if is_dis and not lbl.startswith("[DISABLED]"):
+                    lbl = "[DISABLED] %s" % (lbl,) if lbl else "[DISABLED]"
                 if not hint_str and cls_name == "MarketOrder":
                     if "buyParent/buyscroll" in cur_path:
                         hint_str = "Sellers (Sell Order - double-click or right-click Buy This)"
@@ -3792,7 +3797,7 @@ def _resolve_carbon_click_handler(node, event_name):
     has_evt_fn = getattr(node, "HasEventHandler", None)
     if callable(has_evt_fn):
         try:
-            if has_evt_fn(event_name) is False:
+            if not has_evt_fn(event_name):
                 return None
         except Exception:
             pass
@@ -3839,6 +3844,30 @@ def _run_widget_click_callable(fn, invoke_args, label, node, cmd_pre, clicked_pi
     return label
 
 
+def _resolve_double_click_entry_action(target_node):
+    """Resolve double-click callback on target_node via FindEventHandler, attributes, or controller."""
+    resolved_dbl = _resolve_carbon_click_handler(target_node, "OnDblClick")
+    if resolved_dbl is not None:
+        d_fn, d_args, d_lbl = resolved_dbl
+        dbl_call = (lambda _fn=d_fn, _args=d_args: _fn(*_args)) if d_args else d_fn
+        return (d_lbl, dbl_call)
+    has_evt_fn = getattr(target_node, "HasEventHandler", None)
+    for dbl_attr in ("OnDblClick", "on_double_click", "DoubleClick"):
+        if dbl_attr == "OnDblClick" and callable(has_evt_fn):
+            try:
+                if not has_evt_fn("OnDblClick"):
+                    continue
+            except Exception:
+                pass
+        dbl_fn = getattr(target_node, dbl_attr, None)
+        if callable(dbl_fn):
+            return (dbl_attr, dbl_fn)
+    ctrl_obj = getattr(target_node, "controller", None)
+    if ctrl_obj is not None and callable(getattr(ctrl_obj, "on_double_click", None)):
+        return ("controller.on_double_click", ctrl_obj.on_double_click)
+    return None
+
+
 def _invoke_widget_click(node, right_click=False, double_click=False, click_x=None, click_y=None):
     blocked_reason = _preclick_block_reason(node)
     if blocked_reason:
@@ -3878,6 +3907,8 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
         _clear_py2_exc()
     if _dismiss_pinned_tooltip_if_outside(node, close_if_owner=True):
         return "CloseTooltipPanel(%s)" % (_safe_str(getattr(node, "name", ""), 48),)
+    if not right_click and getattr(node, "enabled", None) is False:
+        return "disabled_widget(%s)" % (_safe_str(getattr(node, "name", "") or node.__class__.__name__, 48),)
     edit_w = _resolve_editable_widget(node)
     if edit_w is not None:
         try:
@@ -4161,18 +4192,10 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
                             cur_entry.Select()
                     except Exception:
                         pass
-                    for dbl_attr in ("OnDblClick", "on_double_click", "DoubleClick"):
-                        dbl_fn = getattr(cur_entry, dbl_attr, None)
-                        if callable(dbl_fn):
-                            return _run_double_click_action(cur_entry, sr_node, dbl_attr, dbl_fn)
-                    ctrl_entry = getattr(cur_entry, "controller", None)
-                    if ctrl_entry is not None and callable(getattr(ctrl_entry, "on_double_click", None)):
-                        return _run_double_click_action(
-                            cur_entry,
-                            sr_node,
-                            "controller.on_double_click",
-                            ctrl_entry.on_double_click,
-                        )
+                    resolved_dbl = _resolve_double_click_entry_action(cur_entry)
+                    if resolved_dbl is not None:
+                        dbl_attr, dbl_fn = resolved_dbl
+                        return _run_double_click_action(cur_entry, sr_node, dbl_attr, dbl_fn)
                 break
             cur_entry = getattr(cur_entry, "parent", None)
 
@@ -4181,18 +4204,10 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
             for _ in range(4):
                 if cur_dbl is None:
                     break
-                for dbl_attr in ("OnDblClick", "on_double_click", "DoubleClick"):
-                    dbl_fn = getattr(cur_dbl, dbl_attr, None)
-                    if callable(dbl_fn):
-                        return _run_double_click_action(cur_dbl, None, dbl_attr, dbl_fn)
-                ctrl_dbl = getattr(cur_dbl, "controller", None)
-                if ctrl_dbl is not None and callable(getattr(ctrl_dbl, "on_double_click", None)):
-                    return _run_double_click_action(
-                        cur_dbl,
-                        None,
-                        "controller.on_double_click",
-                        ctrl_dbl.on_double_click,
-                    )
+                resolved_dbl = _resolve_double_click_entry_action(cur_dbl)
+                if resolved_dbl is not None:
+                    dbl_attr, dbl_fn = resolved_dbl
+                    return _run_double_click_action(cur_dbl, None, dbl_attr, dbl_fn)
                 cur_dbl = getattr(cur_dbl, "parent", None)
 
         icon_btn = getattr(node, "iconBtn", None)
@@ -4273,8 +4288,6 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
             _clicked_pinned_tp = None
     if not right_click:
         _reset_stale_combo_dropdown(node)
-    if getattr(node, "enabled", None) is False:
-        return "disabled_widget(%s)" % (_safe_str(getattr(node, "name", "") or node.__class__.__name__, 48),)
     has_evt_fn = getattr(node, "HasEventHandler", None)
     if double_click:
         dispatch_plan = (
@@ -4286,6 +4299,7 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
             ("event", "OnClick"),
             ("attr", "OnClick"),
             ("attr", "on_click"),
+            ("event", "OnMouseDown"),
             ("attr", "OnMouseDown"),
         )
     else:
@@ -4294,6 +4308,7 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
             ("event", "OnClick"),
             ("attr", "OnClick"),
             ("attr", "on_click"),
+            ("event", "OnMouseDown"),
             ("attr", "OnMouseDown"),
         )
     for kind, target_name in dispatch_plan:
@@ -4305,9 +4320,9 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
                     h_fn, h_args, h_label, node, cmd_pre, _clicked_pinned_tp
                 )
             continue
-        if target_name in ("OnClick", "OnDblClick") and callable(has_evt_fn):
+        if target_name in ("OnClick", "OnDblClick", "OnMouseDown") and callable(has_evt_fn):
             try:
-                if has_evt_fn(target_name) is False:
+                if not has_evt_fn(target_name):
                     continue
             except Exception:
                 pass

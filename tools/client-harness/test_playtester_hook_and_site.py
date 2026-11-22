@@ -9418,6 +9418,14 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
                 # Mirrors carbonui.primitives.base.Base.OnClick empty pass stub.
                 pass
 
+            def OnDblClick(self, *args):
+                # Mirrors carbonui.primitives.base.Base.OnDblClick empty pass stub.
+                pass
+
+            def OnMouseDown(self, *args):
+                # Mirrors carbonui.primitives.base.Base.OnMouseDown empty pass stub.
+                pass
+
             def HasEventHandler(self, handler_name):
                 handler, _ = self.FindEventHandler(handler_name)
                 if not handler:
@@ -9554,12 +9562,65 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
             self.assertEqual(res_fwd, "disabled_widget(ButtonIcon)")
             self.assertEqual(forward_clicks, [])
 
+            res_fwd_dbl = hook._invoke_widget_click(forward_btn, double_click=True)
+            self.assertEqual(res_fwd_dbl, "disabled_widget(ButtonIcon)")
+            self.assertEqual(forward_clicks, [])
+
             res_dbl = hook._invoke_widget_click(card, double_click=True)
             self.assertEqual(res_dbl, "OnDblClick")
             self.assertEqual(plain_card_clicks, [2])
 
             res_inert = hook._invoke_widget_click(inert_box)
             self.assertEqual(res_inert, "RaiseWindow(job_board)")
+
+            res_inert_dbl = hook._invoke_widget_click(inert_box, double_click=True)
+            self.assertEqual(res_inert_dbl, "RaiseWindow(job_board)")
+
+            tooltip_icon_clicks = []
+            tooltip_calls = []
+
+            class FakeTooltipIcon(object):
+                name = "ButtonIcon"
+                enabled = True
+                parent = getattr(forward_btn, "parent", None)
+
+                def HasEventHandler(self, event_name):
+                    return event_name in ("OnClick", "OnDblClick")
+
+                def FindEventHandler(self, event_name):
+                    if event_name == "OnClick":
+                        return (lambda: self.on_click(1), [])
+                    if event_name == "OnDblClick":
+                        return (lambda: self.on_click(2), [])
+                    return (None, None)
+
+                def on_click(self, click_count=1):
+                    tooltip_icon_clicks.append(click_count)
+
+                def OnClick(self, *args):
+                    pass
+
+                def OnDblClick(self, *args):
+                    pass
+
+                def OnMouseDown(self, *args):
+                    pass
+
+                def LoadTooltipPanel(self, *args):
+                    tooltip_calls.append(args)
+
+            tooltip_icon = FakeTooltipIcon()
+            self.assertFalse(hook._is_tooltip_panel_trigger(tooltip_icon))
+            res_tooltip_icon = hook._invoke_widget_click(tooltip_icon)
+            self.assertEqual(res_tooltip_icon, "OnClick")
+            self.assertEqual(tooltip_icon_clicks, [1])
+            self.assertEqual(tooltip_calls, [])
+
+            tooltip_icon.enabled = False
+            res_tooltip_disabled = hook._invoke_widget_click(tooltip_icon)
+            self.assertEqual(res_tooltip_disabled, "disabled_widget(ButtonIcon)")
+            self.assertEqual(tooltip_icon_clicks, [1])
+            self.assertEqual(tooltip_calls, [])
 
 
 if __name__ == "__main__":
