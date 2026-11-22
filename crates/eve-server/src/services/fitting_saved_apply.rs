@@ -138,27 +138,29 @@ pub async fn handle_fit_ships(
         }
     }
 
-    let (fitted_count, missing, _moved_items) = match validate_and_apply_fitting(
-        ctx,
-        char_id,
-        station_id,
-        &target_ship_ids,
-        expected_ship_type_id,
-        &desired_items,
-        false,
-    ) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let first_ship = target_ship_ids.first().copied().unwrap_or(0);
-    let missing_entries: Vec<(PyRep, PyRep)> = missing
+    let (_fitted_count, missing, _moved_items, failed_ship_id) =
+        match validate_and_apply_fitting_with_failed_ship(
+            ctx,
+            char_id,
+            station_id,
+            &target_ship_ids,
+            expected_ship_type_id,
+            &desired_items,
+            false,
+        ) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+    let mut missing_rows: Vec<(TypeId, i64)> =
+        missing.into_iter().filter(|&(_, qty)| qty > 0).collect();
+    missing_rows.sort_by_key(|&(tid, _)| tid);
+    let failed_to_load: Vec<PyRep> = missing_rows
         .into_iter()
-        .map(|(t, q)| (PyRep::Integer(t as i64), PyRep::Integer(q)))
+        .map(|(tid, qty)| PyRep::Tuple(vec![PyRep::Integer(tid as i64), PyRep::Integer(qty)]))
         .collect();
-    Some(Ok(PyRep::keyval([
-        ("shipID", PyRep::Integer(first_ship)),
-        ("fittedCount", PyRep::Integer(fitted_count)),
-        ("missingItems", PyRep::Dict(missing_entries)),
+    Some(Ok(PyRep::Tuple(vec![
+        PyRep::List(failed_to_load),
+        failed_ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
     ])))
 }
 
@@ -173,6 +175,30 @@ pub(crate) fn validate_and_apply_fitting(
     desired_items: &[(TypeId, InventoryFlag, i32)],
     emit_single_item_change: bool,
 ) -> Result<(i64, HashMap<TypeId, i64>, Vec<eve_db::InventoryItemRecord>), BridgeRpcError> {
+    let (fitted_count, missing, moved_items, _failed_ship_id) =
+        validate_and_apply_fitting_with_failed_ship(
+            ctx,
+            char_id,
+            station_id,
+            target_ship_ids,
+            expected_ship_type_id,
+            desired_items,
+            emit_single_item_change,
+        )?;
+    Ok((fitted_count, missing, moved_items))
+}
+
+/// Validates and fits `desired_items` from `char_id`'s Hangar at `station_id` onto `target_ship_ids`.
+/// Returns `(fitted_count, missing_by_type, moved_items, first_failed_ship_id)`.
+pub(crate) fn validate_and_apply_fitting_with_failed_ship(
+    ctx: &ServerContext,
+    char_id: i64,
+    station_id: i64,
+    target_ship_ids: &[i64],
+    expected_ship_type_id: Option<u32>,
+    desired_items: &[(TypeId, InventoryFlag, i32)],
+    emit_single_item_change: bool,
+) -> Result<(i64, HashMap<TypeId, i64>, Vec<eve_db::InventoryItemRecord>, Option<i64>), BridgeRpcError> {
     let ship_check = ctx.db.with_snapshot(|snap| {
         crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
             ctx, snap, station_id,
@@ -842,6 +868,7 @@ pub(crate) fn validate_and_apply_fitting(
     let mut fitted_count = 0_i64;
     let mut missing: HashMap<TypeId, i64> = HashMap::new();
     let mut moved_items: Vec<eve_db::InventoryItemRecord> = Vec::new();
+    let mut failed_ship_id: Option<i64> = None;
     let char_skills = ctx.character_skill_levels(char_id);
     let before_attrs_by_ship: HashMap<i64, std::collections::BTreeMap<u16, f64>> = target_ship_ids
         .iter()
@@ -872,6 +899,7 @@ pub(crate) fn validate_and_apply_fitting(
                 sh.version += 1;
             }
             let mut ship_fitted = false;
+            let mut ship_failed = false;
             for &(tid, flag, req_qty) in &sorted_desired {
                 let flag_u16 = flag as u16;
                 let cat = ctx.sde.types.get(&tid).map(|t| t.category_id).unwrap_or(0);
@@ -903,6 +931,7 @@ pub(crate) fn validate_and_apply_fitting(
                 let total_avail: i64 = matching_stacks.iter().map(|(_, q)| *q as i64).sum();
                 if total_avail < req_qty as i64 {
                     *missing.entry(tid).or_insert(0) += (req_qty as i64) - total_avail;
+                    ship_failed = true;
                     continue;
                 }
                 let mut online = true;
@@ -993,10 +1022,18 @@ pub(crate) fn validate_and_apply_fitting(
                     }
                     to_consume -= take;
                 }
+                if to_consume > 0 {
+                    *missing.entry(tid).or_insert(0) += to_consume as i64;
+                    ship_failed = true;
+                    continue;
+                }
                 ship_fitted = true;
             }
             if ship_fitted {
                 fitted_count += 1;
+            }
+            if ship_failed && failed_ship_id.is_none() {
+                failed_ship_id = Some(ship_id);
             }
         }
     });
@@ -1054,7 +1091,7 @@ pub(crate) fn validate_and_apply_fitting(
             );
         }
     }
-    Ok((fitted_count, missing, moved_items))
+    Ok((fitted_count, missing, moved_items, failed_ship_id))
 }
 
 pub(crate) fn is_item_allowed_in_ship_hold(

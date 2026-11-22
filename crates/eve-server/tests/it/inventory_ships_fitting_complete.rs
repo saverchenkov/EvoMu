@@ -1424,7 +1424,21 @@ async fn test_fitting_slots_cpu_pwg_hardpoints_rigs_saved_multifit_ghost_inspace
         )
         .await
         .expect("ship.FitShips multifit");
-    assert_eq!(mfit_rep.dict_get("fittedCount").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(mfit_rep, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::None]));
+    ctx.db.with_snapshot(|snap| {
+        let fitted_a = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == hull_a && i.type_id == 2048 && i.flag as u16 == 11)
+            .count();
+        let fitted_b = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == hull_b && i.type_id == 2048 && i.flag as u16 == 11)
+            .count();
+        assert_eq!(fitted_a, 1);
+        assert_eq!(fitted_b, 1);
+    });
 
     let sys_id = 30_000_142u32;
     let depot_id = 830_010i64;

@@ -1762,7 +1762,11 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
             cs.shutdown_in_progress = false;
         }
     }
-    let in_space = matches!(profile, SessionProfile::InSpace);
+    let (expected_ship_location_id, expected_ship_flag) = match profile {
+        SessionProfile::DockedStation => (STATION_ID, InventoryFlag::Hangar),
+        SessionProfile::InSpace => (i64::from(SYSTEM_ID), InventoryFlag::None),
+        SessionProfile::DockedStructure => (STRUCTURE_ID, InventoryFlag::Hangar),
+    };
     let needs_db_sync = ctx.db.with_snapshot(|snap| {
         snap.characters.get(&CHAR_ID).is_some_and(|ch| {
             ch.station_id != station_id
@@ -1772,10 +1776,9 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
                 || ch.corporation_id != CORP_ID
                 || ch.alliance_id != Some(ALLIANCE_ID)
                 || ch.fleet_id != Some(FLEET_ID)
-        }) || (in_space
-            && snap.items.get(&SHIP_ID).is_some_and(|ship| {
-                ship.location_id != i64::from(SYSTEM_ID) || ship.flag != InventoryFlag::None
-            }))
+        }) || snap.items.get(&SHIP_ID).is_some_and(|ship| {
+            ship.location_id != expected_ship_location_id || ship.flag != expected_ship_flag
+        })
             || snap.crimewatch_states.contains_key(&CHAR_ID)
             || snap.sp6_lifecycle.safe_logoffs.contains_key(&CHAR_ID)
             || snap.sp6_lifecycle.self_destructs.contains_key(&CHAR_ID)
@@ -1803,11 +1806,9 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
                 ch.alliance_id = Some(ALLIANCE_ID);
                 ch.fleet_id = Some(FLEET_ID);
             }
-            if in_space {
-                if let Some(ship) = snap.items.get_mut(&SHIP_ID) {
-                    ship.location_id = i64::from(SYSTEM_ID);
-                    ship.flag = InventoryFlag::None;
-                }
+            if let Some(ship) = snap.items.get_mut(&SHIP_ID) {
+                ship.location_id = expected_ship_location_id;
+                ship.flag = expected_ship_flag;
             }
             snap.crimewatch_states.remove(&CHAR_ID);
             snap.sp6_lifecycle.safe_logoffs.remove(&CHAR_ID);
@@ -1854,7 +1855,7 @@ fn is_destructive_rpc(service: &str, method: &str) -> bool {
             | ("charUnboundMgr", "DeleteCharacter" | "PrepareCharacterForDelete")
             | ("machoNet", "TerminateAllClients" | "GracefulShutdown")
             | ("sessionMgr", "EndAllGameSessions")
-            | ("ship", "Eject" | "SelfDestruct")
+            | ("ship", "Eject" | "SelfDestruct" | "Undock")
             | ("entity", "CmdAbandonDrone" | "CmdReturnBay")
             | ("fighterMgr", "CmdAbandonFighter")
             | ("stationSvc", "Undock")
@@ -3575,6 +3576,52 @@ fn test_crowset_descriptor_columns_reads_canonical_empty_rowsets() {
     assert!(has_column_in_collection(&legacy_arg_crowset, "warID"));
 }
 
+/// Validates and normalizes ephemeral `beyonceBoundID` / `boundResult[0]` integer handles across
+/// independent C-2 `ServerContext`s so per-process `NEXT_BOUND_ID` increments do not cause false diffs
+/// while malformed or unbound IDs still register as differences.
+fn canonicalize_c2_ephemeral_beyonce_bound(
+    ctx: &ServerContext,
+    session: &SessionState,
+    rep: &PyRep,
+) -> PyRep {
+    let PyRep::KeyVal(map) = rep else {
+        return rep.clone();
+    };
+    let Some(PyRep::Integer(bid)) = map.get("beyonceBoundID") else {
+        return rep.clone();
+    };
+    let Ok(bound_id) = u64::try_from(*bid) else {
+        return rep.clone();
+    };
+    if bound_id == 0 {
+        return rep.clone();
+    }
+    let Ok(entry) = ctx.verify_bound_object(session, bound_id) else {
+        return rep.clone();
+    };
+    if entry.service != "beyonce" {
+        return rep.clone();
+    }
+    let mut normalized = map.clone();
+    let canonical_sentinel = PyRep::String("__canonical_beyonce_bound_id__".to_string());
+    if let Some(bound_res) = normalized.get_mut("boundResult") {
+        match bound_res {
+            PyRep::List(items) | PyRep::Tuple(items) => {
+                let Some(first) = items.first_mut() else {
+                    return rep.clone();
+                };
+                if *first != PyRep::Integer(*bid) {
+                    return rep.clone();
+                }
+                *first = canonical_sentinel.clone();
+            }
+            _ => return rep.clone(),
+        }
+    }
+    normalized.insert("beyonceBoundID".to_string(), canonical_sentinel);
+    PyRep::KeyVal(normalized)
+}
+
 /// `[C-2 / #926, C-9 / #1189]` Enforces the falling `raw_dispatch_ratchet.json` baseline on
 /// `tests/it/` and ratchets catalog RPC divergence (`differing_replies`) between legacy
 /// `caller_trace = None` and `ClientHarness` down toward `0`.
@@ -3806,7 +3853,17 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
                     (Ok(raw_rep), Ok(wire_rep)) => {
                         both_ok_rpcs.insert(sig.rpc_key.clone());
                         resolved_rpcs.insert(sig.rpc_key.clone());
-                        if raw_rep != wire_rep {
+                        let raw_cmp = canonicalize_c2_ephemeral_beyonce_bound(
+                            &ctx_raw,
+                            &sess_raw,
+                            raw_rep,
+                        );
+                        let wire_cmp = canonicalize_c2_ephemeral_beyonce_bound(
+                            &ctx_wire,
+                            &harness.transport().inner.session,
+                            wire_rep,
+                        );
+                        if raw_cmp != wire_cmp {
                             *differing_by_service
                                 .entry(sig.service.clone())
                                 .or_insert(0) += 1;
@@ -4066,4 +4123,96 @@ async fn test_c2_client_harness_wire_frames_and_wrong_shape_rejection() {
     .await
     .expect_err("ClientHarness must fail the test when a handler returns a wrong reply shape");
     assert!(join_err.is_panic());
+}
+
+#[tokio::test]
+async fn test_restore_session_profile_and_c2_beyonce_canonicalization() {
+    assert!(is_destructive_rpc("ship", "Undock"));
+
+    let ctx_a = shared_comprehensive_ctx().await;
+    let ctx_b = shared_comprehensive_ctx().await;
+
+    let mut sess_a = SessionState::new(77_201);
+    sess_a.user_id = Some(1);
+    let mut sess_b = SessionState::new(77_202);
+    sess_b.user_id = Some(1);
+
+    for (profile, expected_loc, expected_flag) in [
+        (SessionProfile::DockedStation, STATION_ID, InventoryFlag::Hangar),
+        (SessionProfile::InSpace, i64::from(SYSTEM_ID), InventoryFlag::None),
+        (SessionProfile::DockedStructure, STRUCTURE_ID, InventoryFlag::Hangar),
+        (SessionProfile::DockedStation, STATION_ID, InventoryFlag::Hangar),
+    ] {
+        restore_session_profile(&ctx_a, &mut sess_a, profile);
+        let ship_pos = ctx_a
+            .db
+            .with_snapshot(|s| s.items.get(&SHIP_ID).map(|it| (it.location_id, it.flag)));
+        assert_eq!(ship_pos, Some((expected_loc, expected_flag)));
+    }
+
+    restore_session_profile(&ctx_a, &mut sess_a, SessionProfile::InSpace);
+    restore_session_profile(&ctx_b, &mut sess_b, SessionProfile::InSpace);
+
+    let bid_a = ctx_a
+        .bind_object(&sess_a, "beyonce", i64::from(SYSTEM_ID))
+        .expect("bind beyonce A");
+    let bid_b = ctx_b
+        .bind_object(&sess_b, "beyonce", i64::from(SYSTEM_ID))
+        .expect("bind beyonce B");
+
+    let mk_undock_rep = |bid: u64, ready_at_ft: i64| {
+        PyRep::keyval([
+            ("solarSystemID", PyRep::Integer(i64::from(SYSTEM_ID))),
+            ("shipID", PyRep::Integer(SHIP_ID)),
+            ("beyonceBoundID", PyRep::Integer(bid as i64)),
+            (
+                "boundResult",
+                PyRep::List(vec![PyRep::Integer(bid as i64), PyRep::Integer(ready_at_ft)]),
+            ),
+        ])
+    };
+
+    let rep_a = mk_undock_rep(bid_a, 123_456);
+    let rep_b = mk_undock_rep(bid_b, 123_456);
+    assert_ne!(rep_a, rep_b, "independent ServerContexts must allocate distinct bound IDs");
+    assert_eq!(
+        canonicalize_c2_ephemeral_beyonce_bound(&ctx_a, &sess_a, &rep_a),
+        canonicalize_c2_ephemeral_beyonce_bound(&ctx_b, &sess_b, &rep_b),
+    );
+
+    // Non-matching ready_at_ft, mismatched boundResult[0], or bogus unbound ID must still differ.
+    let rep_b_diff_time = mk_undock_rep(bid_b, 999_999);
+    assert_ne!(
+        canonicalize_c2_ephemeral_beyonce_bound(&ctx_a, &sess_a, &rep_a),
+        canonicalize_c2_ephemeral_beyonce_bound(&ctx_b, &sess_b, &rep_b_diff_time),
+    );
+
+    let rep_b_mismatched_br = PyRep::keyval([
+        ("solarSystemID", PyRep::Integer(i64::from(SYSTEM_ID))),
+        ("shipID", PyRep::Integer(SHIP_ID)),
+        ("beyonceBoundID", PyRep::Integer(bid_b as i64)),
+        (
+            "boundResult",
+            PyRep::List(vec![PyRep::Integer(bid_b as i64 + 1), PyRep::Integer(123_456)]),
+        ),
+    ]);
+    assert_ne!(
+        canonicalize_c2_ephemeral_beyonce_bound(&ctx_a, &sess_a, &rep_a),
+        canonicalize_c2_ephemeral_beyonce_bound(&ctx_b, &sess_b, &rep_b_mismatched_br),
+    );
+
+    let rep_b_unbound = mk_undock_rep(bid_b + 999_999, 123_456);
+    assert_ne!(
+        canonicalize_c2_ephemeral_beyonce_bound(&ctx_a, &sess_a, &rep_a),
+        canonicalize_c2_ephemeral_beyonce_bound(&ctx_b, &sess_b, &rep_b_unbound),
+    );
+
+    let rep_b_zero = mk_undock_rep(0, 123_456);
+    assert_ne!(
+        canonicalize_c2_ephemeral_beyonce_bound(&ctx_a, &sess_a, &rep_a),
+        canonicalize_c2_ephemeral_beyonce_bound(&ctx_b, &sess_b, &rep_b_zero),
+    );
+
+    cleanup_isolated_bug_queue_dir(&ctx_a);
+    cleanup_isolated_bug_queue_dir(&ctx_b);
 }

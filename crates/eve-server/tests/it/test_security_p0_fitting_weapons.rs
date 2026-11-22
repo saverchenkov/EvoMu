@@ -173,12 +173,14 @@ async fn test_fitting_saved_multifit_and_community_fittings() {
         )
         .await
         .expect("Multifit must succeed");
-    assert_eq!(mfit_res.dict_get("fittedCount").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(mfit_res, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::None]));
 
-    // Both hulls must be assembled
+    // Both hulls must be assembled with both guns fitted
     ctx.db.with_snapshot(|snap| {
         assert!(snap.items.get(&clean_hull1).unwrap().singleton);
         assert!(snap.items.get(&clean_hull2).unwrap().singleton);
+        assert_eq!(snap.items.values().filter(|i| i.location_id == clean_hull1 && i.type_id == gun).count(), 2);
+        assert_eq!(snap.items.values().filter(|i| i.location_id == clean_hull2 && i.type_id == gun).count(), 2);
     });
 
     // Notifications emitted: canonical OnMultipleItemChange with old location/flag
@@ -204,8 +206,16 @@ async fn test_fitting_saved_multifit_and_community_fittings() {
             &[PyRep::List(vec![PyRep::Integer(dup_hull), PyRep::Integer(dup_hull)]), PyRep::Integer(fit_id)],
             &kw, None,
         ).await.expect("Duplicate ship ID FitShips succeeds");
-    assert_eq!(dup_res.dict_get("fittedCount").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(
+        dup_res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(gun as i64), PyRep::Integer(1)])]),
+            PyRep::Integer(dup_hull),
+        ])
+    );
     ctx.db.with_snapshot(|snap| {
+        let fitted_cnt = snap.items.values().filter(|i| i.location_id == dup_hull && i.type_id == gun).count();
+        assert_eq!(fitted_cnt, 1, "Deduplicated ship fits available gun once");
         let remaining_stock = snap.items.values().filter(|i| i.location_id == station_id && i.type_id == gun).map(|i| i.quantity).sum::<i32>();
         assert_eq!(remaining_stock, 0, "Stock must be consumed only once for deduplicated ship ID");
     });
@@ -263,7 +273,7 @@ async fn test_fitting_saved_multifit_and_community_fittings() {
         )
         .await
         .expect("FitShips with power overflow must succeed fitting offline");
-    assert_eq!(over_res.dict_get("fittedCount").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(over_res, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::None]));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.module_online_states.get(&big_gun_item), Some(&false), "Exceeding powergrid module must be offline");
     });
@@ -508,7 +518,15 @@ async fn test_fitships_fitdata_flag_whitelist_and_specialized_holds() {
     // 5. Compatible specialized hold item fitting within capacity succeeds
     seed_item(&ctx, 870_051, ore_tid, char_id, station_id, InventoryFlag::Hangar, 1000, false);
     let ok_res = ctx.dispatch_rpc(&mut sess, "ship", None, "FitShips", &[PyRep::List(vec![PyRep::Integer(ship_id)])], &fit_kw(134, ore_tid as i64, 1000), None).await.expect("Fit ore within capacity");
-    assert_eq!(ok_res.dict_get("fittedCount").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(ok_res, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::None]));
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.items.values().any(|i| {
+            i.location_id == ship_id
+                && i.type_id == ore_tid
+                && i.flag as u16 == 134
+                && i.quantity == 1000
+        }));
+    });
 
     // 6. Tritanium (category 4) into flag 158 (FighterBay) must fail (NF-FIT-FLAG-BYPASS)
     let err_fighter = ctx.dispatch_rpc(&mut sess, "ship", None, "FitShips", &[PyRep::List(vec![PyRep::Integer(ship_id)])], &fit_kw(158, 34, 1), None).await.expect_err("Tritanium into FighterBay must fail");

@@ -424,9 +424,23 @@ async fn test_fit_ships_from_saved_fitting_reports_missing_items() {
     let rep = call(&ctx, &mut s, "ship", "FitShips", vec![PyRep::List(vec![PyRep::Integer(100_000_001)]), PyRep::Integer(670_100)])
         .await
         .expect("FitShips");
-    assert_eq!(int(&rep, "fittedCount"), 1);
-    let Some(PyRep::Dict(missing)) = rep.dict_get("missingItems") else { panic!("missingItems") };
-    let mut missing: Vec<(i64, i64)> = missing.iter().map(|(k, v)| (k.as_i64().unwrap(), v.as_i64().unwrap())).collect();
+    let PyRep::Tuple(rep_parts) = rep else {
+        panic!("expected (failedToLoad, failedShipID) 2-tuple, got {rep:?}");
+    };
+    assert_eq!(rep_parts.len(), 2);
+    assert_eq!(rep_parts[1], PyRep::Integer(100_000_001));
+    let PyRep::List(ref failed_to_load) = rep_parts[0] else {
+        panic!("expected failedToLoad list, got {:?}", rep_parts[0]);
+    };
+    let mut missing: Vec<(i64, i64)> = failed_to_load
+        .iter()
+        .map(|row| match row {
+            PyRep::Tuple(pair) if pair.len() == 2 => {
+                (pair[0].as_i64().unwrap(), pair[1].as_i64().unwrap())
+            }
+            other => panic!("expected (typeID, qty) tuple in failedToLoad, got {other:?}"),
+        })
+        .collect();
     missing.sort();
     let mut expected = vec![(gun as i64, 1), (ammo as i64, 50)];
     expected.sort();

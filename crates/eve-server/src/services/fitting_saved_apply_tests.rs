@@ -164,10 +164,162 @@ async fn handle_fit_ships_applies_saved_fitting_and_reports_missing_items() {
     .await
     .expect("handled")
     .expect("FitShips ok");
-    assert_ne!(res, PyRep::None);
+    assert_eq!(
+        res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(178),
+                PyRep::Integer(50),
+            ])]),
+            PyRep::Integer(ship_id),
+        ])
+    );
 
     let fitted_loc = ctx
         .db
         .with_snapshot(|s| s.items.get(&mod_item_id).map(|i| (i.location_id, i.flag)));
     assert_eq!(fitted_loc, Some((ship_id, InventoryFlag::HiSlot0)));
+}
+
+#[tokio::test]
+async fn handle_fit_ships_complete_and_partial_multifit_tuple_contracts() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_000_002i64;
+    let station_id = 60_003_760i64;
+    let ship_a = 96_000_110i64;
+    let ship_b = 96_000_111i64;
+    let single_ship = 96_000_112i64;
+    let gun_a = 96_000_210i64;
+    let gun_b = 96_000_211i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.name = "MultiFitPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = single_ship;
+        snap.characters.insert(char_id, ch);
+
+        for (sid, singleton) in [(single_ship, true), (ship_a, false), (ship_b, false)] {
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587, // Rifter
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        // Seed two guns: one consumed by complete single_ship fit, one left for ship_a (leaving ship_b short).
+        for gid in [gun_a, gun_b] {
+            snap.items.insert(
+                gid,
+                InventoryItemRecord {
+                    item_id: gid,
+                    type_id: 484,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        for &sk in &[3300u32, 3318, 3392, 3426] {
+            snap.skills.entry(char_id).or_default().insert(
+                sk,
+                TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        snap.saved_fittings.insert(
+            502,
+            SavedFittingRecord {
+                fitting_id: 502,
+                owner_id: char_id,
+                ship_type_id: 587,
+                name: "Single Gun Rifter".into(),
+                description: "Single high-slot fit".into(),
+                items: vec![(484, InventoryFlag::HiSlot0, 1)],
+            },
+        );
+    });
+
+    let mut session = SessionState::default();
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.station_id = Some(station_id);
+    session.solar_system_id = Some(30_000_142);
+    session.ship_id = Some(single_ship);
+
+    // 1. Complete fit returns ([], None)
+    let clean_res = handle_fit_ships(
+        &ctx,
+        &mut session,
+        &[PyRep::List(vec![PyRep::Integer(single_ship)]), PyRep::Integer(502)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("clean FitShips ok");
+    assert_eq!(clean_res, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::None]));
+
+    // 2. Partial multifit: ship_a succeeds cleanly with remaining gun_b; ship_b fails -> ([(484, 1)], ship_b)
+    let partial_res = handle_fit_ships(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::List(vec![PyRep::Integer(ship_a), PyRep::Integer(ship_b)]),
+            PyRep::Integer(502),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("partial multifit returns 2-tuple");
+    assert_eq!(
+        partial_res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(484),
+                PyRep::Integer(1),
+            ])]),
+            PyRep::Integer(ship_b),
+        ])
+    );
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(
+            s.items
+                .values()
+                .filter(|i| i.location_id == single_ship && i.type_id == 484 && i.flag == InventoryFlag::HiSlot0)
+                .count(),
+            1
+        );
+        assert_eq!(
+            s.items
+                .values()
+                .filter(|i| i.location_id == ship_a && i.type_id == 484 && i.flag == InventoryFlag::HiSlot0)
+                .count(),
+            1
+        );
+        assert!(!s.items.values().any(|i| i.location_id == ship_b && i.type_id == 484));
+    });
 }
