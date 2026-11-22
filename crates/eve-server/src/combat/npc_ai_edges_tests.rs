@@ -824,7 +824,7 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
                 _ => None,
             })
             .collect::<Vec<_>>();
-        (events, wire.wire_state.drop_count)
+        (events, wire.wire_state.scene_drop_count())
     };
 
     // 1. NPC attacks abandoned drone while owner is docked in another system -> hits drone, zero notifications
@@ -946,5 +946,5 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         )),
         "live wire docking must suppress stale combat frames emitted right before dock"
     );
-    assert!(live_wire.wire_state.drop_count > 0);
+    assert!(live_wire.wire_state.scene_drop_count() > 0);
 }

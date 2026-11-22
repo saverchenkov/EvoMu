@@ -1232,6 +1232,13 @@ impl ServerContext {
         (pkt, marshaled)
     }
 
+    /// Resolves `location_id` as a valid solar system ID from SDE metadata (`#1190`).
+    pub fn resolve_solar_system_location_id(&self, location_id: i64) -> Option<u32> {
+        u32::try_from(location_id)
+            .ok()
+            .filter(|id| self.sde.solar_systems.contains_key(id))
+    }
+
     /// Returns the active online session's transition `scene_epoch` for `char_id`, if any (`#1190`).
     pub fn active_session_scene_epoch_for_char(&self, char_id: i64) -> Option<u64> {
         let uid = self
@@ -1268,7 +1275,7 @@ impl ServerContext {
     ) -> Vec<PendingMachoNotification> {
         let default_scope = match &target {
             NotificationTarget::SolarSystem(sys_id) => Some(
-                crate::outbound_sequencer::OutboundSceneScope::space(Some(*sys_id), None),
+                crate::outbound_sequencer::OutboundSceneScope::solar_system(Some(*sys_id), None),
             ),
             _ => None,
         };
@@ -1348,11 +1355,12 @@ impl ServerContext {
             }
             let recipient_scope = scene_scope.map(|mut scope| {
                 if scope.scene_epoch.is_none() {
+                    // Never fall back to `active_session_scene_epoch_for_char` here: `notify_in_scene`
+                    // holds `pending_notifications` (`RANK_LEAF = 60`), which outranks `db.with_snapshot` (40).
                     scope.scene_epoch = uid
                         .and_then(|u| self.db.get_online_session(u))
                         .filter(|os| os.character_id == Some(cid))
-                        .map(|os| self.session_scene_epoch(os.session_id))
-                        .or_else(|| self.active_session_scene_epoch_for_char(cid));
+                        .map(|os| self.session_scene_epoch(os.session_id));
                 }
                 scope
             });
@@ -1660,11 +1668,7 @@ impl ServerContext {
             NotificationTarget::Character(cid) => self.db.with_snapshot(|snap| {
                 snap.items
                     .get(&item_id)
-                    .and_then(|it| {
-                        u32::try_from(it.location_id)
-                            .ok()
-                            .filter(|&loc| (30_000_000..40_000_000).contains(&loc))
-                    })
+                    .and_then(|it| self.resolve_solar_system_location_id(it.location_id))
                     .or_else(|| {
                         snap.characters
                             .get(&cid)
@@ -2190,11 +2194,7 @@ impl ServerContext {
             let ship_sys_opt = self.db.with_snapshot(|snap| {
                 snap.items
                     .get(&ship_id)
-                    .and_then(|it| {
-                        u32::try_from(it.location_id)
-                            .ok()
-                            .filter(|&loc| (30_000_000..40_000_000).contains(&loc))
-                    })
+                    .and_then(|it| self.resolve_solar_system_location_id(it.location_id))
                     .or_else(|| {
                         snap.characters
                             .get(&char_id)

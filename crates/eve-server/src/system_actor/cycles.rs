@@ -3319,6 +3319,7 @@ fn capacitor_telemetry_key(n: &crate::router::PendingMachoNotification) -> Optio
     None
 }
 
+#[cfg(test)]
 fn enqueue_cycle_char_notification<N: TypedNotification>(
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     pending: &dyn AnyRwLock<

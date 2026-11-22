@@ -1798,11 +1798,9 @@ pub(crate) fn emit_combat_log_and_damage_state(
     });
     let combat_sys = ctx.db.with_snapshot(|snap| {
         let item_sys = |id: i64| {
-            snap.items.get(&id).and_then(|i| {
-                (30_000_000..40_000_000)
-                    .contains(&i.location_id)
-                    .then_some(i.location_id as u32)
-            })
+            snap.items
+                .get(&id)
+                .and_then(|i| ctx.resolve_solar_system_location_id(i.location_id))
         };
         active_drone
             .map(|(_, _, sys)| sys)

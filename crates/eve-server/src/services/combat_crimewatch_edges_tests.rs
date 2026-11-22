@@ -623,8 +623,8 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
     assert!(!rt.has_extended_runtime_state());
 }
 
-#[test]
-fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_drone_victims() {
+#[tokio::test]
+async fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_drone_victims() {
     let (ctx, _session, att_id, att_ship, sys_a) = make_fighter_ctx_and_session();
     let sys_b = 30_000_144_u32;
     let vic_id = 90_000_002_i64;
@@ -769,7 +769,7 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
                 _ => None,
             })
             .collect::<Vec<_>>();
-        (events, wire.wire_state.drop_count)
+        (events, wire.wire_state.scene_drop_count())
     };
     let raw_victim_combat_events = || {
         ctx.drain_notifications_for_char(vic_id)
@@ -872,18 +872,23 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
         snap.items.get_mut(&vic_ship).unwrap().location_id = sys_a as i64;
     });
     emit_combat_log_and_damage_state(&ctx, att_id, Some(vic_id), att_ship, vic_ship, 2_905, 25.0, false, 0.8, 1.0, 1.0);
-    let _ = ctx.record_atomic_session_transition(crate::router::AtomicSceneTransitionRecord {
-        session_id: 9_088,
-        char_id: Some(vic_id),
-        departed_station_id: None,
-        departed_structure_id: None,
-        departed_solar_system_id: Some(sys_a),
-        departed_tick: 1,
-        entered_station_id: None,
-        entered_structure_id: None,
-        entered_solar_system_id: Some(sys_a),
-        entered_tick: 2,
-    });
+    let _ = ctx.record_atomic_session_transition(
+        crate::router::binding_transition_policy::AtomicSceneTransitionRecord {
+            session_id: 9_088,
+            user_id: Some(vic_uid),
+            char_id: vic_id,
+            kind_label: "scene_transition",
+            reason: "scene_epoch_bump",
+            is_logout: false,
+            is_login: false,
+            prev_sys: Some(sys_a),
+            prev_dock: None,
+            next_sys: Some(sys_a),
+            next_dock: None,
+            can_record_departed: true,
+            removed_bindings: Vec::new(),
+        },
+    );
     let (ev_stale_ep, drops_stale_ep) = drain_vic_wire_combat_events();
     assert!(
         ev_stale_ep.is_empty() && drops_stale_ep > 0,
@@ -891,8 +896,8 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
     );
 }
 
-#[test]
-fn emit_combat_log_and_damage_state_allows_active_structure_gunner_and_blocks_structure_docked() {
+#[tokio::test]
+async fn emit_combat_log_and_damage_state_allows_active_structure_gunner_and_blocks_structure_docked() {
     let (ctx, _session, att_id, att_ship, sys_a) = make_fighter_ctx_and_session();
     let sys_b = 30_000_144_u32;
     let vic_id = 90_000_002_i64;
@@ -996,7 +1001,7 @@ fn emit_combat_log_and_damage_state_allows_active_structure_gunner_and_blocks_st
                 _ => None,
             })
             .collect::<Vec<_>>();
-        (events, wire.wire_state.drop_count)
+        (events, wire.wire_state.scene_drop_count())
     };
 
     // 1. Normally docked in structure (`structure_id == Some(sid)`, `active_ship_id != sid`) -> dropped on wire

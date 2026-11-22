@@ -88,6 +88,14 @@ impl OutboundSceneScope {
         }
     }
 
+    pub const fn solar_system(scene_sys_id: Option<u32>, scene_epoch: Option<u64>) -> Self {
+        Self {
+            scene_epoch,
+            scene_sys_id,
+            requires_in_space: false,
+        }
+    }
+
     pub const fn with_epoch(mut self, scene_epoch: u64) -> Self {
         self.scene_epoch = Some(scene_epoch);
         self
@@ -109,9 +117,17 @@ enum SceneScopeDecision {
 
 /// Outcome of scene-epoch and materialisation gating on a [`TypedNotification`] (`#1190`).
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboundSceneSync {
+    pub scene_epoch: u64,
+    pub solar_system_id: Option<u32>,
+    pub is_in_space: bool,
+    pub has_ballpark: bool,
+}
+
 pub enum GateNotificationOutcome {
     Emit(TypedNotification),
-    Held,
+    Held(Option<SequencerLedgerEvent>),
     Dropped(SequencerLedgerEvent),
 }
 
@@ -133,6 +149,7 @@ pub struct SessionWireState {
     synthetic_remove_floor: Option<(u32, u32)>,
     last_wire_epoch_and_stamp: Option<(u32, u32)>,
     held_frames: VecDeque<HeldSceneFrame>,
+    scene_drop_count: u64,
 }
 
 impl SessionWireState {
@@ -153,6 +170,7 @@ impl SessionWireState {
             synthetic_remove_floor: None,
             last_wire_epoch_and_stamp: None,
             held_frames: VecDeque::new(),
+            scene_drop_count: 0,
         }
     }
 
@@ -163,6 +181,10 @@ impl SessionWireState {
 
     pub fn held_scene_frame_count(&self) -> usize {
         self.held_frames.len()
+    }
+
+    pub fn scene_drop_count(&self) -> u64 {
+        self.scene_drop_count
     }
 
     pub fn with_flight_recorder(mut self, flight_recorder: Arc<FlightRecorder>) -> Self {
@@ -398,12 +420,25 @@ impl SessionWireState {
         solar_system_id: Option<u32>,
         in_space: bool,
     ) -> Vec<SequencerLedgerEvent> {
+        self.sync_scene_with_ballpark(scene_epoch, solar_system_id, in_space, in_space)
+    }
+
+    /// Synchronizes authoritative session scene epoch/location while distinguishing scene
+    /// notification eligibility (`in_space`, e.g. active structure gunners) from whether a
+    /// ballpark `SetState` is expected before releasing incremental scene frames (`has_ballpark`).
+    pub fn sync_scene_with_ballpark(
+        &mut self,
+        scene_epoch: u64,
+        solar_system_id: Option<u32>,
+        in_space: bool,
+        has_ballpark: bool,
+    ) -> Vec<SequencerLedgerEvent> {
         if scene_epoch > self.scene_epoch {
             self.scene_epoch = scene_epoch;
         }
         self.set_scene_solar_system(solar_system_id);
         self.in_space = in_space;
-        self.scene_entered = !in_space || matches!(self.destiny, DestinyStream::Live { .. });
+        self.scene_entered = !has_ballpark || matches!(self.destiny, DestinyStream::Live { .. });
         self.prune_incompatible_held_frames()
     }
 
@@ -427,6 +462,7 @@ impl SessionWireState {
                 if let SceneScopeDecision::Drop { reason } =
                     self.evaluate_scene_scope(scope, has_set_state)
                 {
+                    self.scene_drop_count += 1;
                     dropped.push(SequencerLedgerEvent {
                         kind: SequencerLedgerEventKind::Dropped,
                         epoch: ep,
@@ -450,6 +486,7 @@ impl SessionWireState {
             match self.evaluate_scene_scope(scope, false) {
                 SceneScopeDecision::Allow => {}
                 SceneScopeDecision::Drop { reason } => {
+                    self.scene_drop_count += 1;
                     let stamp = match self.destiny {
                         DestinyStream::Live { last_stamp, .. } => last_stamp,
                         _ => 0,
@@ -463,8 +500,8 @@ impl SessionWireState {
                     });
                 }
                 SceneScopeDecision::Hold => {
-                    let _ = self.hold_scene_frame(HeldSceneFrame::Notification(notif));
-                    return GateNotificationOutcome::Held;
+                    let evicted = self.hold_scene_frame(HeldSceneFrame::Notification(notif));
+                    return GateNotificationOutcome::Held(evicted);
                 }
             }
         }
@@ -519,7 +556,7 @@ impl SessionWireState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcceptDestinyOutcome {
     Accepted(DestinyBatch),
-    Held,
+    Held(Option<SequencerLedgerEvent>),
     Empty,
     Dropped { epoch: u32, stamp: u32, reason: String },
 }
@@ -561,6 +598,7 @@ impl SessionWireState {
             match self.evaluate_scene_scope(scope, batch.has_set_state) {
                 SceneScopeDecision::Allow => {}
                 SceneScopeDecision::Drop { reason } => {
+                    self.scene_drop_count += 1;
                     return AcceptDestinyOutcome::Dropped {
                         epoch: batch.epoch,
                         stamp: batch.stamp,
@@ -568,8 +606,8 @@ impl SessionWireState {
                     };
                 }
                 SceneScopeDecision::Hold => {
-                    let _ = self.hold_scene_frame(HeldSceneFrame::Destiny(batch));
-                    return AcceptDestinyOutcome::Held;
+                    let evicted = self.hold_scene_frame(HeldSceneFrame::Destiny(batch));
+                    return AcceptDestinyOutcome::Held(evicted);
                 }
             }
         }
@@ -691,7 +729,7 @@ impl SessionWireState {
         match self.accept_destiny_batch_with_reason(batch) {
             AcceptDestinyOutcome::Accepted(accepted) => Some(accepted),
             AcceptDestinyOutcome::Empty
-            | AcceptDestinyOutcome::Held
+            | AcceptDestinyOutcome::Held(_)
             | AcceptDestinyOutcome::Dropped { .. } => None,
         }
     }
@@ -951,7 +989,12 @@ fn eval_and_push_destiny_batch(
                 wait_for_bubble: accepted.wait_for_bubble,
             });
         }
-        AcceptDestinyOutcome::Empty | AcceptDestinyOutcome::Held => {}
+        AcceptDestinyOutcome::Empty => {}
+        AcceptDestinyOutcome::Held(held_ev) => {
+            if let Some(ev) = held_ev {
+                events.push(ev);
+            }
+        }
         AcceptDestinyOutcome::Dropped {
             epoch,
             stamp,
@@ -1048,70 +1091,77 @@ fn drain_ready_held_frames_into(
     out: &mut Vec<OutFrame>,
     events: &mut Vec<SequencerLedgerEvent>,
 ) {
-    if state.held_frames.is_empty() {
-        return;
-    }
-    let mut pending = std::mem::take(&mut state.held_frames);
-    let mut still_held = VecDeque::new();
-    while let Some(item) = pending.pop_front() {
-        let (scope_opt, has_set_state, ep, stamp, pkt) = match &item {
-            HeldSceneFrame::Destiny(b) => (
-                b.scene_scope,
-                b.has_set_state,
-                b.epoch,
-                b.stamp,
-                Some("DoDestinyUpdate".to_string()),
-            ),
-            HeldSceneFrame::Notification(n) => (
-                n.scene_scope,
-                false,
-                state.current_epoch(),
-                0,
-                Some(n.event.clone()),
-            ),
-        };
-        if let Some(scope) = scope_opt {
-            match state.evaluate_scene_scope(scope, has_set_state) {
-                SceneScopeDecision::Allow => {}
-                SceneScopeDecision::Drop { reason } => {
-                    events.push(SequencerLedgerEvent {
-                        kind: SequencerLedgerEventKind::Dropped,
-                        epoch: ep,
-                        stamp,
-                        reason,
-                        packet_kind: pkt,
-                    });
-                    continue;
-                }
-                SceneScopeDecision::Hold => {
-                    still_held.push_back(item);
-                    continue;
+    loop {
+        if state.held_frames.is_empty() {
+            return;
+        }
+        let was_entered = state.scene_entered;
+        let mut pending = std::mem::take(&mut state.held_frames);
+        let mut still_held = VecDeque::new();
+        while let Some(item) = pending.pop_front() {
+            let (scope_opt, has_set_state, ep, stamp, pkt) = match &item {
+                HeldSceneFrame::Destiny(b) => (
+                    b.scene_scope,
+                    b.has_set_state,
+                    b.epoch,
+                    b.stamp,
+                    Some("DoDestinyUpdate".to_string()),
+                ),
+                HeldSceneFrame::Notification(n) => (
+                    n.scene_scope,
+                    false,
+                    state.current_epoch(),
+                    0,
+                    Some(n.event.clone()),
+                ),
+            };
+            if let Some(scope) = scope_opt {
+                match state.evaluate_scene_scope(scope, has_set_state) {
+                    SceneScopeDecision::Allow => {}
+                    SceneScopeDecision::Drop { reason } => {
+                        state.scene_drop_count += 1;
+                        events.push(SequencerLedgerEvent {
+                            kind: SequencerLedgerEventKind::Dropped,
+                            epoch: ep,
+                            stamp,
+                            reason,
+                            packet_kind: pkt,
+                        });
+                        continue;
+                    }
+                    SceneScopeDecision::Hold => {
+                        still_held.push_back(item);
+                        continue;
+                    }
                 }
             }
-        }
-        match item {
-            HeldSceneFrame::Destiny(mut batch) => {
-                if batch.epoch == 0 {
+            match item {
+                HeldSceneFrame::Destiny(mut batch) => {
                     if let Some(active_ep) = state.destiny.epoch() {
                         batch.epoch = active_ep;
                     }
+                    for sub_batch in normalize_server_destiny_batch(state, batch) {
+                        let start = out.len();
+                        eval_and_push_destiny_batch(state, sub_batch, out, events);
+                        finalize_pending_destiny_frames(state, out, start, events);
+                    }
                 }
-                let start = out.len();
-                eval_and_push_destiny_batch(state, batch, out, events);
-                finalize_pending_destiny_frames(state, out, start, events);
-            }
-            HeldSceneFrame::Notification(notif) => {
-                if let Some(drop_ev) = state.gate_notification(&notif.event, &notif.args) {
-                    events.push(drop_ev);
-                } else {
-                    push_typed_notif_frame(notif, out);
+                HeldSceneFrame::Notification(notif) => {
+                    if let Some(drop_ev) = state.gate_notification(&notif.event, &notif.args) {
+                        events.push(drop_ev);
+                    } else {
+                        push_typed_notif_frame(notif, out);
+                    }
                 }
             }
         }
-    }
-    if !still_held.is_empty() {
-        still_held.extend(std::mem::take(&mut state.held_frames));
-        state.held_frames = still_held;
+        if !still_held.is_empty() {
+            still_held.extend(std::mem::take(&mut state.held_frames));
+            state.held_frames = still_held;
+        }
+        if !(!was_entered && state.scene_entered) {
+            break;
+        }
     }
 }
 
@@ -1158,8 +1208,13 @@ fn sequence_with_events_in_scene(
         state.leave_space();
     }
 
-    if let Some((new_scene_epoch, new_sys, new_in_space)) = post_rpc_scene {
-        events.extend(state.sync_scene(new_scene_epoch, new_sys, new_in_space));
+    if let Some(sync) = post_rpc_scene {
+        events.extend(state.sync_scene_with_ballpark(
+            sync.scene_epoch,
+            sync.solar_system_id,
+            sync.is_in_space,
+            sync.has_ballpark,
+        ));
     }
 
     // 2. SessionChangeNotification precedes CallRsp (#883, #928) so MachoNet's TransportReader
@@ -1293,13 +1348,17 @@ fn sequence_with_events_in_scene(
     // 5. Post-RPC held scene frames (now that scene entry / SetState has completed) followed by
     //    post-RPC notifications in causal emission order (ORD-5, ORD-6), gated by scene-epoch and
     //    `materialized`.
-    if state.scene_entered {
+    if state.held_scene_frame_count() > 0 {
         drain_ready_held_frames_into(state, &mut out, &mut events);
     }
     for notif in done.notifications {
         match state.gate_typed_notification(notif) {
             GateNotificationOutcome::Emit(allowed) => push_typed_notif_frame(allowed, &mut out),
-            GateNotificationOutcome::Held => {}
+            GateNotificationOutcome::Held(held_ev) => {
+                if let Some(ev) = held_ev {
+                    events.push(ev);
+                }
+            }
             GateNotificationOutcome::Dropped(drop_ev) => events.push(drop_ev),
         }
     }
@@ -1900,11 +1959,15 @@ pub fn sequence_server_rpc_with_events(
 pub fn sequence_server_rpc_in_scene_with_events(
     state: &mut SessionWireState,
     mut done: RpcCompletion,
-    post_rpc_scene: Option<(u64, Option<u32>, bool)>,
+    post_rpc_scene: Option<OutboundSceneSync>,
 ) -> SequenceOutcome {
     let is_detach = done.destiny_drain.is_detach();
-    let mut norm =
-        ServerDestinyNormalizer::from_state_with_scene(state, post_rpc_scene.filter(|_| !is_detach));
+    let mut norm = ServerDestinyNormalizer::from_state_with_scene(
+        state,
+        post_rpc_scene
+            .filter(|_| !is_detach)
+            .map(|s| (s.scene_epoch, s.solar_system_id, s.has_ballpark)),
+    );
 
     let mut normalized_ticks = Vec::with_capacity(done.pending_tick_batches.len());
     for tick_batch in std::mem::take(&mut done.pending_tick_batches) {
@@ -2005,7 +2068,8 @@ pub fn sequence_tick_with_events(
                 events,
             )
         }
-        AcceptDestinyOutcome::Empty | AcceptDestinyOutcome::Held => (None, Vec::new()),
+        AcceptDestinyOutcome::Empty => (None, Vec::new()),
+        AcceptDestinyOutcome::Held(held_ev) => (None, held_ev.into_iter().collect()),
         AcceptDestinyOutcome::Dropped {
             epoch,
             stamp,
@@ -3414,7 +3478,10 @@ mod tests {
             vec![PyRep::Integer(5001), PyRep::Tuple(vec![])],
         )
         .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_new), Some(3))));
-        assert_eq!(wire.gate_typed_notification(future_notif), GateNotificationOutcome::Held);
+        assert!(matches!(
+            wire.gate_typed_notification(future_notif),
+            GateNotificationOutcome::Held(None)
+        ));
         assert_eq!(wire.held_scene_frame_count(), 2);
 
         // 3. Advancing to epoch 3 (`AwaitingSetState`, not yet entered) must keep held frames waiting for SetState,
@@ -3429,10 +3496,10 @@ mod tests {
         let same_epoch_pre_entry_notif =
             TypedNotification::new("OnCombatMessage", vec![PyRep::String("Shot".into())])
                 .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_new), Some(3))));
-        assert_eq!(
+        assert!(matches!(
             wire.gate_typed_notification(same_epoch_pre_entry_notif),
-            GateNotificationOutcome::Held
-        );
+            GateNotificationOutcome::Held(None)
+        ));
         assert_eq!(wire.held_scene_frame_count(), 3);
 
         let straggler_epoch_2 =
@@ -3563,7 +3630,10 @@ mod tests {
             vec![PyRep::Integer(ghost_ball), PyRep::Tuple(vec![])],
         )
         .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(2))));
-        assert_eq!(wire.gate_typed_notification(unmat_notif), GateNotificationOutcome::Held);
+        assert!(matches!(
+            wire.gate_typed_notification(unmat_notif),
+            GateNotificationOutcome::Held(None)
+        ));
 
         // Delivering SetState without `ghost_ball` flushes held frames through the gate, dropping `unmat_notif`.
         assert!(sequence_tick(
@@ -3579,13 +3649,187 @@ mod tests {
         // Changing scene epoch to 3 invalidates and drops any stale held epoch-2 frames.
         let stale_future_hold = TypedNotification::new("OnCombatMessage", vec![])
             .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(3))));
-        assert_eq!(
+        assert!(matches!(
             wire.gate_typed_notification(stale_future_hold),
-            GateNotificationOutcome::Held
-        );
+            GateNotificationOutcome::Held(None)
+        ));
         let pruned = wire.sync_scene(4, Some(30_000_144), false);
         assert_eq!(pruned.len(), 1);
         assert_eq!(wire.held_scene_frame_count(), 0);
         assert!(pruned[0].reason.starts_with("stale_scene_epoch:3<4"));
+
+        // Bounded overflow: pushing beyond MAX_HELD_SCENE_FRAMES evicts the oldest held frame
+        // and surfaces a `held_scene_overflow` ledger event instead of dropping silently (`BF-01`).
+        let total_overflow_pushes = MAX_HELD_SCENE_FRAMES + 4;
+        let mut overflow_evictions = Vec::new();
+        for idx in 0..total_overflow_pushes {
+            let n = TypedNotification::new("OnCombatMessage", vec![PyRep::Integer(idx as i64)])
+                .with_scene_scope(Some(OutboundSceneScope::space(Some(30_000_144), Some(5))));
+            match wire.gate_typed_notification(n) {
+                GateNotificationOutcome::Held(ev_opt) => {
+                    if let Some(ev) = ev_opt {
+                        overflow_evictions.push(ev);
+                    }
+                }
+                other => panic!("expected held frame under overflow test, got {other:?}"),
+            }
+        }
+        assert_eq!(wire.held_scene_frame_count(), MAX_HELD_SCENE_FRAMES);
+        assert_eq!(overflow_evictions.len(), 4);
+        assert!(overflow_evictions
+            .iter()
+            .all(|ev| ev.kind == SequencerLedgerEventKind::Dropped && ev.reason == "held_scene_overflow"));
+    }
+
+    #[test]
+    fn solar_system_scope_delivers_docked_in_matching_system_and_drops_foreign_system() {
+        let sys_a = 30_000_142_u32;
+        let sys_b = 30_000_144_u32;
+        let mut wire = SessionWireState::new(1190_05, 1190_05).with_scene_epoch(3);
+        wire.leave_space();
+        assert!(wire.sync_scene(3, Some(sys_a), false).is_empty());
+
+        let same_sys = TypedNotification::new("OnSolarSystemUpdate", vec![])
+            .with_scene_scope(Some(OutboundSceneScope::solar_system(Some(sys_a), Some(3))));
+        assert!(matches!(
+            wire.gate_typed_notification(same_sys),
+            GateNotificationOutcome::Emit(_)
+        ));
+
+        let other_sys = TypedNotification::new("OnSolarSystemUpdate", vec![])
+            .with_scene_scope(Some(OutboundSceneScope::solar_system(Some(sys_b), Some(3))));
+        assert!(matches!(
+            wire.gate_typed_notification(other_sys),
+            GateNotificationOutcome::Dropped(_)
+        ));
+
+        let space_only = TypedNotification::new("OnDamageMessage", vec![])
+            .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_a), Some(3))));
+        assert!(matches!(
+            wire.gate_typed_notification(space_only),
+            GateNotificationOutcome::Dropped(_)
+        ));
+    }
+
+    #[test]
+    fn held_non_zero_epoch_set_state_and_followup_flush_when_scene_sync_awaits_entry() {
+        let sys_old = 30_000_140_u32;
+        let sys_new = 30_000_142_u32;
+        let mut wire = SessionWireState::new(1190_06, 1190_06).with_scene_epoch(2);
+        let ep_old = wire.enter_space(Some(sys_old));
+        assert!(sequence_tick(
+            &mut wire,
+            DestinyBatch::new(ep_old, 10, true, dummy_updates("SetState", 10))
+                .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_old), Some(2))))
+        )
+        .is_some());
+
+        // Pre-queue notification BEFORE SetState and a held SetState + delta with a non-zero
+        // foreign destiny epoch (99) under future scene_epoch 3.
+        assert!(matches!(
+            wire.gate_typed_notification(
+                TypedNotification::new("OnCombatMessage", vec![PyRep::String("pre".into())])
+                    .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_new), Some(3))))
+            ),
+            GateNotificationOutcome::Held(None)
+        ));
+
+        let mut bp_new = eve_destiny::Ballpark::new(sys_new);
+        bp_new.current_tick = 20;
+        bp_new.add_ball(eve_destiny::Ball {
+            id: 6001,
+            type_id: 587,
+            position: eve_destiny::DVec3::ZERO,
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        });
+        let set_state_6001 = eve_destiny::wire::encode_set_state_payload(&bp_new, 6001);
+        assert!(matches!(
+            wire.accept_destiny_batch_with_reason(
+                DestinyBatch::new(99, 20, true, named_update(20, "SetState", vec![set_state_6001]))
+                    .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_new), Some(3))))
+            ),
+            AcceptDestinyOutcome::Held(None)
+        ));
+        assert!(matches!(
+            wire.accept_destiny_batch_with_reason(
+                DestinyBatch::new(99, 21, false, dummy_updates("Stop", 21))
+                    .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_new), Some(3))))
+            ),
+            AcceptDestinyOutcome::Held(None)
+        ));
+        assert_eq!(wire.held_scene_frame_count(), 3);
+
+        // Scene advances (`enter_space` + `sync_scene_with_ballpark` via OutboundSceneSync) while
+        // `scene_entered` starts false; held SetState must drain, rebind epoch 99 -> active, and flush all 3.
+        let active_ep = wire.enter_space(Some(sys_new));
+        let outcome = sequence_server_rpc_in_scene_with_events(
+            &mut wire,
+            RpcCompletion {
+                call_id: 1,
+                response_frame: PyRep::None,
+                session_change_frame: Some(PyRep::String("jump".into())),
+                item_change_before_session_change: false,
+                pending_tick_batches: Vec::new(),
+                destiny_drain: DestinyDrain::None,
+                notifications: Vec::new(),
+            },
+            Some(OutboundSceneSync {
+                scene_epoch: 3,
+                solar_system_id: Some(sys_new),
+                is_in_space: true,
+                has_ballpark: true,
+            }),
+        );
+        assert!(wire.scene_entered);
+        assert_eq!(wire.held_scene_frame_count(), 0);
+        assert!(outcome.frames.iter().any(|f| matches!(
+            f,
+            OutFrame::DoDestinyUpdate { epoch, has_set_state: true, .. } if *epoch == active_ep
+        )));
+        assert!(outcome.frames.iter().any(|f| matches!(
+            f,
+            OutFrame::DoDestinyUpdate { epoch, has_set_state: false, .. } if *epoch == active_ep
+        )));
+        assert!(outcome
+            .frames
+            .iter()
+            .any(|f| matches!(f, OutFrame::Notification { event, .. } if event == "OnCombatMessage")));
+    }
+
+    #[test]
+    fn structure_gunner_without_ballpark_delivers_space_notifications_without_set_state() {
+        let sys_id = 30_000_142_u32;
+        let mut wire = SessionWireState::new(1190_07, 1190_07).with_scene_epoch(4);
+        wire.leave_space();
+        assert!(wire
+            .sync_scene_with_ballpark(4, Some(sys_id), true, false)
+            .is_empty());
+        assert!(wire.in_space);
+        assert!(wire.scene_entered);
+        assert!(matches!(wire.destiny, DestinyStream::Detached));
+
+        let combat = TypedNotification::new("OnDamageMessage", vec![])
+            .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(4))));
+        assert!(matches!(
+            wire.gate_typed_notification(combat),
+            GateNotificationOutcome::Emit(_)
+        ));
+
+        // Stepping down from structure gunner drops subsequent space-scoped notifications.
+        assert!(wire
+            .sync_scene_with_ballpark(5, Some(sys_id), false, false)
+            .is_empty());
+        let combat_after = TypedNotification::new("OnDamageMessage", vec![])
+            .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(5))));
+        assert!(matches!(
+            wire.gate_typed_notification(combat_after),
+            GateNotificationOutcome::Dropped(_)
+        ));
     }
 }

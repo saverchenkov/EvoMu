@@ -974,6 +974,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
                         };
                         if should_drain {
+                            ctx.sync_session(&mut session);
                             let bridge_in_space = session.character_id.is_some()
                                 && session.station_id.is_none()
                                 && session.solar_system_id.is_some()
