@@ -757,7 +757,7 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         Ball {
             id: owner_ship,
             type_id: 587,
-            position: DVec3::new(100.0, 0.0, 0.0),
+            position: DVec3::new(60_000.0, 0.0, 0.0),
             velocity: DVec3::ZERO,
             max_velocity: 300.0,
             inertia: 2.0,
@@ -917,8 +917,8 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         "undocked owner in matching system must receive OnDamageMessage for active drone"
     );
     assert!(
-        ok_events.iter().any(|ev| ev == "OnDamageStateChange"),
-        "undocked owner in matching system must receive OnDamageStateChange for active drone"
+        ok_events.iter().any(|ev| ev == "OnDamageMessages"),
+        "undocked owner in matching system must receive OnDamageMessages for active drone"
     );
 
     // 5. Persistent wire transition (`#1565`): undocked -> station dock immediately suppresses queued/post-dock combat hits

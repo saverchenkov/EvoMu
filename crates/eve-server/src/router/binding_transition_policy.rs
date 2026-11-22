@@ -633,7 +633,7 @@ impl ServerContext {
 
     /// Returns the monotonic `scene_epoch` currently associated with `session_id` (`0` before
     /// the session's first transition).
-    pub(crate) fn session_scene_epoch(&self, session_id: u64) -> u64 {
+    pub fn session_scene_epoch(&self, session_id: u64) -> u64 {
         self.read_context_grace_store(|s| {
             s.and_then(|st| st.scene_epochs.get(&session_id).copied())
                 .unwrap_or(0)

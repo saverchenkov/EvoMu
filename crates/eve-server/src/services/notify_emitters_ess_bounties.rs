@@ -111,6 +111,7 @@ pub(crate) fn emit_progression_task_completed_with_db(
 /// Emits `OnCombatMessage(messageName, messageArgs)` (`id_type = "charid"`).
 /// Matches `eve/client/script/parklife/tactical.pyj:TacticalSvc.OnCombatMessage(self, messageName, messageArgs)`
 /// where `messageArgs` contains `"specialObject"`, `"damage"`, `"type"`, `"weapon"`, `"hitQualityText"`, and `"isWrecking"`.
+#[cfg(test)]
 pub(crate) fn emit_combat_message(
     ctx: &ServerContext,
     char_id: i64,

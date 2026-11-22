@@ -789,17 +789,24 @@ async fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandon
     emit_combat_log_and_damage_state(&ctx, att_id, None, att_ship, vic_ship, 2_905, 50.0, false, 0.9, 1.0, 1.0);
     let (ev_ship, _) = drain_vic_wire_combat_events();
     assert!(ev_ship.contains(&"OnDamageMessage".to_string()));
-    assert!(ev_ship.contains(&"OnDamageStateChange".to_string()));
+    assert!(ev_ship.contains(&"OnDamageMessages".to_string()));
 
     emit_combat_log_and_damage_state(&ctx, att_id, None, att_ship, active_drone, 2_905, 25.0, false, 0.8, 1.0, 1.0);
     let (ev_drone, _) = drain_vic_wire_combat_events();
     assert!(ev_drone.contains(&"OnDamageMessage".to_string()));
-    assert!(ev_drone.contains(&"OnDamageStateChange".to_string()));
+    assert!(ev_drone.contains(&"OnDamageMessages".to_string()));
 
+    emit_combat_log_and_damage_state(&ctx, npc_att_id, None, npc_ship_id, active_fighter_ball, 2_905, 25.0, false, 0.8, 1.0, 1.0);
+    let raw_fighter_notifs = ctx.drain_notifications_for_char(vic_id);
+    assert!(raw_fighter_notifs.iter().any(|n| {
+        n.event == "OnDamageStateChange"
+            && n.scene_scope
+                .is_some_and(|sc| sc.requires_in_space && sc.scene_sys_id == Some(sys_a))
+    }));
     emit_combat_log_and_damage_state(&ctx, npc_att_id, None, npc_ship_id, active_fighter_ball, 2_905, 25.0, false, 0.8, 1.0, 1.0);
     let (ev_fighter, _) = drain_vic_wire_combat_events();
     assert!(ev_fighter.contains(&"OnDamageMessage".to_string()));
-    assert!(ev_fighter.contains(&"OnDamageStateChange".to_string()));
+    assert!(ev_fighter.contains(&"OnDamageMessages".to_string()));
 
     // 2. Abandoned drone, untracked drone, and stale unpiloted ship item -> zero notifications even with Some(vic_id)
     for target in [abandoned_drone, untracked_drone, stale_ship] {
@@ -1017,10 +1024,24 @@ async fn emit_combat_log_and_damage_state_allows_active_structure_gunner_and_blo
         assert!(ev.is_empty(), "docked pilot must get zero wire events for target={target}");
     }
 
-    // 2. Active Upwell structure gunner (`structure_id == Some(sid)`, `active_ship_id == sid`) -> receives events
+    // 2. Active Upwell structure gunner (`structure_id == Some(sid)`, `active_ship_id == sid`):
+    //    - Even before View Outside ballpark is bootstrapped, scene-scoped combat logs still deliver on wire.
+    //    - With View Outside ballpark attached, wire combat notifications continue to deliver cleanly.
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&vic_id).unwrap().active_ship_id = sid;
     });
+    emit_combat_log_and_damage_state(&ctx, att_id, None, att_ship, sid, 2_905, 25.0, false, 0.8, 1.0, 1.0);
+    let (ev_no_bp, _) = drain_vic_wire_combat_events();
+    assert!(
+        ev_no_bp.contains(&"OnDamageMessage".to_string()),
+        "active structure gunner without View Outside must still receive OnDamageMessage: {ev_no_bp:?}"
+    );
+    assert!(
+        ev_no_bp.contains(&"OnDamageMessages".to_string()),
+        "active structure gunner without View Outside must still receive OnDamageMessages: {ev_no_bp:?}"
+    );
+
+    ctx.mark_space_ballpark_bootstrapped(9_089, vic_id, sys_a);
     for (aid, aship, target, label) in [
         (att_id, att_ship, sid, "player attacking manned structure"),
         (npc_att_id, npc_ship_id, sid, "NPC attacking manned structure"),
@@ -1029,7 +1050,7 @@ async fn emit_combat_log_and_damage_state_allows_active_structure_gunner_and_blo
         emit_combat_log_and_damage_state(&ctx, aid, None, aship, target, 2_905, 25.0, false, 0.8, 1.0, 1.0);
         let (ev, _) = drain_vic_wire_combat_events();
         assert!(ev.contains(&"OnDamageMessage".to_string()), "{label}: missing OnDamageMessage");
-        assert!(ev.contains(&"OnDamageStateChange".to_string()), "{label}: missing OnDamageStateChange");
+        assert!(ev.contains(&"OnDamageMessages".to_string()), "{label}: missing OnDamageMessages");
     }
 
     // 3. Out-of-system guard still applies on wire when gunner's solar_system_id mismatches structure's solar_system_id

@@ -3637,6 +3637,7 @@ fn flush_cycle_weapon_log_entries(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn flush_pending_cycle_damage_notifications(
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     pending_opt: Option<

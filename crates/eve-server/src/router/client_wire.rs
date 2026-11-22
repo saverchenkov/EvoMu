@@ -58,11 +58,23 @@ fn build_wire_state_for_session(
     let mut wire_state = SessionWireState::new(session.session_id, client_id)
         .with_flight_recorder(std::sync::Arc::clone(&ctx.flight_recorder));
     let scene_epoch = ctx.session_scene_epoch(session.session_id);
-    let in_space = session.character_id.is_some()
+    let has_ballpark = session.character_id.is_some()
         && session.solar_system_id.is_some()
         && session.station_id.is_none()
-        && (session.structure_id.is_none() || session.structure_id == session.ship_id);
-    if in_space {
+        && (session.structure_id.is_none()
+            || session
+                .character_id
+                .zip(session.solar_system_id)
+                .is_some_and(|(cid, sys_id)| {
+                    ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
+                }));
+    let is_scene_in_space = has_ballpark
+        || (session.character_id.is_some()
+            && session.station_id.is_none()
+            && session.solar_system_id.is_some()
+            && session.structure_id.is_some()
+            && session.structure_id == session.ship_id);
+    if has_ballpark {
         let ep = wire_state.enter_space(session.solar_system_id);
         wire_state.destiny = crate::outbound_sequencer::DestinyStream::Live {
             epoch: ep,
@@ -73,7 +85,12 @@ fn build_wire_state_for_session(
             wire_state.seed_materialized_from_ballpark(ctx, sys_id, ship_id);
         }
     }
-    let _ = wire_state.sync_scene(scene_epoch, session.solar_system_id, in_space);
+    let _ = wire_state.sync_scene_with_ballpark(
+        scene_epoch,
+        session.solar_system_id,
+        is_scene_in_space,
+        has_ballpark,
+    );
     wire_state
 }
 
