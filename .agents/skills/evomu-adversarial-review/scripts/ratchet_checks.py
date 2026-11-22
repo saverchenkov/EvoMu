@@ -9,6 +9,7 @@ Mirrors the exact Rust ratchet implementations in:
   - Conditional (#1189): `crates/eve-testkit/ratchets/client_compat_ratchet.json`
   - Conditional (#1197): `crates/eve-testkit/ratchets/arch_debt_ratchet.json`
   - Conditional (#1540): `crates/eve-testkit/ratchets/test_fixture_ratchet.json`
+  - Conditional (#1542): `crates/eve-testkit/ratchets/system_lifecycle_ratchet.json`
 
 Also enforces the review-branch commit-message guard blocking GitHub auto-closing keywords
 (`Fixes #N`, `Closes #N`, `Resolves #N`) against open RFC/architecture umbrella issues or non-zero
@@ -20,14 +21,34 @@ import json
 import os
 import re
 import subprocess
+import sys
 
 import review_lib as rl
 
-RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v7.json"
-RATCHET_STAT_FILENAME = "ratchet_stat_index_v7.json"
+RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v8.json"
+RATCHET_STAT_FILENAME = "ratchet_stat_index_v8.json"
 UNTYPED_USER_ERROR_REL = "crates/eve-testkit/ratchets/untyped_user_error_ratchet.json"
 TEST_FIXTURE_REL = "crates/eve-testkit/ratchets/test_fixture_ratchet.json"
 TEST_FIXTURE_PATTERNS = ("hand_built_sessions", "discarded_rpc_results")
+SYSTEM_LIFECYCLE_REL = "crates/eve-testkit/ratchets/system_lifecycle_ratchet.json"
+SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN = "get_or_spawn_calls_outside_wake_entry_points"
+SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING = "seed_if_missing_calls_in_services"
+SYSTEM_LIFECYCLE_RULES = (SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN, SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING)
+SEED_IF_MISSING_HELPERS = frozenset({
+    "ensure_system_pve_sites_seeded",
+    "ensure_special_sites_initialized",
+    "ensure_dungeon_rooms_seeded",
+    "ensure_all_mentioned_dungeon_seeded",
+    "ensure_homefront_sites_for_system_locked",
+    "ensure_homefront_sites_for_system_locked_with_seed",
+    "ensure_store_catalog_seeded",
+    "ensure_social_extras_mailing_lists_seeded",
+    "ensure_corp_rec_ads_populated_in_snap",
+    "seed_component_listings_if_empty",
+    "ensure_rookie_overview_seeded",
+    "ensure_sde_initialized",
+    "ensure_client_flatbuffer_storage_seeded",
+})
 CLIENT_COMPAT_COUNTER_KEYS = (
     "rpc_rules",
     "suppress_rules",
@@ -525,7 +546,11 @@ def _scan_server_src_file(path, rel_in_src, src_cache, stat_src=None):
             stat_src[rel_in_src] = {"sig": sig, "rec": cached}
         return cached, False, stat_src is not None
     raw = raw_bytes.decode("utf-8", errors="replace")
-    needs_clean = rel_in_src == "outbound_sequencer.rs" or any(
+    is_test_rel = is_test_only_rel_path(rel_in_src)
+    is_services_prod = (not is_test_rel) and rel_in_src.startswith("services/")
+    has_sl_spawn_kw = (not is_test_rel) and ("get_or_spawn" in raw)
+    has_sl_seed_kw = is_services_prod and ("ensure_" in raw or "seed_" in raw)
+    needs_clean = rel_in_src == "outbound_sequencer.rs" or has_sl_spawn_kw or has_sl_seed_kw or any(
         s in raw
         for s in (
             "encode_",
@@ -538,7 +563,6 @@ def _scan_server_src_file(path, rel_in_src, src_cache, stat_src=None):
             "should_suppress_macho_notification",
         )
     )
-    is_test_rel = is_test_only_rel_path(rel_in_src)
     is_plumbing = rel_in_src in NOTIFY_PLUMBING_FILES
 
     enc_calls = 0
@@ -547,6 +571,8 @@ def _scan_server_src_file(path, rel_in_src, src_cache, stat_src=None):
     ct_params = 0
     direct_layer_test = 0
     seq_rw = 0
+    sl_spawn = 0
+    sl_seed = 0
 
     if needs_clean:
         clean = strip_rust_comments_and_literals(raw)
@@ -571,6 +597,10 @@ def _scan_server_src_file(path, rel_in_src, src_cache, stat_src=None):
                 total_dl = count_direct_layer_calls(clean)
                 prod_dl = count_direct_layer_calls(prod)
                 direct_layer_test = max(0, total_dl - prod_dl)
+            if has_sl_spawn_kw:
+                sl_spawn = count_get_or_spawn_calls(prod)
+            if has_sl_seed_kw:
+                sl_seed = count_seed_if_missing_calls(prod)
 
     rec = {
         "enc": enc_calls,
@@ -580,6 +610,8 @@ def _scan_server_src_file(path, rel_in_src, src_cache, stat_src=None):
         "dl_test": direct_layer_test,
         "seq_rw": seq_rw,
         "ue": 0 if "test" in os.path.basename(path) else raw.count("BridgeRpcError::user_error("),
+        "sl_spawn": sl_spawn,
+        "sl_seed": sl_seed,
     }
     src_cache[ckey] = rec
     if stat_src is not None:
@@ -783,14 +815,15 @@ def _normalize_rel_file(raw_file):
     return f
 
 
-def check_lock_rank_ratchet(root, lock_cache=None):
+def _check_lock_rank_ratchet_cached(root, lock_cache=None, stat_lock=None):
     """Validate `crates/eve-db/lock_rank_ratchet.txt` identically to `eve_db::lock_rank::validate_ratchet_against_workspace`."""
     rel_ratchet = "crates/eve-db/lock_rank_ratchet.txt"
     full_ratchet = os.path.join(root, rel_ratchet)
     if not os.path.isfile(full_ratchet):
-        return [], False
+        return [], False, False
     lock_cache = lock_cache if lock_cache is not None else {}
     dirty = False
+    stat_dirty = False
     violations = []
     seen = set()
     entries = []
@@ -846,7 +879,7 @@ def check_lock_rank_ratchet(root, lock_cache=None):
         entries.append((lineno, held_rank, acq_rank, rel_f, enc_fn, fld))
 
     if violations:
-        return violations, dirty
+        return violations, dirty, stat_dirty
 
     mem_sites = {}
     for lineno, held_rank, acq_rank, rel_f, enc_fn, fld in entries:
@@ -884,17 +917,26 @@ def check_lock_rank_ratchet(root, lock_cache=None):
                 mem_sites[rel_f] = None
                 continue
             sig = _file_sig(full_src)
-            raw_b = _read_bytes(full_src)
-            lkey = "%s:%s" % (rel_f, hashlib.sha1(raw_b).hexdigest())
-            cached = lock_cache.get(lkey)
-            if isinstance(cached, dict) and isinstance(cached.get("sites"), list):
-                mem_sites[rel_f] = {tuple(x) for x in cached.get("sites", ())}
+            st_hit = stat_lock.get(rel_f) if stat_lock is not None else None
+            if st_hit and st_hit.get("sig") == sig and isinstance(st_hit.get("sites"), list):
+                mem_sites[rel_f] = {tuple(x) for x in st_hit["sites"]}
             else:
-                src_txt = raw_b.decode("utf-8", errors="replace")
-                s_set = scan_lock_rank_sites(src_txt)
-                mem_sites[rel_f] = s_set
-                lock_cache[lkey] = {"sig": sig, "sites": sorted(list(x) for x in s_set)}
-                dirty = True
+                raw_b = _read_bytes(full_src)
+                lkey = "%s:%s" % (rel_f, hashlib.sha1(raw_b).hexdigest())
+                cached = lock_cache.get(lkey)
+                if isinstance(cached, dict) and isinstance(cached.get("sites"), list):
+                    sites_list = cached["sites"]
+                    mem_sites[rel_f] = {tuple(x) for x in sites_list}
+                else:
+                    src_txt = raw_b.decode("utf-8", errors="replace")
+                    s_set = scan_lock_rank_sites(src_txt)
+                    mem_sites[rel_f] = s_set
+                    sites_list = sorted(list(x) for x in s_set)
+                    lock_cache[lkey] = {"sig": sig, "sites": sites_list}
+                    dirty = True
+                if stat_lock is not None:
+                    stat_lock[rel_f] = {"sig": sig, "sites": sites_list}
+                    stat_dirty = True
         if mem_sites[rel_f] is not None and (enc_fn, fld) not in mem_sites[rel_f]:
             violations.append((
                 "RATCHET_LOCK_RANK",
@@ -903,7 +945,13 @@ def check_lock_rank_ratchet(root, lock_cache=None):
                 rel_ratchet,
                 lineno,
             ))
-    return violations, dirty
+    return violations, dirty, stat_dirty
+
+
+def check_lock_rank_ratchet(root, lock_cache=None):
+    """Validate `crates/eve-db/lock_rank_ratchet.txt` identically to `eve_db::lock_rank::validate_ratchet_against_workspace`."""
+    viols, dirty, _ = _check_lock_rank_ratchet_cached(root, lock_cache=lock_cache)
+    return viols, dirty
 
 
 # ---------------------------------------------------------------------------
@@ -1540,6 +1588,180 @@ def check_test_fixture_ratchet(root, rel_path=TEST_FIXTURE_REL, observed_per_fil
     return violations
 
 
+_WS_4_BYTES = frozenset((9, 10, 13, 32))
+_SYS_LIFECYCLE_TOP_KEYS = frozenset({"version", "description", "rules"})
+_SYS_LIFECYCLE_RULE_KEYS = frozenset({"zero_required", "owning_issue", "path_include", "regex", "description", "files"})
+
+
+def _skip_ws_4_b(b, i):
+    n = len(b)
+    while i < n and b[i] in _WS_4_BYTES:
+        i += 1
+    return i
+
+
+def _is_call_like_suffix_b(b, ident_end):
+    """Exact mirror of `system_lifecycle_ratchet.rs::is_call_like_suffix`."""
+    n = len(b)
+    pos = _skip_ws_4_b(b, ident_end)
+    if pos < n and b[pos] == 40:  # '('
+        return True
+    if pos < n and b[pos] == 41:  # ')' -> parenthesized UFCS `(Type::fn)(...)`
+        after = _skip_ws_4_b(b, pos + 1)
+        return after < n and b[after] == 40
+    if pos + 1 < n and b[pos] == 58 and b[pos + 1] == 58:  # '::' -> turbofish `helper::<...>(...)`
+        cur = _skip_ws_4_b(b, pos + 2)
+        if cur < n and b[cur] == 60:  # '<'
+            depth = 1
+            cur += 1
+            while cur < n and depth > 0:
+                if cur + 1 < n and b[cur] == 45 and b[cur + 1] == 62:  # '->'
+                    cur += 2
+                    continue
+                if b[cur] == 60:
+                    depth += 1
+                elif b[cur] == 62:
+                    depth -= 1
+                cur += 1
+            cur = _skip_ws_4_b(b, cur)
+            return cur < n and b[cur] == 40
+    return False
+
+
+def _count_ident_calls(prod_src, prefixes, candidates):
+    """Exact mirror of `system_lifecycle_ratchet.rs::count_ident_calls` on stripped prod Rust source."""
+    if not any(p in prod_src for p in prefixes):
+        return 0
+    b = prod_src.encode("utf-8")
+    n = len(b)
+    count = 0
+    for prefix in prefixes:
+        if prefix not in prod_src:
+            continue
+        pb = prefix.encode("ascii")
+        plen = len(pb)
+        idx = 0
+        while True:
+            i = b.find(pb, idx)
+            if i < 0:
+                break
+            idx = i + plen
+            if i > 0 and _is_ident_b(b[i - 1]):
+                continue
+            ident_end = i + plen
+            while ident_end < n and _is_ident_b(b[ident_end]):
+                ident_end += 1
+            ident = b[i:ident_end].decode("ascii", errors="ignore")
+            if ident in candidates and not _is_fn_def_header_b(b, i) and _is_call_like_suffix_b(b, ident_end):
+                count += 1
+    return count
+
+
+def count_get_or_spawn_calls(prod_src):
+    """Count non-definition `get_or_spawn` / `get_or_spawn_if_runtime` calls in stripped prod Rust source (#1542)."""
+    return _count_ident_calls(prod_src, ("get_or_spawn",), frozenset(("get_or_spawn", "get_or_spawn_if_runtime")))
+
+
+def count_seed_if_missing_calls(prod_src):
+    """Count non-definition `#1542` seed-if-missing helper calls in stripped prod `services/` Rust source."""
+    return _count_ident_calls(prod_src, ("ensure_", "seed_"), SEED_IF_MISSING_HELPERS)
+
+
+def scan_system_lifecycle_per_file(root, src_cache=None, stat_src=None):
+    """Exact per-file mirror of `system_lifecycle_ratchet.rs::SystemLifecycleRatchet::verify_dir` (#1542)."""
+    src_dir = os.path.join(root, "crates", "eve-server", "src")
+    spawn_obs = {}
+    seed_obs = {}
+    if not os.path.isdir(src_dir):
+        return {
+            SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN: spawn_obs,
+            SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING: seed_obs,
+        }
+    cache = {} if src_cache is None else src_cache
+    for p in sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)):
+        rel_in_src = os.path.relpath(p, src_dir).replace("\\", "/")
+        if is_test_only_rel_path(rel_in_src):
+            continue
+        rec, _, _ = _scan_server_src_file(p, rel_in_src, cache, stat_src=stat_src)
+        if rec.get("sl_spawn", 0) > 0:
+            spawn_obs[rel_in_src] = int(rec["sl_spawn"])
+        if rec.get("sl_seed", 0) > 0:
+            seed_obs[rel_in_src] = int(rec["sl_seed"])
+    return {
+        SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN: dict(sorted(spawn_obs.items())),
+        SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING: dict(sorted(seed_obs.items())),
+    }
+
+
+def check_system_lifecycle_ratchet(root, rel_path=SYSTEM_LIFECYCLE_REL, observed_per_file=None):
+    """Validate v2 per-file `system_lifecycle_ratchet.json` (#1542 / #1538) when present."""
+    full_path = os.path.join(root, rel_path)
+    if not os.path.isfile(full_path):
+        return []
+    try:
+        doc = _read_json(full_path)
+    except (OSError, ValueError) as e:
+        return [("RATCHET_SYSTEM_LIFECYCLE", "Failed to parse %s: %s" % (rel_path, e), rel_path, 1)]
+    if not isinstance(doc, dict):
+        return [("RATCHET_SYSTEM_LIFECYCLE", "%s root must be a JSON object" % rel_path, rel_path, 1)]
+    extra_top = sorted(set(doc.keys()) - _SYS_LIFECYCLE_TOP_KEYS)
+    if extra_top:
+        return [("RATCHET_SYSTEM_LIFECYCLE", "%s contains unknown top-level field(s): %s" % (rel_path, extra_top), rel_path, 1)]
+    if int(doc.get("version", 0) or 0) != 2:
+        return [("RATCHET_SYSTEM_LIFECYCLE", "%s expected version 2 ratchet (got %r)" % (rel_path, doc.get("version")), rel_path, 1)]
+    if not isinstance(doc.get("description"), str) or not doc["description"].strip():
+        return [("RATCHET_SYSTEM_LIFECYCLE", "%s must declare non-empty description" % rel_path, rel_path, 1)]
+    rules = doc.get("rules")
+    if not isinstance(rules, dict):
+        return [("RATCHET_SYSTEM_LIFECYCLE", "%s missing `rules` map" % rel_path, rel_path, 1)]
+
+    violations = []
+    for req in SYSTEM_LIFECYCLE_RULES:
+        if req not in rules:
+            violations.append(("RATCHET_SYSTEM_LIFECYCLE", "%s missing required rule '%s'" % (rel_path, req), rel_path, 1))
+    for rname in sorted(rules):
+        if rname not in SYSTEM_LIFECYCLE_RULES:
+            violations.append(("RATCHET_SYSTEM_LIFECYCLE", "Unknown rule '%s' in %s" % (rname, rel_path), rel_path, 1))
+            continue
+        spec = rules[rname]
+        if not isinstance(spec, dict):
+            violations.append(("RATCHET_SYSTEM_LIFECYCLE", "Rule '%s' in %s must be an object" % (rname, rel_path), rel_path, 1))
+            continue
+        extra_rk = sorted(set(spec.keys()) - _SYS_LIFECYCLE_RULE_KEYS)
+        if extra_rk:
+            violations.append(("RATCHET_SYSTEM_LIFECYCLE", "Rule '%s' in %s contains unknown field(s): %s" % (rname, rel_path, extra_rk), rel_path, 1))
+        ow = spec.get("owning_issue")
+        if not isinstance(ow, int) or isinstance(ow, bool) or ow <= 0:
+            violations.append(("RATCHET_SYSTEM_LIFECYCLE", "Rule '%s' must declare positive integer owning_issue" % rname, rel_path, 1))
+        if not isinstance(spec.get("regex"), str) or not spec["regex"].strip() or not isinstance(spec.get("description"), str) or not spec["description"].strip():
+            violations.append(("RATCHET_SYSTEM_LIFECYCLE", "Rule '%s' must declare non-empty regex and description" % rname, rel_path, 1))
+        pinc = spec.get("path_include")
+        if rname == SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING and pinc != "services/":
+            violations.append(("RATCHET_SYSTEM_LIFECYCLE", "Rule '%s' must scope path_include to 'services/'" % rname, rel_path, 1))
+        if pinc is not None and isinstance(spec.get("files"), dict):
+            for rel_k in sorted(spec["files"]):
+                if not str(rel_k).startswith(pinc):
+                    violations.append(("RATCHET_SYSTEM_LIFECYCLE", "Rule '%s' baseline entry '%s' must be under '%s'" % (rname, rel_k, pinc), rel_path, 1))
+
+    if violations:
+        return violations
+
+    obs = scan_system_lifecycle_per_file(root) if observed_per_file is None else observed_per_file
+    for rname in SYSTEM_LIFECYCLE_RULES:
+        spec = rules[rname]
+        violations.extend(
+            _validate_per_file_map(
+                "RATCHET_SYSTEM_LIFECYCLE",
+                "system_lifecycle rule '%s'" % rname,
+                rel_path,
+                spec.get("files"),
+                obs.get(rname, {}),
+                zero_required=bool(spec.get("zero_required") is True),
+            )
+        )
+    return violations
+
+
 def scan_untyped_user_error_per_file(root):
     """Exact per-file mirror of `client_contract.rs::count_untyped_user_error_call_sites`."""
     src_dir = os.path.join(root, "crates", "eve-server", "src")
@@ -2069,6 +2291,26 @@ def check_arch_debt_ratchet(root, rel_path="crates/eve-testkit/ratchets/arch_deb
     return viols
 
 
+class _LazyCacheSection(object):
+    """Defer parsing the large cross-worktree content-addressed cache until a stat-index miss occurs."""
+
+    def __init__(self, loader, section):
+        self._loader = loader
+        self._section = section
+
+    def get(self, key, default=None):
+        return self._loader().setdefault(self._section, {}).get(key, default)
+
+    def __getitem__(self, key):
+        return self._loader().setdefault(self._section, {})[key]
+
+    def __contains__(self, key):
+        return key in self._loader().setdefault(self._section, {})
+
+    def __setitem__(self, key, val):
+        self._loader().setdefault(self._section, {})[key] = val
+
+
 def check_all_ratchets(root, cache_path=None):
     """Run all workspace source ratchets in < 1s without spawning `cargo`."""
     stat_path = None
@@ -2080,15 +2322,22 @@ def check_all_ratchets(root, cache_path=None):
             cache_path = None
             stat_path = None
 
-    cache = _load_cache(cache_path)
+    cache_box = [None]
+
+    def _get_cache():
+        if cache_box[0] is None:
+            cache_box[0] = _load_cache(cache_path)
+        return cache_box[0]
+
     stat_idx = _load_cache(stat_path) if stat_path else None
-    src_cache = cache.setdefault("src_files", {})
-    it_cache = cache.setdefault("it_files", {})
-    lock_cache = cache.setdefault("lock_files", {})
-    arch_cache = cache.setdefault("arch_files", {})
-    bypass_cache = cache.setdefault("bypass_files", {})
+    src_cache = _LazyCacheSection(_get_cache, "src_files")
+    it_cache = _LazyCacheSection(_get_cache, "it_files")
+    lock_cache = _LazyCacheSection(_get_cache, "lock_files")
+    arch_cache = _LazyCacheSection(_get_cache, "arch_files")
+    bypass_cache = _LazyCacheSection(_get_cache, "bypass_files")
     stat_src = stat_idx.setdefault("src_files", {}) if stat_idx is not None else None
     stat_it = stat_idx.setdefault("it_files", {}) if stat_idx is not None else None
+    stat_lock = stat_idx.setdefault("lock_files", {}) if stat_idx is not None else None
     stat_arch = stat_idx.setdefault("arch_files", {}) if stat_idx is not None else None
     stat_bypass = stat_idx.setdefault("bypass_files", {}) if stat_idx is not None else None
     dirty = False
@@ -2101,6 +2350,7 @@ def check_all_ratchets(root, cache_path=None):
     compat_ratchet_rel = "crates/eve-testkit/ratchets/client_compat_ratchet.json"
     untyped_ue_rel = UNTYPED_USER_ERROR_REL
     test_fixture_rel = TEST_FIXTURE_REL
+    sys_lifecycle_rel = SYSTEM_LIFECYCLE_REL
 
     has_enc = os.path.isfile(os.path.join(root, enc_ratchet_rel))
     has_notify = os.path.isfile(os.path.join(root, notify_ratchet_rel))
@@ -2108,6 +2358,7 @@ def check_all_ratchets(root, cache_path=None):
     has_compat = os.path.isfile(os.path.join(root, compat_ratchet_rel))
     has_untyped_ue = os.path.isfile(os.path.join(root, untyped_ue_rel))
     has_test_fixture = os.path.isfile(os.path.join(root, test_fixture_rel))
+    has_sys_lifecycle = os.path.isfile(os.path.join(root, sys_lifecycle_rel))
 
     src_dir = os.path.join(root, "crates", "eve-server", "src")
     it_dir = os.path.join(root, "crates", "eve-server", "tests", "it")
@@ -2120,9 +2371,11 @@ def check_all_ratchets(root, cache_path=None):
     service_ct_files = set()
     direct_layer_test_calls_pf = {}
     ue_per_file = {}
+    sl_spawn_pf = {}
+    sl_seed_pf = {}
     seq_cnt = 0
 
-    if (has_enc or has_notify or has_compat or has_untyped_ue) and os.path.isdir(src_dir):
+    if (has_enc or has_notify or has_compat or has_untyped_ue or has_sys_lifecycle) and os.path.isdir(src_dir):
         for p in sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)):
             rel_in_src = os.path.relpath(p, src_dir).replace("\\", "/")
             rec, chg, st_chg = _scan_server_src_file(p, rel_in_src, src_cache, stat_src=stat_src)
@@ -2149,6 +2402,10 @@ def check_all_ratchets(root, cache_path=None):
                 service_ct_files.add(repo_rel)
             if rec.get("ue", 0) > 0:
                 ue_per_file[rel_in_src] = rec["ue"]
+            if rec.get("sl_spawn", 0) > 0:
+                sl_spawn_pf[rel_in_src] = int(rec["sl_spawn"])
+            if rec.get("sl_seed", 0) > 0:
+                sl_seed_pf[rel_in_src] = int(rec["sl_seed"])
 
     disp_none_calls = disp_none_files = 0
     it_dispatch_files = set()
@@ -2264,9 +2521,10 @@ def check_all_ratchets(root, cache_path=None):
         except (OSError, ValueError, KeyError, TypeError) as e:
             violations.append(("RATCHET_RAW_DISPATCH", "Invalid %s: %s" % (dispatch_ratchet_rel, e), dispatch_ratchet_rel, 1))
 
-    lr_viol, lr_dirty = check_lock_rank_ratchet(root, lock_cache=lock_cache)
+    lr_viol, lr_dirty, lr_sdirty = _check_lock_rank_ratchet_cached(root, lock_cache=lock_cache, stat_lock=stat_lock)
     violations.extend(lr_viol)
     dirty = dirty or lr_dirty
+    stat_dirty = stat_dirty or lr_sdirty
 
     if has_compat:
         compat_rel = "crates/eve-server/src/router/client_compat.rs"
@@ -2400,6 +2658,18 @@ def check_all_ratchets(root, cache_path=None):
             )
         )
 
+    if has_sys_lifecycle:
+        violations.extend(
+            check_system_lifecycle_ratchet(
+                root,
+                rel_path=sys_lifecycle_rel,
+                observed_per_file={
+                    SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN: sl_spawn_pf,
+                    SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING: sl_seed_pf,
+                },
+            )
+        )
+
     ad_viol, ad_dirty, ad_sdirty = _check_arch_debt_ratchet_cached(
         root, arch_cache=arch_cache, stat_arch=stat_arch
     )
@@ -2414,8 +2684,8 @@ def check_all_ratchets(root, cache_path=None):
     dirty = dirty or sb_dirty
     stat_dirty = stat_dirty or sb_sdirty
 
-    if dirty:
-        _save_cache(cache_path, cache)
+    if dirty and cache_box[0] is not None:
+        _save_cache(cache_path, cache_box[0])
     if stat_dirty and stat_path:
         _save_cache(stat_path, stat_idx)
     return violations
@@ -2537,6 +2807,27 @@ def protected_umbrella_issues(root):
         except (OSError, ValueError, TypeError):
             pass
 
+    sl_path = os.path.join(root, SYSTEM_LIFECYCLE_REL)
+    if os.path.isfile(sl_path):
+        try:
+            sl = _read_json(sl_path)
+            if isinstance(sl, dict) and isinstance(sl.get("rules"), dict):
+                by_issue = {}
+                for rname, spec in sl["rules"].items():
+                    if not isinstance(spec, dict) or not isinstance(spec.get("files"), dict):
+                        continue
+                    cnt_i = sum(int(v or 0) for v in spec["files"].values())
+                    for iss in _parse_issue_numbers(spec.get("owning_issue")):
+                        by_issue.setdefault(iss, []).append((str(rname), cnt_i))
+                for iss, items in by_issue.items():
+                    nonzero = [nm for nm, c in items if c > 0]
+                    if nonzero:
+                        protected[iss] = "non-zero system_lifecycle_ratchet.json (%s)" % ", ".join(nonzero[:3])
+                    elif iss not in DEFAULT_UMBRELLA_ISSUES:
+                        protected.pop(iss, None)
+        except (OSError, ValueError, TypeError):
+            pass
+
     return protected
 
 
@@ -2615,3 +2906,20 @@ def lint_branch_commit_issue_closures(root, claims_path=None):
             pass
     protected = protected_umbrella_issues(root)
     return lint_commit_messages_for_issue_closures(commits, protected, claims_allow_batch=claims_allow)
+
+
+def main(argv=None):
+    root = os.path.abspath(argv[0]) if argv else os.getcwd()
+    viols = check_all_ratchets(root)
+    if viols:
+        for cat, msg, path, line in viols:
+            loc = "%s:%s" % (path, line) if path else "<repo>"
+            sys.stderr.write("[%s] %s: %s\n" % (cat, loc, msg))
+        sys.stderr.write("ratchet_checks: FAILED (%d violation(s))\n" % len(viols))
+        return 1
+    print("ratchet_checks: CLEAN (0 violations)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

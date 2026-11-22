@@ -5,7 +5,7 @@ Usage:
   tighten_ratchets.py [--root DIR] --check              # exit 0 if tight, 1 if slack exists, 2 on regression
   tighten_ratchets.py [--root DIR] --write              # strictly lower v2 baselines in place (never raises!)
   tighten_ratchets.py [--root DIR] --dump-counts-json   # print exact per-file scanner counts for Rust parity test
-  tighten_ratchets.py [--root DIR] --migrate-v2 [--only arch_debt,client_compat,untyped_user_error,stringly_error_bypass,test_fixture]
+  tighten_ratchets.py [--root DIR] --migrate-v2 [--only arch_debt,client_compat,untyped_user_error,stringly_error_bypass,test_fixture,system_lifecycle]
 """
 import argparse
 import json
@@ -23,8 +23,16 @@ CLIENT_COMPAT_REL = "crates/eve-testkit/ratchets/client_compat_ratchet.json"
 UNTYPED_UE_REL = rc.UNTYPED_USER_ERROR_REL
 STRINGLY_BYPASS_REL = rc.STRINGLY_ERR_BYPASS_REL
 TEST_FIXTURE_REL = rc.TEST_FIXTURE_REL
+SYSTEM_LIFECYCLE_REL = rc.SYSTEM_LIFECYCLE_REL
 
-ALL_TARGETS = ("arch_debt", "client_compat", "untyped_user_error", "stringly_error_bypass", "test_fixture")
+ALL_TARGETS = (
+    "arch_debt",
+    "client_compat",
+    "untyped_user_error",
+    "stringly_error_bypass",
+    "test_fixture",
+    "system_lifecycle",
+)
 
 
 def _dump_json(obj):
@@ -91,7 +99,7 @@ def _tighten_subset_list(label, allowed_list, observed_set):
 
 
 def collect_all_counts(root):
-    """Scan the workspace once and return canonical per-file counts for all 5 ratchet families."""
+    """Scan the workspace once and return canonical per-file counts for all 6 ratchet families."""
     arch_path = os.path.join(root, ARCH_DEBT_REL)
     arch_counts = {}
     if os.path.isfile(arch_path):
@@ -101,9 +109,17 @@ def collect_all_counts(root):
             raise ValueError("arch_debt scan errors: %s" % (viols,))
         arch_counts = {k: dict(sorted(v.items())) for k, v in sorted(pf.items())}
 
+    shared_src_cache = {}
+    shared_stat_src = {}
     shared_it_cache = {}
     shared_stat_it = {}
-    compat_rep = rc.scan_client_compat_per_file(root, it_cache=shared_it_cache, stat_it=shared_stat_it)
+    compat_rep = rc.scan_client_compat_per_file(
+        root,
+        src_cache=shared_src_cache,
+        it_cache=shared_it_cache,
+        stat_src=shared_stat_src,
+        stat_it=shared_stat_it,
+    )
     client_compat_counts = {
         "counters": compat_rep["counters"],
         "known_rules": compat_rep["known_rules"],
@@ -115,6 +131,8 @@ def collect_all_counts(root):
     bypass_counts = {k: dict(sorted(v.items())) for k, v in sorted(bypass_pf.items())}
     test_fixture_pf = rc.scan_test_fixture_per_file(root, it_cache=shared_it_cache, stat_it=shared_stat_it)
     test_fixture_counts = {k: dict(sorted(test_fixture_pf.get(k, {}).items())) for k in rc.TEST_FIXTURE_PATTERNS}
+    sys_lifecycle_pf = rc.scan_system_lifecycle_per_file(root, src_cache=shared_src_cache, stat_src=shared_stat_src)
+    sys_lifecycle_counts = {k: dict(sorted(sys_lifecycle_pf.get(k, {}).items())) for k in rc.SYSTEM_LIFECYCLE_RULES}
 
     return {
         "arch_debt": arch_counts,
@@ -122,6 +140,7 @@ def collect_all_counts(root):
         "untyped_user_error": untyped_ue_counts,
         "stringly_error_bypass": bypass_counts,
         "test_fixture": test_fixture_counts,
+        "system_lifecycle": sys_lifecycle_counts,
     }
 
 
@@ -233,6 +252,59 @@ def _build_test_fixture_v2(old_doc, tf_counts):
             )
         ),
         "patterns": new_patterns,
+    }
+
+
+def _build_system_lifecycle_v2(old_doc, sl_counts):
+    old_rules = old_doc.get("rules") if isinstance(old_doc, dict) else {}
+    defaults = {
+        rc.SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN: {
+            "owning_issue": 1542,
+            "regex": r"\bget_or_spawn(?:_if_runtime)?\s*\(",
+            "description": (
+                "Calls to SystemRegistry::get_or_spawn and SystemRegistry::get_or_spawn_if_runtime "
+                "in non-test crates/eve-server/src outside fn definitions (#1542)."
+            ),
+        },
+        rc.SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING: {
+            "owning_issue": 1542,
+            "path_include": "services/",
+            "regex": r"\b(?:" + "|".join(sorted(rc.SEED_IF_MISSING_HELPERS)) + r")\s*\(",
+            "description": "Calls under non-test crates/eve-server/src/services/ to the 13 legacy seed-if-missing helpers (#1542).",
+        },
+    }
+    new_rules = {}
+    for rname in rc.SYSTEM_LIFECYCLE_RULES:
+        spec = old_rules.get(rname, {}) if isinstance(old_rules, dict) else {}
+        zero_req = bool(isinstance(spec, dict) and spec.get("zero_required") is True)
+        obs_pf = sl_counts.get(rname, {})
+        if zero_req and obs_pf:
+            raise ValueError(
+                "Cannot migrate zero_required system_lifecycle rule '%s' with non-zero occurrences: %s" % (rname, obs_pf)
+            )
+        d = defaults[rname]
+        entry = {
+            "zero_required": zero_req,
+            "owning_issue": int(spec.get("owning_issue", d["owning_issue"]) or d["owning_issue"]) if isinstance(spec, dict) else d["owning_issue"],
+        }
+        pinc = spec.get("path_include", d.get("path_include")) if isinstance(spec, dict) else d.get("path_include")
+        if pinc is not None:
+            entry["path_include"] = pinc
+        entry["regex"] = spec.get("regex", d["regex"]) if isinstance(spec, dict) and spec.get("regex") else d["regex"]
+        entry["description"] = spec.get("description", d["description"]) if isinstance(spec, dict) and spec.get("description") else d["description"]
+        entry["files"] = {} if zero_req else dict(sorted(obs_pf.items()))
+        new_rules[rname] = entry
+    return {
+        "version": 2,
+        "description": (
+            (old_doc or {}).get("description")
+            if isinstance(old_doc, dict) and (old_doc or {}).get("description")
+            else (
+                "Per-file falling baselines for solar-system lifecycle migration across non-test "
+                "crates/eve-server/src (#1542, #1538). Positive integer counts only (missing file = 0)."
+            )
+        ),
+        "rules": new_rules,
     }
 
 
@@ -413,6 +485,45 @@ def tighten_ratchets(root, write=False, targets=ALL_TARGETS):
                     elif not write:
                         changed_files.append(TEST_FIXTURE_REL)
 
+    if "system_lifecycle" in targets:
+        p = os.path.join(root, SYSTEM_LIFECYCLE_REL)
+        if os.path.isfile(p):
+            doc = rc._read_json(p)
+            if isinstance(doc, dict) and int(doc.get("version", 0) or 0) == 2 and isinstance(doc.get("rules"), dict):
+                new_doc = dict(doc)
+                new_rules = {}
+                file_slack = 0
+                for rname, spec in doc["rules"].items():
+                    if (
+                        rname not in rc.SYSTEM_LIFECYCLE_RULES
+                        or not isinstance(spec, dict)
+                        or not isinstance(spec.get("files"), dict)
+                    ):
+                        new_rules[rname] = spec
+                        continue
+                    tight_pf, sl, regs = _tighten_file_map(
+                        "system_lifecycle.%s" % rname,
+                        spec["files"],
+                        counts["system_lifecycle"].get(rname, {}),
+                        zero_required=bool(spec.get("zero_required") is True),
+                    )
+                    file_slack += sl
+                    regressions.extend(regs)
+                    nspec = dict(spec)
+                    nspec["files"] = tight_pf
+                    new_rules[rname] = nspec
+                for rname in rc.SYSTEM_LIFECYCLE_RULES:
+                    if rname not in doc["rules"]:
+                        regressions.append("system_lifecycle: missing required rule `%s`" % rname)
+                new_doc["rules"] = new_rules
+                slack_total += file_slack
+                if file_slack > 0:
+                    if write and not regressions:
+                        if _write_if_changed(p, new_doc):
+                            changed_files.append(SYSTEM_LIFECYCLE_REL)
+                    elif not write:
+                        changed_files.append(SYSTEM_LIFECYCLE_REL)
+
     return changed_files, slack_total, regressions
 
 
@@ -449,6 +560,12 @@ def migrate_v2(root, targets=ALL_TARGETS):
             doc = _build_test_fixture_v2(rc._read_json(p), counts["test_fixture"])
             if _write_if_changed(p, doc):
                 written.append(TEST_FIXTURE_REL)
+    if "system_lifecycle" in targets:
+        p = os.path.join(root, SYSTEM_LIFECYCLE_REL)
+        if os.path.isfile(p):
+            doc = _build_system_lifecycle_v2(rc._read_json(p), counts["system_lifecycle"])
+            if _write_if_changed(p, doc):
+                written.append(SYSTEM_LIFECYCLE_REL)
     return written
 
 
