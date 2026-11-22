@@ -1297,15 +1297,15 @@ impl SystemRegistry {
             }
         }
 
-        #[cfg(test)]
-        self.run_after_read_probe_hook_for_test(solar_system_id);
-
         // Reject `Cold`/stale transitions before claiming when holding `>= RANK_SYSTEM_REGISTRY`
         // (including `RANK_WORLD_INNER`) so `Loading` slots never depend on fallible
         // `try_write_unranked` (`BF-01`, `BF-05`).
         if held_above_registry {
             return Err(SystemActivationError::WaitRejectedWhileHoldingLocks { solar_system_id });
         }
+
+        #[cfg(test)]
+        self.run_after_read_probe_hook_for_test(solar_system_id);
 
         let rt_handle = tokio::runtime::Handle::try_current()
             .map_err(|_| SystemActivationError::NoTokioRuntime { solar_system_id })?;
