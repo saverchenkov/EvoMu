@@ -1170,16 +1170,25 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0, allow_time_contro
         deadline = time.time() + float(timeout_sec)
         settled = False
         saw_warping = False
+        poll_iters = 0
+        adv_enabled = bool(allow_time_control)
         while time.time() < deadline:
             if _is_warp_settled():
                 settled = True
                 break
             saw_warping = True
-            _sleep_sim_ms(100)
+            poll_iters += 1
+            if adv_enabled and poll_iters >= 3 and (poll_iters % 2 == 1):
+                adv_step_ok = bool(_advance_clock(sm, ipc, 4, raise_on_error=False))
+                if not adv_step_ok:
+                    adv_enabled = False
+                _sleep_sim_ms(200 if adv_step_ok else 100)
+            else:
+                _sleep_sim_ms(100)
         sess = getattr(__builtin__, "session", None)
         if getattr(sess, "stationid", None) is None and getattr(sess, "structureid", None) is None:
             adv_ok = False
-            if allow_time_control:
+            if adv_enabled:
                 adv_ok = bool(_advance_clock(sm, ipc, 2, raise_on_error=False))
                 _sleep_sim_ms(1500 if adv_ok else 600)
             else:

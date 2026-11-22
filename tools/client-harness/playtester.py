@@ -3496,6 +3496,17 @@ def build_reasoning_prompt(
             )
             + ". Do NOT report those closed windows being absent from `open_windows` or `screen.png` as a `ui_state_desync` bug.\n"
         )
+    inv_snap = compact_snap.get("inventory_state") if isinstance(compact_snap.get("inventory_state"), dict) else {}
+    inv_qf = inv_snap.get("quick_filter")
+    inv_af = inv_snap.get("active_filters")
+    inv_filter_banner = ""
+    if inv_qf or inv_af:
+        inv_filter_banner = (
+            f"- **⚠️ Active Inventory Filter Warning:** Inventory window currently has an active filter "
+            f"(`quick_filter={inv_qf!r}`, `active_filters={inv_af!r}`), which hides non-matching items in the UI! "
+            f"Do NOT conclude items are missing or `ui_state_desync` before clearing the filter "
+            f"(`type_text` with `clear: true` on `QuickFilterEdit` or clicking clear filters).\n"
+        )
 
     has_screen = bool(screenshot_path and Path(screenshot_path).exists())
     screen_line = (
@@ -3579,7 +3590,7 @@ def build_reasoning_prompt(
 ]
 
 ### Live `uicore` Scene-Graph & Session Snapshot
-```json
+{inv_filter_banner}```json
 {json.dumps(compact_snap, separators=(',', ':') if compact_mode else None, indent=None if compact_mode else 2)}
 ```
 ### Clickable Widgets ({len(raw_widgets)} total, showing top {min(len(raw_widgets), 135)})
@@ -4790,6 +4801,8 @@ def _resolve_wait_action_ms(
             if parsed > 0 and (raw_wait_ms is None or wait_ms <= 500 < parsed):
                 return parsed
             break
+        if ("warp" in s or "arrival" in s) and (raw_wait_ms is None or wait_ms <= 500):
+            return max(wait_ms, 8000)
     return wait_ms
 
 
