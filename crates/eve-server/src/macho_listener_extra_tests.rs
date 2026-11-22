@@ -3227,7 +3227,12 @@ async fn bf03_safe_logoff_to_charsel_clears_held_frames_and_scene_wire_state() {
         .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(ep)))),
     );
     assert_eq!(held_outcome, GateNotificationOutcome::Held(None));
-    assert_eq!(wire_state.held_scene_frame_count(), 1);
+    let held_future_outcome = wire_state.gate_typed_notification(
+        TypedNotification::new("OnCombatMessage", vec![PyRep::String("future".into())])
+            .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(ep + 1)))),
+    );
+    assert_eq!(held_future_outcome, GateNotificationOutcome::Held(None));
+    assert_eq!(wire_state.held_scene_frame_count(), 2);
     assert!(wire_state.in_space);
 
     // Safe logoff drops active character ownership on the account's online lock (`character_id = None`)
@@ -3270,7 +3275,16 @@ async fn bf03_safe_logoff_to_charsel_clears_held_frames_and_scene_wire_state() {
     assert!(wire_state.solar_system_id.is_none());
     assert_eq!(wire_state.scene_epoch, ep);
     assert_eq!(wire_state.held_scene_frame_count(), 0);
-    assert_eq!(wire_state.scene_drop_count(), 1);
+    assert_eq!(wire_state.scene_drop_count(), 2);
+    let ledger = ctx.flight_recorder.get_outbound_ledger(sid, 16);
+    assert!(
+        ledger.iter().any(|entry| {
+            entry.disposition == crate::flight_recorder::OutboundDisposition::Dropped
+                && entry.reason == "safe_logoff_charsel"
+                && entry.packet_kind == "OnCombatMessage"
+        }),
+        "P2-03: expected safe_logoff_charsel drop in outbound ledger, got {ledger:?}"
+    );
 
     let late_outcome = wire_state.gate_typed_notification(
         TypedNotification::new(

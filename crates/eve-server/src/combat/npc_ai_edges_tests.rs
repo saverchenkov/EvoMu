@@ -243,14 +243,26 @@ async fn step_ai_chase_idle_threat_weights_and_ball_destructions() {
             ch.active_ship_id = ship_ewar;
             ch.solar_system_id = sys_id;
         }
-        // Active EWAR module (group 201 / ECM or Warp Scrambler 52) on ship_ewar
-        let ewar_mod_tid = ctx
-            .sde
-            .types
-            .values()
-            .find(|t| t.group_id == 52)
-            .map(|t| t.type_id)
-            .unwrap_or(3242);
+        // Pick Rifter-fittable active EWAR (group 52) & Logi (group 41) modules deterministically
+        // rather than iterating `HashMap::values()` (which can select Heavy/Capital modules whose
+        // CPU/PG exceed a Rifter and get auto-offlined by `fit()`, dropping `module_active_states`).
+        let pick_group_module = |preferred_tid: u32, group_id: u32, fallback_tid: u32| -> u32 {
+            ctx.sde
+                .types
+                .get(&preferred_tid)
+                .filter(|t| t.group_id == group_id)
+                .map(|t| t.type_id)
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .values()
+                        .filter(|t| t.group_id == group_id)
+                        .min_by_key(|t| t.type_id)
+                        .map(|t| t.type_id)
+                })
+                .unwrap_or(fallback_tid)
+        };
+        let ewar_mod_tid = pick_group_module(3242, 52, 3242);
         snap.items.insert(
             100_950_101,
             InventoryItemRecord {
@@ -266,13 +278,7 @@ async fn step_ai_chase_idle_threat_weights_and_ball_destructions() {
         );
         snap.module_active_states.insert(100_950_101);
         // Active Logi module (group 41) on ship_logi
-        let logi_mod_tid = ctx
-            .sde
-            .types
-            .values()
-            .find(|t| t.group_id == 41)
-            .map(|t| t.type_id)
-            .unwrap_or(3581);
+        let logi_mod_tid = pick_group_module(3586, 41, 3581);
         snap.items.insert(
             100_950_102,
             InventoryItemRecord {

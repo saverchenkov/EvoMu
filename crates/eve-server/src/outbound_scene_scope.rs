@@ -4,8 +4,8 @@
 
 use crate::outbound_sequencer::{
     eval_and_push_destiny_batch, finalize_pending_destiny_frames, normalize_server_destiny_batch,
-    DestinyBatch, DestinyStream, OutFrame, SequenceOutcome, SequencerLedgerEvent,
-    SequencerLedgerEventKind, SessionWireState, TypedNotification,
+    push_or_coalesce_destiny_frame, DestinyBatch, DestinyStream, OutFrame, SequenceOutcome,
+    SequencerLedgerEvent, SequencerLedgerEventKind, SessionWireState, TypedNotification,
 };
 use crate::router::cache_notifications::PendingMachoNotification;
 use crate::router::notify_registry::{
@@ -212,10 +212,30 @@ impl SessionWireState {
                 ),
             };
         }
-        if !self.scene_entered && !has_set_state {
+        if !self.scene_entered && (!has_set_state || matches!(self.destiny, DestinyStream::Detached))
+        {
             return SceneScopeDecision::Hold;
         }
         SceneScopeDecision::Allow
+    }
+
+    fn drop_held_scene_frame(
+        &mut self,
+        frame: HeldSceneFrame,
+        reason: &str,
+    ) -> SequencerLedgerEvent {
+        self.scene_drop_count += 1;
+        let (epoch, stamp, packet_kind) = match frame {
+            HeldSceneFrame::Destiny(b) => (b.epoch, b.stamp, Some("DoDestinyUpdate".to_string())),
+            HeldSceneFrame::Notification(n) => (self.current_epoch(), 0, Some(n.event)),
+        };
+        SequencerLedgerEvent {
+            kind: SequencerLedgerEventKind::Dropped,
+            epoch,
+            stamp,
+            reason: reason.to_string(),
+            packet_kind,
+        }
     }
 
     pub(crate) fn hold_scene_frame(
@@ -225,28 +245,22 @@ impl SessionWireState {
         let mut evicted = None;
         if self.held_frames.len() >= MAX_HELD_SCENE_FRAMES {
             if let Some(oldest) = self.held_frames.pop_front() {
-                self.scene_drop_count += 1;
-                let (epoch, stamp, packet_kind) = match oldest {
-                    HeldSceneFrame::Destiny(b) => {
-                        (b.epoch, b.stamp, Some("DoDestinyUpdate".to_string()))
-                    }
-                    HeldSceneFrame::Notification(n) => (self.current_epoch(), 0, Some(n.event)),
-                };
-                evicted = Some(SequencerLedgerEvent {
-                    kind: SequencerLedgerEventKind::Dropped,
-                    epoch,
-                    stamp,
-                    reason: "held_scene_overflow".to_string(),
-                    packet_kind,
-                });
+                evicted = Some(self.drop_held_scene_frame(oldest, "held_scene_overflow"));
             }
         }
         self.held_frames.push_back(frame);
         evicted
     }
 
-    pub(crate) fn clear_held_scene_frames(&mut self) {
-        self.held_frames.clear();
+    pub(crate) fn clear_held_scene_frames(
+        &mut self,
+        reason: &str,
+    ) -> Vec<SequencerLedgerEvent> {
+        let mut dropped = Vec::with_capacity(self.held_frames.len());
+        while let Some(frame) = self.held_frames.pop_front() {
+            dropped.push(self.drop_held_scene_frame(frame, reason));
+        }
+        dropped
     }
 
     /// Synchronizes authoritative session scene epoch/location onto `SessionWireState` and drops
@@ -462,9 +476,12 @@ pub(crate) fn drain_ready_held_frames_into(
                         batch.epoch = active_ep;
                     }
                     for sub_batch in normalize_server_destiny_batch(state, batch) {
-                        let start = out.len();
-                        eval_and_push_destiny_batch(state, sub_batch, out, events);
-                        finalize_pending_destiny_frames(state, out, start, events);
+                        let mut frame_buf = Vec::new();
+                        eval_and_push_destiny_batch(state, sub_batch, &mut frame_buf, events);
+                        finalize_pending_destiny_frames(state, &mut frame_buf, 0, events);
+                        for frame in frame_buf {
+                            push_or_coalesce_destiny_frame(out, frame, events);
+                        }
                     }
                     if !was_entered && state.scene_entered {
                         break;

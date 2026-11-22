@@ -643,7 +643,10 @@ impl WorldRepository {
             .session_scene_epochs
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        epochs.insert(session_id, epoch);
+        epochs
+            .entry(session_id)
+            .and_modify(|cur| *cur = (*cur).max(epoch))
+            .or_insert(epoch);
     }
 
     /// Removes cached live scene epoch tracking when `session_id` disconnects (`#1190`).

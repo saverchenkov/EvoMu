@@ -684,6 +684,56 @@ fn merge_destiny_updates_pyrep(existing: &mut PyRep, incoming: PyRep) -> usize {
     merged_count
 }
 
+pub(crate) fn push_or_coalesce_destiny_frame(
+    out: &mut Vec<OutFrame>,
+    frame: OutFrame,
+    events: &mut Vec<SequencerLedgerEvent>,
+) {
+    let OutFrame::DoDestinyUpdate {
+        epoch: in_epoch,
+        stamp: in_stamp,
+        has_set_state: in_has_set_state,
+        updates: in_updates,
+        wait_for_bubble: in_wait_for_bubble,
+    } = frame
+    else {
+        out.push(frame);
+        return;
+    };
+    if let Some(OutFrame::DoDestinyUpdate {
+        epoch,
+        stamp,
+        has_set_state,
+        updates,
+        wait_for_bubble,
+    }) = out.last_mut()
+    {
+        if *epoch == in_epoch && *stamp == in_stamp {
+            *has_set_state |= in_has_set_state;
+            *wait_for_bubble |= in_wait_for_bubble;
+            let merged_entries = merge_destiny_updates_pyrep(updates, in_updates);
+            events.push(SequencerLedgerEvent {
+                kind: SequencerLedgerEventKind::Coalesced,
+                epoch: in_epoch,
+                stamp: in_stamp,
+                reason: format!(
+                    "equal_stamp_merge:stamp={}:merged_{merged_entries}_entries",
+                    in_stamp
+                ),
+                packet_kind: None,
+            });
+            return;
+        }
+    }
+    out.push(OutFrame::DoDestinyUpdate {
+        epoch: in_epoch,
+        stamp: in_stamp,
+        has_set_state: in_has_set_state,
+        updates: in_updates,
+        wait_for_bubble: in_wait_for_bubble,
+    });
+}
+
 pub(crate) fn eval_and_push_destiny_batch(
     state: &mut SessionWireState,
     batch: DestinyBatch,
@@ -692,38 +742,17 @@ pub(crate) fn eval_and_push_destiny_batch(
 ) {
     match state.accept_destiny_batch_with_reason(batch) {
         AcceptDestinyOutcome::Accepted(accepted) => {
-            if let Some(OutFrame::DoDestinyUpdate {
-                epoch,
-                stamp,
-                has_set_state,
-                updates,
-                wait_for_bubble,
-            }) = out.last_mut()
-            {
-                if *epoch == accepted.epoch && *stamp == accepted.stamp {
-                    *has_set_state |= accepted.has_set_state;
-                    *wait_for_bubble |= accepted.wait_for_bubble;
-                    let merged_entries = merge_destiny_updates_pyrep(updates, accepted.updates);
-                    events.push(SequencerLedgerEvent {
-                        kind: SequencerLedgerEventKind::Coalesced,
-                        epoch: accepted.epoch,
-                        stamp: accepted.stamp,
-                        reason: format!(
-                            "equal_stamp_merge:stamp={}:merged_{merged_entries}_entries",
-                            accepted.stamp
-                        ),
-                        packet_kind: None,
-                    });
-                    return;
-                }
-            }
-            out.push(OutFrame::DoDestinyUpdate {
-                epoch: accepted.epoch,
-                stamp: accepted.stamp,
-                has_set_state: accepted.has_set_state,
-                updates: accepted.updates,
-                wait_for_bubble: accepted.wait_for_bubble,
-            });
+            push_or_coalesce_destiny_frame(
+                out,
+                OutFrame::DoDestinyUpdate {
+                    epoch: accepted.epoch,
+                    stamp: accepted.stamp,
+                    has_set_state: accepted.has_set_state,
+                    updates: accepted.updates,
+                    wait_for_bubble: accepted.wait_for_bubble,
+                },
+                events,
+            );
         }
         AcceptDestinyOutcome::Empty => {}
         AcceptDestinyOutcome::Held(held_ev) => {
@@ -1056,6 +1085,8 @@ impl ServerDestinyNormalizer {
         }
         if allow_attach_from_detached && matches!(self.stream, DestinyStream::Detached) {
             self.stream = DestinyStream::AwaitingSetState { epoch: batch.epoch };
+            self.scene.in_space = true;
+            self.scene.scene_entered = false;
             self.sim_materialized.clear();
             self.active_add_stamps.clear();
             self.removed_tombstone_stamps.clear();
@@ -1330,6 +1361,7 @@ impl ServerDestinyNormalizer {
                             set_state_stamp: cur_stamp,
                             last_stamp: cur_stamp,
                         };
+                        self.scene.scene_entered = true;
                     }
                     DestinyStream::Live {
                         epoch,
@@ -1341,6 +1373,9 @@ impl ServerDestinyNormalizer {
                         } else {
                             set_state_stamp
                         };
+                        if chunk.has_set_state {
+                            self.scene.scene_entered = true;
+                        }
                         self.stream = DestinyStream::Live {
                             epoch,
                             set_state_stamp: new_set_state,
@@ -1513,7 +1548,7 @@ fn collect_later_added_ids(entries: &[PyRep]) -> HashSet<BallId> {
     ids
 }
 
-fn make_remove_balls_entry(stamp: u32, ball_ids: &[BallId]) -> PyRep {
+pub(crate) fn make_remove_balls_entry(stamp: u32, ball_ids: &[BallId]) -> PyRep {
     PyRep::Tuple(vec![
         PyRep::Integer(i64::from(stamp)),
         PyRep::Tuple(vec![

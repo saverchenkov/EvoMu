@@ -592,7 +592,7 @@ fn property_random_interleavings_preserve_ord_invariants() {
     }
 }
 
-fn named_entry(stamp: u32, action: &str, args: Vec<PyRep>) -> PyRep {
+pub(crate) fn named_entry(stamp: u32, action: &str, args: Vec<PyRep>) -> PyRep {
     PyRep::Tuple(vec![
         PyRep::Integer(i64::from(stamp)),
         PyRep::Tuple(vec![PyRep::String(action.into()), PyRep::Tuple(args)]),
@@ -603,7 +603,7 @@ pub(crate) fn named_update(stamp: u32, action: &str, args: Vec<PyRep>) -> PyRep 
     PyRep::List(vec![named_entry(stamp, action, args)])
 }
 
-fn frame_actions(frame: &OutFrame) -> Option<Vec<&str>> {
+pub(crate) fn frame_actions(frame: &OutFrame) -> Option<Vec<&str>> {
     let OutFrame::DoDestinyUpdate { updates, .. } = frame else { return None };
     let PyRep::List(items) = updates else { return Some(Vec::new()) };
     Some(items.iter().filter_map(|e| crate::sequencer_invariants::parse_destiny_entry(e).map(|(_, a, _)| a)).collect())

@@ -1,9 +1,10 @@
 use super::*;
-use crate::outbound_sequencer::tests::{dummy_updates, named_update};
+use crate::outbound_sequencer::tests::{dummy_updates, frame_actions, named_entry, named_update};
 use crate::outbound_sequencer::{
-    sequence_server_rpc_in_scene_with_events, sequence_tick, sequence_tick_with_events,
-    sequence_with_events, AcceptDestinyOutcome, DestinyBatch, DestinyDrain, DestinyStream,
-    OutFrame, RpcCompletion, SequencerLedgerEventKind, SessionWireState, TypedNotification,
+    make_remove_balls_entry, sequence_server_rpc_in_scene_with_events, sequence_tick,
+    sequence_tick_with_events, sequence_with_events, AcceptDestinyOutcome, DestinyBatch,
+    DestinyDrain, DestinyStream, OutFrame, RpcCompletion, SequencerLedgerEventKind,
+    SessionWireState, TypedNotification,
 };
 use eve_proto::PyRep;
 
@@ -577,4 +578,313 @@ fn held_scene_overflow_increments_scene_drop_count() {
         other => panic!("expected Held(Some(overflow)), got {other:?}"),
     }
     assert_eq!(wire.scene_drop_count(), 1);
+}
+
+fn rpc_with_drain(
+    call_id: u64,
+    destiny_drain: DestinyDrain,
+    notifications: Vec<TypedNotification>,
+) -> RpcCompletion {
+    RpcCompletion {
+        call_id,
+        response_frame: PyRep::None,
+        session_change_frame: None,
+        item_change_before_session_change: false,
+        pending_tick_batches: Vec::new(),
+        destiny_drain,
+        notifications,
+    }
+}
+
+#[test]
+fn bf01_held_set_state_and_same_stamp_held_delta_finalize_before_coalesce() {
+    let sys_old = 30_000_140_u32;
+    let sys_new = 30_000_142_u32;
+    let mut wire = SessionWireState::new(1190_10, 1190_10).with_scene_epoch(2);
+    let ep_old = wire.enter_space(Some(sys_old));
+    assert!(sequence_tick(
+        &mut wire,
+        DestinyBatch::new(ep_old, 10, true, dummy_updates("SetState", 10))
+            .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_old), Some(2))))
+    )
+    .is_some());
+
+    let future_scope = Some(OutboundSceneScope::space(Some(sys_new), Some(3)));
+    assert!(matches!(
+        wire.accept_destiny_batch_with_reason(make_test_set_state_batch(
+            sys_new,
+            6001,
+            99,
+            20,
+            future_scope,
+        )),
+        AcceptDestinyOutcome::Held(None)
+    ));
+    assert!(matches!(
+        wire.accept_destiny_batch_with_reason(
+            DestinyBatch::new(
+                99,
+                20,
+                false,
+                PyRep::List(vec![
+                    named_entry(20, "OnSpecialFX", vec![PyRep::Integer(8888)]),
+                    named_entry(20, "AddBalls2", vec![PyRep::Integer(7001)]),
+                ]),
+            )
+            .with_scene_scope(future_scope),
+        ),
+        AcceptDestinyOutcome::Held(None)
+    ));
+    assert!(matches!(
+        wire.gate_typed_notification(
+            TypedNotification::new(
+                "OnDamageStateChange",
+                vec![PyRep::Integer(7001), PyRep::Tuple(vec![])],
+            )
+            .with_scene_scope(future_scope),
+        ),
+        GateNotificationOutcome::Held(None)
+    ));
+
+    let _ep_new = wire.enter_space(Some(sys_new));
+    let outcome = sequence_server_rpc_in_scene_with_events(
+        &mut wire,
+        rpc_with_drain(10, DestinyDrain::None, Vec::new()),
+        Some(OutboundSceneSync {
+            scene_epoch: 3,
+            solar_system_id: Some(sys_new),
+            is_in_space: true,
+            has_ballpark: true,
+        }),
+    );
+
+    assert!(wire.materialized.contains(&7001));
+    assert!(
+        outcome.events.iter().any(|ev| {
+            ev.kind == SequencerLedgerEventKind::Dropped
+                && ev.packet_kind.as_deref() == Some("OnSpecialFX")
+        }),
+        "expected unmaterialized OnSpecialFX in held same-stamp delta to drop, got {:?}",
+        outcome.events
+    );
+    assert!(
+        outcome
+            .events
+            .iter()
+            .any(|ev| ev.kind == SequencerLedgerEventKind::Coalesced && ev.stamp == 20),
+        "expected stamp-20 Coalesced event, got {:?}",
+        outcome.events
+    );
+    let actions: Vec<Vec<&str>> = outcome.frames.iter().filter_map(frame_actions).collect();
+    assert_eq!(actions, vec![vec!["SetState", "AddBalls2"]]);
+    assert!(outcome.frames.iter().any(|f| matches!(
+        f,
+        OutFrame::Notification { event, .. } if event == "OnDamageStateChange"
+    )));
+}
+
+#[test]
+fn bf01_live_updates_and_same_stamp_held_delta_finalize_before_coalesce() {
+    let sys_id = 30_000_142_u32;
+    let mut wire = SessionWireState::new(1190_11, 1190_11).with_scene_epoch(1);
+    let ep = wire.enter_space(Some(sys_id));
+    let scope_ep1 = Some(OutboundSceneScope::space(Some(sys_id), Some(1)));
+    assert!(sequence_tick(
+        &mut wire,
+        make_test_set_state_batch(sys_id, 6001, ep, 19, scope_ep1),
+    )
+    .is_some());
+
+    let scope_ep2 = Some(OutboundSceneScope::space(Some(sys_id), Some(2)));
+    assert!(matches!(
+        wire.accept_destiny_batch_with_reason(
+            DestinyBatch::new(
+                ep,
+                20,
+                false,
+                PyRep::List(vec![
+                    named_entry(20, "OnSpecialFX", vec![PyRep::Integer(8888)]),
+                    named_entry(20, "AddBalls2", vec![PyRep::Integer(7002)]),
+                ]),
+            )
+            .with_scene_scope(scope_ep2),
+        ),
+        AcceptDestinyOutcome::Held(None)
+    ));
+
+    let outcome = sequence_server_rpc_in_scene_with_events(
+        &mut wire,
+        rpc_with_drain(
+            11,
+            DestinyDrain::Updates(
+                DestinyBatch::new(
+                    ep,
+                    20,
+                    false,
+                    named_update(20, "Stop", vec![PyRep::Integer(6001)]),
+                )
+                .with_scene_scope(scope_ep2),
+            ),
+            vec![TypedNotification::new(
+                "OnDamageStateChange",
+                vec![PyRep::Integer(7002), PyRep::Tuple(vec![])],
+            )
+            .with_scene_scope(scope_ep2)],
+        ),
+        Some(OutboundSceneSync {
+            scene_epoch: 2,
+            solar_system_id: Some(sys_id),
+            is_in_space: true,
+            has_ballpark: true,
+        }),
+    );
+
+    assert!(wire.materialized.contains(&7002));
+    assert!(
+        outcome.events.iter().any(|ev| {
+            ev.kind == SequencerLedgerEventKind::Dropped
+                && ev.packet_kind.as_deref() == Some("OnSpecialFX")
+        }),
+        "expected unmaterialized OnSpecialFX in held delta after Updates(S) to drop, got {:?}",
+        outcome.events
+    );
+    assert!(
+        outcome
+            .events
+            .iter()
+            .any(|ev| ev.kind == SequencerLedgerEventKind::Coalesced && ev.stamp == 20),
+        "expected stamp-20 Coalesced event, got {:?}",
+        outcome.events
+    );
+    let actions: Vec<Vec<&str>> = outcome.frames.iter().filter_map(frame_actions).collect();
+    assert_eq!(actions, vec![vec!["Stop", "AddBalls2"]]);
+    assert!(outcome.frames.iter().any(|f| matches!(
+        f,
+        OutFrame::Notification { event, .. } if event == "OnDamageStateChange"
+    )));
+}
+
+#[test]
+fn bf02_attach_sequence_scene_scoped_add_and_remove_defers_remove_balls() {
+    let sys_id = 30_000_142_u32;
+    let mut wire = SessionWireState::new(1190_12, 1190_12).with_scene_epoch(1);
+    let scope = Some(OutboundSceneScope::space(Some(sys_id), Some(1)));
+
+    let mut set_state = make_test_set_state_batch(sys_id, 6001, 1, 100, scope);
+    if let PyRep::List(ref mut items) = set_state.updates {
+        items.push(named_entry(100, "AddBalls2", vec![PyRep::Integer(7003)]));
+    }
+    let followup_remove = DestinyBatch::new(
+        1,
+        100,
+        false,
+        PyRep::List(vec![make_remove_balls_entry(100, &[7003])]),
+    )
+    .with_scene_scope(scope);
+
+    let outcome = sequence_server_rpc_in_scene_with_events(
+        &mut wire,
+        rpc_with_drain(
+            12,
+            DestinyDrain::AttachSequence {
+                epoch: 1,
+                set_state,
+                followups: vec![followup_remove],
+            },
+            Vec::new(),
+        ),
+        Some(OutboundSceneSync {
+            scene_epoch: 1,
+            solar_system_id: Some(sys_id),
+            is_in_space: true,
+            has_ballpark: true,
+        }),
+    );
+
+    let destiny_stamps_and_actions: Vec<(u32, Vec<&str>)> = outcome
+        .frames
+        .iter()
+        .filter_map(|f| match f {
+            OutFrame::DoDestinyUpdate { stamp, .. } => {
+                frame_actions(f).map(|actions| (*stamp, actions))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        destiny_stamps_and_actions,
+        vec![
+            (100, vec!["SetState", "AddBalls2"]),
+            (101, vec!["RemoveBalls"]),
+        ]
+    );
+    assert!(outcome
+        .events
+        .iter()
+        .all(|ev| ev.kind != SequencerLedgerEventKind::Dropped));
+}
+
+#[test]
+fn p2_02_held_future_set_state_stays_held_across_pre_attach_scene_sync() {
+    let sys_a = 30_000_140_u32;
+    let sys_b = 30_000_142_u32;
+    let mut wire = SessionWireState::new(1190_13, 1190_13).with_scene_epoch(1);
+    wire.leave_space();
+    assert!(wire.sync_scene(1, Some(sys_a), false).is_empty());
+
+    let future_scope = Some(OutboundSceneScope::space(Some(sys_b), Some(2)));
+    assert!(matches!(
+        wire.accept_destiny_batch_with_reason(make_test_set_state_batch(
+            sys_b,
+            6004,
+            99,
+            30,
+            future_scope,
+        )),
+        AcceptDestinyOutcome::Held(None)
+    ));
+    assert_eq!(wire.held_scene_frame_count(), 1);
+
+    // Scene sync arrives before Attach / enter_space (destiny stream still Detached).
+    // Held future SetState must stay Held rather than being flushed into Detached and dropped.
+    let pre_attach_sync = sequence_server_rpc_in_scene_with_events(
+        &mut wire,
+        rpc_with_drain(13, DestinyDrain::None, Vec::new()),
+        Some(OutboundSceneSync {
+            scene_epoch: 2,
+            solar_system_id: Some(sys_b),
+            is_in_space: true,
+            has_ballpark: true,
+        }),
+    );
+    assert!(matches!(wire.destiny, DestinyStream::Detached));
+    assert_eq!(wire.scene_drop_count(), 0);
+    assert_eq!(wire.held_scene_frame_count(), 1);
+    assert!(pre_attach_sync
+        .events
+        .iter()
+        .all(|ev| ev.kind != SequencerLedgerEventKind::Dropped));
+
+    // Once enter_space moves destiny -> AwaitingSetState, the held SetState flushes cleanly.
+    let active_ep = wire.enter_space(Some(sys_b));
+    let post_attach = sequence_server_rpc_in_scene_with_events(
+        &mut wire,
+        rpc_with_drain(14, DestinyDrain::None, Vec::new()),
+        None,
+    );
+    assert_eq!(wire.held_scene_frame_count(), 0);
+    assert!(wire.scene_entered);
+    assert!(matches!(
+        wire.destiny,
+        DestinyStream::Live {
+            epoch,
+            set_state_stamp: 30,
+            last_stamp: 30
+        } if epoch == active_ep
+    ));
+    assert!(wire.materialized.contains(&6004));
+    assert!(post_attach.frames.iter().any(|f| matches!(
+        f,
+        OutFrame::DoDestinyUpdate { epoch, stamp: 30, has_set_state: true, .. } if *epoch == active_ep
+    )));
 }

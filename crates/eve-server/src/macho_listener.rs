@@ -2961,7 +2961,12 @@ async fn handle_safe_logoff_to_charsel<W: AsyncWriteExt + Unpin>(
     if !charsel_evs.is_empty() {
         record_sequencer_events(ctx, session.session_id, &charsel_evs, None, false);
     }
-    wire.wire_state.clear_held_scene_frames();
+    let cleared_evs = wire
+        .wire_state
+        .clear_held_scene_frames("safe_logoff_charsel");
+    if !cleared_evs.is_empty() {
+        record_sequencer_events(ctx, session.session_id, &cleared_evs, None, false);
+    }
     wire.wire_state.leave_space();
     ctx.systems
         .clear_explicit_update_state_guards_for_session(session.session_id);
