@@ -331,18 +331,18 @@ pub(crate) async fn handle_multi_add(
             *entry = entry.max(delay_s);
         }
     }
-    let mut old_ship_loads: std::collections::HashMap<i64, (f64, f64)> =
+    let mut old_ship_attrs: std::collections::HashMap<i64, std::collections::BTreeMap<u16, f64>> =
         std::collections::HashMap::new();
     for &(old_loc, _, _) in &fitted_unfit_ids {
-        if !old_ship_loads.contains_key(&old_loc) {
-            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, old_loc) {
-                old_ship_loads.insert(
+        if !old_ship_attrs.contains_key(&old_loc) {
+            if let Some(snap) =
+                crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs_for_ship(
+                    ctx,
+                    char_id,
                     old_loc,
-                    (
-                        fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
-                        fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
-                    ),
-                );
+                )
+            {
+                old_ship_attrs.insert(old_loc, snap);
             }
         }
     }
@@ -766,15 +766,13 @@ pub(crate) async fn handle_multi_add(
     }
     for old_ship in source_ships {
         ctx.invalidate_ship_fitting(old_ship);
-        if let Ok(new_fit) = ctx.get_or_rebuild_ship_fitting(char_id, old_ship) {
-            if let Some(&(old_cpu, old_pg)) = old_ship_loads.get(&old_ship) {
-                let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
-                let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
-                let _ = ctx.notify_ship_fitting_load_changes(
-                    char_id, old_ship, old_cpu, new_cpu, old_pg, new_pg,
-                );
-            }
-        }
+        crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_for_ship(
+            ctx,
+            char_id,
+            old_ship,
+            old_ship_attrs.get(&old_ship),
+            false,
+        );
         if session.station_id.is_none() && session.structure_id.is_none() {
             if let Some(sys_id) = session.solar_system_id {
                 if let Some(&delay_s) = precomputed_cloak_delays.get(&old_ship) {
@@ -1024,8 +1022,11 @@ async fn handle_multi_add_auto_fit(
         ctx, session, char_id,
     );
     let mut temp_fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
-    let mut prev_cpu = temp_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
-    let mut prev_pg = temp_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
+    let mut prev_ship_attrs =
+        crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs(
+            ctx,
+            &temp_fit,
+        );
     let supplied_pw = kwargs.get("password").and_then(|v| v.as_str());
     let (mut used_slots, item_meta) = ctx.db.with_snapshot(|snap| -> Result<_, BridgeRpcError> {
         let (ch, ship_t) = validate_auto_fit_ship_in_snap(ctx, snap, session, char_id, ship_id)?;
@@ -1051,7 +1052,7 @@ async fn handle_multi_add_auto_fit(
             } else if mod_t.effect_ids.contains(&11) {
                 ((11_u16..=18).collect(), true)
             } else if mod_t.effect_ids.contains(&2663) {
-                ((92_u16..=94).collect(), false)
+                ((92_u16..=94).collect(), true)
             } else if mod_t.effect_ids.contains(&3772) {
                 if let Some(&req_slot_f) = mod_t.default_attributes.get(&1366) {
                     (vec![req_slot_f as u16], true)
@@ -1290,14 +1291,17 @@ async fn handle_multi_add_auto_fit(
             );
         }
         if let Some(ref new_fit) = rebuilt_fit {
-            let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
-            let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
-            if (new_cpu - prev_cpu).abs() > 1e-6 || (new_pg - prev_pg).abs() > 1e-6 {
-                let _ = ctx.notify_ship_fitting_load_changes(
-                    char_id, ship_id, prev_cpu, new_cpu, prev_pg, new_pg,
-                );
-                prev_cpu = new_cpu;
-                prev_pg = new_pg;
+            if let Some(next_attrs) =
+                crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_from_fit(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    Some(&prev_ship_attrs),
+                    new_fit,
+                    true,
+                )
+            {
+                prev_ship_attrs = next_attrs;
             }
         }
         fitted_ids.push(updated.item_id);

@@ -1584,14 +1584,13 @@ pub(crate) async fn handle_dogma_im(
                     }
                 }
             }
-            let old_fit_loads = ctx
+            let old_ship_attrs = ctx
                 .db
                 .with_snapshot(|s| s.items.get(&item_id).map(|i| i.location_id))
                 .and_then(|loc| {
                     ctx.fit(char_id, loc).ok().map(|f| {
-                        (
-                            f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
-                            f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
+                        crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs(
+                            ctx, &f,
                         )
                     })
                 });
@@ -1695,13 +1694,14 @@ pub(crate) async fn handle_dogma_im(
                 }
                 ctx.invalidate_and_push_fit(loc);
                 if let Ok(new_fit) = ctx.fit(char_id, loc) {
-                    if let Some((old_cpu, old_pg)) = old_fit_loads {
-                        let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
-                        let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
-                        let _ = ctx.notify_ship_fitting_load_changes(
-                            char_id, loc, old_cpu, new_cpu, old_pg, new_pg,
-                        );
-                    }
+                    crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_from_fit(
+                        ctx,
+                        char_id,
+                        loc,
+                        old_ship_attrs.as_ref(),
+                        &new_fit,
+                        false,
+                    );
                 }
                 // V24 client derives `OnModuleUnfitted` from this `OnItemChange` (`ixFlag` change).
                 let _ = ctx.notify_fitted_item_trashed(char_id, item_id, type_id, qty, loc, flag);
