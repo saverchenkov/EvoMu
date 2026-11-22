@@ -151,13 +151,18 @@ fn apply_open_defaults(snap: &mut eve_db::WorldStateSnapshot, seed_demo: bool) {
         "v2_full_catalog".to_string(),
     );
     if seed_demo {
-        let tpl = full_demo_template()
+        let demo = full_demo_template();
+        let tpl = demo
             .characters
             .values()
             .next()
             .cloned()
             .expect("demo char");
-        snap.characters.entry(tpl.character_id).or_insert(tpl);
+        let tpl_id = tpl.character_id;
+        snap.characters.entry(tpl_id).or_insert(tpl);
+        if let Some(sk) = demo.skills.get(&tpl_id) {
+            snap.skills.entry(tpl_id).or_insert_with(|| sk.clone());
+        }
         for (username, raw_pw) in [("demo", "demo-secret"), ("demo2", "demo2-secret")] {
             if !snap.accounts.contains_key(username) {
                 let user_id = snap.accounts.values().map(|a| a.user_id).max().unwrap_or(0) + 1;
@@ -467,6 +472,7 @@ pub(crate) async fn register_online_pilot(
             },
         );
     });
+    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let mut s = SessionState::new(sid);
     crate::common::login_pilot(ctx, &mut s, username, password).await;
     rpc_call(ctx, &mut s, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])

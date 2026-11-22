@@ -129,6 +129,11 @@ async fn test_structure_access_lists_and_docking_acl() {
             c3.corporation_id = 98_000_002;
             c3.name = "Blocked Pilot".into();
             snap.characters.insert(blocked_char, c3);
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+                snap,
+                &ctx.sde,
+                blocked_char,
+            );
         }
     });
     let mut sess = login_with_corp(&ctx, 301, char_id).await;

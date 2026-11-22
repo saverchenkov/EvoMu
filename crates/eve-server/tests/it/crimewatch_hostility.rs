@@ -54,6 +54,7 @@ pub(crate) async fn setup_pilot_in_space(
             );
         }
         snap.items.insert(ship_id, item_rec(ship_id, ship_type_id, char_id, solar_system_id as i64, InventoryFlag::None, 1, true));
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     let _ = ctx.db.acquire_online_lock(user_id, 7_000 + user_id, Some(char_id), true, ctx.now_unix());
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);

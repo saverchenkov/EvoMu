@@ -98,6 +98,7 @@ pub(crate) async fn move_pilot_to_system(
                 ..Default::default()
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     sess.solar_system_id = Some(sys_id);
     sess.ship_id = Some(ship_id);

@@ -938,6 +938,7 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
         ch.corporation_id = 0;
         ch.alliance_id = None;
         snap.characters.insert(no_corp_char, ch);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, no_corp_char);
     });
     let mut no_corp_sess = sess_a.clone();
     no_corp_sess.character_id = Some(no_corp_char);
@@ -3110,6 +3111,7 @@ async fn login_in_space(
             ch.solar_system_id = sys_id;
             ch.active_ship_id = ship_id;
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     sess.station_id = None;
     sess.structure_id = None;
@@ -3822,6 +3824,7 @@ async fn login_in_space(
             ch.solar_system_id = sys_id;
             ch.active_ship_id = ship_id;
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     sess.station_id = None;
     sess.structure_id = None;
@@ -4145,6 +4148,7 @@ async fn login_in_space(
             ch.solar_system_id = sys_id;
             ch.active_ship_id = ship_id;
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     sess.station_id = None;
     sess.structure_id = None;

@@ -1205,6 +1205,11 @@ async fn test_corp_lifecycle_kick_join_invite_quit() {
         ch3.balance = IskCents(0);
         ch3.station_id = Some(60003760);
         snap.characters.insert(PILOT_3, ch3);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap,
+            &ctx.sde,
+            PILOT_3,
+        );
     });
 
     let mut sess1 = select_pilot(&ctx, 62_001, "demo", "demo-secret", PILOT_1).await;

@@ -105,6 +105,7 @@ async fn login_in_space(
         ship.dynamic_attributes.insert(48, 25_000.0);
         ship.dynamic_attributes.insert(11, 25_000.0);
         snap.items.insert(ship_id, ship);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     sess.solar_system_id = Some(sys_id);
     sess.station_id = None;

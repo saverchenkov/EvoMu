@@ -98,6 +98,7 @@ async fn setup_pilot_session(
                 blueprint_runs_remaining: None,
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);

@@ -70,11 +70,12 @@ pub(crate) async fn pilot(hull: u32, skills: &[(u32, u8)], modules: &[(i64, u32,
         .await
         .expect("SelectCharacterID");
     ctx.db.with_mut_snapshot(|snap| {
-        let map = skills
-            .iter()
-            .map(|&(id, level)| (id, TrainedSkillRecord { type_id: id, level, skill_points: 1_000_000.0 }))
-            .collect();
-        snap.skills.insert(CHAR_ID, map);
+        // Merge caller-supplied skill levels onto the seeded character rather than wiping starter
+        // Rifter (`587`) skills before `Undock` triggers fixture validation.
+        let entry = snap.skills.entry(CHAR_ID).or_default();
+        for &(id, level) in skills {
+            entry.insert(id, TrainedSkillRecord { type_id: id, level, skill_points: 1_000_000.0 });
+        }
     });
     let undock = ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
     let PyRep::KeyVal(kv) = &undock else { panic!("Undock returns KeyVal") };

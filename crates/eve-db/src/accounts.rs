@@ -315,17 +315,18 @@ impl WorldRepository {
     ) {
         let already_complete = self.authenticate(username, password_token).is_ok()
             && self.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .is_some_and(|c| c.race_id > 0 && c.bloodline_id > 0)
+                snap.characters.get(&char_id).is_some_and(|c| {
+                    c.race_id > 0 && c.bloodline_id > 0 && snap.skills.contains_key(&char_id)
+                })
             });
         if already_complete {
             return;
         }
         let hashed_token = Self::hash_password_token(username, password_token);
         // Resolve SDE outside `try_with_mut_snapshot` to preserve lock ordering with test env guards.
-        let gm_ship_skills = if let Some(sde) = Self::open_default_sde_shared() {
-            Self::derived_skills_for_types(&sde, [587])
+        let shared_sde = Self::open_default_sde_shared();
+        let default_gm_ship_skills = if let Some(sde) = shared_sde.as_deref() {
+            Self::derived_skills_for_types(sde, [587])
         } else {
             HashMap::from([
                 (
@@ -406,21 +407,48 @@ impl WorldRepository {
                     },
                 );
                 let char_skills = snap.skills.entry(char_id).or_default();
-                Self::merge_skill_records_max(char_skills, gm_ship_skills);
+                Self::merge_skill_records_max(char_skills, default_gm_ship_skills);
                 let history = Self::char_creation_skill_history(char_skills);
                 snap.skill_history.entry(char_id).or_insert(history);
                 snap.account_plex_vault.insert(user_id, 10_000);
-            } else if let Some(existing_char) = snap.characters.get_mut(&char_id) {
-                if existing_char.race_id == 0 || existing_char.bloodline_id == 0 {
-                    existing_char.race_id = 1;
-                    existing_char.bloodline_id = 1;
-                    if existing_char.ancestry_id == 0 {
-                        existing_char.ancestry_id = 11;
+            } else if let Some(existing_active_ship_id) =
+                snap.characters.get_mut(&char_id).map(|existing_char| {
+                    if existing_char.race_id == 0 || existing_char.bloodline_id == 0 {
+                        existing_char.race_id = 1;
+                        existing_char.bloodline_id = 1;
+                        if existing_char.ancestry_id == 0 {
+                            existing_char.ancestry_id = 11;
+                        }
+                        if existing_char.school_id == 0 {
+                            existing_char.school_id = 17;
+                        }
+                        existing_char.version += 1;
                     }
-                    if existing_char.school_id == 0 {
-                        existing_char.school_id = 17;
-                    }
-                    existing_char.version += 1;
+                    existing_char.active_ship_id
+                })
+            {
+                if !snap.skills.contains_key(&char_id) {
+                    let backfill_skills = shared_sde
+                        .as_deref()
+                        .and_then(|sde| {
+                            let ship = (existing_active_ship_id > 0)
+                                .then(|| snap.items.get(&existing_active_ship_id))
+                                .flatten()?;
+                            sde.types.get(&ship.type_id)?;
+                            let mut type_ids = vec![ship.type_id];
+                            for it in snap.items.values() {
+                                if it.location_id == existing_active_ship_id
+                                    && WorldStateSnapshot::is_fitted_slot_flag(it.flag)
+                                {
+                                    type_ids.push(it.type_id);
+                                }
+                            }
+                            Some(Self::derived_skills_for_types(sde, type_ids))
+                        })
+                        .unwrap_or(default_gm_ship_skills);
+                    let history = Self::char_creation_skill_history(&backfill_skills);
+                    snap.skills.insert(char_id, backfill_skills);
+                    snap.skill_history.entry(char_id).or_insert(history);
                 }
             }
             Ok::<(), std::convert::Infallible>(())

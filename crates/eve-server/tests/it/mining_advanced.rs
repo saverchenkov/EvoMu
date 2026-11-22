@@ -705,6 +705,16 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
         snap.characters.insert(90_000_003, unpriv_ch);
         snap.characters.get_mut(&char_id).unwrap().structure_id = Some(moon_structure_id);
         snap.corporations.get_mut(&char_corp_id).unwrap().member_roles.insert(90_000_003, 0);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap,
+            &ctx.sde,
+            90_000_002,
+        );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap,
+            &ctx.sde,
+            90_000_003,
+        );
     });
 
     // Corp ACL denial: outsider (foreign corp) and unprivileged member (role 0) must be denied StartNewExtraction & FractureChunkWithStructure
@@ -1202,6 +1212,11 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
         ch.character_id = outsider_char;
         ch.corporation_id = 98_999_999;
         snap.characters.insert(outsider_char, ch);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap,
+            &ctx.sde,
+            outsider_char,
+        );
     });
     let mut outsider_sess = sess.clone();
     outsider_sess.character_id = Some(outsider_char);

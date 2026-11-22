@@ -112,7 +112,18 @@ async fn test_pi_planet_info_command_center_and_colony_limit() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) { ch.balance = IskCents::from_isk(500_000_000); ch.station_id = None; }
-        snap.skills.entry(char_id).or_default().clear();
+        // Clear only PI skills so colony limit assertions hold while preserving active ship skills.
+        if let Some(sk) = snap.skills.get_mut(&char_id) {
+            for skill_id in [
+                COMMAND_CENTER_UPGRADES_SKILL,
+                INTERPLANETARY_CONSOLIDATION_SKILL,
+                REMOTE_SENSING_SKILL,
+                PLANETOLOGY_SKILL,
+                ADV_PLANETOLOGY_SKILL,
+            ] {
+                sk.remove(&skill_id);
+            }
+        }
     });
 
     // 1. feat:pi.planet-info: GetPlanetInfo & GetPlanetResourceInfo

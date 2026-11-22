@@ -39,6 +39,8 @@ fn sess(sid: u64, uid: u64, cid: i64, role: u64) -> SessionState {
 }
 
 fn seed_pilot(db: &WorldRepository, cid: i64, uid: u64, name: &str, isk_cents: i64, evermarks: i64) {
+    // Resolve shared SDE before acquiring `db`'s snapshot lock to preserve test-env lock order.
+    let sde = WorldRepository::open_default_sde_shared();
     db.with_mut_snapshot(|snap| {
         let uname = format!("user_{uid}");
         snap.accounts.entry(uname.clone()).or_insert_with(|| AccountRecord {
@@ -107,6 +109,9 @@ fn seed_pilot(db: &WorldRepository, cid: i64, uid: u64, name: &str, isk_cents: i
             is_blueprint_copy: false,
             blueprint_runs_remaining: None,
         });
+        if let Some(sde) = sde.as_deref() {
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, sde, cid);
+        }
     });
 }
 

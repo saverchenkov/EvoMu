@@ -80,6 +80,7 @@ async fn setup_pilot_in_space(
             item_rec(ship_id, ship_type_id, char_id, sys_id as i64, InventoryFlag::None, 1, true),
         );
     });
+    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let _ = ctx.db.acquire_online_lock(client_id, 8_000 + client_id, Some(char_id), true, ctx.now_unix());
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle

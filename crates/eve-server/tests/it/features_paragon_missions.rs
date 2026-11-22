@@ -67,6 +67,7 @@ fn seed_corp_and_pilots(ctx: &ServerContext, corp_id: i64, ceo_id: i64, members_
                 region_id: 10_000_002, active_ship_id: ship_id, home_station_id: JITA_STATION, balance: IskCents(100_000_000_00), race_id: 1, bloodline_id: 1, ancestry_id: 1, clone_grade: 2, ..base_char.clone()
             });
             ch.user_id = uid; ch.corporation_id = corp_id; ch.solar_system_id = JITA_SYS; ch.station_id = None; ch.structure_id = None; ch.active_ship_id = ship_id;
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
         }
         snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
             __corp.corporation_id = corp_id;

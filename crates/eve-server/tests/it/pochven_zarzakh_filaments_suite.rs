@@ -201,6 +201,7 @@ async fn test_filaments_and_pochven_navigation_mechanics() {
             snap.characters.insert(cid, ch);
             snap.items.insert(sid, eve_db::InventoryItemRecord { item_id: sid, type_id: 587, owner_id: cid, location_id: jita_sys as i64, flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() });
             snap.items.insert(fid, eve_db::InventoryItemRecord { item_id: fid, type_id: 63728, owner_id: cid, location_id: sid, flag: InventoryFlag::Cargo, quantity: 1, singleton: false, ..Default::default() });
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
         }
     });
     for (idx, &(cid, sid, fid)) in ffa_pilots.iter().enumerate() {

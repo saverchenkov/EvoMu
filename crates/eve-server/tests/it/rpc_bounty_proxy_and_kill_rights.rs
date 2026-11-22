@@ -386,6 +386,7 @@ async fn test_bounty_proxy_kill_rights_and_marketplace() {
         ch.user_id = p3_uid;
         ch.name = "Third Pilot".into();
         snap.characters.insert(P3, ch);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, P3);
     });
 
     let empty_kw = HashMap::new();

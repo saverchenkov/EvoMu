@@ -2082,6 +2082,7 @@ async fn spawn_pilot_ship(
                 ..Default::default()
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     ctx.advance_virtual_clock(15);
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -2646,6 +2647,7 @@ async fn spawn_pilot_ship(
                 ..Default::default()
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
@@ -4062,6 +4064,7 @@ fn seed_docked_pilot(
             item_id: ship_id, type_id: ship_type_id, owner_id: char_id, location_id: st_id,
             flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
         });
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     let mut s = SessionState::new(sess_id);
     s.user_id = Some(uid);
@@ -4563,6 +4566,7 @@ async fn test_bf03_anchor_orbital_undocked_corp_planet_and_effective_pochven_sta
                 item_id: shid, type_id: 587, owner_id: cid, location_id: i64::from(RANCER),
                 flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
             });
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
         }
         for idx in 0..8_i64 {
             let gid = 890_003_100 + idx;
@@ -4749,6 +4753,7 @@ async fn test_bf04_structure_control_alliance_grant_and_corp_alliance_block_revo
                 item_id: shid, type_id: 587, owner_id: pid, location_id: st_id,
                 flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
             });
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, pid);
         }
     });
     ctx.db.acquire_online_lock(40, 9401, Some(OWNER), true, now_init).unwrap();
@@ -4984,6 +4989,7 @@ async fn test_r_struct_ctrl_ship_bypass_01_saved_ship_locks_and_flex_pod_fallbac
                 quantity: 1, singleton: true, version: 1, ..Default::default()
             });
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, ALLY_GUNNER);
     });
 
     let mut sess = SessionState::new(9601);
@@ -5255,6 +5261,7 @@ async fn test_upwell_lifecycle_asset_safety_abandoned_and_leave_space() {
         let mut mate = snap.characters.get(&OWNER).unwrap().clone();
         mate.character_id = HACKER; mate.user_id = 2; mate.active_ship_id = boarded_corp_ship;
         snap.characters.insert(HACKER, mate);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, HACKER);
     });
     let corp_wrap_live = kv_i64(&rpc(&ctx, &mut sess, "structureAssetSafety", "MoveCorpAssetsToSafety", &[PyRep::Integer(i64::from(JITA)), PyRep::Integer(src_id)]).await.expect("MoveCorpAssetsToSafety"), "wrapID");
     ctx.db.with_snapshot(|snap| {
@@ -5655,6 +5662,8 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
         cb.character_id = BYSTANDER; cb.user_id = 3; cb.name = "Structure Bystander".into(); cb.corporation_id = 1000009; cb.solar_system_id = JITA; cb.station_id = None; cb.structure_id = None;
         snap.characters.insert(BYSTANDER, cb);
         snap.skills.entry(HACKER).or_default().insert(21718, eve_db::TrainedSkillRecord { type_id: 21718, level: 5, skill_points: 256_000.0 });
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, HACKER);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, BYSTANDER);
     });
     let _ = ctx.db.acquire_online_lock_with_computer_hash(2, 7104, Some(HACKER), None, true, ctx.now_unix());
     let _ = ctx.db.acquire_online_lock_with_computer_hash(3, 7105, Some(BYSTANDER), None, true, ctx.now_unix());
@@ -5986,6 +5995,8 @@ async fn test_upwell_services_clone_bay_modules_and_repairshop() {
         cg.character_id = CORP_GRUNT; cg.corporation_id = owner_corp_id; cg.structure_id = Some(st_id);
         snap.characters.insert(CORP_GRUNT, cg);
         snap.corporations.get_mut(&owner_corp_id).unwrap().members.insert(CORP_GRUNT);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OUTSIDER);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, CORP_GRUNT);
         snap.structure_docking_acl_denied.entry(st_id).or_default().insert(OUTSIDER);
         for iid in [out_ship, boxed_mod, corp_div2_mod] {
             snap.items.get_mut(&iid).unwrap().dynamic_attributes.insert(attr_ids::DAMAGE, 10.0);
@@ -6143,6 +6154,9 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
         let mut ch_m = snap.characters.get(&OWNER).cloned().unwrap();
         ch_m.character_id = CORP_GRUNT; ch_m.corporation_id = owner_corp; ch_m.structure_id = Some(st_id); snap.characters.insert(CORP_GRUNT, ch_m);
         snap.corporations.get_mut(&owner_corp).unwrap().members.insert(CORP_GRUNT);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, GUEST);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OUTSIDER);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, CORP_GRUNT);
     });
 
     let owner_ship_rig = grant(&ctx, OWNER, ship_id, 31358, InventoryFlag::RigSlot0, 1);
@@ -6786,6 +6800,7 @@ async fn test_upwell_tethering_eligibility_restrictions_and_docking_lock() {
         ch.character_id = OUTSIDER; ch.user_id = 3; ch.name = "Attacker".into(); ch.corporation_id = 1000009; ch.solar_system_id = JITA; ch.active_ship_id = unpiloted_ship;
         snap.characters.insert(OUTSIDER, ch);
         snap.structure_docking_acl_denied.entry(astra_id).or_default().insert(OUTSIDER);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OUTSIDER);
     });
     sync_tether(&ctx, OUTSIDER, JITA, unpiloted_ship).await;
     assert!(!jita_sys.get_combat_state(unpiloted_ship).await.unwrap().unwrap().is_tethered);
@@ -6976,6 +6991,7 @@ fn register_char(ctx: &ServerContext, uid: u64, cid: i64, corp_id: i64, sys_id: 
             },
         );
         snap.account_plex_vault.insert(uid, plex);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
         ship_id
     })
 }
