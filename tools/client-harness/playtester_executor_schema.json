@@ -129,6 +129,18 @@
         "double_click": {
           "type": "boolean"
         },
+        "strict_wait": {
+          "type": "boolean"
+        },
+        "clear": {
+          "type": "boolean"
+        },
+        "expect_in_warp_rejection": {
+          "type": "boolean"
+        },
+        "allow_in_warp_error": {
+          "type": "boolean"
+        },
         "wait_ms": {
           "type": "integer"
         },

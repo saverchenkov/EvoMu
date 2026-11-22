@@ -3496,6 +3496,17 @@ def build_reasoning_prompt(
             )
             + ". Do NOT report those closed windows being absent from `open_windows` or `screen.png` as a `ui_state_desync` bug.\n"
         )
+    inv_snap = compact_snap.get("inventory_state") if isinstance(compact_snap.get("inventory_state"), dict) else {}
+    inv_qf = inv_snap.get("quick_filter")
+    inv_af = inv_snap.get("active_filters")
+    inv_filter_banner = ""
+    if inv_qf or inv_af:
+        inv_filter_banner = (
+            f"- **⚠️ Active Inventory Filter Warning:** Inventory window currently has an active filter "
+            f"(`quick_filter={inv_qf!r}`, `active_filters={inv_af!r}`), which hides non-matching items in the UI! "
+            f"Do NOT conclude items are missing or `ui_state_desync` before clearing the filter "
+            f"(`type_text` with `clear: true` on `quickFilterInputBox` or clicking clear filters).\n"
+        )
 
     has_screen = bool(screenshot_path and Path(screenshot_path).exists())
     screen_line = (
@@ -3579,7 +3590,7 @@ def build_reasoning_prompt(
 ]
 
 ### Live `uicore` Scene-Graph & Session Snapshot
-```json
+{inv_filter_banner}```json
 {json.dumps(compact_snap, separators=(',', ':') if compact_mode else None, indent=None if compact_mode else 2)}
 ```
 ### Clickable Widgets ({len(raw_widgets)} total, showing top {min(len(raw_widgets), 135)})
@@ -4790,6 +4801,8 @@ def _resolve_wait_action_ms(
             if parsed > 0 and (raw_wait_ms is None or wait_ms <= 500 < parsed):
                 return parsed
             break
+        if ("warp" in s or "arrival" in s) and (raw_wait_ms is None or wait_ms <= 500):
+            return max(wait_ms, 8000)
     return wait_ms
 
 
@@ -4819,6 +4832,49 @@ def _canonicalize_action_type(act_type: str, has_target: bool) -> str:
     return norm
 
 
+def _extract_optional_action_flags(raw_act: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Preserve supported optional boolean action flags without leaking arbitrary keys."""
+    if not isinstance(raw_act, dict):
+        return {}
+    flags: Dict[str, Any] = {}
+    for key in ("strict_wait", "clear", "expect_in_warp_rejection", "allow_in_warp_error"):
+        if raw_act.get(key):
+            flags[key] = True
+    return flags
+
+
+def _compute_step_rpc_timeout(action: Dict[str, Any]) -> float:
+    """Compute host RPC socket timeout strictly above in-client tasklet wait ceilings."""
+    atype = str(action.get("type") or "").strip().lower()
+    eff_type = str(action.get("target") or "").strip().lower() if atype == "space_command" else atype
+    if eff_type == "jump_gate":
+        return 75.0
+    if eff_type == "dock":
+        return 65.0
+    if eff_type in (
+        "warp_to",
+        "warp_to_location",
+        "warp_to_bookmark",
+        "undock",
+        "select_character",
+        "approach",
+        "orbit",
+        "keep_at_range",
+        "align_to",
+        "align",
+        "stop",
+        "space_command",
+    ):
+        return 35.0
+    if atype == "wait":
+        try:
+            req_s = min(max(float(action.get("wait_ms") or 0) / 1000.0, 0.0), 30.0)
+        except Exception:
+            req_s = 0.0
+        return max(20.0, req_s + 15.0)
+    return 20.0
+
+
 def _normalize_action_defaults(raw_act: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     act = dict(raw_act or {})
     target = act.get("target") if act.get("target") not in ("",) else None
@@ -4846,7 +4902,7 @@ def _normalize_action_defaults(raw_act: Optional[Dict[str, Any]]) -> Dict[str, A
             act_type, target, command, act.get("wait_ms")
         ),
         "expected_ui_and_state_change": str(act.get("expected_ui_and_state_change") or ""),
-        **({"strict_wait": True} if act.get("strict_wait") else {}),
+        **_extract_optional_action_flags(act),
     }
 
 
@@ -5167,8 +5223,9 @@ def _resolve_direct_action(
     act_type = _canonicalize_action_type(raw_type, bool(target))
     if not act_type:
         return None, "missing action type"
+    optional_flags = _extract_optional_action_flags(raw_act)
     command = _coerce_action_command(raw_act)
-    if command in (None, "") and act_type in ("slash_command", "type_text"):
+    if command in (None, "") and not optional_flags.get("clear") and act_type in ("slash_command", "type_text"):
         hint_cmd = str(step_spec.get("target_or_command_hint") or step_spec.get("target_hint") or "").strip()
         if hint_cmd:
             command = hint_cmd
@@ -5192,7 +5249,7 @@ def _resolve_direct_action(
             or step_spec.get("expected_ui_and_state_change")
             or ""
         ),
-        **({"strict_wait": True} if raw_act.get("strict_wait") else {}),
+        **optional_flags,
     }
 
     if act_type in _DIRECT_NON_WIDGET_ACTIONS:
@@ -10588,21 +10645,7 @@ class PlaytesterRunner:
                 str(step_dir / f"burst_{b_idx}.png") for b_idx in range(1, 4)
             ]
 
-        if act_type in ("warp_to", "undock", "dock", "jump_gate"):
-            if act_type == "jump_gate":
-                rpc_timeout = 50.0
-            elif act_type == "dock":
-                rpc_timeout = 38.0
-            else:
-                rpc_timeout = 35.0
-        elif act_type == "wait":
-            try:
-                _req_wait_s = min(max(float(action.get("wait_ms") or 0) / 1000.0, 0.0), 30.0)
-            except Exception:
-                _req_wait_s = 0.0
-            rpc_timeout = max(20.0, _req_wait_s + 15.0)
-        else:
-            rpc_timeout = 20.0
+        rpc_timeout = _compute_step_rpc_timeout(action)
         exec_res: Dict[str, Any] = {}
         valid_action, reject_reason = validate_exploratory_action(
             action,
@@ -13213,20 +13256,7 @@ class ScenarioRunner(PlaytesterRunner):
 
     @staticmethod
     def _step_rpc_timeout(action: Dict[str, Any]) -> float:
-        atype = str(action.get("type") or "")
-        if atype == "jump_gate":
-            return 75.0
-        if atype == "dock":
-            return 65.0
-        if atype in ("warp_to", "warp_to_location", "warp_to_bookmark", "undock", "select_character"):
-            return 35.0
-        if atype == "wait":
-            try:
-                req_s = min(max(float(action.get("wait_ms") or 0) / 1000.0, 0.0), 30.0)
-            except Exception:
-                req_s = 0.0
-            return max(20.0, req_s + 15.0)
-        return 20.0
+        return _compute_step_rpc_timeout(action)
 
     def _execute_wait_until(
         self,

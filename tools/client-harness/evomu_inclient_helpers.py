@@ -1117,7 +1117,7 @@ def _wait_session_timer_clear(max_wait_sec=12.0):
         _sleep_ms(200)
 
 
-def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0, allow_time_control=True, ipc=None):
+def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0, allow_time_control=True, ipc=None, post_settle_sec=None, cancel_check=None):
     _ensure_warp_signal_tracker(sm)
     try:
         sess = getattr(__builtin__, "session", None)
@@ -1170,27 +1170,50 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0, allow_time_contro
         deadline = time.time() + float(timeout_sec)
         settled = False
         saw_warping = False
+        poll_iters = 0
+        adv_enabled = bool(allow_time_control)
         while time.time() < deadline:
+            if callable(cancel_check) and cancel_check():
+                return
             if _is_warp_settled():
                 settled = True
                 break
             saw_warping = True
-            _sleep_sim_ms(100)
+            poll_iters += 1
+            if adv_enabled and poll_iters >= 3 and (poll_iters % 2 == 1):
+                adv_step_ok = bool(_advance_clock(sm, ipc, 4, raise_on_error=False))
+                if not adv_step_ok:
+                    adv_enabled = False
+                _sleep_sim_ms(200 if adv_step_ok else 100)
+            else:
+                _sleep_sim_ms(100)
+        if callable(cancel_check) and cancel_check():
+            return
         sess = getattr(__builtin__, "session", None)
         if getattr(sess, "stationid", None) is None and getattr(sess, "structureid", None) is None:
-            adv_ok = False
-            if allow_time_control:
-                adv_ok = bool(_advance_clock(sm, ipc, 2, raise_on_error=False))
-                _sleep_sim_ms(1500 if adv_ok else 600)
-            else:
-                _sleep_sim_ms(600)
-            _sleep_ms(300)
-            if not settled:
-                post_deadline = time.time() + (4.0 if (allow_time_control and adv_ok) else 12.0)
-                while time.time() < post_deadline:
-                    if _is_warp_settled():
-                        break
-                    _sleep_sim_ms(100)
+            if not (settled and post_settle_sec is not None):
+                adv_ok = False
+                if adv_enabled:
+                    adv_ok = bool(_advance_clock(sm, ipc, 2, raise_on_error=False))
+                    _sleep_sim_ms(1500 if adv_ok else 600)
+                else:
+                    _sleep_sim_ms(600)
+                _sleep_ms(300)
+                if not settled:
+                    post_budget = (
+                        float(post_settle_sec)
+                        if post_settle_sec is not None
+                        else (4.0 if (allow_time_control and adv_ok) else 12.0)
+                    )
+                    post_deadline = time.time() + post_budget
+                    while time.time() < post_deadline:
+                        if callable(cancel_check) and cancel_check():
+                            return
+                        if _is_warp_settled():
+                            break
+                        _sleep_sim_ms(100)
+        if callable(cancel_check) and cancel_check():
+            return
         if not _WARP_SIGNAL_STATE["hooked"] or saw_warping:
             # CCP's WarpLoop sleeps blue.synchro.SleepSim(500) per iteration and emits
             # OnSpecialFX(..., "effects.Warping", 0) only after waking from that sleep.

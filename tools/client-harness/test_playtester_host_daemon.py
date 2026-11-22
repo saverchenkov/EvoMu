@@ -7948,6 +7948,142 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
                 conn.close()
             self.assertEqual(playtester._read_world_downtime_state(db_path), (0, 1795346100))
 
+    def test_resolve_wait_action_ms_expands_warp_arrival_phrase_only_when_short(self):
+        norm = playtester._normalize_action_defaults(
+            {"type": "wait", "target": "wait for warp arrival", "wait_ms": 250}
+        )
+        self.assertEqual(norm["wait_ms"], 8000)
+        self.assertEqual(
+            playtester._resolve_wait_action_ms("wait", "warp_arrival", None, None),
+            8000,
+        )
+        self.assertEqual(
+            playtester._resolve_wait_action_ms("wait", "warp_arrival", None, 12000),
+            12000,
+        )
+
+    def test_build_reasoning_prompt_surfaces_active_inventory_filter_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mem = playtester.PlaytesterMemory(root, git_head="e032a958d")
+            shot = root / "screen.png"
+            shot.write_bytes(b"png")
+            prompt_filtered = playtester.build_reasoning_prompt(
+                step_num=101,
+                screenshot_path=shot,
+                burst_paths=[],
+                ui_snapshot={
+                    "inventory_state": {
+                        "cargo_item_count": 0,
+                        "hangar_item_count": 0,
+                        "quick_filter": "trit",
+                        "active_filters": ["High Slots"],
+                    }
+                },
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                memory=mem,
+                git_head="e032a958d",
+            )
+            self.assertIn("Active Inventory Filter Warning", prompt_filtered)
+            self.assertIn("quick_filter='trit'", prompt_filtered)
+            self.assertIn("quickFilterInputBox", prompt_filtered)
+
+            prompt_clear = playtester.build_reasoning_prompt(
+                step_num=102,
+                screenshot_path=shot,
+                burst_paths=[],
+                ui_snapshot={
+                    "inventory_state": {
+                        "cargo_item_count": 1,
+                        "hangar_item_count": 2,
+                        "quick_filter": None,
+                        "active_filters": None,
+                    }
+                },
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                memory=mem,
+                git_head="e032a958d",
+            )
+            self.assertNotIn("Active Inventory Filter Warning", prompt_clear)
+
+    def test_clear_and_warp_flags_preserved_in_normalization_direct_resolution_and_schemas(self):
+        # 1) _normalize_action_defaults / _normalize_executor_decision preserve clear & negative warp flags
+        exec_norm = playtester._normalize_executor_decision(
+            {
+                "action": {
+                    "type": "type_text",
+                    "target": "quickFilterInputBox",
+                    "strict_wait": True,
+                    "clear": True,
+                    "expect_in_warp_rejection": True,
+                    "allow_in_warp_error": True,
+                }
+            }
+        )
+        self.assertTrue(exec_norm["action"]["strict_wait"])
+        self.assertTrue(exec_norm["action"]["clear"])
+        self.assertIsNone(exec_norm["action"]["command"])
+        self.assertTrue(exec_norm["action"]["expect_in_warp_rejection"])
+        self.assertTrue(exec_norm["action"]["allow_in_warp_error"])
+
+        # 2) _normalize_planner_decision + _resolve_direct_action must preserve strict_wait & clear=True
+        # WITHOUT falling back command = "quickFilterInputBox".
+        plan_dec = playtester._normalize_planner_decision(
+            {
+                "delegated_plan": {
+                    "plan_goal": "Clear filter",
+                    "steps": [
+                        {
+                            "step_number": 1,
+                            "exec_mode": "direct",
+                            "action": {
+                                "type": "type_text",
+                                "target": "quickFilterInputBox",
+                                "strict_wait": True,
+                                "clear": True,
+                            },
+                        }
+                    ],
+                }
+            }
+        )
+        step = plan_dec["delegated_plan"]["steps"][0]
+        self.assertEqual(step["target_or_command_hint"], "quickFilterInputBox")
+        resolved, reason = playtester._resolve_direct_action(
+            step,
+            ui_snapshot={
+                "ui": {
+                    "clickable_widgets": [
+                        {"name": "quickFilterInputBox", "path": "InvContQuickFilter/quickFilterInputBox", "cls": "SingleLineEditText"}
+                    ]
+                }
+            },
+        )
+        self.assertEqual(reason, "")
+        self.assertTrue(resolved["strict_wait"])
+        self.assertTrue(resolved["clear"])
+        self.assertIsNone(resolved["command"])
+
+        # 3) All three schemas allow strict_wait, clear, expect_in_warp_rejection, and allow_in_warp_error.
+        for schema_name, prop_getter in (
+            ("playtester_action_schema.json", lambda d: d["properties"]["action"]["properties"]),
+            ("playtester_executor_schema.json", lambda d: d["properties"]["action"]["properties"]),
+            (
+                "playtester_planner_schema.json",
+                lambda d: d["properties"]["delegated_plan"]["properties"]["steps"]["items"]["properties"]["action"]["properties"],
+            ),
+        ):
+            props = prop_getter(json.loads((HARNESS_DIR / schema_name).read_text(encoding="utf-8")))
+            for flag_key in ("strict_wait", "clear", "expect_in_warp_rejection", "allow_in_warp_error"):
+                self.assertIn(flag_key, props, f"{flag_key} missing in {schema_name}")
+                self.assertEqual(props[flag_key]["type"], "boolean")
+
+        # 4) Unified host RPC timeout helper covers space_command subtypes cleanly.
+        self.assertEqual(playtester._compute_step_rpc_timeout({"type": "space_command", "target": "approach"}), 35.0)
+        self.assertEqual(playtester._compute_step_rpc_timeout({"type": "approach"}), 35.0)
+        self.assertEqual(playtester._compute_step_rpc_timeout({"type": "space_command", "target": "dock"}), 65.0)
+        self.assertEqual(playtester._compute_step_rpc_timeout({"type": "space_command", "target": "jump_gate"}), 75.0)
+
 
 if __name__ == "__main__":
     unittest.main()
