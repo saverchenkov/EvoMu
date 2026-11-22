@@ -46,6 +46,7 @@ def _load_hook_with_py2_stubs():
         "sim_time_injections": [],
         "sim_seq_after": 0,
     }
+    fake_helpers._CLUSTER_SHUTDOWN_MODAL_MARKERS = helpers_mod._CLUSTER_SHUTDOWN_MODAL_MARKERS
     fake_helpers._is_widget_visible = helpers_mod._is_widget_visible
     fake_helpers._is_modal_dialog_root = helpers_mod._is_modal_dialog_root
     fake_helpers._iter_visible_modal_roots = helpers_mod._iter_visible_modal_roots
@@ -7954,6 +7955,167 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         self.assertFalse(tab_res["ok"])
         self.assertIn("ClusterShuttingDown", tab_res["error"])
         self.assertEqual(clicked, ["ItemHangar"])
+
+    def test_countdown_notification_popup_and_nonmodal_banner_do_not_trigger_cluster_shutdown(self):
+        hook = _load_hook_with_py2_stubs()
+        helpers = _load_helpers_with_py2_stubs()
+        clicked = []
+
+        class _Btn:
+            def __init__(self, name, parent=None):
+                self.name = name
+                self.parent = parent
+                self.destroyed = False
+                self.display = True
+                self.state = 0
+
+            def OnClick(self):
+                clicked.append(self.name)
+
+        class NotificationPopup:
+            pass
+
+        class ShutdownDialog:
+            pass
+
+        main_layer = types.SimpleNamespace(name="l_main", parent=None, destroyed=False, display=True, state=0)
+        skill_tab_btn = _Btn("Button_2", parent=main_layer)
+
+        # Real-client T-60m/T-15m/T-5m shutdown notification popups in abovemain (both
+        # without an explicit isModal attribute and with isModal=False) must NOT block clicks.
+        toast_unset_modal = NotificationPopup()
+        toast_unset_modal.name = "ShutdownNotificationPopup"
+        toast_unset_modal.caption = "Daily Cluster Downtime"
+        toast_unset_modal.display = True
+        toast_unset_modal.state = 0
+        toast_unset_modal.destroyed = False
+        toast_unset_modal.children = [
+            types.SimpleNamespace(
+                text="Cluster shutdown in 60 minutes.",
+                destroyed=False,
+                display=True,
+                state=0,
+                children=[],
+            )
+        ]
+
+        nonmodal_popup = NotificationPopup()
+        nonmodal_popup.name = "ShutdownAlertPopup"
+        nonmodal_popup.caption = "Cluster Shutdown Alert"
+        nonmodal_popup.isModal = False
+        nonmodal_popup.display = True
+        nonmodal_popup.state = 0
+        nonmodal_popup.destroyed = False
+        nonmodal_popup.children = [
+            types.SimpleNamespace(
+                text="Cluster shutdown in 15 minutes.",
+                destroyed=False,
+                display=True,
+                state=0,
+                children=[],
+            )
+        ]
+
+        nonmodal_dialog_flag = ShutdownDialog()
+        nonmodal_dialog_flag.name = "ShutdownCountdownDialog"
+        nonmodal_dialog_flag.caption = "Daily Cluster Downtime"
+        nonmodal_dialog_flag.isModal = False
+        nonmodal_dialog_flag.display = True
+        nonmodal_dialog_flag.state = 0
+        nonmodal_dialog_flag.destroyed = False
+        nonmodal_dialog_flag.children = [
+            types.SimpleNamespace(
+                text="Cluster shutdown in 5 minutes.",
+                destroyed=False,
+                display=True,
+                state=0,
+                children=[],
+            )
+        ]
+
+        # Even if an actual modal container showed countdown-only text without an
+        # in-progress/downtime-disconnect marker, bare "cluster shutdown" must not trigger.
+        countdown_modal = types.SimpleNamespace(
+            name="CountdownWarning",
+            caption="Notice",
+            isModal=True,
+            display=True,
+            state=0,
+            destroyed=False,
+            children=[
+                types.SimpleNamespace(
+                    text="Cluster shutdown in 60 minutes.",
+                    destroyed=False,
+                    display=True,
+                    state=0,
+                    children=[],
+                )
+            ],
+        )
+
+        above_children = [toast_unset_modal, nonmodal_popup, nonmodal_dialog_flag]
+        modal_children = [countdown_modal]
+        fake_layers = types.SimpleNamespace(
+            modal=types.SimpleNamespace(children=modal_children, destroyed=False, display=True, state=0),
+            abovemain=types.SimpleNamespace(children=above_children, destroyed=False, display=True, state=0),
+            l_main=main_layer,
+        )
+        fake_reg = types.SimpleNamespace(GetModalWindow=lambda: None, modals=[])
+        fake_uic = types.SimpleNamespace(layer=fake_layers, registry=fake_reg, uilib=None)
+        connected_sess = types.SimpleNamespace(clientID=0, userid=1, charid=90000001, solarsystemid=30000142)
+
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uic), \
+             mock.patch.object(helpers, "_get_uicore", return_value=fake_uic):
+            self.assertEqual(hook._active_disconnect_modal_tag(), "")
+            self.assertEqual(helpers._detect_cluster_shutdown_modal_message(), "")
+            self.assertEqual(hook._invoke_widget_click(skill_tab_btn), "OnClick")
+            self.assertEqual(clicked, ["Button_2"])
+
+            # Explicit isModal=True shutdown modal MUST still block and classify ClusterShuttingDown.
+            real_shutdown_modal = NotificationPopup()
+            real_shutdown_modal.name = "ClusterShutdownModal"
+            real_shutdown_modal.isModal = True
+            real_shutdown_modal.display = True
+            real_shutdown_modal.state = 0
+            real_shutdown_modal.destroyed = False
+            real_shutdown_modal.children = [
+                types.SimpleNamespace(
+                    text="Cluster shutdown in progress. Non-GM logins are rejected.",
+                    destroyed=False,
+                    display=True,
+                    state=0,
+                    children=[],
+                )
+            ]
+            above_children.append(real_shutdown_modal)
+            self.assertEqual(hook._active_disconnect_modal_tag(), "ClusterShuttingDown")
+            self.assertIn("Cluster shutdown in progress", helpers._detect_cluster_shutdown_modal_message())
+            self.assertEqual(hook._invoke_widget_click(skill_tab_btn), "ModalBlocked(ClusterShuttingDown)")
+            self.assertEqual(clicked, ["Button_2"])
+
+            # Replacing with ConnectionLost modal must still classify ConnectionLost.
+            above_children.pop()
+            conn_lost_modal = types.SimpleNamespace(
+                name="MessageBox",
+                msgKey="ConnectionLost",
+                isModal=True,
+                display=True,
+                state=0,
+                destroyed=False,
+                children=[
+                    types.SimpleNamespace(
+                        text="The socket was closed.",
+                        destroyed=False,
+                        display=True,
+                        state=0,
+                        children=[],
+                    )
+                ],
+            )
+            modal_children.append(conn_lost_modal)
+            self.assertEqual(hook._active_disconnect_modal_tag(), "ConnectionLost")
+            self.assertEqual(hook._invoke_widget_click(skill_tab_btn), "ModalBlocked(ConnectionLost)")
 
     def test_modal_layer_hidden_child_nonmodal_dialog_and_tab_select_branches(self):
         hook = _load_hook_with_py2_stubs()
