@@ -275,28 +275,136 @@ impl WorldRepository {
         let mut total_sp = 0.0;
         for (&skill_id, &lvl) in &race.starter_skills {
             if lvl > 0 {
-                let rank = sde
-                    .types
-                    .get(&skill_id)
-                    .and_then(|t| t.default_attributes.get(&275).copied())
-                    .unwrap_or(1.0);
-                let sp =
-                    (250.0 * rank * 2.0_f64.powf(2.5 * (lvl.min(5) as i32 - 1) as f64)).ceil();
-                total_sp += sp;
-                starter_skills_map.insert(
-                    skill_id,
-                    TrainedSkillRecord {
-                        type_id: skill_id,
-                        level: lvl,
-                        skill_points: sp,
-                    },
-                );
+                let rec = Self::trained_skill_record(skill_id, lvl, sde);
+                total_sp += rec.skill_points;
+                starter_skills_map.insert(skill_id, rec);
             }
         }
         if starter_skills_map.is_empty() {
             total_sp = 400_000.0;
         }
         (starter_skills_map, total_sp)
+    }
+
+    /// Opens the shared canonical `SdeRegistry` (`SdeRegistry::open_shared`) while honoring
+    /// `EVOMU_SDE_PATH` under the test-env read lock and avoiding any extra cache static.
+    pub(crate) fn open_default_sde_shared() -> Option<std::sync::Arc<SdeRegistry>> {
+        #[cfg(test)]
+        if crate::default_sde_suppressed_for_test() {
+            return None;
+        }
+        let path = {
+            let _env_guard = crate::lock_test_env_read();
+            SdeRegistry::default_db_path()
+        };
+        SdeRegistry::open_shared(&path).ok()
+    }
+
+    /// Builds a `TrainedSkillRecord` at `level` (clamped to `[1, 5]`) using skill rank attribute `275`.
+    pub(crate) fn trained_skill_record(
+        skill_id: TypeId,
+        level: u8,
+        sde: &SdeRegistry,
+    ) -> TrainedSkillRecord {
+        let clamped = level.clamp(1, 5);
+        let rank = sde
+            .types
+            .get(&skill_id)
+            .and_then(|t| t.default_attributes.get(&275).copied())
+            .unwrap_or(1.0);
+        let skill_points =
+            (250.0 * rank * 2.0_f64.powf(2.5 * (clamped as i32 - 1) as f64)).ceil();
+        TrainedSkillRecord {
+            type_id: skill_id,
+            level: clamped,
+            skill_points,
+        }
+    }
+
+    /// Collects the transitive SDE required-skill closure (`skill_type_id -> max required level`)
+    /// for all supplied item or skill `type_ids`, skipping level `0` and guarding against cycles.
+    pub(crate) fn collect_transitive_required_skills_for_types<I>(
+        sde: &SdeRegistry,
+        type_ids: I,
+    ) -> HashMap<TypeId, u8>
+    where
+        I: IntoIterator<Item = TypeId>,
+    {
+        let mut required: HashMap<TypeId, u8> = HashMap::new();
+        let mut visited: HashSet<TypeId> = HashSet::new();
+        let mut queue: std::collections::VecDeque<TypeId> = type_ids.into_iter().collect();
+        while let Some(tid) = queue.pop_front() {
+            if !visited.insert(tid) {
+                continue;
+            }
+            for (skill_id, req_lvl) in sde.required_skills_for_type(tid) {
+                if req_lvl == 0 {
+                    continue;
+                }
+                let clamped = req_lvl.min(5);
+                required
+                    .entry(skill_id)
+                    .and_modify(|existing| *existing = (*existing).max(clamped))
+                    .or_insert(clamped);
+                if !visited.contains(&skill_id) {
+                    queue.push_back(skill_id);
+                }
+            }
+        }
+        required
+    }
+
+    /// Builds `TrainedSkillRecord` entries for all transitive SDE skill prerequisites of `type_ids`.
+    pub(crate) fn derived_skills_for_types<I>(
+        sde: &SdeRegistry,
+        type_ids: I,
+    ) -> HashMap<TypeId, TrainedSkillRecord>
+    where
+        I: IntoIterator<Item = TypeId>,
+    {
+        Self::collect_transitive_required_skills_for_types(sde, type_ids)
+            .into_iter()
+            .map(|(skill_id, level)| (skill_id, Self::trained_skill_record(skill_id, level, sde)))
+            .collect()
+    }
+
+    /// Merges `additions` into `target`, preserving whichever `(level, skill_points)` is higher.
+    pub(crate) fn merge_skill_records_max<I>(
+        target: &mut HashMap<TypeId, TrainedSkillRecord>,
+        additions: I,
+    ) where
+        I: IntoIterator<Item = (TypeId, TrainedSkillRecord)>,
+    {
+        for (skill_id, incoming) in additions {
+            target
+                .entry(skill_id)
+                .and_modify(|existing| {
+                    if (incoming.level, incoming.skill_points)
+                        > (existing.level, existing.skill_points)
+                    {
+                        *existing = incoming.clone();
+                    }
+                })
+                .or_insert(incoming);
+        }
+    }
+
+    /// Builds canonical sorted character-creation `SkillHistoryEntry` records matching `skills`.
+    pub(crate) fn char_creation_skill_history(
+        skills: &HashMap<TypeId, TrainedSkillRecord>,
+    ) -> Vec<SkillHistoryEntry> {
+        let mut sorted: Vec<_> = skills.values().cloned().collect();
+        sorted.sort_by_key(|s| s.type_id);
+        sorted
+            .into_iter()
+            .map(|s| SkillHistoryEntry {
+                log_date_ft: 133_485_408_000_000_000, // 2024-01-01T00:00:00Z in BlueOS FILETIME ticks
+                event_type_id: 33,                   // SkillEventCharCreation (EVE_Skills.h:24)
+                skill_type_id: s.type_id,
+                skill_level: s.level,
+                absolute_points: s.skill_points,
+            })
+            .collect()
     }
 
     pub fn undock_character(

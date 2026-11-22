@@ -6,59 +6,51 @@ use crate::sqlite_store;
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
-/// Computes SDE starter skills using the shared cached `SdeRegistry` (`SdeRegistry::open_shared`)
-/// while honoring `EVOMU_SDE_PATH` under the test-env read lock and avoiding any extra cache static.
-fn demo_starter_skills_for_default_sde(
-    race_ids: &[u32],
-) -> Option<HashMap<u32, HashMap<TypeId, TrainedSkillRecord>>> {
-    let path = {
-        let _env_guard = crate::lock_test_env_read();
-        eve_sde::SdeRegistry::default_db_path()
-    };
-    let sde = eve_sde::SdeRegistry::open_shared(&path).ok()?;
-    Some(
-        race_ids
-            .iter()
-            .copied()
-            .map(|race_id| (race_id, WorldRepository::starter_skills_for_race(race_id, &sde).0))
-            .collect(),
-    )
-}
-
-fn merge_seeded_skills_with_starter(
-    starter: Option<&HashMap<TypeId, TrainedSkillRecord>>,
-    seeded_overrides: &HashMap<TypeId, TrainedSkillRecord>,
-) -> HashMap<TypeId, TrainedSkillRecord> {
-    let mut merged = starter.cloned().unwrap_or_default();
-    for (skill_id, seeded) in seeded_overrides {
-        merged
-            .entry(*skill_id)
-            .and_modify(|existing| {
-                // Preserve higher seeded specializations without regressing starter skills.
-                if (seeded.level, seeded.skill_points) > (existing.level, existing.skill_points) {
-                    *existing = seeded.clone();
-                }
-            })
-            .or_insert_with(|| seeded.clone());
-    }
-    merged
-}
-
-fn char_creation_skill_history(
-    skills: &HashMap<TypeId, TrainedSkillRecord>,
-) -> Vec<SkillHistoryEntry> {
-    let mut sorted: Vec<_> = skills.values().cloned().collect();
-    sorted.sort_by_key(|s| s.type_id);
-    sorted
-        .into_iter()
-        .map(|s| SkillHistoryEntry {
-            log_date_ft: 133_485_408_000_000_000, // 2024-01-01T00:00:00Z in BlueOS FILETIME ticks
-            event_type_id: 33,                   // SkillEventCharCreation (EVE_Skills.h:24)
-            skill_type_id: s.type_id,
-            skill_level: s.level,
-            absolute_points: s.skill_points,
+fn seeded_skill_map(entries: &[(TypeId, u8, f64)]) -> HashMap<TypeId, TrainedSkillRecord> {
+    entries
+        .iter()
+        .map(|&(type_id, level, skill_points)| {
+            (
+                type_id,
+                TrainedSkillRecord {
+                    type_id,
+                    level,
+                    skill_points,
+                },
+            )
         })
         .collect()
+}
+
+/// Derives a seeded demo pilot's starting skills by merging:
+/// 1. SDE racial starter skills (`WorldRepository::starter_skills_for_race`),
+/// 2. Transitive SDE skill prerequisites for all seeded ships/modules owned by the pilot, and
+/// 3. Demo specialization overrides (or offline item-skill fallbacks when no SDE is available),
+/// preserving whichever `(level, skill_points)` is highest for each skill.
+fn build_demo_pilot_skills(
+    race_id: u32,
+    owned_type_ids: &[TypeId],
+    sde: Option<&eve_sde::SdeRegistry>,
+    specialization_overrides: &[(TypeId, u8, f64)],
+    no_sde_item_fallbacks: &[(TypeId, u8, f64)],
+) -> HashMap<TypeId, TrainedSkillRecord> {
+    let mut skills = HashMap::new();
+    if let Some(sde) = sde {
+        let (starter, _) = WorldRepository::starter_skills_for_race(race_id, sde);
+        WorldRepository::merge_skill_records_max(&mut skills, starter);
+        let derived = WorldRepository::derived_skills_for_types(sde, owned_type_ids.iter().copied());
+        WorldRepository::merge_skill_records_max(&mut skills, derived);
+    } else {
+        WorldRepository::merge_skill_records_max(
+            &mut skills,
+            seeded_skill_map(no_sde_item_fallbacks),
+        );
+    }
+    WorldRepository::merge_skill_records_max(
+        &mut skills,
+        seeded_skill_map(specialization_overrides),
+    );
+    skills
 }
 
 impl WorldRepository {
@@ -372,150 +364,57 @@ impl WorldRepository {
             },
         );
 
-        let seeded_skill_overrides = HashMap::from([
-            (
-                3300,
-                TrainedSkillRecord {
-                    type_id: 3300, // Gunnery
-                    level: 4,
-                    skill_points: 45_255.0,
-                },
-            ),
-            (
-                3302,
-                TrainedSkillRecord {
-                    type_id: 3302, // Small Projectile Turret
-                    level: 5,
-                    skill_points: 256_000.0,
-                },
-            ),
-            (
-                11084,
-                TrainedSkillRecord {
-                    type_id: 11084, // Small Autocannon Specialization
-                    level: 1,
-                    skill_points: 750.0,
-                },
-            ),
-            (
-                3327,
-                TrainedSkillRecord {
-                    type_id: 3327, // Spaceship Command
-                    level: 4,
-                    skill_points: 45_255.0,
-                },
-            ),
-            (
-                3329,
-                TrainedSkillRecord {
-                    type_id: 3329, // Minmatar Frigate
-                    level: 4,
-                    skill_points: 90_510.0,
-                },
-            ),
-            (
-                3380,
-                TrainedSkillRecord {
-                    type_id: 3380, // Industry
-                    level: 5,
-                    skill_points: 256_000.0,
-                },
-            ),
-            (
-                3394,
-                TrainedSkillRecord {
-                    type_id: 3394, // Hull Upgrades
-                    level: 2,
-                    skill_points: 2_829.0,
-                },
-            ),
-            (
-                3443,
-                TrainedSkillRecord {
-                    type_id: 3443, // Trade
-                    level: 4,
-                    skill_points: 45_255.0,
-                },
-            ),
-            (
-                3446,
-                TrainedSkillRecord {
-                    type_id: 3446, // Broker Relations
-                    level: 4,
-                    skill_points: 90_510.0,
-                },
-            ),
-            (
-                3449,
-                TrainedSkillRecord {
-                    type_id: 3449, // Navigation
-                    level: 4,
-                    skill_points: 45_255.0,
-                },
-            ),
-            (
-                3450,
-                TrainedSkillRecord {
-                    type_id: 3450, // Afterburner
-                    level: 4,
-                    skill_points: 45_255.0,
-                },
-            ),
-            (
-                3452,
-                TrainedSkillRecord {
-                    type_id: 3452, // Acceleration Control
-                    level: 4,
-                    skill_points: 181_020.0,
-                },
-            ),
-            (
-                3363,
-                TrainedSkillRecord {
-                    type_id: 3363, // Corporation Management
-                    level: 1,
-                    skill_points: 250.0,
-                },
-            ),
-            (
-                16622,
-                TrainedSkillRecord {
-                    type_id: 16622, // Accounting
-                    level: 4,
-                    skill_points: 135_765.0,
-                },
-            ),
-            (
-                3436,
-                TrainedSkillRecord {
-                    type_id: 3436, // Drones (R-DRONE-NOSKILL-5)
-                    level: 5,
-                    skill_points: 256_000.0,
-                },
-            ),
-        ]);
+        let specialization_overrides = [
+            (3300, 4, 45_255.0),   // Gunnery
+            (3302, 5, 256_000.0),  // Small Projectile Turret
+            (11084, 1, 750.0),     // Small Autocannon Specialization
+            (3327, 4, 45_255.0),   // Spaceship Command
+            (3329, 4, 90_510.0),   // Minmatar Frigate
+            (3380, 5, 256_000.0),  // Industry
+            (3394, 2, 2_829.0),    // Hull Upgrades
+            (3443, 4, 45_255.0),   // Trade
+            (3446, 4, 90_510.0),   // Broker Relations
+            (3449, 4, 45_255.0),   // Navigation
+            (3450, 4, 45_255.0),   // Afterburner
+            (3452, 4, 181_020.0),  // Acceleration Control
+            (3363, 1, 250.0),      // Corporation Management
+            (16622, 4, 135_765.0), // Accounting
+            (3436, 5, 256_000.0),  // Drones (R-DRONE-NOSKILL-5)
+        ];
+        // Offline fallback when no SDE file is present (`SdeRegistry::open_shared` unavailable).
+        let no_sde_item_fallbacks = [
+            (3312, 3, 16_000.0), // Motion Prediction (transitive req of 2889 via 11084)
+            (3392, 1, 250.0),    // Mechanics (req of 1236)
+        ];
         let demo_pilot_races: Vec<(i64, u32)> = [90_000_001_i64, 90_000_002_i64]
             .into_iter()
             .filter_map(|char_id| characters.get(&char_id).map(|ch| (char_id, ch.race_id)))
             .collect();
-        let race_ids: Vec<u32> = demo_pilot_races.iter().map(|(_, race_id)| *race_id).collect();
-        let starter_by_race = match sde {
-            Some(sde) => Some(
-                race_ids
-                    .iter()
-                    .copied()
-                    .map(|race_id| (race_id, Self::starter_skills_for_race(race_id, sde).0))
-                    .collect(),
-            ),
-            None => demo_starter_skills_for_default_sde(&race_ids),
+        let default_sde;
+        let resolved_sde = match sde {
+            Some(sde) => Some(sde),
+            None => {
+                default_sde = Self::open_default_sde_shared();
+                default_sde.as_deref()
+            }
         };
 
         let mut skills = CowMap::new();
         let mut skill_history = HashMap::new();
         for (char_id, race_id) in demo_pilot_races {
-            let starter = starter_by_race.as_ref().and_then(|m| m.get(&race_id));
-            let char_skills = merge_seeded_skills_with_starter(starter, &seeded_skill_overrides);
-            skill_history.insert(char_id, char_creation_skill_history(&char_skills));
+            let owned_type_ids: Vec<TypeId> = items
+                .values()
+                .filter(|item| item.owner_id == char_id)
+                .map(|item| item.type_id)
+                .collect();
+            let char_skills = build_demo_pilot_skills(
+                race_id,
+                &owned_type_ids,
+                resolved_sde,
+                &specialization_overrides,
+                &no_sde_item_fallbacks,
+            );
+            skill_history.insert(char_id, Self::char_creation_skill_history(&char_skills));
             skills.insert(char_id, char_skills);
         }
 
