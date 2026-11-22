@@ -538,6 +538,7 @@ pub(crate) async fn on_warp_initiated_hooks_with_options(
 
 /// Shared warp-initiation side effects: clears jump/undock invulnerability timers,
 /// aborts pending safe logoff, halts active non-warp module cycles, and abandons drones.
+#[cfg(test)]
 pub(crate) async fn on_warp_initiated_hooks(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,

@@ -1621,3 +1621,432 @@ async fn fleet_warp_runs_hooks_dungeon_exit_and_warp_bubble_interdiction() {
         .any(|n| n.event == "OnExitingDungeon"));
 }
 
+#[tokio::test]
+async fn warp_to_member_enforces_movement_guard_and_pre_warp_common_for_cloak_scram_docked_and_too_close() {
+    let ctx = test_ctx_with_clock(100_000);
+    let (_fleet_id, mut fc_sess) = seed_multi_member_fleet(&ctx).await;
+    let kw = HashMap::new();
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    // 1. Too close (< 150 km raw distance, and >= 150 km target pulled < 150 km by minRange) -> WarpDistanceTooClose.
+    assert_eq!(
+        handle_fleet_ops(&ctx, &mut fc_sess, "fleetObjectHandler", "WarpToMember", &[PyRep::Integer(90_000_002)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "WarpDistanceTooClose"
+    );
+    sys.set_ball_position(100_000_003, glam::DVec3::new(200_000.0, 0.0, 0.0)).await;
+    assert_eq!(
+        handle_fleet_ops(
+            &ctx,
+            &mut fc_sess,
+            "fleetObjectHandler",
+            "WarpToMember",
+            &[PyRep::Integer(90_000_003), PyRep::Real(100_000.0)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "WarpDistanceTooClose"
+    );
+    sys.set_ball_position(100_000_003, glam::DVec3::new(400_000.0, 0.0, 0.0)).await;
+
+    // 2. Cloaked caller (CombatState non-covert cloak and active DB non-covert cloak module) -> CloakedCannotWarp.
+    sys.modify_combat_state(100_000_001, |cs| {
+        cs.is_cloaked = true;
+        cs.is_covert_cloak = false;
+        cs.gate_cloak_remaining_ticks = 0;
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        handle_fleet_ops(&ctx, &mut fc_sess, "fleetObjectHandler", "WarpToMember", &[PyRep::Integer(90_000_003)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CloakedCannotWarp"
+    );
+    sys.modify_combat_state(100_000_001, |cs| {
+        cs.is_cloaked = false;
+    })
+    .await
+    .unwrap();
+
+    let cloak_mod_id = 911_371_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: 11370,
+                owner_id: 90_000_001,
+                location_id: 100_000_001,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    assert_eq!(
+        handle_fleet_ops(&ctx, &mut fc_sess, "fleetObjectHandler", "WarpToMember", &[PyRep::Integer(90_000_003)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CloakedCannotWarp"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&cloak_mod_id);
+    });
+
+    // 3. Warp-scrambled, inside warp disruption bubble, and MJD-spooling (`validate_pre_warp_common`).
+    sys.set_warp_scramble_strength(100_000_001, 2).await.unwrap();
+    assert_eq!(
+        handle_fleet_ops(&ctx, &mut fc_sess, "fleetObjectHandler", "WarpToMember", &[PyRep::Integer(90_000_003)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "WarpScrambled"
+    );
+    sys.set_warp_scramble_strength(100_000_001, 0).await.unwrap();
+
+    let bubble_id = 771_901_i64;
+    sys.add_warp_bubble(bubble_id, glam::DVec3::ZERO, 20_000.0).await.unwrap();
+    assert_eq!(
+        handle_fleet_ops(&ctx, &mut fc_sess, "fleetObjectHandler", "WarpToMember", &[PyRep::Integer(90_000_003)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "WarpScrambled"
+    );
+    sys.remove_warp_bubble(bubble_id).await.unwrap();
+
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id: 100_000_001,
+        module_id: 77_901,
+        module_type_id: 4383,
+        owner_char_id: Some(90_000_001),
+        effect_name: "microJumpDrive".into(),
+        is_mwd_or_mjd: true,
+        mjd_jump_distance_m: Some(100_000.0),
+        repeat: 0,
+        duration_s: 12.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        handle_fleet_ops(&ctx, &mut fc_sess, "fleetObjectHandler", "WarpToMember", &[PyRep::Integer(90_000_003)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CantMoveWhileModuleActive"
+    );
+    sys.remove_module_cycle(100_000_001, 77_901).await.unwrap();
+
+    // 4. Docked caller -> ShipNotInSpace; docked target -> TargetNotInSpace.
+    fc_sess.station_id = Some(60_003_760);
+    assert_eq!(
+        handle_fleet_ops(&ctx, &mut fc_sess, "fleetObjectHandler", "WarpToMember", &[PyRep::Integer(90_000_003)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ShipNotInSpace"
+    );
+    fc_sess.station_id = None;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_003).unwrap().station_id = Some(60_003_760);
+    });
+    assert_eq!(
+        handle_fleet_ops(&ctx, &mut fc_sess, "fleetObjectHandler", "WarpToMember", &[PyRep::Integer(90_000_003)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "TargetNotInSpace"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_003).unwrap().station_id = None;
+    });
+
+    // 5. Covert-cloaked caller is allowed through `validate_ship_movement` and keeps cloak active.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&cloak_mod_id).unwrap().type_id = 11578;
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    sys.modify_combat_state(100_000_001, |cs| {
+        cs.is_cloaked = true;
+        cs.is_covert_cloak = true;
+    })
+    .await
+    .unwrap();
+    let (_, before_ball) = sys.get_ball_snapshot(100_000_001).await.unwrap().unwrap();
+    assert!(matches!(before_ball.mode, MovementMode::Stop));
+
+    let ok_res = handle_fleet_ops(&ctx, &mut fc_sess, "fleetObjectHandler", "WarpToMember", &[PyRep::Integer(90_000_003)], &kw)
+        .await
+        .unwrap()
+        .expect("covert-cloaked WarpToMember must succeed");
+    assert!(matches!(ok_res, PyRep::KeyVal(_)));
+    let (_, after_ball) = sys.get_ball_snapshot(100_000_001).await.unwrap().unwrap();
+    assert!(matches!(after_ball.mode, MovementMode::Warp { .. }));
+    let cs = sys.get_combat_state(100_000_001).await.unwrap().unwrap();
+    assert!(cs.is_cloaked && cs.is_covert_cloak);
+}
+
+#[tokio::test]
+async fn squad_wing_and_fleet_warp_reject_cloaked_scrambled_docked_and_too_close_members() {
+    let kw = HashMap::new();
+    let sys_id = 30_000_142_u32;
+    let dest = glam::DVec3::new(50_000_000.0, 0.0, 0.0);
+
+    // Scenario A: Squad warp (SquadCommander 90_000_003) and Wing warp (WingCommander 90_000_002).
+    {
+        let ctx = test_ctx_with_clock(100_000);
+        let (fleet_id, fc_sess) = seed_multi_member_fleet(&ctx).await;
+        let sys = ctx.systems.get_or_spawn(sys_id);
+
+        // Put 90_000_004 into Wing1 / Squad1 alongside SC 90_000_003, and add docked 90_000_006 into Wing1 / Squad2.
+        let extra_cid = 90_000_006_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = snap.characters[&90_000_004].clone();
+            ch.character_id = extra_cid;
+            ch.user_id = 90_000_006;
+            ch.active_ship_id = 100_000_006;
+            ch.solar_system_id = sys_id;
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+            snap.characters.insert(extra_cid, ch);
+
+            let fleet = snap.fleets.get_mut(&fleet_id).unwrap();
+            fleet.members.push(extra_cid);
+            if let Some(m1) = fleet.member_details.get_mut(&90_000_001) {
+                m1.wing_id = None;
+                m1.squad_id = None;
+            }
+            if let Some(m2) = fleet.member_details.get_mut(&90_000_002) {
+                m2.squad_id = None;
+            }
+            if let Some(m4) = fleet.member_details.get_mut(&90_000_004) {
+                m4.wing_id = Some(710_001);
+                m4.squad_id = Some(720_001);
+            }
+            fleet.member_details.insert(
+                extra_cid,
+                eve_db::FleetMemberRecord {
+                    character_id: extra_cid,
+                    role: eve_db::FleetRole::SquadMember,
+                    wing_id: Some(710_001),
+                    squad_id: Some(720_002),
+                    takes_fleet_warp: true,
+                    ..Default::default()
+                },
+            );
+        });
+
+        // Position everyone in range (< 8,000 km) of SC/WC at 49,500 km, except 90_000_004 eligible at 49,400 km.
+        for (sid, x) in [
+            (100_000_001, 49_500_000.0),
+            (100_000_002, 49_550_000.0),
+            (100_000_003, 49_500_000.0),
+            (100_000_004, 49_400_000.0),
+        ] {
+            sys.set_ball_position(sid, glam::DVec3::new(x, 0.0, 0.0)).await;
+        }
+
+        // Docked SC rejected directly with ShipNotInSpace.
+        let mut sc_sess = fc_sess.clone();
+        sc_sess.character_id = Some(90_000_003);
+        sc_sess.ship_id = Some(100_000_003);
+        sc_sess.station_id = Some(60_003_760);
+        assert_eq!(
+            handle_fleet_ops(
+                &ctx,
+                &mut sc_sess,
+                "fleetObjectHandler",
+                "WarpFleet",
+                &[PyRep::Real(dest.x), PyRep::Real(dest.y), PyRep::Real(dest.z)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "ShipNotInSpace"
+        );
+        sc_sess.station_id = None;
+
+        // Cloak SC 90_000_003 with CombatState non-covert cloak: Squad Warp skips SC while warping squadmate 90_000_004.
+        sys.modify_combat_state(100_000_003, |cs| {
+            cs.is_cloaked = true;
+            cs.is_covert_cloak = false;
+        })
+        .await
+        .unwrap();
+        let sq_res = handle_fleet_ops(
+            &ctx,
+            &mut sc_sess,
+            "fleetObjectHandler",
+            "WarpFleet",
+            &[PyRep::Real(dest.x), PyRep::Real(dest.y), PyRep::Real(dest.z)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let PyRep::KeyVal(sq_kv) = sq_res else { panic!("expected KeyVal") };
+        assert_eq!(sq_kv.get("warpCount").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            sq_kv.get("warpedMemberIDs"),
+            Some(&PyRep::List(vec![PyRep::Integer(90_000_004)]))
+        );
+        assert!(matches!(sys.get_ball_snapshot(100_000_003).await.unwrap().unwrap().1.mode, MovementMode::Stop));
+        assert!(sys.get_combat_state(100_000_003).await.unwrap().unwrap().is_cloaked);
+        assert!(matches!(sys.get_ball_snapshot(100_000_004).await.unwrap().unwrap().1.mode, MovementMode::Warp { .. }));
+        assert!(matches!(sys.get_ball_snapshot(100_000_001).await.unwrap().unwrap().1.mode, MovementMode::Stop));
+        assert!(matches!(sys.get_ball_snapshot(100_000_002).await.unwrap().unwrap().1.mode, MovementMode::Stop));
+
+        // Now Wing warp by WC 90_000_002: cloak WC via DB module, scramble SC 90_000_003, leave 90_000_006 docked,
+        // and place an ineligible too-close Wing1 member? Actually uncloak WC? No, test all Wing1 blocked -> warpCount == 0!
+        let cloak_wc = 911_372_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                cloak_wc,
+                eve_db::InventoryItemRecord {
+                    item_id: cloak_wc,
+                    type_id: 11370,
+                    owner_id: 90_000_002,
+                    location_id: 100_000_002,
+                    flag: eve_db::InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.module_active_states.insert(cloak_wc);
+            // Move 90_000_004 outside Wing1 into Wing2 so Wing1 only contains WC, SC, and docked 90_000_006.
+            snap.fleets.get_mut(&fleet_id).unwrap().member_details.get_mut(&90_000_004).unwrap().wing_id = Some(710_002);
+        });
+        sys.modify_combat_state(100_000_003, |cs| {
+            cs.is_cloaked = false;
+        })
+        .await
+        .unwrap();
+        sys.set_warp_scramble_strength(100_000_003, 1).await.unwrap();
+        let mut wc_sess = fc_sess.clone();
+        wc_sess.character_id = Some(90_000_002);
+        wc_sess.ship_id = Some(100_000_002);
+        let wing_res = handle_fleet_ops(
+            &ctx,
+            &mut wc_sess,
+            "fleetObjectHandler",
+            "FleetWarp",
+            &[PyRep::Real(dest.x), PyRep::Real(dest.y), PyRep::Real(dest.z)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let PyRep::KeyVal(wing_kv) = wing_res else { panic!("expected KeyVal") };
+        assert_eq!(wing_kv.get("warpCount").and_then(|v| v.as_i64()), Some(0));
+        assert!(matches!(sys.get_ball_snapshot(100_000_002).await.unwrap().unwrap().1.mode, MovementMode::Stop));
+        assert!(matches!(sys.get_ball_snapshot(100_000_003).await.unwrap().unwrap().1.mode, MovementMode::Stop));
+    }
+
+    // Scenario B: Fleet warp (FleetCommander 90_000_001) rejects DB-docked caller, then skips cloaked/scrambled/too-close/docked members.
+    {
+        let ctx = test_ctx_with_clock(100_000);
+        let (_fleet_id, mut fc_sess) = seed_multi_member_fleet(&ctx).await;
+        let sys = ctx.systems.get_or_spawn(sys_id);
+
+        for (sid, x) in [
+            (100_000_001, 49_500_000.0),
+            (100_000_002, 49_520_000.0),
+            (100_000_003, 49_540_000.0),
+            (100_000_004, 49_900_000.0), // 100 km from dest -> < 150 km too close
+        ] {
+            sys.set_ball_position(sid, glam::DVec3::new(x, 0.0, 0.0)).await;
+        }
+
+        // DB-docked FC rejected even if session.station_id == None.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&90_000_001).unwrap().station_id = Some(60_003_760);
+        });
+        assert_eq!(
+            handle_fleet_ops(
+                &ctx,
+                &mut fc_sess,
+                "fleetObjectHandler",
+                "FleetWarp",
+                &[PyRep::Real(dest.x), PyRep::Real(dest.y), PyRep::Real(dest.z)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "ShipNotInSpace"
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&90_000_001).unwrap().station_id = None;
+            snap.characters.get_mut(&90_000_005).unwrap().solar_system_id = sys_id;
+            snap.characters.get_mut(&90_000_005).unwrap().station_id = Some(60_003_760);
+        });
+
+        // WC cloaked, SC warp-scrambled, SM4 too close (< 150km), SM5 docked in same system.
+        sys.modify_combat_state(100_000_002, |cs| {
+            cs.is_cloaked = true;
+            cs.is_covert_cloak = false;
+        })
+        .await
+        .unwrap();
+        sys.modify_combat_state(100_000_003, |cs| {
+            cs.is_cloaked = false;
+        })
+        .await
+        .unwrap();
+        sys.set_warp_scramble_strength(100_000_003, 1).await.unwrap();
+
+        let fl_res = handle_fleet_ops(
+            &ctx,
+            &mut fc_sess,
+            "fleetObjectHandler",
+            "FleetWarp",
+            &[PyRep::Real(dest.x), PyRep::Real(dest.y), PyRep::Real(dest.z)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let PyRep::KeyVal(fl_kv) = fl_res else { panic!("expected KeyVal") };
+        assert_eq!(fl_kv.get("warpCount").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            fl_kv.get("warpedMemberIDs"),
+            Some(&PyRep::List(vec![PyRep::Integer(90_000_001)]))
+        );
+        assert!(matches!(sys.get_ball_snapshot(100_000_001).await.unwrap().unwrap().1.mode, MovementMode::Warp { .. }));
+        for blocked_sid in [100_000_002_i64, 100_000_003, 100_000_004] {
+            assert!(
+                matches!(sys.get_ball_snapshot(blocked_sid).await.unwrap().unwrap().1.mode, MovementMode::Stop),
+                "blocked fleet member {blocked_sid} must stay in Stop mode"
+            );
+        }
+        assert!(sys.get_combat_state(100_000_002).await.unwrap().unwrap().is_cloaked);
+    }
+}
+

@@ -1804,7 +1804,7 @@ async fn agent_mgr_dungeon_warp_rejects_unprobed_ded_and_private_escalation_with
         .unwrap()
         .unwrap_err();
         assert_eq!(
-            err.code, ERR_INVALID_MISSION_LOCATION,
+            err.code, "InvalidMissionLocation",
             "agentMgr must not allow non-mission dungeon warp to {forbidden_id}"
         );
     }
