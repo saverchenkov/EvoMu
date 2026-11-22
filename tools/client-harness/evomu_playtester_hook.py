@@ -3425,7 +3425,193 @@ def _run_double_click_action(entry, sr_node, dbl_attr, dbl_fn):
     return dbl_attr
 
 
+try:
+    _HOOK_STR_TYPES = (basestring,)
+except NameError:
+    _HOOK_STR_TYPES = (str, bytes)
+
+try:
+    _HOOK_INT_TYPES = (int, long, float)
+except NameError:
+    _HOOK_INT_TYPES = (int, float)
+
+_DISCONNECT_MODAL_MARKERS = (
+    "connection lost",
+    "clustershuttingdown",
+    "cluster shutdown",
+    "daily cluster downtime",
+    "socket was closed",
+    "disconnected from",
+)
+
+
+def _is_node_inside_modal(node):
+    if node is None:
+        return False
+    uic = _get_uicore()
+    reg = getattr(uic, "registry", None) if uic is not None else None
+    if reg is not None:
+        get_modal = getattr(reg, "GetModalWindow", None)
+        if callable(get_modal):
+            try:
+                cur_modal = get_modal()
+                if cur_modal is not None and not getattr(cur_modal, "destroyed", False) and _is_under_widget(node, cur_modal):
+                    return True
+            except Exception:
+                pass
+        for mw in list(getattr(reg, "modals", None) or []):
+            if mw is not None and not getattr(mw, "destroyed", False) and _is_under_widget(node, mw):
+                return True
+    lyr = getattr(uic, "layer", None) if uic is not None else None
+    modal_lyr = getattr(lyr, "modal", None) if lyr is not None else None
+    if modal_lyr is not None and _is_under_widget(node, modal_lyr):
+        return True
+    cur = node
+    for _ in range(20):
+        if cur is None:
+            break
+        cname = getattr(getattr(cur, "__class__", None), "__name__", "")
+        if getattr(cur, "isModal", False) or "MessageBox" in str(cname) or "Modal" in str(cname):
+            return True
+        cur = getattr(cur, "parent", None)
+    return False
+
+
+def _is_node_inside_login_or_charsel(node):
+    if node is None:
+        return False
+    uic = _get_uicore()
+    lyr = getattr(uic, "layer", None) if uic is not None else None
+    if lyr is not None:
+        for lname in ("login", "charsel"):
+            lobj = getattr(lyr, lname, None)
+            if lobj is not None and _is_under_widget(node, lobj):
+                return True
+    cur = node
+    for _ in range(20):
+        if cur is None:
+            break
+        nm = getattr(cur, "name", None)
+        if isinstance(nm, _HOOK_STR_TYPES) and str(nm).lower() in ("login", "charsel", "l_login", "l_charsel"):
+            return True
+        cur = getattr(cur, "parent", None)
+    return False
+
+
+def _active_disconnect_modal_tag():
+    uic = _get_uicore()
+    if uic is None:
+        return ""
+    roots = []
+    reg = getattr(uic, "registry", None)
+    if reg is not None:
+        get_modal = getattr(reg, "GetModalWindow", None)
+        if callable(get_modal):
+            try:
+                mw = get_modal()
+                if mw is not None:
+                    roots.append(mw)
+            except Exception:
+                pass
+        for mw in list(getattr(reg, "modals", None) or []):
+            if mw is not None:
+                roots.append(mw)
+    lyr = getattr(uic, "layer", None)
+    if lyr is not None:
+        for lname in ("modal", "abovemain"):
+            lobj = getattr(lyr, lname, None)
+            if lobj is not None:
+                for ch in list(getattr(lobj, "children", None) or []):
+                    if ch is not None:
+                        roots.append(ch)
+    for root in roots:
+        if getattr(root, "destroyed", False):
+            continue
+        queue = [root]
+        visited = set()
+        frags = []
+        while queue and len(visited) < 30:
+            obj = queue.pop(0)
+            if obj is None or id(obj) in visited or getattr(obj, "destroyed", False):
+                continue
+            visited.add(id(obj))
+            for attr in ("msgKey", "caption", "text"):
+                val = getattr(obj, attr, None)
+                if isinstance(val, _HOOK_STR_TYPES):
+                    s = _safe_str(val, 160).strip()
+                    if s:
+                        frags.append(s)
+            msg_lbl = getattr(obj, "_message_label", None)
+            if msg_lbl is not None and id(msg_lbl) not in visited:
+                queue.append(msg_lbl)
+            children = getattr(obj, "children", None)
+            if children:
+                try:
+                    for ch in list(children)[:12]:
+                        if ch is not None and id(ch) not in visited:
+                            queue.append(ch)
+                except Exception:
+                    pass
+        if not frags:
+            continue
+        low = " ".join(frags).lower()
+        for marker in _DISCONNECT_MODAL_MARKERS:
+            if marker in low:
+                if "shutdown" in marker:
+                    return "ClusterShuttingDown"
+                return "ConnectionLost"
+    return ""
+
+
+def _preclick_block_reason(node):
+    if node is not None and _is_node_inside_modal(node):
+        return ""
+    modal_tag = _active_disconnect_modal_tag()
+    if modal_tag:
+        return "ModalBlocked(%s)" % (modal_tag,)
+    sess = getattr(__builtin__, "session", None)
+    if sess is None:
+        return ""
+    if hasattr(sess, "clientID"):
+        cid_val = getattr(sess, "clientID", None)
+        if isinstance(cid_val, _HOOK_INT_TYPES) and not isinstance(cid_val, bool) and int(cid_val) == 0:
+            if not _is_node_inside_login_or_charsel(node):
+                return "SessionDisconnected(clientID=0)"
+    if hasattr(sess, "charid") and (hasattr(sess, "stationid") or hasattr(sess, "solarsystemid2")):
+        has_world = bool(
+            getattr(sess, "charid", None)
+            and (
+                getattr(sess, "stationid", None)
+                or getattr(sess, "structureid", None)
+                or getattr(sess, "solarsystemid2", None)
+            )
+        )
+        if not has_world and not _is_node_inside_login_or_charsel(node):
+            return "SessionDisconnected(no_world_session)"
+    return ""
+
+
+def _click_rejection_error(click_res, slot_name=None):
+    s = str(click_res)
+    if s.startswith("NeedsLockedTarget"):
+        if slot_name:
+            return "Module %s requires a locked target (loaded targeting cursor); call lock_target first" % (slot_name,)
+        return "Module requires a locked target (loaded targeting cursor); call lock_target first"
+    if s.startswith("UserError("):
+        return "Client action rejected with %s" % (click_res,)
+    if s.startswith("StaleModuleButton("):
+        if slot_name:
+            return "Module %s is stale (%s)" % (slot_name, click_res)
+        return "Stale module button skipped (%s)" % (click_res,)
+    if s.startswith(("ModalBlocked(", "SessionDisconnected(")):
+        return "Action blocked while disconnected or disconnect modal active (%s)" % (click_res,)
+    return ""
+
+
 def _invoke_widget_click(node, right_click=False, double_click=False, click_x=None, click_y=None):
+    blocked_reason = _preclick_block_reason(node)
+    if blocked_reason:
+        return blocked_reason
     _close_neocom_panels_if_outside(node)
     _close_utilmenu_if_outside(node)
     _close_context_menus_if_outside(node)
@@ -4460,10 +4646,17 @@ def _get_state_snapshot(sm):
         "ship_hangar_total_quantity": None,
         "hangar_containers_seen": None,
     }
+    sess_live = getattr(__builtin__, "session", None)
+    cid_live = getattr(sess_live, "clientID", 1) if sess_live is not None else 0
+    has_world_session = bool(
+        sess_dict.get("charid")
+        and (sess_dict.get("stationid") or sess_dict.get("structureid") or sess_dict.get("solarsystemid2"))
+        and (not isinstance(cid_live, _HOOK_INT_TYPES) or isinstance(cid_live, bool) or int(cid_live) != 0)
+    )
     try:
-        ic_svc = getattr(sm, "services", {}).get("invCache")
+        ic_svc = getattr(sm, "services", {}).get("invCache") if has_world_session else None
         invs = getattr(ic_svc, "inventories", None) if ic_svc is not None else None
-        if isinstance(invs, dict):
+        if has_world_session and isinstance(invs, dict):
             ship_id_i = sess_dict.get("shipid")
             st_locs = {x for x in (sess_dict.get("stationid"), sess_dict.get("structureid")) if x}
 
@@ -6533,15 +6726,10 @@ def _execute_action(sm, action):
                     click_res = _invoke_widget_click(node)
                     result["clicked_widget"] = click_res
                     result["activated_slot"] = slot_name
-                    if str(click_res).startswith("NeedsLockedTarget"):
+                    click_err = _click_rejection_error(click_res, slot_name=slot_name)
+                    if click_err:
                         result["ok"] = False
-                        result["error"] = "Module %s requires a locked target (loaded targeting cursor); call lock_target first" % (slot_name,)
-                    elif str(click_res).startswith("UserError("):
-                        result["ok"] = False
-                        result["error"] = "Client action rejected with %s" % (click_res,)
-                    elif str(click_res).startswith("StaleModuleButton("):
-                        result["ok"] = False
-                        result["error"] = "Module %s is stale (%s)" % (slot_name, click_res)
+                        result["error"] = click_err
                 else:
                     result["ok"] = False
                     result["activated_slot"] = "none_fitted"
@@ -6807,16 +6995,11 @@ def _execute_action(sm, action):
                         click_y=hy,
                     )
                     result["clicked_widget"] = click_res
-                    if str(click_res).startswith("NeedsLockedTarget"):
+                    click_err = _click_rejection_error(click_res)
+                    if click_err:
                         result["ok"] = False
-                        result["error"] = "Module requires a locked target (loaded targeting cursor); call lock_target first"
-                    elif str(click_res).startswith("UserError("):
-                        result["ok"] = False
-                        result["error"] = "Client action rejected with %s" % (click_res,)
-                    elif str(click_res).startswith("StaleModuleButton("):
-                        result["ok"] = False
-                        result["error"] = "Stale module button skipped (%s)" % (click_res,)
-                    if getattr(node, "name", "") == "skillsBtn":
+                        result["error"] = click_err
+                    elif getattr(node, "name", "") == "skillsBtn":
                         try:
                             from eve.client.script.ui.skillPlan.skillPlanDockablePanel import SkillPlanDockablePanel
                             sp_wnd = SkillPlanDockablePanel.GetIfOpen()
@@ -6854,15 +7037,10 @@ def _execute_action(sm, action):
                         click_y=y_val,
                     )
                     result["clicked_widget"] = click_res
-                    if str(click_res).startswith("NeedsLockedTarget"):
+                    click_err = _click_rejection_error(click_res)
+                    if click_err:
                         result["ok"] = False
-                        result["error"] = "Module requires a locked target (loaded targeting cursor); call lock_target first"
-                    elif str(click_res).startswith("UserError("):
-                        result["ok"] = False
-                        result["error"] = "Client action rejected with %s" % (click_res,)
-                    elif str(click_res).startswith("StaleModuleButton("):
-                        result["ok"] = False
-                        result["error"] = "Stale module button skipped (%s)" % (click_res,)
+                        result["error"] = click_err
                     result["clicked_xy"] = [x_val, y_val]
 
             elif atype == "drag_widget":

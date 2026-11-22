@@ -7453,5 +7453,170 @@ class TestHarnessSettleAndDeepWindowInspect1190(unittest.TestCase):
             self.assertEqual(box.caretIndex, (0, 0))
 
 
+class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
+    def test_get_state_snapshot_skips_invcache_when_disconnected(self):
+        hook = _load_hook_with_py2_stubs()
+        items_getattr_calls = {"n": 0}
+
+        class _BoomInv:
+            def __getattr__(self, name):
+                if name == "items":
+                    items_getattr_calls["n"] += 1
+                    sess_now = getattr(builtins, "session", None)
+                    if getattr(sess_now, "clientID", 1) == 0 or not getattr(sess_now, "charid", None):
+                        raise RuntimeError("ObjectCallGPCS.PerformSessionCheck")
+                    return [types.SimpleNamespace(itemID=1, categoryID=6, flagID=4, quantity=1)]
+                raise AttributeError(name)
+
+        fake_inv_cache = types.SimpleNamespace(inventories={(60003760, 4): _BoomInv()})
+        fake_sm = types.SimpleNamespace(services={"invCache": fake_inv_cache})
+
+        # Disconnected session (clientID=0, no char/location): must NOT touch invCache.inventories (#1584).
+        disconnected_sess = types.SimpleNamespace(
+            clientID=0,
+            charid=None,
+            stationid=None,
+            structureid=None,
+            solarsystemid2=None,
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": disconnected_sess, "sm": fake_sm}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=None):
+            snap = hook._get_state_snapshot(fake_sm)
+        self.assertEqual(items_getattr_calls["n"], 0)
+        self.assertIsNone(snap["inventory_state"]["hangar_item_count"])
+
+        # Partial teardown where charid still lingers but clientID=0 must also skip invCache.
+        teardown_sess = types.SimpleNamespace(
+            clientID=0,
+            charid=90000001,
+            stationid=60003760,
+            structureid=None,
+            solarsystemid2=30000142,
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": teardown_sess, "sm": fake_sm}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=None):
+            hook._get_state_snapshot(fake_sm)
+        self.assertEqual(items_getattr_calls["n"], 0)
+
+        # Connected world session must inspect invCache normally.
+        connected_sess = types.SimpleNamespace(
+            clientID=42,
+            charid=90000001,
+            stationid=60003760,
+            structureid=None,
+            solarsystemid2=30000142,
+            shipid=758432905,
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess, "sm": fake_sm}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=None):
+            snap_live = hook._get_state_snapshot(fake_sm)
+        self.assertEqual(items_getattr_calls["n"], 1)
+        self.assertEqual(snap_live["inventory_state"]["hangar_item_count"], 1)
+
+    def test_invoke_widget_click_blocks_behind_disconnect_modal_or_client_id_zero(self):
+        hook = _load_hook_with_py2_stubs()
+        clicked = []
+
+        class _Btn:
+            def __init__(self, name, parent=None):
+                self.name = name
+                self.parent = parent
+                self.destroyed = False
+
+            def OnClick(self):
+                clicked.append(self.name)
+
+        main_layer = types.SimpleNamespace(name="l_main", parent=None, destroyed=False)
+        item_hangar = _Btn("ItemHangar", parent=main_layer)
+
+        msg_lbl = types.SimpleNamespace(text="The socket was closed.", destroyed=False, children=[])
+        modal_wnd = types.SimpleNamespace(
+            name="MessageBox",
+            caption="Connection Lost",
+            msgKey="ConnectionLost",
+            _message_label=msg_lbl,
+            destroyed=False,
+            isModal=True,
+            children=[msg_lbl],
+            parent=None,
+        )
+        ok_btn = _Btn("OK", parent=modal_wnd)
+        modal_wnd.children.append(ok_btn)
+
+        layers_with_modal = types.SimpleNamespace(
+            modal=types.SimpleNamespace(children=[modal_wnd], destroyed=False),
+            abovemain=types.SimpleNamespace(children=[], destroyed=False),
+            l_main=main_layer,
+        )
+        reg_with_modal = types.SimpleNamespace(GetModalWindow=lambda: modal_wnd, modals=[modal_wnd])
+        uic_modal = types.SimpleNamespace(layer=layers_with_modal, registry=reg_with_modal, uilib=None)
+
+        connected_sess = types.SimpleNamespace(clientID=5, charid=90000001, stationid=60003760, solarsystemid2=30000142)
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_modal):
+            # Background in-world widget click must be blocked while Connection Lost modal is open (#1585).
+            res_bg = hook._invoke_widget_click(item_hangar)
+            self.assertEqual(res_bg, "ModalBlocked(ConnectionLost)")
+            self.assertEqual(clicked, [])
+
+            # Clicking a button inside the modal itself must still work.
+            res_ok = hook._invoke_widget_click(ok_btn)
+            self.assertEqual(res_ok, "OnClick")
+            self.assertEqual(clicked, ["OK"])
+
+        # Without modal, disconnected session (clientID=0) must also block ItemHangar click before OnClick().
+        layers_clean = types.SimpleNamespace(
+            modal=types.SimpleNamespace(children=[], destroyed=False),
+            abovemain=types.SimpleNamespace(children=[], destroyed=False),
+            l_main=main_layer,
+        )
+        reg_clean = types.SimpleNamespace(GetModalWindow=lambda: None, modals=[])
+        uic_clean = types.SimpleNamespace(layer=layers_clean, registry=reg_clean, uilib=None)
+        disconnected_sess = types.SimpleNamespace(clientID=0, charid=None, stationid=None, solarsystemid2=None)
+        with mock.patch.dict(builtins.__dict__, {"session": disconnected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_clean):
+            res_disc = hook._invoke_widget_click(item_hangar)
+            self.assertEqual(res_disc, "SessionDisconnected(clientID=0)")
+            self.assertEqual(clicked, ["OK"])
+
+        # Healthy connected session without blocking modal must click ItemHangar normally.
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_clean):
+            res_live = hook._invoke_widget_click(item_hangar)
+            self.assertEqual(res_live, "OnClick")
+            self.assertEqual(clicked, ["OK", "ItemHangar"])
+
+    def test_wait_for_session_fails_fast_on_cluster_shutting_down_modal(self):
+        helpers = _load_helpers_with_py2_stubs()
+        lbl = types.SimpleNamespace(
+            text="Cluster shutdown in progress. Non-GM logins are rejected.",
+            destroyed=False,
+            children=[],
+        )
+        modal_wnd = types.SimpleNamespace(
+            name="MessageBox",
+            msgKey="ClusterShuttingDown",
+            caption="Notice",
+            _message_label=lbl,
+            destroyed=False,
+            children=[lbl],
+        )
+        fake_uicore = types.SimpleNamespace(
+            registry=types.SimpleNamespace(GetModalWindow=lambda: modal_wnd, modals=[modal_wnd]),
+            layer=types.SimpleNamespace(
+                modal=types.SimpleNamespace(children=[modal_wnd]),
+                abovemain=types.SimpleNamespace(children=[]),
+            ),
+        )
+        unauth_sess = types.SimpleNamespace(userid=None, charid=None, clientID=0)
+        sleep_calls = []
+        with mock.patch.dict(builtins.__dict__, {"session": unauth_sess}, clear=False), \
+             mock.patch.object(helpers, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(helpers, "_sleep_ms", side_effect=lambda ms: sleep_calls.append(ms)):
+            with self.assertRaisesRegex(RuntimeError, "ClusterShuttingDown"):
+                helpers._wait_for_session(mock.MagicMock(), "demo", "demo-secret", 90000001, timeout_sec=90.0)
+        self.assertEqual(sleep_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
