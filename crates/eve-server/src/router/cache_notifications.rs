@@ -1253,6 +1253,7 @@ impl ServerContext {
             event,
             "OnItemChange" | "OnMultipleItemChange" | "OnBlueprintsUpdated"
         ) {
+            self.observe_active_fuel_emit(&recipients, event, &args);
             if !already_switch_checked && event == "OnItemChange" && recipients.len() == 1 {
                 if self.try_consume_projected_on_item_change_args(recipients[0].0, &args, "notify") {
                     return Vec::new();
@@ -2252,7 +2253,6 @@ impl ServerContext {
                 vec![PyRep::List(vec![row.clone()]), change_dict.clone()],
             );
         }
-        self.record_client_emitted_item(item);
     }
 
     /// Computes canonical V24 `OnItemChange` delta entries (`old_value` keyed by column index).

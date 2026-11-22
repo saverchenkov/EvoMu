@@ -99,6 +99,7 @@ pub struct ServerContext {
     pub crimewatch: Arc<crate::combat::crimewatch::CrimeWatchLock>,
     pub(crate) combat_ephemeral: Arc<RankedRwLock<crate::services::combat_crimewatch::CombatRuntimeState, RANK_LEAF>>,
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
+    pub(crate) active_fuel_reserves: Arc<crate::services::tactical_modules::ActiveFuelReserveTracker>,
     pub session_change_timers: Arc<RankedMutex<HashMap<i64, crate::services::space_destiny::SessionChangeTimerState>, RANK_LEAF>>,
     pub location_change_invuln: Arc<RankedMutex<HashMap<i64, u64>, RANK_LEAF>>,
     pub feature_flags: Arc<RwLock<crate::config::FeatureFlagsConfig>>,
@@ -275,6 +276,7 @@ pub(crate) struct ServerContextWeak {
     crimewatch: std::sync::Weak<crate::combat::crimewatch::CrimeWatchLock>,
     combat_ephemeral: std::sync::Weak<RankedRwLock<crate::services::combat_crimewatch::CombatRuntimeState, RANK_LEAF>>,
     tactical_state: std::sync::Weak<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
+    active_fuel_reserves: std::sync::Weak<crate::services::tactical_modules::ActiveFuelReserveTracker>,
     session_change_timers: std::sync::Weak<RankedMutex<HashMap<i64, crate::services::space_destiny::SessionChangeTimerState>, RANK_LEAF>>,
     location_change_invuln: std::sync::Weak<RankedMutex<HashMap<i64, u64>, RANK_LEAF>>,
     feature_flags: std::sync::Weak<RwLock<crate::config::FeatureFlagsConfig>>,
@@ -358,6 +360,7 @@ impl ServerContextWeak {
             crimewatch: self.crimewatch.upgrade()?,
             combat_ephemeral: self.combat_ephemeral.upgrade()?,
             tactical_state: self.tactical_state.upgrade()?,
+            active_fuel_reserves: self.active_fuel_reserves.upgrade()?,
             session_change_timers: self.session_change_timers.upgrade()?,
             location_change_invuln: self.location_change_invuln.upgrade()?,
             feature_flags: self.feature_flags.upgrade()?,
@@ -717,6 +720,7 @@ impl ServerContext {
             crimewatch: Arc::downgrade(&self.crimewatch),
             combat_ephemeral: Arc::downgrade(&self.combat_ephemeral),
             tactical_state: Arc::downgrade(&self.tactical_state),
+            active_fuel_reserves: Arc::downgrade(&self.active_fuel_reserves),
             session_change_timers: Arc::downgrade(&self.session_change_timers),
             location_change_invuln: Arc::downgrade(&self.location_change_invuln),
             feature_flags: Arc::downgrade(&self.feature_flags),
@@ -782,6 +786,9 @@ impl ServerContext {
         let tactical_state = Arc::new(RankedRwLock::new(
             crate::services::tactical_modules::TacticalModulesState::default(),
         ));
+        let active_fuel_reserves = Arc::new(
+            crate::services::tactical_modules::ActiveFuelReserveTracker::default(),
+        );
         let systems = Arc::new(
             SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db))
                 .with_mechanic_rng(Arc::clone(&mechanic_rng))
@@ -887,6 +894,7 @@ impl ServerContext {
             crimewatch,
             combat_ephemeral,
             tactical_state,
+            active_fuel_reserves,
             session_change_timers: Arc::new(RankedMutex::new(HashMap::new())),
             location_change_invuln: Arc::new(RankedMutex::new(HashMap::new())),
             feature_flags: Arc::new(RwLock::new(crate::config::FeatureFlagsConfig::default())),

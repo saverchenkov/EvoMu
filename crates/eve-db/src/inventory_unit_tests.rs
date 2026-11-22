@@ -3531,7 +3531,7 @@ fn rollback_restore_consumed_stacks_exact_id_dead_ship_and_diverged_diffs_r5() {
         assert!(diffs_full.is_empty(), "exact pre.item_id restore must emit no spurious diffs");
         let restored = &snap.items[&s_exact.item_id];
         assert_eq!(restored.quantity, 500);
-        assert_eq!(restored.version, s_exact.version + 1);
+        assert!(restored.version > s_exact.version);
 
         let pre_partial = restored.clone();
         let res_part = snap
@@ -3830,6 +3830,110 @@ fn rollback_restore_consumed_stacks_cross_owner_and_exposed_exact_r7() {
         assert!(diffs_full[0].0.is_none());
         assert_eq!(diffs_full[0].1.as_ref().unwrap().item_id, stack_b);
         assert_eq!(diffs_full[0].1.as_ref().unwrap().quantity, 500);
+    });
+}
+
+#[test]
+fn rollback_resurrection_monotonic_version_and_locked_pre_no_fallback_r8() {
+    let repo = WorldRepository::with_demo_seed();
+    let owner = 90_000_001_i64;
+    let ship_id = 990_778_001_i64;
+    let stack_id = 990_778_002_i64;
+    let locked_wrap_id = 990_778_003_i64;
+
+    repo.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: owner,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            stack_id,
+            InventoryItemRecord {
+                item_id: stack_id,
+                type_id: 16_274,
+                owner_id: owner,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 75_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            locked_wrap_id,
+            InventoryItemRecord {
+                item_id: locked_wrap_id,
+                type_id: 3465,
+                owner_id: owner,
+                location_id: ship_id,
+                flag: InventoryFlag::Locked,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. 3 separate reserves (`75k v1 -> 50k v2 -> 25k v3 -> deleted`) then out-of-order resurrection A (`BF-1486-2B-R8-01`).
+    let res_a = repo.with_mut_snapshot(|s| s.reserve_consume_stack_for_rollback(stack_id, 25_000).unwrap());
+    let res_b = repo.with_mut_snapshot(|s| s.reserve_consume_stack_for_rollback(stack_id, 25_000).unwrap());
+    let res_c = repo.with_mut_snapshot(|s| s.reserve_consume_stack_for_rollback(stack_id, 25_000).unwrap());
+    assert_eq!(res_c.0.version, 3);
+    assert!(repo.with_snapshot(|s| !s.items.contains_key(&stack_id)));
+
+    let resurrected_ver = repo.with_mut_snapshot(|s| {
+        let diffs = s.rollback_restore_consumed_stacks_if_exposed(&[res_a], |_, _, _| true);
+        assert_eq!(diffs.len(), 1);
+        s.items[&stack_id].version
+    });
+    assert!(
+        resurrected_ver > res_c.0.version,
+        "resurrected version ({resurrected_ver}) must stay monotonically above pre-delete version ({})",
+        res_c.0.version
+    );
+    let merged_ver = repo.with_mut_snapshot(|s| {
+        let _ = s.rollback_restore_consumed_stacks_if_exposed(&[res_b], |_, _, _| true);
+        s.items[&stack_id].version
+    });
+    assert!(merged_ver > resurrected_ver);
+    assert_eq!(repo.with_snapshot(|s| s.items[&stack_id].quantity), 50_000);
+
+    // 2. Locked/wrap `pre` must not fall through to fallback stack minting when deleted or conflicted (`P2-R8-01`).
+    repo.with_mut_snapshot(|snap| {
+        let res_locked = snap.reserve_consume_stack_for_rollback(locked_wrap_id, 40).unwrap();
+        let before_count = snap.items.len();
+        let diffs = snap.rollback_restore_consumed_stacks(&[res_locked]);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].1.as_ref().map(|e| e.quantity), Some(60));
+        assert_eq!(
+            snap.items.len(),
+            before_count,
+            "locked/wrap partial rollback must not mint an unlocked fallback stack"
+        );
+        assert_eq!(snap.items[&locked_wrap_id].quantity, 60);
+
+        let res_locked_full = snap.reserve_consume_stack_for_rollback(locked_wrap_id, 60).unwrap();
+        let before_full_count = snap.items.len();
+        let diffs_full = snap.rollback_restore_consumed_stacks(&[res_locked_full]);
+        assert_eq!(diffs_full.len(), 1);
+        assert!(diffs_full[0].1.is_none());
+        assert_eq!(
+            snap.items.len(),
+            before_full_count,
+            "locked/wrap deleted rollback must not mint an unlocked fallback stack"
+        );
     });
 }
 

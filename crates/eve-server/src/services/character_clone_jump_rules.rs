@@ -945,8 +945,8 @@ fn collect_clone_vat_bay_fuel_stacks(
         .map(|i| (i.item_id, i.flag, i.quantity))
         .collect();
     stacks.sort_by_key(|&(id, flg, _)| (if flg == InventoryFlag::SpecializedFuelBay { 0 } else { 1 }, id));
-    let have: i32 = stacks.iter().map(|x| x.2).sum();
-    if have < needed {
+    let have: i64 = stacks.iter().map(|x| i64::from(x.2)).sum();
+    if have < i64::from(needed) {
         return Err(BridgeRpcError {
             code: "NotEnoughFuel".into(),
             message: format!("Clone Vat Bay requires {needed} x type {fuel_type}, ship holds {have}"),
@@ -1033,9 +1033,15 @@ pub async fn activate_clone_vat_bay(
         prev_active_by_ship: Option<(i64, u64)>,
     }
 
-    let (reserved, pre_wal_seq) = ctx.db.try_with_mut_snapshot(
-        |s| -> Result<(ReservedCloneVatBayDb, u64), BridgeRpcError> {
-            let pre_wal_seq = s.wal_seq;
+    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
+    let (reserved, fuel_guard) = ctx.db.try_with_mut_snapshot(
+        |s| -> Result<
+            (
+                ReservedCloneVatBayDb,
+                crate::services::tactical_modules::ActiveFuelReserveGuard,
+            ),
+            BridgeRpcError,
+        > {
             let stacks = collect_clone_vat_bay_fuel_stacks(
                 s, ship_id, module_id, char_id, fuel_type, needed, now_unix,
             )?;
@@ -1054,19 +1060,18 @@ pub async fn activate_clone_vat_bay(
             }
             st.active_by_ship.insert(ship_id, (module_id, until_unix));
             save_clone_vat_bay_state(s, &st);
+            let fuel_guard = ctx
+                .active_fuel_reserves
+                .begin_reserve(db_key, consumed_items.iter().map(|(pre, _)| pre.item_id));
             Ok((
                 ReservedCloneVatBayDb {
                     consumed_items,
                     prev_active_by_ship,
                 },
-                pre_wal_seq,
+                fuel_guard,
             ))
         },
     )?;
-    ctx.clear_stale_emitted_tombstones_on_reserve(
-        pre_wal_seq,
-        reserved.consumed_items.iter().map(|(pre, _)| pre.item_id),
-    );
 
     if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::commit_module_cycle_atomic_with_notifications(
         ctx,
@@ -1092,12 +1097,12 @@ pub async fn activate_clone_vat_bay(
     )
     .await
     {
-        if let Ok(diffs) = ctx.db.tx::<Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)>, eve_db::TxError>(
+        let _ = ctx.db.tx::<(), eve_db::TxError>(
             "rollback_clone_vat_bay_reserve",
             |wtx| {
                 let diffs = wtx.snap.rollback_restore_consumed_stacks_if_exposed(
                     &reserved.consumed_items,
-                    |pre, _, restored| ctx.should_emit_item_on_exact_rollback(pre, restored),
+                    |pre, _, _| ctx.should_emit_item_on_exact_rollback(Some(&fuel_guard), pre.item_id),
                 );
                 let mut st = load_clone_vat_bay_state(wtx.snap);
                 if st.active_by_ship.get(&ship_id).copied() == Some((module_id, until_unix)) {
@@ -1118,14 +1123,10 @@ pub async fn activate_clone_vat_bay(
                     char_id,
                     &diffs,
                 );
-                Ok(diffs)
+                Ok(())
             },
-        ) {
-            if !diffs.is_empty() {
-                let wal_seq = ctx.db.with_snapshot(|s| s.wal_seq);
-                ctx.record_tx_item_diffs_emitted(wal_seq, &diffs);
-            }
-        }
+        );
+        drop(fuel_guard);
         if e.contains("CannotActivateCloaked") {
             return Err(BridgeRpcError::with_client_error(
                 "ShipCloaked",
@@ -1139,6 +1140,8 @@ pub async fn activate_clone_vat_bay(
             e,
         ));
     }
+
+    drop(fuel_guard);
 
     // Mark DB active/online states AFTER actor commit so stale-cycle reconciliation inside
     // `activate_module_cycle_atomic` cannot strip `module_active_states` during reactivation.

@@ -1844,7 +1844,7 @@ async fn cyno_exact_stack_rollback_preserves_id_and_diverged_or_destroyed_ship_r
     let cyno_mod = ctx.sde.types.get(&21_096).unwrap().clone();
     let _ = ctx.drain_notifications_for_char(char_a);
 
-    // 1. Exact full-stack warp rejection restores fuel_id in place (version + 1) with 0 OnItemChange.
+    // 1. Exact full-stack warp rejection restores fuel_id in place (monotonic version > v0) with 0 OnItemChange.
     let warp_err = super::super::light_cyno(&ctx, &sys, char_a, ship_a, lowsec, mod_a, &cyno_mod)
         .await
         .expect_err("warping ship must reject cyno and preserve exact fuel_id");
@@ -1858,7 +1858,7 @@ async fn cyno_exact_stack_rollback_preserves_id_and_diverged_or_destroyed_ship_r
     ctx.db.with_snapshot(|s| {
         let f = &s.items[&fuel_id];
         assert_eq!(f.quantity, 250);
-        assert_eq!(f.version, v0 + 1);
+        assert!(f.version > v0);
     });
     {
         let ck = super::super::ctx_key(&ctx);
@@ -1930,7 +1930,7 @@ async fn cyno_exact_stack_rollback_preserves_id_and_diverged_or_destroyed_ship_r
         snap.items.get_mut(&id).unwrap().singleton = true;
         (id, reserved)
     });
-    super::super::refund_ship_fuel_items(&ctx, char_a, &div_reserved);
+    super::super::refund_ship_fuel_items(&ctx, char_a, &div_reserved, None);
     assert_eq!(
         ctx.drain_notifications_for_char(char_a)
             .iter()
@@ -1973,7 +1973,7 @@ async fn cyno_exact_stack_rollback_preserves_id_and_diverged_or_destroyed_ship_r
         reserved
     });
     let _ = ctx.drain_notifications_for_char(char_a);
-    super::super::refund_ship_fuel_items(&ctx, char_a, &dead_reserved);
+    super::super::refund_ship_fuel_items(&ctx, char_a, &dead_reserved, None);
     ctx.db.with_snapshot(|s| {
         assert!(
             !s.items

@@ -601,8 +601,36 @@ fn refund_ship_fuel_items(
     ctx: &ServerContext,
     char_id: i64,
     consumed: &[(eve_db::InventoryItemRecord, i32)],
+    reserve_guard: Option<&crate::services::tactical_modules::ActiveFuelReserveGuard>,
 ) {
-    ctx.rollback_consumed_items_tx(char_id, consumed);
+    ctx.rollback_consumed_items_tx(char_id, consumed, reserve_guard);
+}
+
+fn consume_or_err_with_guard(
+    ctx: &ServerContext,
+    ship_id: i64,
+    type_id: TypeId,
+    qty: i64,
+    msg: impl FnOnce(i64) -> String,
+) -> Result<
+    (
+        Vec<(eve_db::InventoryItemRecord, i32)>,
+        crate::services::tactical_modules::ActiveFuelReserveGuard,
+    ),
+    BridgeRpcError,
+> {
+    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
+    ctx.db
+        .with_mut_snapshot(|snap| {
+            consume_from_ship(snap, ship_id, type_id, qty).map(|consumed| {
+                let guard = ctx.active_fuel_reserves.begin_reserve(
+                    db_key,
+                    consumed.iter().map(|(pre, _)| pre.item_id),
+                );
+                (consumed, guard)
+            })
+        })
+        .map_err(|have| err("NotEnoughFuel", msg(have)))
 }
 
 fn consume_or_err(
@@ -612,20 +640,7 @@ fn consume_or_err(
     qty: i64,
     msg: impl FnOnce(i64) -> String,
 ) -> Result<Vec<(eve_db::InventoryItemRecord, i32)>, BridgeRpcError> {
-    let (pre_wal_seq, res) = ctx.db.with_mut_snapshot(|snap| {
-        let pre_wal_seq = snap.wal_seq;
-        (pre_wal_seq, consume_from_ship(snap, ship_id, type_id, qty))
-    });
-    match res {
-        Ok(consumed) => {
-            ctx.clear_stale_emitted_tombstones_on_reserve(
-                pre_wal_seq,
-                consumed.iter().map(|(pre, _)| pre.item_id),
-            );
-            Ok(consumed)
-        }
-        Err(have) => Err(err("NotEnoughFuel", msg(have))),
-    }
+    consume_or_err_with_guard(ctx, ship_id, type_id, qty, msg).map(|(consumed, _guard)| consumed)
 }
 
 fn self_immobilizing_cycle(
@@ -821,18 +836,24 @@ async fn light_cyno(
             st.beacon_cycles.remove(&(ctx_key(ctx), ship_id));
         }
     };
-    let reserved_fuel = if fuel_qty > 0 {
-        match consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
+    let (reserved_fuel, fuel_guard) = if fuel_qty > 0 {
+        match consume_or_err_with_guard(ctx, ship_id, fuel_type, fuel_qty, |have| {
             format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}")
         }) {
-            Ok(consumed) => consumed,
+            Ok(res) => res,
             Err(e) => {
                 clear_cyno_claim();
                 return Err(e);
             }
         }
     } else {
-        Vec::new()
+        (
+            Vec::new(),
+            ctx.active_fuel_reserves.begin_reserve(
+                crate::services::tactical_modules::db_ptr_key(&ctx.db),
+                std::iter::empty(),
+            ),
+        )
     };
     let mut cycle = self_immobilizing_cycle(
         ship_id,
@@ -858,7 +879,8 @@ async fn light_cyno(
     .await
     {
         clear_cyno_claim();
-        refund_ship_fuel_items(ctx, char_id, &reserved_fuel);
+        refund_ship_fuel_items(ctx, char_id, &reserved_fuel, Some(&fuel_guard));
+        drop(fuel_guard);
         let code = if e.contains("ModuleAlreadyActive") {
             "ModuleAlreadyActive"
         } else if e.contains("CantActivateInWarp") {
@@ -872,6 +894,7 @@ async fn light_cyno(
         };
         return Err(err(code, e));
     }
+    drop(fuel_guard);
     cyno_state()
         .write()
         .unwrap_or_else(|e| e.into_inner())

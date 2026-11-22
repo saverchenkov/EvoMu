@@ -2111,7 +2111,10 @@ impl WorldStateSnapshot {
                     if let Some(entry) = self.items.get_mut(&pre.item_id) {
                         if let Some(new_qty) = entry.quantity.checked_add(*take) {
                             entry.quantity = new_qty;
-                            entry.version = entry.version.saturating_add(1);
+                            entry.version = entry
+                                .version
+                                .saturating_add(1)
+                                .max(self.wal_seq.saturating_add(1));
                             let post = entry.clone();
                             let same_identity_state = post.owner_id == pre.owner_id
                                 && post.location_id == pre.location_id
@@ -2138,7 +2141,10 @@ impl WorldStateSnapshot {
             {
                 let mut restored = pre.clone();
                 restored.quantity = *take;
-                restored.version = pre.version.saturating_add(1);
+                restored.version = pre
+                    .version
+                    .saturating_add(1)
+                    .max(self.wal_seq.saturating_add(1));
                 self.items.insert(pre.item_id, restored.clone());
                 if *take != pre.quantity || should_emit_exact(pre, None, &restored) {
                     diffs.push((None, Some(restored)));
@@ -2148,7 +2154,7 @@ impl WorldStateSnapshot {
                 diffs.push((Some(pre.clone()), None));
             }
 
-            if dest_locked || pre.singleton {
+            if dest_locked || pre.singleton || Self::has_locked_flag_or_wrap_type(pre) {
                 continue;
             }
 

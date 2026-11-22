@@ -160,6 +160,7 @@ type SuperweaponFuelReserve = (
     Vec<(eve_db::InventoryFlag, i32)>,
     Vec<(eve_db::InventoryItemRecord, i32)>,
     Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)>,
+    crate::services::tactical_modules::ActiveFuelReserveGuard,
 );
 
 fn deduct_superweapon_fuel_with_diffs(
@@ -169,13 +170,19 @@ fn deduct_superweapon_fuel_with_diffs(
     fuel_qty: i32,
     kind: &str,
 ) -> Result<SuperweaponFuelReserve, BridgeRpcError> {
+    let db_key = db_key_of(ctx);
     if fuel_qty <= 0 {
-        return Ok((0, Vec::new(), Vec::new(), Vec::new()));
+        return Ok((
+            0,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            ctx.active_fuel_reserves
+                .begin_reserve(db_key, std::iter::empty()),
+        ));
     }
-    let (res, pre_wal_seq) = ctx
-        .db
+    ctx.db
         .try_with_mut_snapshot(|snap| {
-            let pre_wal_seq = snap.wal_seq;
             let stacks = collect_superweapon_fuel_stacks(snap, ship_id, fuel_tid);
             let total_avail: i64 = stacks.iter().map(|&(_, _, _, q)| i64::from(q)).sum();
             if total_avail < i64::from(fuel_qty) {
@@ -224,21 +231,22 @@ fn deduct_superweapon_fuel_with_diffs(
                 let _ = snap.rollback_restore_consumed_stacks(&reserved_stacks);
                 return Err(format!("Insufficient {kind} fuel (type {fuel_tid})"));
             }
+            let guard = ctx
+                .active_fuel_reserves
+                .begin_reserve(db_key, reserved_stacks.iter().map(|(pre, _)| pre.item_id));
             Ok((
-                (fuel_qty, consumed_by_flag, reserved_stacks, item_diffs),
-                pre_wal_seq,
+                fuel_qty,
+                consumed_by_flag,
+                reserved_stacks,
+                item_diffs,
+                guard,
             ))
         })
         .map_err(|message| BridgeRpcError {
             code: "InsufficientFuel".into(),
             message,
             client_error: None,
-        })?;
-    ctx.clear_stale_emitted_tombstones_on_reserve(
-        pre_wal_seq,
-        res.2.iter().map(|(pre, _)| pre.item_id),
-    );
-    Ok(res)
+        })
 }
 
 struct InFlightSuperweaponGuard<'a> {
@@ -261,6 +269,7 @@ fn emit_superweapon_fuel_item_diffs(
     ctx: &ServerContext,
     char_id: i64,
     item_diffs: &[(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)],
+    _fuel_guard: crate::services::tactical_modules::ActiveFuelReserveGuard,
 ) {
     if item_diffs.is_empty() {
         return;
@@ -305,8 +314,9 @@ fn refund_superweapon_fuel_reserved(
     ctx: &ServerContext,
     char_id: i64,
     reserved: &[(eve_db::InventoryItemRecord, i32)],
+    fuel_guard: crate::services::tactical_modules::ActiveFuelReserveGuard,
 ) {
-    ctx.rollback_consumed_items_tx(char_id, reserved);
+    ctx.rollback_consumed_items_tx(char_id, reserved, Some(&fuel_guard));
 }
 
 #[cfg(test)]
@@ -318,9 +328,9 @@ fn deduct_superweapon_fuel(
     fuel_qty: i32,
     kind: &str,
 ) -> Result<(i32, Vec<(eve_db::InventoryFlag, i32)>), BridgeRpcError> {
-    let (consumed_total, consumed_by_flag, _reserved, item_diffs) =
+    let (consumed_total, consumed_by_flag, _reserved, item_diffs, fuel_guard) =
         deduct_superweapon_fuel_with_diffs(ctx, ship_id, fuel_tid, fuel_qty, kind)?;
-    emit_superweapon_fuel_item_diffs(ctx, char_id, &item_diffs);
+    emit_superweapon_fuel_item_diffs(ctx, char_id, &item_diffs, fuel_guard);
     Ok((consumed_total, consumed_by_flag))
 }
 
@@ -669,7 +679,6 @@ async fn activate_superweapon_with_args_inner(
     }
 
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let now_unix = ctx.now_unix_secs();
 
     if is_lancer {
         if !has_active_siege {
@@ -776,6 +785,7 @@ async fn activate_superweapon_with_args_inner(
         let caster_lock_secs = (mod_type.default_attributes.get(&73).copied().unwrap_or(300_000.0) / 1_000.0).round() as u64;
 
         // Validate Crimewatch safety across ALL eligible cone targets BEFORE deducting isotopes or draining capacitor (`#478`).
+        let now_unix = ctx.now_unix_secs();
         let _ = crate::services::r6_t1_p0_helpers::collect_and_precheck_lancer_cone_targets(
             ctx,
             &sys,
@@ -791,6 +801,8 @@ async fn activate_superweapon_with_args_inner(
         )
         .await?;
 
+        // Re-read wall clock after async prechecks so `lance_caster_lock_until` is never stale (`P2-R8-04`).
+        let now_unix = ctx.now_unix_secs();
         let db_key = db_key_of(ctx);
         let new_lock_until = now_unix + caster_lock_secs;
         let prev_lance_lock = {
@@ -822,7 +834,7 @@ async fn activate_superweapon_with_args_inner(
             }
         };
 
-        let (consumed_fuel, _consumed_stacks, fuel_reserved, fuel_diffs) =
+        let (consumed_fuel, _consumed_stacks, fuel_reserved, fuel_diffs, fuel_guard) =
             match deduct_superweapon_fuel_with_diffs(ctx, ship_id, lance_fuel_tid, lance_fuel_qty, "lance") {
                 Ok(res) => res,
                 Err(err) => {
@@ -842,11 +854,12 @@ async fn activate_superweapon_with_args_inner(
         )
         .await
         {
-            refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved);
+            refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved, fuel_guard);
             restore_lance_lock();
             return Err(err);
         }
 
+        let now_unix = ctx.now_unix_secs();
         let hit_targets = match crate::services::r6_t1_p0_helpers::execute_lancer_beam_attack(
             ctx,
             &sys,
@@ -871,14 +884,15 @@ async fn activate_superweapon_with_args_inner(
             Ok(hits) => hits,
             Err(err) => {
                 restore_lance_lock();
-                refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved);
+                refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved, fuel_guard);
                 if lancer_cap_cost > 0.0 {
                     let _ = sys.add_capacitor_clamped(ship_id, lancer_cap_cost).await;
                 }
                 return Err(err);
             }
         };
-        emit_superweapon_fuel_item_diffs(ctx, char_id, &fuel_diffs);
+        emit_superweapon_fuel_item_diffs(ctx, char_id, &fuel_diffs, fuel_guard);
+        let now_unix = ctx.now_unix_secs();
         {
             let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
             for &vid in &hit_targets {
@@ -980,6 +994,7 @@ async fn activate_superweapon_with_args_inner(
                 return Err(BridgeRpcError::user_error("TargetInvulnerable"));
             }
         }
+        let now_unix = ctx.now_unix_secs();
         if crate::services::space_destiny::is_location_change_invulnerable(ctx, tid, now_unix) {
             return Err(BridgeRpcError::user_error("TargetInvulnerable"));
         }
@@ -1118,7 +1133,8 @@ async fn activate_superweapon_with_args_inner(
         )));
     }
 
-    let (consumed_fuel, _consumed_stacks, fuel_reserved, fuel_diffs) =
+    let now_unix = ctx.now_unix_secs();
+    let (consumed_fuel, _consumed_stacks, fuel_reserved, fuel_diffs, fuel_guard) =
         deduct_superweapon_fuel_with_diffs(ctx, ship_id, fuel_tid, fuel_qty, "superweapon")?;
     let dd_cap_cycle_need = if dd_cur_cap_opt.is_some() { dd_cap_cost } else { 0.0 };
 
@@ -1165,10 +1181,11 @@ async fn activate_superweapon_with_args_inner(
         )
         .await
         {
-            refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved);
+            refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved, fuel_guard);
             return Err(err);
         }
-        emit_superweapon_fuel_item_diffs(ctx, char_id, &fuel_diffs);
+        emit_superweapon_fuel_item_diffs(ctx, char_id, &fuel_diffs, fuel_guard);
+        let now_unix = ctx.now_unix_secs();
         ctx.tactical_state
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -1198,9 +1215,10 @@ async fn activate_superweapon_with_args_inner(
         )
         .await
         {
-            refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved);
+            refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved, fuel_guard);
             return Err(err);
         }
+        let now_unix = ctx.now_unix_secs();
         let (app, destroyed) =
             match crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
                 ctx, &sys, sys_id, char_id, tb.id, dmg_vec, 10.0, now_unix,
@@ -1213,11 +1231,12 @@ async fn activate_superweapon_with_args_inner(
                     if dd_cap_cycle_need > 0.0 {
                         let _ = sys.add_capacitor_clamped(ship_id, dd_cap_cycle_need).await;
                     }
-                    refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved);
+                    refund_superweapon_fuel_reserved(ctx, char_id, &fuel_reserved, fuel_guard);
                     return Err(err);
                 }
             };
-        emit_superweapon_fuel_item_diffs(ctx, char_id, &fuel_diffs);
+        emit_superweapon_fuel_item_diffs(ctx, char_id, &fuel_diffs, fuel_guard);
+        let now_unix = ctx.now_unix_secs();
         ctx.tactical_state
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -1255,6 +1274,7 @@ async fn activate_superweapon_with_args_inner(
         hit_targets.push(tb.id);
     }
 
+    let now_unix = ctx.now_unix_secs();
     ctx.crimewatch
         .write()
         .unwrap_or_else(|e| e.into_inner())

@@ -229,6 +229,8 @@ fn dispatch_tx_effects(
     now_ft: i64,
     commit_epoch: u64,
     staging_scope_id: Option<u64>,
+    active_fuel_reserves: &crate::services::tactical_modules::ActiveFuelReserveTracker,
+    db_key: usize,
 ) -> (EmittedEffectKeys, Vec<ProjectedAccountRecord>) {
     let mut emitted_effects = EmittedEffectKeys::default();
     let mut records = Vec::new();
@@ -239,6 +241,7 @@ fn dispatch_tx_effects(
         if recipients.is_empty() {
             continue;
         }
+        active_fuel_reserves.observe_pre_emit_event(db_key, &effect.event, &effect.args);
         let is_account_change = effect.event == "OnAccountChange";
         let fields_opt = if is_account_change {
             extract_account_change_fields(&effect.args)
@@ -359,6 +362,8 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
     let notify_tx = ctx.notify_tx.clone();
     let sde = Arc::clone(&ctx.sde);
     let switches = Arc::clone(&ctx.projected_item_switches);
+    let active_fuel_reserves = Arc::clone(&ctx.active_fuel_reserves);
+    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
 
     ctx.db.register_post_commit_listener(Arc::new(
         move |snap, changes, effects| {
@@ -385,6 +390,8 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                     now_ft,
                     commit_epoch,
                     staging_scope_id,
+                    &active_fuel_reserves,
+                    db_key,
                 )
             };
 
@@ -455,6 +462,11 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 if !specs.is_empty() {
                     let mut item_notifs = Vec::with_capacity(specs.len());
                     for spec in specs {
+                        active_fuel_reserves.observe_pre_emit_event(
+                            db_key,
+                            "OnItemChange",
+                            &spec.args,
+                        );
                         switched_projected_keys.insert((spec.recipient_char_id, spec.item_id));
                         item_notifs.push(assemble_pending_notification(
                             spec.recipient_char_id,
@@ -839,142 +851,56 @@ impl ServerContext {
         )
     }
 
-    fn set_client_emitted_item_state(
-        st: &mut crate::services::tactical_modules::TacticalModulesState,
-        db_key: usize,
-        wal_seq: u64,
-        item: &eve_db::InventoryItemRecord,
-    ) {
-        use crate::services::tactical_modules::ClientEmittedItemState;
-        let state = if item.location_id == 6 {
-            ClientEmittedItemState::Tombstone { emit_wal_seq: wal_seq }
-        } else {
-            ClientEmittedItemState::Live {
-                version: item.version,
-                owner_id: item.owner_id,
-                location_id: item.location_id,
-                flag: item.flag,
-                quantity: item.quantity,
-                singleton: item.singleton,
-            }
-        };
-        st.client_emitted_items.insert((db_key, item.item_id), state);
-    }
-
-    pub(crate) fn record_client_emitted_item(&self, item: &eve_db::InventoryItemRecord) {
-        let wal_seq = self.db.with_snapshot(|s| s.wal_seq);
-        let db_key = crate::services::tactical_modules::db_ptr_key(&self.db);
-        let mut st = self.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        Self::set_client_emitted_item_state(&mut st, db_key, wal_seq, item);
-    }
-
-    pub(crate) fn record_tx_item_diffs_emitted(
+    pub(crate) fn observe_active_fuel_emit(
         &self,
-        wal_seq: u64,
-        diffs: &[(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)],
+        recipients: &[(i64, Option<u64>)],
+        event: &str,
+        payload_args: &[PyRep],
     ) {
-        use crate::services::tactical_modules::ClientEmittedItemState;
-        let db_key = crate::services::tactical_modules::db_ptr_key(&self.db);
-        let mut st = self.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        for (pre_opt, post_opt) in diffs {
-            match (pre_opt.as_ref(), post_opt.as_ref()) {
-                (_, Some(post)) if pre_opt.as_ref() != Some(post) => {
-                    Self::set_client_emitted_item_state(&mut st, db_key, wal_seq, post);
-                }
-                (Some(pre), None) => {
-                    st.client_emitted_items.insert(
-                        (db_key, pre.item_id),
-                        ClientEmittedItemState::Tombstone { emit_wal_seq: wal_seq },
-                    );
-                }
-                _ => {}
-            }
+        if recipients.is_empty() {
+            return;
         }
-    }
-
-    pub(crate) fn clear_stale_emitted_tombstones_on_reserve(
-        &self,
-        pre_reserve_wal_seq: u64,
-        item_ids: impl IntoIterator<Item = i64>,
-    ) {
-        use crate::services::tactical_modules::ClientEmittedItemState;
-        let db_key = crate::services::tactical_modules::db_ptr_key(&self.db);
-        let mut st = self.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        for item_id in item_ids {
-            if matches!(
-                st.client_emitted_items.get(&(db_key, item_id)),
-                Some(ClientEmittedItemState::Tombstone { emit_wal_seq })
-                    if pre_reserve_wal_seq > *emit_wal_seq
-            ) {
-                st.client_emitted_items.remove(&(db_key, item_id));
-            }
-        }
+        self.active_fuel_reserves.observe_pre_emit_event(
+            crate::services::tactical_modules::db_ptr_key(&self.db),
+            event,
+            payload_args,
+        );
     }
 
     pub(crate) fn should_emit_item_on_exact_rollback(
         &self,
-        pre: &eve_db::InventoryItemRecord,
-        restored: &eve_db::InventoryItemRecord,
+        reserve_guard: Option<&crate::services::tactical_modules::ActiveFuelReserveGuard>,
+        item_id: i64,
     ) -> bool {
-        use crate::services::tactical_modules::ClientEmittedItemState;
-        let db_key = crate::services::tactical_modules::db_ptr_key(&self.db);
-        let st = self.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-        match st.client_emitted_items.get(&(db_key, pre.item_id)) {
-            None => false,
-            Some(ClientEmittedItemState::Tombstone { .. }) => true,
-            Some(ClientEmittedItemState::Live {
-                version: emit_ver,
-                owner_id,
-                location_id,
-                flag,
-                quantity,
-                singleton,
-            }) => {
-                pre.version < *emit_ver
-                    && (*owner_id != restored.owner_id
-                        || *location_id != restored.location_id
-                        || *flag != restored.flag
-                        || *quantity != restored.quantity
-                        || *singleton != restored.singleton)
-            }
-        }
+        reserve_guard
+            .is_some_and(|guard| self.active_fuel_reserves.has_exposed_since(guard, item_id))
     }
 
     /// Restores previously reserved stack quantities inside an atomic `WorldRepository::tx`
     /// and queues `#931` `TxNotificationEffect`s (`OnItemChange` / `OnBlueprintsUpdated`) for any
-    /// diverged or orphaned stacks (`#1486`, `#931`).
+    /// diverged, orphaned, or externally-exposed stacks (`#1486`, `#931`).
     pub fn rollback_consumed_items_tx(
         &self,
         fallback_char_id: i64,
         reserved: &[(eve_db::InventoryItemRecord, i32)],
+        reserve_guard: Option<&crate::services::tactical_modules::ActiveFuelReserveGuard>,
     ) {
         if reserved.is_empty() {
             return;
         }
-        if let Ok(diffs) = self
-            .db
-            .tx::<Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)>, eve_db::TxError>(
-                "rollback_consumed_items",
-                |wtx| {
-                    let diffs = wtx.snap.rollback_restore_consumed_stacks_if_exposed(
-                        reserved,
-                        |pre, _, restored| self.should_emit_item_on_exact_rollback(pre, restored),
-                    );
-                    super::delta_projection::push_item_diffs_tx_effects(
-                        wtx.snap,
-                        wtx.effects,
-                        &self.sde,
-                        fallback_char_id,
-                        &diffs,
-                    );
-                    Ok(diffs)
-                },
-            )
-        {
-            if !diffs.is_empty() {
-                let wal_seq = self.db.with_snapshot(|s| s.wal_seq);
-                self.record_tx_item_diffs_emitted(wal_seq, &diffs);
-            }
-        }
+        let _ = self.db.tx::<(), eve_db::TxError>("rollback_consumed_items", |wtx| {
+            let diffs = wtx.snap.rollback_restore_consumed_stacks_if_exposed(
+                reserved,
+                |pre, _, _| self.should_emit_item_on_exact_rollback(reserve_guard, pre.item_id),
+            );
+            super::delta_projection::push_item_diffs_tx_effects(
+                wtx.snap,
+                wtx.effects,
+                &self.sde,
+                fallback_char_id,
+                &diffs,
+            );
+            Ok(())
+        });
     }
 }

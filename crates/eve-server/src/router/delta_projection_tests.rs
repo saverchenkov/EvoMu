@@ -1564,7 +1564,7 @@ fn concurrent_cross_owner_fuel_rollback_never_notifies_unrelated_new_owner_r7_02
     let shadow_b = ShadowClient::from_world(char_b, &ctx.db, Some(&ctx.sde));
     let _ = ctx.drain_notifications_for_char(char_b);
 
-    ctx.rollback_consumed_items_tx(char_a, &[reserved]);
+    ctx.rollback_consumed_items_tx(char_a, &[reserved], None);
 
     let notifs_b = ctx.drain_notifications_for_char(char_b);
     assert!(

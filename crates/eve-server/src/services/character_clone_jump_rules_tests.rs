@@ -1808,7 +1808,7 @@ async fn clone_vat_bay_exact_stack_preserves_id_ship_not_in_space_and_claim_guar
         .acquire_online_lock(host_uid, 999_601, Some(host_cid), true, ctx.now_unix())
         .unwrap();
 
-    // 1. P2-4 + F1486-2B-R5-01: absent ball fails with ShipNotInSpace, restores exact fuel_id (version + 1) with 0 OnItemChange.
+    // 1. P2-4 + F1486-2B-R5-01: absent ball fails with ShipNotInSpace, restores exact fuel_id (monotonic version > v0) with 0 OnItemChange.
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     sys_h
         .spawn_ball_with_meta(
@@ -1851,7 +1851,7 @@ async fn clone_vat_bay_exact_stack_preserves_id_ship_not_in_space_and_claim_guar
     ctx.db.with_snapshot(|s| {
         let f = &s.items[&fuel_id];
         assert_eq!(f.quantity, 250);
-        assert_eq!(f.version, v0 + 1);
+        assert!(f.version > v0);
         assert!(load_clone_vat_bay_state(s).active_by_ship.get(&titan_id).is_none());
         assert!(!s.module_active_states.contains(&vat_id));
     });

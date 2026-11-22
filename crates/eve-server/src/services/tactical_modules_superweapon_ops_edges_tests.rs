@@ -1380,22 +1380,22 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
     let mut shadow_2x = ShadowClient::from_world(char_id, &ctx.db, Some(&ctx.sde));
     let _ = ctx.drain_notifications_for_char(char_id);
 
-    let (_, _, _res_a, diffs_a) =
+    let (_, _, _res_a, diffs_a, guard_a) =
         deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
             .expect("call A reserve 25k");
-    let (_, _, res_b, _diffs_b) =
+    let (_, _, res_b, _diffs_b, guard_b) =
         deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
             .expect("call B reserve remaining 25k");
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&fuel_2x)));
 
-    emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs_a);
+    emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs_a, guard_a);
     let commit_a_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(commit_a_notifs.iter().any(|n| n.event == "OnItemChange"));
     for n in commit_a_notifs {
         shadow_2x.apply_notification(&n.event, &n.args);
     }
 
-    refund_superweapon_fuel_reserved(&ctx, char_id, &res_b);
+    refund_superweapon_fuel_reserved(&ctx, char_id, &res_b, guard_b);
     let rollback_b_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
         rollback_b_notifs.iter().any(|n| n.event == "OnItemChange"),
@@ -1408,10 +1408,10 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
     shadow_2x.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
 
     // Subsequent single-caller reserve + rollback must remain silent (0 OnItemChange).
-    let (_, _, res_solo, _) =
+    let (_, _, res_solo, _, guard_solo) =
         deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
             .expect("solo reserve 25k");
-    refund_superweapon_fuel_reserved(&ctx, char_id, &res_solo);
+    refund_superweapon_fuel_reserved(&ctx, char_id, &res_solo, guard_solo);
     assert!(
         ctx.drain_notifications_for_char(char_id)
             .iter()
@@ -1445,34 +1445,39 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
         shadow_2x.apply_notification(&n.event, &n.args);
     }
 
-    let (_, _, _res_3a, diffs_3a) =
+    let (_, _, _res_3a, diffs_3a, guard_3a) =
         deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
             .expect("3x call A reserve 25k");
-    let (_, _, _res_3b, _diffs_3b) =
+    let (_, _, _res_3b, _diffs_3b, guard_3b) =
         deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
             .expect("3x call B reserve 25k");
-    let res_3c_clone_vat = ctx.db.with_mut_snapshot(|snap| {
-        snap.reserve_consume_stack_for_rollback(fuel_3x, 10_000)
-            .expect("3x call C clone vat / cyno reserve 10k")
+    let (res_3c_clone_vat, guard_3c) = ctx.db.with_mut_snapshot(|snap| {
+        let res = snap
+            .reserve_consume_stack_for_rollback(fuel_3x, 10_000)
+            .expect("3x call C clone vat / cyno reserve 10k");
+        let guard = ctx
+            .active_fuel_reserves
+            .begin_reserve(db_key_of(&ctx), [res.0.item_id]);
+        (res, guard)
     });
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_3x].quantity), 15_000);
 
     // Call A emits live 15k to client before C and B roll back out of order.
-    emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs_3a);
+    emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs_3a, guard_3a);
     for n in ctx.drain_notifications_for_char(char_id) {
         shadow_2x.apply_notification(&n.event, &n.args);
     }
     shadow_2x.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
 
     // Rollback C via the Clone Vat Bay tx rollback pattern (`rollback_restore_consumed_stacks_if_exposed` + `push_item_diffs_tx_effects`).
-    let diffs_c = ctx
+    let _diffs_c = ctx
         .db
         .tx::<Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)>, eve_db::TxError>(
             "test_clone_vat_overlap_rollback",
             |wtx| {
                 let diffs = wtx.snap.rollback_restore_consumed_stacks_if_exposed(
                     &[res_3c_clone_vat],
-                    |pre, _, restored| ctx.should_emit_item_on_exact_rollback(pre, restored),
+                    |pre, _, _| ctx.should_emit_item_on_exact_rollback(Some(&guard_3c), pre.item_id),
                 );
                 crate::router::delta_projection::push_item_diffs_tx_effects(
                     wtx.snap,
@@ -1485,8 +1490,7 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
             },
         )
         .unwrap();
-    let wal_c = ctx.db.with_snapshot(|s| s.wal_seq);
-    ctx.record_tx_item_diffs_emitted(wal_c, &diffs_c);
+    drop(guard_3c);
     for n in ctx.drain_notifications_for_char(char_id) {
         shadow_2x.apply_notification(&n.event, &n.args);
     }
@@ -1494,7 +1498,7 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
     shadow_2x.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
 
     // Now B rolls back (`25k + 25k == 50k == pre_3b.quantity`, so `same_identity_state` is true!).
-    refund_superweapon_fuel_reserved(&ctx, char_id, &_res_3b);
+    refund_superweapon_fuel_reserved(&ctx, char_id, &_res_3b, guard_3b);
     let rollback_3b_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
         rollback_3b_notifs.iter().any(|n| n.event == "OnItemChange"),
@@ -1505,6 +1509,8 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_3x].quantity), 50_000);
     shadow_2x.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
 }
 
 #[tokio::test]
@@ -1798,9 +1804,9 @@ async fn superweapon_concurrent_lancer_fob_precheck_and_reserved_fuel_f01_f05() 
     // 3. Superweapon fuel reservation rollback mints clean stack when source stack locks/moves (F-01) and emits OnItemChange diffs (F1486-2B-R5-01).
     let _ = ctx.db.acquire_online_lock(1, 1, Some(f.char_id), true, ctx.now_unix());
     let _ = ctx.drain_notifications_for_char(f.char_id);
-    let (_, _, reserved, _) = deduct_superweapon_fuel_with_diffs(&ctx, f.titan_id, 16_274, 100, "superweapon").unwrap();
+    let (_, _, reserved, _, guard) = deduct_superweapon_fuel_with_diffs(&ctx, f.titan_id, 16_274, 100, "superweapon").unwrap();
     ctx.db.with_mut_snapshot(|snap| { snap.items.get_mut(&f.titan_fuel).unwrap().flag = InventoryFlag::Locked; });
-    refund_superweapon_fuel_reserved(&ctx, f.char_id, &reserved);
+    refund_superweapon_fuel_reserved(&ctx, f.char_id, &reserved, guard);
     let (lq, tq) = ctx.db.with_snapshot(|s| (s.items[&f.titan_fuel].quantity, s.items.values().filter(|i| i.location_id == f.titan_id && i.type_id == 16_274).map(|i| i.quantity).sum::<i32>()));
     assert_eq!((lq, tq), (400, 500));
     let diverged_notifs = ctx.drain_notifications_for_char(f.char_id);
@@ -1817,10 +1823,10 @@ async fn superweapon_overlapping_reserve_rollback_and_deferred_emit_bf1486_2b_r6
     let _ = ctx.drain_notifications_for_char(f.char_id);
 
     // 1. Call A reserves 25_000 (50_000 -> 25_000); Call B reserves remaining 25_000 (25_000 -> None).
-    let (_, _, res_a, _) =
+    let (_, _, res_a, _, guard_a) =
         deduct_superweapon_fuel_with_diffs(&ctx, f.titan_id, 16_274, 25_000, "superweapon")
             .unwrap();
-    let (_, _, res_b, diffs_b) =
+    let (_, _, _res_b, diffs_b, guard_b) =
         deduct_superweapon_fuel_with_diffs(&ctx, f.titan_id, 16_274, 25_000, "superweapon")
             .unwrap();
     assert_eq!(diffs_b.len(), 1);
@@ -1830,12 +1836,12 @@ async fn superweapon_overlapping_reserve_rollback_and_deferred_emit_bf1486_2b_r6
     );
 
     // 2. Call A fails pre-commit and rolls back 25_000; Call B succeeds and emits deferred diffs.
-    refund_superweapon_fuel_reserved(&ctx, f.char_id, &res_a);
+    refund_superweapon_fuel_reserved(&ctx, f.char_id, &res_a, guard_a);
     assert_eq!(
         ctx.db.with_snapshot(|s| s.items[&f.titan_fuel].quantity),
         25_000
     );
-    emit_superweapon_fuel_item_diffs(&ctx, f.char_id, &diffs_b);
+    emit_superweapon_fuel_item_diffs(&ctx, f.char_id, &diffs_b, guard_b);
 
     // 3. Authoritative DB stays 25_000, ZERO locJunkyard tombstones emitted, and client syncs to live 25_000.
     assert_eq!(
@@ -1871,6 +1877,168 @@ async fn superweapon_overlapping_reserve_rollback_and_deferred_emit_bf1486_2b_r6
     assert_eq!(col_i64(&last.args[0], "itemID"), Some(f.titan_fuel));
     assert_eq!(col_i64(&last.args[0], "locationID"), Some(f.titan_id));
     assert_eq!(col_i64(&last.args[0], "quantity"), Some(25_000));
-    drop(res_b);
+    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+}
+
+#[tokio::test]
+async fn superweapon_3way_depletion_resurrection_and_tx_effect_converges_bf1486_2b_r8() {
+    use eve_testkit::shadow_client::ShadowClient;
+
+    let ctx = test_ctx();
+    let null_sys = find_nullsec_sys(&ctx.sde);
+    let char_id = 90_000_001_i64;
+    let titan_id = 100_826_001_i64;
+    let mod_id = 100_826_002_i64;
+    let fuel_id = 100_826_010_i64;
+    let unrelated_id = 100_826_011_i64;
+    let titan_tid = find_titan_type_id(&ctx.sde);
+    let dd_tid = find_doomsday_type_id(&ctx.sde);
+
+    setup_ship_and_module(&ctx, null_sys, char_id, titan_id, titan_tid, mod_id, dd_tid, DVec3::ZERO);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
+
+    let (initial_fuel, unrelated_pre, unrelated_post) = ctx.db.with_mut_snapshot(|snap| {
+        let fuel = InventoryItemRecord {
+            item_id: fuel_id,
+            type_id: 16_274,
+            owner_id: char_id,
+            location_id: titan_id,
+            flag: InventoryFlag::SpecializedFuelBay,
+            quantity: 75_000,
+            singleton: false,
+            version: 1,
+            ..Default::default()
+        };
+        let mut unrel = InventoryItemRecord {
+            item_id: unrelated_id,
+            type_id: 34,
+            owner_id: char_id,
+            location_id: titan_id,
+            flag: InventoryFlag::Cargo,
+            quantity: 100,
+            singleton: false,
+            version: 1,
+            ..Default::default()
+        };
+        snap.items.insert(fuel_id, fuel.clone());
+        snap.items.insert(unrelated_id, unrel.clone());
+        let pre = unrel.clone();
+        unrel.quantity = 90;
+        unrel.version = 2;
+        snap.items.insert(unrelated_id, unrel.clone());
+        (fuel, pre, unrel)
+    });
+
+    let mut shadow = ShadowClient::from_world(char_id, &ctx.db, Some(&ctx.sde));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. BF-1486-2B-R8-02: Non-reserve OnItemChange leaves ActiveFuelReserveTracker completely empty.
+    ctx.notify_item_mutation(char_id, Some(&unrelated_pre), Some(&unrelated_post));
+    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+    for n in ctx.drain_notifications_for_char(char_id) {
+        shadow.apply_notification(&n.event, &n.args);
+    }
+    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+
+    // 2. BF-1486-2B-R8-01 exact 3-way repro:
+    //    X starts {qty: 75k, v: 1} -> A reserves 25k ({50k, v: 2}) -> B reserves 25k ({25k, v: 3}) -> C reserves 25k (deleted).
+    let (_, _, res_a, _diffs_a, guard_a) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+            .expect("call A reserve 25k");
+    assert_eq!(res_a[0].0.version, initial_fuel.version);
+
+    let (_, _, res_b, _diffs_b, guard_b) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+            .expect("call B reserve 25k");
+    assert_eq!(res_b[0].0.version, 2);
+
+    let (_, _, res_c, diffs_c, guard_c) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+            .expect("call C reserve 25k");
+    assert_eq!(res_c[0].0.version, 3);
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&fuel_id)));
+    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 1);
+    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 3);
+
+    // Caller C commits and emits tombstone to client.
+    emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs_c, guard_c);
+    for n in ctx.drain_notifications_for_char(char_id) {
+        shadow.apply_notification(&n.event, &n.args);
+    }
+    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 2);
+
+    // Caller A rolls back (resurrects 25_000 with monotonic version > 3, not regressing to 2).
+    refund_superweapon_fuel_reserved(&ctx, char_id, &res_a, guard_a);
+    let resurrected_ver = ctx.db.with_snapshot(|s| s.items[&fuel_id].version);
+    assert!(
+        resurrected_ver > res_c[0].0.version,
+        "resurrected version ({resurrected_ver}) must be > pre-delete version ({})",
+        res_c[0].0.version
+    );
+    for n in ctx.drain_notifications_for_char(char_id) {
+        shadow.apply_notification(&n.event, &n.args);
+    }
+    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 1);
+
+    // Caller B rolls back (25k + 25k == 50k == pre_b.quantity, so same_identity_state == true).
+    // Tracker sees exposed_seq > reserve_seq and emits 50_000 convergence OnItemChange!
+    refund_superweapon_fuel_reserved(&ctx, char_id, &res_b, guard_b);
+    let rollback_b_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        rollback_b_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "3-way commit-before-rollback must emit 50k convergence OnItemChange for Caller B"
+    );
+    for n in rollback_b_notifs {
+        shadow.apply_notification(&n.event, &n.args);
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 50_000);
+    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+
+    // 3. #931 dispatch_tx_effects OnItemChange interleaved during silent reserve forces convergence OnItemChange on rollback.
+    let (_, _, res_d, _diffs_d, guard_d) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 10_000, "superweapon")
+            .expect("call D reserve 10k");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 40_000);
+    ctx.db
+        .tx::<(), eve_db::TxError>("test_interleaved_931_item_change", |wtx| {
+            let live = wtx.snap.items[&fuel_id].clone();
+            let exposed_prev = InventoryItemRecord {
+                quantity: live.quantity + 10_000,
+                ..live.clone()
+            };
+            crate::router::delta_projection::push_item_diffs_tx_effects(
+                wtx.snap,
+                wtx.effects,
+                &ctx.sde,
+                char_id,
+                &[(Some(exposed_prev), Some(live))],
+            );
+            Ok(())
+        })
+        .unwrap();
+    for n in ctx.drain_notifications_for_char(char_id) {
+        shadow.apply_notification(&n.event, &n.args);
+    }
+    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+
+    refund_superweapon_fuel_reserved(&ctx, char_id, &res_d, guard_d);
+    let rollback_d_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        rollback_d_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "interleaved #931 OnItemChange during reserve must trigger convergence OnItemChange on exact rollback"
+    );
+    for n in rollback_d_notifs {
+        shadow.apply_notification(&n.event, &n.args);
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 50_000);
+    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
 }
 
