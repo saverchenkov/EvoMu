@@ -1,0 +1,387 @@
+{
+  "schema_version": 1,
+  "description": "Deterministic post-parse classification overrides for EVE Wiki PvE importer long-tail entries (zero wiki prose).",
+  "entries": {
+    "Break Their Will (Angel Cartel) (Level 1)#1": {
+      "notes": "repair_station_objective",
+      "objective": {
+        "kind": "destroy_structure",
+        "classification_state": "explicit",
+        "target_name": "repair station"
+      }
+    },
+    "Break Their Will (Angel Cartel) (Level 3)#1": {
+      "notes": "repair_station_objective",
+      "objective": {
+        "kind": "destroy_structure",
+        "classification_state": "explicit",
+        "target_name": "repair station"
+      }
+    },
+    "Break Their Will (Blood Raiders) (Level 1)#1": {
+      "notes": "repair_station_objective",
+      "objective": {
+        "kind": "destroy_structure",
+        "classification_state": "explicit",
+        "target_name": "repair station"
+      }
+    },
+    "Break Their Will (Serpentis) (Level 1)#1": {
+      "notes": "repair_station_objective",
+      "objective": {
+        "kind": "destroy_structure",
+        "classification_state": "explicit",
+        "target_name": "repair station"
+      }
+    },
+    "Burning Down the Hive#1": {
+      "notes": "remove_all_drones_objective",
+      "objective": {
+        "kind": "kill_all",
+        "classification_state": "explicit"
+      }
+    },
+    "Clear the Way#1": {
+      "notes": "drive_off_raiders_objective",
+      "objective": {
+        "kind": "kill_all",
+        "classification_state": "explicit"
+      }
+    },
+    "Deadly Serious#1": {
+      "notes": "defend_facility_kill_attackers_objective",
+      "objective": {
+        "kind": "kill_all",
+        "classification_state": "explicit"
+      }
+    },
+    "Desperate Maneuvers#1": {
+      "notes": "eliminate_all_hostile_vessels_objective",
+      "objective": {
+        "kind": "kill_all",
+        "classification_state": "explicit"
+      }
+    },
+    "Bleur Hein#2": {
+      "notes": "generic_targets_objective",
+      "objective": {
+        "kind": "kill_all",
+        "classification_state": "explicit"
+      }
+    },
+    "Lafuni Oduntra#2": {
+      "notes": "generic_targets_objective",
+      "objective": {
+        "kind": "kill_all",
+        "classification_state": "explicit"
+      }
+    },
+    "Lunuin Eurek#2": {
+      "notes": "generic_targets_objective",
+      "objective": {
+        "kind": "kill_all",
+        "classification_state": "explicit"
+      }
+    },
+    "Halt the Invasion (Minmatar Republic)#1": {
+      "notes": "bare_destroy_objective",
+      "objective": {
+        "kind": "kill_all",
+        "classification_state": "explicit"
+      }
+    },
+    "Hidden Camera#1": {
+      "notes": "place_item_in_warehouse_objective",
+      "objective": {
+        "kind": "deliver_item",
+        "classification_state": "explicit",
+        "target_name": "Covert Recording Device",
+        "item_quantity": 1,
+        "volume_m3": 1.0
+      }
+    },
+    "Everybody Has a Price#1": {
+      "notes": "take_passenger_to_warehouse_objective",
+      "objective": {
+        "kind": "deliver_item",
+        "classification_state": "explicit",
+        "target_name": "Ralie Ardanne",
+        "volume_m3": 1.0
+      }
+    },
+    "Escaped Dissident#1": {
+      "notes": "recapture_and_return_objective",
+      "objective": {
+        "kind": "retrieve_item",
+        "classification_state": "explicit",
+        "target_name": "Parriaval Mastes"
+      }
+    },
+    "Escaped Killer#1": {
+      "notes": "recapture_and_return_objective",
+      "objective": {
+        "kind": "retrieve_item",
+        "classification_state": "explicit",
+        "target_name": "Milare Terhellen"
+      }
+    },
+    "Lost Records#1": {
+      "notes": "locate_and_return_records_objective",
+      "objective": {
+        "kind": "retrieve_item",
+        "classification_state": "explicit",
+        "target_name": "records",
+        "volume_m3": 1.0
+      }
+    },
+    "Lost That Bet#2": {
+      "notes": "wait_for_drop_and_return_objective",
+      "objective": {
+        "kind": "retrieve_item",
+        "classification_state": "explicit",
+        "target_name": "Dolls",
+        "item_quantity": 1,
+        "volume_m3": 1.0
+      }
+    },
+    "Recover the Containers#1": {
+      "notes": "table_trigger_column_wave_label_links",
+      "rooms": {
+        "1": {
+          "waves": {
+            "1": {
+              "spawns": {
+                "3": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 2,
+                  "classification_state": "explicit"
+                }
+              }
+            }
+          }
+        },
+        "3": {
+          "waves": {
+            "1": {
+              "spawns": {
+                "4": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 2,
+                  "classification_state": "explicit"
+                },
+                "5": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 2,
+                  "classification_state": "explicit"
+                }
+              }
+            }
+          }
+        },
+        "4": {
+          "waves": {
+            "1": {
+              "spawns": {
+                "1": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 3,
+                  "classification_state": "explicit"
+                },
+                "2": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 4,
+                  "classification_state": "explicit"
+                },
+                "3": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 5,
+                  "classification_state": "explicit"
+                },
+                "4": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 6,
+                  "classification_state": "explicit"
+                },
+                "5": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 2,
+                  "classification_state": "explicit"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "Sansha Acquisition#1": {
+      "notes": "battery_reinforcement_trigger_label",
+      "waves": {
+        "2": {
+          "spawns": {
+            "1": {
+              "kind": "this_ship_destroyed",
+              "condition": "on_destroy",
+              "target_wave_index": 3,
+              "classification_state": "explicit"
+            }
+          }
+        }
+      }
+    },
+    "Search and Rescue#1": {
+      "notes": "ordinal_reinforcement_trigger_labels",
+      "waves": {
+        "1": {
+          "spawns": {
+            "1": {
+              "kind": "this_ship_destroyed",
+              "condition": "on_destroy",
+              "target_wave_index": 3,
+              "classification_state": "explicit"
+            }
+          }
+        },
+        "2": {
+          "spawns": {
+            "1": {
+              "kind": "this_ship_destroyed",
+              "condition": "on_destroy",
+              "target_wave_index": 4,
+              "classification_state": "explicit"
+            }
+          }
+        }
+      }
+    },
+    "Serpentis Extravaganza (Level 4)#1": {
+      "notes": "typo_and_calls_for_reinforcements_triggers",
+      "rooms": {
+        "2": {
+          "waves": {
+            "1": {
+              "spawns": {
+                "1": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 2,
+                  "classification_state": "explicit"
+                }
+              }
+            },
+            "4": {
+              "spawns": {
+                "2": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 5,
+                  "classification_state": "explicit"
+                }
+              }
+            }
+          }
+        },
+        "3": {
+          "waves": {
+            "4": {
+              "spawns": {
+                "1": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 5,
+                  "classification_state": "explicit"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "The Mordus Headhunters (Level 5)#1": {
+      "notes": "reinforcement_column_labels",
+      "rooms": {
+        "1": {
+          "waves": {
+            "1": {
+              "spawns": {
+                "3": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 2,
+                  "classification_state": "explicit"
+                },
+                "4": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 4,
+                  "classification_state": "explicit"
+                }
+              }
+            }
+          }
+        },
+        "2": {
+          "waves": {
+            "2": {
+              "spawns": {
+                "1": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 3,
+                  "classification_state": "explicit"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "Vengeance (Blood Raiders)#1": {
+      "notes": "ordinal_reinforcement_trigger_labels",
+      "rooms": {
+        "3": {
+          "waves": {
+            "1": {
+              "spawns": {
+                "2": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 3,
+                  "classification_state": "explicit"
+                },
+                "4": {
+                  "kind": "this_ship_destroyed",
+                  "condition": "on_destroy",
+                  "target_wave_index": 2,
+                  "classification_state": "explicit"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "Violent Expulsion (Thukker Tribe)#1": {
+      "notes": "ordinal_reinforcement_trigger_label",
+      "waves": {
+        "1": {
+          "spawns": {
+            "1": {
+              "kind": "this_ship_destroyed",
+              "condition": "on_destroy",
+              "target_wave_index": 2,
+              "classification_state": "explicit"
+            }
+          }
+        }
+      }
+    }
+  }
+}
