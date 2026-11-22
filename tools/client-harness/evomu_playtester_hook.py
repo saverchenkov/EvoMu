@@ -4233,9 +4233,10 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
 def _sample_ego_warp_state(sm):
     sess = getattr(__builtin__, "session", None)
     sid = int(getattr(sess, "shipid", 0) or 0) if sess is not None else 0
-    michelle = getattr(sm, "services", {}).get("michelle")
-    fx_svc = getattr(sm, "services", {}).get("fxSequencer")
-    space_svc = getattr(sm, "services", {}).get("space")
+    svcs_w = getattr(sm, "services", {}) if sm is not None else {}
+    michelle = svcs_w.get("michelle")
+    fx_svc = svcs_w.get("fxSequencer") or svcs_w.get("FxSequencer")
+    space_svc = svcs_w.get("space")
     bp = michelle.GetBallpark() if (michelle is not None and hasattr(michelle, "GetBallpark")) else None
     ball = bp.GetBall(sid) if (bp is not None and sid and hasattr(bp, "GetBall")) else None
     mode = int(getattr(ball, "mode", -1)) if ball is not None else -1
@@ -4244,9 +4245,16 @@ def _sample_ego_warp_state(sm):
     vz = float(getattr(ball, "vz", 0.0) or 0.0) if ball is not None else 0.0
     speed = math.sqrt(vx * vx + vy * vy + vz * vz)
     fx_names = []
-    if fx_svc is not None and sid and hasattr(fx_svc, "GetAllBallActivationNames"):
+    if fx_svc is not None and sid:
         try:
-            fx_names = list(fx_svc.GetAllBallActivationNames(sid) or [])
+            if hasattr(fx_svc, "GetAllBallActivationNames"):
+                fx_names = list(fx_svc.GetAllBallActivationNames(sid) or [])
+            elif hasattr(fx_svc, "GetActivations"):
+                fx_names = [
+                    str(getattr(a, "guid", a) or "")
+                    for a in list(fx_svc.GetActivations() or [])
+                    if getattr(a, "guid", a)
+                ]
         except Exception:
             fx_names = []
     warp_cache_val = getattr(space_svc, "warpDestinationCache", None) if space_svc is not None else None
@@ -4556,23 +4564,43 @@ def _is_ship_currently_warping(sm):
     return False
 
 
-def _wait_active_warp_before_command(sm, allow_time_control=True, timeout_sec=16.0):
+def _wait_active_warp_before_command(sm, allow_time_control=True, timeout_sec=None, cancel_check=None):
     """Wait for an in-progress warp to complete before issuing follow-up navigation commands."""
+    if callable(cancel_check) and cancel_check():
+        return False
     if not _is_ship_currently_warping(sm):
         return False
+    eff_timeout = (
+        float(timeout_sec)
+        if timeout_sec is not None
+        else (8.0 if allow_time_control else 18.0)
+    )
     if allow_time_control and hasattr(H, "_advance_clock"):
         try:
             H._advance_clock(sm, None, 2, raise_on_error=False)
         except Exception:
             pass
+    if callable(cancel_check) and cancel_check():
+        return False
     try:
-        H._wait_warp_fx_settled(
-            sm,
-            timeout_sec=(float(timeout_sec) if allow_time_control else 35.0),
-            allow_time_control=bool(allow_time_control),
-        )
+        try:
+            H._wait_warp_fx_settled(
+                sm,
+                timeout_sec=eff_timeout,
+                allow_time_control=bool(allow_time_control),
+                post_settle_sec=1.5,
+                cancel_check=cancel_check,
+            )
+        except TypeError:
+            H._wait_warp_fx_settled(
+                sm,
+                timeout_sec=eff_timeout,
+                allow_time_control=bool(allow_time_control),
+            )
     except Exception:
         pass
+    if callable(cancel_check) and cancel_check():
+        return False
     try:
         smp = _sample_ego_warp_state(sm)
         if (
@@ -4589,11 +4617,7 @@ def _wait_active_warp_before_command(sm, allow_time_control=True, timeout_sec=16
 
 
 def _extract_inv_container_payload(iv):
-    """Extract cached inventory items without triggering remote RPCs or test-proxy __getattr__."""
-    items_attr = getattr(iv, "items", None)
-    if isinstance(items_attr, (dict, list, tuple, set)):
-        vals = list(items_attr.values()) if isinstance(items_attr, dict) else list(items_attr)
-        return True, vals, None
+    """Extract cached inventory items via own dict/slots first (`cachedItems`/`listed`), falling back to `.items`."""
     own_d = _safe_own_dict(iv)
     cached_attr = own_d.get("cachedItems") if own_d is not None else _safe_own_slot_attr(iv, "cachedItems")
     if isinstance(cached_attr, dict):
@@ -4605,8 +4629,16 @@ def _extract_inv_container_payload(iv):
         elif not listed_val and not cached_attr:
             return False, [], None
         return True, list(cached_attr.values()), listed_flags
-    if hasattr(iv, "GetItems"):
-        return False, [], None
+    items_attr = (
+        own_d.get("items")
+        if (own_d is not None and "items" in own_d)
+        else _safe_own_slot_attr(iv, "items")
+    )
+    if items_attr is None:
+        items_attr = getattr(iv, "items", None)
+    if isinstance(items_attr, (dict, list, tuple, set)):
+        vals = list(items_attr.values()) if isinstance(items_attr, dict) else list(items_attr)
+        return True, vals, None
     return False, [], None
 
 
@@ -4996,7 +5028,7 @@ def _get_state_snapshot(sm):
                             if _item_flag_id(it) == 5:
                                 unified_cargo_items.append(it)
                 elif (loc_k in st_locs or loc_k == 10004) and flag_k in (4, None):
-                    if flag_k is None and listed_flags is not None and None not in listed_flags and 4 not in listed_flags:
+                    if listed_flags is not None and None not in listed_flags and 4 not in listed_flags:
                         continue
                     hangar_seen = True
                     if loc_k == 10004:
@@ -5149,13 +5181,13 @@ def _get_state_snapshot(sm):
         if not isinstance(_win, dict):
             continue
         _w_tok = (
-            str(_win.get("window_id") or "")
+            _to_utf8(_win.get("window_id") or "")
             + " "
-            + str(_win.get("name") or "")
+            + _to_utf8(_win.get("name") or "")
             + " "
-            + str(_win.get("cls") or "")
+            + _to_utf8(_win.get("cls") or "")
             + " "
-            + str(_win.get("caption") or "")
+            + _to_utf8(_win.get("caption") or "")
         ).lower()
         if "inv" in _w_tok or "cargo" in _w_tok or "hangar" in _w_tok:
             if _win.get("quick_filter") and not inventory_state.get("quick_filter"):
@@ -6650,6 +6682,7 @@ def _execute_action(sm, action):
     uicore = _get_uicore()
     layers = getattr(uicore, "layer", None) if uicore is not None else None
     result = {"ok": True, "action_ok": True, "action_type": raw_atype, "target": raw_target}
+    cancel_flag = [False]
 
     def _do_action():
         try:
@@ -7908,7 +7941,15 @@ def _execute_action(sm, action):
                         sub in ("warp_to", "align_to", "approach", "orbit", "keep_at_range", "dock", "jump_gate")
                         and not _action_expects_in_warp_rejection(action)
                     ):
-                        _wait_active_warp_before_command(sm, allow_time_control=allow_time_control)
+                        _wait_active_warp_before_command(
+                            sm,
+                            allow_time_control=allow_time_control,
+                            cancel_check=lambda: cancel_flag[0],
+                        )
+                        if cancel_flag[0]:
+                            result["ok"] = False
+                            result["error"] = result.get("error") or "action cancelled after timeout"
+                            return
                         sess = getattr(__builtin__, "session", None)
                         sys_id = int(getattr(sess, "solarsystemid", 0) or 0) if sess is not None else 0
                     beyonce = H._get_beyonce(sm, sys_id)
@@ -7999,8 +8040,6 @@ def _execute_action(sm, action):
                         sid_d = int(getattr(sess_d, "shipid", 0) or 0) if sess_d is not None else 0
                         mich_d = sm.services.get("michelle") if hasattr(sm, "services") else None
                         bp_d = mich_d.GetBallpark() if (sid_d and mich_d is not None) else None
-                        if not _action_expects_in_warp_rejection(action):
-                            _wait_active_warp_before_command(sm, allow_time_control=allow_time_control)
                         H._wait_view_settled(sm)
                         pre_clear_ok = (
                             bool(H._clear_session_timer(sm, raise_on_error=False))
@@ -8652,7 +8691,15 @@ def _execute_action(sm, action):
                 else:
                     bmid, bm_obj, memo = found_bm
                     if not _action_expects_in_warp_rejection(action):
-                        _wait_active_warp_before_command(sm, allow_time_control=allow_time_control)
+                        _wait_active_warp_before_command(
+                            sm,
+                            allow_time_control=allow_time_control,
+                            cancel_check=lambda: cancel_flag[0],
+                        )
+                        if cancel_flag[0]:
+                            result["ok"] = False
+                            result["error"] = result.get("error") or "action cancelled after timeout"
+                            return
                     _WARP_TELEMETRY["last_warp_saw_mode3"] = False
                     _WARP_TELEMETRY["last_warp_saw_fx_warping"] = False
                     _WARP_TELEMETRY["last_warp_saw_signal"] = False
@@ -8810,16 +8857,30 @@ def _execute_action(sm, action):
                 done_flag[0] = True
 
         uthread.new(_worker)
+        eff_cmd_t = target.lower() if (atype == "space_command" and target) else raw_atype
         max_wait_s = (
             42.0
-            if raw_atype == "jump_gate"
+            if eff_cmd_t == "jump_gate"
             else (
                 38.0
-                if raw_atype == "dock"
+                if eff_cmd_t == "dock"
                 else (
                     25.0
-                    if raw_atype in ("warp_to", "warp_to_location", "warp_to_bookmark", "undock", "select_character")
-                    or atype in ("select_character", "warp_to_location", "warp_to_bookmark")
+                    if eff_cmd_t in (
+                        "warp_to",
+                        "warp_to_location",
+                        "warp_to_bookmark",
+                        "undock",
+                        "select_character",
+                        "approach",
+                        "orbit",
+                        "keep_at_range",
+                        "align_to",
+                        "align",
+                        "stop",
+                        "space_command",
+                    )
+                    or atype in ("select_character", "warp_to_location", "warp_to_bookmark", "space_command")
                     else 12.0
                 )
             )
@@ -8831,9 +8892,11 @@ def _execute_action(sm, action):
             # break after 0.8s so serve_forever_on_stackless never deadlocks or waits 12s!
             if (time.time() - t_start) > 0.8:
                 if bool(_active_modal_keys() - pre_modal_keys):
+                    cancel_flag[0] = True
                     result["blocked_by_modal"] = True
                     break
         if not done_flag[0] and not result.get("blocked_by_modal"):
+            cancel_flag[0] = True
             result["ok"] = False
             result["error"] = "action tasklet timed out after %.1fs" % (time.time() - t_start,)
     except Exception:
@@ -8855,7 +8918,7 @@ def _execute_action(sm, action):
             poll_step = 150 if (pre_mode == 3 or pre_in_warp) else 250
             waited_total = 0
             early_reason = ""
-            wait_tgt_low = str(action.get("target") or "").strip().lower()
+            wait_tgt_low = _to_utf8(action.get("target") or "").strip().lower()
             wait_exp_low = _to_utf8(action.get("expected_ui_and_state_change") or "").lower()
             allow_warp_tc = bool(
                 allow_time_control

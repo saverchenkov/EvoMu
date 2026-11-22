@@ -8191,6 +8191,8 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
     def test_v24_inv_cache_container_cached_items_listed_depth3_session_check_and_filters(self):
         hook = _load_hook_with_py2_stubs()
 
+        v24_getattr_calls = []
+
         class _V24InvCacheContainer(object):
             def __init__(self, cached_items, listed_flags, moniker):
                 self.cachedItems = dict(cached_items)
@@ -8198,6 +8200,7 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
                 self.moniker = moniker
 
             def __getattr__(self, name):
+                v24_getattr_calls.append(name)
                 if name == "GetItems":
                     return lambda *a, **kw: None
                 raise AttributeError(name)
@@ -8220,8 +8223,9 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
             {4},
             _wrap_moniker({"stationid": 60003760}),
         )
-        # (b) Unlisted flag=5 with only fitted module cached under flag=27 must NOT look like empty cargo.
+        # (b) Unlisted flag=5 / flag=4 with only fitted module cached under flag=27 must NOT look like empty cargo/hangar.
         c_ship_unlisted = _V24InvCacheContainer({30: types.SimpleNamespace(itemID=30, typeID=31009, flagID=27, stacksize=1)}, {27}, _wrap_moniker({"shipid": 70001}))
+        c_hangar_unlisted = _V24InvCacheContainer({31: types.SimpleNamespace(itemID=31, typeID=31009, flagID=27, stacksize=1)}, {27}, _wrap_moniker({"stationid": 60003760}))
 
         class _FakeInvSvc(object):
             def __init__(self, inv_map):
@@ -8274,6 +8278,7 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
              mock.patch.object(hook, "_install_warp_telemetry", lambda *_a: None):
             snap = hook._get_state_snapshot(sm_ok)
 
+        self.assertEqual(v24_getattr_calls, [])
         inv_state = snap["inventory_state"]
         self.assertIsNotNone(inv_state)
         self.assertEqual(inv_state["cargo_item_count"], 1)
@@ -8290,11 +8295,12 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         self.assertEqual(snap["ui"]["open_windows"][0].get("quick_filter"), "trit")
         self.assertEqual(snap["ui"]["open_windows"][0].get("active_filters"), ["High Slots"])
 
-        # Filtered stale containers must stay filtered when only unlisted ship container exists.
+        # Filtered stale containers must stay filtered when only unlisted ship/hangar containers exist.
         sm_unlisted = types.SimpleNamespace(
             services={
                 "invCache": _FakeInvSvc({
                     (70001, None): c_ship_unlisted,
+                    (60003760, 4): c_hangar_unlisted,
                     (70002, None): c_stale_char,
                     (60003761, None): c_stale_station,
                 }),
@@ -8308,6 +8314,7 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
              mock.patch.object(hook, "_install_flight_recorder_hooks", lambda *_a: None), \
              mock.patch.object(hook, "_install_warp_telemetry", lambda *_a: None):
             snap_unlisted = hook._get_state_snapshot(sm_unlisted)
+        self.assertEqual(v24_getattr_calls, [])
         self.assertIsNone(snap_unlisted["inventory_state"]["cargo_item_count"])
         self.assertIsNone(snap_unlisted["inventory_state"]["hangar_item_count"])
 
@@ -8352,36 +8359,51 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         self.assertTrue(hook._action_expects_in_warp_rejection({"type": "warp_to", "target": "1", "expect_in_warp_rejection": True}))
         self.assertTrue(hook._action_expects_in_warp_rejection({"type": "space_command", "command": "approach", "allow_in_warp_error": True}))
 
-        # (b) V24 idle warpDestinationCache = [None, None, None] must NOT count as active warp; docked clears telemetry.
+        # (b) V24 idle space.warpDestinationCache = [None, None, None] must NOT count as active warp; non-None tuple DOES; docked clears telemetry.
         ball = types.SimpleNamespace(mode=0)
-        bp = types.SimpleNamespace(
-            GetBall=lambda _sid: ball,
-            warpDestinationCache=[None, None, None],
-        )
+        bp = types.SimpleNamespace(GetBall=lambda _sid: ball)
         michelle = types.SimpleNamespace(GetBallpark=lambda: bp)
-        sm_space = types.SimpleNamespace(services={"michelle": michelle, "FxSequencer": types.SimpleNamespace(GetActivations=lambda: [])})
+        space_svc = types.SimpleNamespace(warpDestinationCache=[None, None, None])
+        fx_svc_idle = types.SimpleNamespace(GetAllBallActivationNames=lambda _sid: [])
+        sm_space = types.SimpleNamespace(services={"michelle": michelle, "space": space_svc, "fxSequencer": fx_svc_idle})
         sess_space = types.SimpleNamespace(charid=90000001, shipid=70001, solarsystemid=30000142, stationid=None, structureid=None)
         hook._WARP_TELEMETRY["in_warp"] = False
-        with mock.patch.dict(builtins.__dict__, {"session": sess_space}, clear=False):
+        with mock.patch.dict(builtins.__dict__, {"session": sess_space}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_space)):
             ego = hook._sample_ego_warp_state(sm_space)
             self.assertFalse(ego["has_warp_dest_cache"])
             self.assertFalse(hook._is_ship_currently_warping(sm_space))
+            space_svc.warpDestinationCache = [1.0, 2.0, 3.0]
+            ego_active = hook._sample_ego_warp_state(sm_space)
+            self.assertTrue(ego_active["has_warp_dest_cache"])
+            self.assertTrue(hook._is_ship_currently_warping(sm_space))
+        space_svc.warpDestinationCache = [None, None, None]
 
         hook._WARP_TELEMETRY["in_warp"] = True
         sess_docked = types.SimpleNamespace(charid=90000001, shipid=70001, solarsystemid=None, stationid=60003760, structureid=None)
-        with mock.patch.dict(builtins.__dict__, {"session": sess_docked}, clear=False):
+        with mock.patch.dict(builtins.__dict__, {"session": sess_docked}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_docked)):
             self.assertFalse(hook._is_ship_currently_warping(sm_space))
             self.assertFalse(hook._WARP_TELEMETRY["in_warp"])
 
-        # (c) Positive space_command pre-waits active warp; negative probe skips pre-wait.
+        # (c) Positive space_command pre-waits active warp; negative probe skips pre-wait; dock calls pre-wait once.
         calls = []
         hook._WARP_TELEMETRY["in_warp"] = True
-        beyonce_mock = types.SimpleNamespace(CmdFollowBall=lambda tid, dist: calls.append(("CmdFollowBall", tid, dist)))
-        bp_approach = types.SimpleNamespace(balls={40009088: object(), 70001: object()}, GetBall=bp.GetBall, warpDestinationCache=bp.warpDestinationCache)
+        beyonce_mock = types.SimpleNamespace(
+            CmdFollowBall=lambda tid, dist: calls.append(("CmdFollowBall", tid, dist)),
+            CmdDock=lambda tid: calls.append(("CmdDock", tid)),
+        )
+        bp_approach = types.SimpleNamespace(
+            balls={40009088: object(), 60003760: types.SimpleNamespace(surfaceDist=0.0), 70001: object()},
+            GetBall=bp.GetBall,
+            GetSurfaceDist=lambda _a, _b: 0.0,
+        )
         sm_cmd = types.SimpleNamespace(
             services={
                 "michelle": types.SimpleNamespace(GetRemotePark=lambda: bp_approach, GetBallpark=lambda: bp_approach),
-                "FxSequencer": types.SimpleNamespace(GetActivations=lambda: []),
+                "space": space_svc,
+                "fxSequencer": fx_svc_idle,
+                "autoPilot": types.SimpleNamespace(InFlight=lambda: False),
             },
             GetService=lambda name: sm_cmd.services.get(name),
         )
@@ -8391,6 +8413,8 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
              mock.patch.dict(sys.modules, {"uthread": None}), \
              mock.patch.object(hook.H, "_get_beyonce", create=True, return_value=beyonce_mock), \
              mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None), \
+             mock.patch.object(hook.H, "_clear_session_timer", create=True, return_value=True), \
+             mock.patch.object(hook.H, "_wait_view_settled", create=True, return_value=None), \
              mock.patch.object(hook, "_settle_after_action", return_value=50), \
              mock.patch.object(hook, "_wait_active_warp_before_command", side_effect=lambda *_a, **_kw: wait_calls.append("pre_wait") or True):
             r_neg = hook._execute_action(
@@ -8418,28 +8442,45 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
             self.assertTrue(r_pos["ok"], r_pos)
             self.assertEqual(wait_calls, ["pre_wait"])
             self.assertEqual(calls, [("CmdFollowBall", 40009088, 50.0), ("CmdFollowBall", 40009088, 50.0)])
+
+            wait_calls.clear()
+            r_dock = hook._execute_action(
+                sm_cmd,
+                {
+                    "type": "dock",
+                    "target": "60003760",
+                    "item_id": 60003760,
+                    "wait_ms": 0,
+                    "reuse_pre_state": False,
+                },
+            )
+            self.assertEqual(len(wait_calls), 1)
         hook._WARP_TELEMETRY["in_warp"] = False
 
-        # (d) _wait_warp_fx_settled advances server sim clock during long waits when allow_time_control=True.
+        # (d) _wait_warp_fx_settled advances server sim clock, transitions ball/fx state in place, and exits BEFORE timeout.
         adv_calls = []
         fake_now = [100.0]
 
         def _fake_sleep(dt):
             fake_now[0] += float(dt)
 
-        fx_warping = [types.SimpleNamespace(guid="effects.Warping")]
+        ball_w = types.SimpleNamespace(mode=3)
+        fx_warping = ["effects.Warping"]
+        bp_w = types.SimpleNamespace(GetBall=lambda _sid: ball_w)
         sm_warp = types.SimpleNamespace(
             services={
-                "michelle": types.SimpleNamespace(GetBallpark=lambda: types.SimpleNamespace(GetBall=lambda _sid: types.SimpleNamespace(mode=3))),
-                "FxSequencer": types.SimpleNamespace(GetActivations=lambda: list(fx_warping)),
+                "michelle": types.SimpleNamespace(GetBallpark=lambda: bp_w),
+                "space": types.SimpleNamespace(warpDestinationCache=[1.0, 2.0, 3.0]),
+                "fxSequencer": types.SimpleNamespace(GetAllBallActivationNames=lambda _sid: list(fx_warping)),
             }
         )
 
         def _fake_advance(sm, ipc, secs, raise_on_error=False):
             adv_calls.append(secs)
             if len(adv_calls) >= 2:
-                fx_warping.clear()
-                sm.services["michelle"] = types.SimpleNamespace(GetBallpark=lambda: types.SimpleNamespace(GetBall=lambda _sid: types.SimpleNamespace(mode=0)))
+                ball_w.mode = 0
+                sm_warp.services["space"].warpDestinationCache = [None, None, None]
+                fx_warping[:] = []
             return True
 
         with mock.patch.dict(builtins.__dict__, {"session": sess_space}, clear=False), \
@@ -8447,11 +8488,13 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
              mock.patch.object(helpers, "_sleep_ms", side_effect=lambda ms: _fake_sleep(float(ms) / 1000.0)), \
              mock.patch.object(helpers, "_advance_clock", side_effect=_fake_advance), \
              mock.patch.object(helpers.time, "time", side_effect=lambda: fake_now[0]):
-            helpers._wait_warp_fx_settled(sm_warp, timeout_sec=5.0, allow_time_control=True)
+            helpers._wait_warp_fx_settled(sm_warp, timeout_sec=5.0, allow_time_control=True, post_settle_sec=1.0)
         self.assertEqual(fx_warping, [])
+        self.assertEqual(ball_w.mode, 0)
         self.assertGreaterEqual(len(adv_calls), 2)
+        self.assertLess(fake_now[0], 105.0)
 
-        # (e) hook wait > 1200ms while warping advances clock when allow_time_control=True.
+        # (e) hook wait > 1200ms while warping advances clock ONLY when time_control=True; non-ASCII target avoids UnicodeEncodeError.
         wait_adv = []
         hook._WARP_TELEMETRY["in_warp"] = True
         hook.H._advance_clock = lambda _sm, _ipc, secs, raise_on_error=False: wait_adv.append(secs) or True
@@ -8469,10 +8512,47 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
              mock.patch.object(hook.time, "time", side_effect=lambda: t_clock[0]):
             res_w = hook._execute_action(
                 sm_space,
-                {"type": "wait", "target": "warp_arrival", "wait_ms": 3000, "allow_time_control": True},
+                {"type": "wait", "target": "warp_arrival", "wait_ms": 3000, "time_control": True},
             )
-        self.assertTrue(res_w["ok"], res_w)
-        self.assertTrue(wait_adv)
+            self.assertTrue(res_w["ok"], res_w)
+            self.assertTrue(wait_adv)
+
+            wait_adv.clear()
+            hook._WARP_TELEMETRY["in_warp"] = True
+            t_clock[0] = 0.0
+            res_no_tc = hook._execute_action(
+                sm_space,
+                {"type": "wait", "target": "warp_\u2605", "wait_ms": 2000, "scenario_mode": True, "time_control": False},
+            )
+            self.assertTrue(res_no_tc["ok"], res_no_tc)
+            self.assertEqual(wait_adv, [])
+        hook._WARP_TELEMETRY["in_warp"] = False
+
+        # (f) Watchdog timeout cancels _worker cleanly so delayed CmdFollowBall NEVER fires after timeout.
+        deferred_workers = []
+        delayed_follow_calls = []
+        hook._WARP_TELEMETRY["in_warp"] = True
+        beyonce_late = types.SimpleNamespace(CmdFollowBall=lambda tid, dist: delayed_follow_calls.append((tid, dist)))
+        fake_uthread_cap = types.SimpleNamespace(new=lambda fn: deferred_workers.append(fn))
+        sc_time_seq = iter([0.0, 0.0, 10.0, 26.0, 26.0, 26.0])
+        with mock.patch.dict(builtins.__dict__, {"session": sess_space}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_space)), \
+             mock.patch.dict(sys.modules, {"uthread": fake_uthread_cap}), \
+             mock.patch.object(hook.H, "_get_beyonce", create=True, return_value=beyonce_late), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook.H, "_wait_warp_fx_settled", create=True, return_value=None), \
+             mock.patch.object(hook.time, "time", side_effect=lambda s=sc_time_seq: next(s, 26.0)):
+            res_to = hook._execute_action(
+                sm_cmd,
+                {"type": "space_command", "target": "approach", "item_id": 40009088, "wait_ms": 0, "reuse_pre_state": False},
+            )
+        self.assertFalse(res_to["ok"], res_to)
+        self.assertIn("timed out after 26.0s", res_to.get("error", ""))
+        self.assertEqual(len(deferred_workers), 1)
+        deferred_workers[0]()
+        self.assertEqual(delayed_follow_calls, [])
+        hook._WARP_TELEMETRY["in_warp"] = False
 
 
 if __name__ == "__main__":

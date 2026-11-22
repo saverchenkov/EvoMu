@@ -125,6 +125,18 @@
           "type": "boolean",
           "description": "True to double-click the target widget or coordinate."
         },
+        "clear": {
+          "type": "boolean",
+          "description": "True with type_text to clear an input/filter box and invoke ClearFilter()."
+        },
+        "expect_in_warp_rejection": {
+          "type": "boolean",
+          "description": "Set true only when intentionally testing mid-warp error rejection."
+        },
+        "allow_in_warp_error": {
+          "type": "boolean",
+          "description": "Alias of expect_in_warp_rejection for intentional mid-warp negative probes."
+        },
         "wait_ms": {
           "type": "integer",
           "description": "Milliseconds to let the UI and MachoNet/Quasar calls settle after the action (typically 800 to 3000)."
