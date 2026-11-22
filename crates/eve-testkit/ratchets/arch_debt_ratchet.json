@@ -1056,7 +1056,6 @@
         "services/station_structure_handlers.rs": 3,
         "services/structure_lifecycle_cargo_fuel.rs": 2,
         "services/structure_lifecycle_rpc.rs": 1,
-        "services/tactical_modules_superweapon_ops.rs": 1,
         "services/wallet_ledger.rs": 2,
         "services/wallet_services_ext.rs": 2,
         "sp6_lifecycle/drone_return.rs": 1

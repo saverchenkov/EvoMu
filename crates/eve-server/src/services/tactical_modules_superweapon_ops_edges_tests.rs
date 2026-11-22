@@ -2042,3 +2042,329 @@ async fn superweapon_3way_depletion_resurrection_and_tx_effect_converges_bf1486_
     assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
 }
 
+#[tokio::test]
+async fn emit_superweapon_fuel_diffs_serializes_concurrent_rollback_and_mutations_bf1486_2b_r9_01() {
+    use eve_testkit::shadow_client::ShadowClient;
+    use std::sync::{mpsc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    let ctx = test_ctx();
+    let null_sys = find_nullsec_sys(&ctx.sde);
+    let char_id = 90_000_001_i64;
+    let titan_id = 100_826_101_i64;
+    let mod_id = 100_826_102_i64;
+    let fuel_id = 100_826_110_i64;
+    let titan_tid = find_titan_type_id(&ctx.sde);
+    let dd_tid = find_doomsday_type_id(&ctx.sde);
+
+    setup_ship_and_module(&ctx, null_sys, char_id, titan_id, titan_tid, mod_id, dd_tid, DVec3::ZERO);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            fuel_id,
+            InventoryItemRecord {
+                item_id: fuel_id,
+                type_id: 16_274,
+                owner_id: char_id,
+                location_id: titan_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 50_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut shadow = ShadowClient::from_world(char_id, &ctx.db, Some(&ctx.sde));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Part A (BF-1486-2B-R9-01 deterministic interleaving):
+    // B reserves 25k (50k -> 25k), A reserves remaining 25k (25k -> None/deleted).
+    // Thread 2 holds `WorldRepository::writer` in `ctx.db.tx`, wakes Thread 1 so
+    // `emit_superweapon_fuel_item_diffs` blocks on `writer`, then commits B's rollback
+    // (resurrecting stack at 25k). Thread 1 must observe the post-commit 25k stack
+    // inside `WorldRepository::tx`, never resurrecting stale tombstone notifications.
+    let (_, _, res_b, _diffs_b, guard_b) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+            .expect("reserve B");
+    let (_, _, _res_a, diffs_a, guard_a) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+            .expect("reserve A full depletion");
+
+    let (tx_entered_tx, tx_entered_rx) = mpsc::channel();
+    thread::scope(|s| {
+        let ctx_ref = &ctx;
+        let res_b_ref = &res_b;
+        let h2 = s.spawn(move || {
+            let _ = ctx_ref.db.tx::<(), eve_db::TxError>(
+                "test_concurrent_rollback_interleave",
+                |wtx| {
+                    tx_entered_tx.send(()).unwrap();
+                    thread::sleep(Duration::from_millis(30));
+                    let diffs = wtx.snap.rollback_restore_consumed_stacks_if_exposed(
+                        res_b_ref,
+                        |pre, _, _| {
+                            ctx_ref.should_emit_item_on_exact_rollback(Some(&guard_b), pre.item_id)
+                        },
+                    );
+                    crate::router::delta_projection::push_item_diffs_tx_effects(
+                        wtx.snap,
+                        wtx.effects,
+                        &ctx_ref.sde,
+                        char_id,
+                        &diffs,
+                    );
+                    Ok(())
+                },
+            );
+            drop(guard_b);
+        });
+        tx_entered_rx.recv().unwrap();
+        emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs_a, guard_a);
+        h2.join().unwrap();
+    });
+
+    for n in ctx.drain_notifications_for_char(char_id) {
+        shadow.apply_notification(&n.event, &n.args);
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 25_000);
+    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+
+    // Part B (Deterministic interleaving with concurrent invbroker-style stack mutation):
+    // C reserves 5k (25k -> 20k); Thread 2 enters `tx`, wakes Thread 1's emit (blocking on
+    // `writer`), mutates stack 20k -> 15k and emits tx-effect, then Thread 1 unblocks inside
+    // `writer` and converges client strictly to 15k (never emitting stale 20k out of order).
+    let (_, _, _res_c, diffs_c, guard_c) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 5_000, "superweapon")
+            .expect("reserve C");
+
+    let (mut_entered_tx, mut_entered_rx) = mpsc::channel();
+    thread::scope(|s| {
+        let ctx_ref = &ctx;
+        let h2 = s.spawn(move || {
+            let _ = ctx_ref.db.tx::<(), eve_db::TxError>(
+                "test_concurrent_mutation_interleave",
+                |wtx| {
+                    mut_entered_tx.send(()).unwrap();
+                    thread::sleep(Duration::from_millis(30));
+                    let prev = wtx.snap.items.get(&fuel_id).cloned().unwrap();
+                    let mut next = prev.clone();
+                    next.quantity = 15_000;
+                    next.version += 1;
+                    wtx.snap.items.insert(fuel_id, next.clone());
+                    crate::router::delta_projection::push_item_diffs_tx_effects(
+                        wtx.snap,
+                        wtx.effects,
+                        &ctx_ref.sde,
+                        char_id,
+                        &[(Some(prev), Some(next))],
+                    );
+                    Ok(())
+                },
+            );
+        });
+        mut_entered_rx.recv().unwrap();
+        emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs_c, guard_c);
+        h2.join().unwrap();
+    });
+
+    for n in ctx.drain_notifications_for_char(char_id) {
+        shadow.apply_notification(&n.event, &n.args);
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 15_000);
+    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+
+    // Part C (`Barrier` race): emit vs rollback under simultaneous contention across iterations.
+    for _ in 0..12 {
+        let _ = ctx.db.tx::<(), eve_db::TxError>("replenish_race_stack", |wtx| {
+            let prev = wtx.snap.items.get(&fuel_id).cloned();
+            let mut next = prev.clone().unwrap_or(InventoryItemRecord {
+                item_id: fuel_id,
+                type_id: 16_274,
+                owner_id: char_id,
+                location_id: titan_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 50_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            });
+            next.quantity = 50_000;
+            next.version += 1;
+            wtx.snap.items.insert(fuel_id, next.clone());
+            crate::router::delta_projection::push_item_diffs_tx_effects(
+                wtx.snap,
+                wtx.effects,
+                &ctx.sde,
+                char_id,
+                &[(prev, Some(next))],
+            );
+            Ok(())
+        });
+        for n in ctx.drain_notifications_for_char(char_id) {
+            shadow.apply_notification(&n.event, &n.args);
+        }
+
+        let (_, _, _res1, diffs1, guard1) =
+            deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+                .expect("race reserve 1");
+        let (_, _, res2, _diffs2, guard2) =
+            deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+                .expect("race reserve 2 depletion");
+
+        let barrier = Barrier::new(2);
+        thread::scope(|s| {
+            let h1 = thread::Builder::new()
+                .spawn_scoped(s, || {
+                    barrier.wait();
+                    emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs1, guard1);
+                })
+                .unwrap();
+            let h2 = thread::Builder::new()
+                .spawn_scoped(s, || {
+                    barrier.wait();
+                    refund_superweapon_fuel_reserved(&ctx, char_id, &res2, guard2);
+                })
+                .unwrap();
+            h1.join().unwrap();
+            h2.join().unwrap();
+        });
+
+        for n in ctx.drain_notifications_for_char(char_id) {
+            shadow.apply_notification(&n.event, &n.args);
+        }
+        assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 25_000);
+        shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+        assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+        assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn emit_superweapon_fuel_diffs_cross_owner_transfer_scopes_clearance_bf1486_2b_r9_02() {
+    use eve_testkit::shadow_client::ShadowClient;
+
+    let ctx = test_ctx();
+    let null_sys = find_nullsec_sys(&ctx.sde);
+    let char_a = 90_000_001_i64;
+    let char_b = 90_000_002_i64;
+    let titan_a = 100_826_201_i64;
+    let mod_a = 100_826_202_i64;
+    let ship_b = 100_826_211_i64;
+    let mod_b = 100_826_212_i64;
+    let fuel_id = 100_826_220_i64;
+    let titan_tid = find_titan_type_id(&ctx.sde);
+    let dd_tid = find_doomsday_type_id(&ctx.sde);
+
+    setup_ship_and_module(&ctx, null_sys, char_a, titan_a, titan_tid, mod_a, dd_tid, DVec3::ZERO);
+    setup_ship_and_module(
+        &ctx,
+        null_sys,
+        char_b,
+        ship_b,
+        titan_tid,
+        mod_b,
+        dd_tid,
+        DVec3::new(10_000.0, 0.0, 0.0),
+    );
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_a), false, ctx.now_unix());
+    let _ = ctx
+        .db
+        .acquire_online_lock(2, 2, Some(char_b), false, ctx.now_unix());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            fuel_id,
+            InventoryItemRecord {
+                item_id: fuel_id,
+                type_id: 16_274,
+                owner_id: char_a,
+                location_id: titan_a,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 50_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut shadow_a = ShadowClient::from_world(char_a, &ctx.db, Some(&ctx.sde));
+    let mut shadow_b = ShadowClient::from_world(char_b, &ctx.db, Some(&ctx.sde));
+    let _ = ctx.drain_notifications_for_char(char_a);
+    let _ = ctx.drain_notifications_for_char(char_b);
+
+    // Reserve 25k on char_a's Titan, leaving live row at 25k while guard_a stays active.
+    let (_, _, _res_a, diffs_a, guard_a) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_a, 16_274, 25_000, "superweapon")
+            .expect("reserve A");
+
+    // Transfer the remaining 25k stack to unrelated owner `char_b` before `emit_superweapon_fuel_item_diffs`.
+    // Emit only `char_b`'s creation diff here so `shadow_a` still carries a stale pre-transfer entry
+    // and relies on `emit_superweapon_fuel_item_diffs` for clearance without leaking to `char_b`.
+    ctx.db
+        .tx::<(), eve_db::TxError>("cross_owner_transfer_fuel_stack", |wtx| {
+            let mut moved = wtx.snap.items.get(&fuel_id).cloned().unwrap();
+            moved.owner_id = char_b;
+            moved.location_id = ship_b;
+            moved.flag = InventoryFlag::SpecializedFuelBay;
+            moved.version += 1;
+            wtx.snap.items.insert(fuel_id, moved.clone());
+            crate::router::delta_projection::push_item_diffs_tx_effects(
+                wtx.snap,
+                wtx.effects,
+                &ctx.sde,
+                char_b,
+                &[(None, Some(moved))],
+            );
+            Ok(())
+        })
+        .unwrap();
+
+    for n in ctx.drain_notifications_for_char(char_b) {
+        shadow_b.apply_notification(&n.event, &n.args);
+    }
+    assert!(ctx.drain_notifications_for_char(char_a).is_empty());
+
+    // Now run superweapon commit emission for `char_a`:
+    // - `char_b` must receive ZERO notifications (strict owner boundary `cur.owner_id == pre.owner_id`).
+    // - `char_a` must receive ONLY a clearance tombstone for `pre` (never `char_b`'s row/location).
+    emit_superweapon_fuel_item_diffs(&ctx, char_a, &diffs_a, guard_a);
+
+    let notifs_b = ctx.drain_notifications_for_char(char_b);
+    assert!(
+        notifs_b.is_empty(),
+        "unrelated new owner char_b must never receive OnItemChange from char_a superweapon commit emit: {notifs_b:?}"
+    );
+
+    let notifs_a = ctx.drain_notifications_for_char(char_a);
+    assert!(
+        notifs_a.iter().any(|n| n.event == "OnItemChange"),
+        "prior owner char_a must receive clearance OnItemChange after cross-owner transfer"
+    );
+    let serialized_a = format!("{notifs_a:?}");
+    assert!(
+        !serialized_a.contains(&ship_b.to_string()) && !serialized_a.contains(&char_b.to_string()),
+        "char_a clearance notification must not leak char_b owner/location: {serialized_a}"
+    );
+    for n in notifs_a {
+        shadow_a.apply_notification(&n.event, &n.args);
+    }
+
+    shadow_a.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+    shadow_b.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+}
+

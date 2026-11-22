@@ -6,13 +6,14 @@ use crate::router::notify_registry::OnDbuffUpdated;
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::inventory_fitting::{scanners_superweapons_state, ActiveDbuffEntry};
 use crate::system_actor::SystemHandle;
+use eve_db::lock_rank::{RankedMutex, RANK_LEAF};
 use eve_destiny::{Ball, DamageVector, DVec3, TargetLock};
 use eve_dogma::{DogmaItemState, ShipFittingEngine};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{attr_ids, InvType, TypeId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub use super::tactical_modules_probes::*;
 
@@ -55,14 +56,28 @@ struct ActiveFuelReserveMap {
     by_item: HashMap<(usize, i64), ActiveFuelReserveEntry>,
 }
 
+/// Leaf lock rank strictly above `RANK_WORLD_INNER` (40), `RANK_LEAF` (60), and
+/// `RANK_TRANSITION_GRACE` (65), and strictly below `RANK_CLOCK` (70), with zero inner locks
+/// acquired while held so `notify_inner` can observe exposure even when a caller holds a `RANK_LEAF` lock.
+const RANK_FUEL_RESERVE: u16 = RANK_LEAF + 6;
+
 /// Bounded, refcounted tracker of currently in-flight silent fuel reservations
 /// (`BF-1486-2B-R8-01`, `BF-1486-2B-R8-02`). Tracks only item IDs with at least one
 /// active reservation so steady-state `OnItemChange` traffic performs a single atomic load
 /// with zero DB snapshot reads or mutex/map work.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ActiveFuelReserveTracker {
     active_reserve_count: AtomicUsize,
-    inner: Mutex<ActiveFuelReserveMap>,
+    inner: RankedMutex<ActiveFuelReserveMap, RANK_FUEL_RESERVE>,
+}
+
+impl Default for ActiveFuelReserveTracker {
+    fn default() -> Self {
+        Self {
+            active_reserve_count: AtomicUsize::new(0),
+            inner: RankedMutex::new(ActiveFuelReserveMap::default()),
+        }
+    }
 }
 
 /// RAII guard for one active silent fuel reservation across pre-commit async awaits and rollback.
