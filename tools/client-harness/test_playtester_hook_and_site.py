@@ -7464,11 +7464,18 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         items_getattr_calls = {"n": 0}
 
         class _BoomInv:
+            def __init__(self, session_check=None):
+                if session_check is not None:
+                    self.sessionCheck = session_check
+
             def __getattr__(self, name):
                 if name == "items":
                     items_getattr_calls["n"] += 1
                     sess_now = getattr(builtins, "session", None)
-                    if getattr(sess_now, "clientID", 1) == 0 or not getattr(sess_now, "charid", None):
+                    if (
+                        (hasattr(sess_now, "userid") and not getattr(sess_now, "userid", None))
+                        or not getattr(sess_now, "charid", None)
+                    ):
                         raise RuntimeError("ObjectCallGPCS.PerformSessionCheck")
                     return [types.SimpleNamespace(itemID=1, categoryID=6, flagID=4, quantity=1)]
                 raise AttributeError(name)
@@ -7476,9 +7483,10 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         fake_inv_cache = types.SimpleNamespace(inventories={(60003760, 4): _BoomInv()})
         fake_sm = types.SimpleNamespace(services={"invCache": fake_inv_cache})
 
-        # Disconnected session (clientID=0, no char/location): must NOT touch invCache.inventories (#1584).
+        # Disconnected session (userid=None, no char/location): must NOT touch invCache.inventories (#1584).
         disconnected_sess = types.SimpleNamespace(
             clientID=0,
+            userid=None,
             charid=None,
             stationid=None,
             structureid=None,
@@ -7490,9 +7498,10 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         self.assertEqual(items_getattr_calls["n"], 0)
         self.assertIsNone(snap["inventory_state"]["hangar_item_count"])
 
-        # Partial teardown where charid still lingers but clientID=0 must also skip invCache.
+        # Partial teardown where charid still lingers but userid=None must also skip invCache.
         teardown_sess = types.SimpleNamespace(
             clientID=0,
+            userid=None,
             charid=90000001,
             stationid=60003760,
             structureid=None,
@@ -7503,9 +7512,10 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
             hook._get_state_snapshot(fake_sm)
         self.assertEqual(items_getattr_calls["n"], 0)
 
-        # Connected world session must inspect invCache normally.
+        # Connected real EVE client world session has clientID=0; must still inspect invCache normally.
         connected_sess = types.SimpleNamespace(
-            clientID=42,
+            clientID=0,
+            userid=1,
             charid=90000001,
             stationid=60003760,
             structureid=None,
@@ -7518,7 +7528,21 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         self.assertEqual(items_getattr_calls["n"], 1)
         self.assertEqual(snap_live["inventory_state"]["hangar_item_count"], 1)
 
-    def test_invoke_widget_click_blocks_behind_disconnect_modal_or_client_id_zero(self):
+        # Stale bound inventory proxy whose sessionCheck mismatches live session must be skipped cleanly.
+        stale_inv_cache = types.SimpleNamespace(
+            inventories={
+                (60008494, 4): _BoomInv(session_check={"stationid": 60008494}),
+                (60003760, 4): _BoomInv(session_check={"stationid": 60003760}),
+            }
+        )
+        stale_sm = types.SimpleNamespace(services={"invCache": stale_inv_cache})
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess, "sm": stale_sm}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=None):
+            snap_filtered = hook._get_state_snapshot(stale_sm)
+        self.assertEqual(items_getattr_calls["n"], 2)
+        self.assertEqual(snap_filtered["inventory_state"]["hangar_item_count"], 1)
+
+    def test_invoke_widget_click_blocks_behind_disconnect_modal_and_cleared_session(self):
         hook = _load_hook_with_py2_stubs()
         clicked = []
 
@@ -7556,7 +7580,13 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         reg_with_modal = types.SimpleNamespace(GetModalWindow=lambda: modal_wnd, modals=[modal_wnd])
         uic_modal = types.SimpleNamespace(layer=layers_with_modal, registry=reg_with_modal, uilib=None)
 
-        connected_sess = types.SimpleNamespace(clientID=5, charid=90000001, stationid=60003760, solarsystemid2=30000142)
+        connected_sess = types.SimpleNamespace(
+            clientID=0,
+            userid=1,
+            charid=90000001,
+            stationid=60003760,
+            solarsystemid2=30000142,
+        )
         with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
              mock.patch.object(hook, "_get_uicore", return_value=uic_modal):
             # Background in-world widget click must be blocked while Connection Lost modal is open (#1585).
@@ -7569,7 +7599,7 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
             self.assertEqual(res_ok, "OnClick")
             self.assertEqual(clicked, ["OK"])
 
-        # Without modal, disconnected session (clientID=0) must also block ItemHangar click before OnClick().
+        # Without modal, disconnected session (userid=None) must also block ItemHangar click before OnClick().
         layers_clean = types.SimpleNamespace(
             modal=types.SimpleNamespace(children=[], destroyed=False),
             abovemain=types.SimpleNamespace(children=[], destroyed=False),
@@ -7577,14 +7607,34 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         )
         reg_clean = types.SimpleNamespace(GetModalWindow=lambda: None, modals=[])
         uic_clean = types.SimpleNamespace(layer=layers_clean, registry=reg_clean, uilib=None)
-        disconnected_sess = types.SimpleNamespace(clientID=0, charid=None, stationid=None, solarsystemid2=None)
+        disconnected_sess = types.SimpleNamespace(
+            clientID=0,
+            userid=None,
+            charid=None,
+            stationid=None,
+            solarsystemid2=None,
+        )
         with mock.patch.dict(builtins.__dict__, {"session": disconnected_sess}, clear=False), \
              mock.patch.object(hook, "_get_uicore", return_value=uic_clean):
             res_disc = hook._invoke_widget_click(item_hangar)
-            self.assertEqual(res_disc, "SessionDisconnected(clientID=0)")
+            self.assertEqual(res_disc, "SessionDisconnected(no_userid)")
             self.assertEqual(clicked, ["OK"])
 
-        # Healthy connected session without blocking modal must click ItemHangar normally.
+        # Partial teardown (userid still set, char/location cleared) must block non-login/charsel clicks too.
+        no_world_sess = types.SimpleNamespace(
+            clientID=0,
+            userid=1,
+            charid=None,
+            stationid=None,
+            solarsystemid2=None,
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": no_world_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_clean):
+            res_no_world = hook._invoke_widget_click(item_hangar)
+            self.assertEqual(res_no_world, "SessionDisconnected(no_world_session)")
+            self.assertEqual(clicked, ["OK"])
+
+        # Healthy connected session (even with real clientID=0) without blocking modal must click ItemHangar normally.
         with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
              mock.patch.object(hook, "_get_uicore", return_value=uic_clean):
             res_live = hook._invoke_widget_click(item_hangar)
@@ -7719,7 +7769,7 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
             modals=[hidden_display_modal, hidden_state_modal],
         )
         fake_uic = types.SimpleNamespace(layer=fake_layers, registry=fake_reg, uilib=None)
-        connected_sess = types.SimpleNamespace(clientID=5, charid=90000001, solarsystemid=30000142)
+        connected_sess = types.SimpleNamespace(clientID=0, userid=1, charid=90000001, solarsystemid=30000142)
 
         with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
              mock.patch.object(hook, "_get_uicore", return_value=fake_uic), \
@@ -7970,7 +8020,7 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         # (a) Active mixed ConnectionLost + Daily cluster downtime modal must tag ClusterShuttingDown (P2-1),
         # block non-modal *Dialog* in main, block unrelated modal, block SelectByIdx & Select tabs,
         # and still allow clicks on the active disconnect modal's own Dismiss button.
-        connected_sess = types.SimpleNamespace(clientID=5, charid=90000001, solarsystemid=30000142)
+        connected_sess = types.SimpleNamespace(clientID=0, userid=1, charid=90000001, solarsystemid=30000142)
         with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
              mock.patch.object(hook, "_get_uicore", return_value=uic_disc):
             self.assertEqual(hook._active_disconnect_modal_tag(), "ClusterShuttingDown")
@@ -7987,7 +8037,7 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
             self.assertEqual(hook._invoke_widget_click(disc_ok), "OnClick")
             self.assertEqual(clicked, ["Dismiss"])
 
-        # (b) With only hidden modal inside modal_layer and non-modal *Dialog* in main while disconnected (clientID=0 / None):
+        # (b) With only hidden modal inside modal_layer and non-modal *Dialog* in main:
         modal_layer_hidden_only = types.SimpleNamespace(
             name="l_modal",
             display=True,
@@ -8004,12 +8054,21 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
             registry=types.SimpleNamespace(GetModalWindow=lambda: None, modals=[], GetWindows=lambda: [win_idx, win_select]),
             uilib=None,
         )
-        for bad_cid in (0, None):
-            disc_sess = types.SimpleNamespace(clientID=bad_cid, charid=90000001, solarsystemid=30000142)
+        # Connected clientID=0 session with valid userid/charid/location must NOT be falsely blocked.
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_hidden_only):
+            self.assertEqual(hook._invoke_widget_click(dlg_btn), "OnClick")
+        clicked.pop()
+
+        # Cleared/partial-teardown sessions (no userid or no charid/location) must block hidden-modal, dialog, and tab clicks:
+        for expected_reason, disc_sess in (
+            ("SessionDisconnected(no_userid)", types.SimpleNamespace(clientID=0, userid=None, charid=90000001, solarsystemid=30000142)),
+            ("SessionDisconnected(no_world_session)", types.SimpleNamespace(clientID=0, userid=1, charid=None, stationid=None, solarsystemid2=None, solarsystemid=None)),
+        ):
             with mock.patch.dict(builtins.__dict__, {"session": disc_sess}, clear=False), \
                  mock.patch.object(hook, "_get_uicore", return_value=uic_hidden_only):
-                self.assertEqual(hook._invoke_widget_click(hidden_modal_btn), "SessionDisconnected(clientID=%s)" % (bad_cid,))
-                self.assertEqual(hook._invoke_widget_click(dlg_btn), "SessionDisconnected(clientID=%s)" % (bad_cid,))
+                self.assertEqual(hook._invoke_widget_click(hidden_modal_btn), expected_reason)
+                self.assertEqual(hook._invoke_widget_click(dlg_btn), expected_reason)
                 r_idx = hook._click_top_tabs_in_window("MarketIdx", max_tabs=1)
                 self.assertFalse(r_idx["ok"])
                 self.assertIn("disconnected", r_idx["error"].lower())

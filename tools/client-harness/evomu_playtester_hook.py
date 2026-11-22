@@ -3514,22 +3514,29 @@ def _active_disconnect_modal_tag():
     return _active_disconnect_modal_info()[0]
 
 
-def _preclick_block_reason(node):
-    modal_tag, modal_root = _active_disconnect_modal_info()
-    if modal_tag:
-        if node is not None and _is_under_visible_root(node, modal_root):
-            return ""
-        return "ModalBlocked(%s)" % (modal_tag,)
-    if node is not None and _is_node_inside_modal(node):
-        return ""
-    sess = getattr(__builtin__, "session", None)
+_SCALAR_SESSION_CHECK_KEYS = (
+    "userid",
+    "charid",
+    "corpid",
+    "shipid",
+    "stationid",
+    "stationid2",
+    "structureid",
+    "solarsystemid",
+    "solarsystemid2",
+)
+
+
+def _session_disconnect_reason(sess):
+    """Return a SessionDisconnected reason when a live EVE session is logged out or torn down.
+
+    EVE client sessions always keep ``session.clientID == 0`` (CoreSession default) even
+    while connected, so only ``userid``, ``charid``, and location attributes indicate health.
+    """
     if sess is None:
         return ""
-    if hasattr(sess, "clientID"):
-        cid_val = getattr(sess, "clientID", None)
-        if cid_val is None or (isinstance(cid_val, _HOOK_INT_TYPES) and not isinstance(cid_val, bool) and int(cid_val) == 0):
-            if not _is_node_inside_login_or_charsel(node):
-                return "SessionDisconnected(clientID=%s)" % (cid_val,)
+    if hasattr(sess, "userid") and not getattr(sess, "userid", None):
+        return "SessionDisconnected(no_userid)"
     if hasattr(sess, "charid") and (
         hasattr(sess, "stationid")
         or hasattr(sess, "structureid")
@@ -3545,8 +3552,64 @@ def _preclick_block_reason(node):
                 or getattr(sess, "solarsystemid", None)
             )
         )
-        if not has_world and not _is_node_inside_login_or_charsel(node):
+        if not has_world:
             return "SessionDisconnected(no_world_session)"
+    return ""
+
+
+def _has_live_world_session(sess_live):
+    """Return True when the live session is authenticated on an active char and location."""
+    if sess_live is None or _session_disconnect_reason(sess_live):
+        return False
+    return bool(
+        getattr(sess_live, "charid", None)
+        and (
+            getattr(sess_live, "stationid", None)
+            or getattr(sess_live, "structureid", None)
+            or getattr(sess_live, "solarsystemid2", None)
+            or getattr(sess_live, "solarsystemid", None)
+        )
+    )
+
+
+def _filter_session_safe_inventories(invs, sess_live):
+    """Skip bound inventory proxies whose instance sessionCheck mismatches the live session."""
+    safe = {}
+    for key, iv in list(invs.items()):
+        try:
+            iv_dict = object.__getattribute__(iv, "__dict__")
+        except Exception:
+            iv_dict = None
+        sess_check = iv_dict.get("sessionCheck") if isinstance(iv_dict, dict) else None
+        if isinstance(sess_check, dict):
+            mismatch = False
+            for ck, expected in sess_check.items():
+                if (
+                    ck in _SCALAR_SESSION_CHECK_KEYS
+                    and isinstance(expected, _HOOK_INT_TYPES)
+                    and not isinstance(expected, bool)
+                    and getattr(sess_live, ck, None) != expected
+                ):
+                    mismatch = True
+                    break
+            if mismatch:
+                continue
+        safe[key] = iv
+    return safe
+
+
+def _preclick_block_reason(node):
+    modal_tag, modal_root = _active_disconnect_modal_info()
+    if modal_tag:
+        if node is not None and _is_under_visible_root(node, modal_root):
+            return ""
+        return "ModalBlocked(%s)" % (modal_tag,)
+    if node is not None and _is_node_inside_modal(node):
+        return ""
+    sess = getattr(__builtin__, "session", None)
+    reason = _session_disconnect_reason(sess)
+    if reason and not _is_node_inside_login_or_charsel(node):
+        return reason
     return ""
 
 
@@ -4606,24 +4669,12 @@ def _get_state_snapshot(sm):
         "hangar_containers_seen": None,
     }
     sess_live = getattr(__builtin__, "session", None)
-    cid_live = getattr(sess_live, "clientID", 1) if sess_live is not None else 0
-    has_live_client_id = (
-        cid_live is not None
-        and (not isinstance(cid_live, _HOOK_INT_TYPES) or isinstance(cid_live, bool) or int(cid_live) != 0)
-    )
-    has_world_session = bool(
-        sess_dict.get("charid")
-        and (
-            sess_dict.get("stationid")
-            or sess_dict.get("structureid")
-            or sess_dict.get("solarsystemid2")
-            or sess_dict.get("solarsystemid")
-        )
-        and has_live_client_id
-    )
+    has_world_session = _has_live_world_session(sess_live)
     try:
         ic_svc = getattr(sm, "services", {}).get("invCache") if has_world_session else None
         invs = getattr(ic_svc, "inventories", None) if ic_svc is not None else None
+        if has_world_session and isinstance(invs, dict):
+            invs = _filter_session_safe_inventories(invs, sess_live)
         if has_world_session and isinstance(invs, dict):
             ship_id_i = sess_dict.get("shipid")
             st_locs = {x for x in (sess_dict.get("stationid"), sess_dict.get("structureid")) if x}
