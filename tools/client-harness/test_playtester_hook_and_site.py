@@ -31,6 +31,7 @@ def _load_hook_with_py2_stubs():
     hook_path = HARNESS_DIR / "evomu_playtester_hook.py"
     orig_builtin = sys.modules.get("__builtin__")
     orig_helpers = sys.modules.get("evomu_inclient_helpers")
+    helpers_mod = _load_helpers_with_py2_stubs()
     sys.modules["__builtin__"] = builtins
     fake_helpers = types.ModuleType("evomu_inclient_helpers")
     fake_helpers._advance_clock = lambda *_args, **_kwargs: False
@@ -45,6 +46,10 @@ def _load_hook_with_py2_stubs():
         "sim_time_injections": [],
         "sim_seq_after": 0,
     }
+    fake_helpers._is_widget_visible = helpers_mod._is_widget_visible
+    fake_helpers._is_modal_dialog_root = helpers_mod._is_modal_dialog_root
+    fake_helpers._iter_visible_modal_roots = helpers_mod._iter_visible_modal_roots
+    fake_helpers._collect_widget_text_fragments = helpers_mod._collect_widget_text_fragments
     sys.modules["evomu_inclient_helpers"] = fake_helpers
     try:
         spec = importlib.util.spec_from_file_location("_evomu_playtester_hook_test", str(hook_path))
@@ -7451,6 +7456,568 @@ class TestHarnessSettleAndDeepWindowInspect1190(unittest.TestCase):
             self.assertTrue(ok_empty, err_empty)
             self.assertEqual(box.text, "")
             self.assertEqual(box.caretIndex, (0, 0))
+
+
+class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
+    def test_get_state_snapshot_skips_invcache_when_disconnected(self):
+        hook = _load_hook_with_py2_stubs()
+        items_getattr_calls = {"n": 0}
+
+        class _BoomInv:
+            def __getattr__(self, name):
+                if name == "items":
+                    items_getattr_calls["n"] += 1
+                    sess_now = getattr(builtins, "session", None)
+                    if getattr(sess_now, "clientID", 1) == 0 or not getattr(sess_now, "charid", None):
+                        raise RuntimeError("ObjectCallGPCS.PerformSessionCheck")
+                    return [types.SimpleNamespace(itemID=1, categoryID=6, flagID=4, quantity=1)]
+                raise AttributeError(name)
+
+        fake_inv_cache = types.SimpleNamespace(inventories={(60003760, 4): _BoomInv()})
+        fake_sm = types.SimpleNamespace(services={"invCache": fake_inv_cache})
+
+        # Disconnected session (clientID=0, no char/location): must NOT touch invCache.inventories (#1584).
+        disconnected_sess = types.SimpleNamespace(
+            clientID=0,
+            charid=None,
+            stationid=None,
+            structureid=None,
+            solarsystemid2=None,
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": disconnected_sess, "sm": fake_sm}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=None):
+            snap = hook._get_state_snapshot(fake_sm)
+        self.assertEqual(items_getattr_calls["n"], 0)
+        self.assertIsNone(snap["inventory_state"]["hangar_item_count"])
+
+        # Partial teardown where charid still lingers but clientID=0 must also skip invCache.
+        teardown_sess = types.SimpleNamespace(
+            clientID=0,
+            charid=90000001,
+            stationid=60003760,
+            structureid=None,
+            solarsystemid2=30000142,
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": teardown_sess, "sm": fake_sm}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=None):
+            hook._get_state_snapshot(fake_sm)
+        self.assertEqual(items_getattr_calls["n"], 0)
+
+        # Connected world session must inspect invCache normally.
+        connected_sess = types.SimpleNamespace(
+            clientID=42,
+            charid=90000001,
+            stationid=60003760,
+            structureid=None,
+            solarsystemid2=30000142,
+            shipid=758432905,
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess, "sm": fake_sm}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=None):
+            snap_live = hook._get_state_snapshot(fake_sm)
+        self.assertEqual(items_getattr_calls["n"], 1)
+        self.assertEqual(snap_live["inventory_state"]["hangar_item_count"], 1)
+
+    def test_invoke_widget_click_blocks_behind_disconnect_modal_or_client_id_zero(self):
+        hook = _load_hook_with_py2_stubs()
+        clicked = []
+
+        class _Btn:
+            def __init__(self, name, parent=None):
+                self.name = name
+                self.parent = parent
+                self.destroyed = False
+
+            def OnClick(self):
+                clicked.append(self.name)
+
+        main_layer = types.SimpleNamespace(name="l_main", parent=None, destroyed=False)
+        item_hangar = _Btn("ItemHangar", parent=main_layer)
+
+        msg_lbl = types.SimpleNamespace(text="The socket was closed.", destroyed=False, children=[])
+        modal_wnd = types.SimpleNamespace(
+            name="MessageBox",
+            caption="Connection Lost",
+            msgKey="ConnectionLost",
+            _message_label=msg_lbl,
+            destroyed=False,
+            isModal=True,
+            children=[msg_lbl],
+            parent=None,
+        )
+        ok_btn = _Btn("OK", parent=modal_wnd)
+        modal_wnd.children.append(ok_btn)
+
+        layers_with_modal = types.SimpleNamespace(
+            modal=types.SimpleNamespace(children=[modal_wnd], destroyed=False),
+            abovemain=types.SimpleNamespace(children=[], destroyed=False),
+            l_main=main_layer,
+        )
+        reg_with_modal = types.SimpleNamespace(GetModalWindow=lambda: modal_wnd, modals=[modal_wnd])
+        uic_modal = types.SimpleNamespace(layer=layers_with_modal, registry=reg_with_modal, uilib=None)
+
+        connected_sess = types.SimpleNamespace(clientID=5, charid=90000001, stationid=60003760, solarsystemid2=30000142)
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_modal):
+            # Background in-world widget click must be blocked while Connection Lost modal is open (#1585).
+            res_bg = hook._invoke_widget_click(item_hangar)
+            self.assertEqual(res_bg, "ModalBlocked(ConnectionLost)")
+            self.assertEqual(clicked, [])
+
+            # Clicking a button inside the modal itself must still work.
+            res_ok = hook._invoke_widget_click(ok_btn)
+            self.assertEqual(res_ok, "OnClick")
+            self.assertEqual(clicked, ["OK"])
+
+        # Without modal, disconnected session (clientID=0) must also block ItemHangar click before OnClick().
+        layers_clean = types.SimpleNamespace(
+            modal=types.SimpleNamespace(children=[], destroyed=False),
+            abovemain=types.SimpleNamespace(children=[], destroyed=False),
+            l_main=main_layer,
+        )
+        reg_clean = types.SimpleNamespace(GetModalWindow=lambda: None, modals=[])
+        uic_clean = types.SimpleNamespace(layer=layers_clean, registry=reg_clean, uilib=None)
+        disconnected_sess = types.SimpleNamespace(clientID=0, charid=None, stationid=None, solarsystemid2=None)
+        with mock.patch.dict(builtins.__dict__, {"session": disconnected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_clean):
+            res_disc = hook._invoke_widget_click(item_hangar)
+            self.assertEqual(res_disc, "SessionDisconnected(clientID=0)")
+            self.assertEqual(clicked, ["OK"])
+
+        # Healthy connected session without blocking modal must click ItemHangar normally.
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_clean):
+            res_live = hook._invoke_widget_click(item_hangar)
+            self.assertEqual(res_live, "OnClick")
+            self.assertEqual(clicked, ["OK", "ItemHangar"])
+
+    def test_wait_for_session_fails_fast_on_cluster_shutting_down_modal(self):
+        helpers = _load_helpers_with_py2_stubs()
+        lbl = types.SimpleNamespace(
+            text="Cluster shutdown in progress. Non-GM logins are rejected.",
+            destroyed=False,
+            children=[],
+        )
+        modal_wnd = types.SimpleNamespace(
+            name="MessageBox",
+            msgKey="ClusterShuttingDown",
+            caption="Notice",
+            _message_label=lbl,
+            destroyed=False,
+            children=[lbl],
+        )
+        fake_uicore = types.SimpleNamespace(
+            registry=types.SimpleNamespace(GetModalWindow=lambda: modal_wnd, modals=[modal_wnd]),
+            layer=types.SimpleNamespace(
+                modal=types.SimpleNamespace(children=[modal_wnd]),
+                abovemain=types.SimpleNamespace(children=[]),
+            ),
+        )
+        unauth_sess = types.SimpleNamespace(userid=None, charid=None, clientID=0)
+        sleep_calls = []
+        with mock.patch.dict(builtins.__dict__, {"session": unauth_sess}, clear=False), \
+             mock.patch.object(helpers, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(helpers, "_sleep_ms", side_effect=lambda ms: sleep_calls.append(ms)):
+            with self.assertRaisesRegex(RuntimeError, "ClusterShuttingDown"):
+                helpers._wait_for_session(mock.MagicMock(), "demo", "demo-secret", 90000001, timeout_sec=90.0)
+        self.assertEqual(sleep_calls, [])
+
+    def test_hidden_modals_and_nonmodal_abovemain_banners_do_not_block_or_trigger_shutdown(self):
+        hook = _load_hook_with_py2_stubs()
+        helpers = _load_helpers_with_py2_stubs()
+        clicked = []
+
+        class _Btn:
+            def __init__(self, name, parent=None):
+                self.name = name
+                self.parent = parent
+                self.destroyed = False
+                self.display = True
+                self.state = 0
+
+            def OnClick(self):
+                clicked.append(self.name)
+
+        class _ShutdownBanner:
+            pass
+
+        main_layer = types.SimpleNamespace(name="l_main", parent=None, destroyed=False, display=True, state=0)
+        item_hangar = _Btn("ItemHangar", parent=main_layer)
+
+        # 1) Hidden disconnect modal (display=False) + UI_HIDDEN (state=2) modal + non-modal countdown banner in abovemain.
+        hidden_display_modal = types.SimpleNamespace(
+            name="MessageBox",
+            msgKey="ConnectionLost",
+            caption="Connection Lost",
+            display=False,
+            state=0,
+            destroyed=False,
+            isModal=True,
+            children=[types.SimpleNamespace(text="The socket was closed.", destroyed=False, display=True, state=0, children=[])],
+        )
+        hidden_state_modal = types.SimpleNamespace(
+            name="MessageBox",
+            msgKey="ClusterShuttingDown",
+            caption="Cluster Shutdown",
+            display=True,
+            state=2,
+            destroyed=False,
+            isModal=True,
+            children=[types.SimpleNamespace(text="Daily cluster downtime", destroyed=False, display=True, state=0, children=[])],
+        )
+        visible_wrapper_with_hidden_label = types.SimpleNamespace(
+            name="MessageBox",
+            caption="Notice",
+            display=True,
+            state=0,
+            destroyed=False,
+            isModal=True,
+            children=[
+                types.SimpleNamespace(
+                    text="Cluster shutdown in progress",
+                    destroyed=False,
+                    display=False,
+                    state=2,
+                    children=[],
+                )
+            ],
+        )
+        nonmodal_banner = _ShutdownBanner()
+        nonmodal_banner.name = "ShutdownNotification"
+        nonmodal_banner.caption = "Daily Cluster Downtime"
+        nonmodal_banner.isModal = False
+        nonmodal_banner.display = True
+        nonmodal_banner.state = 0
+        nonmodal_banner.destroyed = False
+        nonmodal_banner.children = [
+            types.SimpleNamespace(
+                text="Cluster shutdown in 15 minutes",
+                destroyed=False,
+                display=True,
+                state=0,
+                children=[],
+            )
+        ]
+
+        fake_layers = types.SimpleNamespace(
+            modal=types.SimpleNamespace(
+                children=[hidden_display_modal, visible_wrapper_with_hidden_label],
+                destroyed=False,
+                display=True,
+                state=0,
+            ),
+            abovemain=types.SimpleNamespace(
+                children=[hidden_state_modal, nonmodal_banner],
+                destroyed=False,
+                display=True,
+                state=0,
+            ),
+            l_main=main_layer,
+        )
+        fake_reg = types.SimpleNamespace(
+            GetModalWindow=lambda: hidden_display_modal,
+            modals=[hidden_display_modal, hidden_state_modal],
+        )
+        fake_uic = types.SimpleNamespace(layer=fake_layers, registry=fake_reg, uilib=None)
+        connected_sess = types.SimpleNamespace(clientID=5, charid=90000001, solarsystemid=30000142)
+
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uic), \
+             mock.patch.object(helpers, "_get_uicore", return_value=fake_uic):
+            self.assertEqual(hook._active_disconnect_modal_tag(), "")
+            self.assertEqual(helpers._detect_cluster_shutdown_modal_message(), "")
+            self.assertEqual(hook._invoke_widget_click(item_hangar), "OnClick")
+            self.assertEqual(clicked, ["ItemHangar"])
+
+        # 2) Visible modal in abovemain (isModal=True) MUST block clicks and trigger shutdown detection.
+        visible_abovemain_modal = _ShutdownBanner()
+        visible_abovemain_modal.name = "ShutdownDialog"
+        visible_abovemain_modal.msgKey = "ClusterShuttingDown"
+        visible_abovemain_modal.isModal = True
+        visible_abovemain_modal.display = True
+        visible_abovemain_modal.state = 0
+        visible_abovemain_modal.destroyed = False
+        visible_abovemain_modal.children = [
+            types.SimpleNamespace(
+                text="Cluster shutdown in progress",
+                destroyed=False,
+                display=True,
+                state=0,
+                children=[],
+            )
+        ]
+        fake_layers.abovemain.children.append(visible_abovemain_modal)
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uic), \
+             mock.patch.object(helpers, "_get_uicore", return_value=fake_uic):
+            self.assertEqual(hook._active_disconnect_modal_tag(), "ClusterShuttingDown")
+            self.assertIn("ClusterShuttingDown", helpers._detect_cluster_shutdown_modal_message())
+            self.assertEqual(hook._invoke_widget_click(item_hangar), "ModalBlocked(ClusterShuttingDown)")
+            self.assertEqual(clicked, ["ItemHangar"])
+
+        # 3) _click_top_tabs_in_window must fail cleanly if a disconnect modal blocks the tab click.
+        tab_btn = _Btn("DetailsTab")
+        tab_btn.text = "Details"
+
+        class TabGroup:
+            pass
+
+        tab_group = TabGroup()
+        tab_group.name = "MyTabGroup"
+        tab_group.tabs = [tab_btn]
+        tab_group.destroyed = False
+        tab_group.display = True
+        tab_group.state = 0
+        tab_group.children = [tab_btn]
+        win_with_tabs = types.SimpleNamespace(
+            windowID="Market",
+            name="Market",
+            destroyed=False,
+            display=True,
+            state=0,
+            minimized=False,
+            children=[tab_group],
+        )
+        tab_layers = types.SimpleNamespace(
+            modal=types.SimpleNamespace(children=[], destroyed=False, display=True, state=0),
+            abovemain=types.SimpleNamespace(children=[visible_abovemain_modal], destroyed=False, display=True, state=0),
+            main=types.SimpleNamespace(children=[win_with_tabs], destroyed=False, display=True, state=0),
+        )
+        tab_uic = types.SimpleNamespace(
+            layer=tab_layers,
+            registry=types.SimpleNamespace(GetModalWindow=lambda: None, modals=[], GetWindows=lambda: [win_with_tabs]),
+            uilib=None,
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=tab_uic):
+            tab_res = hook._click_top_tabs_in_window("Market", max_tabs=1)
+        self.assertFalse(tab_res["ok"])
+        self.assertIn("ClusterShuttingDown", tab_res["error"])
+        self.assertEqual(clicked, ["ItemHangar"])
+
+    def test_modal_layer_hidden_child_nonmodal_dialog_and_tab_select_branches(self):
+        hook = _load_hook_with_py2_stubs()
+        clicked = []
+        selected = []
+
+        class CustomMainDialog:
+            def __init__(self, name, parent=None):
+                self.name = name
+                self.parent = parent
+                self.destroyed = False
+                self.display = True
+                self.state = 0
+                self.children = []
+
+        class _Btn:
+            def __init__(self, name, parent=None):
+                self.name = name
+                self.parent = parent
+                self.destroyed = False
+                self.display = True
+                self.state = 0
+
+            def OnClick(self):
+                clicked.append(self.name)
+
+        class _SelectOnlyTab:
+            def __init__(self, name, parent=None):
+                self.name = name
+                self.text = name
+                self.parent = parent
+                self.destroyed = False
+                self.display = True
+                self.state = 0
+
+            def Select(self):
+                selected.append(("Select", self.name))
+
+        class _TabGroup:
+            def __init__(self, tabs, parent=None):
+                self.name = "TabGroup"
+                self.tabs = tabs
+                self.parent = parent
+                self.destroyed = False
+                self.display = True
+                self.state = 0
+                self.children = list(tabs)
+
+            def SelectByIdx(self, idx):
+                selected.append(("SelectByIdx", idx))
+
+        main_layer = types.SimpleNamespace(name="l_main", parent=None, destroyed=False, display=True, state=0, children=[])
+        nonmodal_dlg = CustomMainDialog("MySettingsDialog", parent=main_layer)
+        dlg_btn = _Btn("Apply", parent=nonmodal_dlg)
+        nonmodal_dlg.children.append(dlg_btn)
+        main_layer.children.append(nonmodal_dlg)
+
+        # Hidden modal child inside a visible modal layer container.
+        hidden_modal_child = types.SimpleNamespace(
+            name="HiddenModal",
+            display=False,
+            state=0,
+            destroyed=False,
+            isModal=True,
+            children=[],
+        )
+        hidden_modal_btn = _Btn("HiddenModalBtn", parent=hidden_modal_child)
+        hidden_modal_child.children.append(hidden_modal_btn)
+        l_modal_wrap = types.SimpleNamespace(
+            name="l_modal_0",
+            display=True,
+            state=0,
+            destroyed=False,
+            children=[hidden_modal_child],
+        )
+
+        # Visible ConnectionLost modal whose caption also mentions Daily cluster downtime (P2-1).
+        disc_modal = types.SimpleNamespace(
+            name="MessageBox",
+            caption="Connection Lost",
+            msgKey="ConnectionLost",
+            isModal=True,
+            display=True,
+            state=0,
+            destroyed=False,
+            children=[
+                types.SimpleNamespace(
+                    text="Daily cluster downtime is in progress",
+                    destroyed=False,
+                    display=True,
+                    state=0,
+                    children=[],
+                )
+            ],
+        )
+        disc_ok = _Btn("Dismiss", parent=disc_modal)
+        disc_modal.children.append(disc_ok)
+
+        unrelated_modal = types.SimpleNamespace(
+            name="ConfirmModal",
+            caption="Unrelated Notice",
+            isModal=True,
+            display=True,
+            state=0,
+            destroyed=False,
+            children=[],
+        )
+        unrelated_btn = _Btn("UnrelatedOk", parent=unrelated_modal)
+        unrelated_modal.children.append(unrelated_btn)
+
+        # Two tab groups inside l_main: one exercises SelectByIdx (plain tab), one exercises tab.Select().
+        plain_tab = types.SimpleNamespace(name="OrdersTab", text="Orders", destroyed=False, display=True, state=0)
+        tg_idx = _TabGroup([plain_tab], parent=main_layer)
+        plain_tab.parent = tg_idx
+        win_idx = types.SimpleNamespace(
+            windowID="MarketIdx",
+            name="MarketIdx",
+            destroyed=False,
+            display=True,
+            state=0,
+            minimized=False,
+            children=[tg_idx],
+            parent=main_layer,
+        )
+        tg_idx.parent = win_idx
+
+        select_tab = _SelectOnlyTab("DetailsTab")
+
+        class _SelectBranchTabGroup:
+            def __init__(self, tabs, parent=None):
+                self.name = "TabGroup"
+                self.tabs = tabs
+                self.parent = parent
+                self.destroyed = False
+                self.display = True
+                self.state = 0
+                self.children = list(tabs)
+
+        tg_select_branch = _SelectBranchTabGroup([select_tab], parent=main_layer)
+        select_tab.parent = tg_select_branch
+        win_select = types.SimpleNamespace(
+            windowID="MarketSel",
+            name="MarketSel",
+            destroyed=False,
+            display=True,
+            state=0,
+            minimized=False,
+            children=[tg_select_branch],
+            parent=main_layer,
+        )
+        tg_select_branch.parent = win_select
+
+        modal_layer = types.SimpleNamespace(
+            name="l_modal",
+            display=True,
+            state=0,
+            destroyed=False,
+            children=[l_modal_wrap, disc_modal, unrelated_modal],
+        )
+        uic_disc = types.SimpleNamespace(
+            layer=types.SimpleNamespace(
+                modal=modal_layer,
+                abovemain=types.SimpleNamespace(children=[], destroyed=False, display=True, state=0),
+                main=main_layer,
+            ),
+            registry=types.SimpleNamespace(
+                GetModalWindow=lambda: disc_modal,
+                modals=[disc_modal, unrelated_modal],
+                GetWindows=lambda: [win_idx, win_select],
+            ),
+            uilib=None,
+        )
+
+        # (a) Active mixed ConnectionLost + Daily cluster downtime modal must tag ClusterShuttingDown (P2-1),
+        # block non-modal *Dialog* in main, block unrelated modal, block SelectByIdx & Select tabs,
+        # and still allow clicks on the active disconnect modal's own Dismiss button.
+        connected_sess = types.SimpleNamespace(clientID=5, charid=90000001, solarsystemid=30000142)
+        with mock.patch.dict(builtins.__dict__, {"session": connected_sess}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_disc):
+            self.assertEqual(hook._active_disconnect_modal_tag(), "ClusterShuttingDown")
+            self.assertEqual(hook._invoke_widget_click(dlg_btn), "ModalBlocked(ClusterShuttingDown)")
+            self.assertEqual(hook._invoke_widget_click(unrelated_btn), "ModalBlocked(ClusterShuttingDown)")
+            self.assertEqual(hook._invoke_widget_click(hidden_modal_btn), "ModalBlocked(ClusterShuttingDown)")
+            tab_idx_res = hook._click_top_tabs_in_window("MarketIdx", max_tabs=1)
+            self.assertFalse(tab_idx_res["ok"])
+            self.assertIn("ClusterShuttingDown", tab_idx_res["error"])
+            tab_sel_res = hook._click_top_tabs_in_window("MarketSel", max_tabs=1)
+            self.assertFalse(tab_sel_res["ok"])
+            self.assertIn("ClusterShuttingDown", tab_sel_res["error"])
+            self.assertEqual(selected, [])
+            self.assertEqual(hook._invoke_widget_click(disc_ok), "OnClick")
+            self.assertEqual(clicked, ["Dismiss"])
+
+        # (b) With only hidden modal inside modal_layer and non-modal *Dialog* in main while disconnected (clientID=0 / None):
+        modal_layer_hidden_only = types.SimpleNamespace(
+            name="l_modal",
+            display=True,
+            state=0,
+            destroyed=False,
+            children=[l_modal_wrap],
+        )
+        uic_hidden_only = types.SimpleNamespace(
+            layer=types.SimpleNamespace(
+                modal=modal_layer_hidden_only,
+                abovemain=types.SimpleNamespace(children=[], destroyed=False, display=True, state=0),
+                main=main_layer,
+            ),
+            registry=types.SimpleNamespace(GetModalWindow=lambda: None, modals=[], GetWindows=lambda: [win_idx, win_select]),
+            uilib=None,
+        )
+        for bad_cid in (0, None):
+            disc_sess = types.SimpleNamespace(clientID=bad_cid, charid=90000001, solarsystemid=30000142)
+            with mock.patch.dict(builtins.__dict__, {"session": disc_sess}, clear=False), \
+                 mock.patch.object(hook, "_get_uicore", return_value=uic_hidden_only):
+                self.assertEqual(hook._invoke_widget_click(hidden_modal_btn), "SessionDisconnected(clientID=%s)" % (bad_cid,))
+                self.assertEqual(hook._invoke_widget_click(dlg_btn), "SessionDisconnected(clientID=%s)" % (bad_cid,))
+                r_idx = hook._click_top_tabs_in_window("MarketIdx", max_tabs=1)
+                self.assertFalse(r_idx["ok"])
+                self.assertIn("disconnected", r_idx["error"].lower())
+                r_sel = hook._click_top_tabs_in_window("MarketSel", max_tabs=1)
+                self.assertFalse(r_sel["ok"])
+                self.assertIn("disconnected", r_sel["error"].lower())
+        self.assertEqual(selected, [])
+        self.assertEqual(clicked, ["Dismiss"])
 
 
 if __name__ == "__main__":

@@ -687,6 +687,10 @@ _DOWNTIME_DISCONNECT_MARKERS = (
     "broken pipe",
     "remotingerror",
     "connectionlost",
+    "connection lost",
+    "socket was closed",
+    "sessiondisconnected",
+    "caller not in solsys nor station",
 )
 
 _DOWNTIME_MODAL_KEYS = ("modals", "modal", "active_modal", "recent_modal_messages")
@@ -737,6 +741,47 @@ def _seconds_until_downtime_ends(
         if until_start <= float(pre_window_secs):
             return max(0.0, until_start + float(window_secs) + buf)
     return 0.0
+
+
+def _read_world_downtime_state(world_db_path: Any) -> tuple[int, Optional[int]]:
+    """Read (clock_offset_secs, downtime_until_unix) read-only from harness_world.sqlite."""
+    if not world_db_path:
+        return (0, None)
+    db_path = Path(world_db_path)
+    if not db_path.exists():
+        return (0, None)
+    conn = None
+    clock_offset_secs = 0
+    downtime_until_unix: Optional[int] = None
+    try:
+        conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
+        try:
+            row = conn.execute(
+                "SELECT meta_value FROM world_meta WHERE meta_key = 'clock_offset_secs'"
+            ).fetchone()
+            if row and row[0] is not None:
+                clock_offset_secs = int(row[0])
+        except Exception:
+            pass
+        try:
+            drow = conn.execute(
+                "SELECT value FROM domain_rows WHERE domain = 'service_domains.cluster_and_runtime' AND key = 'cluster_downtime_state'"
+            ).fetchone()
+            if drow and drow[0]:
+                payload = json.loads(str(drow[0]))
+                if isinstance(payload, dict) and payload.get("downtime_until_unix") is not None:
+                    downtime_until_unix = int(payload["downtime_until_unix"])
+        except Exception:
+            pass
+    except Exception:
+        pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return (clock_offset_secs, downtime_until_unix)
 
 
 def _text_mentions_cluster_downtime(text: Any) -> bool:
@@ -8430,7 +8475,8 @@ class PlaytesterRunner:
         explicit_candidates = disconnect_candidates + explicit_only_candidates
         if any(_text_mentions_cluster_downtime(item) for item in explicit_candidates):
             return True
-        if not _is_cluster_downtime_window(now_unix=now_unix):
+        in_win, _ = self._effective_downtime_window_and_remaining(now_unix=now_unix)
+        if not in_win:
             return False
         if any(_text_mentions_disconnect(item) for item in disconnect_candidates):
             return True
@@ -8438,6 +8484,28 @@ class PlaytesterRunner:
         if client_proc is not None and client_proc.poll() is not None:
             return True
         return False
+
+    def _effective_downtime_window_and_remaining(
+        self,
+        *,
+        now_unix: Optional[float] = None,
+        pre_window_secs: int = 0,
+    ) -> tuple[bool, float]:
+        """Compute (in_downtime_window, remaining_secs) accounting for virtual clock offset and DB state."""
+        wall_now = float(time.time() if now_unix is None else now_unix)
+        offset_secs, downtime_until_unix = _read_world_downtime_state(getattr(self, "world_db_path", None))
+        effective_now = wall_now + float(offset_secs)
+        max_wait_secs = float(DEFAULT_DOWNTIME_WINDOW_SECS) + 1200.0 + 15.0
+        if downtime_until_unix is not None:
+            rem_until = float(downtime_until_unix) - effective_now
+            if 0.0 < rem_until <= max_wait_secs:
+                return (True, rem_until + float(DEFAULT_DOWNTIME_RESUME_BUFFER_SECS))
+        in_win = _is_cluster_downtime_window(now_unix=effective_now)
+        wait_secs = _seconds_until_downtime_ends(
+            now_unix=effective_now,
+            pre_window_secs=pre_window_secs,
+        )
+        return (in_win, wait_secs)
 
     def _wait_out_cluster_downtime(
         self,
@@ -8450,7 +8518,10 @@ class PlaytesterRunner:
     ) -> float:
         """Pause continuous playtester cleanly across daily cluster downtime (~11:00-11:15 UTC)."""
         now_ts = float(time_fn() if now_unix is None else now_unix)
-        wait_secs = _seconds_until_downtime_ends(now_unix=now_ts, pre_window_secs=1200)
+        _, wait_secs = self._effective_downtime_window_and_remaining(
+            now_unix=now_ts,
+            pre_window_secs=1200,
+        )
         if wait_secs <= 0.0:
             # Server reported ClusterShuttingDown outside pre-window; back off briefly without spinning.
             wait_secs = 15.0

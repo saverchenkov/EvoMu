@@ -7701,5 +7701,253 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
             self.assertEqual(tail_hits[0]["channel"], "scenario_tail_client_tracebacks")
 
 
+class TestVirtualClockDowntimeGuards(unittest.TestCase):
+    def _seed_world_downtime(self, db_path: Path, *, offset_secs: int, downtime_until_unix: int) -> None:
+        import sqlite3
+
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("CREATE TABLE world_meta (meta_key TEXT PRIMARY KEY, meta_value INTEGER NOT NULL)")
+            conn.execute(
+                "CREATE TABLE domain_rows (domain TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (domain, key))"
+            )
+            conn.execute("INSERT INTO world_meta (meta_key, meta_value) VALUES ('clock_offset_secs', ?)", (int(offset_secs),))
+            conn.execute(
+                "INSERT INTO domain_rows (domain, key, value) VALUES (?, ?, ?)",
+                (
+                    "service_domains.cluster_and_runtime",
+                    "cluster_downtime_state",
+                    json.dumps({"downtime_until_unix": int(downtime_until_unix)}),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_virtual_clock_downtime_detection_and_wait_from_world_sqlite(self):
+        # Virtual clock = wall + 31218 => wall 1795313984 (02:19:44Z) maps to virtual 11:00:02Z.
+        offset_secs = 31218
+        downtime_until = 1795346100
+        wall_inside = 1795313984.0
+        wall_after = 1795314920.0
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged_eve"
+            staged.mkdir(parents=True)
+            args = playtester.parse_args(["--no-github-sync", "--continuous", "--no-hybrid"])
+            args.worktree = str(root)
+            args.staged_app = str(staged)
+            runner = playtester.PlaytesterRunner(args)
+            try:
+                self._seed_world_downtime(
+                    runner.world_db_path,
+                    offset_secs=offset_secs,
+                    downtime_until_unix=downtime_until,
+                )
+                # Healthy step must remain False even while virtual downtime is active.
+                self.assertFalse(
+                    runner._is_cluster_downtime_active(
+                        exec_res={"action_ok": True, "flight_recorder": {"macho_calls": [{"status": "OK"}]}},
+                        ui_snapshot={"ui": {"modals": []}},
+                        now_unix=wall_inside,
+                    )
+                )
+                # Step #1584/#1585 disconnect artifacts under virtual downtime must return True.
+                self.assertTrue(
+                    runner._is_cluster_downtime_active(
+                        exec_res={
+                            "action_ok": False,
+                            "action_error": "RuntimeError: Caller not in solsys nor station",
+                            "flight_recorder": {
+                                "log_exceptions": [{"headline": "ObjectCallGPCS.py, in PerformSessionCheck"}]
+                            },
+                        },
+                        post_state={"ui": {"modals": [{"title": "Connection Lost"}]}},
+                        now_unix=wall_inside,
+                    )
+                )
+                # Once virtual clock passes downtime_until_unix & 11:15Z, disconnect must NOT be suppressed.
+                self.assertFalse(
+                    runner._is_cluster_downtime_active(
+                        exec_res={
+                            "action_ok": False,
+                            "action_error": "RuntimeError: Caller not in solsys nor station",
+                        },
+                        post_state={"ui": {"modals": [{"title": "Connection Lost"}]}},
+                        now_unix=wall_after,
+                    )
+                )
+
+                # _wait_out_cluster_downtime must sleep ~903s (898 + 5s buffer), not fall back to 15s.
+                fake_clock = {"t": wall_inside}
+                slept = []
+
+                def fake_time():
+                    return fake_clock["t"]
+
+                def fake_sleep(sec):
+                    slept.append(sec)
+                    fake_clock["t"] += sec
+
+                waited = runner._wait_out_cluster_downtime(
+                    reason="virtual downtime disconnect",
+                    sleep_fn=fake_sleep,
+                    time_fn=fake_time,
+                    chunk_secs=300.0,
+                )
+                self.assertGreater(waited, 895.0)
+                self.assertLess(waited, 910.0)
+                self.assertAlmostEqual(sum(slept), 903.0, places=1)
+            finally:
+                runner.oracle.flush()
+
+    def test_execute_step_virtual_downtime_disconnect_suppresses_bug_filing(self):
+        offset_secs = 31218
+        downtime_until = 1795346100
+        wall_inside = 1795313984.0
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged_eve"
+            staged.mkdir(parents=True)
+            args = playtester.parse_args(["--no-github-sync", "--continuous"])
+            args.worktree = str(root)
+            args.staged_app = str(staged)
+            runner = playtester.PlaytesterRunner(args)
+            try:
+                runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+                self._seed_world_downtime(
+                    runner.world_db_path,
+                    offset_secs=offset_secs,
+                    downtime_until_unix=downtime_until,
+                )
+                pre_snap = {
+                    "active_view": "hangar",
+                    "session": {"charid": 90000001, "stationid": 60003760},
+                    "open_windows": [],
+                    "modals": [],
+                    "ui": {
+                        "modals": [],
+                        "open_windows": [],
+                        "clickable_widgets": [
+                            {"name": "ItemHangar", "path": "ItemHangar", "label": "Item Hangar", "x": 100, "y": 200, "w": 80, "h": 24}
+                        ],
+                    },
+                }
+                disconnect_exec = {
+                    "ok": False,
+                    "action_ok": False,
+                    "action_error": "Action blocked while disconnected or disconnect modal active (SessionDisconnected(clientID=0))",
+                    "error": "Action blocked while disconnected or disconnect modal active (SessionDisconnected(clientID=0))",
+                    "post_state": {
+                        "active_view": "hangar",
+                        "session": {"charid": None, "stationid": None},
+                        "open_windows": [],
+                        "modals": [{"title": "Connection Lost"}],
+                        "ui": {"modals": [{"title": "Connection Lost"}], "open_windows": [], "clickable_widgets": []},
+                    },
+                    "flight_recorder": {
+                        "modals_opened": [{"title": "Connection Lost"}],
+                        "log_exceptions": [],
+                        "macho_exceptions": [],
+                        "quasar_errors": [],
+                        "scatters_observed": [],
+                    },
+                }
+
+                rpc_calls = []
+
+                def fake_rpc_call(method, params=None, timeout=15.0):
+                    rpc_calls.append((method, params))
+                    if method == "get_state":
+                        return pre_snap
+                    if method == "execute_action":
+                        return disconnect_exec
+                    return {}
+
+                def fake_cap(dest_path, **kwargs):
+                    Path(dest_path).write_bytes(b"\x89PNG\r\n\x1a\n")
+                    return {"ok": True, "mode": "mock"}
+
+                fake_time = mock.Mock(return_value=wall_inside)
+                decision = {
+                    "thought": "click hangar item",
+                    "persona_check": "ok",
+                    "delegated_plan": {
+                        "batch_goal": "Click ItemHangar",
+                        "routine_name": "click_hangar",
+                        "max_batch_steps": 1,
+                        "horizon_rationale": "Test disconnect bug suppression",
+                        "success_criteria": "Attempt click",
+                        "abort_conditions": [],
+                        "steps": [
+                            {
+                                "step_number": 1,
+                                "exec_mode": "direct",
+                                "capture_screenshot": False,
+                                "action_type_hint": "click_widget",
+                                "target_or_command_hint": "ItemHangar",
+                                "instruction": "Click ItemHangar",
+                                "expected_outcome": "ItemHangar clicked",
+                                "action": {"type": "click_widget", "target": "ItemHangar"},
+                                "assertions": {},
+                            }
+                        ],
+                    },
+                }
+                with mock.patch("playtester.time.time", fake_time), \
+                     mock.patch("playtester.get_git_head", return_value="f249af816"), \
+                     mock.patch("playtester.capture_window_screenshot", side_effect=fake_cap), \
+                     mock.patch("playtester.invoke_agy_planner", return_value=(decision, "test-model", 0.1)), \
+                     mock.patch("playtester.invoke_agy_executor", side_effect=AssertionError("unexpected invoke_agy_executor")) as m_exec, \
+                     mock.patch("playtester.subprocess.run", side_effect=AssertionError("unexpected subprocess.run")) as m_subproc, \
+                     mock.patch.object(runner, "_drain_host_gm_sim_events", return_value=None), \
+                     mock.patch.object(runner.rpc, "call", side_effect=fake_rpc_call):
+                    runner.execute_step(1, {}, [])
+                runner.oracle.flush(timeout=5.0)
+
+                m_exec.assert_not_called()
+                m_subproc.assert_not_called()
+                self.assertTrue(
+                    any(
+                        method == "execute_action"
+                        and isinstance(params, dict)
+                        and isinstance(params.get("action"), dict)
+                        and params["action"].get("type") == "click_widget"
+                        and params["action"].get("target") == "ItemHangar"
+                        for method, params in rpc_calls
+                    )
+                )
+                self.assertTrue(runner._downtime_pause_requested)
+                self.assertEqual(list(runner.bug_queue_dir.glob("*.json")), [])
+            finally:
+                runner.oracle.flush()
+
+    def test_read_world_downtime_state_survives_missing_world_meta(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "partial#db.sqlite"
+            conn = sqlite3.connect(str(db_path))
+            try:
+                conn.execute(
+                    "CREATE TABLE domain_rows (domain TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (domain, key))"
+                )
+                conn.execute(
+                    "INSERT INTO domain_rows (domain, key, value) VALUES (?, ?, ?)",
+                    (
+                        "service_domains.cluster_and_runtime",
+                        "cluster_downtime_state",
+                        json.dumps({"downtime_until_unix": 1795346100}),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            self.assertEqual(playtester._read_world_downtime_state(db_path), (0, 1795346100))
+
+
 if __name__ == "__main__":
     unittest.main()

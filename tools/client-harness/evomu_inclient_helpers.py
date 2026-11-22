@@ -566,6 +566,137 @@ def _assert_ui_rendered(sm, expected_view):
             raise RuntimeError("michelle.GetBallpark() is None in inflight view")
 
 
+_CLUSTER_SHUTDOWN_MODAL_MARKERS = (
+    "clustershuttingdown",
+    "cluster shutdown in progress",
+    "daily cluster downtime",
+    "non-gm logins are rejected",
+    "cluster is currently shutting down",
+    "server is shutting down",
+)
+
+
+def _is_widget_visible(obj):
+    if obj is None or getattr(obj, "destroyed", False):
+        return False
+    if not getattr(obj, "display", True):
+        return False
+    if getattr(obj, "state", None) == 2:
+        return False
+    return True
+
+
+def _is_modal_dialog_root(obj):
+    if obj is None:
+        return False
+    if getattr(obj, "isModal", False):
+        return True
+    cls_name = str(getattr(getattr(obj, "__class__", None), "__name__", "") or "")
+    return any(tok in cls_name for tok in ("MessageBox", "Dialog", "Popup", "HybridWindow", "Modal"))
+
+
+def _iter_visible_modal_roots(uic):
+    if uic is None:
+        return []
+    roots = []
+    seen = set()
+
+    def _add(node):
+        if node is None or id(node) in seen or not _is_widget_visible(node):
+            return
+        seen.add(id(node))
+        roots.append(node)
+
+    reg = getattr(uic, "registry", None)
+    if reg is not None:
+        get_modal = getattr(reg, "GetModalWindow", None)
+        if callable(get_modal):
+            try:
+                _add(get_modal())
+            except Exception:
+                pass
+        for mw in list(getattr(reg, "modals", None) or []):
+            _add(mw)
+    lyr = getattr(uic, "layer", None)
+    if lyr is not None:
+        modal_lyr = getattr(lyr, "modal", None)
+        if modal_lyr is not None and _is_widget_visible(modal_lyr):
+            for ch in list(getattr(modal_lyr, "children", None) or []):
+                if ch is None:
+                    continue
+                cname = str(getattr(ch, "name", "") or "")
+                if cname.startswith("l_modal_"):
+                    if _is_widget_visible(ch):
+                        for gch in list(getattr(ch, "children", None) or []):
+                            _add(gch)
+                else:
+                    _add(ch)
+        above_lyr = getattr(lyr, "abovemain", None)
+        if above_lyr is not None and _is_widget_visible(above_lyr):
+            for ch in list(getattr(above_lyr, "children", None) or []):
+                if _is_widget_visible(ch) and _is_modal_dialog_root(ch):
+                    _add(ch)
+    return roots
+
+
+def _collect_widget_text_fragments(root, max_nodes=40):
+    frags = []
+    if not _is_widget_visible(root):
+        return frags
+    queue = [root]
+    visited = set()
+    while queue and len(visited) < max_nodes:
+        obj = queue.pop(0)
+        if obj is None or id(obj) in visited or not _is_widget_visible(obj):
+            continue
+        visited.add(id(obj))
+        for attr in ("msgKey", "caption", "text"):
+            val = getattr(obj, attr, None)
+            if isinstance(val, _STR_TYPES):
+                try:
+                    if isinstance(val, bytes) and str is not bytes:
+                        s = val.decode("utf-8", "replace")
+                    elif isinstance(val, str):
+                        s = val
+                    else:
+                        s = val.encode("utf-8", "replace")
+                except Exception:
+                    try:
+                        s = str(val)
+                    except Exception:
+                        s = ""
+                s = s.strip()
+                if s and s not in frags:
+                    frags.append(s)
+        msg_lbl = getattr(obj, "_message_label", None)
+        if msg_lbl is not None and id(msg_lbl) not in visited:
+            queue.append(msg_lbl)
+        children = getattr(obj, "children", None)
+        if children:
+            try:
+                for ch in list(children)[:16]:
+                    if ch is not None and id(ch) not in visited:
+                        queue.append(ch)
+            except Exception:
+                pass
+    return frags
+
+
+def _detect_cluster_shutdown_modal_message():
+    uic = _get_uicore()
+    if uic is None:
+        return ""
+    for root in _iter_visible_modal_roots(uic):
+        frags = _collect_widget_text_fragments(root)
+        if not frags:
+            continue
+        joined = " | ".join(frags)
+        low = joined.lower()
+        if any(marker in low for marker in _CLUSTER_SHUTDOWN_MODAL_MARKERS):
+            return joined[:200]
+    return ""
+
+
 def _wait_for_session(sm, user, password, target_char_id, timeout_sec=120.0, defer_char_select=False):
     deadline = time.time() + timeout_sec
     tried_manual_login, tried_manual_select = False, False
@@ -675,6 +806,11 @@ def _wait_for_session(sm, user, password, target_char_id, timeout_sec=120.0, def
                 if sess is not None:
                     sess.nextSessionChange = None
                 sm.GetService("sessionMgr").PerformSessionChange("charsel", sm.RemoteSvc("charUnboundMgr").SelectCharacterID, int(chosen_char_id), None, True)
+        cur_sess = getattr(__builtin__, "session", None)
+        if not getattr(cur_sess, "charid", None):
+            shutdown_msg = _detect_cluster_shutdown_modal_message()
+            if shutdown_msg:
+                raise RuntimeError("ClusterShuttingDown: %s" % shutdown_msg)
         _sleep_ms(250)
     sess = getattr(__builtin__, "session", None)
     if getattr(sess, "charid", None):
