@@ -5941,6 +5941,24 @@ class PlaytesterBugOracle:
         return cls._strip_build_path_prefix(str(tb_txt or "")).strip()[:140]
 
     @classmethod
+    def _canonical_client_tb_sig(
+        cls, tb_txt: str, detail: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Canonical signature for deduplicating mirrored client traceback exemptions."""
+        norm_lines = [
+            (ln[len("[evomu_site] "):] if ln.startswith("[evomu_site] ") else ln)
+            for ln in str(tb_txt or "").splitlines()
+        ]
+        norm_tb = "\n".join(norm_lines).strip()
+        sig = cls._tb_frame_sig(norm_tb) if norm_tb else ""
+        key_low = str((detail or {}).get("key") or "unknown").lower()
+        if sig:
+            sig_norm = re.sub(r"\s+", " ", sig.strip().lower())
+            return f"{key_low}|{sig_norm}"
+        det_txt = re.sub(r"\s+", " ", str((detail or {}).get("detail") or "").strip().lower())[:140]
+        return f"{key_low}|{det_txt}" if det_txt else key_low
+
+    @classmethod
     def _format_tb_summary(cls, headline: str, tb_txt: str) -> str:
         hl = cls._strip_build_path_prefix(str(headline or "")).strip()
         raw_frames, game_frames = cls._extract_tb_frames(tb_txt)
@@ -6505,7 +6523,13 @@ class PlaytesterBugOracle:
         req_level = int(skill_m.group(2))
         reported_trained = int(skill_m.group(3))
         live_trained = trained_levels.get(str(req_skill_id), 0)
-        if req_level < 1 or live_trained >= req_level or live_trained != reported_trained:
+        if (
+            req_skill_id < 1
+            or not (1 <= req_level <= 5)
+            or not (0 <= live_trained <= 5)
+            or live_trained >= req_level
+            or live_trained != reported_trained
+        ):
             return False, None
 
         return True, {
@@ -6745,6 +6769,9 @@ class PlaytesterBugOracle:
         step_num: int = 0,
         occ_idx: int = 0,
         seq: Any = None,
+        mirror_sig: str = "",
+        mirror_occ: int = 0,
+        dedup_namespace: str = "",
     ) -> Dict[str, Any]:
         """Build a standardized exemption telemetry entry for `_UserErrorExemptionTracker`."""
         hit = dict(detail)
@@ -6753,9 +6780,16 @@ class PlaytesterBugOracle:
         hit["occ_idx"] = int(occ_idx)
         if isinstance(seq, int) and not isinstance(seq, bool):
             hit["seq"] = int(seq)
-        if hit["step"] > 0 and "seq" not in hit:
+        ns = str(dedup_namespace or "").strip()
+        if "seq" not in hit and (hit["step"] > 0 or ns):
             key_low = str(hit.get("key") or "unknown").lower()
-            hit["dedup_id"] = f"step:{hit['step']}:{hit['channel']}:{int(occ_idx)}:{key_low}"
+            sig_clean = str(mirror_sig or "").strip()
+            prefix = f"{ns}:" if ns else ""
+            if sig_clean:
+                sig_digest = hashlib.sha256(sig_clean.encode("utf-8")).hexdigest()[:16]
+                hit["dedup_id"] = f"{prefix}step:{hit['step']}:tb:{sig_digest}:{int(mirror_occ)}"
+            else:
+                hit["dedup_id"] = f"{prefix}step:{hit['step']}:{hit['channel']}:{int(occ_idx)}:{key_low}"
         hit.setdefault("ts", time.time())
         return hit
 
@@ -6908,10 +6942,12 @@ class PlaytesterBugOracle:
         exemptions_out: Optional[List[Dict[str, Any]]] = None,
         channel: str = "log_exceptions",
         step_num: int = 0,
+        mirror_instances_out: Optional[set] = None,
     ) -> Tuple[List[Any], List[Any]]:
         """Split `log_exceptions` into `(non_benign, ignorable_benign)` via `is_ignorable_client_traceback`."""
         non_benign: List[Any] = []
         benign: List[Any] = []
+        mirror_occ: Dict[str, int] = {}
         for idx, entry in enumerate(entries or []):
             hl, _, full_tb = cls._extract_log_exception_parts(entry, fallback_trace=fallback_trace)
             ignorable, detail = cls.classify_ignorable_client_traceback(
@@ -6919,15 +6955,23 @@ class PlaytesterBugOracle:
             )
             if ignorable:
                 benign.append(entry)
-                if exemptions_out is not None and detail is not None:
-                    exemptions_out.append(
-                        cls._build_exemption_hit(
-                            detail,
-                            channel=channel,
-                            step_num=step_num,
-                            occ_idx=idx,
+                if detail is not None:
+                    msig = cls._canonical_client_tb_sig(full_tb, detail)
+                    m_occ = mirror_occ.get(msig, 0)
+                    mirror_occ[msig] = m_occ + 1
+                    if mirror_instances_out is not None:
+                        mirror_instances_out.add((msig, m_occ))
+                    if exemptions_out is not None:
+                        exemptions_out.append(
+                            cls._build_exemption_hit(
+                                detail,
+                                channel=channel,
+                                step_num=step_num,
+                                occ_idx=idx,
+                                mirror_sig=msig,
+                                mirror_occ=m_occ,
+                            )
                         )
-                    )
             else:
                 non_benign.append(entry)
         return non_benign, benign
@@ -7071,23 +7115,54 @@ class PlaytesterBugOracle:
                         seq=call_seq,
                     )
                 )
-        for idx, tb_item in enumerate(unseen_tracebacks or ()):
-            if not isinstance(tb_item, dict):
-                continue
-            hl = str(tb_item.get("headline") or "")
-            tr = str(tb_item.get("trace") or "")
-            ignorable, det = cls.classify_ignorable_client_traceback(
-                hl, tr, expected_text, ui_state=ui_state
-            )
-            if ignorable and det is not None:
-                collected.append(
-                    cls._build_exemption_hit(
+        unseen_list = list(unseen_tracebacks or ())
+        if unseen_list:
+            seen_tb_dedup_ids = {
+                str(h["dedup_id"])
+                for h in collected
+                if h.get("channel") == "log_exceptions" and h.get("dedup_id")
+            }
+            seen_mirror_instances: set = set()
+            if (
+                step_num <= 0
+                and isinstance(fr, dict)
+                and (fr.get("log_exceptions") or ())
+            ):
+                cls.partition_log_exceptions(
+                    fr.get("log_exceptions") or (),
+                    expected_text=expected_text,
+                    ui_state=ui_state,
+                    step_num=step_num,
+                    mirror_instances_out=seen_mirror_instances,
+                )
+            tb_mirror_occ: Dict[str, int] = {}
+            for idx, tb_item in enumerate(unseen_list):
+                if not isinstance(tb_item, dict):
+                    continue
+                hl = str(tb_item.get("headline") or "")
+                tr = str(tb_item.get("trace") or "")
+                ignorable, det = cls.classify_ignorable_client_traceback(
+                    hl, tr, expected_text, ui_state=ui_state
+                )
+                if ignorable and det is not None:
+                    msig = cls._canonical_client_tb_sig(tr or hl, det)
+                    m_occ = tb_mirror_occ.get(msig, 0)
+                    tb_mirror_occ[msig] = m_occ + 1
+                    if (msig, m_occ) in seen_mirror_instances:
+                        continue
+                    hit = cls._build_exemption_hit(
                         det,
                         channel="client_tracebacks.log",
                         step_num=step_num,
                         occ_idx=idx,
+                        mirror_sig=msig,
+                        mirror_occ=m_occ,
                     )
-                )
+                    if hit.get("dedup_id") and hit["dedup_id"] in seen_tb_dedup_ids:
+                        continue
+                    if hit.get("dedup_id"):
+                        seen_tb_dedup_ids.add(str(hit["dedup_id"]))
+                    collected.append(hit)
         step_act_err = str(exec_res.get("action_error") or "").strip()
         if step_act_err:
             ok_act, det_act = cls.classify_expected_user_error(
@@ -7244,6 +7319,7 @@ class PlaytesterBugOracle:
                 )
         if new_tb:
             unseen_tbs = []
+            tb_mirror_occ: Dict[str, int] = {}
             for tb_idx, u in enumerate(self._extract_unseen_tb_blocks(new_tb)):
                 ignorable_tb, tb_det = self.classify_ignorable_client_traceback(
                     u.get("headline", ""),
@@ -7253,12 +7329,19 @@ class PlaytesterBugOracle:
                 )
                 if ignorable_tb:
                     if tb_det is not None:
+                        msig = self._canonical_client_tb_sig(
+                            u.get("trace") or u.get("headline") or "", tb_det
+                        )
+                        m_occ = tb_mirror_occ.get(msig, 0)
+                        tb_mirror_occ[msig] = m_occ + 1
                         step_exemptions.append(
                             self._build_exemption_hit(
                                 tb_det,
                                 channel="client_tracebacks.log",
                                 step_num=step_num,
                                 occ_idx=tb_idx,
+                                mirror_sig=msig,
+                                mirror_occ=m_occ,
                             )
                         )
                     continue
@@ -11825,16 +11908,11 @@ def evaluate_scenario_checks(
     if chk.get("no_client_exception", True):
         bad_excs = []
         for le in (fr.get("log_exceptions") or []):
-            if isinstance(le, dict):
-                hl = str(le.get("headline") or "")
-                tr = str(le.get("trace") or "")
-            else:
-                hl = str(le or "")
-                tr = ""
+            hl, _, full_tb = PlaytesterBugOracle._extract_log_exception_parts(le)
             if not PlaytesterBugOracle.is_ignorable_client_traceback(
-                hl, tr, expected_text, ui_state=scen_ui_state
+                hl, full_tb, expected_text, ui_state=scen_ui_state
             ):
-                bad_excs.append(hl or tr[:120] or repr(le))
+                bad_excs.append(hl or full_tb[:120] or repr(le))
         for u in (ctx.get("unseen_tracebacks") or []):
             hl = str(u.get("headline") or "")
             tr = str(u.get("trace") or "")
@@ -12092,7 +12170,7 @@ def _read_log_chunk_from_offset(path: Optional[Path], log_offsets: Optional[Dict
 def _is_explicit_client_log_header(ln: str) -> bool:
     s_hdr = ln[len("[evomu_site] "):] if ln.startswith("[evomu_site] ") else ln
     if ln.startswith("[evomu_site] ") and any(
-        tok in s_hdr for tok in ("LogException", "_LogException", "LogTraceback", "sys.excepthook", "EXCEPTION #", "Traceback (most recent call last):")
+        tok in s_hdr for tok in ("LogException", "_LogException", "LogTraceback", "sys.excepthook", "Action tasklet exception", "EXCEPTION #", "Traceback (most recent call last):")
     ):
         return True
     return s_hdr.startswith((
@@ -12102,6 +12180,7 @@ def _is_explicit_client_log_header(ln: str) -> bool:
         "blue.pyos.exceptionHandler:",
         "stdlogutils.",
         "sys.excepthook:",
+        "Action tasklet exception",
         "EXCEPTION #",
     ))
 
@@ -12185,9 +12264,14 @@ def scan_scenario_logs_for_errors(
     ui_state: Optional[Dict[str, Any]] = None,
     exemptions_out: Optional[List[Dict[str, Any]]] = None,
     step_num: int = 0,
+    channel_prefix: str = "scenario_",
+    dedup_namespace: str = "",
 ) -> List[str]:
     """Scan server and client logs cleanly from optional byte offsets, honoring known benign V24 tracebacks."""
     errors: List[str] = []
+    tb_errors: List[str] = []
+    emitted_tb_keys: set = set()
+    eff_ns = str(dedup_namespace or ("tail" if channel_prefix != "scenario_" else "")).strip()
     srv_txt, _ = _read_log_chunk_from_offset(server_log_path, log_offsets)
     if srv_txt:
         for ln in srv_txt.splitlines():
@@ -12198,6 +12282,35 @@ def scan_scenario_logs_for_errors(
             elif _SCENARIO_ERROR_LINE_RE.search(ln):
                 errors.append(f"[server.log] {ln.strip()[:280]}")
 
+    raw_tb, _ = _read_log_chunk_from_offset(traceback_log_path, log_offsets)
+    if raw_tb:
+        tb_mirror_occ: Dict[str, int] = {}
+        tb_channel = f"{channel_prefix}client_tracebacks"
+        for u in PlaytesterBugOracle.parse_tb_blocks(raw_tb):
+            ign_tb, det_tb = PlaytesterBugOracle.classify_ignorable_client_traceback(
+                u.get("headline", ""), u.get("trace", ""), ui_state=ui_state
+            )
+            if not ign_tb:
+                tb_errors.append(f"[client_tracebacks.log] {u.get('headline', '')[:240]}")
+            elif exemptions_out is not None and det_tb is not None:
+                msig = PlaytesterBugOracle._canonical_client_tb_sig(
+                    u.get("trace") or u.get("headline") or "", det_tb
+                )
+                m_occ = tb_mirror_occ.get(msig, 0)
+                tb_mirror_occ[msig] = m_occ + 1
+                emitted_tb_keys.add((msig, m_occ))
+                exemptions_out.append(
+                    PlaytesterBugOracle._build_exemption_hit(
+                        det_tb,
+                        channel=tb_channel,
+                        step_num=step_num,
+                        occ_idx=len(exemptions_out),
+                        mirror_sig=msig,
+                        mirror_occ=m_occ,
+                        dedup_namespace=eff_ns,
+                    )
+                )
+
     tb_resolved = traceback_log_path.resolve() if traceback_log_path else None
     for clp in client_log_paths:
         if not clp or not clp.exists():
@@ -12207,6 +12320,29 @@ def scan_scenario_logs_for_errors(
         c_txt, start_off = _read_log_chunk_from_offset(clp, log_offsets)
         if not c_txt:
             continue
+        log_channel = f"{channel_prefix}log:{clp.name}"
+        file_mirror_occ: Dict[str, int] = {}
+
+        def _record_client_log_exemption(sig_txt: str, det: Dict[str, Any]) -> None:
+            msig = PlaytesterBugOracle._canonical_client_tb_sig(sig_txt, det)
+            m_occ = file_mirror_occ.get(msig, 0)
+            file_mirror_occ[msig] = m_occ + 1
+            if (msig, m_occ) in emitted_tb_keys:
+                return
+            emitted_tb_keys.add((msig, m_occ))
+            if exemptions_out is not None:
+                exemptions_out.append(
+                    PlaytesterBugOracle._build_exemption_hit(
+                        det,
+                        channel=log_channel,
+                        step_num=step_num,
+                        occ_idx=len(exemptions_out),
+                        mirror_sig=msig,
+                        mirror_occ=m_occ,
+                        dedup_namespace=eff_ns,
+                    )
+                )
+
         lines = c_txt.splitlines()
         seen_started = start_off > 0
         idx = 0
@@ -12236,14 +12372,7 @@ def scan_scenario_logs_for_errors(
                     if not ign_blk:
                         errors.append(f"[{clp.name}] {hl[:240]}")
                     elif exemptions_out is not None and det_blk is not None:
-                        exemptions_out.append(
-                            PlaytesterBugOracle._build_exemption_hit(
-                                det_blk,
-                                channel=f"scenario_log:{clp.name}",
-                                step_num=step_num,
-                                occ_idx=len(exemptions_out),
-                            )
-                        )
+                        _record_client_log_exemption(blk_txt, det_blk)
                 idx = next_idx
                 continue
             if _SCENARIO_DESYNC_LINE_RE.search(ln):
@@ -12255,34 +12384,10 @@ def scan_scenario_logs_for_errors(
                 if not ign_ln:
                     errors.append(f"[{clp.name}] {ln.strip()[:280]}")
                 elif exemptions_out is not None and det_ln is not None:
-                    exemptions_out.append(
-                        PlaytesterBugOracle._build_exemption_hit(
-                            det_ln,
-                            channel=f"scenario_log:{clp.name}",
-                            step_num=step_num,
-                            occ_idx=len(exemptions_out),
-                        )
-                    )
+                    _record_client_log_exemption(ln, det_ln)
             idx += 1
 
-    raw_tb, _ = _read_log_chunk_from_offset(traceback_log_path, log_offsets)
-    if raw_tb:
-        for u in PlaytesterBugOracle.parse_tb_blocks(raw_tb):
-            ign_tb, det_tb = PlaytesterBugOracle.classify_ignorable_client_traceback(
-                u.get("headline", ""), u.get("trace", ""), ui_state=ui_state
-            )
-            if not ign_tb:
-                errors.append(f"[client_tracebacks.log] {u.get('headline', '')[:240]}")
-            elif exemptions_out is not None and det_tb is not None:
-                exemptions_out.append(
-                    PlaytesterBugOracle._build_exemption_hit(
-                        det_tb,
-                        channel="scenario_client_tracebacks",
-                        step_num=step_num,
-                        occ_idx=len(exemptions_out),
-                    )
-                )
-
+    errors.extend(tb_errors)
     return errors
 
 
@@ -13615,6 +13720,8 @@ class ScenarioRunner(PlaytesterRunner):
                 ui_state=tail_ui_state,
                 exemptions_out=tail_log_exemptions,
                 step_num=len(step_records),
+                channel_prefix="scenario_tail_",
+                dedup_namespace="tail",
             )
         )
         if tail_log_exemptions:

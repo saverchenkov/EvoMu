@@ -7365,5 +7365,341 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
             self.assertEqual(j_entry["steps"][0]["user_error_exemption_count"], 2)
 
 
+    def test_scenario_mirrored_evomu_site_tracebacks_and_tail_scan_dedup(self):
+        tb_missing_skill = (
+            "Action tasklet exception (click_widget):\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/fitting/fittingWnd.py", line 88, in FitModule\n'
+            "UserError: ('ModuleFitFailed', {'moduleName': 'Light Ion Blaster I', "
+            "'reason': 'Missing required skill 3300 level 1 (trained: 0)'})\n"
+        )
+        tb_target_not_locked = (
+            "log.LogException Traceback:\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/inflight/shipHud/moduleButton.py", line 42, in ModuleButton.OnStateChange\n'
+            '  File "eve/client/script/ui/inflight/shipHud/moduleButton.py", line 99, in ActivateEffect\n'
+            "UserError: ('TargetNotLocked', {})\n"
+        )
+        tb_target_other_site = (
+            "log.LogException Traceback:\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/inflight/shipHud/moduleButton.py", line 55, in ModuleButton.OnStateChange\n'
+            '  File "eve/client/script/ui/inflight/shipHud/weaponGroup.py", line 99, in ActivateEffect\n'
+            "UserError: ('TargetNotLocked', {})\n"
+        )
+        live_ui_state = {
+            "session": {"charid": 90000001},
+            "skills_state": {"trained_skill_levels": {"3300": 0}},
+        }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            srv_log = root / "server.log"
+            cli_log = root / "client.log"
+            tb_log = root / "client_tracebacks.log"
+            srv_log.write_text("", encoding="utf-8")
+
+            # BF-USERERR-R6-01 (a): client.log [evomu_site] mirror + client_tracebacks.log + fr["log_exceptions"] -> 1
+            cli_log.write_text(f"[evomu_site] {tb_missing_skill}", encoding="utf-8")
+            tb_log.write_text(tb_missing_skill, encoding="utf-8")
+            offsets: dict = {}
+            log_hits: list = []
+            errs = playtester.scan_scenario_logs_for_errors(
+                srv_log,
+                [cli_log],
+                traceback_log_path=tb_log,
+                log_offsets=offsets,
+                ui_state=live_ui_state,
+                exemptions_out=log_hits,
+                step_num=1,
+            )
+            self.assertEqual(errs, [])
+            self.assertEqual(len(log_hits), 1)
+            self.assertEqual(log_hits[0]["channel"], "scenario_client_tracebacks")
+
+            exec_res = {
+                "flight_recorder": {
+                    "log_exceptions": [
+                        {
+                            "seq": 1,
+                            "headline": "UserError: ('ModuleFitFailed', {'moduleName': 'Light Ion Blaster I'})",
+                            "trace": tb_missing_skill,
+                        }
+                    ]
+                }
+            }
+            fr_hits = playtester.PlaytesterBugOracle.collect_exec_res_user_error_exemptions(
+                exec_res,
+                ui_state=live_ui_state,
+                step_num=1,
+                unseen_tracebacks=[{"headline": "", "trace": tb_missing_skill}],
+            )
+            self.assertEqual(len(fr_hits), 1)
+            tracker = playtester._UserErrorExemptionTracker(retain_all=True, max_recent=50)
+            absorbed = tracker.absorb_hits(fr_hits + log_hits, step_num=1)
+            self.assertEqual(len(absorbed), 1)
+            self.assertEqual(len(tracker.hits), 1)
+            self.assertEqual(tracker.summary()["user_error_exemptions_count"], 1)
+
+            # BF-USERERR-R6-01 (b): 2 genuine identical exceptions in step 2 mirrored across all 3 sinks -> 2 (not 1, not 6)
+            cli_log.write_text(
+                f"[evomu_site] {tb_missing_skill}" * 2,
+                encoding="utf-8",
+            )
+            tb_log.write_text(tb_missing_skill * 2, encoding="utf-8")
+            offsets_repeat: dict = {}
+            repeat_log_hits: list = []
+            self.assertEqual(
+                playtester.scan_scenario_logs_for_errors(
+                    srv_log,
+                    [cli_log],
+                    traceback_log_path=tb_log,
+                    log_offsets=offsets_repeat,
+                    ui_state=live_ui_state,
+                    exemptions_out=repeat_log_hits,
+                    step_num=2,
+                ),
+                [],
+            )
+            self.assertEqual(len(repeat_log_hits), 2)
+            repeat_fr_hits = playtester.PlaytesterBugOracle.collect_exec_res_user_error_exemptions(
+                {
+                    "flight_recorder": {
+                        "log_exceptions": [
+                            {"seq": 1, "trace": tb_missing_skill},
+                            {"seq": 2, "trace": tb_missing_skill},
+                        ]
+                    }
+                },
+                ui_state=live_ui_state,
+                step_num=2,
+            )
+            repeat_tracker = playtester._UserErrorExemptionTracker(retain_all=True, max_recent=50)
+            self.assertEqual(len(repeat_tracker.absorb_hits(repeat_fr_hits + repeat_log_hits, step_num=2)), 2)
+
+            # BF-USERERR-R6-01 (c): 2 distinct callsites with same key stay distinct -> 2
+            cli_log.write_text(
+                f"[evomu_site] {tb_target_not_locked}[evomu_site] {tb_target_other_site}",
+                encoding="utf-8",
+            )
+            tb_log.write_text(tb_target_not_locked + tb_target_other_site, encoding="utf-8")
+            distinct_hits: list = []
+            self.assertEqual(
+                playtester.scan_scenario_logs_for_errors(
+                    srv_log,
+                    [cli_log],
+                    traceback_log_path=tb_log,
+                    log_offsets={},
+                    exemptions_out=distinct_hits,
+                    step_num=3,
+                ),
+                [],
+            )
+            self.assertEqual(len(distinct_hits), 2)
+
+            # BF-USERERR-R6-01 (d): standalone [evomu_site] in client.log without client_tracebacks.log -> 1
+            cli_log.write_text(f"[evomu_site] {tb_missing_skill}", encoding="utf-8")
+            standalone_hits: list = []
+            self.assertEqual(
+                playtester.scan_scenario_logs_for_errors(
+                    srv_log,
+                    [cli_log],
+                    traceback_log_path=root / "missing_tracebacks.log",
+                    log_offsets={},
+                    ui_state=live_ui_state,
+                    exemptions_out=standalone_hits,
+                    step_num=4,
+                ),
+                [],
+            )
+            self.assertEqual(len(standalone_hits), 1)
+            self.assertEqual(standalone_hits[0]["channel"], "scenario_log:client.log")
+
+        # P2 checks: invalid ModuleFitFailed bounds fail closed + evaluate_scenario_checks normalizes raw strings
+        bad_lvl_err = (
+            "UserError: ('ModuleFitFailed', {'moduleName': 'Light Ion Blaster I', "
+            "'reason': 'Missing required skill 3300 level 6 (trained: 0)'})"
+        )
+        self.assertFalse(
+            playtester.PlaytesterBugOracle.is_expected_user_error(bad_lvl_err, ui_state=live_ui_state)
+        )
+        bad_sid_err = (
+            "UserError: ('ModuleFitFailed', {'moduleName': 'Light Ion Blaster I', "
+            "'reason': 'Missing required skill 0 level 1 (trained: 0)'})"
+        )
+        self.assertFalse(
+            playtester.PlaytesterBugOracle.is_expected_user_error(bad_sid_err, ui_state=live_ui_state)
+        )
+        ok_raw, chk_raw, reason_raw = playtester.evaluate_scenario_checks(
+            {"no_client_exception": True},
+            live_ui_state,
+            live_ui_state,
+            {
+                "action_ok": True,
+                "flight_recorder": {
+                    "log_exceptions": [
+                        f"{tb_missing_skill}\nCALLSTACK:\n  File \"fake.py\", line 1"
+                    ]
+                },
+            },
+            context={},
+        )
+        self.assertTrue(ok_raw, (chk_raw, reason_raw))
+        ok_bad_raw, chk_bad_raw, reason_bad_raw = playtester.evaluate_scenario_checks(
+            {"no_client_exception": True},
+            live_ui_state,
+            live_ui_state,
+            {
+                "action_ok": True,
+                "flight_recorder": {
+                    "log_exceptions": [
+                        'Traceback (most recent call last):\n  File "foo.py", line 1\nKeyError: "x"'
+                    ]
+                },
+            },
+            context={},
+        )
+        self.assertFalse(ok_bad_raw)
+        self.assertEqual(chk_bad_raw, "no_client_exception")
+        self.assertIn("KeyError", reason_bad_raw)
+
+        # BF-USERERR-R6-01 & BF-USERERR-R6-02 end-to-end ScenarioRunner.run_scenarios()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen_path = root / "scen_r6.json"
+            scen_path.write_text(
+                json.dumps(
+                    {
+                        "id": "scen_r6_dedup_tail",
+                        "title": "R6 mirror dedup and tail flush",
+                        "starting_state": {"account": "demo", "char_id": 90000001},
+                        "steps": [
+                            {
+                                "id": "step_mirror",
+                                "action": {"type": "click_widget", "target": "fit_btn"},
+                                "checks": {"no_error_reply": True, "no_client_exception": True},
+                            },
+                            {
+                                "id": "step_tail_pre",
+                                "action": {"type": "click_widget", "target": "lock_btn"},
+                                "checks": {"no_error_reply": True, "no_client_exception": True},
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = types.SimpleNamespace(
+                worktree=str(root),
+                staged_app=str(root / "Missing.app"),
+                macho_port=26000,
+                bridge_port=26001,
+                http_port=26002,
+                gateway_port=26003,
+                xmpp_port=26004,
+                rpc_port=26005,
+                model_chain="gemini-3-flash",
+                model=None,
+                hybrid=False,
+                planner_model_chain=None,
+                executor_model_chain=None,
+                window_size="full",
+                ui_scale=0.0,
+                screenshot_max_dim=1024,
+                persona=None,
+                no_github_sync=True,
+                scenarios=[str(scen_path)],
+                out_dir=str(root / "out"),
+                silent=True,
+            )
+            with mock.patch.object(playtester, "get_git_head", return_value="deadbeef"), \
+                 mock.patch.object(playtester.PlaytesterRunner, "_server_bin_mtime", return_value=0.0):
+                runner = playtester.ScenarioRunner(
+                    args, scenario_paths=[scen_path], out_dir=root / "out"
+                )
+
+            def _fake_start_server(reset_db=False):
+                runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+                (runner.current_run_dir / "server.log").write_text("", encoding="utf-8")
+                return True
+
+            def _fake_start_client():
+                (runner.current_run_dir / "client_logs").mkdir(parents=True, exist_ok=True)
+                (runner.current_run_dir / "client.log").write_text("", encoding="utf-8")
+                (runner.current_run_dir / "client_logs" / "client_tracebacks.log").write_text(
+                    "", encoding="utf-8"
+                )
+                return True
+
+            def _fake_stop_client():
+                # Flush a post-step traceback (same signature & key as final step's pre-stop flush!)
+                (runner.current_run_dir / "client_logs").mkdir(parents=True, exist_ok=True)
+                with (runner.current_run_dir / "client.log").open("a", encoding="utf-8") as f:
+                    f.write(f"[evomu_site] {tb_missing_skill}")
+                with (runner.current_run_dir / "client_logs" / "client_tracebacks.log").open(
+                    "a", encoding="utf-8"
+                ) as f:
+                    f.write(tb_missing_skill)
+
+            exec_idx = {"n": 0}
+
+            def _fake_rpc_call(method, params=None, timeout=15.0):
+                if method == "get_ui_state":
+                    return dict(live_ui_state)
+                if method == "execute_action":
+                    exec_idx["n"] += 1
+                    cli_p = runner.current_run_dir / "client.log"
+                    tb_p = runner.current_run_dir / "client_logs" / "client_tracebacks.log"
+                    if exec_idx["n"] == 1:
+                        # Step 1: same exception across fr["log_exceptions"], client_tracebacks.log, [evomu_site] client.log -> 1
+                        with cli_p.open("a", encoding="utf-8") as f:
+                            f.write(f"[evomu_site] {tb_missing_skill}")
+                        with tb_p.open("a", encoding="utf-8") as f:
+                            f.write(tb_missing_skill)
+                        return {
+                            "action_ok": True,
+                            "post_state": dict(live_ui_state),
+                            "flight_recorder": {
+                                "log_exceptions": [
+                                    {"seq": 1, "headline": "UserError: ('ModuleFitFailed', {})", "trace": tb_missing_skill}
+                                ]
+                            },
+                        }
+                    # Step 2 (final step): pre-shutdown client_tracebacks.log + [evomu_site] client.log -> 1
+                    with cli_p.open("a", encoding="utf-8") as f:
+                        f.write(f"[evomu_site] {tb_missing_skill}")
+                    with tb_p.open("a", encoding="utf-8") as f:
+                        f.write(tb_missing_skill)
+                    return {"action_ok": True, "post_state": {}, "flight_recorder": {}}
+                return {}
+
+            with mock.patch.object(runner, "start_server", side_effect=_fake_start_server), \
+                 mock.patch.object(runner, "stop_server", return_value=None), \
+                 mock.patch.object(runner, "start_client", side_effect=_fake_start_client), \
+                 mock.patch.object(runner, "stop_client", side_effect=_fake_stop_client), \
+                 mock.patch.object(runner, "_close_gm_bridge", return_value=None), \
+                 mock.patch.object(runner, "_drain_host_gm_sim_events", return_value=None), \
+                 mock.patch.object(runner.rpc, "call", side_effect=_fake_rpc_call):
+                rc = runner.run_scenarios()
+
+            self.assertEqual(rc, 0)
+            payload = json.loads((root / "out" / "result.json").read_text(encoding="utf-8"))
+            entry = payload["journeys"]["scen_r6_dedup_tail"]
+            self.assertTrue(entry["passed"])
+            # Step 1: 3-way mirror collapsed to 1; Step 2: 2-way log mirror collapsed to 1
+            self.assertEqual(entry["steps"][0]["user_error_exemption_count"], 1)
+            self.assertEqual(entry["steps"][1]["user_error_exemption_count"], 1)
+            # Post-shutdown tail flush at new byte offset (with 2-way mirror collapsed to 1) preserved -> +1 = 3 total
+            self.assertEqual(payload["user_error_exemptions_count"], 3)
+            self.assertEqual(payload["precondition_verified_user_error_exemptions"], 3)
+            self.assertEqual(len(entry["user_error_exemptions"]), 3)
+            tail_hits = [
+                h for h in entry["user_error_exemptions"]
+                if str(h.get("channel") or "").startswith("scenario_tail_")
+            ]
+            self.assertEqual(len(tail_hits), 1)
+            self.assertEqual(tail_hits[0]["channel"], "scenario_tail_client_tracebacks")
+
+
 if __name__ == "__main__":
     unittest.main()
