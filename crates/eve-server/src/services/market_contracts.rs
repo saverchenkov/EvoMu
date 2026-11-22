@@ -2427,6 +2427,37 @@ fn inspect_contract_container_items<'a>(
     Ok(Some(visible))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("marketProxy", "StartupCheck", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "GetSystemAsks", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "GetHistoryForManyTypeIDs", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "GetCorporationOrders", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "GetMarketOrderHistory", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "ModifyCharOrder", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "ModifyPlexCharOrder", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "GetPlexBest", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "GetPlexOrders", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "GetPlexHistory", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "GetPlexNewPriceHistory", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "GetPlexOldPriceHistory", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("marketProxy", "PlacePlexSellOrder", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("account", "GetCashBalance", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("vaultManager", "get_account_balance", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "CollectMyPageInfo", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "NumOutstandingContracts", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "DeleteContractNotification", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "DeleteNotification", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "DeleteMultipleContracts", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "FinishAuction", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GetCourierContractFromItemID", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GetItemsInContainer", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GetItemsInDockableLocation", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GetMyContractEscrow", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GetNumItemsInContainers", RpcDispatchHandler::Sync(handle)),
+];
+
 #[cfg(test)]
 #[path = "market_contracts_tests.rs"]
 mod market_contracts_tests;

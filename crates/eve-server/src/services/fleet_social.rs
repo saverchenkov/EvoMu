@@ -41,7 +41,7 @@ pub(crate) mod fleet_social_fleet_ops;
 #[path = "fleet_social_fleets.rs"]
 pub(crate) mod fleet_social_fleets;
 #[path = "fleet_social_mail.rs"]
-mod fleet_social_mail;
+pub(crate) mod fleet_social_mail;
 #[path = "fleet_social_notify.rs"]
 pub mod fleet_social_notify;
 #[path = "fleet_social_persistence.rs"]

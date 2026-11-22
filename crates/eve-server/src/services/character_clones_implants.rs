@@ -1918,6 +1918,33 @@ pub(crate) fn handle_list_stations(
     ))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("charUnboundMgr", "GetCharacterInfo", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("charMgr", "GetCharacterInfo", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "InstallCloneInStation", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "InstallCloneInStructure", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "SetJumpCloneName", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "ValidateInstallJumpClone", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "ResetLastCloneJumpTime", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "GetCloneState", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "GetStationCloneState", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "GetPriceForClone", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "CloneJump", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "DestroyInstalledClone", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("standingMgr", "GetCharStandings", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("standingMgr", "GetStandingTransactions", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("paperDollServer", "GetMyPaperDollData", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("paperDollServer", "GetPaperDollData", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("paperDollServer", "GetPaperDollDataBatch", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("paperDollServer", "GetPaperDollPortraitDataFor", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("paperDollServer", "UpdateExistingCharacterFull", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("paperDollServer", "UpdateExistingCharacterLimited", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("charMgr", "ListStations", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("charUnboundMgr", "ListStations", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+];
+
 #[cfg(test)]
 #[path = "character_clones_implants_tests.rs"]
 mod character_clones_implants_tests;

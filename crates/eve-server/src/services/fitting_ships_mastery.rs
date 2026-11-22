@@ -2442,6 +2442,53 @@ fn build_ejected_capsule_ball_and_combat_state(
     (ball, combat_state)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext, session: &'a mut SessionState, bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str, method: &'a str, args: &'a [PyRep], kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_ships_mastery_and_fitting_ext(
+        ctx, session, bound_entry, service, method, args, kwargs,
+    ))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("ship", "Eject", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "LeaveShip", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "BoardStoredShip", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "Board", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "StoreVessel", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "Scoop", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "ScoopToSMA", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "ScoopToFleetHangar", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "ScoopToInfrastructureHold", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "ScoopToMobileDepotHold", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "GetShipConfiguration", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "ConfigureShip", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "SetShipPassword", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("eject", "LaunchShipOrContainerFromWreckOrContainer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "LaunchFromContainer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "CreateNewbieShip", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetRequiredSkillLevels", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetMyCertificates", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetCurrCharMasteryLevel", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "GetCurrCharMasteryLevel", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetCertificatesForShipByMasteryLevel", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetSkillsRequiredForMasteryLevel", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "GetSkillsRequiredForMasteryLevel", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("shipKillCounter", "GetItemKillCountPlayer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("shipKillCounter", "SetShipKillCounter", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("repairSvc", "GetDamagedModulesAndRepairCost", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "FitShips", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "GetShipFittingInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "TrashItems", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "GetDirtTimestamp", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "ResetDirtTimestamp", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "SafeLogoff", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("ship", "AbortSafeLogoff", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "fitting_ships_mastery_tests.rs"]
 mod fitting_ships_mastery_tests;

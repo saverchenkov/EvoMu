@@ -1763,9 +1763,6 @@ impl ServerContext {
         if let Some(res) = box_fut(|| services::corp_registry_ops::handle_corp_hangar_invbroker(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = services::character_skill_ops::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
         let prev_cid_before_select = (effective_service == "charUnboundMgr"
             && method == "SelectCharacterID")
             .then_some(session.character_id)
@@ -1886,11 +1883,6 @@ impl ServerContext {
         )).await {
             return res;
         }
-        if let Some(res) = box_fut(|| services::space_entity_mining::handle(
-            self, session, effective_service, method, args, bound_entry.as_ref(),
-        )).await {
-            return res;
-        }
         if let Some(res) = box_fut(|| services::space_entity_ops::handle(
             self, session, bound_entry.as_ref(), effective_service, method, args, kwargs,
         )).await {
@@ -1921,9 +1913,12 @@ impl ServerContext {
         )).await {
             return res;
         }
-        if let Some(res) = box_fut(|| services::abyssal_void_mgr::handle(
-            self, session, effective_service, method, args, kwargs,
-        )).await {
+        // Preserve abyssal_void_mgr::handle's cross-service Abyssal in-pocket RPC guard ahead of
+        // combat_crimewatch, fleet_social (XmppChatMgr/LSC/scanMgr), sov_fw_insurgency (map.GetCurrentSovData),
+        // and fallback scanSvc handlers.
+        if let Some(res) = services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
+            session, effective_service, method, args,
+        ) {
             return res;
         }
         if let Some(res) = box_fut(|| services::combat_crimewatch::handle(
@@ -1934,9 +1929,6 @@ impl ServerContext {
         if let Some(res) = services::market_trading::handle(
             self, session, effective_service, method, args, kwargs,
         ) {
-            return res;
-        }
-        if let Some(res) = services::contracts_service::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
         if let Some(res) = services::market_contracts::handle(self, session, effective_service, method, args, kwargs) {
@@ -1982,12 +1974,6 @@ impl ServerContext {
             return res;
         }
         if let Some(res) = box_fut(|| services::sov_fw_insurgency::handle(self, session, effective_service, method, args, kwargs)).await {
-            return res;
-        }
-        if let Some(res) = services::corp_registry_ops::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
-        if let Some(res) = services::map_service::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
         if let Some(res) = box_fut(|| services::cluster_macho_misc_services::handle(self, session, effective_service, method, args, kwargs)).await {

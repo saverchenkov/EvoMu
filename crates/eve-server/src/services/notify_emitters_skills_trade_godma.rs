@@ -1419,6 +1419,26 @@ pub fn emit_plex_withdraw_failed(
     );
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    _kwargs: &std::collections::HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle_misc_cluster_localization(ctx, session, service, method, args)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("browserLockdownSvc", "IsBrowserInLockdown", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("browserLockdownSvc", "GetDefaultHomePage", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("browserLockdownSvc", "GetFlaggedSitesList", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("browserLockdownSvc", "GetFlaggedSitesHash", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "notify_emitters_skills_trade_godma_tests.rs"]
 mod notify_emitters_skills_trade_godma_tests;

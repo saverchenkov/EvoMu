@@ -742,6 +742,46 @@ pub(super) async fn handle_fleets(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_fleets(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("fleetObjectHandler", "Init", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "CreateFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "CreateWing", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "CreateWing", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "DeleteWing", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "ChangeWingName", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "CreateSquad", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "CreateSquad", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "DeleteSquad", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "ChangeSquadName", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "Invite", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "Invite", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "AcceptInvite", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "AcceptInvite", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "RejectInvite", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "KickMember", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "KickMember", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "ForceLeaveFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "LeaveFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "LeaveFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "DisbandFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "MoveMember", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "MoveMember", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "FinishMove", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "fleet_social_fleets_tests.rs"]
 mod fleet_social_fleets_tests;

@@ -1822,6 +1822,69 @@ fn handle_get_broadcast_history(
     Ok(PyRep::List(entries))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_fleet_ops(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("fleetObjectHandler", "SendBroadcast", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "BroadcastToBubble", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "BroadcastToSystem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "SendBroadcast", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "BroadcastToBubble", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "BroadcastToSystem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "WarpToMember", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "WarpToMember", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "FleetWarp", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "FleetWarp", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "WarpFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "WarpFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "SetMotd", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "SetMotd", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "SetMotdEx", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "GetMotd", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "SetOptions", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "SetAutoJoinSquadID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "SetFleetMaxSize", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "GetFleetMaxSize", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "SetTakesFleetWarp", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "SetTakesFleetWarp", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "SetAcceptsRegroupValue", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "SetAcceptsRegroupValue", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "SetAcceptsConduitJumpsValue", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "SetAcceptsConduitJumpsValue", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "GetFleetComposition", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "GetInitState", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "GetInitState", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "GetWings", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "GetWings", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "GetFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "GetFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "AddToWatchlist", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "RemoveFromWatchlist", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "RegisterForDamageUpdates", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "AddToWatchlist", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "RemoveFromWatchlist", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "RegisterForDamageUpdates", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "SetBroadcastFilter", RpcDispatchHandler::Async(dispatch_rpc)), // rpc-lint: allow auditor acceptance text feat:fleet.broadcast-scope-and-filter
+    rpc_entry("fleetMgr", "SetBroadcastFilter", RpcDispatchHandler::Async(dispatch_rpc)), // rpc-lint: allow auditor acceptance text feat:fleet.broadcast-scope-and-filter
+    rpc_entry("fleetObjectHandler", "GetBroadcastFilter", RpcDispatchHandler::Async(dispatch_rpc)), // rpc-lint: allow auditor acceptance text feat:fleet.broadcast-scope-and-filter
+    rpc_entry("fleetMgr", "GetBroadcastFilter", RpcDispatchHandler::Async(dispatch_rpc)), // rpc-lint: allow auditor acceptance text feat:fleet.broadcast-scope-and-filter
+    rpc_entry("fleetObjectHandler", "GetBroadcastHistory", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "GetBroadcastHistory", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "Regroup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "Regroup", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "fleet_social_fleet_ops_tests.rs"]
 pub(crate) mod fleet_social_fleet_ops_tests;

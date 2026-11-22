@@ -1440,6 +1440,26 @@ pub async fn handle_wrecks_killmails(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_wrecks_killmails(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("ship", "SelfDestruct", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdSelfDestruct", RpcDispatchHandler::Async(dispatch_rpc)), // rpc-lint: allow legacy combat_death_crimewatch self-destruct alias
+    rpc_entry("ship", "AbortSelfDestruct", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("invbroker", "LootAll", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "combat_wrecks_killmails_tests.rs"] mod combat_wrecks_killmails_tests;
 

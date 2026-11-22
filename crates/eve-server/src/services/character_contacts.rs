@@ -18,8 +18,9 @@ mod character_contacts_helpers;
 pub use character_contacts_helpers::{
     is_character_online, notify_watchlist_logon, notify_watchlist_presence, parse_id_list,
 };
+pub(crate) use character_contacts_helpers::check_mail_recipient_blocks;
 use character_contacts_helpers::{
-    check_mail_recipient_blocks, handle_home_station_candidates, handle_self_destruct_clone,
+    handle_home_station_candidates, handle_self_destruct_clone,
 };
 
 
@@ -1485,6 +1486,52 @@ pub fn handle_contacts(
         }
     }
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("charMgr", "GetPublicInfo3", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "GetPrivateInfo", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "GetCharacterDescription", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "SetCharacterDescription", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "GetEmployementRecordAndCharacterTransfers", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("corporationSvc", "GetEmployementRecordAndCharacterTransfers", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "AddOwnerNote", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "GetOwnerNote", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "EditOwnerNote", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "RemoveOwnerNote", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "GetOwnerNoteLabels", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "RespecCharacter", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("skillMgr2", "RespecCharacter", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "GetContactList", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "GetContacts", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "AddContact", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "EditContact", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "EditContactsRelationshipID", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "DeleteContacts", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "BlockOwners", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "UnblockOwners", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "CreateLabel", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "GetLabels", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "EditLabel", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "DeleteLabel", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "AssignLabels", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "RemoveLabels", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("onlineStatus", "GetOnlineStatus", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("onlineStatus", "GetInitialState", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "GetHomeStation", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("home_station", "get_home_station", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "SetHomeStation", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("home_station", "set_home_station", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "GetAssetWorth", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "List", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "ListIncludingContainers", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("charMgr", "ListStationItems", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("home_station", "get_home_station_candidates", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("home_station", "get_next_remote_change_time", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("home_station", "reset_remote_change_time", RpcDispatchHandler::Sync(handle_contacts)),
+    rpc_entry("home_station", "self_destruct_clone", RpcDispatchHandler::Sync(handle_contacts)),
+];
 
 #[cfg(test)] #[path = "character_contacts_unit_tests.rs"] mod character_contacts_unit_tests;
 #[cfg(test)] #[path = "character_contacts_edges2_tests.rs"] mod character_contacts_edges2_tests;

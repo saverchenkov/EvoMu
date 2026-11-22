@@ -1747,6 +1747,63 @@ fn handle_cluster_statistics(ctx: &ServerContext) -> PyRep {
     PyRep::Tuple(vec![PyRep::Dict(pilots), PyRep::Dict(docked), PyRep::Real(1.0)])
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    // Preserve macho_cluster_mgmt::handle's pre-fallthrough calls_received["machoNet"] counter.
+    if service == "machoNet" {
+        if let Ok(mut state) = ctx.cluster_state.write() {
+            *state.calls_received.entry(service.to_string()).or_insert(0) += 1;
+        }
+    }
+    handle(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("posMgr", "GetControlTowers", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "GetMoonForTower", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "GetMoonProcessInfoForTower", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "SetSessionCheck", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "AssumeStructureControl", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "RelinquishStructureControl", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "GetStarbasePermissions", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "SetStarbasePermissions", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "GetTowerNotificationSettings", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "SetTowerNotifications", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "GetTowerSentrySettings", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "SetTowerSentrySettings", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "SetTowerPassword", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "GetConsumptionFactor", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "GetSiloCapacityByItemID", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "LinkResourceForTower", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "RunMoonProcessCycleforTower", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("posMgr", "ChangeStructureProvisionType", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("billMgr", "GetCorporationBills", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("billMgr", "GetCorporationBillsReceivable", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("billMgr", "CharPayBill", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("billMgr", "PayCorporationBill", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("billMgr", "GetAutomaticPaySettings", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("billMgr", "SendAutomaticPaySettings", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("account", "GiveCash", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("account", "SetContactCost", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("account", "GetDefaultContactCost", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GetClusterGameStatisticsForClient", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("pingService", "Ping", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("localizationServer", "GetAllTextChanges", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("localizationServer", "UpdateLocalizationQAWrap", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("localizationServer", "ReloadFSDPickle", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("clientStatLogger", "LogString", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("eveguard_report", "heartbeat_started", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("eveguard_report", "heartbeat_stopped", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "wallet_serverops_tests.rs"]
 mod wallet_serverops_tests;

@@ -722,6 +722,45 @@ fn handle_get_all_roaming_weather_systems(ctx: &ServerContext) -> Result<PyRep, 
     Ok(PyRep::List(list))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(res) =
+        crate::services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
+            session, service, method, args,
+        )
+    {
+        return Some(res);
+    }
+    handle(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("map", "GetBeaconCount", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetConstellationLPData", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetDeadspaceAgentsMap", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetDeadspaceComplexMap", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetEdencomFortressSystems", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetEdencomMinorVictorySystems", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetFacWarZoneInfo", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetHistory", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetIncursionGlobalReport", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetMyExtraMapInfo", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetMyExtraMapInfoAgents", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetRecentSovActivity", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetSolarSystemVisits", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetStationCount", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetSystemsInIncursions", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("map", "GetTriglavianMinorVictorySystems", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "map_service_tests.rs"]
 mod map_service_tests;

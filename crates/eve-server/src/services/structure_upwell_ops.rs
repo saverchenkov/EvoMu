@@ -1852,6 +1852,69 @@ pub(crate) fn transfer_structure_corp_ownership_in_snap(
         ),
     )
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        // Preserve station_structure::handle's lazy Upwell lifecycle sync pre-hook.
+        if service.starts_with("structure") {
+            crate::services::station_structure::structure_lifecycle::sync_all_structures(ctx);
+        }
+        handle(ctx, session, service, method, args, kwargs).await
+    })
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("structureDeployment", "Unanchor", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDeployment", "CancelUnanchor", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDeployment", "RenameStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureVulnerability", "UpdateReinforceTimesFromClient", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureAssetSafety", "MovePersonalAssetsToSafety", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureAssetSafety", "MoveCorpAssetsToSafety", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureAssetSafety", "GetItemsInSafetyForCharacter", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureAssetSafety", "GetItemsInSafetyForCorp", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureAssetSafety", "GetWrapNames", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureAssetSafety", "GetStructuresICanDeliverTo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureAssetSafety", "MoveSafetyWrapToStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureAssetSafety", "MoveEjectTimeGM", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureControl", "TakeControl", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureControl", "ReleaseControl", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureControl", "GetStructurePilot", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureControl", "BoardStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureControl", "EjectFromStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureSettings", "CharacterHasService", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureSettings", "CharacterCheckService", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureSettings", "CharacterGetService", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureSettings", "CharacterHasSetting", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureSettings", "CharacterGetServices", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureSettings", "clear_memoized", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDirectory", "clear_memoized", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDirectory", "SetStructureDescription", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDirectory", "GetStructureDescription", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDirectory", "GetStructures", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDirectory", "GetCorporationStructures", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDirectory", "GetStructureInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDeliveries", "Deliver", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureCargoDelivery", "DropOffItems", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureCargo", "CargoDropoff", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureGuests", "GetGuests", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureHangarViewMgr", "GetMyHangarViewState", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("jumpCloneSvc", "GetNumClonesInPilotsStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureJumpBridgeMgr", "GetLinkedStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureJumpBridgeMgr", "GetJbStructureDestination", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDirectory", "GetJumpBridgesWithMyAccess", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDirectory", "GetNearbyJumpBridges", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "structure_upwell_ops_tests.rs"]
 mod structure_upwell_ops_tests;

@@ -2423,6 +2423,69 @@ pub(crate) async fn handle_dogma_im(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        let res = handle_dogma_im(ctx, session, bound_entry, service, method, args, kwargs).await;
+        if matches!(res, Some(Ok(_))) {
+            crate::services::character_skill_ops::post_inventory_fitting_hook(
+                ctx,
+                session,
+                bound_entry,
+                method,
+                args,
+            )
+            .await;
+        }
+        res
+    })
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("dogmaIM", "SetSessionCheck", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetAllInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetShipAttributes", RpcDispatchHandler::BoundAsync(dispatch_rpc)), // rpc-lint: allow tools/client-harness/run_journeys bridge probe calls GetShipAttributes
+    rpc_entry("shipStanceMgr", "SetShipStance", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "ItemGetInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "GetItemInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "GetDynamicItemInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetDynamicItemInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "DestroyFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "SetModuleOnline", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "TakeModuleOffline", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "AddTarget", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "RemoveTarget", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "ClearTargets", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetTargets", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetTargeters", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "LinkWeapons", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "LinkWeapons", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "PeelAndLink", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "PeelAndLink", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "MergeModuleGroups", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "MergeModuleGroups", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "UnlinkModule", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "UnlinkModule", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "DestroyWeaponBank", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "DestroyWeaponBank", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "LinkAllWeapons", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "LinkAllWeapons", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "UnlinkAllModules", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "UnlinkAllModules", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "LoadAmmo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "UnloadAmmo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetLayerDamageValuesByItems", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "fitting_dogma_im_tests.rs"]
 mod fitting_dogma_im_tests;

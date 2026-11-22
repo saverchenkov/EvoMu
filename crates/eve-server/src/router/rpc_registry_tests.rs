@@ -753,7 +753,11 @@ fn track_2b_registry_registers_all_modules_without_duplicates() {
 
     let registry =
         RpcRegistry::try_from_modules(COMPILED_RPC_MODULES).expect("zero duplicate entries");
-    assert_eq!(COMPILED_RPC_MODULES.len(), 44);
+    assert!(
+        COMPILED_RPC_MODULES.len() >= 44,
+        "expected Track 2A + 2B module count >= 44, got {}",
+        COMPILED_RPC_MODULES.len()
+    );
     assert!(
         registry.all_entries().len() >= 526,
         "expected Track 2A + 2B entries >= 526, got {}",
@@ -1065,4 +1069,597 @@ async fn public_qa_tools_migrated_methods_bypass_gm_qa_precheck_and_hit_rpc_regi
         .await
         .expect_err("unregistered publicQaToolsServer method must fail with UnimplementedRPC");
     assert_eq!(unimpl.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
+}
+
+#[test]
+fn track_2c_registry_registers_all_modules_without_duplicates() {
+    let files: std::collections::HashSet<&str> =
+        COMPILED_RPC_MODULES.iter().map(|m| m.file).collect();
+    let expected_track_2c = [
+        ("services/character_skill_ops.rs", 5usize),
+        ("services/space_entity_mining.rs", 5),
+        ("services/contracts_service.rs", 20),
+        ("services/map_service.rs", 16),
+        ("services/corp_registry_ops.rs", 10),
+        ("services/shipcaster_ops.rs", 6),
+        ("services/abyssal_void_mgr.rs", 8),
+        ("services/market_contracts.rs", 26),
+        ("services/wallet_serverops.rs", 35),
+        ("services/notify_emitters_skills_trade_godma.rs", 4),
+        ("services/structure_profiles_directory.rs", 7),
+        ("services/structure_profiles_rpc.rs", 16),
+        ("services/structure_upwell_ops.rs", 40),
+        ("services/crimewatch_bounty.rs", 24),
+        ("services/combat_wrecks_killmails.rs", 4),
+        ("services/character_clones_implants.rs", 22),
+        ("services/character_skills_helpers.rs", 18),
+        ("services/character_contacts.rs", 41),
+        ("services/fitting_dogma_im.rs", 33),
+        ("services/fitting_ships_mastery.rs", 33),
+        ("services/fitting_containers_ships_ops.rs", 13),
+        ("services/fleet_social_fleet_ops.rs", 47),
+        ("services/fleet_social_fleets.rs", 24),
+        ("services/fleet_social_chat_auth_ops.rs", 6),
+        ("services/fleet_social_mail.rs", 42),
+        ("services/mailing_lists_ops.rs", 27),
+        ("services/space_cyno_filaments.rs", 7),
+        ("services/space_destiny.rs", 21),
+    ];
+    for (file, expected_len) in expected_track_2c {
+        assert!(files.contains(file), "missing Track 2C module {file}");
+        let mod_entry = COMPILED_RPC_MODULES
+            .iter()
+            .find(|m| m.file == file)
+            .expect("module exists");
+        assert_eq!(
+            mod_entry.rpcs.len(),
+            expected_len,
+            "unexpected RPC count for {file}"
+        );
+    }
+
+    let registry =
+        RpcRegistry::try_from_modules(COMPILED_RPC_MODULES).expect("zero duplicate entries");
+    assert_eq!(COMPILED_RPC_MODULES.len(), 72);
+    assert!(
+        registry.all_entries().len() >= 1095,
+        "expected Track 2A + 2B + 2C entries >= 1095, got {}",
+        registry.all_entries().len()
+    );
+
+    for (svc, method) in [
+        ("skillMgr2", "GetSkillChangesForISIS"),
+        ("reprocessingSvc", "GetQuotes"),
+        ("contractProxy", "GetLoginInfo"),
+        ("contractProxy", "NumOutstandingContracts"),
+        ("marketProxy", "GetPlexOrders"),
+        ("account", "GetCashBalance"),
+        ("vaultManager", "get_account_balance"),
+        ("map", "GetBeaconCount"),
+        ("corpRegistry", "GetSuggestedTickerNames"),
+        ("shipCasterLauncherMgr", "GetFactionsWithShipcaster"),
+        ("abyssalMgr", "ClientIsReady"),
+        ("voidSpaceMgr", "ClientIsReady"),
+        ("posMgr", "SetSessionCheck"),
+        ("billMgr", "GetCorporationBills"),
+        ("account", "GetDefaultContactCost"),
+        ("machoNet", "GetClusterGameStatisticsForClient"),
+        ("pingService", "Ping"),
+        ("browserLockdownSvc", "IsBrowserInLockdown"),
+        ("structureDirectory", "GetMyCharacterStructures"),
+        ("structureProfiles", "GetProfiles"),
+        ("structureDeployment", "Unanchor"),
+        ("structureSettings", "CharacterHasService"),
+        ("bountyProxy", "GetMyBounties"),
+        ("ship", "AbortSelfDestruct"),
+        ("charUnboundMgr", "GetCharacterInfo"),
+        ("skillMgr2", "GetImplants"),
+        ("charMgr", "GetContactList"),
+        ("charMgr", "GetSettingsInfo"),
+        ("mailMgr", "GetLabels"),
+        ("mailMgr", "MoveAllToTrash"),
+        ("mailingListsMgr", "GetJoinedLists"),
+        ("calendarMgr", "GetEventList"),
+        ("dogmaIM", "GetTargets"),
+        ("dogmaIM", "GetAllInfo"),
+        ("charFittingMgr", "LinkWeapons"),
+        ("ship", "GetDirtTimestamp"),
+        ("invbroker", "FitFitting"),
+        ("fleetObjectHandler", "GetMotd"),
+        ("fleetMgr", "CreateFleet"),
+        ("wormholeMgr", "WormholeJump"),
+        ("jumpTimers", "GetTimers"),
+        ("beyonce", "CallComponentFromClient"),
+    ] {
+        assert!(
+            registry.lookup(svc, method).is_some(),
+            "missing Track 2C registry lookup for {svc}.{method}"
+        );
+    }
+
+    // Conditional fallthrough, shadowed, deferred, and pre/post-hook entries intentionally left in fallback.
+    for (svc, method) in [
+        ("skillMgr2", "GetRespecInfo"),
+        ("skillMgr2", "AbortTraining"),
+        ("jumpCloneSvc", "GetShipCloneState"),
+        ("killRightMgr", "SellKillRight"),
+        ("fleetObjectHandler", "CreateFleet"),
+        ("posMgr", "AnchorOrbital"),
+        ("posMgr", "UnanchorOrbital"),
+        ("miningScanMgr", "perform_scan"),
+        ("userSvc", "GetRedeemTokens"),
+        ("account", "GiveCashFromCorpAccount"),
+        ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances"),
+        ("map", "GetAllRoamingWeatherSystems"),
+    ] {
+        assert!(
+            registry.lookup(svc, method).is_none(),
+            "expected {svc}.{method} to stay outside compiled registry"
+        );
+    }
+}
+
+#[tokio::test]
+async fn track_2c_dispatch_routes_and_preserves_hooks_and_rejects_unregistered() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let mut sess = SessionState::new(98_401);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.station_id = Some(60_003_760);
+    sess.solar_system_id = Some(30_000_142);
+    sess.role = ServerContext::ROLE_GM_CANONICAL_MASK;
+    let kw = HashMap::new();
+
+    // Sync path: contracts_service, character_skill_ops, corp_registry_ops, market_contracts,
+    // wallet_serverops, fleet_social_chat_auth_ops, fleet_social_mail, mailing_lists_ops
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "contractProxy", None, "GetLoginInfo", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "contractProxy",
+            None,
+            "NumOutstandingContracts",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "account", None, "GetCashBalance", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "vaultManager",
+            None,
+            "get_account_balance",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "skillMgr2",
+            None,
+            "GetSkillChangesForISIS",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpRegistry",
+            None,
+            "GetSuggestedTickerNames",
+            &[PyRep::String("Alpha Beta".into())],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(matches!(
+        ctx.dispatch_rpc(&mut sess, "pingService", None, "Ping", &[], &kw, None)
+            .await,
+        Ok(PyRep::Integer(_))
+    ));
+    assert!(matches!(
+        ctx.dispatch_rpc(&mut sess, "posMgr", None, "SetSessionCheck", &[], &kw, None)
+            .await,
+        Ok(PyRep::Bool(true))
+    ));
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetSettingsInfo", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(matches!(
+        ctx.dispatch_rpc(&mut sess, "mailMgr", None, "GetLabels", &[], &kw, None)
+            .await,
+        Ok(PyRep::Dict(_))
+    ));
+    assert!(matches!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "mailingListsMgr",
+            None,
+            "GetJoinedLists",
+            &[],
+            &kw,
+            None,
+        )
+        .await,
+        Ok(PyRep::Dict(_))
+    ));
+
+    // Preserved mailMgr.SendMail recipient block check in fleet_social_mail::dispatch_rpc
+    let blocker_id = 90_000_002i64;
+    ctx.social_extras
+        .lock()
+        .unwrap()
+        .blocked
+        .entry(blocker_id)
+        .or_default()
+        .insert(90_000_001);
+    let block_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "mailMgr",
+            None,
+            "SendMail",
+            &[
+                PyRep::List(vec![PyRep::Integer(blocker_id)]),
+                PyRep::String("Blocked".into()),
+                PyRep::String("Body".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("blocked recipient must reject mailMgr.SendMail");
+    assert_eq!(block_err.code, "ContactBlocked");
+
+    // SyncReadOnlySession path: map_service, notify_emitters_skills_trade_godma
+    assert!(matches!(
+        ctx.dispatch_rpc(&mut sess, "map", None, "GetBeaconCount", &[], &kw, None)
+            .await,
+        Ok(PyRep::Dict(_))
+    ));
+    assert!(matches!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "browserLockdownSvc",
+            None,
+            "IsBrowserInLockdown",
+            &[],
+            &kw,
+            None,
+        )
+        .await,
+        Ok(PyRep::Bool(_))
+    ));
+
+    // SyncNoKwargs path: crimewatch_bounty
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "bountyProxy", None, "GetMyBounties", &[], &kw, None)
+        .await
+        .is_ok());
+
+    // Async path: abyssal_void_mgr, shipcaster_ops, structure_profiles_rpc
+    let abyss_gate_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "abyssalMgr",
+            None,
+            "ClientIsReady",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("abyssalMgr.ClientIsReady outside abyssal space returns NotInAbyssalSpace");
+    assert_eq!(abyss_gate_err.code, "NotInAbyssalSpace");
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "voidSpaceMgr",
+            None,
+            "ClientIsReady",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCasterLauncherMgr",
+            None,
+            "GetFactionsWithShipcaster",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "structureProfiles", None, "GetProfiles", &[], &kw, None)
+        .await
+        .is_ok());
+
+    // BoundAsync path: space_destiny, fitting_dogma_im, space_entity_mining
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "jumpTimers", None, "GetTimers", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "GetTargets", &[], &kw, None)
+        .await
+        .is_ok());
+    let quote_res = ctx
+        .dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None)
+        .await
+        .expect("reprocessingSvc.GetQuotes should succeed while docked");
+    assert!(
+        quote_res.dict_get("stationBaseYield").is_some()
+            || matches!(quote_res, PyRep::Tuple(_))
+    );
+
+    // Preserved abyssal pocket restriction in map_service::dispatch_rpc
+    let prev_char_loc = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap
+            .characters
+            .get_mut(&90_000_001)
+            .expect("demo character 90_000_001 exists");
+        let prev = (ch.solar_system_id, ch.station_id, ch.structure_id);
+        ch.solar_system_id = 32_000_001;
+        ch.station_id = None;
+        ch.structure_id = None;
+        prev
+    });
+    let mut abyss_sess = sess.clone();
+    abyss_sess.solar_system_id = Some(32_000_001);
+    abyss_sess.station_id = None;
+    abyss_sess.structure_id = None;
+    let abyss_err = ctx
+        .dispatch_rpc(&mut abyss_sess, "map", None, "GetBeaconCount", &[], &kw, None)
+        .await
+        .expect_err("abyssal map restriction must block map.GetBeaconCount");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            (ch.solar_system_id, ch.station_id, ch.structure_id) = prev_char_loc;
+        }
+    });
+    assert_eq!(abyss_err.code, "MapDisabledInAbyssalSpace");
+
+    // Excluded conditional fallthrough & shadowed handlers preserve fallback routing
+    let scan_err = ctx
+        .dispatch_rpc(&mut sess, "miningScanMgr", None, "perform_scan", &[], &kw, None)
+        .await
+        .expect_err("empty miningScanMgr.perform_scan must remain UnimplementedRPC");
+    assert_eq!(scan_err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "GetRedeemTokens", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "map",
+            None,
+            "GetAllRoamingWeatherSystems",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "skillMgr2", None, "GetRespecInfo", &[], &kw, None)
+        .await
+        .is_ok());
+
+    // Unregistered methods on newly migrated top-level services must fail with UnimplementedRPC
+    for (svc, method) in [
+        ("contractProxy", "UnregisteredContractMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("map", "UnregisteredMapMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("reprocessingSvc", "UnregisteredReprocessMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("shipCasterLauncherMgr", "UnregisteredShipcasterMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("abyssalMgr", "UnregisteredAbyssalMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("voidSpaceMgr", "UnregisteredVoidSpaceMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("mailingListsMgr", "UnregisteredMailingListMethod"), // rpc-lint: allow negative dispatch test fixture
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut sess, svc, None, method, &[], &kw, None)
+            .await
+            .expect_err("unregistered migrated method must fail with UnimplementedRPC");
+        assert_eq!(err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
+    }
+}
+
+#[tokio::test]
+async fn track_2c_structure_rpcs_run_lazy_lifecycle_sync_prehook() {
+    use crate::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state};
+
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let now = ctx.now_unix();
+    let char_id = 90_000_001_i64;
+    let corp_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
+        .unwrap_or(98_000_001);
+    let mut sess = SessionState::new(98_402);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.solar_system_id = Some(30_000_142);
+    sess.role = ServerContext::ROLE_GM_CANONICAL_MASK;
+    let kw = HashMap::new();
+
+    let make_structure = |structure_id: i64, state: &str, reinforced_until_unix: u64| {
+        eve_db::UpwellStructureRecord {
+            structure_id,
+            type_id: 35_832,
+            owner_corp_id: corp_id,
+            solar_system_id: 30_000_142,
+            name: format!("Sync Test {structure_id}"),
+            position: [10_000.0, 0.0, 0.0],
+            state: state.into(),
+            quantum_core_installed: true,
+            fuel_blocks: 500,
+            shield_hp: 1.0,
+            armor_hp: 1.0,
+            hull_hp: 1.0,
+            reinforced_until_unix,
+            last_damage_tick: 0,
+            last_damage_unix: 0,
+            self_destruct_at_unix: None,
+        }
+    };
+
+    // 1) structure_profiles_directory: expired Onlining timer transitions via GetMyCharacterStructures
+    let s_dir_id = 9_900_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures
+            .insert(s_dir_id, make_structure(s_dir_id, "Onlining", now.saturating_sub(10)));
+    });
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "structureDirectory", None, "GetMyCharacterStructures", &[], &kw, None)
+        .await
+        .is_ok());
+    let s_dir_state = ctx
+        .db
+        .with_snapshot(|snap| snap.structures.get(&s_dir_id).map(|s| s.state.clone()));
+    assert_eq!(s_dir_state.as_deref(), Some("ShieldVulnerable"));
+
+    // 2) structure_profiles_rpc: expired Onlining timer transitions via structureProfiles.GetProfiles
+    let s_prof_id = 9_900_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures
+            .insert(s_prof_id, make_structure(s_prof_id, "Onlining", now.saturating_sub(10)));
+    });
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "structureProfiles", None, "GetProfiles", &[], &kw, None)
+        .await
+        .is_ok());
+    let s_prof_state = ctx
+        .db
+        .with_snapshot(|snap| snap.structures.get(&s_prof_id).map(|s| s.state.clone()));
+    assert_eq!(s_prof_state.as_deref(), Some("ShieldVulnerable"));
+
+    // 3) structure_upwell_ops: elapsed unanchor timer packages structure before CancelUnanchor runs
+    let s_unanchor_id = 9_900_003_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures
+            .insert(s_unanchor_id, make_structure(s_unanchor_id, "ShieldVulnerable", 0));
+        let mut ext = load_ext_state(snap);
+        ext.unanchoring_until_unix
+            .insert(s_unanchor_id, now.saturating_sub(10));
+        save_ext_state(snap, &ext);
+    });
+    let cancel_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureDeployment",
+            None,
+            "CancelUnanchor",
+            &[PyRep::Integer(s_unanchor_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("elapsed unanchor timer must package structure before CancelUnanchor runs");
+    assert_eq!(cancel_err.code, "StructureNotFound");
+    let remaining = ctx
+        .db
+        .with_snapshot(|snap| snap.structures.get(&s_unanchor_id).cloned());
+    assert!(
+        remaining.is_none(),
+        "elapsed unanchor timer must have removed structure from space"
+    );
+}
+
+#[tokio::test]
+async fn track_2c_abyssal_in_pocket_guards_and_macho_net_metrics_preserved() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap
+            .characters
+            .get_mut(&90_000_001)
+            .expect("demo character 90_000_001 exists");
+        ch.solar_system_id = 32_000_001;
+        ch.station_id = None;
+        ch.structure_id = None;
+    });
+    let mut abyss_sess = SessionState::new(98_403);
+    abyss_sess.user_id = Some(1);
+    abyss_sess.character_id = Some(90_000_001);
+    abyss_sess.solar_system_id = Some(32_000_001);
+    let kw = HashMap::new();
+
+    let xmpp_err = ctx
+        .dispatch_rpc(
+            &mut abyss_sess,
+            "XmppChatMgr",
+            None,
+            "AddCharacterToChannel",
+            &[PyRep::String("solarsystemid2:32000001".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("abyssal guard must block XmppChatMgr.AddCharacterToChannel on local");
+    assert_eq!(xmpp_err.code, "LocalChannelDisabledInAbyssalSpace");
+
+    let sov_err = ctx
+        .dispatch_rpc(&mut abyss_sess, "map", None, "GetCurrentSovData", &[], &kw, None)
+        .await
+        .expect_err("abyssal guard must block map.GetCurrentSovData");
+    assert_eq!(sov_err.code, "MapDisabledInAbyssalSpace");
+
+    let dscan_err = ctx
+        .dispatch_rpc(&mut abyss_sess, "scanSvc", None, "DirectionalScan", &[], &kw, None)
+        .await
+        .expect_err("abyssal guard must block scanSvc.DirectionalScan");
+    assert_eq!(dscan_err.code, "CannotDscanInThisSystem");
+
+    let before_calls = ctx
+        .cluster_state
+        .read()
+        .expect("cluster_state rwlock")
+        .calls_received
+        .get("machoNet")
+        .copied()
+        .unwrap_or(0);
+    assert!(ctx
+        .dispatch_rpc(
+            &mut abyss_sess,
+            "machoNet",
+            None,
+            "GetClusterGameStatisticsForClient",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    let after_calls = ctx
+        .cluster_state
+        .read()
+        .expect("cluster_state rwlock")
+        .calls_received
+        .get("machoNet")
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(after_calls, before_calls + 1);
 }

@@ -369,7 +369,7 @@ fn handle_char_contacts(
     )
 }
 
-pub(super) fn handle_contacts_notifications_calendar(
+pub(crate) fn handle_contacts_notifications_calendar(
     ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
@@ -497,3 +497,14 @@ pub(super) fn handle_contacts_notifications_calendar(
         _ => None,
     }
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("charMgr", "GetSettingsInfo", RpcDispatchHandler::Sync(handle_contacts_notifications_calendar)),
+    rpc_entry("charMgr", "LogSettings", RpcDispatchHandler::Sync(handle_contacts_notifications_calendar)),
+    rpc_entry("charMgr", "CSPAChargedAction", RpcDispatchHandler::Sync(handle_contacts_notifications_calendar)),
+    rpc_entry("charMgr", "CSPAChargedActionForMany", RpcDispatchHandler::Sync(handle_contacts_notifications_calendar)),
+    rpc_entry("charMgr", "SetNote", RpcDispatchHandler::Sync(handle_contacts_notifications_calendar)),
+    rpc_entry("charMgr", "GetNote", RpcDispatchHandler::Sync(handle_contacts_notifications_calendar)),
+];

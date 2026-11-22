@@ -1205,6 +1205,38 @@ fn handle_mailing_list_ops(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("mailMgr", "MarkAsReadByList", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailMgr", "MarkAsUnreadByList", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailMgr", "MoveAllToTrash", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailMgr", "MoveToTrash", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailMgr", "MoveToTrashByLabel", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailMgr", "MoveToTrashByList", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "Create", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "GetInfo", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "GetJoinedLists", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "Join", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "Leave", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "GetMembers", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "ClearEntityAccess", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "GetWelcomeMail", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "ClearWelcomeMail", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "Delete", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "GetSettings", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "KickMembers", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "SaveWelcomeMail", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "SendWelcomeMail", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "SetDefaultAccess", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "SaveSettings", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "SetEntitiesAccess", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "SetEntityAccess", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "SetMembersClear", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "SetMembersMuted", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+    rpc_entry("mailingListsMgr", "SetMembersOperator", RpcDispatchHandler::Sync(crate::services::fleet_social::fleet_social_mail::handle_mail_and_calendar)),
+];
+
 fn caller_has_operator_or_owner_role(ml: &MailingListState, char_id: i64) -> bool {
     ml.owner_id == char_id || ml.members.get(&char_id).copied().unwrap_or(0) >= 2
 }

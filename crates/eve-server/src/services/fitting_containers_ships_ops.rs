@@ -2040,6 +2040,36 @@ pub(crate) fn foreign_ship_deny_err(deny_sma: bool, msg: String) -> BridgeRpcErr
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_ext_tail(ctx, session, bound_entry, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("invbroker", "FitFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "GetAssetWorth", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "GetPriceForItems", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "HasExistingPasswordSet", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "ImportExportWithPlanet", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "ListIncludingContainers", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "ListStationItems", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "ListStations", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "Reprocess", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "RetrievePassword", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("itemLocking", "GetLockedItemLocations", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("itemLocking", "GetItemsByLocation", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("encodedItems", "DecodeItem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "fitting_containers_ships_ops_cov_unit_tests.rs"]
 mod fitting_containers_ships_ops_cov_unit_tests;
