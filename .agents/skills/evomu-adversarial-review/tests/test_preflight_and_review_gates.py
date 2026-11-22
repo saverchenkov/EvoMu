@@ -2111,6 +2111,44 @@ fn t() {
                 else:
                     os.environ["EVOMU_HOURLY_CI_STATE_PATH"] = old_env
 
+    def test_1587_nested_tests_it_submodules_included_in_it_tokens_and_head_it(self):
+        from unittest import mock
+
+        # 1. Live repo index must discover nested `tests/it/*/*.rs` submodules recursively
+        idx = run_review._load_or_build_reverse_dep_index(REPO_ROOT)
+        self.assertIn("operation_replay_and_container_password_notices", idx["it_tokens"])
+        self.assertIn("esi_universe_sov_ext_2", idx["it_tokens"])
+
+        # 2. Modifying a nested IT submodule must NOT be silently dropped for either head="HEAD" or explicit commit SHA
+        nested_files = [
+            "crates/eve-server/tests/it/notify_events/operation_replay_and_container_password_notices.rs",
+            "crates/eve-server/tests/it/esi_universe_sov_complete/esi_universe_sov_ext_2.rs",
+        ]
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        for head_ref in ("HEAD", head_sha):
+            def _fake_sh(cmd, cwd, env=None, timeout=None):
+                if cmd[:3] == ["git", "diff", "--name-only"]:
+                    return 0, "\n".join(nested_files) + "\n"
+                if cmd[:3] == ["git", "diff", "-U0"]:
+                    return 0, ""
+                return 0, ""
+
+            with mock.patch.object(run_review, "sh", side_effect=_fake_sh):
+                cmds = run_review.derive_affected_test_commands(REPO_ROOT, "HEAD~1", "cargo", head=head_ref)
+            it_filters = [c[-1] for c in cmds if "--test" in c and "it" in c]
+            self.assertIn(
+                "operation_replay_and_container_password_notices",
+                it_filters,
+                "nested notify_events IT submodule dropped for head=%s: %s" % (head_ref, cmds),
+            )
+            self.assertIn(
+                "esi_universe_sov_ext_2",
+                it_filters,
+                "nested esi_universe_sov_complete IT submodule dropped for head=%s: %s" % (head_ref, cmds),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

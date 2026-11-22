@@ -526,9 +526,9 @@ PATH_TRIGGERED_IT_CANARIES = (
     T2_DESTINY_IT_TESTS + T3_CORP_IT_TESTS + T4_COMBAT_MODULE_IT_TESTS + T5_STRUCTURE_IT_TESTS
 )
 
-MAX_AFFECTED_IT_FILTERS = 12
+MAX_AFFECTED_IT_FILTERS = 13
 MAX_AFFECTED_LIB_FILTERS = 6
-REV_DEP_CACHE_FILENAME = "reverse_dep_index_v2.json"
+REV_DEP_CACHE_FILENAME = "reverse_dep_index_v3.json"
 _REV_DEP_MEM_CACHE = {}
 
 _USE_MOD_RE = re.compile(
@@ -621,11 +621,11 @@ def _load_rpc_catalog_names(root):
 
 def _load_or_build_reverse_dep_index(root):
     """Build or load cached reverse-import / RPC-service / notification / symbol index from
-    `crates/eve-server/src` and `crates/eve-server/tests/it/*.rs`."""
+    `crates/eve-server/src` and `crates/eve-server/tests/it/**/*.rs`."""
     src_dir = os.path.join(root, "crates", "eve-server", "src")
     it_dir = os.path.join(root, "crates", "eve-server", "tests", "it")
     src_files = sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)) if os.path.isdir(src_dir) else []
-    it_files = sorted(glob.glob(os.path.join(it_dir, "*.rs"))) if os.path.isdir(it_dir) else []
+    it_files = sorted(glob.glob(os.path.join(it_dir, "**", "*.rs"), recursive=True)) if os.path.isdir(it_dir) else []
 
     src_max_m = max((os.stat(p).st_mtime_ns for p in src_files), default=0)
     it_max_m = max((os.stat(p).st_mtime_ns for p in it_files), default=0)
@@ -698,7 +698,10 @@ def _load_or_build_reverse_dep_index(root):
     qual_prefixes = known_src_mods | {"eve_server", "services", "router", "sp6_lifecycle", "system_actor", "combat"}
 
     for p in it_files:
+        rel_it = os.path.relpath(p, it_dir).replace("\\", "/")
         mod_name = os.path.splitext(os.path.basename(p))[0]
+        if mod_name == "mod" and "/" in rel_it:
+            mod_name = rel_it.split("/")[-2]
         with open(p, encoding="utf-8", errors="replace") as fh:
             txt = fh.read()
         toks = set()
@@ -720,7 +723,7 @@ def _load_or_build_reverse_dep_index(root):
         for w in mod_name.split("_"):
             if len(w) >= 4 and w not in _DEP_STOP_WORDS:
                 toks.add("kw:" + w)
-        raw_it[mod_name] = toks
+        raw_it.setdefault(mod_name, set()).update(toks)
         for h in _IT_HELPER_RE.findall(txt):
             if h not in ("common", "main", mod_name):
                 it_reverse_helper.setdefault(h, set()).add(mod_name)
@@ -1020,6 +1023,8 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
         if parts[2] == "tests":
             if crate == "eve-server" and len(parts) >= 5 and parts[3] == "it":
                 submod = os.path.splitext(parts[-1])[0]
+                if submod == "mod" and len(parts) >= 6:
+                    submod = parts[-2]
                 if submod not in skip_server_it and submod not in direct_server_it:
                     direct_server_it.append(submod)
             elif len(parts) == 4:
@@ -1086,16 +1091,24 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
                 head_it = set(it_tokens.keys())
             else:
                 ls_proc = subprocess.run(
-                    ["git", "ls-tree", "--name-only", head, "crates/eve-server/tests/it/"],
+                    ["git", "ls-tree", "-r", "--name-only", head, "crates/eve-server/tests/it/"],
                     cwd=root,
                     capture_output=True,
                     text=True,
                 )
-                head_it = {
-                    os.path.splitext(os.path.basename(l.strip()))[0]
-                    for l in ls_proc.stdout.splitlines()
-                    if l.strip().endswith(".rs")
-                } or set(it_tokens.keys())
+                head_it = set()
+                for raw_l in ls_proc.stdout.splitlines():
+                    l = raw_l.strip().replace("\\", "/")
+                    if not l.endswith(".rs"):
+                        continue
+                    base_name = os.path.splitext(os.path.basename(l))[0]
+                    if base_name == "mod":
+                        segs = l.split("/")
+                        if len(segs) >= 6:
+                            base_name = segs[-2]
+                    if base_name not in ("main", "mod", "common"):
+                        head_it.add(base_name)
+                head_it = head_it or set(it_tokens.keys())
 
             for par_s in list(changed_server_stems):
                 changed_server_stems.update(idx["src_parent"].get(par_s, ()))
@@ -1193,8 +1206,8 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
                     if tok.startswith("svc:"):
                         rem_weights[tok] = hw * 0.08
 
-            # TT-03: Never truncate directly modified `tests/it/*.rs` files at [:4]; keep all of them,
-            # and always preserve at least `MAX_AFFECTED_IT_FILTERS - 4` (= 8) reverse-dep slots so
+            # TT-03: Never truncate directly modified `tests/it/**/*.rs` files at [:4]; keep all of them,
+            # and always preserve at least `MAX_AFFECTED_IT_FILTERS - 4` (= 9) reverse-dep slots so
             # editing >4 IT files never starves reverse-dependency discovery.
             selected_server_it = [s for s in direct_server_it if s in head_it]
             direct_present_count = len(selected_server_it)
