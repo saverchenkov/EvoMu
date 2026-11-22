@@ -445,7 +445,16 @@ async fn fast_checkout_activity_mgr_and_bounties_taxes_kill_mutations() {
         .free_fast_checkout_plex = false;
     let paid_uid = ctx.db.provision_player_account("fc_paid_user", "secret123");
     set_user_fast_checkout_enabled(&ctx, paid_uid, true);
-    let paid_sess = auth_session(paid_uid, char1, corp1, 30_000_142);
+    let paid_char = 90_000_099_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut c = snap.characters[&char1].clone();
+        c.character_id = paid_char;
+        c.user_id = paid_uid;
+        c.corporation_id = corp2;
+        snap.characters.insert(paid_char, c);
+    });
+    let cross_user_sess = auth_session(paid_uid, char1, corp1, 30_000_142);
+    let paid_sess = auth_session(paid_uid, paid_char, corp2, 30_000_142);
     assert_eq!(handle_fc_act(&ctx, &paid_sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(fc_offer_id), PyRep::Integer(1), PyRep::String("secret123".into())], &kw).unwrap().unwrap_err().code, "OfferNotFound");
 
     // Seed an explicit real-money catalog PLEX offer for paid-mode checkout validation
@@ -480,10 +489,16 @@ async fn fast_checkout_activity_mgr_and_bounties_taxes_kill_mutations() {
         let tok = PaymentTokenRecord { id: 1, user_id: paid_uid, token_str: "tok".into(), is_quick_pay: true, consumed: false };
         snap.quasar_commerce.payment_tokens = vec![tok];
     });
+    // Cross-user active_char_id on FastCheckout must be rejected without touching either user's vault.
+    assert_eq!(handle_fc_act(&ctx, &cross_user_sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(fc_offer_id), PyRep::Integer(1), PyRep::String("secret123".into())], &kw).unwrap().unwrap_err().code, "InvalidOffer");
+    assert_eq!(ctx.db.with_snapshot(|s| s.unified_plex_balance_for_user(1)), fc_plex_qty * 2);
+    assert_eq!(ctx.db.with_snapshot(|s| s.unified_plex_balance_for_user(paid_uid)), 0);
+
     let fc_paid = handle_fc_act(&ctx, &paid_sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(fc_offer_id), PyRep::Integer(1), PyRep::String("secret123".into())], &kw).unwrap().unwrap();
     assert_eq!(fc_paid.dict_get("status"), Some(&PyRep::String("CONFIRMED".into())));
     assert_eq!(fc_paid.dict_get("plexAmount"), Some(&PyRep::Integer(fc_plex_qty)));
-    assert_eq!(fc_paid.dict_get("newPlexBalance"), Some(&PyRep::Integer(fc_plex_qty * 3)));
+    assert_eq!(fc_paid.dict_get("newPlexBalance"), Some(&PyRep::Integer(fc_plex_qty)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.unified_plex_balance_for_user(1)), fc_plex_qty * 2);
     handle_fc_act(&ctx, &sess1, "FastCheckoutService", "ClearFastCheckoutCacheForUser", &[], &kw).unwrap().unwrap();
 
     // ActivityMgr validation + seen badge tracking

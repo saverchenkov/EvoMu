@@ -1583,6 +1583,9 @@ impl PublicGatewayRouter {
         }
 
         // 6. Build authoritative server context and dispatch handler
+        let forwarded_idem_key = idem_key
+            .as_deref()
+            .and_then(crate::services::quasar_payment_store_types::encode_idempotency_bytes_hex);
         let auth_ctx = AuthoritativeContext::for_session_at(
             Some(session_uid),
             session_cid,
@@ -1592,7 +1595,8 @@ impl PublicGatewayRouter {
             self.gateway_instance_uuid.clone(),
             now_unix,
         )
-        .with_service_roles(session.role);
+        .with_service_roles(session.role)
+        .with_idempotency_key(forwarded_idem_key);
 
         let handler_opt = self
             .handlers

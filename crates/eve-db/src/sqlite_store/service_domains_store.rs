@@ -401,7 +401,7 @@ impl_service_domain_persist!(
 
 impl_service_domain_persist!(
     QuasarCommerceStore,
-    maps: [nes_store_offer_tags, targeted_offers],
+    maps: [nes_store_offer_tags, targeted_offers, store_purchase_idempotency],
     sets: [lp_asset_ops_completed],
     scalars: [
         payment_tokens,

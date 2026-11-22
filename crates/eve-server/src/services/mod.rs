@@ -198,6 +198,7 @@ pub mod space_nav_movement_guard;
 pub mod space_navigation_advanced;
 pub mod station_structure;
 pub mod station_structure_handlers;
+pub(crate) mod store_purchase_engine;
 pub mod structure_acl_defense_rules;
 pub mod structure_anchoring_rules;
 pub mod structure_control_ops;

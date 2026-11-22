@@ -1958,6 +1958,25 @@ fn all_17_service_domains_survive_tx_commit_restart_and_scalar_reset() {
             ..Default::default()
         }]),
         lp_asset_ops_completed: HashSet::from(["op-1".into()]),
+        store_purchase_idempotency: BTreeMap::from([(
+            "1:plex_vault:idem-1".into(),
+            CommittedStorePurchaseRecord {
+                buyer_user_id: 1,
+                channel: "plex_vault".into(),
+                idempotency_key: "idem-1".into(),
+                offer_id: 3,
+                quantity: 1,
+                gift_char_id: None,
+                tx_id: 1001,
+                plex_spent: 110,
+                plex_credited: 0,
+                is_free_mode_settlement: false,
+                delivered_item_id: 2001,
+                delivered_items_count: 1,
+                committed_unix: 1_700_000_000,
+                commit_seq: 1001,
+            },
+        )]),
     };
 
     let expected_fleet_social = FleetAndSocialOpsStore {

@@ -371,210 +371,133 @@ pub fn handle(
                     format!("Unsupported store currency: {currency}"),
                 )));
             }
-            let qty = match args
-                .get(2)
-                .and_then(|a| a.as_i64())
-                .or_else(|| kwargs.get("quantity").and_then(|v| v.as_i64()))
-            {
-                Some(q) if q <= 0 => {
-                    return Some(Err(rpc_err(
-                        "InvalidQuantity",
-                        "Purchase quantity must be a positive integer",
-                    )))
-                }
-                Some(q) => q,
-                None => 1,
+            let qty = match args.get(2).or_else(|| kwargs.get("quantity")) {
+                None | Some(PyRep::None) => 1u32,
+                Some(val) => match val
+                    .as_i64()
+                    .and_then(|q| u32::try_from(q).ok())
+                    .filter(|&q| q > 0)
+                {
+                    Some(q) => q,
+                    None => {
+                        return Some(Err(rpc_err(
+                            "InvalidQuantity",
+                            "Purchase quantity must be a positive integer",
+                        )))
+                    }
+                },
             };
 
-            let catalog = ctx
-                .db
-                .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
-            let offer_tags = ctx
-                .db
-                .with_snapshot(crate::services::quasar_payment_store::read_store_offer_tags);
-            let offer = match catalog.offers.iter().find(|o| o.id as i64 == offer_id) {
-                Some(o) => o.clone(),
-                None => {
-                    return Some(Err(rpc_err(
-                        "OfferNotFound",
-                        format!("NES offer {offer_id} not found"),
-                    )))
+            let map_store_err = |err: crate::services::quasar_payment_store_types::StorePurchaseError| {
+                use crate::services::quasar_payment_store_types::StorePurchaseError as E;
+                match err {
+                    E::OfferNotFound(m) => rpc_err("OfferNotFound", m),
+                    E::InvalidOffer(m)
+                    | E::UnfulfillableVirtualOffer(m)
+                    | E::PaymentUnavailable(m)
+                    | E::PaymentTokenRequired(m)
+                    | E::PaymentTokenNotFound(m)
+                    | E::PaymentTokenForbidden(m)
+                    | E::PaymentTokenInvalid(m) => rpc_err("InvalidOffer", m),
+                    E::InvalidQuantity(m) | E::Overflow(m) => rpc_err("InvalidQuantity", m),
+                    E::TargetedNotEligible(m) => rpc_err("TargetedOfferNotEligible", m),
+                    E::GiftRecipientNotFound(m)
+                    | E::NoDeliveryCharacter(m)
+                    | E::TargetCharacterNotFound(m)
+                    | E::TargetCharacterForbidden(m) => rpc_err("CharacterNotFound", m),
+                    E::MissingDeliveryStation(m) => rpc_err("InvalidLocation", m),
+                    E::InsufficientPlex { required, available } => rpc_err(
+                        "InsufficientPlexBalance",
+                        format!("Need {required} PLEX in vault, have {available}"),
+                    ),
+                    E::IdempotencyConflict(m) => rpc_err("IdempotencyConflict", m),
+                    E::PersistenceFailure(m) => rpc_err("PersistenceFailure", m),
                 }
             };
+
             let now_unix = ctx.now_unix();
-            let ineligible_targeted = offer.targeted
-                && ctx.db.with_snapshot(|snap| {
-                    !crate::services::quasar_payment_store_types::is_user_eligible_for_targeted_offer(
-                        snap,
-                        &offer,
-                        user_id as u64,
-                        now_unix,
-                    )
-                });
-            if ineligible_targeted {
-                return Some(Err(rpc_err(
-                    "TargetedOfferNotEligible",
-                    format!("Character {char_id} is not eligible for targeted offer {offer_id}"),
-                )));
-            }
-            if let Some(sp_grant) = ctx.db.with_snapshot(|snap| {
-                crate::services::quasar_payment_store_types::resolve_omega_weekly_free_sp_grant(
+            match ctx.db.with_snapshot(|snap| {
+                crate::services::quasar_payment_store_types::resolve_eligible_omega_weekly_free_sp_grant(
                     snap,
+                    user_id as u64,
                     offer_id,
+                    now_unix,
                 )
             }) {
-                return Some(super::character_skill_ops::handle_omega_weekly_free_sp_offer(
-                    ctx,
-                    session,
-                    offer_id,
-                    sp_grant,
-                    method == "buy_offer",
-                ));
-            }
-            if offer.price_plex <= 0 && !ctx.feature_flags_snapshot().free_fast_checkout_plex {
-                return Some(Err(rpc_err(
-                    "InvalidOffer",
-                    format!("Offer {offer_id} has invalid non-positive PLEX price"),
-                )));
-            }
-            let total_plex = match offer.price_plex.checked_mul(qty) {
-                Some(v) if v >= 0 => v,
-                _ => {
-                    return Some(Err(rpc_err(
-                        "InvalidQuantity",
-                        "PLEX price overflows",
-                    )));
+                Err(e) => return Some(Err(map_store_err(e))),
+                Ok(Some(sp_grant)) => {
+                    return Some(super::character_skill_ops::handle_omega_weekly_free_sp_offer(
+                        ctx,
+                        session,
+                        offer_id,
+                        sp_grant,
+                        method == "buy_offer",
+                    ));
                 }
+                Ok(None) => {}
+            }
+
+            let idem_key =
+                crate::services::quasar_payment_store_types::extract_rpc_idempotency_key(kwargs);
+            let input = crate::services::quasar_payment_store_types::StorePurchaseInput {
+                channel: crate::services::quasar_payment_store_types::StorePurchaseChannel::StoreManager,
+                buyer_user_id: user_id as u64,
+                active_char_id: Some(char_id),
+                gift_char_id: None,
+                session_station_id: session.station_id.or(session.structure_id),
+                offer_id: offer_id as u64,
+                quantity: qty,
+                now_unix,
+                payment: crate::services::quasar_payment_store_types::StorePurchasePaymentSpec::PlexVault {
+                    allow_free_when_zero: ctx.feature_flags_snapshot().free_fast_checkout_plex,
+                },
+                fast_checkout_mode: false,
+                tx_description_mode:
+                    crate::services::quasar_payment_store_types::StoreTxDescriptionMode::NesOfferNameLower,
+                idempotency_key: idem_key.as_deref(),
             };
+
             if method == "can_purchase_offer" {
                 let can_buy = ctx
                     .db
-                    .with_snapshot(|snap| snap.plex_vault_balance(char_id) >= total_plex);
-                return Some(Ok(PyRep::Bool(can_buy)));
+                    .with_snapshot(|snap| {
+                        crate::services::quasar_payment_store_types::can_purchase_store_offer_in_snapshot(
+                            snap, &input,
+                        )
+                    })
+                    .map(PyRep::Bool)
+                    .map_err(map_store_err);
+                return Some(can_buy);
             }
-            let offer_tags_slice = offer_tags.get(&offer.id).map(Vec::as_slice).unwrap_or(&[]);
-            let omega_duration_secs =
-                crate::services::quasar_payment_store_types::compute_omega_license_duration_secs(
-                    &offer,
-                    &catalog,
-                    offer_tags_slice,
-                    u32::try_from(qty).unwrap_or(1),
-                );
-            let has_physical_items = offer.product_ids.iter().any(|pid| {
-                catalog
-                    .products
-                    .iter()
-                    .any(|p| p.id == *pid && p.type_id > 0 && p.quantity > 0)
-            });
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let ch = snap.characters.get(&char_id).ok_or_else(|| rpc_err("CharacterNotFound", "character not found"))?;
-                let delivery_station = session
-                    .station_id
-                    .or(session.structure_id)
-                    .filter(|&s| s > 0)
-                    .or_else(|| (ch.home_station_id > 0).then_some(ch.home_station_id));
-                if has_physical_items && delivery_station.is_none() {
-                    return Err(rpc_err(
-                        "InvalidLocation",
-                        format!("Character {char_id} has no valid delivery station"),
-                    ));
-                }
-                let station_id = delivery_station.unwrap_or(0);
-                let cur_plex = snap.plex_vault_balance(char_id);
-                if cur_plex < total_plex {
-                    return Err(rpc_err(
-                        "InsufficientPlexBalance",
-                        format!("Need {total_plex} PLEX in vault, have {cur_plex}"),
-                    ));
-                }
-                let rem_plex = snap
-                    .adjust_plex_vault(char_id, -total_plex)
-                    .ok_or_else(|| rpc_err("InsufficientPlexBalance", "Insufficient PLEX in vault"))?;
-                snap.next_entity_id += 1;
-                let tx_id = snap.next_entity_id as u64;
-                crate::services::quasar_payment_store::record_plex_transaction(
-                    snap,
-                    tx_id,
-                    user_id,
-                    -total_plex,
-                    rem_plex,
-                    &format!("NES purchase: {}", offer.name),
-                    now_unix,
-                );
 
-                let mut delivered_item_id = 0_i64;
-                let mut delivered_items: Vec<InventoryItemRecord> = Vec::new();
-                for pid in &offer.product_ids {
-                    if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
-                        if prod.type_id > 0 && prod.quantity > 0 {
-                            let total_qty = i32::try_from(
-                                (prod.quantity as i64)
-                                    .checked_mul(qty)
-                                    .ok_or_else(|| rpc_err("InvalidQuantity", "Quantity overflow"))?,
-                            )
-                            .map_err(|_| rpc_err("InvalidQuantity", "Quantity overflow"))?;
-                            snap.next_entity_id += 1;
-                            delivered_item_id = snap.next_entity_id;
-                            let rec = InventoryItemRecord {
-                                item_id: delivered_item_id,
-                                type_id: prod.type_id,
-                                owner_id: char_id,
-                                location_id: station_id,
-                                flag: InventoryFlag::Hangar,
-                                quantity: total_qty,
-                                singleton: false,
-                                version: 1,
-                                ..Default::default()
-                            };
-                            snap.items.insert(delivered_item_id, rec.clone());
-                            delivered_items.push(rec);
-                        }
-                    }
-                }
-                let omega_notice = if let Some(duration_secs) = omega_duration_secs {
-                    crate::services::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
-                        snap,
-                        user_id,
-                        duration_secs,
-                        now_unix,
+            let outcome = match ctx
+                .db
+                .try_with_mut_snapshot(|snap| {
+                    crate::services::quasar_payment_store_types::purchase_store_offer_in_snapshot(
+                        snap, &input,
                     )
-                    .1
-                } else {
-                    None
-                };
-                Ok((rem_plex, delivered_item_id, delivered_items, tx_id, omega_notice))
-            });
-            match res {
-                Ok((rem_plex, item_id, delivered_items, tx_id, omega_notice)) => {
-                    for rec in &delivered_items {
-                        ctx.notify_item_mutation(char_id, None, Some(rec));
-                    }
-                    crate::services::quasar_payment_store::emit_balance_changed_notice(
-                        &ctx.quasar_gateway.pending_notices,
-                        user_id,
-                        tx_id,
-                        -total_plex,
-                        rem_plex,
-                        &format!("NES purchase: {}", offer.name),
-                        now_unix,
-                    );
-                    if let Some(notice) = omega_notice {
-                        ctx.quasar_gateway
-                            .pending_notices
-                            .write()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .push((crate::quasar_gateway::NoticeScope::User(user_id as i32), notice));
-                    }
-                    Some(Ok(PyRep::keyval([
-                        ("success", PyRep::Bool(true)),
-                        ("offerID", PyRep::Integer(offer_id)),
-                        ("plexSpent", PyRep::Integer(total_plex)),
-                        ("plexRemaining", PyRep::Integer(rem_plex)),
-                        ("deliveredItemID", PyRep::Integer(item_id)),
-                    ])))
-                }
-                Err(e) => Some(Err(e)),
-            }
+                })
+                .map_err(map_store_err)
+            {
+                Ok(o) => o,
+                Err(e) => return Some(Err(e)),
+            };
+            crate::services::quasar_payment_store_types::emit_store_purchase_notices(
+                &ctx.db,
+                &ctx.sde,
+                &ctx.quasar_gateway.macho_notify_sink,
+                &ctx.quasar_gateway.pending_notices,
+                &outcome,
+                true,
+                now_unix,
+            );
+            Some(Ok(PyRep::keyval([
+                ("success", PyRep::Bool(true)),
+                ("offerID", PyRep::Integer(offer_id)),
+                ("plexSpent", PyRep::Integer(outcome.plex_spent)),
+                ("plexRemaining", PyRep::Integer(outcome.new_plex_balance)),
+                ("deliveredItemID", PyRep::Integer(outcome.delivered_item_id)),
+            ])))
         }
 
         // --- Station Direct Trade (`trademgr`, `feat:wallet.trade-window`) ---

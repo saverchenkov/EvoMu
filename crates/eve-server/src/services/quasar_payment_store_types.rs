@@ -955,6 +955,7 @@ pub(crate) fn deliver_store_hangar_items_in_snapshot(
     cid: i64,
     target_station: i64,
     items_to_deliver: &[(u32, i32)],
+    merge_existing: bool,
 ) -> Vec<(
     i64,
     Option<eve_db::InventoryItemRecord>,
@@ -962,34 +963,36 @@ pub(crate) fn deliver_store_hangar_items_in_snapshot(
 )> {
     let mut mutations = Vec::with_capacity(items_to_deliver.len());
     for &(type_id, deliver_qty) in items_to_deliver {
-        if let Some(existing) = snap.items.values_mut().find(|it| {
-            it.owner_id == cid
-                && it.location_id == target_station
-                && it.flag == eve_db::InventoryFlag::Hangar
-                && it.type_id == type_id
-                && !it.singleton
-        }) {
-            let pre = existing.clone();
-            existing.quantity = existing.quantity.saturating_add(deliver_qty);
-            existing.version += 1;
-            mutations.push((cid, Some(pre), Some(existing.clone())));
-        } else {
-            snap.next_entity_id += 1;
-            let item_id = snap.next_entity_id;
-            let rec = eve_db::InventoryItemRecord {
-                item_id,
-                type_id,
-                owner_id: cid,
-                location_id: target_station,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: deliver_qty,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            };
-            snap.items.insert(item_id, rec.clone());
-            mutations.push((cid, None, Some(rec)));
+        if merge_existing {
+            if let Some(existing) = snap.items.values_mut().find(|it| {
+                it.owner_id == cid
+                    && it.location_id == target_station
+                    && it.flag == eve_db::InventoryFlag::Hangar
+                    && it.type_id == type_id
+                    && !it.singleton
+            }) {
+                let pre = existing.clone();
+                existing.quantity = existing.quantity.saturating_add(deliver_qty);
+                existing.version += 1;
+                mutations.push((cid, Some(pre), Some(existing.clone())));
+                continue;
+            }
         }
+        snap.next_entity_id += 1;
+        let item_id = snap.next_entity_id;
+        let rec = eve_db::InventoryItemRecord {
+            item_id,
+            type_id,
+            owner_id: cid,
+            location_id: target_station,
+            flag: eve_db::InventoryFlag::Hangar,
+            quantity: deliver_qty,
+            singleton: false,
+            version: 1,
+            ..Default::default()
+        };
+        snap.items.insert(item_id, rec.clone());
+        mutations.push((cid, None, Some(rec)));
     }
     mutations
 }
@@ -1034,7 +1037,8 @@ pub(crate) fn emit_store_item_mutations(
         if let Some(new_item) = post {
             let changes = match pre {
                 None => vec![(3, PyRep::Integer(0))],
-                Some(old) => vec![(6, PyRep::Integer(old.quantity as i64))],
+                // Stack size deltas use `ixStackSize` (`9`), never `ixGroupID` (`6`).
+                Some(old) => vec![(9, PyRep::Integer(old.quantity as i64))],
             };
             let row = crate::router::delta_projection::build_inv_item_dbrow(new_item, sde, "");
             let change_dict = PyRep::Dict(
@@ -1053,6 +1057,46 @@ pub(crate) fn emit_store_item_mutations(
     }
 }
 
+pub(crate) use super::store_purchase_engine::*;
+
+pub(crate) fn emit_store_purchase_notices(
+    db: &WorldRepository,
+    sde: &SdeRegistry,
+    macho_sink_lock: &Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
+    pending_notices: &Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
+    outcome: &StorePurchaseOutcome,
+    emit_balance_notice: bool,
+    now_unix: u64,
+) {
+    if outcome.idempotent_replay {
+        return;
+    }
+    emit_store_item_mutations(db, sde, macho_sink_lock, &outcome.delivered_mutations);
+    if emit_balance_notice {
+        emit_balance_changed_notice(
+            pending_notices,
+            outcome.buyer_user_id,
+            outcome.tx_id,
+            outcome.net_plex_delta,
+            outcome.new_plex_balance,
+            &outcome.tx_description,
+            now_unix,
+        );
+    }
+    if let Some(ref notice) = outcome.omega_notice {
+        pending_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((
+                NoticeScope::User(outcome.omega_target_user_id as i32),
+                notice.clone(),
+            ));
+    }
+    if let Some(sched_id) = outcome.schedule_id {
+        publish_schedule_set_notice(pending_notices, outcome.omega_target_user_id, sched_id, 1);
+    }
+}
+
 pub fn register_plex_vault_extra_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
@@ -1066,188 +1110,106 @@ pub fn register_plex_vault_extra_handlers(
     let allow_free_plex = free_fast_checkout_plex;
     router.register_handler(
         "eve_public.plex.vault.api.PurchaseRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, any, dyn_msg| {
             let uid = ctx
                 .effective_user_id()
+                .filter(|&u| u > 0)
                 .ok_or_else(|| (STATUS_FORBIDDEN, "User authentication required".to_string()))?
                 as u64;
+            ensure_quasar_wire_u32_quantity(&any.value, false)
+                .map_err(|msg| (STATUS_BAD_REQUEST, msg))?;
             let offer_id = dyn_msg
                 .get(1)
                 .and_then(|v| match v {
-                    DynamicValue::String(s) => s.parse::<u32>().ok(),
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) if *i > 0 => Some(*i as u32),
-                    DynamicValue::Uint64(u) => Some(*u as u32),
-                    DynamicValue::Int64(i) if *i > 0 => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::String(s) => s.parse::<u32>().ok(),
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) if *i > 0 => Some(*i as u32),
-                        DynamicValue::Uint64(u) => Some(*u as u32),
-                        DynamicValue::Int64(i) if *i > 0 => Some(*i as u32),
-                        _ => None,
-                    }),
-                    _ => None,
+                    DynamicValue::Message(m) => m.get(1).and_then(parse_quasar_positive_u64_id),
+                    other => parse_quasar_positive_u64_id(other),
                 })
-                .filter(|&id| id > 0)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid store offer ID".to_string()))?;
+                .ok_or_else(|| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        "Missing or invalid store offer ID".to_string(),
+                    )
+                })?;
 
             let qty = match dyn_msg.get(2) {
                 None => 1u32,
-                Some(DynamicValue::Uint32(q)) if *q > 0 => *q,
-                Some(DynamicValue::Uint64(q)) if *q > 0 => *q as u32,
-                Some(DynamicValue::Int32(q)) if *q > 0 => *q as u32,
-                Some(DynamicValue::Int64(q)) if *q > 0 => *q as u32,
-                _ => return Err((STATUS_BAD_REQUEST, "Purchase quantity must be positive".to_string())),
+                Some(v) => parse_quasar_positive_u32_checked(v).ok_or_else(|| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        "Purchase quantity must be a positive u32 integer".to_string(),
+                    )
+                })?,
             };
 
             let gift_char_id = match dyn_msg.get(3) {
                 Some(DynamicValue::Message(gm)) => match gm.get(3) {
                     Some(DynamicValue::Message(cm)) => match cm.get(1) {
-                        Some(DynamicValue::Uint64(c)) if *c > 0 => Some(*c as i64),
-                        Some(DynamicValue::Int64(c)) if *c > 0 => Some(*c),
-                        Some(DynamicValue::Uint32(c)) if *c > 0 => Some(*c as i64),
-                        Some(DynamicValue::Int32(c)) if *c > 0 => Some(*c as i64),
-                        _ => None,
+                        None => None,
+                        Some(val) => {
+                            let parsed = match val {
+                                DynamicValue::Uint64(c) => i64::try_from(*c).ok(),
+                                DynamicValue::Int64(c) => Some(*c),
+                                DynamicValue::Uint32(c) => Some(i64::from(*c)),
+                                DynamicValue::Int32(c) => Some(i64::from(*c)),
+                                _ => None,
+                            };
+                            match parsed {
+                                Some(0) => None,
+                                Some(c) if c > 0 => Some(c),
+                                _ => {
+                                    return Err((
+                                        STATUS_BAD_REQUEST,
+                                        "Invalid gift recipient character ID".to_string(),
+                                    ))
+                                }
+                            }
+                        }
                     },
                     _ => None,
                 },
                 _ => None,
             };
-            let active_cid = gift_char_id.or_else(|| ctx.effective_character_id().map(|c| c as i64));
             let now_unix = ctx.now_unix();
+            let idem_key = ctx
+                .idempotency_key
+                .clone()
+                .filter(|k| !k.is_empty())
+                .or_else(|| extract_quasar_store_idempotency_key(dyn_msg));
+            let input = StorePurchaseInput {
+                channel: StorePurchaseChannel::PlexVaultQuasar,
+                buyer_user_id: uid,
+                active_char_id: ctx.effective_character_id().map(|c| c as i64),
+                gift_char_id,
+                session_station_id: None,
+                offer_id,
+                quantity: qty,
+                now_unix,
+                payment: StorePurchasePaymentSpec::PlexVault {
+                    allow_free_when_zero: allow_free_plex
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                },
+                fast_checkout_mode: false,
+                tx_description_mode: StoreTxDescriptionMode::NesOfferNameUpper,
+                idempotency_key: idem_key.as_deref(),
+            };
 
-            let (tx_id, total_plex, new_bal, desc, maybe_omega, delivered_mutations) = db_purch
-                .try_with_mut_snapshot(|snap| {
-                    if let Some(gift_cid) = gift_char_id {
-                        if !snap.characters.contains_key(&gift_cid) {
-                            return Err(format!("{STATUS_NOT_FOUND}:Gift recipient character {gift_cid} not found"));
-                        }
-                    }
-                    let catalog = read_store_catalog(snap);
-                    let offer_tags = read_store_offer_tags(snap);
-                    let offer = catalog
-                        .offers
-                        .iter()
-                        .find(|o| o.id == offer_id)
-                        .cloned()
-                        .ok_or_else(|| format!("{STATUS_NOT_FOUND}:Offer {offer_id} not found"))?;
-                    if offer.targeted && !is_user_eligible_for_targeted_offer(snap, &offer, uid, now_unix) {
-                        return Err(format!("{STATUS_FORBIDDEN}:User {uid} is not eligible for targeted offer {offer_id}"));
-                    }
-                    if offer.price_plex < 0 {
-                        return Err(format!("{STATUS_BAD_REQUEST}:Offer {offer_id} has invalid negative PLEX price"));
-                    }
-                    if offer.price_plex == 0 && !allow_free_plex.load(std::sync::atomic::Ordering::Relaxed) {
-                        return Err(format!("{STATUS_BAD_REQUEST}:Offer {offer_id} has invalid zero PLEX price"));
-                    }
-                    let total_cost = offer.price_plex.saturating_mul(qty as i64);
+            let outcome = db_purch
+                .try_with_mut_snapshot(|snap| purchase_store_offer_in_snapshot(snap, &input))
+                .map_err(store_purchase_error_to_quasar)?;
 
-                    let mut items_to_deliver = Vec::new();
-                    for pid in &offer.product_ids {
-                        if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
-                            if prod.type_id > 0 && prod.quantity > 0 {
-                                let deliver_qty = prod
-                                    .quantity
-                                    .checked_mul(qty)
-                                    .and_then(|q| i32::try_from(q).ok())
-                                    .ok_or_else(|| {
-                                        format!("{STATUS_BAD_REQUEST}:Delivery quantity overflow")
-                                    })?;
-                                items_to_deliver.push((prod.type_id, deliver_qty));
-                            }
-                        }
-                    }
-                    // Validate recipient character and station BEFORE deducting PLEX when delivering physical items
-                    let recipient_cid = active_cid.or_else(|| {
-                        let mut chars: Vec<_> = snap
-                            .characters
-                            .values()
-                            .filter(|c| c.user_id == uid)
-                            .map(|c| c.character_id)
-                            .collect();
-                        chars.sort_unstable();
-                        chars.first().copied()
-                    });
-                    let delivery_target = if !items_to_deliver.is_empty() {
-                        let Some(cid) = recipient_cid else {
-                            return Err(format!("{STATUS_BAD_REQUEST}:No valid recipient character for store delivery"));
-                        };
-                        let Some(ch) = snap.characters.get(&cid).cloned() else {
-                            return Err(format!("{STATUS_NOT_FOUND}:Recipient character {cid} not found"));
-                        };
-                        let Some(target_station) = ch
-                            .station_id
-                            .filter(|&st| st > 0)
-                            .or_else(|| ch.structure_id.filter(|&st| st > 0))
-                            .or_else(|| (ch.home_station_id > 0).then_some(ch.home_station_id))
-                        else {
-                            return Err(format!("{STATUS_BAD_REQUEST}:Target character {cid} has no valid delivery station"));
-                        };
-                        Some((cid, target_station, items_to_deliver))
-                    } else if let Some(cid) = active_cid {
-                        if !snap.characters.contains_key(&cid) {
-                            return Err(format!("{STATUS_NOT_FOUND}:Recipient character {cid} not found"));
-                        }
-                        None
-                    } else {
-                        None
-                    };
-
-                    let Some(bal) = snap.adjust_unified_plex_for_user(uid, -total_cost) else {
-                        return Err(format!("{STATUS_BAD_REQUEST}:Insufficient PLEX balance"));
-                    };
-                    snap.next_entity_id += 1;
-                    let tx_id = snap.next_entity_id as u64;
-                    let desc = format!("NES Purchase: {}", offer.name);
-                    record_plex_transaction(snap, tx_id, uid, -total_cost, bal, &desc, now_unix);
-
-                    let delivered_mutations =
-                        if let Some((cid, target_station, items_to_deliver)) = delivery_target {
-                            deliver_store_hangar_items_in_snapshot(
-                                snap,
-                                cid,
-                                target_station,
-                                &items_to_deliver,
-                            )
-                        } else {
-                            Vec::new()
-                        };
-                    let tags = offer_tags.get(&offer.id).map(Vec::as_slice).unwrap_or(&[]);
-                    let omega_notice = if let Some(duration_secs) =
-                        compute_omega_license_duration_secs(&offer, &catalog, tags, qty)
-                    {
-                        let omega_target_uid = recipient_cid
-                            .and_then(|cid| snap.characters.get(&cid).map(|c| c.user_id))
-                            .unwrap_or(uid);
-                        let (_, n) = crate::services::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
-                            snap,
-                            omega_target_uid,
-                            duration_secs,
-                            now_unix,
-                        );
-                        n.map(|notice| (omega_target_uid, notice))
-                    } else {
-                        None
-                    };
-                    Ok((tx_id, total_cost, bal, desc, omega_notice, delivered_mutations))
-                })
-                .map_err(|e| {
-                    if let Some((c, m)) = e.split_once(':') {
-                        if let Ok(code) = c.parse::<u32>() {
-                            return (code, m.to_string());
-                        }
-                    }
-                    (STATUS_BAD_REQUEST, e)
-                })?;
-
-            emit_store_item_mutations(&db_purch, &sde_purch, &macho_sink_purch, &delivered_mutations);
-            emit_balance_changed_notice(&pending_purch, uid, tx_id, -total_plex, new_bal, &desc, now_unix);
-            if let Some((omega_target_uid, n)) = maybe_omega {
-                pending_purch.write().unwrap_or_else(|e| e.into_inner()).push((NoticeScope::User(omega_target_uid as i32), n));
-            }
+            emit_store_purchase_notices(
+                &db_purch,
+                &sde_purch,
+                &macho_sink_purch,
+                &pending_purch,
+                &outcome,
+                true,
+                now_unix,
+            );
             Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.PurchaseResponse"),
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.PurchaseResponse"
+                ),
                 value: Vec::new(),
             })
         }),
