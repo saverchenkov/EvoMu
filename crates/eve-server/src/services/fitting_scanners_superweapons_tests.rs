@@ -247,7 +247,7 @@ async fn data_relic_analyzer_cargo_scanner_and_ship_scanner_activation() {
             .unwrap()
             .is_ok()
     );
-    assert_eq!(active_hacking_target_for_char(char_id), Some(container_id));
+    assert_eq!(active_hacking_target_for_char(&ctx, char_id), Some(container_id));
     mark_hacking_container_unlocked(&ctx, char_id, container_id);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items.get(&container_id).unwrap().flag, InventoryFlag::None);

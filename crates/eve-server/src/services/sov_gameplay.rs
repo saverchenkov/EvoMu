@@ -1443,10 +1443,7 @@ pub fn try_handle_sov_hub_data_hack(
     let coherence = base_coherence + 10.0 * (hack_lvl as f64);
     let strength = base_strength + 2.0 * (hack_lvl as f64);
 
-    {
-        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+    ctx.scanners_superweapons.with_hacking_mut(|st| {
         st.active_hacking_target_by_char.insert(char_id, target_id);
         st.hacking_states.insert(
             target_id,
@@ -1459,7 +1456,7 @@ pub fn try_handle_sov_hub_data_hack(
                 unlocked: false,
             },
         );
-    }
+    });
 
     let start_event_data = PyRep::Dict(vec![
         (

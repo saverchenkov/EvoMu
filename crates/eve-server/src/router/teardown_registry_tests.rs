@@ -1109,3 +1109,71 @@ fn apply_db_false_skips_destination_validation_even_if_structure_destroyed() {
     assert!(!crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.safe_logoffs.contains_key(&char_id)));
     assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnSystemWideEffectStop"));
 }
+
+#[test]
+fn transition_and_disconnect_teardown_clears_hacking_session_only_for_departing_char() {
+    use crate::services::inventory_fitting::fitting_scanners_superweapons::{
+        active_hacking_target_for_char, HackingSessionState,
+    };
+
+    let ctx = test_ctx();
+    let (jita_sys, jita_st) = jita_station_and_sys(&ctx);
+    let (char_a, ship_a, cont_a) = (880_011_i64, 880_111_i64, 1_880_010_001_i64);
+    let (char_b, ship_b, cont_b) = (880_012_i64, 880_112_i64, 1_880_010_002_i64);
+    let mut sess_a = seed_pilot(&ctx, char_a, 880_011, ship_a, 587, jita_sys, None);
+    let sess_b = seed_pilot(&ctx, char_b, 880_012, ship_b, 587, jita_sys, None);
+
+    ctx.scanners_superweapons.with_hacking_mut(|st| {
+        st.active_hacking_target_by_char.insert(char_a, cont_a);
+        st.active_hacking_target_by_char.insert(char_b, cont_b);
+        for (cid, mod_id) in [(cont_a, 91_001_i64), (cont_b, 91_002_i64)] {
+            st.hacking_states.insert(
+                cid,
+                HackingSessionState {
+                    container_id: cid,
+                    analyzer_module_id: mod_id,
+                    virus_coherence: 50.0,
+                    virus_strength: 20.0,
+                    core_hp_remaining: 40.0,
+                    unlocked: false,
+                },
+            );
+        }
+    });
+
+    // 1. Pre-transition teardown on Dock clears char_a's target + unreferenced cont_a, leaving char_b + cont_b intact.
+    ctx.execute_session_transition_sync(
+        Some(&mut sess_a),
+        SessionTransitionSpec::for_kind(
+            char_a,
+            TransitionKind::Dock { dock_id: jita_st, is_structure: false },
+            "dock",
+        ),
+    )
+    .expect("dock transition for char_a");
+
+    assert_eq!(active_hacking_target_for_char(&ctx, char_a), None);
+    assert_eq!(active_hacking_target_for_char(&ctx, char_b), Some(cont_b));
+    ctx.scanners_superweapons.with_hacking(|st| {
+        assert!(!st.hacking_states.contains_key(&cont_a));
+        assert!(st.hacking_states.contains_key(&cont_b));
+    });
+
+    // 2. Shared target container: disconnect teardown for char_a keeps cont_b while char_b still targets it;
+    //    disconnecting char_b removes the final reference and clears cont_b too.
+    ctx.scanners_superweapons.with_hacking_mut(|st| {
+        st.active_hacking_target_by_char.insert(char_a, cont_b);
+    });
+    super::run_disconnect_teardown_sync(&ctx, char_a, Some(&sess_a));
+    assert_eq!(active_hacking_target_for_char(&ctx, char_a), None);
+    assert_eq!(active_hacking_target_for_char(&ctx, char_b), Some(cont_b));
+    ctx.scanners_superweapons.with_hacking(|st| {
+        assert!(st.hacking_states.contains_key(&cont_b));
+    });
+
+    super::run_disconnect_teardown_sync(&ctx, char_b, Some(&sess_b));
+    assert_eq!(active_hacking_target_for_char(&ctx, char_b), None);
+    ctx.scanners_superweapons.with_hacking(|st| {
+        assert!(!st.hacking_states.contains_key(&cont_b));
+    });
+}

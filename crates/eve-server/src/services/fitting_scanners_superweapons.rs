@@ -5,10 +5,10 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use std::sync::{OnceLock, RwLock};
+use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 
 #[derive(Debug, Clone)]
-pub(crate) struct ActiveDbuffEntry {
+pub struct ActiveDbuffEntry {
     pub dbuff_id: u32,
     pub value: f64,
     pub expires_at_unix: u64,
@@ -17,7 +17,7 @@ pub(crate) struct ActiveDbuffEntry {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(crate) struct HackingSessionState {
+pub struct HackingSessionState {
     pub container_id: i64,
     pub analyzer_module_id: i64,
     pub virus_coherence: f64,
@@ -26,42 +26,105 @@ pub(crate) struct HackingSessionState {
     pub unlocked: bool,
 }
 
-#[derive(Default)]
-pub(crate) struct ScannersSuperweaponsState {
-    /// Active dbuffs per `(ServerContext::instance_id, target ship_id)` (process-wide state, so
-    /// keyed by context instance to keep separate server contexts apart).
-    pub ship_dbuffs: HashMap<(u64, i64), Vec<ActiveDbuffEntry>>,
-    /// Active system-wide effect beacon `type_id` per `solar_system_id`
-    pub system_wide_effects: HashMap<u32, u32>,
-    /// All active overlapping system-wide effect beacon `type_id`s per `solar_system_id`
-    pub system_wide_effect_lists: HashMap<u32, Vec<u32>>,
-    /// Active hacking minigame state per target `container_id`
+/// Per-`ServerContext` runtime state for active hacking sessions (`#1583` Track 2).
+#[derive(Debug, Default)]
+pub struct HackingRuntimeState {
+    /// Active hacking minigame state per target `container_id`.
     pub hacking_states: HashMap<i64, HackingSessionState>,
-    /// Active hacking target `container_id` per `character_id`
+    /// Active hacking target `container_id` per `character_id`.
     pub active_hacking_target_by_char: HashMap<i64, i64>,
-    /// Contested sovereignty structure/node state per `target_id`
-    pub entosis_contested_nodes: HashMap<i64, i64>,
 }
 
-pub(crate) fn active_hacking_target_for_char(char_id: i64) -> Option<i64> {
-    scanners_superweapons_state()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .active_hacking_target_by_char
-        .get(&char_id)
-        .copied()
+/// Per-`ServerContext` runtime state for active ship debuffs (`ship_dbuffs`) and active
+/// hacking sessions (`#1583` Track 2).
+#[derive(Debug, Default)]
+pub struct ScannersSuperweaponsRuntime {
+    ship_dbuffs: RankedRwLock<HashMap<i64, Vec<ActiveDbuffEntry>>, RANK_LEAF>,
+    hacking: RankedRwLock<HackingRuntimeState, RANK_LEAF>,
+}
+
+impl ScannersSuperweaponsRuntime {
+    /// Creates an empty per-context scanner/superweapon runtime state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reads per-ship debuffs under a short `RANK_LEAF` guard. Never nest DB or actor locks inside `f`.
+    pub fn with_ship_dbuffs<R>(&self, f: impl FnOnce(&HashMap<i64, Vec<ActiveDbuffEntry>>) -> R) -> R {
+        let guard = self.ship_dbuffs.read().unwrap_or_else(|e| e.into_inner());
+        f(&guard)
+    }
+
+    /// Mutates per-ship debuffs under a short `RANK_LEAF` guard. Never nest DB or actor locks inside `f`.
+    pub fn with_ship_dbuffs_mut<R>(
+        &self,
+        f: impl FnOnce(&mut HashMap<i64, Vec<ActiveDbuffEntry>>) -> R,
+    ) -> R {
+        let mut guard = self.ship_dbuffs.write().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    }
+
+    /// Reads active hacking session maps under a short `RANK_LEAF` guard.
+    pub fn with_hacking<R>(&self, f: impl FnOnce(&HackingRuntimeState) -> R) -> R {
+        let guard = self.hacking.read().unwrap_or_else(|e| e.into_inner());
+        f(&guard)
+    }
+
+    /// Mutates active hacking session maps under a short `RANK_LEAF` guard.
+    pub fn with_hacking_mut<R>(&self, f: impl FnOnce(&mut HackingRuntimeState) -> R) -> R {
+        let mut guard = self.hacking.write().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    }
+
+    /// Clears `char_id`'s active hacking target and reclaims orphaned `hacking_states` on session
+    /// teardown or disconnect (`#1190`, `#1583` Track 2).
+    pub fn clear_hacking_session_for_char(&self, char_id: i64) {
+        let mut guard = self.hacking.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(target_id) = guard.active_hacking_target_by_char.remove(&char_id) {
+            let still_targeted = guard
+                .active_hacking_target_by_char
+                .values()
+                .any(|&tid| tid == target_id);
+            if !still_targeted {
+                guard.hacking_states.remove(&target_id);
+            }
+        }
+    }
+
+    fn retain_ship_dbuffs(
+        &self,
+        now_unix: u64,
+        mut keep_entry: impl FnMut(&ActiveDbuffEntry) -> bool,
+    ) -> Vec<i64> {
+        let mut guard = self.ship_dbuffs.write().unwrap_or_else(|e| e.into_inner());
+        let mut affected = Vec::new();
+        guard.retain(|&ship_id, entries| {
+            let before = entries.len();
+            entries.retain(|e| e.expires_at_unix > now_unix && keep_entry(e));
+            if entries.len() != before {
+                affected.push(ship_id);
+            }
+            !entries.is_empty()
+        });
+        affected.sort_unstable();
+        affected.dedup();
+        affected
+    }
+}
+
+/// Returns the active hacking target `container_id` for `char_id` in `ctx`, if any (`#1583` Track 2).
+pub fn active_hacking_target_for_char(ctx: &ServerContext, char_id: i64) -> Option<i64> {
+    ctx.scanners_superweapons
+        .with_hacking(|st| st.active_hacking_target_by_char.get(&char_id).copied())
 }
 
 pub fn mark_hacking_container_unlocked(ctx: &ServerContext, char_id: i64, target_id: i64) {
-    {
-        let mut st = scanners_superweapons_state()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+    ctx.scanners_superweapons.with_hacking_mut(|st| {
         if let Some(entry) = st.hacking_states.get_mut(&target_id) {
             entry.core_hp_remaining = 0.0;
             entry.unlocked = true;
         }
-    }
+    });
     let now_unix = ctx.now_unix_secs();
     let _ = crate::services::station_structure::structure_lifecycle::record_structure_hack_reveal(ctx, char_id, target_id);
     if let Err(err) = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
@@ -107,34 +170,28 @@ fn save_ship_clone_offers(snap: &mut eve_db::WorldStateSnapshot, offers: &HashMa
     snap.cluster_and_runtime.ship_clone_offers = offers.clone();
 }
 
-pub(crate) fn scanners_superweapons_state() -> &'static RwLock<ScannersSuperweaponsState> {
-    static STATE: OnceLock<RwLock<ScannersSuperweaponsState>> = OnceLock::new();
-    STATE.get_or_init(|| RwLock::new(ScannersSuperweaponsState::default()))
-}
-
 /// Collects active `ship_dbuffs` for `ship_id` at `now_unix` (pruning expired entries) as [`eve_dogma::GangBurstEffect`]s.
 pub(crate) fn active_ship_dbuff_gang_bursts(
     ctx: &ServerContext,
     ship_id: i64,
     now_unix: u64,
 ) -> Vec<eve_dogma::GangBurstEffect> {
-    let mut st = scanners_superweapons_state()
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    let Some(entries) = st.ship_dbuffs.get_mut(&(ctx.instance_id, ship_id)) else {
-        return Vec::new();
-    };
-    entries.retain(|e| e.expires_at_unix > now_unix);
-    entries
-        .iter()
-        .map(|e| eve_dogma::GangBurstEffect {
-            source_item_id: e.source_module_id,
-            source_type_id: None,
-            dbuff_id: Some(e.dbuff_id),
-            value: e.value,
-            modifiers: Vec::new(),
-        })
-        .collect()
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        let Some(entries) = dbuffs.get_mut(&ship_id) else {
+            return Vec::new();
+        };
+        entries.retain(|e| e.expires_at_unix > now_unix);
+        entries
+            .iter()
+            .map(|e| eve_dogma::GangBurstEffect {
+                source_item_id: e.source_module_id,
+                source_type_id: None,
+                dbuff_id: Some(e.dbuff_id),
+                value: e.value,
+                modifiers: Vec::new(),
+            })
+            .collect()
+    })
 }
 
 /// Computes aggregated active `dbuff` values for `ship_id` at `now_unix`, pruning expired entries.
@@ -144,11 +201,8 @@ pub(crate) fn get_aggregated_ship_dbuffs(
     now_unix: u64,
 ) -> HashMap<u32, (f64, u64)> {
     let mut by_id: HashMap<u32, (Vec<f64>, u64)> = HashMap::new();
-    {
-        let mut st = scanners_superweapons_state()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(entries) = st.ship_dbuffs.get_mut(&(ctx.instance_id, ship_id)) {
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        if let Some(entries) = dbuffs.get_mut(&ship_id) {
             entries.retain(|e| e.expires_at_unix > now_unix);
             for e in entries.iter() {
                 let slot = by_id.entry(e.dbuff_id).or_insert_with(|| (Vec::new(), 0));
@@ -156,7 +210,7 @@ pub(crate) fn get_aggregated_ship_dbuffs(
                 slot.1 = slot.1.max(e.expires_at_unix);
             }
         }
-    }
+    });
     // Include system-wide weather/storm (`group_id == 1975` / `920`) `warfareBuff*` dbuffs in the ship's solar system
     let sys_id_opt: Option<u32> = ctx.db.with_snapshot(|snap| {
         let ship = snap.items.get(&ship_id)?;
@@ -174,17 +228,12 @@ pub(crate) fn get_aggregated_ship_dbuffs(
             }
         }
     }
-    let sys_tids: Vec<u32> = ctx.db.with_snapshot(|snap| {
-        let Some(ship) = snap.items.get(&ship_id) else {
-            return Vec::new();
-        };
-        let Some(sys_id) = u32::try_from(ship.location_id)
+    let space_sys_and_tids: Option<(u32, Vec<u32>)> = ctx.db.with_snapshot(|snap| {
+        let ship = snap.items.get(&ship_id)?;
+        let sys_id = u32::try_from(ship.location_id)
             .ok()
-            .filter(|s| ctx.sde.solar_systems.contains_key(s))
-        else {
-            return Vec::new();
-        };
-        let mut tids: Vec<u32> = snap
+            .filter(|s| ctx.sde.solar_systems.contains_key(s))?;
+        let tids: Vec<u32> = snap
             .items
             .values()
             .filter(|i| {
@@ -197,23 +246,25 @@ pub(crate) fn get_aggregated_ship_dbuffs(
             })
             .map(|i| i.type_id)
             .collect();
-        let sw_guard = scanners_superweapons_state()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(&eff_tid) = sw_guard.system_wide_effects.get(&sys_id) {
-            if !tids.contains(&eff_tid) {
-                tids.push(eff_tid);
-            }
-        }
-        if let Some(eff_list) = sw_guard.system_wide_effect_lists.get(&sys_id) {
-            for &eff_tid in eff_list {
+        Some((sys_id, tids))
+    });
+    let sys_tids: Vec<u32> = match space_sys_and_tids {
+        Some((sys_id, mut tids)) => {
+            let (eff_opt, eff_list) = ctx.systems.get_system_wide_effects(sys_id);
+            if let Some(eff_tid) = eff_opt {
                 if !tids.contains(&eff_tid) {
                     tids.push(eff_tid);
                 }
             }
+            for eff_tid in eff_list {
+                if !tids.contains(&eff_tid) {
+                    tids.push(eff_tid);
+                }
+            }
+            tids
         }
-        tids
-    });
+        None => Vec::new(),
+    };
     for tid in sys_tids {
         if let Some(t) = ctx.sde.types.get(&tid) {
             for (id_attr, val_attr) in [(2468u16, 2469u16), (2470, 2471), (2472, 2473), (2536, 2537)] {
@@ -242,30 +293,13 @@ pub(crate) fn get_aggregated_ship_dbuffs(
 }
 
 /// Removes all `ship_dbuffs` entries originating from `source_module_id` (plus expired entries)
-/// for `ctx.instance_id`, returning the sorted affected ship IDs.
+/// in `ctx`, returning the sorted affected ship IDs.
 pub(crate) fn clear_ship_dbuffs_by_source_module(
     ctx: &ServerContext,
     source_module_id: i64,
 ) -> Vec<i64> {
-    let now_unix = ctx.now_unix_secs();
-    let mut st = scanners_superweapons_state()
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    let mut affected = Vec::new();
-    st.ship_dbuffs.retain(|&(inst_id, ship_id), entries| {
-        if inst_id != ctx.instance_id {
-            return true;
-        }
-        let before = entries.len();
-        entries.retain(|e| e.source_module_id != source_module_id && e.expires_at_unix > now_unix);
-        if entries.len() != before {
-            affected.push(ship_id);
-        }
-        !entries.is_empty()
-    });
-    affected.sort_unstable();
-    affected.dedup();
-    affected
+    ctx.scanners_superweapons
+        .retain_ship_dbuffs(ctx.now_unix_secs(), |e| e.source_module_id != source_module_id)
 }
 
 /// Collects the effective `(dbuffCollectionID, value, expiryFiletime)` list for `DestinyEvent::OnDbuffUpdated`,
@@ -360,29 +394,10 @@ pub(crate) async fn sync_ship_dbuffs_and_destiny(
     }
 }
 
-/// Purges expired command-burst `ship_dbuffs` for `ctx.instance_id` at `now_unix` and pushes
-/// updated fit projections and `DestinyEvent::OnDbuffUpdated` to affected in-space actors (`#834`, `#922`, `#1122`).
+/// Purges expired command-burst `ship_dbuffs` for `ctx` at `now_unix` and pushes updated fit
+/// projections and `DestinyEvent::OnDbuffUpdated` to affected in-space actors (`#834`, `#922`, `#1122`).
 pub fn purge_expired_ship_dbuffs_all(ctx: &ServerContext, now_unix: u64) {
-    let expired_ships: Vec<i64> = {
-        let mut st = scanners_superweapons_state()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut affected = Vec::new();
-        st.ship_dbuffs.retain(|&(inst_id, ship_id), entries| {
-            if inst_id != ctx.instance_id {
-                return true;
-            }
-            let before = entries.len();
-            entries.retain(|e| e.expires_at_unix > now_unix);
-            if entries.len() != before {
-                affected.push(ship_id);
-            }
-            !entries.is_empty()
-        });
-        affected.sort_unstable();
-        affected.dedup();
-        affected
-    };
+    let expired_ships = ctx.scanners_superweapons.retain_ship_dbuffs(now_unix, |_| true);
     sync_ship_dbuffs_and_destiny_sync(ctx, &expired_ships, now_unix);
 }
 
@@ -499,28 +514,20 @@ pub(crate) fn apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(
         let eff_tids: Vec<TypeId> = if !snap_eff_items.is_empty() {
             snap_eff_items.into_iter().map(|(_, tid)| tid).collect()
         } else {
-            let sw = scanners_superweapons_state().read().unwrap_or_else(|e| e.into_inner());
-            sw.system_wide_effect_lists
-                .get(&sys_id)
-                .map(|v| {
-                    v.iter()
-                        .copied()
-                        .filter(|&t| !(47378..=47392).contains(&t))
-                        .collect::<Vec<_>>()
-                })
-                .filter(|v| !v.is_empty())
-                .or_else(|| {
-                    sw.system_wide_effects
-                        .get(&sys_id)
-                        .copied()
-                        .filter(|&t| !(47378..=47392).contains(&t))
-                        .map(|t| vec![t])
-                })
-                .or_else(|| {
-                    eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, sys_id, None)
-                        .map(|(_, _, _, eff_tid)| vec![eff_tid])
-                })
-                .unwrap_or_default()
+            let (eff_opt, eff_list) = ctx.systems.get_system_wide_effects(sys_id);
+            let filtered_list: Vec<TypeId> = eff_list
+                .into_iter()
+                .filter(|&t| !(47378..=47392).contains(&t))
+                .collect();
+            if !filtered_list.is_empty() {
+                filtered_list
+            } else if let Some(eff_tid) = eff_opt.filter(|&t| !(47378..=47392).contains(&t)) {
+                vec![eff_tid]
+            } else {
+                eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, sys_id, None)
+                    .map(|(_, _, _, eff_tid)| vec![eff_tid])
+                    .unwrap_or_default()
+            }
         };
         if !eff_tids.is_empty() {
             let (target_cat_id, is_npc_or_sleeper, ship_type_id_opt) = ctx.db.with_snapshot(|snap| {
@@ -669,10 +676,7 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
             let coherence = base_coherence + 10.0 * (hack_lvl as f64);
             let strength = base_strength + 2.0 * (hack_lvl as f64);
 
-            {
-                let mut st = scanners_superweapons_state()
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
+            ctx.scanners_superweapons.with_hacking_mut(|st| {
                 st.active_hacking_target_by_char.insert(char_id, target_id);
                 st.hacking_states.insert(
                     target_id,
@@ -685,7 +689,7 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                         unlocked: false,
                     },
                 );
-            }
+            });
 
             let start_event_data = PyRep::Dict(vec![
                 (
@@ -1103,8 +1107,7 @@ fn handle_system_wide_effects(
                     .filter(|&s| s >= 30_000_000)
                     .map(|s| s as u32)
                     .unwrap_or(sys_id);
-                let prev = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).system_wide_effects.remove(&reset_sys);
-                let _ = prev;
+                let _prev = ctx.systems.clear_system_wide_effect(reset_sys);
                 if ship_id > 0 {
                     ctx.invalidate_ship_fitting(ship_id);
                 }
@@ -1148,7 +1151,7 @@ fn handle_system_wide_effects(
                         .map(|(_, _, _, tid)| tid)
                 });
                 if let Some(req_tid) = req_tid_opt {
-                    scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).system_wide_effects.insert(sys_id, req_tid);
+                    ctx.systems.set_system_wide_effect(sys_id, req_tid);
                     if ship_id > 0 {
                         ctx.invalidate_and_push_fit(ship_id);
                     }
@@ -1172,12 +1175,10 @@ fn handle_system_wide_effects(
             }
 
             let resolved_wh = eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, sys_id, None);
-            let active_tid_opt = scanners_superweapons_state()
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .system_wide_effects
-                .get(&sys_id)
-                .copied()
+            let active_tid_opt = ctx
+                .systems
+                .get_system_wide_effects(sys_id)
+                .0
                 .or_else(|| resolved_wh.map(|(_, _, _, tid)| tid));
             let eff_name = active_tid_opt
                 .and_then(|tid| ctx.sde.types.get(&tid))
@@ -1573,14 +1574,11 @@ fn handle_dogma_dbuff_rpc(
             Err(_) => 60.0,
         };
         let exp = now_unix + (duration_s.round() as u64);
-        {
-            let mut st = scanners_superweapons_state()
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
+        ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
             for (idx, &(dbuff_id, value)) in buff_pairs.iter().enumerate() {
                 for &tsid in &target_ships {
-                    st.ship_dbuffs
-                        .entry((ctx.instance_id, tsid))
+                    dbuffs
+                        .entry(tsid)
                         .or_default()
                         .push(ActiveDbuffEntry {
                             dbuff_id,
@@ -1590,7 +1588,7 @@ fn handle_dogma_dbuff_rpc(
                         });
                 }
             }
-        }
+        });
         for &tsid in &target_ships {
             ctx.invalidate_and_push_fit(tsid);
             ctx.emit_typed(

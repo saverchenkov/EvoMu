@@ -137,6 +137,9 @@ pub struct ServerContext {
     pub brain_primed_sessions: Arc<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
     /// Per-session RPC token buckets checked before `sync_session` / DB snapshot locks (`#1186`).
     pub(crate) rpc_rate_buckets: Arc<RankedMutex<HashMap<u64, SessionRpcRateBucket>, RANK_LEAF>>,
+    pub scanners_superweapons: Arc<
+        crate::services::inventory_fitting::fitting_scanners_superweapons::ScannersSuperweaponsRuntime,
+    >,
     /// Test-only fast-path bypass for per-session RPC rate budgeting (`#1264`).
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) rpc_rate_budget_disabled: Arc<AtomicBool>,
@@ -303,6 +306,9 @@ pub(crate) struct ServerContextWeak {
         std::sync::Weak<RankedRwLock<HashMap<(u64, i64), (i64, std::time::Instant)>, RANK_LEAF>>,
     brain_primed_sessions: std::sync::Weak<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
     rpc_rate_buckets: std::sync::Weak<RankedMutex<HashMap<u64, SessionRpcRateBucket>, RANK_LEAF>>,
+    scanners_superweapons: std::sync::Weak<
+        crate::services::inventory_fitting::fitting_scanners_superweapons::ScannersSuperweaponsRuntime,
+    >,
     #[cfg(any(test, feature = "testkit"))]
     rpc_rate_budget_disabled: std::sync::Weak<AtomicBool>,
     #[cfg(any(test, feature = "testkit"))]
@@ -388,6 +394,7 @@ impl ServerContextWeak {
                 .upgrade()?,
             brain_primed_sessions: self.brain_primed_sessions.upgrade()?,
             rpc_rate_buckets: self.rpc_rate_buckets.upgrade()?,
+            scanners_superweapons: self.scanners_superweapons.upgrade()?,
             #[cfg(any(test, feature = "testkit"))]
             rpc_rate_budget_disabled: self.rpc_rate_budget_disabled.upgrade()?,
             #[cfg(any(test, feature = "testkit"))]
@@ -748,6 +755,7 @@ impl ServerContext {
             ),
             brain_primed_sessions: Arc::downgrade(&self.brain_primed_sessions),
             rpc_rate_buckets: Arc::downgrade(&self.rpc_rate_buckets),
+            scanners_superweapons: Arc::downgrade(&self.scanners_superweapons),
             #[cfg(any(test, feature = "testkit"))]
             rpc_rate_budget_disabled: Arc::downgrade(&self.rpc_rate_budget_disabled),
             #[cfg(any(test, feature = "testkit"))]
@@ -920,6 +928,9 @@ impl ServerContext {
             pending_structure_view_outside_set_state: Arc::new(RankedRwLock::new(HashMap::new())),
             brain_primed_sessions: Arc::new(RankedRwLock::new(HashSet::new())),
             rpc_rate_buckets: Arc::new(RankedMutex::new(HashMap::new())),
+            scanners_superweapons: Arc::new(
+                crate::services::inventory_fitting::fitting_scanners_superweapons::ScannersSuperweaponsRuntime::new(),
+            ),
             #[cfg(any(test, feature = "testkit"))]
             rpc_rate_budget_disabled: Arc::new(AtomicBool::new(false)),
             #[cfg(any(test, feature = "testkit"))]

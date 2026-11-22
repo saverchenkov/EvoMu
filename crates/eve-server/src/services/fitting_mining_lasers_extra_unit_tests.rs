@@ -1192,20 +1192,18 @@ async fn perform_scan_zero_pos_fallback_and_dbuff_attr23_range_multiplier() {
     assert_eq!(res_base.dict_get("count").and_then(|v| v.as_i64()), Some(1));
 
     // 3. Apply DBuff attr 23 = +150% -> range = 10_000 * 2.5 = 25_000 -> reveals 22 km asteroid as well
-    {
-        let mut st = fitting_scanners_superweapons::scanners_superweapons_state()
-            .write()
-            .unwrap();
-        st.ship_dbuffs.insert(
-            (ctx.instance_id, ship_id),
+    let exp = ctx.now_unix_secs() + 600;
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.insert(
+            ship_id,
             vec![fitting_scanners_superweapons::ActiveDbuffEntry {
                 dbuff_id: 23,
                 value: 150.0,
-                expires_at_unix: ctx.now_unix_secs() + 600,
+                expires_at_unix: exp,
                 source_module_id: hi_mod,
             }],
         );
-    }
+    });
     let res_buffed = call_scan(&ctx, &mut sess, &[PyRep::Integer(hi_mod)], &kw)
         .await
         .unwrap()

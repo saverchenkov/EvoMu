@@ -5,9 +5,7 @@
 use crate::rng::MechanicRng;
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
-use crate::services::inventory_fitting::fitting_scanners_superweapons::{
-    scanners_superweapons_state, ActiveDbuffEntry,
-};
+use crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry;
 use crate::services::mobile_deployables::{
     read_deployable_state_snap, write_deployable_state_snap, GROUP_MOBILE_CYNO_BEACON,
     GROUP_MOBILE_CYNO_INHIBITOR, GROUP_MOBILE_DEPOT, GROUP_MOBILE_MICRO_JUMP_UNIT,
@@ -344,14 +342,11 @@ fn remove_soak_dbuffs_and_notify(
     char_id: i64,
     ship_id: i64,
 ) {
-    let remaining_wire: Vec<(i64, f64, i64)> = {
-        let mut st = scanners_superweapons_state()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+    let now_unix = ctx.now_unix();
+    let remaining_wire: Vec<(i64, f64, i64)> = ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
         let mut rem = Vec::new();
-        if let Some(entries) = st.ship_dbuffs.get_mut(&(ctx.instance_id, ship_id)) {
+        if let Some(entries) = dbuffs.get_mut(&ship_id) {
             entries.retain(|e| e.source_module_id != GM_LOGI_SOAK_DBUFF_SOURCE_ID);
-            let now_unix = ctx.now_unix();
             entries.retain(|e| e.expires_at_unix > now_unix);
             for e in entries.iter() {
                 rem.push((
@@ -361,11 +356,11 @@ fn remove_soak_dbuffs_and_notify(
                 ));
             }
             if entries.is_empty() {
-                st.ship_dbuffs.remove(&(ctx.instance_id, ship_id));
+                dbuffs.remove(&ship_id);
             }
         }
         rem
-    };
+    });
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     if let Ok(mut bp) = sys_handle.ballpark.write() {
@@ -2079,14 +2074,8 @@ fn step_logi_soak_for_system(ctx: &ServerContext, solar_system_id: u32) {
         bp.update_dbuffs(soak.target_ship_id, wire_dbuffs);
     }
 
-    {
-        let mut st = scanners_superweapons_state()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let list = st
-            .ship_dbuffs
-            .entry((ctx.instance_id, soak.target_ship_id))
-            .or_default();
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        let list = dbuffs.entry(soak.target_ship_id).or_default();
         list.retain(|e| {
             e.source_module_id != GM_LOGI_SOAK_DBUFF_SOURCE_ID && e.expires_at_unix > now_unix
         });
@@ -2098,7 +2087,7 @@ fn step_logi_soak_for_system(ctx: &ServerContext, solar_system_id: u32) {
                 source_module_id: GM_LOGI_SOAK_DBUFF_SOURCE_ID,
             });
         }
-    }
+    });
 
     ctx.invalidate_ship_fitting(soak.target_ship_id);
     ctx.push_fit_projection(soak.target_char_id, soak.target_ship_id);

@@ -2001,6 +2001,15 @@ impl SystemView {
     }
 }
 
+/// Per-`SystemRegistry` overrides for solar-system-wide environment effects (`#1583` Track 2).
+#[derive(Debug, Default)]
+pub struct SystemWideEffectsState {
+    /// Active system-wide effect beacon `type_id` per `solar_system_id`.
+    pub effects: HashMap<SolarSystemId, u32>,
+    /// Overlapping system-wide effect beacon `type_id`s per `solar_system_id`.
+    pub effect_lists: HashMap<SolarSystemId, Vec<u32>>,
+}
+
 #[cfg(test)]
 #[path = "types_tests.rs"]
 mod types_tests;

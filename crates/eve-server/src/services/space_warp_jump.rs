@@ -1514,29 +1514,27 @@ fn pop_self_phenomena_dbuffs_for_ship(
     if phenomena_mod_ids.is_empty() {
         return Vec::new();
     }
-    let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    let key = (ctx.instance_id, ship_id);
-    let mut removed = Vec::new();
-    let should_remove_key = if let Some(entries) = st.ship_dbuffs.get_mut(&key) {
-        let mut kept = Vec::with_capacity(entries.len());
-        for entry in entries.drain(..) {
-            if phenomena_mod_ids.contains(&entry.source_module_id) {
-                removed.push(entry);
-            } else {
-                kept.push(entry);
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        let mut removed = Vec::new();
+        let should_remove_key = if let Some(entries) = dbuffs.get_mut(&ship_id) {
+            let mut kept = Vec::with_capacity(entries.len());
+            for entry in entries.drain(..) {
+                if phenomena_mod_ids.contains(&entry.source_module_id) {
+                    removed.push(entry);
+                } else {
+                    kept.push(entry);
+                }
             }
+            *entries = kept;
+            entries.is_empty()
+        } else {
+            false
+        };
+        if should_remove_key {
+            dbuffs.remove(&ship_id);
         }
-        *entries = kept;
-        entries.is_empty()
-    } else {
-        false
-    };
-    if should_remove_key {
-        st.ship_dbuffs.remove(&key);
-    }
-    removed
+        removed
+    })
 }
 
 fn restore_self_phenomena_dbuffs_for_ship(
@@ -1547,13 +1545,12 @@ fn restore_self_phenomena_dbuffs_for_ship(
     if entries.is_empty() {
         return;
     }
-    let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    st.ship_dbuffs
-        .entry((ctx.instance_id, ship_id))
-        .or_default()
-        .extend(entries);
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs
+            .entry(ship_id)
+            .or_default()
+            .extend(entries);
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

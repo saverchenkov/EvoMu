@@ -1163,7 +1163,6 @@
         "services/fitting_conduit_jump.rs": 1,
         "services/fitting_cyno_portal.rs": 1,
         "services/fitting_dogma_im.rs": 1,
-        "services/fitting_scanners_superweapons.rs": 1,
         "services/fw_gameplay_insurgency.rs": 1,
         "services/industry_rigs.rs": 2,
         "services/lp_store_catalog.rs": 2,

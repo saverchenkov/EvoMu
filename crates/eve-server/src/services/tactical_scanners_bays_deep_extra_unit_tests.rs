@@ -10,7 +10,7 @@ use super::inventory_fitting::fitting_scanners_superweapons::{
     active_hacking_target_for_char, apply_active_dbuffs_and_system_effects_to_ship_attrs,
     get_aggregated_ship_dbuffs, handle_scanner_analyzer_entosis_activation,
     handle_superweapons_dbuffs_and_clones, mark_hacking_container_unlocked,
-    scanners_superweapons_state, ActiveDbuffEntry,
+    ActiveDbuffEntry,
 };
 use super::inventory_fitting::fitting_ship_bays::{
     board_stored_ship, ship_drop, ship_jettison, ship_scoop_and_store,
@@ -390,13 +390,12 @@ async fn scanners_analyzers_dbuffs_and_jump_clone_rpcs() {
     put_item(&ctx, cont_id, 23, c2, sys_id as i64, InventoryFlag::Locked, 1, true);
     put_item(&ctx, 1_400_004, 16274, c2, br_id, InventoryFlag::Cargo, 100, false);
 
-    {
-        let mut st = scanners_superweapons_state().write().unwrap();
-        st.ship_dbuffs.insert((ctx.instance_id, ship_id), vec![
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.insert(ship_id, vec![
             ActiveDbuffEntry { dbuff_id: 99_999_991, value: 1.5, expires_at_unix: 1_900_000_000, source_module_id: 1 },
             ActiveDbuffEntry { dbuff_id: 99_999_991, value: 0.5, expires_at_unix: 1_700_000_000, source_module_id: 2 },
         ]);
-    }
+    });
     assert!(get_aggregated_ship_dbuffs(&ctx, ship_id, 1_800_000_000).contains_key(&99_999_991));
     let mut attrs = HashMap::from([(37u16, 100.0)]);
     apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, ship_id, &mut attrs);
@@ -426,7 +425,7 @@ async fn scanners_analyzers_dbuffs_and_jump_clone_rpcs() {
     let relic_s = DogmaItemState::from_sde(10, 997_016, &ctx.sde);
     assert_eq!(handle_scanner_analyzer_entosis_activation(&ctx, &sys, c1, ship_id, 10, &relic_t, &relic_s, None).await.unwrap().unwrap_err().code, "TargetRequired");
     let _ = handle_scanner_analyzer_entosis_activation(&ctx, &sys, c1, ship_id, 10, &relic_t, &relic_s, Some(cont_id)).await.unwrap().unwrap();
-    assert_eq!(active_hacking_target_for_char(c1), Some(cont_id));
+    assert_eq!(active_hacking_target_for_char(&ctx, c1), Some(cont_id));
     mark_hacking_container_unlocked(&ctx, c1, cont_id);
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&cont_id].flag), InventoryFlag::None);
 

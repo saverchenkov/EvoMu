@@ -872,12 +872,9 @@ async fn query_item_attributes_routes_modules_charges_drones_and_fleet_bursts_wi
         .as_f64()
         .unwrap();
     let now_u = ctx.now_unix_secs();
-    {
-        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .write()
-            .unwrap();
-        st.ship_dbuffs
-            .entry((ctx.instance_id, ship_id))
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs
+            .entry(ship_id)
             .or_default()
             .push(crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                 dbuff_id: 26,
@@ -885,7 +882,7 @@ async fn query_item_attributes_routes_modules_charges_drones_and_fleet_bursts_wi
                 expires_at_unix: now_u + 30,
                 source_module_id: 777_001,
             });
-    }
+    });
     let fit_boosted = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
     assert!(fit_boosted.gang_bursts.iter().any(|b| b.dbuff_id == Some(26)));
     let boosted_range = query_attr(&ctx, &mut session, ship_id, attr_ids::MAX_TARGET_RANGE)

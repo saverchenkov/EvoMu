@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::inventory_fitting::{scanners_superweapons_state, ActiveDbuffEntry};
+use crate::services::inventory_fitting::ActiveDbuffEntry;
 use crate::services::mining_cycle::*;
 use eve_db::{
     AsteroidRecord, InventoryFlag, InventoryItemRecord, StandingTransactionRecord,
@@ -260,14 +260,16 @@ fn can_harvest_mining_kind_and_dbuff_multiplier_edge_cases() {
     let ship_id = 810_001_i64;
     let now = ctx.now_unix_secs();
     assert!((dbuff_multiplier(&ctx, ship_id, miner, 73) - 1.0).abs() < 1e-9);
-    scanners_superweapons_state().write().unwrap().ship_dbuffs.insert(
-        (ctx.instance_id, ship_id),
-        vec![
-            ActiveDbuffEntry { dbuff_id: 801, value: -20.0, expires_at_unix: now + 300, source_module_id: 1 },
-            ActiveDbuffEntry { dbuff_id: 802, value: 50.0, expires_at_unix: now + 300, source_module_id: 2 },
-            ActiveDbuffEntry { dbuff_id: 803, value: 99.0, expires_at_unix: now + 300, source_module_id: 3 },
-        ],
-    );
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.insert(
+            ship_id,
+            vec![
+                ActiveDbuffEntry { dbuff_id: 801, value: -20.0, expires_at_unix: now + 300, source_module_id: 1 },
+                ActiveDbuffEntry { dbuff_id: 802, value: 50.0, expires_at_unix: now + 300, source_module_id: 2 },
+                ActiveDbuffEntry { dbuff_id: 803, value: 99.0, expires_at_unix: now + 300, source_module_id: 3 },
+            ],
+        );
+    });
     assert!((dbuff_multiplier(&ctx, ship_id, miner, 73) - 0.80).abs() < 1e-9);
     assert!((dbuff_multiplier(&ctx, ship_id, miner, 54) - 1.50).abs() < 1e-9);
     assert!((dbuff_multiplier(&ctx, ship_id, gas_harv, 73) - 1.0).abs() < 1e-9);

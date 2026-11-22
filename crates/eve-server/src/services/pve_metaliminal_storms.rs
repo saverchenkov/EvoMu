@@ -298,7 +298,7 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
     let mut added_anomalies: Vec<(SolarSystemId, String, i64, i64, &'static str)> = Vec::new();
 
     // Store storm weather beacons strictly in per-ServerContext `ctx.db` `snap.items`
-    // (never in process-global `scanners_superweapons_state`) so concurrent ServerContexts never leak.
+    // (never in `ScannersSuperweaponsRuntime` / system overrides) so concurrent ServerContexts never leak.
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.retain(|_, it| {
             if it.flag == InventoryFlag::None && is_storm_beacon_type(it.type_id) {

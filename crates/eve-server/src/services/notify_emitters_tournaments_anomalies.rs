@@ -743,27 +743,23 @@ pub fn collect_active_system_wide_effects_in_system(
             .map(|i| (i.item_id, i.type_id))
             .collect()
     });
+    let (eff_opt, eff_list) = ctx.systems.get_system_wide_effects(sys_id);
     let mut override_seen = false;
-    {
-        let sw = crate::services::inventory_fitting::scanners_superweapons_state()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(&tid) = sw.system_wide_effects.get(&sys_id) {
-            override_seen = true;
+    if let Some(tid) = eff_opt {
+        override_seen = true;
+        if is_info_bubble_system_wide_effect_type(tid)
+            && !active.iter().any(|&(_, existing)| existing == tid)
+        {
+            active.push((i64::from(sys_id), tid));
+        }
+    }
+    if !eff_list.is_empty() {
+        override_seen = true;
+        for tid in eff_list {
             if is_info_bubble_system_wide_effect_type(tid)
                 && !active.iter().any(|&(_, existing)| existing == tid)
             {
                 active.push((i64::from(sys_id), tid));
-            }
-        }
-        if let Some(list) = sw.system_wide_effect_lists.get(&sys_id) {
-            override_seen = true;
-            for &tid in list {
-                if is_info_bubble_system_wide_effect_type(tid)
-                    && !active.iter().any(|&(_, existing)| existing == tid)
-                {
-                    active.push((i64::from(sys_id), tid));
-                }
             }
         }
     }
