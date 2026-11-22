@@ -284,6 +284,33 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("operationsManager", "get_tutorial_state", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "has_skipped_tutorial", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "is_main_tutorial_finished", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "get_active_category_id", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "is_category_complete", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "get_category_state", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "complete_category_for_character", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "get_character_progress", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "get_mission_avoidance_systems", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "get_operations_completed_at_least_once", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "activate_operation_in_solar_system", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "block_task", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "unblock_task", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "skip_task", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "start_site", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "process_client_event", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("survey", "GetActiveSurveyID", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("survey", "PerformSurveyChecks", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("survey", "ClaimSurveyRewards", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("eventLog", "LogClientEvent", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("eventLog", "LogClientStats", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("eventLog", "LogPlayerRequestedDisconnect", RpcDispatchHandler::Sync(handle)),
+];
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

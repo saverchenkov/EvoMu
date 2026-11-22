@@ -790,6 +790,25 @@ fn season_config_to_keyval(cfg: &SeasonConfig, defs: &[SeasonalChallengeDef]) ->
 }
 
 /// Dispatches calls to `seasonManager`.
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("seasonManager", "get_max_active_challenges", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "get_season_end_time", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "select_season", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "get_season_data_for_character", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "fill_up_and_return_challenges_for_character", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "get_challenge", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "challenge_is_dormant", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "get_challenge_expiration_date", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "process_client_event", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "claim_challenge_rewards", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "get_loot_table_by_typeID", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "get_character_progress_by_character_id", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "claim_goal_reward", RpcDispatchHandler::Sync(handle_season_manager)),
+    rpc_entry("seasonManager", "reload_fsd_data", RpcDispatchHandler::Sync(handle_season_manager)),
+];
+
 pub fn handle_season_manager(
     ctx: &ServerContext,
     session: &mut SessionState,

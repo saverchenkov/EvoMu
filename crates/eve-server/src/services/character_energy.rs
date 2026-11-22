@@ -252,6 +252,14 @@ pub fn consume_character_energy(
 }
 
 /// Dispatches RPC calls for `characterEnergyMgr`.
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub const RPCS: &[RpcEntry] = &[rpc_entry(
+    "characterEnergyMgr",
+    "GetMyEnergyState",
+    RpcDispatchHandler::SyncNoKwargs(handle),
+)];
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

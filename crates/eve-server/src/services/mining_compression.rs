@@ -978,6 +978,29 @@ pub fn handle_structure_compression_mgr(
 }
 
 /// Dispatches compression, decompression, and reprocessing RPCs.
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_compression(ctx, session, service, method, args, kwargs))
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("structureCompressionMgr", "CompressItemInStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureCompressionMgr", "DecompressGasInStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureCompressionMgr", "GetMyGasDecompressionEfficiency", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("inSpaceCompressionMgr", "CompressItemInSpace", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("corpMiningLedger", "GetObserversWithMiningEvents", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("corpMiningLedger", "GetObserverLedger", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("characterMiningLedger", "GetCharacterLogs", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle_compression(
     ctx: &ServerContext,
     session: &mut SessionState,

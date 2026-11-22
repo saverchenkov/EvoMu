@@ -27,6 +27,57 @@ macro_rules! require_cid {
     ($session:expr) => { match ServerContext::require_character($session) { Ok((_, cid)) => cid, Err(e) => return Some(Err(e)) } };
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("tourneyMgr", "AbortCountdown", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "AddPlayer", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "BanShip", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "BanShipType", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "CleanupGrid", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "CompletePregameChecks", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "CreateMatch", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "ExecuteMemberChange", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "FinalizeBans", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "GetActiveMatchForCamera", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "GetFancyDetails", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "GetMatchSystem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "GetTeamMembers", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "IsOtherMatchInProgress", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "LockMemberList", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "UnlockMemberList", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "MatchCompleted", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideDroneRestrict", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideLockRestrict", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideMoveRestrict", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideWarpRestrict", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideError", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideFleetBossID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "QueryShipList", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "RemovePlayer", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "RemoveSelfFromReferees", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "ResetMatch", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "ReturnAllPlayers", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "ReturnTeamPlayers", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "StartAutobanning", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "StartCountdown", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "TeleportPlayers", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "TeleportRefHome", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "UnBanShipType", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "UpdateFleetDetails", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

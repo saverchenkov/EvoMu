@@ -639,6 +639,31 @@ pub fn record_proving_grounds_combat_result_if_queued(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("pvpFilamentMgr", "JoinPVPQueue", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "LeavePVPQueue", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetAllEvents", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetActiveEvents", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetMostRecentEvent", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetNextEventDate", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetLeaderboard", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetCharacterStatistics", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "AbyssalPVPEndGateActivation", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

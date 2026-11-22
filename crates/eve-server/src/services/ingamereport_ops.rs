@@ -36,6 +36,19 @@ pub fn get_persisted_reports(ctx: &ServerContext) -> Vec<InGameReportRecord> {
 }
 
 /// Dispatches `ingamereport.*` RPC calls.
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("ingamereport", "report_exploit_abuse", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_gambling", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_inappropriate_character_name", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_inappropriate_language", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_macro_use", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_offensive_mail", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_other", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_questionable_transaction", RpcDispatchHandler::SyncNoService(handle)),
+];
+
 pub fn handle(
     ctx: &ServerContext,
     session: &SessionState,

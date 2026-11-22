@@ -150,6 +150,36 @@ fn expert_systems_to_py_dict(records: &BTreeMap<i64, ExpertSystemRecord>) -> PyR
     PyRep::Dict(dict)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry(
+        "expertSystemMgr",
+        "GetMyExpertSystems",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "expertSystemMgr",
+        "ConsumeExpertSystem",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "expertSystemMgr",
+        "RemoveMyExpertSystem",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "node_graph",
+        "process_client_blackboard_request",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "node_graph",
+        "process_client_graph_message",
+        RpcDispatchHandler::Sync(handle),
+    ),
+];
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

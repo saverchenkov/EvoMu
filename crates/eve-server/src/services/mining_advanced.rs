@@ -396,6 +396,30 @@ pub mod mining_compression;
 pub use mining_compression::*;
 
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("moonExtractions", "StartNewExtraction", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "CancelExtraction", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "FractureChunkWithStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "GetExtractionsForCorp", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "GetMoonResourcesForStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "GetExtractionAndEventIDFromStructureID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("autoMoonMining", "RequestMiningDetails", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("autoMoonMining", "RequestMiningCycleOutput", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

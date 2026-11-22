@@ -22,6 +22,7 @@ pub mod notify_registry;
 pub mod notify_types;
 pub mod reply_registry;
 pub mod rpc_args;
+pub mod rpc_registry;
 pub mod session;
 pub mod session_transition;
 pub mod teardown_registry;

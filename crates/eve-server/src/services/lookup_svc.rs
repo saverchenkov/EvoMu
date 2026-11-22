@@ -190,6 +190,27 @@ fn handle_bannedwords_check_search_words_allowed(
     Ok(PyRep::Bool(all_ok))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("lookupSvc", "LookupCharacters", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupEvePlayerCharacters", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupCorporations", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupFactions", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupKnownLocationsByGroup", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupLocationsByGroup", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupNoneNPCAccountOwners", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupOwners", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupPCOwners", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupWarableCorporationsOrAlliances", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("bannedwords", "fetch_regexes", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("bannedwords", "check_words_allowed", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("bannedwords", "check_chat_words_allowed", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("bannedwords", "check_search_words_allowed", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("search", "Query", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("search", "QuickQuery", RpcDispatchHandler::SyncReadOnlySession(handle)),
+];
+
 pub fn handle(
     ctx: &ServerContext,
     session: &SessionState,

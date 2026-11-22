@@ -1069,6 +1069,24 @@ fn handle_transfer_lp(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("LPStoreMgr", "GetAvailableOffersFromCorp", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPStoreMgr", "TakeOfferForCharacter", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPStoreMgr", "TakeOfferForCorporation", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPStoreMgr", "ExchangeConcordLP", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPSvc", "GetAllMyCharacterWalletLPBalances", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPSvc", "GetAllMyCorporationWalletLPBalances", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPSvc", "TransferLPFromMyWalletToOtherCorp", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPSvc", "TransferLPFromMyCorpWalletToOtherCorp", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPSvc", "ExchangeConcordLP", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("rewardMgr", "GetRewardLPLogs", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("rewardMgr", "GetDelayedRewardsByGroupIDs", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("RWManager", "solarsystem_contains_rw_instances", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("RWManager", "get_closest_rw_stations", RpcDispatchHandler::Sync(handle)),
+];
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

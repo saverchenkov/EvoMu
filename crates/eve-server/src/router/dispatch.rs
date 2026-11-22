@@ -1686,28 +1686,58 @@ impl ServerContext {
         if let Some(res) = box_fut(|| services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(self, session, effective_service, method, args)).await {
             return res;
         }
-        if let Some(res) = services::character_energy::handle(self, session, effective_service, method, args) {
-            return res;
-        }
-        if let Some(res) = services::project_discovery::handle_project_discovery(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ) {
-            return res;
-        }
-        if let Some(res) = services::season_manager::handle_season_manager(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ) {
-            return res;
+        if let Some(entry) = self.rpc_registry.lookup(effective_service, method).copied() {
+            use crate::router::rpc_registry::RpcDispatchHandler;
+            let registry_res = match entry.handler {
+                RpcDispatchHandler::Sync(f) => {
+                    f(self, session, effective_service, method, args, kwargs)
+                }
+                RpcDispatchHandler::SyncReadOnlySession(f) => {
+                    f(self, session, effective_service, method, args, kwargs)
+                }
+                RpcDispatchHandler::SyncNoKwargs(f) => {
+                    f(self, session, effective_service, method, args)
+                }
+                RpcDispatchHandler::SyncNoService(f) => f(self, session, method, args, kwargs),
+                RpcDispatchHandler::SyncCallerTrace(f) => {
+                    f(self, session, effective_service, method, args, kwargs, caller_trace)
+                }
+                RpcDispatchHandler::Async(f) => {
+                    f(self, session, effective_service, method, args, kwargs).await
+                }
+                RpcDispatchHandler::AsyncCallerTrace(f) => {
+                    f(self, session, effective_service, method, args, kwargs, caller_trace).await
+                }
+                RpcDispatchHandler::BoundAsync(f) => {
+                    f(
+                        self,
+                        session,
+                        bound_entry.as_ref(),
+                        effective_service,
+                        method,
+                        args,
+                        kwargs,
+                    )
+                    .await
+                }
+            };
+            match registry_res {
+                Some(res) => return res,
+                None => {
+                    debug_assert!(
+                        false,
+                        "registered RPC handler for {effective_service}.{method} returned None"
+                    );
+                    return self.unimplemented_rpc_error(
+                        session,
+                        effective_service,
+                        method,
+                        args,
+                        kwargs,
+                        caller_trace,
+                    );
+                }
+            }
         }
         if let Some(res) = services::macho_cluster_mgmt::handle(self, session, effective_service, method, args, kwargs) {
             return res;
@@ -1733,13 +1763,7 @@ impl ServerContext {
         if let Some(res) = box_fut(|| services::corp_registry_ops::handle_corp_hangar_invbroker(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = services::character_expert_systems::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
         if let Some(res) = services::character_skill_ops::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
-        if let Some(res) = services::character_certificates::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
         let prev_cid_before_select = (effective_service == "charUnboundMgr"
@@ -1915,19 +1939,10 @@ impl ServerContext {
         if let Some(res) = services::contracts_service::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = services::lp_store::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
         if let Some(res) = services::market_contracts::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = services::fast_checkout_and_activity::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
         if let Some(res) = services::wallet_serverops::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::mining_advanced::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
         if let Some(res) = services::industry_pi::handle(self, session, effective_service, method, args, kwargs, bound_entry.as_ref()) {
@@ -1978,33 +1993,28 @@ impl ServerContext {
         if let Some(res) = box_fut(|| services::cosmetics_events::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = services::operations_manager::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
         if let Some(res) = services::corp_registry_ops::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
-        if let Some(res) = services::lookup_svc::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::pvp_filament_mgr::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
         if let Some(res) = services::map_service::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = box_fut(|| services::tourney_service::handle(self, session, effective_service, method, args, kwargs)).await {
-            return res;
-        }
-        if effective_service == "ingamereport" {
-            if let Some(res) = services::ingamereport_ops::handle(self, session, method, args, kwargs) {
-                return res;
-            }
-        }
         if let Some(res) = box_fut(|| services::cluster_macho_misc_services::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
 
+        self.unimplemented_rpc_error(session, effective_service, method, args, kwargs, caller_trace)
+    }
+
+    fn unimplemented_rpc_error(
+        &self,
+        session: &SessionState,
+        effective_service: &str,
+        method: &str,
+        args: &[PyRep],
+        kwargs: &HashMap<String, PyRep>,
+        caller_trace: Option<&str>,
+    ) -> Result<PyRep, BridgeRpcError> {
         let in_catalog = self.cataloged_services.contains(effective_service);
         let warn_cat = if in_catalog {
             WarnCategory::UnknownRpc

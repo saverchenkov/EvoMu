@@ -287,6 +287,39 @@ where
 }
 
 /// Dispatches calls to `ProjectDiscovery`.
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("ProjectDiscovery", "is_enabled", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "initialize_tutorial_status", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_player_state", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_player_statistics", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_total_needed_xp", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_tutorial_completion_status", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_tutorial_level", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "increase_tutorial_level", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "reset_tutorial", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "skip_tutorial", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "give_tutorial_rewards", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "give_tutorial_complete_experience", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_tutorial_xp_reward", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_new_task", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "new_training_task", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_remaining_bonus_samples", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_maximum_bonus_samples", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_player_analysis_kredits", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_project_id", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "post_classification", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "submit", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "submit_classification", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "fix_task_id", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_current_task_index", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_data_from_url", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "append", RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "remove", RpcDispatchHandler::Sync(handle_project_discovery)),
+];
+
 pub fn handle_project_discovery(
     ctx: &ServerContext,
     session: &mut SessionState,

@@ -199,6 +199,56 @@ pub fn get_my_certificates_pyrep(
 }
 
 /// Dispatches `certificateMgr` RPCs (`feat:skills.certificates`).
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry(
+        "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
+        "GetMyCertificates",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
+        "GetCertificatesByCharacter",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
+        "GetCertificateCategories",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
+        "GetCertificateClasses",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
+        "GetAllShipCertificateRecommendations",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
+        "GrantCertificate",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
+        "BatchCertificateGrant",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
+        "BatchCertificateUpdate",
+        RpcDispatchHandler::Sync(handle),
+    ),
+    rpc_entry(
+        "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
+        "UpdateCertificateFlags",
+        RpcDispatchHandler::Sync(handle),
+    ),
+];
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
