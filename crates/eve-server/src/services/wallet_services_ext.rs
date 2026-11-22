@@ -420,6 +420,7 @@ pub fn handle(
                 crate::services::quasar_payment_store_types::resolve_eligible_omega_weekly_free_sp_grant(
                     snap,
                     user_id as u64,
+                    char_id,
                     offer_id,
                     now_unix,
                 )

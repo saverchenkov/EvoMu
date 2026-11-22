@@ -182,7 +182,9 @@ pub(crate) fn extract_quasar_store_idempotency_key(
         }
         if msg.full_name.ends_with("idempotency.Token") {
             return msg.get(1).and_then(|v| match v {
-                DynamicValue::String(s) if !s.is_empty() => Some(s.clone()),
+                DynamicValue::String(s) if !s.is_empty() => {
+                    encode_idempotency_bytes_hex(s.as_bytes())
+                }
                 DynamicValue::Bytes(b) => encode_idempotency_bytes_hex(b),
                 _ => None,
             });
@@ -324,15 +326,33 @@ pub(crate) fn store_offer_has_deliverable_fulfillment(
     })
 }
 
+pub(crate) fn validate_store_char_ownership(
+    snap: &WorldStateSnapshot,
+    buyer_user_id: u64,
+    char_id: i64,
+) -> Result<(), StorePurchaseError> {
+    match snap.characters.get(&char_id) {
+        Some(ch) if ch.user_id != buyer_user_id => Err(StorePurchaseError::TargetCharacterForbidden(
+            format!("Target character {char_id} does not belong to user"),
+        )),
+        None => Err(StorePurchaseError::TargetCharacterNotFound(format!(
+            "Target character {char_id} not found"
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
 pub(crate) fn resolve_eligible_omega_weekly_free_sp_grant(
     snap: &WorldStateSnapshot,
     user_id: u64,
+    char_id: i64,
     offer_id: i64,
     now_unix: u64,
 ) -> Result<Option<i64>, StorePurchaseError> {
     let Some(sp_grant) = resolve_omega_weekly_free_sp_grant(snap, offer_id) else {
         return Ok(None);
     };
+    validate_store_char_ownership(snap, user_id, char_id)?;
     let catalog = read_store_catalog(snap);
     if let Some(offer) = catalog.offers.iter().find(|o| i64::from(o.id) == offer_id) {
         if offer.targeted
@@ -372,6 +392,7 @@ struct PreparedStorePurchaseData {
     omega_target_uid: u64,
     delivery_target: Option<(i64, i64, Vec<(u32, i32)>)>,
     delivered_items_count: i64,
+    payment_token_id: Option<u32>,
     idem_key: Option<(String, String)>,
 }
 
@@ -758,21 +779,47 @@ fn validate_active_char_ownership(
         return Ok(());
     }
     if let Some(acid) = input.active_char_id {
-        match snap.characters.get(&acid) {
-            Some(ch) if ch.user_id != input.buyer_user_id => {
-                return Err(StorePurchaseError::TargetCharacterForbidden(format!(
-                    "Target character {acid} does not belong to user"
-                )));
-            }
-            None if matches!(input.channel, StorePurchaseChannel::PaymentTokenQuasar) => {
-                return Err(StorePurchaseError::TargetCharacterNotFound(format!(
-                    "Target character {acid} not found"
-                )));
-            }
-            _ => {}
-        }
+        validate_store_char_ownership(snap, input.buyer_user_id, acid)?;
     }
     Ok(())
+}
+
+fn input_payment_token_id(input: &StorePurchaseInput<'_>) -> Option<u32> {
+    match input.payment {
+        StorePurchasePaymentSpec::PaymentTokenById { token_id, .. } => Some(token_id),
+        StorePurchasePaymentSpec::PlexVault { .. }
+        | StorePurchasePaymentSpec::FastCheckoutAuto { .. } => None,
+    }
+}
+
+fn check_store_purchase_idempotency_replay<'a>(
+    snap: &'a WorldStateSnapshot,
+    input: &StorePurchaseInput<'_>,
+    idem_key: &Option<(String, String)>,
+) -> Result<Option<(&'a CommittedStorePurchaseRecord, i64)>, StorePurchaseError> {
+    let Some((map_key, _)) = idem_key else {
+        return Ok(None);
+    };
+    let Some(record) = snap.quasar_commerce.store_purchase_idempotency.get(map_key) else {
+        return Ok(None);
+    };
+    validate_active_char_ownership(snap, input)?;
+    let req_token_id = input_payment_token_id(input);
+    if record.offer_id != input.offer_id
+        || record.quantity != input.quantity
+        || record.gift_char_id != input.gift_char_id
+        || record.active_char_id != input.active_char_id
+        || record.payment_token_id != req_token_id
+    {
+        return Err(StorePurchaseError::IdempotencyConflict(format!(
+            "Idempotency key '{}' already committed with different parameters",
+            record.idempotency_key
+        )));
+    }
+    Ok(Some((
+        record,
+        snap.unified_plex_balance_for_user(input.buyer_user_id),
+    )))
 }
 
 fn prepare_store_purchase_in_snapshot(
@@ -789,23 +836,13 @@ fn prepare_store_purchase_in_snapshot(
     let vault_uid = input.buyer_user_id;
     let idem_key = raw_and_map_store_idempotency_key(input);
     if allow_idempotent_replay {
-        if let Some((ref map_key, _)) = idem_key {
-            if let Some(record) = snap.quasar_commerce.store_purchase_idempotency.get(map_key) {
-                validate_active_char_ownership(snap, input)?;
-                if record.offer_id != input.offer_id
-                    || record.quantity != input.quantity
-                    || record.gift_char_id != input.gift_char_id
-                {
-                    return Err(StorePurchaseError::IdempotencyConflict(format!(
-                        "Idempotency key '{}' already committed with different parameters",
-                        record.idempotency_key
-                    )));
-                }
-                return Ok(PreparedStorePurchase::IdempotentReplay {
-                    record: record.clone(),
-                    new_plex_balance: snap.unified_plex_balance_for_user(vault_uid),
-                });
-            }
+        if let Some((record, new_plex_balance)) =
+            check_store_purchase_idempotency_replay(snap, input, &idem_key)?
+        {
+            return Ok(PreparedStorePurchase::IdempotentReplay {
+                record: record.clone(),
+                new_plex_balance,
+            });
         }
     }
 
@@ -903,6 +940,7 @@ fn prepare_store_purchase_in_snapshot(
         omega_target_uid,
         delivery_target,
         delivered_items_count,
+        payment_token_id: input_payment_token_id(input),
         idem_key,
     }))
 }
@@ -1009,6 +1047,8 @@ fn commit_store_purchase_in_snapshot(
             offer_id: data.offer_id,
             quantity: input.quantity,
             gift_char_id: input.gift_char_id,
+            active_char_id: input.active_char_id,
+            payment_token_id: data.payment_token_id,
             tx_id,
             plex_spent: data.total_cost_plex,
             plex_credited: data.total_plex_credit,
@@ -1128,12 +1168,19 @@ pub(crate) fn insert_bounded_store_purchase_idempotency(
     map.insert(map_key, record);
 }
 
-/// Validates offer availability and targeted eligibility before external password verification.
+/// Validates committed idempotency replay/conflict first, falling back to live offer
+/// availability and character ownership before external password verification.
 pub(crate) fn validate_store_purchase_offer_in_snapshot(
     snap: &WorldStateSnapshot,
     input: &StorePurchaseInput<'_>,
 ) -> Result<(), StorePurchaseError> {
-    resolve_store_purchase_offer(snap, input).map(|_| ())
+    let idem_key = raw_and_map_store_idempotency_key(input);
+    if check_store_purchase_idempotency_replay(snap, input, &idem_key)?.is_some() {
+        return Ok(());
+    }
+    resolve_store_purchase_offer(snap, input)?;
+    validate_active_char_ownership(snap, input)?;
+    Ok(())
 }
 
 /// Evaluates `storeManager.can_purchase_offer` using the same live snapshot validation

@@ -1332,6 +1332,16 @@ impl PublicGatewayRouter {
             .map(|(_, count)| count)
     }
 
+    /// Returns whether `norm_type` owns durable snapshot-level idempotency (with payload
+    /// fingerprint verification and retryable non-OK failures) rather than the router TTL cache.
+    fn bypasses_volatile_gateway_idempotency_cache(norm_type: &str) -> bool {
+        matches!(
+            norm_type,
+            "eve_public.plex.vault.api.PurchaseRequest"
+                | "eve_public.payment.purchase.api.TokenRequest"
+        )
+    }
+
     /// Extracts an embedded idempotency key (`eve.idempotency.Token`) from a dynamic message if present.
     fn extract_embedded_idempotency_key(&self, dyn_msg: &DynamicQuasarMessage) -> Option<Vec<u8>> {
         let desc = self.descriptors.get_message(&dyn_msg.full_name)?;
@@ -1339,10 +1349,14 @@ impl PublicGatewayRouter {
             let norm = QuasarDescriptorRegistry::normalize_type_name(&f.type_name);
             if norm == "eve.idempotency.Token" {
                 if let Some(DynamicValue::Message(sub)) = dyn_msg.get(f.number) {
-                    if let Some(DynamicValue::Bytes(uuid)) = sub.get(1) {
-                        if !uuid.is_empty() {
+                    match sub.get(1) {
+                        Some(DynamicValue::Bytes(uuid)) if !uuid.is_empty() => {
                             return Some(uuid.clone());
                         }
+                        Some(DynamicValue::String(uuid)) if !uuid.is_empty() => {
+                            return Some(uuid.as_bytes().to_vec());
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1569,16 +1583,19 @@ impl PublicGatewayRouter {
         // 5. Bounded idempotency key deduplication (with TTL + max-entry eviction)
         let idem_key = explicit_idempotency_key
             .or_else(|| self.extract_embedded_idempotency_key(&dyn_msg));
+        let bypass_volatile_cache = Self::bypasses_volatile_gateway_idempotency_cache(&norm_type);
         let cid_key = session_cid.unwrap_or(0);
-        if let Some(ref ikey) = idem_key {
-            let cache_tuple = (session_uid, cid_key, norm_type.clone(), ikey.clone());
-            if let Some(cached) = self
-                .idempotency_cache
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&cache_tuple, now_unix)
-            {
-                return build_response(cached.status_code, cached.status_message, cached.payload);
+        if !bypass_volatile_cache {
+            if let Some(ref ikey) = idem_key {
+                let cache_tuple = (session_uid, cid_key, norm_type.clone(), ikey.clone());
+                if let Some(cached) = self
+                    .idempotency_cache
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&cache_tuple, now_unix)
+                {
+                    return build_response(cached.status_code, cached.status_message, cached.payload);
+                }
             }
         }
 
@@ -1644,18 +1661,20 @@ impl PublicGatewayRouter {
 
         #[cfg(any(test, feature = "demo-seed"))]
         let tapped_req_type = norm_type.clone();
-        if let Some(ikey) = idem_key {
-            let cache_tuple = (session_uid, cid_key, norm_type, ikey);
-            self.idempotency_cache.write().unwrap_or_else(|e| e.into_inner()).insert(
-                cache_tuple,
-                CachedIdempotentResponse {
-                    status_code,
-                    status_message: status_message.clone(),
-                    payload: rsp_payload.clone(),
-                    created_at_unix: now_unix,
-                },
-                now_unix,
-            );
+        if !bypass_volatile_cache && status_code == STATUS_OK {
+            if let Some(ikey) = idem_key {
+                let cache_tuple = (session_uid, cid_key, norm_type, ikey);
+                self.idempotency_cache.write().unwrap_or_else(|e| e.into_inner()).insert(
+                    cache_tuple,
+                    CachedIdempotentResponse {
+                        status_code,
+                        status_message: status_message.clone(),
+                        payload: rsp_payload.clone(),
+                        created_at_unix: now_unix,
+                    },
+                    now_unix,
+                );
+            }
         }
 
         // Discard notices queued by a failed handler; publish remaining pending notices.

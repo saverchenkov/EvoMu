@@ -2113,8 +2113,163 @@ fn fast_checkout_live_catalog_updates_quantity_overflow_virtual_reject_and_idemp
         .code,
         "IdempotencyConflict"
     );
+    // Replay with nonexistent offer_id rejects as `IdempotencyConflict` (not `OfferNotFound`).
+    assert_eq!(
+        handle(
+            &ctx,
+            &sess,
+            "FastCheckoutService",
+            "BuyOffer",
+            &[PyRep::Integer(999_999), PyRep::Integer(2), PyRep::String("regrpw".into())],
+            &idem_kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "IdempotencyConflict"
+    );
+    // Deleting committed offer `8802` or retracting targeted offer must NOT break exact replay (`BF-2`).
+    let saved_8802 = ctx.db.with_mut_snapshot(|snap| {
+        let mut cat = read_store_catalog(snap);
+        let idx = cat.offers.iter().position(|o| o.id == 8802).unwrap();
+        let removed = cat.offers.remove(idx);
+        save_store_catalog(snap, &cat);
+        removed
+    });
+    let deleted_replay = handle(
+        &ctx,
+        &sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[PyRep::Integer(8802), PyRep::Integer(2), PyRep::String("regrpw".into())],
+        &idem_kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        deleted_replay.dict_get("transactionID"),
+        Some(&PyRep::Integer(first_tx_id))
+    );
+    assert_eq!(deleted_replay.dict_get("status"), Some(&PyRep::String("CONFIRMED".into())));
+    assert_eq!(deleted_replay.dict_get("itemsDelivered"), Some(&PyRep::Integer(4)));
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cat = read_store_catalog(snap);
+        cat.offers.push(saved_8802);
+        save_store_catalog(snap, &cat);
+    });
 
-    // 7. Cross-user active character is rejected on FastCheckout (`BF-04`), and paid status preserves `"CONFIRMED"` across flag flips.
+    // Retracting targeted offer eligibility and flipping `free_fast_checkout_plex` `true -> false` preserve committed replays.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cat = read_store_catalog(snap);
+        cat.offers.push(StoreOffer {
+            id: 8806,
+            name: "Targeted Crate".into(),
+            description: "Targeted".into(),
+            category_id: 3,
+            price_plex: 10,
+            product_ids: vec![88011],
+            targeted: true,
+            price_cents: None,
+            currency: None,
+        });
+        save_store_catalog(snap, &cat);
+        let target_key = format!("{uid}:8806");
+        snap.quasar_commerce.targeted_offers.insert(
+            target_key.clone(),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: uid,
+                catalogue_entry_name: "8806".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
+    let mut target_idem_kw = HashMap::new();
+    target_idem_kw.insert("idempotency_key".into(), PyRep::String("fc-idem-8806".into()));
+    let targ_first = handle(
+        &ctx,
+        &sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[PyRep::Integer(8806), PyRep::Integer(1), PyRep::String("regrpw".into())],
+        &target_idem_kw,
+    )
+    .unwrap()
+    .unwrap();
+    let targ_tx_id = targ_first.dict_get("transactionID").cloned().unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce
+            .targeted_offers
+            .get_mut(&format!("{uid}:8806"))
+            .unwrap()
+            .retracted = true;
+    });
+    let targ_replay = handle(
+        &ctx,
+        &sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[PyRep::Integer(8806), PyRep::Integer(1), PyRep::String("regrpw".into())],
+        &target_idem_kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(targ_replay.dict_get("transactionID"), Some(&targ_tx_id));
+
+    ctx.feature_flags.write().unwrap().free_fast_checkout_plex = true;
+    let mut free_pack_kw = HashMap::new();
+    free_pack_kw.insert("idempotency_key".into(), PyRep::String("fc-free-pack-1".into()));
+    let free_first = handle(
+        &ctx,
+        &sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[PyRep::Integer(1), PyRep::Integer(1)],
+        &free_pack_kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(free_first.dict_get("status"), Some(&PyRep::String("COMPLETED".into())));
+    let free_tx_id = free_first.dict_get("transactionID").cloned().unwrap();
+    let free_plex_amt = free_first
+        .dict_get("plexAmount")
+        .and_then(PyRep::as_i64)
+        .unwrap();
+    ctx.feature_flags.write().unwrap().free_fast_checkout_plex = false;
+    let free_replay = handle(
+        &ctx,
+        &sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[PyRep::Integer(1), PyRep::Integer(1), PyRep::String("regrpw".into())],
+        &free_pack_kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(free_replay.dict_get("status"), Some(&PyRep::String("COMPLETED".into())));
+    assert_eq!(free_replay.dict_get("transactionID"), Some(&free_tx_id));
+    assert_eq!(free_replay.dict_get("plexAmount"), Some(&PyRep::Integer(free_plex_amt)));
+
+    // 7. Cross-user & non-existent active character are rejected on FastCheckout (`BF-3`/`BF-04`),
+    //    and paid status preserves `"CONFIRMED"` across flag flips.
+    let mut missing_char_sess = sess.clone();
+    missing_char_sess.character_id = Some(90_999_999);
+    assert_eq!(
+        handle(
+            &ctx,
+            &missing_char_sess,
+            "FastCheckoutService",
+            "BuyOffer",
+            &[PyRep::Integer(8802), PyRep::Integer(1), PyRep::String("regrpw".into())],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CharacterNotFound"
+    );
     let other_uid = ctx.db.provision_player_account("fc_other_user", "otherpw");
     set_user_fast_checkout_enabled(&ctx, other_uid, true);
     let hijack_sess = auth_session(other_uid, cid, corp_id, sys_id);
@@ -2188,7 +2343,8 @@ fn fast_checkout_live_catalog_updates_quantity_overflow_virtual_reject_and_idemp
     ctx.feature_flags.write().unwrap().free_fast_checkout_plex = false;
 
     ctx.db.with_snapshot(|s| {
-        assert_eq!(s.unified_plex_balance_for_user(uid), 500);
+        // Initial 500 - 80 (8801) - 20 (8802) - 10 (8806) + free_plex_amt (pack 1) + 100 (8805) = 490 + free_plex_amt.
+        assert_eq!(s.unified_plex_balance_for_user(uid), 490 + free_plex_amt);
         assert_eq!(s.unified_plex_balance_for_user(other_uid), 0);
         let trit_total: i32 = s
             .items
@@ -2196,6 +2352,6 @@ fn fast_checkout_live_catalog_updates_quantity_overflow_virtual_reject_and_idemp
             .filter(|i| i.owner_id == cid && i.type_id == 34)
             .map(|i| i.quantity)
             .sum();
-        assert_eq!(trit_total, 6);
+        assert_eq!(trit_total, 8);
     });
 }

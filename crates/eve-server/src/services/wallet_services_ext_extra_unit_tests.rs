@@ -797,4 +797,44 @@ fn store_manager_consolidated_overflow_virtual_reject_1005_omega_and_idempotency
             .sum();
         assert_eq!(qty, 1);
     });
+
+    // 5. Missing and cross-user character checks on virtual/Omega offer 1001 and weekly free SP offer 1005 (`BF-3`).
+    let other_uid = ctx.db.provision_player_account("sm_other_user", "pw123");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(other_uid, 1_000);
+    });
+    let mut foreign_sess = SessionState::new(7202);
+    foreign_sess.user_id = Some(other_uid);
+    foreign_sess.character_id = Some(cid);
+    foreign_sess.station_id = Some(station_id);
+    let mut ghost_sess = SessionState::new(7203);
+    ghost_sess.user_id = Some(uid);
+    ghost_sess.character_id = Some(972_999);
+    ghost_sess.station_id = Some(station_id);
+    let pre_sp = ctx.db.with_snapshot(|s| s.characters[&cid].free_skill_points);
+    for bad_sess in [&mut foreign_sess, &mut ghost_sess] {
+        for bad_offer in [1001_i64, 1005_i64] {
+            for method in ["can_purchase_offer", "buy_offer"] {
+                assert_eq!(
+                    call_wallet_ext(
+                        &ctx,
+                        bad_sess,
+                        "storeManager",
+                        method,
+                        &[PyRep::Integer(bad_offer)],
+                        &kw,
+                    )
+                    .unwrap()
+                    .unwrap_err()
+                    .code,
+                    "CharacterNotFound"
+                );
+            }
+        }
+    }
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.unified_plex_balance_for_user(uid), 390);
+        assert_eq!(s.unified_plex_balance_for_user(other_uid), 1_000);
+        assert!((s.characters[&cid].free_skill_points - pre_sp).abs() < f64::EPSILON);
+    });
 }

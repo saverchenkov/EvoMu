@@ -1967,6 +1967,8 @@ fn all_17_service_domains_survive_tx_commit_restart_and_scalar_reset() {
                 offer_id: 3,
                 quantity: 1,
                 gift_char_id: None,
+                active_char_id: Some(90_000_001),
+                payment_token_id: None,
                 tx_id: 1001,
                 plex_spent: 110,
                 plex_credited: 0,

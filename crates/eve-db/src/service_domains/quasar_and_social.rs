@@ -315,6 +315,8 @@ pub struct CommittedStorePurchaseRecord {
     pub offer_id: u64,
     pub quantity: u32,
     pub gift_char_id: Option<i64>,
+    pub active_char_id: Option<i64>,
+    pub payment_token_id: Option<u32>,
     pub tx_id: u64,
     pub plex_spent: i64,
     pub plex_credited: i64,

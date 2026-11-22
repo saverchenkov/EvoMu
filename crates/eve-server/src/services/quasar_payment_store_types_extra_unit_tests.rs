@@ -522,14 +522,27 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
         ch.home_station_id = station_id;
         snap.characters.insert(cid, ch);
 
+        let mut ch_alt = ch.clone();
+        ch_alt.character_id = 94_400_002;
+        snap.characters.insert(ch_alt.character_id, ch_alt);
+
         snap.account_plex_vault.insert(uid, 2_000);
-        snap.quasar_commerce.payment_tokens = vec![PaymentTokenRecord {
-            id: 9401,
-            user_id: uid,
-            token_str: "tok-9401".into(),
-            is_quick_pay: true,
-            consumed: false,
-        }];
+        snap.quasar_commerce.payment_tokens = vec![
+            PaymentTokenRecord {
+                id: 9401,
+                user_id: uid,
+                token_str: "tok-9401".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 9403,
+                user_id: uid,
+                token_str: "tok-9403".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+        ];
         snap.quasar_commerce.payment_receipts.clear();
 
         snap.next_entity_id += 1;
@@ -868,6 +881,13 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
             .status_code,
         STATUS_OK
     );
+    // Same-router replay deduplicates and enforces fingerprint conflicts cleanly (`BF-1`, P2).
+    assert_eq!(
+        router2
+            .handle_public_request(&sess, &gw_idem_req, Some(b"gw-idem-1003".to_vec()), false, now)
+            .status_code,
+        STATUS_OK
+    );
     let router3 = PublicGatewayRouter::new(
         QuasarDescriptorRegistry::open_default_or_empty(),
         Arc::clone(&router.db),
@@ -898,13 +918,8 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
         }),
         ..gw_idem_req.clone()
     };
-    let router3_mismatch = PublicGatewayRouter::new(
-        QuasarDescriptorRegistry::open_default_or_empty(),
-        Arc::clone(&router.db),
-        shared_sde(),
-    );
     assert_eq!(
-        router3_mismatch
+        router2
             .handle_public_request(
                 &sess,
                 &gw_mismatch_req,
@@ -915,19 +930,81 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
             .status_code,
         STATUS_BAD_REQUEST
     );
+    let mut sess_alt_char = sess.clone();
+    sess_alt_char.character_id = Some(94_400_002);
+    assert_eq!(
+        router2
+            .handle_public_request(
+                &sess_alt_char,
+                &gw_idem_req,
+                Some(b"gw-idem-1003".to_vec()),
+                false,
+                now,
+            )
+            .status_code,
+        STATUS_BAD_REQUEST
+    );
+    // Non-existent active character is rejected on virtual/Omega offer 1001 (`BF-3`).
+    let mut ghost_sess = sess.clone();
+    ghost_sess.character_id = Some(999_400_999);
+    let omega_virtual_req = EvePublicRequest {
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.PurchaseRequest"),
+            value: WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::Varint(1001),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::Varint(1),
+                    },
+                ],
+            }
+            .encode(),
+        }),
+        ..gw_idem_req.clone()
+    };
+    assert_eq!(
+        router2
+            .handle_public_request(&ghost_sess, &omega_virtual_req, None, false, now)
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    // Transient handler failure does not poison `router2.idempotency_cache`: retry succeeds after funding.
+    router.db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 10);
+    });
+    assert_eq!(
+        router2
+            .handle_public_request(&sess, &gw_idem_req, Some(b"gw-retry-1003".to_vec()), false, now)
+            .status_code,
+        STATUS_BAD_REQUEST
+    );
+    router.db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 1_440);
+    });
+    assert_eq!(
+        router2
+            .handle_public_request(&sess, &gw_idem_req, Some(b"gw-retry-1003".to_vec()), false, now)
+            .status_code,
+        STATUS_OK
+    );
     router.db.with_snapshot(|s| {
-        // Initial 2_000 - 2*140 (stack purchase) - 140 (idem_input) - 140 (gw_idem_req) = 1_440.
-        assert_eq!(s.unified_plex_balance_for_user(uid), 1_440);
+        // 1_440 before retry-test - 140 (gw-retry-1003) = 1_300.
+        assert_eq!(s.unified_plex_balance_for_user(uid), 1_300);
         let qty: i32 = s
             .items
             .values()
             .filter(|i| i.owner_id == cid && i.type_id == 40_519)
             .map(|i| i.quantity)
             .sum();
-        assert_eq!(qty, 5);
+        assert_eq!(qty, 6);
     });
 
-    // Cross-router `TokenRequest` replay returns authentic `TokenResponse` sequential without double consumption, and rejects mismatched offer/qty.
+    // Same-router & cross-router `TokenRequest` replay returns authentic `TokenResponse` sequential
+    // without double consumption, rejects offer/qty/token_id mismatches, and recovers after failure.
     router.db.with_mut_snapshot(|snap| {
         snap.quasar_commerce.payment_tokens.push(PaymentTokenRecord {
             id: 9402,
@@ -957,7 +1034,7 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
                 fields: vec![
                     WireField {
                         field_number: 1,
-                        value: WireValue::LengthDelimited(tok_order_1),
+                        value: WireValue::LengthDelimited(tok_order_1.clone()),
                     },
                     WireField {
                         field_number: 2,
@@ -977,6 +1054,15 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
         now,
     );
     assert_eq!(tok_rsp_1.status_code, STATUS_OK);
+    let tok_rsp_same = router2.handle_public_request(
+        &sess,
+        &tok_req_1,
+        Some(b"gw-tok-9402".to_vec()),
+        false,
+        now,
+    );
+    assert_eq!(tok_rsp_same.status_code, STATUS_OK);
+    assert_eq!(tok_rsp_1.payload, tok_rsp_same.payload);
     let router4 = PublicGatewayRouter::new(
         QuasarDescriptorRegistry::open_default_or_empty(),
         Arc::clone(&router.db),
@@ -1022,15 +1108,10 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
             }
             .encode(),
         }),
-        ..gw_idem_req
+        ..gw_idem_req.clone()
     };
-    let router4_mismatch = PublicGatewayRouter::new(
-        QuasarDescriptorRegistry::open_default_or_empty(),
-        Arc::clone(&router.db),
-        shared_sde(),
-    );
     assert_eq!(
-        router4_mismatch
+        router2
             .handle_public_request(
                 &sess,
                 &tok_mismatch_req,
@@ -1041,8 +1122,91 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
             .status_code,
         STATUS_BAD_REQUEST
     );
+    let tok_mismatch_token_req = EvePublicRequest {
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.purchase.api.TokenRequest"),
+            value: WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(tok_order_1.clone()),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::Varint(9403),
+                    },
+                ],
+            }
+            .encode(),
+        }),
+        ..gw_idem_req.clone()
+    };
+    assert_eq!(
+        router2
+            .handle_public_request(
+                &sess,
+                &tok_mismatch_token_req,
+                Some(b"gw-tok-9402".to_vec()),
+                false,
+                now,
+            )
+            .status_code,
+        STATUS_BAD_REQUEST
+    );
+    let tok_retry_req = EvePublicRequest {
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.purchase.api.TokenRequest"),
+            value: WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(tok_order_1),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::Varint(9404),
+                    },
+                ],
+            }
+            .encode(),
+        }),
+        ..gw_idem_req
+    };
+    assert_eq!(
+        router2
+            .handle_public_request(
+                &sess,
+                &tok_retry_req,
+                Some(b"gw-tok-retry-9404".to_vec()),
+                false,
+                now,
+            )
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    router.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.payment_tokens.push(PaymentTokenRecord {
+            id: 9404,
+            user_id: uid,
+            token_str: "tok-9404".into(),
+            is_quick_pay: true,
+            consumed: false,
+        });
+    });
+    assert_eq!(
+        router2
+            .handle_public_request(
+                &sess,
+                &tok_retry_req,
+                Some(b"gw-tok-retry-9404".to_vec()),
+                false,
+                now,
+            )
+            .status_code,
+        STATUS_OK
+    );
     router.db.with_snapshot(|s| {
-        assert_eq!(s.quasar_commerce.payment_receipts.len(), 2);
+        assert_eq!(s.quasar_commerce.payment_receipts.len(), 3);
         let tok_rec = s
             .quasar_commerce
             .store_purchase_idempotency
