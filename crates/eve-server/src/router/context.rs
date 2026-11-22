@@ -1211,6 +1211,10 @@ impl ServerContext {
         );
         ctx.systems.set_belt_respawn_interval_secs(cfg.belt_respawn_interval_secs);
         ctx.systems.set_downtime_utc_secs_of_day(cfg.downtime_utc_secs_of_day);
+        crate::services::serverops_cluster::set_scheduled_downtime_enabled(
+            &ctx,
+            cfg.scheduled_downtime_enabled,
+        );
         *ctx.feature_flags.write().unwrap_or_else(|e| e.into_inner()) = cfg.feature_flags.clone();
         if !ctx
             .quasar_gateway

@@ -307,6 +307,9 @@ pub struct ServerConfig {
     pub belt_respawn_interval_secs: u64,
     #[serde(default = "default_downtime_utc_secs_of_day")]
     pub downtime_utc_secs_of_day: u64,
+    /// Enables automatic daily scheduled downtime countdowns and shutdown (`true` by default; `#1586`).
+    #[serde(default = "default_true")]
+    pub scheduled_downtime_enabled: bool,
     #[serde(default)]
     pub feature_flags: FeatureFlagsConfig,
 }
@@ -367,6 +370,7 @@ impl Default for ServerConfig {
             player_accounts: Vec::new(),
             belt_respawn_interval_secs: default_belt_respawn_interval_secs(),
             downtime_utc_secs_of_day: default_downtime_utc_secs_of_day(),
+            scheduled_downtime_enabled: true,
             feature_flags: FeatureFlagsConfig::default(),
         }
     }
@@ -586,6 +590,11 @@ impl ServerConfig {
                 cfg.feature_flags.allow_local_dev_gateway_jwt = enabled;
             }
         }
+        if let Ok(dt_enabled_str) = std::env::var("EVOMU_SCHEDULED_DOWNTIME_ENABLED") {
+            if let Some(enabled) = parse_bool_flag(&dt_enabled_str) {
+                cfg.scheduled_downtime_enabled = enabled;
+            }
+        }
         if let Some(mult) = parse_rate_env("EVOMU_SKILL_TRAINING_MULTIPLIER")? {
             cfg.feature_flags.skill_training_multiplier = mult;
         }
@@ -719,6 +728,7 @@ info_gathering_interval_secs = 600
         assert_eq!(cfg.world_db_path, "data/test_world.sqlite");
         assert_eq!(cfg.belt_respawn_interval_secs, 43_200);
         assert_eq!(cfg.downtime_utc_secs_of_day, 36_000);
+        assert!(cfg.scheduled_downtime_enabled);
         assert!(!cfg.feature_flags.enable_quasar_gateway);
         assert!(cfg.feature_flags.enable_esi_http);
         assert!(!cfg.feature_flags.enable_living_world);

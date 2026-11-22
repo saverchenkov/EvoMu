@@ -42,6 +42,7 @@ fn server_config_defaults_accounts_and_boundary_validation() {
     assert_eq!(def.world_db_path, "data/evomu_world.sqlite");
     assert_eq!(def.belt_respawn_interval_secs, 86_400);
     assert_eq!(def.downtime_utc_secs_of_day, 39_600);
+    assert!(def.scheduled_downtime_enabled);
     assert!(def.feature_flags.enable_quasar_gateway);
     assert!(def.feature_flags.enable_esi_http);
     assert!(def.feature_flags.enable_living_world);
@@ -454,6 +455,78 @@ fn rate_multipliers_parse_defaults_aliases_env_overrides_and_validation() {
         );
         std::env::remove_var("EVOMU_MINING_YIELD_MULTIPLIER");
     }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn scheduled_downtime_enabled_parses_env_overrides_and_propagates_to_context() {
+    let _lock = crate::lock_test_env_write();
+    let _guard = EnvVarGuard::capture(&[
+        "EVOMU_CONFIG_PATH",
+        "EVOMU_SCHEDULED_DOWNTIME_ENABLED",
+        "EVOMU_STORAGE_BACKEND",
+    ]);
+
+    let default_cfg = ServerConfig::from_toml_str(
+        "world_db_path = \"ephemeral\"\n[storage]\nbackend = \"memory\"\n",
+    )
+    .expect("default scheduled_downtime_enabled");
+    assert!(default_cfg.scheduled_downtime_enabled);
+    let default_ctx =
+        crate::router::ServerContext::from_config(&default_cfg).expect("default context");
+    assert!(crate::services::serverops_cluster::is_scheduled_downtime_enabled(
+        &default_ctx
+    ));
+
+    let disabled_cfg = ServerConfig::from_toml_str(
+        "world_db_path = \"ephemeral\"\nscheduled_downtime_enabled = false\n[storage]\nbackend = \"memory\"\n",
+    )
+    .expect("scheduled_downtime_enabled = false");
+    assert!(!disabled_cfg.scheduled_downtime_enabled);
+    let rendered = toml::to_string(&disabled_cfg).expect("serialize ServerConfig");
+    let reparsed = ServerConfig::from_toml_str(&rendered).expect("roundtrip ServerConfig");
+    assert_eq!(disabled_cfg, reparsed);
+
+    let disabled_ctx =
+        crate::router::ServerContext::from_config(&disabled_cfg).expect("disabled context");
+    assert!(!crate::services::serverops_cluster::is_scheduled_downtime_enabled(
+        &disabled_ctx
+    ));
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "evomu_scheduled_dt_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let cfg_path = tmp_dir.join("downtime.toml");
+    std::fs::write(
+        &cfg_path,
+        "scheduled_downtime_enabled = true\n[storage]\nbackend = \"memory\"\n",
+    )
+    .unwrap();
+    std::env::set_var("EVOMU_CONFIG_PATH", &cfg_path);
+
+    // Unrecognized or empty env override keeps TOML value; falsy/truthy overrides apply.
+    std::env::set_var("EVOMU_SCHEDULED_DOWNTIME_ENABLED", "maybe");
+    assert!(
+        ServerConfig::load_default_or_env()
+            .expect("invalid bool keeps TOML")
+            .scheduled_downtime_enabled
+    );
+    std::env::set_var("EVOMU_SCHEDULED_DOWNTIME_ENABLED", "false");
+    assert!(
+        !ServerConfig::load_default_or_env()
+            .expect("false env disables")
+            .scheduled_downtime_enabled
+    );
+    std::env::set_var("EVOMU_SCHEDULED_DOWNTIME_ENABLED", "1");
+    assert!(
+        ServerConfig::load_default_or_env()
+            .expect("1 env enables")
+            .scheduled_downtime_enabled
+    );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
