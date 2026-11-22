@@ -53,6 +53,7 @@ fn fields_for(
         location_id,
         flag_id,
         wire_qty,
+        change_dict: None,
     }
 }
 
@@ -396,7 +397,7 @@ fn projected_only_class_counts_are_exact_beyond_sample_cap_across_all_kinds_and_
         Some(&3)
     );
     assert_eq!(
-        summary.item_change.projected_only_by_class.get("before=ship_or_container,after=recycling_loc_6,flag=0,owner=character,singleton=false"),
+        summary.item_change.projected_only_by_class.get("before=ship_or_container,after=recycling_loc_6,flag=0,before_flag=5,owner=character,singleton=false"),
         Some(&2)
     );
     assert_eq!(
@@ -777,11 +778,13 @@ fn matched_across_scopes_pairs_cleanly_without_distorting_same_scope_matched() {
     ] {
         ledger2.record_hand_written(
             scope,
+            None,
             helper,
             &[(cid, None)],
             "ownerID",
             "OnBlueprintsUpdated",
             &[PyRep::Integer(owner)],
+            &[],
         );
     }
     let final_s = ledger2.flush_pending();
@@ -896,4 +899,293 @@ fn matched_across_scopes_pairs_cleanly_without_distorting_same_scope_matched() {
     assert_eq!(neg_s.item_change.matched_across_scopes, 0);
     assert_eq!(neg_s.item_change.projected_only, 4);
     assert_eq!(neg_s.item_change.hand_written_only, 5);
+}
+
+#[test]
+fn compare_change_dict_key_order_independent_and_differs_by_helper() {
+    let cid = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let mut ledger = ItemCompareLedger::default();
+    let proj_dict_a = CanonicalChangeDict::from_entries(&[
+        (3, PyRep::Integer(station_id)),
+        (4, PyRep::Integer(InventoryFlag::Hangar as i64)),
+    ]);
+    let proj_dict_b = CanonicalChangeDict::from_entries(&[
+        (3, PyRep::Integer(station_id)),
+        (4, PyRep::Integer(InventoryFlag::Cargo as i64)),
+        (9, PyRep::Integer(10)),
+    ]);
+    let proj_dict_cross = CanonicalChangeDict::from_entries(&[(10, PyRep::Integer(25))]);
+
+    let mut proj_a = fields_for(8_100_001, Some(34), cid, station_id, 5, 50);
+    proj_a.change_dict = Some(proj_dict_a);
+    let mut proj_b = fields_for(8_100_002, Some(34), cid, 6, 0, 0);
+    proj_b.change_dict = Some(proj_dict_b);
+    let mut proj_c = fields_for(8_100_003, Some(34), cid, station_id, 4, 25);
+    proj_c.change_dict = Some(proj_dict_cross);
+
+    ledger.record_projected_batch_detailed(
+        CompareOriginScope::Dispatch,
+        Some("invbroker.Move".to_string()),
+        None,
+        vec![
+            (
+                cid,
+                "charid",
+                proj_a,
+                "before=station,after=station,flag=5,owner=character,singleton=false".into(),
+                true,
+            ),
+            (
+                cid,
+                "charid",
+                proj_b,
+                "before=ship_or_container,after=recycling_loc_6,flag=0,before_flag=5,owner=character,singleton=false".into(),
+                true,
+            ),
+            (
+                cid,
+                "charid",
+                proj_c,
+                "before=station,after=station,flag=4,owner=character,singleton=false".into(),
+                true,
+            ),
+        ],
+        Vec::new(),
+        0,
+    );
+
+    // 1. Key-reversed change dictionary {4, 3} matches {3, 4}.
+    let mut hw_a = fields_for(8_100_001, Some(34), cid, station_id, 5, 50);
+    hw_a.change_dict = Some(CanonicalChangeDict::from_entries(&[
+        (4, PyRep::Integer(InventoryFlag::Hangar as i64)),
+        (3, PyRep::Integer(station_id)),
+    ]));
+    ledger.match_or_record_item_row_detailed(
+        CompareOriginScope::Dispatch,
+        Some("invbroker.Move"),
+        "notify_item_mutation",
+        &[(cid, None)],
+        "charid",
+        Some(&hw_a),
+        None,
+    );
+
+    // 2. Deleted item where helper only emits {3: old_loc} without {4, 9} records dictionary_differs.
+    let mut hw_b = fields_for(8_100_002, Some(34), cid, 6, 0, 0);
+    hw_b.change_dict = Some(CanonicalChangeDict::from_entries(&[(
+        3,
+        PyRep::Integer(station_id),
+    )]));
+    ledger.match_or_record_item_row_detailed(
+        CompareOriginScope::Dispatch,
+        Some("invbroker.Move"),
+        "TrashItems",
+        &[(cid, None)],
+        "charid",
+        Some(&hw_b),
+        None,
+    );
+
+    // 3. Cross-scope match also compares change dictionaries cleanly.
+    let mut hw_c = fields_for(8_100_003, Some(34), cid, station_id, 4, 25);
+    hw_c.change_dict = Some(CanonicalChangeDict::from_entries(&[(
+        10,
+        PyRep::Integer(99),
+    )]));
+    ledger.match_or_record_item_row_detailed(
+        CompareOriginScope::Tick,
+        None,
+        "tick_helper",
+        &[(cid, None)],
+        "charid",
+        Some(&hw_c),
+        None,
+    );
+
+    let s = ledger.flush_pending();
+    assert_eq!(s.item_change.matched, 2);
+    assert_eq!(s.item_change.matched_across_scopes, 1);
+    assert_eq!(s.item_change.dictionary_same, 1);
+    assert_eq!(s.item_change.dictionary_differs, 2);
+    assert_eq!(s.item_change.first_set.matched, 2);
+    assert_eq!(s.item_change.first_set.dictionary_same, 1);
+    assert_eq!(s.item_change.first_set.dictionary_differs, 1);
+    assert_eq!(
+        s.item_change.dictionary_by_helper.get("notify_item_mutation"),
+        Some(&HelperDictionaryCounts {
+            same_dictionary: 1,
+            different_dictionary: 0,
+        })
+    );
+    assert_eq!(
+        s.item_change.dictionary_by_helper.get("TrashItems"),
+        Some(&HelperDictionaryCounts {
+            same_dictionary: 0,
+            different_dictionary: 1,
+        })
+    );
+    assert_eq!(
+        s.item_change.dictionary_by_helper.get("tick_helper"),
+        Some(&HelperDictionaryCounts {
+            same_dictionary: 0,
+            different_dictionary: 1,
+        })
+    );
+    assert_eq!(s.item_change.sample_dictionary_differs.len(), 2);
+}
+
+#[tokio::test]
+async fn compare_section4_first_set_contexts_hand_written_breakdowns_and_ndjson() {
+    let ctx = ServerContext::new();
+    set_item_compare_override_for_test(&ctx, Some(true), Some(None));
+    let ndjson_path = std::env::temp_dir().join(format!(
+        "evomu_delta_item_compare_sec4_{}_{}.ndjson",
+        std::process::id(),
+        ctx.now_unix()
+    ));
+    let _ = std::fs::remove_file(&ndjson_path);
+    set_item_compare_override_for_test(&ctx, Some(true), Some(Some(ndjson_path.clone())));
+
+    let char_id = ctx.db.with_snapshot(|s| *s.characters.keys().next().expect("demo seed char"));
+    let station_id = ctx
+        .db
+        .with_snapshot(|s| s.characters[&char_id].station_id.unwrap_or(60_003_760));
+    let user_id = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let template = ctx
+        .db
+        .with_snapshot(|s| s.items.values().next().expect("demo item").clone());
+    let ship_id = 91_800_010_i64;
+    let move_id = 91_800_020_i64;
+    let drone_id = 91_800_021_i64;
+    let del_cargo_id = 91_800_022_i64;
+    let hw_only_hangar_id = 91_800_023_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            item_with(&template, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            move_id,
+            item_with(&template, move_id, 34, char_id, station_id, InventoryFlag::Hangar, 40, false),
+        );
+        snap.items.insert(
+            del_cargo_id,
+            item_with(&template, del_cargo_id, 34, char_id, ship_id, InventoryFlag::Cargo, 15, false),
+        );
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.station_id = Some(station_id);
+            c.structure_id = None;
+            c.active_ship_id = ship_id;
+        }
+    });
+    ctx.db
+        .acquire_online_lock(user_id, 93_140, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+
+    let mut before_move = None;
+    let mut after_move = None;
+    let mut before_del = None;
+    let mut drone_after = None;
+
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("sec4_dispatch_mix", |tx| -> Result<(), eve_db::TxError> {
+                let prev_move = tx.snap.items.get(&move_id).expect("move item").clone();
+                let mut next_move = prev_move.clone();
+                next_move.location_id = ship_id;
+                next_move.flag = InventoryFlag::Cargo;
+                tx.snap.items.insert(move_id, next_move.clone());
+                before_move = Some(prev_move);
+                after_move = Some(next_move);
+
+                let drone = item_with(
+                    &template,
+                    drone_id,
+                    2454,
+                    char_id,
+                    ship_id,
+                    InventoryFlag::DroneBay,
+                    5,
+                    false,
+                );
+                tx.snap.items.insert(drone_id, drone.clone());
+                drone_after = Some(drone);
+
+                before_del = tx.snap.remove_system_cleanup_item(del_cargo_id);
+                Ok(())
+            })
+            .expect("tx");
+
+        // Matched first-set move (4 -> 5), matched non-first-set DroneBay (flag 87),
+        // and matched first-set deletion (before_flag=5) via Tombstone.
+        ctx.notify_item_mutation(char_id, before_move.as_ref(), after_move.as_ref());
+        ctx.notify_item_mutation(char_id, None, drone_after.as_ref());
+        ctx.notify_item_mutation(char_id, before_del.as_ref(), None);
+
+        // Standalone hand-written-only notify in first-set hangar flag 4 without DB item change.
+        let hw_rec = item_with(
+            &template,
+            hw_only_hangar_id,
+            34,
+            char_id,
+            station_id,
+            InventoryFlag::Hangar,
+            9,
+            false,
+        );
+        ctx.notify_item_mutation(char_id, None, Some(&hw_rec));
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+
+    log_item_compare_summary(&ctx);
+    let summary = item_compare_summary(&ctx);
+    let ic = &summary.item_change;
+
+    let hangar_to_cargo = "before=station,after=ship_or_container,flag=5,owner=character,singleton=false";
+    let cargo_del = "before=ship_or_container,after=recycling_loc_6,flag=0,before_flag=5,owner=character,singleton=false";
+    let drone_bay = "before=none,after=ship_or_container,flag=87,owner=character,singleton=false";
+    let hw_hangar = "before=none,after=station,flag=4,owner=character,singleton=false";
+
+    assert_eq!(ic.matched, 3, "ic={ic:#?}");
+    assert_eq!(ic.matched_by_class.get(hangar_to_cargo), Some(&1));
+    assert_eq!(ic.matched_by_class.get(cargo_del), Some(&1));
+    assert_eq!(ic.matched_by_class.get(drone_bay), Some(&1));
+    assert_eq!(
+        ic.matched_by_dispatch_method.get(crate::flight_recorder::UNKNOWN_RPC_LABEL),
+        Some(&3)
+    );
+
+    assert_eq!(ic.hand_written_only, 1, "ic={ic:#?}");
+    assert_eq!(ic.hand_written_only_by_class.get(hw_hangar), Some(&1));
+    assert_eq!(
+        ic.hand_written_only_by_dispatch_method
+            .get(crate::flight_recorder::UNKNOWN_RPC_LABEL),
+        Some(&1)
+    );
+
+    // First-set excludes DroneBay (flag 87) and keeps hangar/cargo move, deletion (before_flag=5),
+    // and hand-written hangar item.
+    assert_eq!(ic.first_set.matched, 2, "first_set={:#?}", ic.first_set);
+    assert_eq!(ic.first_set.matched_by_class.get(hangar_to_cargo), Some(&1));
+    assert_eq!(ic.first_set.matched_by_class.get(cargo_del), Some(&1));
+    assert_eq!(ic.first_set.matched_by_class.get(drone_bay), None);
+    assert_eq!(ic.first_set.hand_written_only, 1);
+    assert_eq!(ic.first_set.hand_written_only_by_class.get(hw_hangar), Some(&1));
+    assert_eq!(ic.contexts_by_class.get(hangar_to_cargo), Some(&1));
+    assert_eq!(ic.contexts_by_class.get(cargo_del), Some(&1));
+    assert_eq!(ic.contexts_by_class.get(drone_bay), Some(&1));
+    assert_eq!(ic.contexts_by_class.get(hw_hangar), Some(&1));
+    assert_eq!(ic.first_set.contexts_by_class.get(hangar_to_cargo), Some(&1));
+    assert_eq!(ic.first_set.contexts_by_class.get(drone_bay), None);
+
+    let ndjson_raw = std::fs::read_to_string(&ndjson_path).expect("read ndjson");
+    let _ = std::fs::remove_file(&ndjson_path);
+    let parsed: serde_json::Value = serde_json::from_str(
+        ndjson_raw.lines().last().expect("ndjson line"),
+    )
+    .expect("valid json");
+    assert_eq!(parsed["item_change"]["first_set"]["matched"], 2);
 }
