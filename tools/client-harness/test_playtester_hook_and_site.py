@@ -9261,6 +9261,133 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         self.assertEqual(clear_filter_calls, [True])
         self.assertEqual(submit_calls, ["OnReturn"])
 
+    def test_world_actions_block_on_disconnect_modal_and_distinguish_docked_vs_not_in_space(self):
+        hook = _load_hook_with_py2_stubs()
+        beyonce_calls = []
+        undock_calls = []
+        open_calls = []
+
+        lbl = types.SimpleNamespace(
+            text="Cluster shutdown in progress (ClusterShuttingDown): Daily cluster downtime",
+            destroyed=False,
+            display=True,
+            state=0,
+            children=[],
+        )
+        disc_modal = types.SimpleNamespace(
+            name="MessageBox",
+            windowID="MessageBox",
+            isModal=True,
+            destroyed=False,
+            display=True,
+            state=0,
+            children=[lbl],
+        )
+        uic_disc = types.SimpleNamespace(
+            layer=types.SimpleNamespace(
+                modal=types.SimpleNamespace(children=[disc_modal], destroyed=False, display=True, state=0),
+                abovemain=types.SimpleNamespace(children=[], destroyed=False, display=True, state=0),
+                main=types.SimpleNamespace(children=[], destroyed=False, display=True, state=0),
+            ),
+            registry=types.SimpleNamespace(
+                GetModalWindow=lambda: disc_modal,
+                modals=[disc_modal],
+                GetWindows=lambda: [disc_modal],
+            ),
+            uilib=None,
+        )
+        uic_clean = types.SimpleNamespace(
+            layer=types.SimpleNamespace(
+                modal=types.SimpleNamespace(children=[], destroyed=False, display=True, state=0),
+                abovemain=types.SimpleNamespace(children=[], destroyed=False, display=True, state=0),
+                main=types.SimpleNamespace(children=[], destroyed=False, display=True, state=0),
+            ),
+            registry=types.SimpleNamespace(GetModalWindow=lambda: None, modals=[], GetWindows=lambda: []),
+            uilib=None,
+        )
+        fake_beyonce = types.SimpleNamespace(CmdWarpToStuff=lambda *a, **kw: beyonce_calls.append(a))
+        fake_sm = types.SimpleNamespace(services={}, GetService=lambda _n: None)
+        snap = {"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}
+
+        # 1. Even when solarsystemid cleared during ClusterShutdown, active disconnect modal must win over "while docked".
+        torn_sess_with_sys2 = types.SimpleNamespace(
+            userid=1, charid=90000001, solarsystemid=None, solarsystemid2=30000142, stationid=None, structureid=None, mutating=0, changing=None
+        )
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": torn_sess_with_sys2}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=torn_sess_with_sys2)), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_disc), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value=snap), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook, "_open_client_window", side_effect=lambda *_a, **_kw: open_calls.append(True) or {"ok": True}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None), \
+             mock.patch.object(hook.H, "_undock_ship", create=True, side_effect=lambda *_a, **_kw: undock_calls.append(True)), \
+             mock.patch.object(hook.H, "_get_beyonce", create=True, return_value=fake_beyonce):
+            res_warp = hook._execute_action(fake_sm, {"type": "warp_to", "target": "Stargate (Perimeter)", "wait_ms": 0})
+            self.assertFalse(res_warp["ok"], res_warp)
+            self.assertIn("ModalBlocked(ClusterShuttingDown)", res_warp.get("error", ""))
+            self.assertNotIn("while docked", res_warp.get("error", ""))
+
+            res_undock = hook._execute_action(fake_sm, {"type": "undock", "wait_ms": 0})
+            self.assertFalse(res_undock["ok"], res_undock)
+            self.assertIn("ModalBlocked(ClusterShuttingDown)", res_undock.get("error", ""))
+
+            res_open = hook._execute_action(fake_sm, {"type": "open_neocom", "target": "inventory", "wait_ms": 0})
+            self.assertFalse(res_open["ok"], res_open)
+            self.assertIn("ModalBlocked(ClusterShuttingDown)", res_open.get("error", ""))
+
+            res_wait = hook._execute_action(fake_sm, {"type": "wait", "wait_ms": 0})
+            self.assertTrue(res_wait["ok"], res_wait)
+
+        self.assertEqual(beyonce_calls, [])
+        self.assertEqual(undock_calls, [])
+        self.assertEqual(open_calls, [])
+
+        # 2. Disconnected session without a modal returns SessionDisconnected(...) instead of "while docked".
+        disc_sess = types.SimpleNamespace(
+            userid=None, charid=None, solarsystemid=None, solarsystemid2=None, stationid=None, structureid=None, mutating=0, changing=None
+        )
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": disc_sess}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=disc_sess)), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_clean), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value=snap), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None), \
+             mock.patch.object(hook.H, "_get_beyonce", create=True, return_value=fake_beyonce):
+            res_disc_warp = hook._execute_action(fake_sm, {"type": "warp_to", "target": "Stargate (Perimeter)", "wait_ms": 0})
+            self.assertFalse(res_disc_warp["ok"], res_disc_warp)
+            self.assertIn("SessionDisconnected(no_userid)", res_disc_warp.get("error", ""))
+
+        # 3. Without disconnect modal/no_userid: genuinely docked reports "while docked", missing solarsystemid reports "while not in space".
+        docked_sess = types.SimpleNamespace(
+            userid=1, charid=90000001, solarsystemid=None, solarsystemid2=30000142, stationid=60003760, structureid=None, mutating=0, changing=None
+        )
+        no_sys_sess = types.SimpleNamespace(
+            userid=1, charid=90000001, solarsystemid=None, solarsystemid2=30000142, stationid=None, structureid=None, mutating=0, changing=None
+        )
+        for sess_case, expected_substr in (
+            (docked_sess, "cannot run space_command while docked"),
+            (no_sys_sess, "cannot run space_command while not in space"),
+        ):
+            with mock.patch.dict(sys.modules, {"uthread": None}), \
+                 mock.patch.dict(builtins.__dict__, {"session": sess_case}, clear=False), \
+                 mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_case)), \
+                 mock.patch.object(hook, "_get_uicore", return_value=uic_clean), \
+                 mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+                 mock.patch.object(hook, "_install_warp_telemetry"), \
+                 mock.patch.object(hook, "_get_state_snapshot", return_value=snap), \
+                 mock.patch.object(hook, "_settle_after_action", return_value=0), \
+                 mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None), \
+                 mock.patch.object(hook.H, "_get_beyonce", create=True, return_value=fake_beyonce):
+                res_case = hook._execute_action(fake_sm, {"type": "warp_to", "target": "Stargate (Perimeter)", "wait_ms": 0})
+                self.assertFalse(res_case["ok"], res_case)
+                self.assertIn(expected_substr, res_case.get("error", ""))
+
 
 if __name__ == "__main__":
     unittest.main()
