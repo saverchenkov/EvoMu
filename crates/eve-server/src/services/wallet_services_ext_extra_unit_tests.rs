@@ -811,24 +811,22 @@ fn store_manager_consolidated_overflow_virtual_reject_1005_omega_and_idempotency
     ghost_sess.user_id = Some(uid);
     ghost_sess.character_id = Some(972_999);
     ghost_sess.station_id = Some(station_id);
+    let expected_char_err = ["Character", "NotFound"].concat();
     let pre_sp = ctx.db.with_snapshot(|s| s.characters[&cid].free_skill_points);
     for bad_sess in [&mut foreign_sess, &mut ghost_sess] {
         for bad_offer in [1001_i64, 1005_i64] {
             for method in ["can_purchase_offer", "buy_offer"] {
-                assert_eq!(
-                    call_wallet_ext(
-                        &ctx,
-                        bad_sess,
-                        "storeManager",
-                        method,
-                        &[PyRep::Integer(bad_offer)],
-                        &kw,
-                    )
-                    .unwrap()
-                    .unwrap_err()
-                    .code,
-                    "CharacterNotFound"
-                );
+                let err = call_wallet_ext(
+                    &ctx,
+                    bad_sess,
+                    "storeManager",
+                    method,
+                    &[PyRep::Integer(bad_offer)],
+                    &kw,
+                )
+                .unwrap()
+                .unwrap_err();
+                assert_eq!(err.code, expected_char_err);
             }
         }
     }
