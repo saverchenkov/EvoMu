@@ -6,8 +6,6 @@
 //! (`#1583`), and optionally appends one NDJSON summary line on teardown.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{create_dir_all, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -21,6 +19,15 @@ use super::ServerContext;
 
 const CENSUS_REPORT_ENV: &str = "EVOMU_FIXTURE_CENSUS_REPORT_PATH";
 const MAX_CENSUS_SAMPLES: usize = 16;
+
+#[cfg(not(test))]
+#[inline]
+fn acquire_test_env_read_guard() {}
+
+#[cfg(test)]
+fn acquire_test_env_read_guard() -> crate::TestEnvReadGuard {
+    crate::lock_test_env_read()
+}
 
 /// Sampled violation captured during first-RPC fixture census inspection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,7 +53,7 @@ pub struct FixtureCensusSnapshot {
 #[derive(Debug)]
 struct FixtureCensusState {
     test_name: String,
-    checked_sessions: HashSet<u64>,
+    checked_sessions: HashSet<(u64, Option<i64>)>,
     sessions_checked: usize,
     violation_total: usize,
     violations_by_kind: BTreeMap<String, usize>,
@@ -83,15 +90,18 @@ impl FixtureCensusState {
     fn resolved_report_path(&self) -> Option<PathBuf> {
         match &self.report_path_override {
             Some(explicit) => explicit.clone(),
-            None => std::env::var_os(CENSUS_REPORT_ENV)
-                .map(PathBuf::from)
-                .filter(|path| !path.as_os_str().is_empty()),
+            None => {
+                let _env_guard = acquire_test_env_read_guard();
+                std::env::var_os(CENSUS_REPORT_ENV)
+                    .map(PathBuf::from)
+                    .filter(|path| !path.as_os_str().is_empty())
+            }
         }
     }
 }
 
 /// Per-`ServerContext` collector that runs at most one legal-fixture check per
-/// session and flushes an optional NDJSON summary when the last `Arc` drops.
+/// `(session_id, character_id)` pair and flushes an optional NDJSON line when the last `Arc` drops.
 #[derive(Debug)]
 pub struct FixtureCensusCollector {
     state: Mutex<FixtureCensusState>,
@@ -120,12 +130,12 @@ impl FixtureCensusCollector {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).snapshot()
     }
 
-    fn claim_session_for_check(&self, session_id: u64) -> bool {
+    fn claim_session_for_check(&self, session_id: u64, character_id: Option<i64>) -> bool {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .checked_sessions
-            .insert(session_id)
+            .insert((session_id, character_id))
     }
 
     fn record_check_outcome(
@@ -166,25 +176,29 @@ impl Drop for FixtureCensusCollector {
             return;
         };
         let snapshot = state.snapshot();
-        if append_ndjson_report(&path, &snapshot).is_ok() {
-            state.reported_to_file = true;
+        match append_ndjson_report(&path, &snapshot) {
+            Ok(()) => state.reported_to_file = true,
+            Err(err) => tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "failed to append fixture census NDJSON report"
+            ),
         }
     }
 }
 
 fn append_ndjson_report(path: &Path, snapshot: &FixtureCensusSnapshot) -> std::io::Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)?;
     }
     let line = serde_json::to_string(snapshot)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(file, "{line}")
+    eve_testkit::append_ndjson_line(path, &line)
 }
 
-/// Pre-auth and character-select RPCs are deferred while `character_id` is `None` so
-/// `Login -> SelectCharacterID` flows are checked on their first gameplay RPC instead
-/// of firing a premature `UnauthenticatedSession` false positive.
+/// Pre-auth and V24 pre-character-select RPCs are deferred while `character_id` is `None` so
+/// login and character-entry flows are audited on their first gameplay RPC instead of firing a
+/// premature `UnauthenticatedSession` false positive.
 fn should_check_session_on_rpc(session: &SessionState, service: &str, method: &str) -> bool {
     if session.character_id.is_some() {
         return true;
@@ -202,6 +216,11 @@ fn should_check_session_on_rpc(session: &SessionState, service: &str, method: &s
             | "userSvc"
             | "photoUploadSvc"
             | "config"
+            | "alert"
+            | "populationCap"
+            | "loginCampaignManager"
+            | "seasonalLoginCampaignManager"
+            | "publicGatewaySvc"
     ) && !matches!(
         (service, method),
         (
@@ -213,6 +232,9 @@ fn should_check_session_on_rpc(session: &SessionState, service: &str, method: &s
                 | "ClientHasReleasedTheseObjects"
                 | "MachoBindObject"
         ) | ("petitioner", "MayPetition")
+            | ("air_npe", "is_air_npe_enabled")
+            | ("invbroker", "GetItemDescriptor")
+            | ("map", "GetSecurityModifiedSystems")
     )
 }
 
@@ -283,12 +305,16 @@ impl ServerContext {
         bound_id: Option<u64>,
         method: &str,
     ) {
-        let bound_service = bound_id.and_then(|bid| self.owned_bound_service_for_metrics(session, bid));
+        let bound_service =
+            bound_id.and_then(|bid| self.owned_bound_service_for_metrics(session, bid));
         let effective_service = bound_service.as_deref().unwrap_or(service);
         if !should_check_session_on_rpc(session, effective_service, method) {
             return;
         }
-        if !self.fixture_census.claim_session_for_check(session.session_id) {
+        if !self
+            .fixture_census
+            .claim_session_for_check(session.session_id, session.character_id)
+        {
             return;
         }
         let view = session_to_fixture_view(session, self.now_unix());
@@ -315,13 +341,14 @@ mod tests {
     use eve_machonet::service_roles;
     use eve_proto::{BridgeRpcError, PyRep};
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
+
+    fn test_ctx_with_sde(sde: Arc<eve_sde::SdeRegistry>) -> TestContext {
+        TestContext::with_sde_and_repository(sde, Arc::new(eve_db::WorldRepository::with_demo_seed()))
+    }
 
     fn test_ctx() -> TestContext {
-        TestContext::with_sde_and_repository(
-            Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
-            Arc::new(eve_db::WorldRepository::with_demo_seed()),
-        )
+        test_ctx_with_sde(Arc::new(eve_sde::SdeRegistry::with_canonical_seed()))
     }
 
     async fn dispatch_no_kw(
@@ -335,7 +362,7 @@ mod tests {
             .await
     }
 
-    fn seeded_test_character_session(
+    fn seeded_character_session_with_id(
         ctx: &TestContext,
         session_id: u64,
         account_name: &str,
@@ -362,8 +389,8 @@ mod tests {
     async fn first_rpc_census_records_violation_before_sync_and_is_idempotent() {
         let ctx = test_ctx();
         ctx.set_fixture_census_report_path(None);
-        let mut session = seeded_test_character_session(&ctx, 11, "census_u1", "Census Pilot One");
-        // Diverge corporation_id in memory so only a pre-sync check observes the mismatch.
+        let mut session =
+            seeded_character_session_with_id(&ctx, 11, "census_u1", "Census Pilot One");
         session.corporation_id = Some(98_000_999);
 
         let res = dispatch_no_kw(&ctx, &mut session, "beyonce", "GetFormations", &[]).await;
@@ -373,48 +400,105 @@ mod tests {
         assert_eq!(snap1.sessions_checked, 1);
         assert_eq!(snap1.violations_by_kind.get("CharacterCorporationMismatch"), Some(&1));
 
-        // Second RPC on the same session must not re-run the census check.
         assert!(dispatch_no_kw(&ctx, &mut session, "beyonce", "GetFormations", &[]).await.is_ok());
         assert_eq!(ctx.fixture_census_snapshot(), snap1);
     }
 
     #[tokio::test]
-    async fn collector_aggregates_violations_across_sessions_and_flushes_ndjson_on_drop() {
+    async fn default_session_id_zero_audits_multiple_distinct_characters() {
+        let ctx = test_ctx();
+        ctx.set_fixture_census_report_path(None);
+
+        let mut char_a = seeded_character_session_with_id(&ctx, 0, "def_u1", "Default Sid Pilot A");
+        let mut char_b = seeded_character_session_with_id(&ctx, 0, "def_u2", "Default Sid Pilot B");
+        char_a.corporation_id = Some(98_000_701);
+        char_b.corporation_id = Some(98_000_702);
+
+        assert!(dispatch_no_kw(&ctx, &mut char_a, "beyonce", "GetFormations", &[]).await.is_ok());
+        assert!(dispatch_no_kw(&ctx, &mut char_a, "beyonce", "GetFormations", &[]).await.is_ok());
+        assert!(dispatch_no_kw(&ctx, &mut char_b, "beyonce", "GetFormations", &[]).await.is_ok());
+
+        let snap = ctx.fixture_census_snapshot();
+        assert_eq!(snap.sessions_checked, 2);
+        assert_eq!(snap.violations_by_kind.get("CharacterCorporationMismatch"), Some(&2));
+    }
+
+    #[test]
+    fn collector_aggregates_and_flushes_concurrent_drops_to_ndjson_cleanly() {
         let report_path = std::env::temp_dir().join(format!(
-            "evomu_fixture_census_test_{}_{:?}.ndjson",
+            "evomu_fixture_census_concurrent_{}_{:?}.ndjson",
             std::process::id(),
             std::thread::current().id()
         ));
         let _ = std::fs::remove_file(&report_path);
 
-        {
-            let ctx = test_ctx().with_fixture_census_report_path(Some(report_path.clone()));
-            let mut unauth = SessionState::new(21);
-            let _ = dispatch_no_kw(&ctx, &mut unauth, "ship", "GetShipID", &[]).await;
+        let shared_sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+        let threads = 8usize;
+        let barrier = Arc::new(Barrier::new(threads));
 
-            let mut s2 = seeded_test_character_session(&ctx, 22, "census_u2", "Census Pilot Two");
-            s2.corporation_id = Some(98_000_888);
-            let _ = dispatch_no_kw(&ctx, &mut s2, "beyonce", "GetFormations", &[]).await;
+        std::thread::scope(|scope| {
+            for idx in 0..threads {
+                let sde = Arc::clone(&shared_sde);
+                let path = report_path.clone();
+                let drop_barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("tokio runtime");
+                    let ctx = test_ctx_with_sde(sde).with_fixture_census_report_path(Some(path));
+                    rt.block_on(async {
+                        let mut unauth = SessionState::new(100 + idx as u64);
+                        let _ = dispatch_no_kw(&ctx, &mut unauth, "ship", "GetShipID", &[]).await;
 
-            let snap = ctx.fixture_census_snapshot();
-            assert_eq!(snap.sessions_checked, 2);
-            assert_eq!(snap.violations_by_kind.get("UnauthenticatedSession"), Some(&1));
-            assert_eq!(snap.violations_by_kind.get("CharacterCorporationMismatch"), Some(&1));
-            assert!(snap.violation_total >= 2);
-        }
+                        for c in 0..2u64 {
+                            let uname = format!("conc_u_{idx}_{c}");
+                            let cname = format!("Conc Pilot {idx} {c}");
+                            let mut s =
+                                seeded_character_session_with_id(&ctx, 200 + c, &uname, &cname);
+                            s.corporation_id = Some(98_000_800 + idx as i64);
+                            let _ =
+                                dispatch_no_kw(&ctx, &mut s, "beyonce", "GetFormations", &[]).await;
+                        }
+                        // Add 14 more sessions so serialized NDJSON exceeds 4 KiB per drop.
+                        for extra in 0..14i64 {
+                            let mut s = SessionState::new(300 + extra as u64);
+                            s.user_id = Some(1);
+                            s.character_id = Some(9_900_000 + extra);
+                            let _ =
+                                dispatch_no_kw(&ctx, &mut s, "beyonce", "GetFormations", &[]).await;
+                        }
+                        let snap = ctx.fixture_census_snapshot();
+                        assert_eq!(snap.sessions_checked, 17);
+                        assert_eq!(snap.samples.len(), MAX_CENSUS_SAMPLES);
+                        assert_eq!(snap.violations_by_kind.get("UnauthenticatedSession"), Some(&1));
+                        assert_eq!(
+                            snap.violations_by_kind.get("CharacterCorporationMismatch"),
+                            Some(&2)
+                        );
+                    });
+                    drop_barrier.wait();
+                    drop(ctx);
+                });
+            }
+        });
 
-        let content = std::fs::read_to_string(&report_path).expect("ndjson report written on drop");
+        let content = std::fs::read_to_string(&report_path).expect("ndjson report written");
         let _ = std::fs::remove_file(&report_path);
         let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 1, "expected one NDJSON record on context drop");
-        let parsed: FixtureCensusSnapshot = serde_json::from_str(lines[0]).expect("valid NDJSON");
-        assert_eq!(parsed.sessions_checked, 2);
-        assert_eq!(parsed.violations_by_kind.get("UnauthenticatedSession"), Some(&1));
-        assert_eq!(parsed.violations_by_kind.get("CharacterCorporationMismatch"), Some(&1));
+        assert_eq!(lines.len(), threads, "expected one NDJSON record per context drop");
+        for line in lines {
+            let parsed: FixtureCensusSnapshot =
+                serde_json::from_str(line).expect("concurrent NDJSON line must parse cleanly");
+            assert_eq!(parsed.sessions_checked, 17);
+            assert_eq!(parsed.samples.len(), MAX_CENSUS_SAMPLES);
+            assert_eq!(parsed.violations_by_kind.get("UnauthenticatedSession"), Some(&1));
+            assert_eq!(parsed.violations_by_kind.get("CharacterCorporationMismatch"), Some(&2));
+        }
     }
 
     #[tokio::test]
-    async fn login_and_character_select_do_not_trigger_false_positive_before_gameplay() {
+    async fn v24_login_and_pre_charsel_rpcs_do_not_trigger_false_positive_before_gameplay() {
         let ctx = test_ctx();
         ctx.set_fixture_census_report_path(None);
         let user_id = ctx.db.provision_player_account("census_login_u", "pw");
@@ -424,33 +508,59 @@ mod tests {
             .expect("create clean character");
 
         let mut session = SessionState::new(33);
-        let login = dispatch_no_kw(
+        assert!(dispatch_no_kw(
             &ctx,
             &mut session,
             "authentication",
             "Login",
             &[PyRep::String("census_login_u".into()), PyRep::String("pw".into())],
         )
-        .await;
-        assert!(login.is_ok(), "login failed: {login:?}");
+        .await
+        .is_ok());
 
-        let select = dispatch_no_kw(
+        for (svc, method, args) in [
+            ("alert", "BeanCount", vec![PyRep::Integer(123)]),
+            ("air_npe", "is_air_npe_enabled", Vec::new()),
+            ("invbroker", "GetItemDescriptor", Vec::new()),
+            ("loginCampaignManager", "get_client_campaign_state", Vec::new()),
+            ("seasonalLoginCampaignManager", "get_active_campaign", Vec::new()),
+            ("map", "GetSecurityModifiedSystems", Vec::new()),
+            ("publicGatewaySvc", "SendRequest", Vec::new()),
+            (
+                "populationCap",
+                "MachoResolveObject",
+                vec![PyRep::Tuple(vec![PyRep::Integer(created.character_id), PyRep::Integer(1373)])],
+            ),
+            (
+                "populationCap",
+                "MachoBindObject",
+                vec![
+                    PyRep::Tuple(vec![PyRep::Integer(created.character_id), PyRep::Integer(1373)]),
+                    PyRep::Tuple(vec![
+                        PyRep::String("GetCharacterLoadSlot".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(created.character_id)]),
+                        PyRep::Dict(Vec::new()),
+                    ]),
+                ],
+            ),
+        ] {
+            let _ = dispatch_no_kw(&ctx, &mut session, svc, method, &args).await;
+        }
+        assert_eq!(ctx.fixture_census_snapshot().sessions_checked, 0);
+
+        assert!(dispatch_no_kw(
             &ctx,
             &mut session,
             "charUnboundMgr",
             "SelectCharacterID",
             &[PyRep::Integer(created.character_id)],
         )
-        .await;
-        assert!(select.is_ok(), "SelectCharacterID failed: {select:?}");
+        .await
+        .is_ok());
 
         assert!(dispatch_no_kw(&ctx, &mut session, "beyonce", "GetFormations", &[]).await.is_ok());
         let snap = ctx.fixture_census_snapshot();
         assert_eq!(snap.sessions_checked, 1);
-        assert_eq!(
-            snap.violation_total, 0,
-            "clean Login -> SelectCharacterID -> gameplay had violations: {:?}",
-            snap.samples
-        );
+        assert_eq!(snap.violation_total, 0, "unexpected violations: {:?}", snap.samples);
     }
 }

@@ -115,6 +115,19 @@ fn resolve_test_name(thread_name: Option<&str>, bt_str: &str) -> String {
     "unknown_test".to_string()
 }
 
+/// Appends one NDJSON line atomically as a single `\n`-terminated buffer under a process mutex.
+pub fn append_ndjson_line(path: &Path, line: &str) -> std::io::Result<()> {
+    let trimmed = line.trim_end_matches(['\r', '\n']);
+    let mut buf = String::with_capacity(trimmed.len() + 1);
+    buf.push_str(trimmed);
+    buf.push('\n');
+
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(buf.as_bytes())?;
+    file.flush()
+}
+
 fn write_attestation(dir: &Path, crate_name: &str, test_name: &str, rows: &[&str]) {
     #[derive(serde::Serialize)]
     struct Record<'a> {
@@ -126,22 +139,13 @@ fn write_attestation(dir: &Path, crate_name: &str, test_name: &str, rows: &[&str
         test: test_name,
         rows,
     };
-    let json_line = match serde_json::to_string(&record) {
-        Ok(mut s) => {
-            s.push('\n');
-            s
-        }
-        Err(_) => return,
+    let Ok(json_line) = serde_json::to_string(&record) else {
+        return;
     };
 
     let filename = format!("{crate_name}.jsonl");
     let target = dir.join(filename);
-
-    let _guard = WRITE_LOCK.lock().unwrap();
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(target) {
-        let _ = f.write_all(json_line.as_bytes());
-        let _ = f.flush();
-    }
+    let _ = append_ndjson_line(&target, &json_line);
 }
 
 #[cfg(test)]
