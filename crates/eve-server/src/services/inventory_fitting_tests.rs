@@ -2133,3 +2133,133 @@ async fn invbroker_add_insufficient_cpu_encodes_module_name_and_reason() {
     assert_eq!(mod_name_val, Some(ab_name.as_str()));
     assert_eq!(reason_val, Some(err.message.as_str()));
 }
+
+#[tokio::test]
+async fn seeded_pilot_90000001_fits_core_probe_launcher_i_with_starter_astrometrics() {
+    let sde = shared_sde();
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::clone(&sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+
+    let char_id = 90_000_001i64;
+    let launcher_type_id = 17_938u32; // Core Probe Launcher I (requires Astrometrics 3412 L1)
+    let launcher_item_id = 96_509_601i64;
+    let missing_launcher_item_id = 96_509_602i64;
+
+    let (station_id, ship_id, astrometrics_level) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id).expect("seeded pilot 90000001");
+        let st_id = ch.station_id.expect("seeded station");
+        let sh_id = ch.active_ship_id;
+        let astro_lvl = snap
+            .skills
+            .get(&char_id)
+            .and_then(|sk| sk.get(&3412))
+            .map(|rec| rec.level)
+            .unwrap_or(0);
+        for item_id in [launcher_item_id, missing_launcher_item_id] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id: launcher_type_id,
+                    owner_id: char_id,
+                    location_id: st_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        (st_id, sh_id, astro_lvl)
+    });
+    assert!(
+        astrometrics_level >= 1,
+        "seeded pilot 90000001 must start with Astrometrics (3412) >= level 1, got {astrometrics_level}"
+    );
+
+    let mut session = SessionState::default();
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_170);
+    session.station_id = Some(station_id);
+    session.solar_system_id = Some(30_000_142);
+    session.ship_id = Some(ship_id);
+
+    let fit_res = handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(launcher_item_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::HiSlot2 as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("seeded pilot 90000001 should fit Core Probe Launcher I via starter Astrometrics");
+    assert_eq!(fit_res.dict_get("itemID"), Some(&PyRep::Integer(launcher_item_id)));
+    assert_eq!(
+        fit_res.dict_get("flagID"),
+        Some(&PyRep::Integer(InventoryFlag::HiSlot2 as i64))
+    );
+    let fitted_loc = ctx
+        .db
+        .with_snapshot(|s| s.items.get(&launcher_item_id).map(|i| (i.location_id, i.flag)));
+    assert_eq!(fitted_loc, Some((ship_id, InventoryFlag::HiSlot2)));
+
+    // Negative control: unfit back to station hangar and remove Astrometrics (3412) to verify ModuleFitFailed.
+    let unfit_res = handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(launcher_item_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("unfitting Core Probe Launcher I back to Hangar succeeds");
+    assert_eq!(
+        unfit_res.dict_get("flagID"),
+        Some(&PyRep::Integer(InventoryFlag::Hangar as i64))
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sk) = snap.skills.get_mut(&char_id) {
+            sk.remove(&3412);
+        }
+    });
+    let err = handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(missing_launcher_item_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::HiSlot2 as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect_err("fitting Core Probe Launcher I without Astrometrics must fail");
+    assert_eq!(err.code, "FittingValidationFailed");
+    assert!(
+        err.message.contains("3412"),
+        "expected missing skill 3412 reason, got {:?}",
+        err.message
+    );
+}

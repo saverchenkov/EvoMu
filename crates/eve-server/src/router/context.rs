@@ -1269,7 +1269,7 @@ impl ServerContext {
         self.living_world.seed_default_convoys();
         self.db.with_mut_snapshot(|snap| {
             if snap.characters.is_empty() {
-                eve_db::WorldRepository::populate_demo_snapshot(snap);
+                eve_db::WorldRepository::populate_demo_snapshot_with_sde(snap, &self.sde);
             }
             if let Some(st) = snap.system_states.get_mut(&30_002_813) {
                 st.wormhole_remaining_mass_kg = 2_000_000_000.0;
