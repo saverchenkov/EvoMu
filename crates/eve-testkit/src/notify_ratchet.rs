@@ -138,7 +138,7 @@ pub fn strip_cfg_test_items(stripped_src: &str) -> String {
     String::from_utf8(bytes).expect("ASCII cfg(test) masking preserves UTF-8")
 }
 
-fn find_cfg_test_attr_end(bytes: &[u8], hash_idx: usize) -> Option<usize> {
+pub(crate) fn find_cfg_test_attr_end(bytes: &[u8], hash_idx: usize) -> Option<usize> {
     let n = bytes.len();
     let mut j = hash_idx + 2;
     let mut bracket_depth = 1usize;

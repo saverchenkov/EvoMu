@@ -665,8 +665,7 @@ impl WorldRepository {
         }
     }
 
-    pub fn with_demo_seed() -> Self {
-        let initial_snap = Self::create_demo_snapshot();
+    fn build_demo_repo_in_memory(initial_snap: WorldStateSnapshot) -> Self {
         let mut conn = rusqlite::Connection::open_in_memory()
             .expect("open in-memory SQLite connection for WorldRepository");
         sqlite_store::apply_migrations(&conn).expect("apply SQLite migrations for WorldRepository");
@@ -677,13 +676,35 @@ impl WorldRepository {
                 .expect("initialize per-deployment JWT signing secret");
         let entity_block = initial_snap.next_entity_id.max(200_000_000);
 
-        let repo = Self::from_parts(
+        Self::from_parts(
             initial_snap,
             conn,
             entity_block,
             None,
             AuthRuntimeState::new(jwt_secret),
-        );
+        )
+    }
+
+    /// Creates an ephemeral in-memory demo-seeded `WorldRepository` seeded from `sde` without
+    /// reading `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, `EVOMU_DISABLE_DEMO_SEED`,
+    /// `EVOMU_SDE_PATH`, `CARGO_MANIFEST_DIR`, or the process-global `SDE_CACHE` (`#1583` BF-01).
+    pub fn with_demo_seed_in_memory_for_sde(sde: &eve_sde::SdeRegistry) -> Self {
+        Self::build_demo_repo_in_memory(Self::create_demo_snapshot_with_sde(Some(sde)))
+    }
+
+    /// Creates an ephemeral in-memory demo-seeded `WorldRepository` without consulting
+    /// `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, or `EVOMU_DISABLE_DEMO_SEED` (`#1583` PG-01).
+    ///
+    /// Note: this still calls [`Self::create_demo_snapshot`], which reads `EVOMU_SDE_PATH` /
+    /// `SdeRegistry::default_db_path()` and `SdeRegistry::open_shared()` (`SDE_CACHE`) to populate
+    /// racial starter skills (`#1582`); callers requiring full SDE/env isolation must use
+    /// [`Self::with_demo_seed_in_memory_for_sde`].
+    pub fn with_demo_seed_in_memory() -> Self {
+        Self::build_demo_repo_in_memory(Self::create_demo_snapshot())
+    }
+
+    pub fn with_demo_seed() -> Self {
+        let repo = Self::build_demo_repo_in_memory(Self::create_demo_snapshot());
 
         #[cfg(any(test, feature = "legacy-json-snapshot"))]
         {
