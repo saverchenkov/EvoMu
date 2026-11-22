@@ -1176,6 +1176,35 @@ _INERT_TOOLTIP_CLICK_BASE_CLASSES = (
 )
 
 
+def _find_defining_class_attr(node, attr_name):
+    for cls in getattr(type(node), "__mro__", ()):
+        cls_dict = getattr(cls, "__dict__", {})
+        if attr_name in cls_dict:
+            return (cls.__name__, cls_dict[attr_name])
+    return (None, None)
+
+
+def _is_inert_tooltip_click_handler(node, resolved, inst_dict, inert_on_click):
+    h_fn, h_args, h_label = resolved
+    if h_args or h_label != "OnClick" or "OnClick" in inst_dict:
+        return False
+    if inert_on_click:
+        partial_func = getattr(h_fn, "func", None)
+        partial_args = getattr(h_fn, "args", None)
+        if getattr(partial_func, "__name__", None) == "on_click_wrapper" and partial_args == (node,):
+            return True
+    defining_cls, cls_raw = _find_defining_class_attr(node, "OnClick")
+    if defining_cls not in _INERT_TOOLTIP_CLICK_BASE_CLASSES:
+        return False
+    h_func = getattr(h_fn, "__func__", None)
+    cls_func = getattr(cls_raw, "__func__", cls_raw)
+    return (
+        getattr(h_fn, "__self__", None) is node
+        and h_func is not None
+        and h_func is cls_func
+    )
+
+
 def _is_tooltip_panel_trigger(node):
     if node is None:
         return False
@@ -1188,19 +1217,30 @@ def _is_tooltip_panel_trigger(node):
         return False
     if callable(getattr(node, "func", None)) or callable(getattr(node, "cmd", None)):
         return False
-    if callable(getattr(node, "on_click", None)) or _resolve_carbon_click_handler(node, "OnClick") is not None:
-        return False
     inst_dict = getattr(node, "__dict__", None) or {}
+    inert_on_click = False
+    if callable(getattr(node, "on_click", None)):
+        oc_cls, _ = _find_defining_class_attr(node, "on_click")
+        if (
+            "on_click" not in inst_dict
+            and oc_cls in _INERT_TOOLTIP_CLICK_BASE_CLASSES
+            and hasattr(node, "_on_click")
+            and not callable(getattr(node, "_on_click", None))
+        ):
+            inert_on_click = True
+        else:
+            return False
+    resolved_click = _resolve_carbon_click_handler(node, "OnClick")
+    if resolved_click is not None and not _is_inert_tooltip_click_handler(
+        node, resolved_click, inst_dict, inert_on_click
+    ):
+        return False
     for hname in ("OnClick", "Click", "OnMouseDown"):
         hv = inst_dict.get(hname)
         if callable(hv) or (isinstance(hv, tuple) and len(hv) >= 1 and callable(hv[0])):
             return False
     for hname in ("Click", "OnClick", "OnMouseDown"):
-        defining_cls = None
-        for cls in getattr(type(node), "__mro__", ()):
-            if hname in getattr(cls, "__dict__", {}):
-                defining_cls = cls.__name__
-                break
+        defining_cls, _ = _find_defining_class_attr(node, hname)
         if defining_cls is not None and defining_cls not in _INERT_TOOLTIP_CLICK_BASE_CLASSES:
             return False
     return True
@@ -3844,6 +3884,39 @@ def _run_widget_click_callable(fn, invoke_args, label, node, cmd_pre, clicked_pi
     return label
 
 
+def _get_carbon_mouse_button(right_click):
+    try:
+        import carbonui.uiconst as _uiconst
+        return getattr(_uiconst, "MOUSERIGHT", 1) if right_click else getattr(_uiconst, "MOUSELEFT", 0)
+    except Exception:
+        return 1 if right_click else 0
+
+
+def _accepts_extra_positional_arg(fn, bound_arg_count=0):
+    """Return False only when fn's Python signature strictly cannot take another positional arg."""
+    target = fn
+    consumed = int(bound_arg_count or 0)
+    while getattr(target, "func", None) is not None and hasattr(target, "args"):
+        consumed += len(getattr(target, "args", ()) or ())
+        target = target.func
+    if getattr(target, "__self__", None) is not None and getattr(target, "__func__", None) is not None:
+        consumed += 1
+        target = target.__func__
+    code = getattr(target, "__code__", None) or getattr(target, "func_code", None)
+    if code is None:
+        return True
+    if getattr(code, "co_flags", 0) & 0x04:
+        return True
+    return (getattr(code, "co_argcount", 0) - consumed) >= 1
+
+
+def _mouse_down_invoke_args(fn, base_args, right_click):
+    arg_seq = tuple(base_args) if base_args else ()
+    if _accepts_extra_positional_arg(fn, len(arg_seq)):
+        return arg_seq + (_get_carbon_mouse_button(right_click),)
+    return arg_seq
+
+
 def _resolve_double_click_entry_action(target_node):
     """Resolve double-click callback on target_node via FindEventHandler, attributes, or controller."""
     resolved_dbl = _resolve_carbon_click_handler(target_node, "OnDblClick")
@@ -3862,6 +3935,11 @@ def _resolve_double_click_entry_action(target_node):
         dbl_fn = getattr(target_node, dbl_attr, None)
         if callable(dbl_fn):
             return (dbl_attr, dbl_fn)
+        if isinstance(dbl_fn, tuple) and len(dbl_fn) >= 1 and callable(dbl_fn[0]):
+            return (
+                "%s(tuple)" % (dbl_attr,),
+                (lambda _fn=dbl_fn[0], _args=dbl_fn[1:]: _fn(*_args)),
+            )
     ctrl_obj = getattr(target_node, "controller", None)
     if ctrl_obj is not None and callable(getattr(ctrl_obj, "on_double_click", None)):
         return ("controller.on_double_click", ctrl_obj.on_double_click)
@@ -4316,6 +4394,8 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
             resolved = _resolve_carbon_click_handler(node, target_name)
             if resolved is not None:
                 h_fn, h_args, h_label = resolved
+                if target_name == "OnMouseDown":
+                    h_args = _mouse_down_invoke_args(h_fn, h_args, right_click)
                 return _run_widget_click_callable(
                     h_fn, h_args, h_label, node, cmd_pre, _clicked_pinned_tp
                 )
@@ -4327,13 +4407,20 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
             except Exception:
                 pass
         fn = getattr(node, target_name, None)
+        invoke_fn = None
+        invoke_args = ()
+        invoke_label = target_name
         if callable(fn):
+            invoke_fn = fn
+        elif isinstance(fn, tuple) and len(fn) >= 1 and callable(fn[0]):
+            invoke_fn = fn[0]
+            invoke_args = fn[1:]
+            invoke_label = "%s(tuple)" % (target_name,)
+        if invoke_fn is not None:
+            if target_name == "OnMouseDown":
+                invoke_args = _mouse_down_invoke_args(invoke_fn, invoke_args, right_click)
             return _run_widget_click_callable(
-                fn, (), target_name, node, cmd_pre, _clicked_pinned_tp
-            )
-        if isinstance(fn, tuple) and len(fn) >= 1 and callable(fn[0]):
-            return _run_widget_click_callable(
-                fn[0], fn[1:], "%s(tuple)" % (target_name,), node, cmd_pre, _clicked_pinned_tp
+                invoke_fn, invoke_args, invoke_label, node, cmd_pre, _clicked_pinned_tp
             )
     if raised_wnd_name:
         return "RaiseWindow(%s)" % (raised_wnd_name,)
