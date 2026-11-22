@@ -3208,4 +3208,15 @@ fn war_timestamps_use_windows_filetime_for_all_war_ally_neg_invite_and_treaty_fi
         panic!("expected 4-tuple from GetBaseInfo for retracted mutual war");
     };
     assert_eq!(dict_i64(&retracted_base[0], "retracted"), Some(ft_invite));
+    let second_retract = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warsInfoMgr",
+        "RetractMutualWar",
+        &[PyRep::Integer(mwar_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(second_retract.code, "WarAlreadyEnding");
 }

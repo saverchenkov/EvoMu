@@ -971,41 +971,12 @@ pub(super) fn handle_wars(
                 return err("CorpRoleDenied", "Acting on war negotiations requires CEO or Director role");
             }
             let neg_id = arg_i64(0).unwrap_or(0);
-            let Some((n, w_opt)) = ctx.db.with_snapshot(|snap| {
-                let n = snap
-                    .war_state
-                    .negotiations
-                    .iter()
-                    .find(|n| n.id == neg_id && n.status == "Offered")?
-                    .clone();
-                let w = snap.wars.get(&n.war_id).cloned();
-                Some((n, w))
-            }) else {
-                return err("NegotiationNotFound", format!("No open negotiation {neg_id}"));
-            };
-            let Some(w) = w_opt else {
-                return err("WarNotFound", format!("War {} not found", n.war_id));
-            };
-            if n.kind != NegKind::Ally {
-                return err("NegotiationNotFound", format!("Negotiation {neg_id} is not of the requested kind"));
-            }
-            let allowed = match method {
-                "RetractWarAllyOffer" => my_corp == n.from_corp,
-                _ => my_corp == w.defender_corp_id,
-            };
-            if !allowed {
-                return err("NotNegotiationCounterparty", "Your corporation cannot act on this negotiation");
-            }
             let action = match method {
                 "AcceptAllyNegotiation" => AllyNegotiationAction::Accept,
                 "RetractWarAllyOffer" => AllyNegotiationAction::Retract,
                 _ => AllyNegotiationAction::Decline,
             };
-            let accepting = action == AllyNegotiationAction::Accept;
-            if accepting && !w.active {
-                return err("WarNotActive", format!("War {} has ended", n.war_id));
-            }
-            let effective_opt = match ctx.db.try_with_mut_snapshot(|snap| {
+            let outcome = match ctx.db.try_with_mut_snapshot(|snap| {
                 wars::resolve_ally_negotiation(snap, neg_id, my_corp, action, now)
                     .map_err(rpc_err)
             }) {
@@ -1014,16 +985,16 @@ pub(super) fn handle_wars(
             };
             let mut out = vec![
                 ("negotiationID", PyRep::Integer(neg_id)),
-                ("warID", PyRep::Integer(n.war_id)),
+                ("warID", PyRep::Integer(outcome.war_id)),
                 ("status", PyRep::String(action.status_str().into())),
             ];
-            if let Some(effective) = effective_opt {
-                out.push(("allyID", PyRep::Integer(n.from_corp)));
+            if let Some(effective) = outcome.effective_unix {
+                out.push(("allyID", PyRep::Integer(outcome.ally_id)));
                 out.push(("timeStarted", PyRep::Integer(unix_to_filetime(effective))));
                 emit_war_changed(
                     ctx,
-                    n.war_id,
-                    vec![("allyID", PyRep::None, PyRep::Integer(n.from_corp))],
+                    outcome.war_id,
+                    vec![("allyID", PyRep::None, PyRep::Integer(outcome.ally_id))],
                 );
             }
             Some(Ok(PyRep::keyval(out)))
@@ -1034,18 +1005,12 @@ pub(super) fn handle_wars(
                 return err("CorpRoleDenied", "Retracting mutual war requires CEO or Director role");
             }
             let war_id = arg_i64(0).or(bound_obj_id).unwrap_or(0);
-            let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&war_id).cloned()) else {
-                return err("WarNotFound", format!("War {war_id} not found"));
+            let finish = match ctx.db.try_with_mut_snapshot(|snap| {
+                wars::retract_mutual_war(snap, war_id, my_corp, now).map_err(rpc_err)
+            }) {
+                Ok(f) => f,
+                Err(e) => return Some(Err(e)),
             };
-            if !w.mutual || !w.active {
-                return err("NotActiveMutualWar", format!("War {war_id} is not an active mutual war"));
-            }
-            if my_corp != w.aggressor_corp_id && my_corp != w.defender_corp_id {
-                return err("NotWarParticipant", "Only war participants can retract a mutual war");
-            }
-            let finish = ctx
-                .db
-                .with_mut_snapshot(|snap| wars::retract_mutual_war(snap, war_id, now));
             let finish_ft = unix_to_filetime(finish);
             emit_war_changed(
                 ctx,

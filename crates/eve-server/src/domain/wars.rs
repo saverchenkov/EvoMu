@@ -44,6 +44,14 @@ pub enum MutualWarAcceptOutcome {
     RejectedAlreadyAtWar,
 }
 
+/// Outcome of [`resolve_ally_negotiation`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllyNegotiationOutcome {
+    pub war_id: i64,
+    pub ally_id: i64,
+    pub effective_unix: Option<u64>,
+}
+
 /// Previous and updated Unix timestamps produced by [`set_declare_time`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeclareTimeUpdate {
@@ -186,7 +194,7 @@ pub fn war_started_unix(w: &WarRecord) -> u64 {
 }
 
 /// Returns `true` when `w` permits legal war combat at `now_unix`:
-/// `w.active`, not past `finish_at_unix`, and either `w.mutual` or past 24h `WAR_TIMER_SECS`.
+/// `w.active`, not past `finish_at_unix`, and `now_unix >= war_started_unix(w)`.
 pub fn is_war_combat_active_at(snap: &WorldStateSnapshot, w: &WarRecord, now_unix: u64) -> bool {
     if !w.active {
         return false;
@@ -200,7 +208,7 @@ pub fn is_war_combat_active_at(snap: &WorldStateSnapshot, w: &WarRecord, now_uni
     {
         return false;
     }
-    w.mutual || now_unix >= w.started_unix.saturating_add(WAR_TIMER_SECS)
+    now_unix >= war_started_unix(w)
 }
 
 #[inline]
@@ -734,6 +742,17 @@ pub fn credit_corp(snap: &mut WorldStateSnapshot, corp_id: i64, amount: IskCents
     }
 }
 
+fn beneficiary_corp_id(snap: &WorldStateSnapshot, entity_id: i64) -> Option<i64> {
+    if snap.corporations.contains_key(&entity_id) {
+        Some(entity_id)
+    } else {
+        snap.alliances
+            .get(&entity_id)
+            .map(|a| a.executor_corp_id)
+            .filter(|cid| snap.corporations.contains_key(cid))
+    }
+}
+
 fn insert_war_record(
     snap: &mut WorldStateSnapshot,
     war_id: i64,
@@ -906,13 +925,50 @@ pub fn set_finish_time(
 
 /// Retracts a mutual war, scheduling termination after `WAR_TIMER_SECS` in both `war_state.wars`
 /// and `war_lifecycle_meta`, returning `finish_at_unix`.
-pub fn retract_mutual_war(snap: &mut WorldStateSnapshot, war_id: i64, now_unix: u64) -> u64 {
+pub fn retract_mutual_war(
+    snap: &mut WorldStateSnapshot,
+    war_id: i64,
+    caller_corp: i64,
+    now_unix: u64,
+) -> Result<u64, DomainError> {
+    let Some(w) = snap.wars.get(&war_id).cloned() else {
+        return Err(DomainError::not_found(
+            "WarNotFound",
+            format!("War {war_id} not found"),
+        ));
+    };
+    if !w.mutual || !w.active {
+        return Err(DomainError::precondition_failed(
+            "NotActiveMutualWar",
+            format!("War {war_id} is not an active mutual war"),
+        ));
+    }
+    if !corp_represents_war_side(snap, caller_corp, w.aggressor_corp_id)
+        && !corp_represents_war_side(snap, caller_corp, w.defender_corp_id)
+    {
+        return Err(DomainError::forbidden(
+            "NotWarParticipant",
+            "Only war participants can retract a mutual war",
+        ));
+    }
+    if snap
+        .war_state
+        .wars
+        .get(&war_id)
+        .and_then(|m| m.finish_at_unix)
+        .is_some()
+    {
+        return Err(DomainError::conflict(
+            "WarAlreadyEnding",
+            format!("War {war_id} is already ending"),
+        ));
+    }
     let finish = now_unix + WAR_TIMER_SECS;
     snap.war_state.wars.entry(war_id).or_default().finish_at_unix = Some(finish);
     let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
     lm.retracted_unix = Some(now_unix);
     lm.finished_unix = Some(finish);
-    finish
+    Ok(finish)
 }
 
 fn has_unexpired_accepted_ally(
@@ -1109,7 +1165,7 @@ pub fn resolve_ally_negotiation(
     caller_corp: i64,
     action: AllyNegotiationAction,
     now_unix: u64,
-) -> Result<Option<u64>, DomainError> {
+) -> Result<AllyNegotiationOutcome, DomainError> {
     let (neg_idx, neg) = find_offered_negotiation(snap, neg_id, PersistedNegKind::Ally)?;
     let Some((w_active, defender_corp_id)) =
         snap.wars.get(&neg.war_id).map(|w| (w.active, w.defender_corp_id))
@@ -1120,8 +1176,8 @@ pub fn resolve_ally_negotiation(
         ));
     };
     let allowed = match action {
-        AllyNegotiationAction::Retract => caller_corp == neg.from_corp,
-        _ => caller_corp == defender_corp_id,
+        AllyNegotiationAction::Retract => corp_represents_war_side(snap, caller_corp, neg.from_corp),
+        _ => corp_represents_war_side(snap, caller_corp, defender_corp_id),
     };
     if !allowed {
         return Err(DomainError::forbidden(
@@ -1131,7 +1187,11 @@ pub fn resolve_ally_negotiation(
     }
     if action != AllyNegotiationAction::Accept {
         snap.war_state.negotiations[neg_idx].status = action.status_str().into();
-        return Ok(None);
+        return Ok(AllyNegotiationOutcome {
+            war_id: neg.war_id,
+            ally_id: neg.from_corp,
+            effective_unix: None,
+        });
     }
     if !w_active {
         return Err(DomainError::precondition_failed(
@@ -1148,8 +1208,17 @@ pub fn resolve_ally_negotiation(
             ),
         ));
     }
+    let recipient_corp = beneficiary_corp_id(snap, neg.from_corp);
+    if neg.isk > IskCents::ZERO && recipient_corp.is_none() {
+        return Err(DomainError::not_found(
+            "CorporationNotFound",
+            format!("Ally beneficiary {} not found", neg.from_corp),
+        ));
+    }
     debit_corp(snap, caller_corp, neg.isk)?;
-    credit_corp(snap, neg.from_corp, neg.isk);
+    if let Some(target_corp) = recipient_corp {
+        credit_corp(snap, target_corp, neg.isk);
+    }
 
     let effective = now_unix + WAR_TIMER_SECS;
     let st = &mut snap.war_state;
@@ -1171,7 +1240,11 @@ pub fn resolve_ally_negotiation(
     }
     let ally_rec = ally_record_for_entity(snap, neg.from_corp);
     ensure_lifecycle_ally(snap, neg.war_id, ally_rec);
-    Ok(Some(effective))
+    Ok(AllyNegotiationOutcome {
+        war_id: neg.war_id,
+        ally_id: neg.from_corp,
+        effective_unix: Some(effective),
+    })
 }
 
 /// Applies `warRegistry.GMJoinDefender` across `negotiations`, `ally_expires_unix`, `war_state.wars`,
@@ -1583,6 +1656,11 @@ mod tests {
             snap.war_lifecycle_meta[&mwar_id].started_unix,
             Some(t0 - 100)
         );
+        // Future mutual start timestamp via set_declare_time aligns combat activity with war_started_unix.
+        let upd_future = set_declare_time(&mut snap, mwar_id, t0 + 600).expect("set_declare_time future");
+        assert_eq!(upd_future.new_started_unix, t0 + 600);
+        assert!(!active_war_between(&snap, agg, def, t0 + 599));
+        assert!(active_war_between(&snap, agg, def, t0 + 600));
         set_declare_time(&mut snap, mwar_id, t0).expect("restore declared");
 
         // Stale mutual invite returns Ok(RejectedAlreadyAtWar) and drops the invite cleanly.
@@ -1638,8 +1716,14 @@ mod tests {
         assert!(!snap.war_state.ally_expires_unix.contains_key(&(mwar_id, ally)));
         assert!(!is_war_participant(&snap, mwar_id, ally, None, t0));
 
-        let retract_finish = retract_mutual_war(&mut snap, mwar_id, t0);
+        let retract_finish = retract_mutual_war(&mut snap, mwar_id, agg, t0).expect("retract mutual war");
         assert_eq!(retract_finish, t0 + WAR_TIMER_SECS);
+        assert_eq!(
+            retract_mutual_war(&mut snap, mwar_id, agg, t0 + 10)
+                .unwrap_err()
+                .code,
+            "WarAlreadyEnding"
+        );
         assert_eq!(snap.war_lifecycle_meta[&mwar_id].retracted_unix, Some(t0));
         assert_eq!(
             snap.war_lifecycle_meta[&mwar_id].finished_unix,
@@ -1816,5 +1900,94 @@ mod tests {
         gm_activate_defender(&mut snap, war_id, None, exp).expect("reactivate all allies");
         assert!(!snap.war_state.ally_expires_unix.contains_key(&(war_id, ally_alliance)));
         assert_eq!(snap.war_lifecycle_meta[&war_id].allies, vec![expected_ally_rec]);
+
+        // Alliance-defender executor authz and ISK conservation when an alliance offers itself as ally.
+        let def_alliance = 99_210_005_i64;
+        let def_exec_corp = 98_210_005_i64;
+        let ally_exec_corp = 98_210_006_i64;
+        let missing_ally = 99_210_999_i64;
+        for (cid, aid, isk) in [
+            (def_exec_corp, def_alliance, 5_000_000_i64),
+            (ally_exec_corp, ally_alliance, 0_i64),
+        ] {
+            let mut c = eve_db::CorporationRecord::default();
+            c.corporation_id = cid;
+            c.alliance_id = Some(aid);
+            c.set_division_balance(1, IskCents::from_isk(isk));
+            snap.corporations.insert(cid, c);
+        }
+        snap.alliances.insert(
+            def_alliance,
+            eve_db::AllianceRecord {
+                alliance_id: def_alliance,
+                executor_corp_id: def_exec_corp,
+                ..Default::default()
+            },
+        );
+        snap.alliances.insert(
+            ally_alliance,
+            eve_db::AllianceRecord {
+                alliance_id: ally_alliance,
+                executor_corp_id: ally_exec_corp,
+                ..Default::default()
+            },
+        );
+        let awar_id = 709_i64;
+        insert_war_record(&mut snap, awar_id, agg, def_alliance, false, Some(880_009), t0);
+        let missing_isk_neg = create_negotiation(
+            &mut snap,
+            awar_id,
+            PersistedNegKind::Ally,
+            missing_ally,
+            IskCents::from_isk(1_000_000),
+            "missing corp".into(),
+            t0,
+        )
+        .expect("create missing ally offer");
+        assert_eq!(
+            resolve_ally_negotiation(
+                &mut snap,
+                missing_isk_neg,
+                def_exec_corp,
+                AllyNegotiationAction::Accept,
+                t0,
+            )
+            .unwrap_err()
+            .code,
+            "CorporationNotFound"
+        );
+        assert_eq!(
+            snap.corporations[&def_exec_corp].division_balance(1),
+            IskCents::from_isk(5_000_000)
+        );
+        let exec_ally_neg = create_negotiation(
+            &mut snap,
+            awar_id,
+            PersistedNegKind::Ally,
+            ally_alliance,
+            IskCents::from_isk(1_500_000),
+            "alliance executor".into(),
+            t0,
+        )
+        .expect("create alliance ally offer");
+        let outcome = resolve_ally_negotiation(
+            &mut snap,
+            exec_ally_neg,
+            def_exec_corp,
+            AllyNegotiationAction::Accept,
+            t0,
+        )
+        .expect("alliance defender executor accepts");
+        assert_eq!(outcome.war_id, awar_id);
+        assert_eq!(outcome.ally_id, ally_alliance);
+        assert_eq!(outcome.effective_unix, Some(t0 + WAR_TIMER_SECS));
+        assert_eq!(
+            snap.corporations[&def_exec_corp].division_balance(1),
+            IskCents::from_isk(3_500_000)
+        );
+        assert_eq!(
+            snap.corporations[&ally_exec_corp].division_balance(1),
+            IskCents::from_isk(1_500_000)
+        );
     }
 }

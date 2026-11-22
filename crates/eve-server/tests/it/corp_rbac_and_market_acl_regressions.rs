@@ -570,13 +570,17 @@ async fn issue_553_market_acl_hides_denied_upwell_orders() {
     });
     assert_eq!(count_get_orders(rpc(&ctx, &mut s2, "marketProxy", "GetOrders", &[PyRep::Integer(34)]).await.unwrap()), vec![npc_order]);
 
-    // Case C: active war blocks P2
+    // Case C: non-mutual war does not block P2 during 24h warm-up, then active war blocks P2
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&P2).unwrap().standings.clear();
         snap.wars.insert(700_553, WarRecord {
             war_id: 700_553, aggressor_corp_id: enemy_corp, defender_corp_id: owner_corp,
             mutual: false, started_unix: now, active: true,
         });
+    });
+    assert_eq!(count_get_orders(rpc(&ctx, &mut s2, "marketProxy", "GetOrders", &[PyRep::Integer(34)]).await.unwrap()), vec![fort_order, npc_order]);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.wars.get_mut(&700_553).unwrap().started_unix = now.saturating_sub(86_400);
     });
     assert_eq!(count_get_orders(rpc(&ctx, &mut s2, "marketProxy", "GetOrders", &[PyRep::Integer(34)]).await.unwrap()), vec![npc_order]);
 
