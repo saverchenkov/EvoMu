@@ -10,12 +10,11 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
 use eve_testkit::client_harness::ClientErrorResponse;
-use eve_testkit::legal_fixture::assert_legal_fixture;
+use eve_testkit::legal_fixture::{assert_legal_fixture, FixtureSessionView, LegalFixtureExpectation};
 use eve_testkit::scenario::{ActorSpec, ScenarioBuilder, ScenarioWorldBackend, ShipLoadoutSpec};
 use std::collections::HashMap;
 
 const JITA_STATION_ID: i64 = 60_003_760;
-const JITA_SOLAR_SYSTEM_ID: u32 = 30_000_142;
 
 fn do_action_info(rep: &PyRep) -> &PyRep {
     match rep {
@@ -54,32 +53,29 @@ async fn rpc_call(ctx: &ServerContext, sess: &mut SessionState, service: &str, m
         .await
 }
 
-fn dock_at_station(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, sta_id: i64, fallback_sys: Option<u32>) -> (u32, i64) {
-    let st_info = ctx.sde.stations.get(&sta_id);
-    let sys_id = st_info.map(|s| s.solar_system_id).or(fallback_sys).unwrap_or(JITA_SOLAR_SYSTEM_ID);
-    let reg_id = st_info.map(|s| s.region_id).or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id)).unwrap_or(10_000_002);
-    let const_id = st_info.map(|s| s.constellation_id).or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.constellation_id)).unwrap_or(20_000_001);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id; ch.constellation_id = const_id; ch.region_id = reg_id;
-            ch.station_id = Some(sta_id); ch.structure_id = None;
-            let ship_id = ch.active_ship_id;
-            if let Some(ship) = snap.items.get_mut(&ship_id) {
-                ship.location_id = sta_id;
-                ship.flag = InventoryFlag::Hangar;
-            }
-            snap.item_positions.remove(&ship_id);
-        }
+fn dock_at_station(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, sta_id: i64) -> (u32, i64) {
+    let st = ctx.sde.stations.get(&sta_id).unwrap_or_else(|| panic!("station {sta_id} must exist in SDE"));
+    let (sys_id, const_id, reg_id) = (st.solar_system_id, st.constellation_id, st.region_id);
+    ctx.db.with_mut_snapshot(|snap| if let Some(ch) = snap.characters.get_mut(&char_id) {
+        (ch.solar_system_id, ch.constellation_id, ch.region_id, ch.station_id, ch.structure_id) = (sys_id, const_id, reg_id, Some(sta_id), None);
+        if let Some(ship) = snap.items.get_mut(&ch.active_ship_id) { (ship.location_id, ship.flag) = (sta_id, InventoryFlag::Hangar); }
+        snap.item_positions.remove(&ch.active_ship_id);
     });
-    sess.solar_system_id = Some(sys_id); sess.constellation_id = Some(const_id);
-    sess.region_id = Some(reg_id); sess.station_id = Some(sta_id); sess.structure_id = None;
+    (sess.solar_system_id, sess.constellation_id, sess.region_id, sess.station_id, sess.structure_id) = (Some(sys_id), Some(const_id), Some(reg_id), Some(sta_id), None);
+    let view = FixtureSessionView { session_id: sess.session_id, user_id: sess.user_id, character_id: sess.character_id, corporation_id: sess.corporation_id, alliance_id: sess.alliance_id, station_id: sess.station_id, structure_id: sess.structure_id, solar_system_id: sess.solar_system_id, ship_id: sess.ship_id, corp_role: sess.corp_role, fleet_id: sess.fleet_id, role: sess.role, now_unix: Some(ctx.now_unix()) };
+    let exp = LegalFixtureExpectation { expect_omega: true, expect_in_space: Some(false), expected_dock_location_id: Some(sta_id), ..Default::default() };
+    ctx.db.with_snapshot(|snap| assert_legal_fixture("dock_at_station", snap, &ctx.sde, &view, &exp));
     (sys_id, sta_id)
 }
 
 fn colocate_with_agent(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, agent_id: i64) -> (u32, i64) {
     let agent = ctx.sde.agents.get(&agent_id).expect("agent in SDE");
-    let sta_id = agent.station_id.unwrap_or(JITA_STATION_ID);
-    dock_at_station(ctx, sess, char_id, sta_id, agent.solar_system_id)
+    let sta_id = agent.station_id.unwrap_or_else(|| {
+        let sys_id = agent.solar_system_id.unwrap_or_else(|| panic!("agent {agent_id} missing station_id and solar_system_id"));
+        ctx.sde.solar_systems.get(&sys_id).and_then(|s| s.stations.first().map(|st| st.station_id))
+            .unwrap_or_else(|| panic!("no station in agent {agent_id} solar system {sys_id}"))
+    });
+    dock_at_station(ctx, sess, char_id, sta_id)
 }
 
 fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str) -> ActiveMissionRecord {
@@ -107,7 +103,7 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     let (dist_agent_id, dist_corp_id) = ctx.sde.agents.values()
         .filter(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 22 && a.solar_system_id.is_some())
         .min_by_key(|a| a.agent_id).map(|a| (a.agent_id, a.corporation_id)).expect("Distribution agent in SDE");
-    let (dist_sys_id, dist_station_id) = colocate_with_agent(&ctx, &mut sess, char_id, dist_agent_id);
+    let (_dist_sys_id, dist_station_id) = colocate_with_agent(&ctx, &mut sess, char_id, dist_agent_id);
     ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.standings.insert(dist_corp_id, 2.0); } });
 
     // 1. Courier Mission archetype offered by Distribution agent (division 22)
@@ -132,17 +128,15 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     assert_eq!(not_at_dest.code, "CourierNotAtDestinationStation");
 
     // Fly / dock at destination station
-    let dest_sys_id = ctx.sde.stations.get(&dest_station_id).expect("dest station").solar_system_id;
+    dock_at_station(&ctx, &mut sess, char_id, dest_station_id);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = Some(dest_station_id); ch.solar_system_id = dest_sys_id;
             let ship_id = ch.active_ship_id;
             for it in snap.items.values_mut() {
                 if it.owner_id == char_id && it.type_id == courier_cargo_type { it.location_id = ship_id; it.flag = InventoryFlag::Cargo; }
             }
         }
     });
-    sess.station_id = Some(dest_station_id); sess.solar_system_id = Some(dest_sys_id);
 
     // Test: item with forged custom name "courier_cargo:<char>:<mid>X" is rejected on delivery (RV-COURIER-TAG-FORGE-01)
     let forged_id = 999_777_111;
@@ -168,14 +162,7 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     let cargo_consumed = ctx.db.with_snapshot(|snap| !snap.items.values().any(|it| it.owner_id == char_id && it.type_id == courier_cargo_type && it.flag == InventoryFlag::Cargo));
     assert!(cargo_consumed, "Courier cargo must be consumed on completion");
 
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = dist_sys_id;
-            ch.station_id = Some(dist_station_id);
-        }
-    });
-    sess.solar_system_id = Some(dist_sys_id);
-    sess.station_id = Some(dist_station_id);
+    dock_at_station(&ctx, &mut sess, char_id, dist_station_id);
 
     // 2. Trade Mission archetype: DERIVED required goods and quantity from template title heuristic
     // Template 1419 ("The Drill", DERIVED: type 21632, quantity 18)
@@ -554,7 +541,7 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
         .filter(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 22 && a.solar_system_id.is_some())
         .min_by_key(|a| a.agent_id)
         .map(|a| (a.agent_id, a.corporation_id)).expect("Distribution agent");
-    let (dist_sys_id, dist_station_id) = colocate_with_agent(&ctx, &mut sess, char_id, dist_agent_id);
+    let (_dist_sys_id, dist_station_id) = colocate_with_agent(&ctx, &mut sess, char_id, dist_agent_id);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) { ch.standings.insert(dist_corp_id, 2.0); }
     });
@@ -680,14 +667,7 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
         .await
         .expect_err("ship.Jettison courier cargo must fail");
     assert_eq!(jet_err.code, "ItemCannotBeJettisoned");
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = dist_sys_id;
-            ch.station_id = Some(dist_station_id);
-        }
-    });
-    sess.solar_system_id = Some(dist_sys_id);
-    sess.station_id = Some(dist_station_id);
+    dock_at_station(&ctx, &mut sess, char_id, dist_station_id);
 
     // Verify courier cargo is NOT merged into the untagged stack; two distinct item records exist with courier tag.
     let courier_tag = format!("courier_cargo:{char_id}:{mid}");
@@ -1982,7 +1962,7 @@ async fn test_lp_store_offers_exchange_rates_and_purchase_validation() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let (mut sess, char_id) = setup_scenario_pilot(&ctx, 506).await;
-    dock_at_station(&ctx, &mut sess, char_id, JITA_STATION_ID, Some(JITA_SOLAR_SYSTEM_ID));
+    dock_at_station(&ctx, &mut sess, char_id, JITA_STATION_ID);
 
     let offers = rpc_call(
         &ctx,
@@ -2142,9 +2122,6 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
 use eve_testkit::client_harness::ClientErrorResponse;
-
-const JITA_STATION_ID: i64 = 60_003_760;
-const JITA_SOLAR_SYSTEM_ID: u32 = 30_000_142;
 
 async fn rpc_call(
     ctx: &ServerContext,

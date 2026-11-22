@@ -34,27 +34,20 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     kv_get(rep, key)
 }
 
-fn session_view(sess: &eve_machonet::SessionState) -> FixtureSessionView {
-    FixtureSessionView {
-        session_id: sess.session_id, user_id: sess.user_id, character_id: sess.character_id,
-        corporation_id: sess.corporation_id, alliance_id: sess.alliance_id, station_id: sess.station_id,
-        structure_id: sess.structure_id, solar_system_id: sess.solar_system_id, ship_id: sess.ship_id,
-        corp_role: sess.corp_role, fleet_id: sess.fleet_id, role: sess.role, now_unix: None,
-    }
+fn session_view(s: &eve_machonet::SessionState) -> FixtureSessionView {
+    FixtureSessionView { session_id: s.session_id, user_id: s.user_id, character_id: s.character_id, corporation_id: s.corporation_id, alliance_id: s.alliance_id, station_id: s.station_id, structure_id: s.structure_id, solar_system_id: s.solar_system_id, ship_id: s.ship_id, corp_role: s.corp_role, fleet_id: s.fleet_id, role: s.role, now_unix: None }
 }
 
 async fn dock_actor_at_jita(ctx: &ServerContext, actor: &mut BuiltActor<ServerWireTransport<'_>>) {
-    {
-        let sess = &mut actor.harness.transport_mut().inner.session;
-        let cur_sys = actor.solar_system_id;
-        if cur_sys != JITA_SYS {
-            if sess.station_id.is_some() { undock_from_station(ctx, sess, cur_sys).await; }
-            fly_stargates_to(ctx, sess, JITA_SYS).await;
-        }
-        if sess.station_id != Some(JITA_STATION) {
-            let ship_id = sess.ship_id.expect("active ship");
-            warp_and_dock_at_station(ctx, sess, ship_id, JITA_SYS, JITA_STATION).await;
-        }
+    let sess = &mut actor.harness.transport_mut().inner.session;
+    let cur_sys = actor.solar_system_id;
+    if cur_sys != JITA_SYS {
+        if sess.station_id.is_some() { undock_from_station(ctx, sess, cur_sys).await; }
+        fly_stargates_to(ctx, sess, JITA_SYS).await;
+    }
+    if sess.station_id != Some(JITA_STATION) {
+        let ship_id = sess.ship_id.expect("active ship");
+        warp_and_dock_at_station(ctx, sess, ship_id, JITA_SYS, JITA_STATION).await;
     }
     let view = session_view(&actor.harness.transport().inner.session);
     let exp = LegalFixtureExpectation { expected_dock_location_id: Some(JITA_STATION), expect_in_space: Some(false), ..actor.expectation.clone() };
@@ -62,17 +55,12 @@ async fn dock_actor_at_jita(ctx: &ServerContext, actor: &mut BuiltActor<ServerWi
 }
 
 fn actor_spec(label: &str, username: &str, character_name: &str, starting_isk: f64, require_omega: bool, in_space: bool, fleet: FleetSetup) -> ActorSpec {
-    ActorSpec {
-        label: label.into(), username: username.into(), password: format!("{username}-secret"),
-        character_name: character_name.into(), starting_isk, require_omega, in_space, fleet,
-        ..ActorSpec::default()
-    }
+    ActorSpec { label: label.into(), username: username.into(), password: format!("{username}-secret"), character_name: character_name.into(), starting_isk, require_omega, in_space, fleet, ..ActorSpec::default() }
 }
 
 async fn build_checked_scenario<'c>(ctx: &'c ServerContext, specs: Vec<ActorSpec>) -> BuiltScenario<ServerWireTransport<'c>> {
     let mut backend = ServerScenarioBackend::new(ctx);
-    let mut b = ScenarioBuilder::new();
-    for spec in specs { b = b.add_actor(spec); }
+    let b = specs.into_iter().fold(ScenarioBuilder::new(), |b, spec| b.add_actor(spec));
     let scenario = b.build(&mut backend).await;
     for actor in &scenario.actors {
         let view = backend.actor_session_view(actor.harness.transport());

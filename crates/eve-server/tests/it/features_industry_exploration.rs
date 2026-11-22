@@ -3,15 +3,22 @@
 #![forbid(unsafe_code)]
 
 async fn assert_actor_legal(ctx: &eve_server::router::ServerContext, actor: &mut eve_testkit::scenario::BuiltActor<crate::common::ServerWireTransport<'_>>, label: &str) {
-    use eve_testkit::scenario::ScenarioWorldBackend;
     let mut backend = crate::scenario_common::ServerScenarioBackend::new(ctx);
     actor.expectation.ship_in_space_ballpark = match (actor.station_id, actor.ship_id) {
-        (None, Some(sid)) => backend.ship_in_space_ballpark(actor.solar_system_id, sid).await,
+        (None, Some(sid)) => eve_testkit::scenario::ScenarioWorldBackend::ship_in_space_ballpark(&mut backend, actor.solar_system_id, sid).await,
         (None, None) => Some(false),
         _ => None,
     };
-    let view = backend.actor_session_view(actor.harness.transport());
+    let view = eve_testkit::scenario::ScenarioWorldBackend::actor_session_view(&backend, actor.harness.transport());
     ctx.db.with_snapshot(|snap| eve_testkit::legal_fixture::assert_legal_fixture(label, snap, &ctx.sde, &view, &actor.expectation));
+}
+
+async fn clear_prev_ball_sys_meta(ctx: &eve_server::router::ServerContext, actor: &eve_testkit::scenario::BuiltActor<crate::common::ServerWireTransport<'_>>, sys_id: u32, force_clear: bool) -> (u32, u32) {
+    if force_clear || actor.solar_system_id != sys_id {
+        if let Some(prev) = actor.ship_id { if let Some(h) = ctx.systems.get_handle(actor.solar_system_id) { let _ = h.remove_ball(prev).await; } }
+    }
+    let sys = ctx.sde.solar_systems.get(&sys_id);
+    (sys.map(|s| s.region_id).unwrap_or(10_000_002), sys.map(|s| s.constellation_id).unwrap_or(20_000_001))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -19,26 +26,37 @@ async fn relocate_actor_to_space(
     ctx: &eve_server::router::ServerContext, actor: &mut eve_testkit::scenario::BuiltActor<crate::common::ServerWireTransport<'_>>,
     solar_system_id: u32, ship_id: i64, ship_type_id: u32, pos: glam::DVec3, ball: eve_destiny::Ball, alliance_id: Option<i64>,
 ) {
-    let (orig_sys, char_id) = (actor.solar_system_id, actor.character_id);
-    if orig_sys != solar_system_id { if let Some(prev) = actor.ship_id { if let Some(h) = ctx.systems.get_handle(orig_sys) { let _ = h.remove_ball(prev).await; } } }
-    let sys = ctx.sde.solar_systems.get(&solar_system_id);
-    let (reg_id, const_id) = (sys.map(|s| s.region_id).unwrap_or(10_000_002), sys.map(|s| s.constellation_id).unwrap_or(20_000_001));
+    let (char_id, (reg_id, const_id)) = (actor.character_id, clear_prev_ball_sys_meta(ctx, actor, solar_system_id, false).await);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             (ch.solar_system_id, ch.constellation_id, ch.region_id, ch.station_id, ch.structure_id, ch.active_ship_id) = (solar_system_id, const_id, reg_id, None, None, ship_id);
             if alliance_id.is_some() { ch.alliance_id = alliance_id; }
         }
-        if let Some(ship) = snap.items.get_mut(&ship_id) { (ship.location_id, ship.flag) = (i64::from(solar_system_id), eve_db::InventoryFlag::None); }
-        else { snap.items.insert(ship_id, eve_db::InventoryItemRecord { item_id: ship_id, type_id: ship_type_id, owner_id: char_id, location_id: i64::from(solar_system_id), flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() }); }
+        snap.items.entry(ship_id).and_modify(|s| { (s.location_id, s.flag) = (i64::from(solar_system_id), eve_db::InventoryFlag::None); })
+            .or_insert_with(|| eve_db::InventoryItemRecord { item_id: ship_id, type_id: ship_type_id, owner_id: char_id, location_id: i64::from(solar_system_id), flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() });
         snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
     });
-    (actor.solar_system_id, actor.station_id, actor.ship_id) = (solar_system_id, None, Some(ship_id));
-    (actor.expectation.expect_in_space, actor.expectation.expected_dock_location_id) = (Some(true), None);
-    let sess = &mut actor.harness.transport_mut().inner.session;
-    (sess.solar_system_id, sess.constellation_id, sess.region_id, sess.station_id, sess.structure_id, sess.ship_id) = (Some(solar_system_id), Some(const_id), Some(reg_id), None, None, Some(ship_id));
-    if alliance_id.is_some() { sess.alliance_id = alliance_id; }
+    (actor.solar_system_id, actor.station_id, actor.ship_id, actor.expectation.expect_in_space, actor.expectation.expected_dock_location_id) = (solar_system_id, None, Some(ship_id), Some(true), None);
+    let s = &mut actor.harness.transport_mut().inner.session;
+    (s.solar_system_id, s.constellation_id, s.region_id, s.station_id, s.structure_id, s.ship_id) = (Some(solar_system_id), Some(const_id), Some(reg_id), None, None, Some(ship_id));
+    if alliance_id.is_some() { s.alliance_id = alliance_id; }
     let h = ctx.systems.get_or_spawn(solar_system_id);
     if !matches!(h.get_ball_snapshot(ship_id).await, Ok(Some(_))) { h.spawn_ball(ball).await.unwrap(); }
+}
+
+async fn relocate_actor_to_station(ctx: &eve_server::router::ServerContext, actor: &mut eve_testkit::scenario::BuiltActor<crate::common::ServerWireTransport<'_>>, station_id: i64, fallback_sys: Option<u32>, label: &str) {
+    let sys_id = ctx.sde.stations.get(&station_id).map(|s| s.solar_system_id).or(fallback_sys).expect("station or solar system in SDE");
+    let (reg_id, const_id) = clear_prev_ball_sys_meta(ctx, actor, sys_id, actor.station_id.is_none()).await;
+    let char_id = actor.character_id;
+    ctx.db.with_mut_snapshot(|snap| if let Some(ch) = snap.characters.get_mut(&char_id) {
+        (ch.solar_system_id, ch.constellation_id, ch.region_id, ch.station_id, ch.structure_id) = (sys_id, const_id, reg_id, Some(station_id), None);
+        if let Some(ship) = snap.items.get_mut(&ch.active_ship_id) { (ship.location_id, ship.flag) = (station_id, eve_db::InventoryFlag::Hangar); }
+        snap.item_positions.remove(&ch.active_ship_id);
+    });
+    (actor.solar_system_id, actor.station_id, actor.expectation.expect_in_space, actor.expectation.expected_dock_location_id) = (sys_id, Some(station_id), Some(false), Some(station_id));
+    let s = &mut actor.harness.transport_mut().inner.session;
+    (s.solar_system_id, s.constellation_id, s.region_id, s.station_id, s.structure_id) = (Some(sys_id), Some(const_id), Some(reg_id), Some(station_id), None);
+    assert_actor_legal(ctx, actor, label).await;
 }
 
 // Submodule: deployables_and_air_opportunities
@@ -193,17 +211,15 @@ async fn test_lp_store_militia_enlistment_gate_and_clean_catalog() {
     let (offer_id, reward_tid) = chosen_offer.expect("24th Imperial Crusade offer without trade-ins");
 
     let (fw_station_id, fw_sys_id) = (60_015_054_i64, 30_002_978_u32);
-    sess.station_id = Some(fw_station_id);
-    sess.solar_system_id = Some(fw_sys_id);
+    relocate_actor_to_station(&ctx, &mut actor, fw_station_id, Some(fw_sys_id), "lp_pilot_fw").await;
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&pilot_id).unwrap();
         ch.loyalty_points.insert(1_000_179, 500_000);
         ch.balance = eve_db::IskCents(500_000_000_00);
         ch.standings.insert(1_000_179, -1.0);
         ch.war_faction_id = None;
-        ch.station_id = Some(fw_station_id);
-        ch.solar_system_id = fw_sys_id;
     });
+    let sess = &mut actor.harness.transport_mut().inner.session;
 
     // Negative 1: Unenlisted pilot with negative corp standing is rejected
     let args = [PyRep::Integer(1_000_179), PyRep::Integer(offer_id), PyRep::Integer(1)];
@@ -236,16 +252,11 @@ async fn test_lp_store_militia_enlistment_gate_and_clean_catalog() {
 async fn test_mobile_scan_inhibitor_hides_ships_from_dscan_and_probes() {
     // parity: feat:structures.mobile-scan-inhibitor
     let (_dir, _db_path, ctx) = new_persistent_ctx();
-    let mut scenario = {
-        let mut backend = ServerScenarioBackend::new(&ctx);
-        ScenarioBuilder::with_seed(0xB602)
-            .add_actor(b6_actor_spec("inhib_ext", "Inhib Ext", Some(587)))
-            .add_actor(b6_actor_spec("inhib_in", "Inhib In", Some(587)))
-            .build(&mut backend).await
-    };
-    let [ext_actor, inside_actor] = scenario.actors.as_mut_slice() else {
-        unreachable!("expected two scan inhibitor actors");
-    };
+    let mut scenario = ScenarioBuilder::with_seed(0xB602)
+        .add_actor(b6_actor_spec("inhib_ext", "Inhib Ext", Some(587)))
+        .add_actor(b6_actor_spec("inhib_in", "Inhib In", Some(587)))
+        .build(&mut ServerScenarioBackend::new(&ctx)).await;
+    let [ext_actor, inside_actor] = scenario.actors.as_mut_slice() else { unreachable!("expected two scan inhibitor actors") };
     let (pilot_ext, pilot_in) = (ext_actor.character_id, inside_actor.character_id);
     grant_anchoring_skill(&ctx, pilot_ext);
     let sys_handle = ctx.systems.get_or_spawn(LOWSEC_SYS_ID);
@@ -338,16 +349,11 @@ async fn test_mobile_scan_inhibitor_hides_ships_from_dscan_and_probes() {
 async fn test_mobile_siphon_steals_material_from_pos_within_range() {
     // parity: feat:structures.mobile-siphon
     let (_dir, db_path, ctx) = new_persistent_ctx();
-    let mut scenario = {
-        let mut backend = ServerScenarioBackend::new(&ctx);
-        ScenarioBuilder::with_seed(0xB603)
-            .add_actor(b6_actor_spec("siphon_owner", "Siphon Owner", Some(587)))
-            .add_actor(b6_actor_spec("siphon_bystander", "Siphon Bystander", Some(587)))
-            .build(&mut backend).await
-    };
-    let [owner_actor, bystander_actor] = scenario.actors.as_mut_slice() else {
-        unreachable!("expected two siphon actors");
-    };
+    let mut scenario = ScenarioBuilder::with_seed(0xB603)
+        .add_actor(b6_actor_spec("siphon_owner", "Siphon Owner", Some(587)))
+        .add_actor(b6_actor_spec("siphon_bystander", "Siphon Bystander", Some(587)))
+        .build(&mut ServerScenarioBackend::new(&ctx)).await;
+    let [owner_actor, bystander_actor] = scenario.actors.as_mut_slice() else { unreachable!("expected two siphon actors") };
     let (pilot_id, other_id) = (owner_actor.character_id, bystander_actor.character_id);
     let corp_id = owner_actor.corporation_id;
     grant_anchoring_skill(&ctx, pilot_id);
@@ -693,32 +699,27 @@ fn new_ctx() -> ServerContext {
 }
 
 async fn build_mission_actor<'c>(ctx: &'c ServerContext, seed: u64, label: &str) -> BuiltActor<ServerWireTransport<'c>> {
-    let mut backend = ServerScenarioBackend::new(ctx);
     let spec = ActorSpec { label: label.into(), username: format!("b6m_{label}"), character_name: format!("Pilot {}", label.replace('_', "")), require_omega: true, ..Default::default() };
-    let mut actor = ScenarioBuilder::with_seed(seed).add_actor(spec).build(&mut backend).await.actors.into_iter().next().expect("built mission actor");
+    let mut actor = ScenarioBuilder::with_seed(seed).add_actor(spec).build(&mut ServerScenarioBackend::new(ctx)).await.actors.into_iter().next().expect("built mission actor");
     assert_actor_legal(ctx, &mut actor, label).await;
     actor
 }
 
 async fn build_merc_den_actor<'c>(ctx: &'c ServerContext, seed: u64, label: &str, null_sys: u32, pos: DVec3) -> BuiltActor<ServerWireTransport<'c>> {
-    let mut backend = ServerScenarioBackend::new(ctx);
-    let mut actor = ScenarioBuilder::with_seed(seed)
-        .add_actor(ActorSpec {
-            label: label.into(), username: format!("b6d_{label}"), character_name: format!("Den Owner {}", label.replace('_', "")),
-            require_omega: true, starting_isk: 500_000_000.0, extra_skills: vec![TYPE_MERCENARY_DEN_MANAGEMENT],
-            corp: CorpSetup::FoundPlayerCorp { name: format!("MercDen {label}"), ticker: "MDN".into(), tax_rate: 0.0, required_roles: corp_roles::ROLE_DIRECTOR },
-            ship: Some(ShipLoadoutSpec { hull_type_id: 639, ..Default::default() }), in_space: true, ..Default::default()
-        })
-        .build(&mut backend).await.actors.into_iter().next().expect("built merc den actor");
+    let spec = ActorSpec {
+        label: label.into(), username: format!("b6d_{label}"), character_name: format!("Den Owner {}", label.replace('_', "")),
+        require_omega: true, starting_isk: 500_000_000.0, extra_skills: vec![TYPE_MERCENARY_DEN_MANAGEMENT],
+        corp: CorpSetup::FoundPlayerCorp { name: format!("MercDen {label}"), ticker: "MDN".into(), tax_rate: 0.0, required_roles: corp_roles::ROLE_DIRECTOR },
+        ship: Some(ShipLoadoutSpec { hull_type_id: 639, ..Default::default() }), in_space: true, ..Default::default()
+    };
+    let mut actor = ScenarioBuilder::with_seed(seed).add_actor(spec).build(&mut ServerScenarioBackend::new(ctx)).await.actors.into_iter().next().expect("built merc den actor");
     let (corp_id, ship_id) = (actor.corporation_id, actor.ship_id.expect("built merc den ship_id"));
     relocate_actor_to_space(ctx, &mut actor, null_sys, ship_id, 639, pos, make_ball(ship_id, 639, pos), Some(ALLIANCE)).await;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(corp) = snap.corporations.get_mut(&corp_id) { corp.alliance_id = Some(ALLIANCE); }
-        let al = snap.alliances.entry(ALLIANCE).or_insert_with(|| eve_db::AllianceRecord {
-            alliance_id: ALLIANCE, name: format!("Alliance {ALLIANCE}"), short_name: "ALLY".into(),
-            executor_corp_id: corp_id, member_corp_ids: std::collections::HashSet::new(),
-        });
-        al.member_corp_ids.insert(corp_id);
+        snap.alliances.entry(ALLIANCE).or_insert_with(|| eve_db::AllianceRecord {
+            alliance_id: ALLIANCE, name: format!("Alliance {ALLIANCE}"), short_name: "ALLY".into(), executor_corp_id: corp_id, member_corp_ids: Default::default(),
+        }).member_corp_ids.insert(corp_id);
     });
     assert_actor_legal(ctx, &mut actor, label).await;
     actor
@@ -742,23 +743,19 @@ fn reload_db(ctx: &ServerContext) -> Arc<WorldRepository> {
     Arc::new(db)
 }
 
-fn colocate_with_agent(ctx: &ServerContext, actor: &mut BuiltActor<ServerWireTransport<'_>>, agent_id: i64) {
-    let agent = ctx.sde.agents.get(&agent_id).expect("agent in SDE");
-    let sys_id = agent.solar_system_id.unwrap_or(SYS_ID);
-    let char_id = actor.character_id;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = agent.station_id;
-            ch.structure_id = None;
-        }
-    });
-    actor.solar_system_id = sys_id;
-    actor.station_id = agent.station_id;
-    let sess = &mut actor.harness.transport_mut().inner.session;
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = agent.station_id;
-    sess.structure_id = None;
+async fn colocate_with_agent(ctx: &ServerContext, actor: &mut BuiltActor<ServerWireTransport<'_>>, agent_id: i64) {
+    let agent = ctx.sde.agents.get(&agent_id).expect("agent in SDE").clone();
+    if let Some(sta_id) = agent.station_id {
+        relocate_actor_to_station(ctx, actor, sta_id, agent.solar_system_id, &format!("agent_{agent_id}")).await;
+    } else {
+        let sys_id = agent.solar_system_id.unwrap_or(SYS_ID);
+        let (ship_id, ship_tid) = ctx.db.with_snapshot(|snap| {
+            let sid = snap.characters[&actor.character_id].active_ship_id;
+            (sid, snap.items.get(&sid).map_or(587, |it| it.type_id))
+        });
+        relocate_actor_to_space(ctx, actor, sys_id, ship_id, ship_tid, DVec3::ZERO, make_ball(ship_id, ship_tid, DVec3::ZERO), None).await;
+        assert_actor_legal(ctx, actor, &format!("agent_{agent_id}")).await;
+    }
 }
 
 #[tokio::test]
@@ -775,7 +772,7 @@ async fn test_pve_mission_bonus_timer_payout_and_expiry() {
         .values()
         .find(|a| a.level == 2 && a.agent_type_id == 2 && a.division_id == 24 && a.solar_system_id.is_some())
         .expect("Level 2 agent");
-    colocate_with_agent(&ctx, &mut actor, agent.agent_id);
+    colocate_with_agent(&ctx, &mut actor, agent.agent_id).await;
     let sess = &mut actor.harness.transport_mut().inner.session;
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&pilot_id).unwrap().standings.insert(agent.corporation_id, 5.0);
@@ -813,7 +810,7 @@ async fn test_pve_mission_bonus_timer_payout_and_expiry() {
         .values()
         .find(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 24 && a.agent_id != agent.agent_id && a.solar_system_id.is_some())
         .expect("Level 1 agent");
-    colocate_with_agent(&ctx, &mut actor, agent_l1.agent_id);
+    colocate_with_agent(&ctx, &mut actor, agent_l1.agent_id).await;
     let sess = &mut actor.harness.transport_mut().inner.session;
     let offer_b = rpc(&ctx, sess, "agentMgr", "DoAction", &[PyRep::Integer(2), PyRep::Integer(agent_l1.agent_id)])
         .await
@@ -849,7 +846,7 @@ async fn test_pve_mission_offer_expiry_no_penalty_and_cosmos_lockout() {
         .values()
         .find(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id != 18 && a.solar_system_id.is_some())
         .expect("Level 1 agent");
-    colocate_with_agent(&ctx, &mut actor, agent.agent_id);
+    colocate_with_agent(&ctx, &mut actor, agent.agent_id).await;
     let sess = &mut actor.harness.transport_mut().inner.session;
 
     let offer = rpc(&ctx, sess, "agentMgr", "DoAction", &[PyRep::Integer(2), PyRep::Integer(agent.agent_id)])
@@ -886,7 +883,7 @@ async fn test_pve_mission_offer_expiry_no_penalty_and_cosmos_lockout() {
         .values()
         .find(|a| a.agent_type_id == 5 && a.solar_system_id.is_some())
         .expect("Data Center agent");
-    colocate_with_agent(&ctx, &mut actor, cosmos_agent.agent_id);
+    colocate_with_agent(&ctx, &mut actor, cosmos_agent.agent_id).await;
     let sess = &mut actor.harness.transport_mut().inner.session;
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&pilot_id).unwrap().standings.insert(cosmos_agent.corporation_id, 5.0);
@@ -925,7 +922,7 @@ async fn test_pve_mission_level_clone_and_space_restrictions() {
         .values()
         .find(|a| a.level == 4 && a.solar_system_id.is_some() && a.station_id.is_some() && a.agent_type_id == 2 && a.division_id != 18)
         .expect("Level 4 agent");
-    colocate_with_agent(&ctx, &mut actor, l4_agent.agent_id);
+    colocate_with_agent(&ctx, &mut actor, l4_agent.agent_id).await;
     let sess = &mut actor.harness.transport_mut().inner.session;
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&pilot_id).unwrap();
@@ -948,7 +945,7 @@ async fn test_pve_mission_level_clone_and_space_restrictions() {
     assert!(omega_ok.dict_get("missionID").and_then(|v| v.as_i64()).is_some());
 
     let l5_highsec = ctx.sde.agents.get(&3008513).expect("L5 highsec agent");
-    colocate_with_agent(&ctx, &mut actor, l5_highsec.agent_id);
+    colocate_with_agent(&ctx, &mut actor, l5_highsec.agent_id).await;
     let sess = &mut actor.harness.transport_mut().inner.session;
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&pilot_id).unwrap().standings.insert(l5_highsec.corporation_id, 9.0);
@@ -968,7 +965,7 @@ async fn test_pve_research_agent_daily_mission_and_persistence() {
     let pilot_id = actor.character_id;
 
     let rnd_agent = ctx.sde.agents.get(&3009318).expect("R&D agent 3009318");
-    colocate_with_agent(&ctx, &mut actor, rnd_agent.agent_id);
+    colocate_with_agent(&ctx, &mut actor, rnd_agent.agent_id).await;
     let sess = &mut actor.harness.transport_mut().inner.session;
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&pilot_id).unwrap();

@@ -67,23 +67,16 @@ fn make_inventory_item(
 }
 
 pub(super) async fn build_space_pilot(
-    ctx: &ServerContext,
-    seed: u64,
-    sys_id: u32,
-    ship_type_id: u32,
-    pos: DVec3,
-    shield_hp: f64,
-    equip_analyzers: bool,
+    ctx: &ServerContext, seed: u64, sys_id: u32, ship_type_id: u32, pos: DVec3, shield_hp: f64, equip_analyzers: bool,
 ) -> (SessionState, i64, i64) {
-    use crate::scenario_common::ServerScenarioBackend;
-    use eve_testkit::legal_fixture::assert_legal_fixture;
-    use eve_testkit::scenario::{ActorSpec, ScenarioBuilder, ScenarioWorldBackend, ShipLoadoutSpec};
+    use eve_testkit::{legal_fixture::assert_legal_fixture, scenario::{ActorSpec, ScenarioBuilder, ScenarioWorldBackend, ShipLoadoutSpec}};
 
-    let mut backend = ServerScenarioBackend::new(ctx);
+    let mut backend = crate::scenario_common::ServerScenarioBackend::new(ctx);
+    let modules = if equip_analyzers { vec![(InventoryFlag::MedSlot0, TYPE_DATA_ANALYZER_I), (InventoryFlag::MedSlot1, TYPE_RELIC_ANALYZER_I)] } else { vec![] };
     let spec = ActorSpec {
         label: format!("exp_{seed}"), username: format!("exp_{seed:x}"), character_name: format!("Explorer {seed:X}"),
         starting_isk: 100_000_000.0, require_omega: true,
-        ship: Some(ShipLoadoutSpec { hull_type_id: ship_type_id, ..Default::default() }), in_space: true, ..ActorSpec::default()
+        ship: Some(ShipLoadoutSpec { hull_type_id: ship_type_id, modules, ..Default::default() }), in_space: true, ..ActorSpec::default()
     };
     let mut actor = ScenarioBuilder::with_seed(seed).add_actor(spec).build(&mut backend).await.actors.into_iter().next().expect("scenario explorer actor");
     let (char_id, ship_id, orig_sys_id) = (actor.character_id, actor.ship_id.expect("scenario ship_id"), actor.solar_system_id);
@@ -92,10 +85,14 @@ pub(super) async fn build_space_pilot(
     if orig_sys_id != sys_id {
         let sys_meta = ctx.sde.solar_systems.get(&sys_id).map(|s| (s.constellation_id, s.region_id));
         ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&char_id) { (ch.solar_system_id, ch.station_id, ch.structure_id) = (sys_id, None, None); }
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                (ch.solar_system_id, ch.station_id, ch.structure_id) = (sys_id, None, None);
+                if let Some((const_id, reg_id)) = sys_meta { (ch.constellation_id, ch.region_id) = (const_id, reg_id); }
+            }
             if let Some(ship) = snap.items.get_mut(&ship_id) { (ship.location_id, ship.flag) = (i64::from(sys_id), InventoryFlag::None); }
             snap.item_positions.insert(ship_id, pos.to_array());
         });
+        actor.solar_system_id = sys_id;
         let sess = &mut actor.harness.transport_mut().inner.session;
         sess.solar_system_id = Some(sys_id);
         if let Some((const_id, reg_id)) = sys_meta { (sess.constellation_id, sess.region_id) = (Some(const_id), Some(reg_id)); }
@@ -114,20 +111,6 @@ pub(super) async fn build_space_pilot(
     let view = backend.actor_session_view(actor.harness.transport());
     let (exp, label) = (&actor.expectation, &actor.label);
     ctx.db.with_snapshot(|snap| assert_legal_fixture(label, snap, &ctx.sde, &view, exp));
-
-    if equip_analyzers {
-        ctx.db.with_mut_snapshot(|snap| {
-            for (slot_off, tid, flag) in [
-                (1_i64, TYPE_DATA_ANALYZER_I, InventoryFlag::MedSlot0),
-                (2_i64, TYPE_RELIC_ANALYZER_I, InventoryFlag::MedSlot1),
-            ] {
-                snap.items.insert(
-                    ship_id * 10 + slot_off,
-                    make_inventory_item(ship_id * 10 + slot_off, tid, char_id, ship_id, flag, 1),
-                );
-            }
-        });
-    }
 
     let mut sess = actor.harness.into_transport().inner.session;
     let _ = sess.drain_notifications();

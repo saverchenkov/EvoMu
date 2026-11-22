@@ -556,7 +556,7 @@ use eve_proto::quasar::{
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{STATUS_NOT_FOUND, STATUS_OK, STATUS_UNAUTHORIZED};
 use eve_server::router::ServerContext;
-use eve_testkit::legal_fixture::{assert_legal_fixture, LegalFixtureExpectation};
+use eve_testkit::legal_fixture::assert_legal_fixture;
 use eve_testkit::scenario::{ActorSpec, BuiltScenario, ScenarioBuilder, ScenarioWorldBackend};
 use std::collections::HashMap;
 
@@ -809,23 +809,28 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
     let ctx = ServerContext::new();
     let mut scenario = build_planet_pilot(&ctx, "planet_pilot", "planet_pilot_u1", "demo-secret", true).await;
     let actor = scenario.actor_mut(0);
-    let char_id = actor.character_id;
-    let ship_id = actor.ship_id.expect("active ship in space");
+    let (char_id, orig_sys, ship_id) = (actor.character_id, actor.solar_system_id, actor.ship_id.expect("active ship in space"));
+    if let Some(orig) = ctx.systems.get_handle(orig_sys) { let _ = orig.remove_ball(ship_id).await; }
+    let sys_meta = ctx.sde.solar_systems.get(&NULLSEC_SYSTEM).map(|s| (s.constellation_id, s.region_id));
     let hull_type = ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) { (ch.solar_system_id, ch.station_id, ch.structure_id) = (NULLSEC_SYSTEM, None, None); }
-        snap.items.get_mut(&ship_id).map_or(587, |s| { s.location_id = i64::from(NULLSEC_SYSTEM); s.type_id })
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            (ch.solar_system_id, ch.station_id, ch.structure_id) = (NULLSEC_SYSTEM, None, None);
+            if let Some((cid, rid)) = sys_meta { (ch.constellation_id, ch.region_id) = (cid, rid); }
+        }
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        snap.items.get_mut(&ship_id).map_or(587, |s| { (s.location_id, s.flag) = (i64::from(NULLSEC_SYSTEM), eve_db::InventoryFlag::None); s.type_id })
     });
-    let cs = ctx.build_type_combat_state(hull_type);
-    ctx.systems.get_or_spawn(NULLSEC_SYSTEM).spawn_ball_with_combat(eve_destiny::Ball {
-        id: ship_id, type_id: hull_type, position: glam::DVec3::ZERO, velocity: glam::DVec3::ZERO,
-        max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
-    }, cs).await.expect("spawn ship in nullsec ballpark");
-    actor.harness.transport_mut().inner.session.solar_system_id = Some(NULLSEC_SYSTEM);
+    let ball = eve_destiny::Ball { id: ship_id, type_id: hull_type, position: glam::DVec3::ZERO, velocity: glam::DVec3::ZERO, max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop };
+    ctx.systems.get_or_spawn(NULLSEC_SYSTEM).spawn_ball_with_combat(ball, ctx.build_type_combat_state(hull_type)).await.expect("spawn ship in nullsec ballpark");
+    actor.solar_system_id = NULLSEC_SYSTEM;
+    let sess = &mut actor.harness.transport_mut().inner.session;
+    sess.solar_system_id = Some(NULLSEC_SYSTEM);
+    if let Some((cid, rid)) = sys_meta { (sess.constellation_id, sess.region_id) = (Some(cid), Some(rid)); }
     let mut backend = ServerScenarioBackend::new(&ctx);
     let (view, in_nullsec) = (backend.actor_session_view(actor.harness.transport()), backend.ship_in_space_ballpark(NULLSEC_SYSTEM, ship_id).await);
     drop(backend);
-    let exp = LegalFixtureExpectation { expect_in_space: Some(true), ship_in_space_ballpark: in_nullsec, ..actor.expectation.clone() };
-    ctx.db.with_snapshot(|snap| assert_legal_fixture("planet_pilot_nullsec", snap, &ctx.sde, &view, &exp));
+    actor.expectation.ship_in_space_ballpark = in_nullsec;
+    ctx.db.with_snapshot(|snap| assert_legal_fixture("planet_pilot_nullsec", snap, &ctx.sde, &view, &actor.expectation));
     let sess = &mut actor.harness.transport_mut().inner.session;
 
     // =========================================================================
