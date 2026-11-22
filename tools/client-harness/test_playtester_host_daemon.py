@@ -1531,6 +1531,8 @@ class TestSpeedupOptimizations(unittest.TestCase):
         trunc_exit_path = full_exit_path[-120:]
         long_entry_suffix = "topRightCont2/scrollParent/contentArea/entry_0_long_container_path"
         full_clip_path = f"t/main/rightCont/{long_entry_suffix}"
+        boundary_120_after = ("a" * 54) + "/" + long_entry_suffix
+        self.assertGreaterEqual(len(boundary_120_after), 120)
         trunc_snap = {
             "ui": {
                 "clickable_widgets": [
@@ -1548,6 +1550,20 @@ class TestSpeedupOptimizations(unittest.TestCase):
                         "x": 520,
                         "y": 310,
                     },
+                    {
+                        "path": f"{full_clip_path}/clearBtn",
+                        "name": "clearBtn",
+                        "label": "Clear",
+                        "x": 610,
+                        "y": 310,
+                    },
+                    {
+                        "path": boundary_120_after,
+                        "name": "boundaryEntry",
+                        "label": "Boundary",
+                        "x": 640,
+                        "y": 340,
+                    },
                 ],
                 "context_menu": [],
             }
@@ -1560,6 +1576,7 @@ class TestSpeedupOptimizations(unittest.TestCase):
         self.assertEqual(act_trunc["target"], trunc_exit_path)
         self.assertEqual((act_trunc["x"], act_trunc["y"]), (910, 42))
 
+        # Left-clipped prefix matches via `clip_hits` even when a sibling makes `sub_hits` ambiguous.
         act_clip, err_clip = playtester._resolve_direct_action(
             {"action": {"type": "click_widget", "target": f"tCont/{long_entry_suffix}"}},
             trunc_snap,
@@ -1568,23 +1585,52 @@ class TestSpeedupOptimizations(unittest.TestCase):
         self.assertEqual(act_clip["target"], full_clip_path)
         self.assertEqual((act_clip["x"], act_clip["y"]), (520, 310))
 
-        ambig_full = (
-            "root/desktop/l_viewstate/l_virtual_goods_store/"
-            "AurumStoreContainer/WholeWindowContainer/Content/Footer/confirmButton"
+        # Left-clip at slash boundary is allowed only when the widget path is >= 120 chars.
+        act_boundary, err_boundary = playtester._resolve_direct_action(
+            {"action": {"type": "click_widget", "target": f"clippedSeg/{boundary_120_after}"}},
+            trunc_snap,
         )
+        self.assertEqual(err_boundary, "")
+        self.assertEqual(act_boundary["target"], boundary_120_after)
+        self.assertEqual((act_boundary["x"], act_boundary["y"]), (640, 340))
+
+        # Mismatched `before_slash` prefix must NOT match a different container under >=120 threshold.
+        wrong_prefix_snap = {
+            "ui": {
+                "clickable_widgets": [
+                    {
+                        "path": f"root/panelB/{long_entry_suffix}",
+                        "name": "entry_0",
+                        "x": 50,
+                        "y": 60,
+                    },
+                ],
+                "context_menu": [],
+            }
+        }
+        act_wrong_prefix, err_wrong_prefix = playtester._resolve_direct_action(
+            {"action": {"type": "click_widget", "target": f"panelA/{long_entry_suffix}"}},
+            wrong_prefix_snap,
+        )
+        self.assertIsNone(act_wrong_prefix)
+        self.assertIn("not found", err_wrong_prefix)
+
+        ambig_after_120 = ("desk/" * 11) + long_entry_suffix
+        self.assertGreaterEqual(len(ambig_after_120), 120)
+        ambig_full = f"veryLongRootSeg/{ambig_after_120}"
         ambig_snap = {
             "ui": {
                 "clickable_widgets": [
-                    {"path": ambig_full[-70:], "name": "confirmButton", "x": 10, "y": 20},
-                    {"path": ambig_full[-65:], "name": "confirmButton", "x": 30, "y": 40},
+                    {"path": ambig_after_120, "name": "confirmButton", "x": 10, "y": 20},
+                    {"path": ambig_full[-70:], "name": "confirmButton", "x": 30, "y": 40},
                     {
-                        "path": f"root/panelA/{long_entry_suffix}",
+                        "path": f"root/panelA/rightCont/{long_entry_suffix}",
                         "name": "entry_0",
                         "x": 50,
                         "y": 60,
                     },
                     {
-                        "path": f"root/panelB/{long_entry_suffix}",
+                        "path": f"root/panelB/rightCont/{long_entry_suffix}",
                         "name": "entry_0",
                         "x": 70,
                         "y": 80,
@@ -1593,6 +1639,7 @@ class TestSpeedupOptimizations(unittest.TestCase):
                 "context_menu": [],
             }
         }
+        # Ambiguous `trunc_hits` must reject immediately rather than falling through to `clip_hits`.
         act_ambig, err_ambig = playtester._resolve_direct_action(
             {"action": {"type": "click_widget", "target": ambig_full}},
             ambig_snap,
@@ -1606,6 +1653,32 @@ class TestSpeedupOptimizations(unittest.TestCase):
         )
         self.assertIsNone(act_clip_ambig)
         self.assertIn("not found", err_clip_ambig)
+
+        # `type_text` (`allow_multi_sub=True`) must also reject ambiguous `clip_hits` rather than
+        # falling through to `sub_hits`.
+        act_type_ambig, err_type_ambig = playtester._resolve_direct_action(
+            {
+                "action": {
+                    "type": "type_text",
+                    "target": f"tCont/{long_entry_suffix}",
+                    "text": "hello",
+                }
+            },
+            ambig_snap,
+        )
+        self.assertIsNone(act_type_ambig)
+        self.assertIn("not found", err_type_ambig)
+
+        # Cross-pool fallback must also not run once a pool had ambiguous `trunc_hits`.
+        self.assertIsNone(
+            playtester._find_widget_in_pools(
+                ambig_full,
+                (
+                    ambig_snap["ui"]["clickable_widgets"],
+                    [{"path": ambig_full, "name": "confirmButton", "x": 99, "y": 99}],
+                ),
+            )
+        )
 
         drag_snap = {
             "ui": {

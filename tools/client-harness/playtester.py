@@ -5191,7 +5191,7 @@ def _find_widget_in_pools(
 ) -> Optional[Dict[str, Any]]:
     """Match a widget target string against candidate `clickable_widgets` pools."""
     t_low = target.lower()
-    after_slash = t_low.split("/", 1)[1] if "/" in t_low else ""
+    before_slash, after_slash = t_low.split("/", 1) if "/" in t_low else ("", "")
     for pool in search_pools:
         for key in ("path", "name", "label", "text"):
             for w in pool:
@@ -5208,16 +5208,16 @@ def _find_widget_in_pools(
         trunc_hits = [
             w for w, p_low in pool_paths if len(p_low) >= 60 and "/" in p_low and t_low.endswith(p_low)
         ]
-        if len(trunc_hits) == 1:
-            return trunc_hits[0]
-        if len(after_slash) >= 40 and "/" in after_slash:
+        if trunc_hits:
+            return trunc_hits[0] if len(trunc_hits) == 1 else None
+        if before_slash and len(after_slash) >= 40 and "/" in after_slash:
             clip_hits = [
                 w
                 for w, p_low in pool_paths
-                if p_low == after_slash or p_low.endswith("/" + after_slash)
+                if p_low.endswith(t_low) or (len(p_low) >= 120 and p_low == after_slash)
             ]
-            if len(clip_hits) == 1:
-                return clip_hits[0]
+            if clip_hits:
+                return clip_hits[0] if len(clip_hits) == 1 else None
         sub_hits = [
             w
             for w in pool
