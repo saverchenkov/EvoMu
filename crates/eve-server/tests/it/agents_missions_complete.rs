@@ -66,7 +66,9 @@ fn dock_at_station(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, s
             let ship_id = ch.active_ship_id;
             if let Some(ship) = snap.items.get_mut(&ship_id) {
                 ship.location_id = sta_id;
+                ship.flag = InventoryFlag::Hangar;
             }
+            snap.item_positions.remove(&ship_id);
         }
     });
     sess.solar_system_id = Some(sys_id); sess.constellation_id = Some(const_id);
@@ -850,8 +852,6 @@ use eve_server::router::ServerContext;
 use eve_testkit::client_harness::ClientErrorResponse;
 use std::collections::HashMap;
 
-const JITA_STATION_ID: i64 = 60_003_760;
-const JITA_SOLAR_SYSTEM_ID: u32 = 30_000_142;
 const CALDARI_NAVY_CORP_ID: i64 = 1_000_035;
 const CALDARI_STATE_FACTION_ID: i64 = 500_001;
 const CONNECTIONS_SKILL: TypeId = 3359;
@@ -871,28 +871,6 @@ async fn rpc_call(
     common::borrow_wire_harness(ctx, sess)
         .call(service, None, method, args, &kw)
         .await
-}
-
-fn colocate_with_agent(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    char_id: i64,
-    agent_id: i64,
-) -> (u32, i64) {
-    let agent = ctx.sde.agents.get(&agent_id).expect("agent in SDE");
-    let sys_id = agent.solar_system_id.unwrap_or(JITA_SOLAR_SYSTEM_ID);
-    let sta_id = agent.station_id.unwrap_or(JITA_STATION_ID);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = agent.station_id;
-            ch.structure_id = None;
-        }
-    });
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = agent.station_id;
-    sess.structure_id = None;
-    (sys_id, sta_id)
 }
 
 fn is_storyline(m: &eve_sde::MissionTemplate) -> bool {
@@ -1499,8 +1477,6 @@ use eve_server::router::ServerContext;
 use eve_testkit::client_harness::ClientErrorResponse;
 use std::collections::HashMap;
 
-const JITA_STATION_ID: i64 = 60_003_760;
-const JITA_SOLAR_SYSTEM_ID: u32 = 30_000_142;
 const CALDARI_NAVY_CORP_ID: i64 = 1_000_035;
 
 async fn rpc_call(
@@ -1512,28 +1488,6 @@ async fn rpc_call(
 ) -> Result<PyRep, ClientErrorResponse> {
     let mut harness = common::borrow_wire_harness(ctx, sess);
     harness.call(service, None, method, args, &HashMap::new()).await
-}
-
-fn colocate_with_agent(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    char_id: i64,
-    agent_id: i64,
-) -> (u32, i64) {
-    let agent = ctx.sde.agents.get(&agent_id).expect("agent in SDE");
-    let sys_id = agent.solar_system_id.unwrap_or(JITA_SOLAR_SYSTEM_ID);
-    let sta_id = agent.station_id.unwrap_or(JITA_STATION_ID);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = agent.station_id;
-            ch.structure_id = None;
-        }
-    });
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = agent.station_id;
-    sess.structure_id = None;
-    (sys_id, sta_id)
 }
 
 fn is_storyline(m: &eve_sde::MissionTemplate) -> bool {
@@ -2201,44 +2155,6 @@ async fn rpc_call(
 ) -> Result<PyRep, ClientErrorResponse> {
     let mut harness = common::borrow_wire_harness(ctx, sess);
     harness.call(service, None, method, args, &HashMap::new()).await
-}
-
-fn colocate_with_agent(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    char_id: i64,
-    agent_id: i64,
-) -> (u32, i64) {
-    let agent = ctx.sde.agents.get(&agent_id).expect("agent in SDE");
-    let sta_id = agent.station_id.unwrap_or(JITA_STATION_ID);
-    let st_info = ctx.sde.stations.get(&sta_id);
-    let sys_id = st_info
-        .map(|s| s.solar_system_id)
-        .or(agent.solar_system_id)
-        .unwrap_or(JITA_SOLAR_SYSTEM_ID);
-    let reg_id = st_info
-        .map(|s| s.region_id)
-        .or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id))
-        .unwrap_or(10_000_002);
-    let const_id = st_info
-        .map(|s| s.constellation_id)
-        .or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.constellation_id))
-        .unwrap_or(20_000_001);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.constellation_id = const_id;
-            ch.region_id = reg_id;
-            ch.station_id = Some(sta_id);
-            ch.structure_id = None;
-        }
-    });
-    sess.solar_system_id = Some(sys_id);
-    sess.constellation_id = Some(const_id);
-    sess.region_id = Some(reg_id);
-    sess.station_id = Some(sta_id);
-    sess.structure_id = None;
-    (sys_id, sta_id)
 }
 
 fn make_item(

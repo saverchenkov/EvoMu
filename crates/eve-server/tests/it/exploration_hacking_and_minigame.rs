@@ -80,85 +80,40 @@ pub(super) async fn build_space_pilot(
     use eve_testkit::scenario::{ActorSpec, ScenarioBuilder, ScenarioWorldBackend, ShipLoadoutSpec};
 
     let mut backend = ServerScenarioBackend::new(ctx);
-    let scenario = ScenarioBuilder::with_seed(seed)
-        .add_actor(ActorSpec {
-            label: format!("exp_{seed}"),
-            username: format!("exp_{seed:x}"),
-            character_name: format!("Explorer {seed:X}"),
-            starting_isk: 100_000_000.0,
-            require_omega: true,
-            ship: Some(ShipLoadoutSpec {
-                hull_type_id: ship_type_id,
-                ..Default::default()
-            }),
-            in_space: true,
-            ..ActorSpec::default()
-        })
-        .build(&mut backend)
-        .await;
-    let mut actor = scenario.actors.into_iter().next().expect("scenario explorer actor");
-    let char_id = actor.character_id;
-    let ship_id = actor.ship_id.expect("scenario ship_id");
-    let orig_sys_id = actor.solar_system_id;
+    let spec = ActorSpec {
+        label: format!("exp_{seed}"), username: format!("exp_{seed:x}"), character_name: format!("Explorer {seed:X}"),
+        starting_isk: 100_000_000.0, require_omega: true,
+        ship: Some(ShipLoadoutSpec { hull_type_id: ship_type_id, ..Default::default() }), in_space: true, ..ActorSpec::default()
+    };
+    let mut actor = ScenarioBuilder::with_seed(seed).add_actor(spec).build(&mut backend).await.actors.into_iter().next().expect("scenario explorer actor");
+    let (char_id, ship_id, orig_sys_id) = (actor.character_id, actor.ship_id.expect("scenario ship_id"), actor.solar_system_id);
 
     let _ = ctx.systems.get_or_spawn(orig_sys_id).remove_ball(ship_id).await;
     if orig_sys_id != sys_id {
         let sys_meta = ctx.sde.solar_systems.get(&sys_id).map(|s| (s.constellation_id, s.region_id));
         ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                ch.solar_system_id = sys_id;
-                ch.station_id = None;
-                ch.structure_id = None;
-            }
-            if let Some(ship) = snap.items.get_mut(&ship_id) {
-                ship.location_id = i64::from(sys_id);
-                ship.flag = InventoryFlag::None;
-            }
+            if let Some(ch) = snap.characters.get_mut(&char_id) { (ch.solar_system_id, ch.station_id, ch.structure_id) = (sys_id, None, None); }
+            if let Some(ship) = snap.items.get_mut(&ship_id) { (ship.location_id, ship.flag) = (i64::from(sys_id), InventoryFlag::None); }
             snap.item_positions.insert(ship_id, pos.to_array());
         });
         let sess = &mut actor.harness.transport_mut().inner.session;
         sess.solar_system_id = Some(sys_id);
-        if let Some((const_id, reg_id)) = sys_meta {
-            sess.constellation_id = Some(const_id);
-            sess.region_id = Some(reg_id);
-        }
+        if let Some((const_id, reg_id)) = sys_meta { (sess.constellation_id, sess.region_id) = (Some(const_id), Some(reg_id)); }
     } else {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.item_positions.insert(ship_id, pos.to_array());
-        });
+        ctx.db.with_mut_snapshot(|snap| { snap.item_positions.insert(ship_id, pos.to_array()); });
     }
 
     let mut cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
-    cs.shield_hp = shield_hp;
-    cs.max_shield_hp = shield_hp;
-    ctx.systems
-        .get_or_spawn(sys_id)
-        .spawn_ball_with_meta(
-            Ball {
-                id: ship_id,
-                type_id: ship_type_id,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 365.0,
-                inertia: 1.0,
-                mass: 1_200_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            cs,
-            ctx.build_ship_slim_meta(char_id, ship_type_id),
-        )
-        .await
-        .expect("spawn scenario ship ball");
+    (cs.shield_hp, cs.max_shield_hp) = (shield_hp, shield_hp);
+    ctx.systems.get_or_spawn(sys_id).spawn_ball_with_meta(Ball {
+        id: ship_id, type_id: ship_type_id, position: pos, velocity: DVec3::ZERO,
+        max_velocity: 365.0, inertia: 1.0, mass: 1_200_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }, cs, ctx.build_ship_slim_meta(char_id, ship_type_id)).await.expect("spawn scenario ship ball");
 
     actor.expectation.ship_in_space_ballpark = backend.ship_in_space_ballpark(sys_id, ship_id).await;
     let view = backend.actor_session_view(actor.harness.transport());
-    let exp = &actor.expectation;
-    let label = &actor.label;
-    ctx.db.with_snapshot(|snap| {
-        assert_legal_fixture(label, snap, &ctx.sde, &view, exp);
-    });
+    let (exp, label) = (&actor.expectation, &actor.label);
+    ctx.db.with_snapshot(|snap| assert_legal_fixture(label, snap, &ctx.sde, &view, exp));
 
     if equip_analyzers {
         ctx.db.with_mut_snapshot(|snap| {
@@ -2962,7 +2917,7 @@ async fn test_petitioner_may_petition_codes() {
 
     let mut no_char_sess = SessionState::default();
     no_char_sess.session_id = 88_999;
-    no_char_sess.user_id = Some(88_999);
+    crate::common::login_pilot(&ctx, &mut no_char_sess, "demo", "demo-secret").await;
     let res_no_char = ctx.dispatch_rpc(&mut no_char_sess, "petitioner", None, "MayPetition", &[PyRep::Integer(401), PyRep::Integer(0)], &kw, None).await.unwrap();
     assert_eq!(res_no_char, PyRep::Integer(-6), "Missing character session must return -6");
 

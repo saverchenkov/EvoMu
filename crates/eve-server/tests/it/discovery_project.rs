@@ -26,23 +26,10 @@ use std::collections::HashMap;
 
 const SKIN_TYPE_ID: u32 = 40519;
 
-async fn build_discovery_pilot<'c>(
-    ctx: &'c ServerContext,
-    username: &str,
-    password: &str,
-    char_name: &str,
-) -> BuiltScenario<ServerWireTransport<'c>> {
+async fn build_discovery_pilot<'c>(ctx: &'c ServerContext, username: &str, password: &str, char_name: &str) -> BuiltScenario<ServerWireTransport<'c>> {
     let mut backend = ServerScenarioBackend::new(ctx);
-    let mut b = ScenarioBuilder::new();
-    b = b.add_actor(ActorSpec {
-        label: username.into(),
-        username: username.into(),
-        password: password.into(),
-        character_name: char_name.into(),
-        require_omega: true,
-        ..ActorSpec::default()
-    });
-    let scenario = b.build(&mut backend).await;
+    let spec = ActorSpec { label: username.into(), username: username.into(), password: password.into(), character_name: char_name.into(), require_omega: true, ..ActorSpec::default() };
+    let scenario = ScenarioBuilder::new().add_actor(spec).build(&mut backend).await;
     let actor = scenario.actor(0);
     let view = backend.actor_session_view(actor.harness.transport());
     ctx.db.with_snapshot(|snap| assert_legal_fixture(username, snap, &ctx.sde, &view, &actor.expectation));
@@ -575,26 +562,10 @@ use std::collections::HashMap;
 
 const NULLSEC_SYSTEM: u32 = 30_004_759;
 
-async fn build_planet_pilot<'c>(
-    ctx: &'c ServerContext,
-    label: &str,
-    username: &str,
-    password: &str,
-    in_space: bool,
-) -> BuiltScenario<ServerWireTransport<'c>> {
+async fn build_planet_pilot<'c>(ctx: &'c ServerContext, label: &str, username: &str, password: &str, in_space: bool) -> BuiltScenario<ServerWireTransport<'c>> {
     let mut backend = ServerScenarioBackend::new(ctx);
-    let scenario = ScenarioBuilder::new()
-        .add_actor(ActorSpec {
-            label: label.into(),
-            username: username.into(),
-            password: password.into(),
-            character_name: format!("Planet {}", label.replace('_', "")),
-            require_omega: true,
-            in_space,
-            ..ActorSpec::default()
-        })
-        .build(&mut backend)
-        .await;
+    let spec = ActorSpec { label: label.into(), username: username.into(), password: password.into(), character_name: format!("Planet {}", label.replace('_', "")), require_omega: true, in_space, ..ActorSpec::default() };
+    let scenario = ScenarioBuilder::new().add_actor(spec).build(&mut backend).await;
     let actor = scenario.actor(0);
     let view = backend.actor_session_view(actor.harness.transport());
     ctx.db.with_snapshot(|snap| assert_legal_fixture(label, snap, &ctx.sde, &view, &actor.expectation));
@@ -841,56 +812,20 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
     let char_id = actor.character_id;
     let ship_id = actor.ship_id.expect("active ship in space");
     let hull_type = ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = NULLSEC_SYSTEM;
-            ch.station_id = None;
-            ch.structure_id = None;
-        }
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            ship.location_id = i64::from(NULLSEC_SYSTEM);
-            ship.type_id
-        } else {
-            587
-        }
+        if let Some(ch) = snap.characters.get_mut(&char_id) { (ch.solar_system_id, ch.station_id, ch.structure_id) = (NULLSEC_SYSTEM, None, None); }
+        snap.items.get_mut(&ship_id).map_or(587, |s| { s.location_id = i64::from(NULLSEC_SYSTEM); s.type_id })
     });
     let cs = ctx.build_type_combat_state(hull_type);
-    ctx.systems
-        .get_or_spawn(NULLSEC_SYSTEM)
-        .spawn_ball_with_combat(
-            eve_destiny::Ball {
-                id: ship_id,
-                type_id: hull_type,
-                position: glam::DVec3::ZERO,
-                velocity: glam::DVec3::ZERO,
-                max_velocity: 300.0,
-                inertia: 2.0,
-                mass: 1_000_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: eve_destiny::MovementMode::Stop,
-            },
-            cs,
-        )
-        .await
-        .expect("spawn ship in nullsec ballpark");
+    ctx.systems.get_or_spawn(NULLSEC_SYSTEM).spawn_ball_with_combat(eve_destiny::Ball {
+        id: ship_id, type_id: hull_type, position: glam::DVec3::ZERO, velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+    }, cs).await.expect("spawn ship in nullsec ballpark");
     actor.harness.transport_mut().inner.session.solar_system_id = Some(NULLSEC_SYSTEM);
     let mut backend = ServerScenarioBackend::new(&ctx);
-    let view = backend.actor_session_view(actor.harness.transport());
-    let in_nullsec = backend.ship_in_space_ballpark(NULLSEC_SYSTEM, ship_id).await;
+    let (view, in_nullsec) = (backend.actor_session_view(actor.harness.transport()), backend.ship_in_space_ballpark(NULLSEC_SYSTEM, ship_id).await);
     drop(backend);
-    ctx.db.with_snapshot(|snap| {
-        assert_legal_fixture(
-            "planet_pilot_nullsec",
-            snap,
-            &ctx.sde,
-            &view,
-            &LegalFixtureExpectation {
-                expect_in_space: Some(true),
-                ship_in_space_ballpark: in_nullsec,
-                ..actor.expectation.clone()
-            },
-        );
-    });
+    let exp = LegalFixtureExpectation { expect_in_space: Some(true), ship_in_space_ballpark: in_nullsec, ..actor.expectation.clone() };
+    ctx.db.with_snapshot(|snap| assert_legal_fixture("planet_pilot_nullsec", snap, &ctx.sde, &view, &exp));
     let sess = &mut actor.harness.transport_mut().inner.session;
 
     // =========================================================================

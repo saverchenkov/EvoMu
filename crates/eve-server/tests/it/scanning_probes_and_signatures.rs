@@ -83,12 +83,13 @@ async fn spawn_test_ball(
         .await;
 }
 
-fn assert_scan_actor_legal(
-    ctx: &ServerContext,
-    actor: &BuiltActor<ServerWireTransport<'_>>,
-    label: &str,
-) {
-    let backend = ServerScenarioBackend::new(ctx);
+async fn assert_scan_actor_legal(ctx: &ServerContext, actor: &mut BuiltActor<ServerWireTransport<'_>>, label: &str) {
+    let mut backend = ServerScenarioBackend::new(ctx);
+    actor.expectation.ship_in_space_ballpark = match (actor.station_id, actor.ship_id) {
+        (None, Some(sid)) => backend.ship_in_space_ballpark(actor.solar_system_id, sid).await,
+        (None, None) => Some(false),
+        _ => None,
+    };
     let view = backend.actor_session_view(actor.harness.transport());
     ctx.db.with_snapshot(|snap| assert_legal_fixture(label, snap, &ctx.sde, &view, &actor.expectation));
 }
@@ -102,57 +103,42 @@ async fn build_scan_actor<'c>(
     in_space: bool,
 ) -> BuiltActor<ServerWireTransport<'c>> {
     let mut backend = ServerScenarioBackend::new(ctx);
-    let scenario = ScenarioBuilder::with_seed(seed)
+    let mut actor = ScenarioBuilder::with_seed(seed)
         .add_actor(ActorSpec {
-            label: label.into(),
-            username: format!("scan_{label}"),
-            character_name: format!("Scanner {}", label.replace('_', "")),
-            require_omega: true,
-            extra_skills: extra_skills.to_vec(),
-            ship: Some(ShipLoadoutSpec {
-                hull_type_id: ship_type_id,
-                ..Default::default()
-            }),
-            in_space,
-            ..Default::default()
+            label: label.into(), username: format!("scan_{label}"), character_name: format!("Scanner {}", label.replace('_', "")),
+            require_omega: true, extra_skills: extra_skills.to_vec(), in_space,
+            ship: Some(ShipLoadoutSpec { hull_type_id: ship_type_id, ..Default::default() }), ..Default::default()
         })
-        .build(&mut backend)
-        .await;
-    let actor = scenario.actors.into_iter().next().expect("built scan actor");
-    assert_scan_actor_legal(ctx, &actor, label);
+        .build(&mut backend).await.actors.into_iter().next().expect("built scan actor");
+    assert_scan_actor_legal(ctx, &mut actor, label).await;
     actor
 }
 
-async fn place_actor_in_jita<'c>(
-    ctx: &'c ServerContext,
-    actor: &mut BuiltActor<ServerWireTransport<'c>>,
-    station_id: Option<i64>,
-    solar_system_id: u32,
-) {
-    let char_id = actor.character_id;
-    let ship_id = actor.ship_id.expect("actor ship_id");
+async fn place_actor_in_jita<'c>(ctx: &'c ServerContext, actor: &mut BuiltActor<ServerWireTransport<'c>>, station_id: Option<i64>, solar_system_id: u32) {
+    let (char_id, orig_sys_id, ship_id) = (actor.character_id, actor.solar_system_id, actor.ship_id.expect("actor ship_id"));
+    if let Some(h) = ctx.systems.get_handle(orig_sys_id) { let _ = h.remove_ball(ship_id).await; }
+    let (st_info, sys_info) = (station_id.and_then(|s| ctx.sde.stations.get(&s)), ctx.sde.solar_systems.get(&solar_system_id));
+    let reg_id = st_info.map(|s| s.region_id).or_else(|| sys_info.map(|s| s.region_id)).unwrap_or(10_000_002);
+    let const_id = st_info.map(|s| s.constellation_id).or_else(|| sys_info.map(|s| s.constellation_id)).unwrap_or(20_000_001);
+    let flag = if station_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None };
     let ship_type_id = ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = solar_system_id;
-            ch.station_id = station_id;
-            ch.structure_id = None;
-            ch.active_ship_id = ship_id;
+            (ch.solar_system_id, ch.constellation_id, ch.region_id, ch.station_id, ch.structure_id, ch.active_ship_id) =
+                (solar_system_id, const_id, reg_id, station_id, None, ship_id);
         }
         let ship = snap.items.get_mut(&ship_id).expect("ship item");
-        ship.location_id = station_id.unwrap_or(i64::from(solar_system_id));
-        ship.flag = InventoryFlag::Hangar;
+        (ship.location_id, ship.flag) = (station_id.unwrap_or(i64::from(solar_system_id)), flag);
+        if station_id.is_none() { snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]); } else { snap.item_positions.remove(&ship_id); }
         ship.type_id
     });
-    actor.station_id = station_id;
-    actor.solar_system_id = solar_system_id;
+    (actor.station_id, actor.solar_system_id) = (station_id, solar_system_id);
+    (actor.expectation.expect_in_space, actor.expectation.expected_dock_location_id) = (Some(station_id.is_none()), station_id);
     let sess = &mut actor.harness.transport_mut().inner.session;
-    sess.solar_system_id = Some(solar_system_id);
-    sess.station_id = station_id;
-    sess.structure_id = None;
-    sess.ship_id = Some(ship_id);
-    if station_id.is_none() {
-        spawn_test_ball(ctx, solar_system_id, ship_id, ship_type_id, DVec3::ZERO, 1_200_000.0, false).await;
-    }
+    (sess.solar_system_id, sess.constellation_id, sess.region_id, sess.station_id, sess.structure_id, sess.ship_id) =
+        (Some(solar_system_id), Some(const_id), Some(reg_id), station_id, None, Some(ship_id));
+    if station_id.is_none() { spawn_test_ball(ctx, solar_system_id, ship_id, ship_type_id, DVec3::ZERO, 1_200_000.0, false).await; }
+    let label = format!("{}_relocated", actor.label);
+    assert_scan_actor_legal(ctx, actor, &label).await;
 }
 
 // parity: feat:scanning.moon-survey-probe-launch-rules

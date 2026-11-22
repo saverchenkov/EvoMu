@@ -2,6 +2,45 @@
 
 #![forbid(unsafe_code)]
 
+async fn assert_actor_legal(ctx: &eve_server::router::ServerContext, actor: &mut eve_testkit::scenario::BuiltActor<crate::common::ServerWireTransport<'_>>, label: &str) {
+    use eve_testkit::scenario::ScenarioWorldBackend;
+    let mut backend = crate::scenario_common::ServerScenarioBackend::new(ctx);
+    actor.expectation.ship_in_space_ballpark = match (actor.station_id, actor.ship_id) {
+        (None, Some(sid)) => backend.ship_in_space_ballpark(actor.solar_system_id, sid).await,
+        (None, None) => Some(false),
+        _ => None,
+    };
+    let view = backend.actor_session_view(actor.harness.transport());
+    ctx.db.with_snapshot(|snap| eve_testkit::legal_fixture::assert_legal_fixture(label, snap, &ctx.sde, &view, &actor.expectation));
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn relocate_actor_to_space(
+    ctx: &eve_server::router::ServerContext, actor: &mut eve_testkit::scenario::BuiltActor<crate::common::ServerWireTransport<'_>>,
+    solar_system_id: u32, ship_id: i64, ship_type_id: u32, pos: glam::DVec3, ball: eve_destiny::Ball, alliance_id: Option<i64>,
+) {
+    let (orig_sys, char_id) = (actor.solar_system_id, actor.character_id);
+    if orig_sys != solar_system_id { if let Some(prev) = actor.ship_id { if let Some(h) = ctx.systems.get_handle(orig_sys) { let _ = h.remove_ball(prev).await; } } }
+    let sys = ctx.sde.solar_systems.get(&solar_system_id);
+    let (reg_id, const_id) = (sys.map(|s| s.region_id).unwrap_or(10_000_002), sys.map(|s| s.constellation_id).unwrap_or(20_000_001));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            (ch.solar_system_id, ch.constellation_id, ch.region_id, ch.station_id, ch.structure_id, ch.active_ship_id) = (solar_system_id, const_id, reg_id, None, None, ship_id);
+            if alliance_id.is_some() { ch.alliance_id = alliance_id; }
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) { (ship.location_id, ship.flag) = (i64::from(solar_system_id), eve_db::InventoryFlag::None); }
+        else { snap.items.insert(ship_id, eve_db::InventoryItemRecord { item_id: ship_id, type_id: ship_type_id, owner_id: char_id, location_id: i64::from(solar_system_id), flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() }); }
+        snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
+    });
+    (actor.solar_system_id, actor.station_id, actor.ship_id) = (solar_system_id, None, Some(ship_id));
+    (actor.expectation.expect_in_space, actor.expectation.expected_dock_location_id) = (Some(true), None);
+    let sess = &mut actor.harness.transport_mut().inner.session;
+    (sess.solar_system_id, sess.constellation_id, sess.region_id, sess.station_id, sess.structure_id, sess.ship_id) = (Some(solar_system_id), Some(const_id), Some(reg_id), None, None, Some(ship_id));
+    if alliance_id.is_some() { sess.alliance_id = alliance_id; }
+    let h = ctx.systems.get_or_spawn(solar_system_id);
+    if !matches!(h.get_ball_snapshot(ship_id).await, Ok(Some(_))) { h.spawn_ball(ball).await.unwrap(); }
+}
+
 // Submodule: deployables_and_air_opportunities
 #[allow(unused_imports, dead_code)]
 mod deployables_and_air_opportunities {
@@ -79,35 +118,25 @@ fn make_ball(id: i64, type_id: u32, position: DVec3, radius: f64) -> Ball {
     }
 }
 
-fn assert_actor_legal(ctx: &ServerContext, actor: &BuiltActor<ServerWireTransport<'_>>, label: &str) {
-    let backend = ServerScenarioBackend::new(ctx);
-    let view = backend.actor_session_view(actor.harness.transport());
-    ctx.db.with_snapshot(|snap| assert_legal_fixture(label, snap, &ctx.sde, &view, &actor.expectation));
+fn switch_actor_active_ship(ctx: &ServerContext, actor: &mut BuiltActor<ServerWireTransport<'_>>, ship_id: i64) {
+    let char_id = actor.character_id;
+    ctx.db.with_mut_snapshot(|snap| if let Some(ch) = snap.characters.get_mut(&char_id) { ch.active_ship_id = ship_id; });
+    actor.ship_id = Some(ship_id);
+    actor.harness.transport_mut().inner.session.ship_id = Some(ship_id);
 }
 
-async fn build_b6_actor<'c>(
-    ctx: &'c ServerContext,
-    seed: u64,
-    label: &str,
-    hull_type_id: Option<u32>,
-) -> BuiltActor<ServerWireTransport<'c>> {
+fn b6_actor_spec(label: &str, name: &str, hull: Option<u32>) -> ActorSpec {
+    ActorSpec {
+        label: label.into(), username: format!("b6_{label}"), character_name: name.into(), require_omega: true,
+        ship: hull.map(|hull_type_id| ShipLoadoutSpec { hull_type_id, ..Default::default() }), ..Default::default()
+    }
+}
+
+async fn build_b6_actor<'c>(ctx: &'c ServerContext, seed: u64, label: &str, hull: Option<u32>) -> BuiltActor<ServerWireTransport<'c>> {
     let mut backend = ServerScenarioBackend::new(ctx);
-    let scenario = ScenarioBuilder::with_seed(seed)
-        .add_actor(ActorSpec {
-            label: label.into(),
-            username: format!("b6_{label}"),
-            character_name: format!("Pilot {}", label.replace('_', "")),
-            require_omega: true,
-            ship: hull_type_id.map(|hull| ShipLoadoutSpec {
-                hull_type_id: hull,
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .build(&mut backend)
-        .await;
-    let actor = scenario.actors.into_iter().next().expect("built actor");
-    assert_actor_legal(ctx, &actor, label);
+    let spec = b6_actor_spec(label, &format!("Pilot {}", label.replace('_', "")), hull);
+    let mut actor = ScenarioBuilder::with_seed(seed).add_actor(spec).build(&mut backend).await.actors.into_iter().next().expect("built actor");
+    assert_actor_legal(ctx, &mut actor, label).await;
     actor
 }
 
@@ -210,13 +239,10 @@ async fn test_mobile_scan_inhibitor_hides_ships_from_dscan_and_probes() {
     let mut scenario = {
         let mut backend = ServerScenarioBackend::new(&ctx);
         ScenarioBuilder::with_seed(0xB602)
-            .add_actor(ActorSpec { label: "inhib_ext".into(), username: "b6_inhib_ext".into(), character_name: "Inhib Ext".into(), require_omega: true, ..Default::default() })
-            .add_actor(ActorSpec { label: "inhib_in".into(), username: "b6_inhib_in".into(), character_name: "Inhib In".into(), ..Default::default() })
+            .add_actor(b6_actor_spec("inhib_ext", "Inhib Ext", Some(587)))
+            .add_actor(b6_actor_spec("inhib_in", "Inhib In", Some(587)))
             .build(&mut backend).await
     };
-    for actor in &scenario.actors {
-        assert_actor_legal(&ctx, actor, &actor.label);
-    }
     let [ext_actor, inside_actor] = scenario.actors.as_mut_slice() else {
         unreachable!("expected two scan inhibitor actors");
     };
@@ -225,46 +251,40 @@ async fn test_mobile_scan_inhibitor_hides_ships_from_dscan_and_probes() {
     let sys_handle = ctx.systems.get_or_spawn(LOWSEC_SYS_ID);
 
     let base = DVec3::splat(2.0e11);
-    let (scanner_ship_id, hidden_ship_id, visible_ship_id, deployer_ship_id, inhibitor_id) =
-        (700_001, 700_002, 700_003, 700_004, 700_005);
+    let deployer_ship_id = ext_actor.ship_id.expect("ext deployer ship");
+    let hidden_ship_id = inside_actor.ship_id.expect("inside hidden ship");
+    let (scanner_ship_id, visible_ship_id, inhibitor_id) = (700_001, 700_003, 700_005);
+    let dep_pos = base + DVec3::new(110_000.0, 0.0, 0.0);
+    let hid_pos = base + DVec3::new(100_000.0, 0.0, 0.0);
+    relocate_actor_to_space(&ctx, ext_actor, LOWSEC_SYS_ID, deployer_ship_id, 587, dep_pos, make_ball(deployer_ship_id, 587, dep_pos, 40.0), None).await;
+    relocate_actor_to_space(&ctx, inside_actor, LOWSEC_SYS_ID, hidden_ship_id, 587, hid_pos, make_ball(hidden_ship_id, 587, hid_pos, 40.0), None).await;
+
     for (bid, pos) in [
         (scanner_ship_id, base),
-        (hidden_ship_id, base + DVec3::new(100_000.0, 0.0, 0.0)),
         (visible_ship_id, base + DVec3::new(200_000.0, 0.0, 0.0)),
-        (deployer_ship_id, base + DVec3::new(110_000.0, 0.0, 0.0)),
     ] {
         sys_handle.spawn_ball(make_ball(bid, 587, pos, 40.0)).await.unwrap();
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(bid, item_rec(bid, 587, pilot_ext, i64::from(LOWSEC_SYS_ID), eve_db::InventoryFlag::None, 1, true));
+            snap.item_positions.insert(bid, [pos.x, pos.y, pos.z]);
+        });
     }
-
     ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&pilot_ext).unwrap();
-        ch.station_id = None;
-        ch.solar_system_id = LOWSEC_SYS_ID;
-        ch.active_ship_id = deployer_ship_id;
-        snap.items.insert(deployer_ship_id, item_rec(deployer_ship_id, 587, pilot_ext, LOWSEC_SYS_ID as i64, eve_db::InventoryFlag::None, 1, true));
         snap.items.insert(inhibitor_id, item_rec(inhibitor_id, 33_589, pilot_ext, deployer_ship_id, eve_db::InventoryFlag::Cargo, 1, false));
     });
+    assert_actor_legal(&ctx, ext_actor, "inhib_ext_deploy").await;
+    assert_actor_legal(&ctx, inside_actor, "inhib_in_deploy").await;
 
     // Live deployment via posMgr.AnchorStructure (60s activation delay + 3600s active lifetime)
-    let deploy_sess = &mut ext_actor.harness.transport_mut().inner.session;
-    deploy_sess.station_id = None;
-    deploy_sess.solar_system_id = Some(LOWSEC_SYS_ID);
-    deploy_sess.ship_id = Some(deployer_ship_id);
-    let anchor_rep = rpc(&ctx, deploy_sess, "posMgr", "AnchorStructure", &[PyRep::Integer(inhibitor_id)])
+    let anchor_rep = rpc(&ctx, &mut ext_actor.harness.transport_mut().inner.session, "posMgr", "AnchorStructure", &[PyRep::Integer(inhibitor_id)])
         .await
         .expect("posMgr.AnchorStructure Mobile Scan Inhibitor");
     assert_eq!(anchor_rep.dict_get("anchoringDelaySeconds").and_then(|v| v.as_f64()), Some(60.0));
 
     // Negative 1: Mobile Scan Inhibitor (group 1275) cannot be unanchored / scooped once deployed
-    let scoop_err = rpc(&ctx, deploy_sess, "entity", "CmdUnanchor", &[PyRep::Integer(inhibitor_id)]).await.unwrap_err();
+    let scoop_err = rpc(&ctx, &mut ext_actor.harness.transport_mut().inner.session, "entity", "CmdUnanchor", &[PyRep::Integer(inhibitor_id)]).await.unwrap_err();
     assert_eq!(scoop_err.code, "CannotUnanchor");
-    ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&pilot_ext).unwrap().active_ship_id = scanner_ship_id;
-        let c2 = s.characters.get_mut(&pilot_in).unwrap();
-        c2.station_id = None;
-        c2.solar_system_id = LOWSEC_SYS_ID;
-        c2.active_ship_id = hidden_ship_id;
-    });
+    switch_actor_active_ship(&ctx, ext_actor, scanner_ship_id);
 
     let inhib_pos = [base.x + 110_250.0, base.y, base.z];
     let vis_pos = [base.x + 200_000.0, base.y, base.z];
@@ -281,11 +301,10 @@ async fn test_mobile_scan_inhibitor_hides_ships_from_dscan_and_probes() {
 
     // Negative 2: At t + 30s (during 60s warmup), inhibitor does NOT mask ships
     ctx.advance_secs(30);
-    deploy_sess.ship_id = Some(scanner_ship_id);
+    assert_actor_legal(&ctx, ext_actor, "inhib_ext_active").await;
+    assert_actor_legal(&ctx, inside_actor, "inhib_in_active").await;
+    let deploy_sess = &mut ext_actor.harness.transport_mut().inner.session;
     let inside_sess = &mut inside_actor.harness.transport_mut().inner.session;
-    inside_sess.station_id = None;
-    inside_sess.solar_system_id = Some(LOWSEC_SYS_ID);
-    inside_sess.ship_id = Some(hidden_ship_id);
     let dscan_args = [PyRep::Real(360.0), PyRep::Real(1_000_000.0)];
     let warmup_ids = dscan_ids(rpc(&ctx, deploy_sess, "scanMgr", "ConeScan", &dscan_args).await.unwrap());
     assert!(warmup_ids.contains(&hidden_ship_id), "Ship must remain visible before 60s inhibitor activation completes");
@@ -322,13 +341,10 @@ async fn test_mobile_siphon_steals_material_from_pos_within_range() {
     let mut scenario = {
         let mut backend = ServerScenarioBackend::new(&ctx);
         ScenarioBuilder::with_seed(0xB603)
-            .add_actor(ActorSpec { label: "siphon_owner".into(), username: "b6_siphon_owner".into(), character_name: "Siphon Owner".into(), require_omega: true, ..Default::default() })
-            .add_actor(ActorSpec { label: "siphon_bystander".into(), username: "b6_siphon_bystander".into(), character_name: "Siphon Bystander".into(), ..Default::default() })
+            .add_actor(b6_actor_spec("siphon_owner", "Siphon Owner", Some(587)))
+            .add_actor(b6_actor_spec("siphon_bystander", "Siphon Bystander", Some(587)))
             .build(&mut backend).await
     };
-    for actor in &scenario.actors {
-        assert_actor_legal(&ctx, actor, &actor.label);
-    }
     let [owner_actor, bystander_actor] = scenario.actors.as_mut_slice() else {
         unreachable!("expected two siphon actors");
     };
@@ -339,15 +355,18 @@ async fn test_mobile_siphon_steals_material_from_pos_within_range() {
 
     let base = DVec3::splat(2.0e11);
     let (pos_tower_id, pos_silo_id, athanor_id) = (710_001, 710_002, 710_003);
-    let (deployer_near_ship, deployer_far_ship) = (710_004, 710_005);
+    let deployer_near_ship = owner_actor.ship_id.expect("owner near ship");
+    let deployer_far_ship = 710_005;
     let (siphon_near_id, siphon_far_id, unanchored_siphon_id) = (710_006, 710_007, 710_008);
     let (pos_silo_stack_id, pos_hangar_stack_id, athanor_stack_id) = (710_010, 710_011, 710_012);
+
+    let near_pos = base + DVec3::new(40_000.0, 0.0, 0.0);
+    relocate_actor_to_space(&ctx, owner_actor, LOWSEC_SYS_ID, deployer_near_ship, 587, near_pos, make_ball(deployer_near_ship, 587, near_pos, 40.0), None).await;
 
     for (bid, tid, dx, rad) in [
         (pos_tower_id, 16_213, 0.0, 2_000.0),
         (pos_silo_id, 14_343, 2_000.0, 500.0),
         (athanor_id, 35_835, 100_000.0, 5_000.0),
-        (deployer_near_ship, 587, 40_000.0, 40.0),
         (deployer_far_ship, 587, 250_000.0, 40.0),
         (unanchored_siphon_id, 33_477, 25_000.0, 100.0),
     ] {
@@ -359,15 +378,10 @@ async fn test_mobile_siphon_steals_material_from_pos_within_range() {
     }
 
     ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&pilot_id).unwrap();
-        ch.station_id = None;
-        ch.solar_system_id = LOWSEC_SYS_ID;
-        ch.active_ship_id = deployer_near_ship;
         for (iid, tid, owner, loc, flag, qty, sing) in [
             (pos_tower_id, 16_213, corp_id, LOWSEC_SYS_ID as i64, eve_db::InventoryFlag::None, 1, true),
             (pos_silo_id, 14_343, corp_id, LOWSEC_SYS_ID as i64, eve_db::InventoryFlag::None, 1, true),
             (athanor_id, 35_835, corp_id, LOWSEC_SYS_ID as i64, eve_db::InventoryFlag::None, 1, true),
-            (deployer_near_ship, 587, pilot_id, LOWSEC_SYS_ID as i64, eve_db::InventoryFlag::None, 1, true),
             (deployer_far_ship, 587, pilot_id, LOWSEC_SYS_ID as i64, eve_db::InventoryFlag::None, 1, true),
             (siphon_near_id, 33_477, pilot_id, deployer_near_ship, eve_db::InventoryFlag::Cargo, 1, false),
             (siphon_far_id, 33_477, pilot_id, deployer_far_ship, eve_db::InventoryFlag::Cargo, 1, false),
@@ -379,17 +393,16 @@ async fn test_mobile_siphon_steals_material_from_pos_within_range() {
             snap.items.insert(iid, item_rec(iid, tid, owner, loc, flag, qty, sing));
         }
     });
+    assert_actor_legal(&ctx, owner_actor, "siphon_owner_near").await;
 
-    let sess = &mut owner_actor.harness.transport_mut().inner.session;
-    sess.station_id = None;
-    sess.solar_system_id = Some(LOWSEC_SYS_ID);
-    sess.ship_id = Some(deployer_near_ship);
-    rpc(&ctx, sess, "posMgr", "AnchorStructure", &[PyRep::Integer(siphon_near_id)]).await.expect("Anchor near siphon");
-    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&pilot_id).unwrap().active_ship_id = deployer_far_ship);
-    sess.ship_id = Some(deployer_far_ship);
-    let err_far = rpc(&ctx, sess, "posMgr", "AnchorStructure", &[PyRep::Integer(siphon_far_id)]).await.unwrap_err();
+    rpc(&ctx, &mut owner_actor.harness.transport_mut().inner.session, "posMgr", "AnchorStructure", &[PyRep::Integer(siphon_near_id)]).await.expect("Anchor near siphon");
+    switch_actor_active_ship(&ctx, owner_actor, deployer_far_ship);
+    let err_far = rpc(&ctx, &mut owner_actor.harness.transport_mut().inner.session, "posMgr", "AnchorStructure", &[PyRep::Integer(siphon_far_id)]).await.unwrap_err();
     assert_eq!(err_far.code, "NoSiphonTargetInRange");
-    sess.ship_id = Some(deployer_near_ship);
+    switch_actor_active_ship(&ctx, owner_actor, deployer_near_ship);
+    assert_actor_legal(&ctx, owner_actor, "siphon_owner_active").await;
+    assert_actor_legal(&ctx, bystander_actor, "siphon_bystander_active").await;
+    let sess = &mut owner_actor.harness.transport_mut().inner.session;
 
     // Negative 1: Zero theft during anchoring and immediately upon anchor completion (t = 60s)
     ctx.advance_secs(60);
@@ -566,21 +579,10 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
 
     let ctx_reloaded = reload_ctx(&db_path, Arc::clone(&ctx.sde));
     let mut harness_reloaded = crate::common::new_wire_harness(&ctx_reloaded, 91_001);
-    let login_rep = harness_reloaded
-        .call_ok("authentication", None, "Login", &[PyRep::String(username), PyRep::String("scenario-password".into())], &HashMap::new())
-        .await;
-    assert_ne!(login_rep, PyRep::None);
-    let sel_rep = harness_reloaded
-        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(pilot_id)], &HashMap::new())
-        .await;
-    assert_ne!(sel_rep, PyRep::None);
+    assert_ne!(harness_reloaded.call_ok("authentication", None, "Login", &[PyRep::String(username), PyRep::String("scenario-password".into())], &HashMap::new()).await, PyRep::None);
+    assert_ne!(harness_reloaded.call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(pilot_id)], &HashMap::new()).await, PyRep::None);
     ctx_reloaded.sync_session(&mut harness_reloaded.transport_mut().inner.session);
-    let PyRep::Dict(prog_entries) = harness_reloaded
-        .call_ok("operationsManager", None, "get_character_progress", &[], &HashMap::new())
-        .await
-    else {
-        panic!("expected progress dict");
-    };
+    let PyRep::Dict(prog_entries) = harness_reloaded.call_ok("operationsManager", None, "get_character_progress", &[], &HashMap::new()).await else { panic!("expected progress dict"); };
     assert!(prog_entries.iter().any(|(k, v)| k.as_i64() == Some(cat_id) && v.as_i64() == Some(100)));
 }
 
@@ -690,82 +692,35 @@ fn new_ctx() -> ServerContext {
     ctx
 }
 
-fn assert_actor_legal(ctx: &ServerContext, actor: &BuiltActor<ServerWireTransport<'_>>, label: &str) {
-    let backend = ServerScenarioBackend::new(ctx);
-    let view = backend.actor_session_view(actor.harness.transport());
-    ctx.db.with_snapshot(|snap| assert_legal_fixture(label, snap, &ctx.sde, &view, &actor.expectation));
-}
-
 async fn build_mission_actor<'c>(ctx: &'c ServerContext, seed: u64, label: &str) -> BuiltActor<ServerWireTransport<'c>> {
     let mut backend = ServerScenarioBackend::new(ctx);
-    let scenario = ScenarioBuilder::with_seed(seed)
-        .add_actor(ActorSpec { label: label.into(), username: format!("b6m_{label}"), character_name: format!("Pilot {}", label.replace('_', "")), require_omega: true, ..Default::default() })
-        .build(&mut backend).await;
-    let actor = scenario.actors.into_iter().next().expect("built mission actor");
-    assert_actor_legal(ctx, &actor, label);
+    let spec = ActorSpec { label: label.into(), username: format!("b6m_{label}"), character_name: format!("Pilot {}", label.replace('_', "")), require_omega: true, ..Default::default() };
+    let mut actor = ScenarioBuilder::with_seed(seed).add_actor(spec).build(&mut backend).await.actors.into_iter().next().expect("built mission actor");
+    assert_actor_legal(ctx, &mut actor, label).await;
     actor
 }
 
-async fn build_merc_den_actor<'c>(
-    ctx: &'c ServerContext,
-    seed: u64,
-    label: &str,
-    null_sys: u32,
-    pos: DVec3,
-) -> BuiltActor<ServerWireTransport<'c>> {
+async fn build_merc_den_actor<'c>(ctx: &'c ServerContext, seed: u64, label: &str, null_sys: u32, pos: DVec3) -> BuiltActor<ServerWireTransport<'c>> {
     let mut backend = ServerScenarioBackend::new(ctx);
-    let scenario = ScenarioBuilder::with_seed(seed)
+    let mut actor = ScenarioBuilder::with_seed(seed)
         .add_actor(ActorSpec {
-            label: label.into(),
-            username: format!("b6d_{label}"),
-            character_name: format!("Den Owner {}", label.replace('_', "")),
-            require_omega: true,
-            starting_isk: 500_000_000.0,
-            extra_skills: vec![TYPE_MERCENARY_DEN_MANAGEMENT],
+            label: label.into(), username: format!("b6d_{label}"), character_name: format!("Den Owner {}", label.replace('_', "")),
+            require_omega: true, starting_isk: 500_000_000.0, extra_skills: vec![TYPE_MERCENARY_DEN_MANAGEMENT],
             corp: CorpSetup::FoundPlayerCorp { name: format!("MercDen {label}"), ticker: "MDN".into(), tax_rate: 0.0, required_roles: corp_roles::ROLE_DIRECTOR },
-            ship: Some(ShipLoadoutSpec { hull_type_id: 639, ..Default::default() }),
-            in_space: true,
-            ..Default::default()
+            ship: Some(ShipLoadoutSpec { hull_type_id: 639, ..Default::default() }), in_space: true, ..Default::default()
         })
-        .build(&mut backend).await;
-    let mut actor = scenario.actors.into_iter().next().expect("built merc den actor");
-    assert_actor_legal(ctx, &actor, label);
-    let (char_id, corp_id, ship_id) = (
-        actor.character_id,
-        actor.corporation_id,
-        actor.ship_id.expect("built merc den ship_id"),
-    );
+        .build(&mut backend).await.actors.into_iter().next().expect("built merc den actor");
+    let (corp_id, ship_id) = (actor.corporation_id, actor.ship_id.expect("built merc den ship_id"));
+    relocate_actor_to_space(ctx, &mut actor, null_sys, ship_id, 639, pos, make_ball(ship_id, 639, pos), Some(ALLIANCE)).await;
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = null_sys;
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.alliance_id = Some(ALLIANCE);
-        }
-        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.alliance_id = Some(ALLIANCE);
-        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) { corp.alliance_id = Some(ALLIANCE); }
         let al = snap.alliances.entry(ALLIANCE).or_insert_with(|| eve_db::AllianceRecord {
-            alliance_id: ALLIANCE,
-            name: format!("Alliance {ALLIANCE}"),
-            short_name: "ALLY".into(),
-            executor_corp_id: corp_id,
-            member_corp_ids: std::collections::HashSet::new(),
+            alliance_id: ALLIANCE, name: format!("Alliance {ALLIANCE}"), short_name: "ALLY".into(),
+            executor_corp_id: corp_id, member_corp_ids: std::collections::HashSet::new(),
         });
         al.member_corp_ids.insert(corp_id);
     });
-    actor.solar_system_id = null_sys;
-    actor.station_id = None;
-    let sess = &mut actor.harness.transport_mut().inner.session;
-    sess.solar_system_id = Some(null_sys);
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.alliance_id = Some(ALLIANCE);
-    ctx.systems
-        .get_or_spawn(null_sys)
-        .spawn_ball(make_ball(ship_id, 639, pos))
-        .await
-        .expect("spawn merc den ship ball");
+    assert_actor_legal(ctx, &mut actor, label).await;
     actor
 }
 
@@ -1059,19 +1014,13 @@ async fn test_ships_board_ship_skill_and_clone_check_and_persistence() {
     eve_testkit::attest(&["feat:ships.board-ship-skill-and-clone-check"]);
     let ctx = new_ctx();
     let mut backend = ServerScenarioBackend::new(&ctx);
-    let scenario = ScenarioBuilder::with_seed(0xB615)
+    let mut actor = ScenarioBuilder::with_seed(0xB615)
         .add_actor(ActorSpec {
-            label: "ship_boarder".into(),
-            username: "b6m_ship_boarder".into(),
-            character_name: "Pilot shipboarder".into(),
-            require_omega: true,
-            extra_skills: vec![3329],
-            ..Default::default()
+            label: "ship_boarder".into(), username: "b6m_ship_boarder".into(), character_name: "Pilot shipboarder".into(),
+            require_omega: true, extra_skills: vec![3329], ..Default::default()
         })
-        .build(&mut backend)
-        .await;
-    let mut actor = scenario.actors.into_iter().next().expect("built ship_boarder actor");
-    assert_actor_legal(&ctx, &actor, "ship_boarder");
+        .build(&mut backend).await.actors.into_iter().next().expect("built ship_boarder actor");
+    assert_actor_legal(&ctx, &mut actor, "ship_boarder").await;
     let pilot_id = actor.character_id;
     let station_id = actor.station_id.expect("built mission actor station_id");
     let target_ship_id = 910_001i64;

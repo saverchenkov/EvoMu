@@ -36,33 +36,19 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 fn session_view(sess: &eve_machonet::SessionState) -> FixtureSessionView {
     FixtureSessionView {
-        session_id: sess.session_id,
-        user_id: sess.user_id,
-        character_id: sess.character_id,
-        corporation_id: sess.corporation_id,
-        alliance_id: sess.alliance_id,
-        station_id: sess.station_id,
-        structure_id: sess.structure_id,
-        solar_system_id: sess.solar_system_id,
-        ship_id: sess.ship_id,
-        corp_role: sess.corp_role,
-        fleet_id: sess.fleet_id,
-        role: sess.role,
-        now_unix: None,
+        session_id: sess.session_id, user_id: sess.user_id, character_id: sess.character_id,
+        corporation_id: sess.corporation_id, alliance_id: sess.alliance_id, station_id: sess.station_id,
+        structure_id: sess.structure_id, solar_system_id: sess.solar_system_id, ship_id: sess.ship_id,
+        corp_role: sess.corp_role, fleet_id: sess.fleet_id, role: sess.role, now_unix: None,
     }
 }
 
-async fn dock_actor_at_jita(
-    ctx: &ServerContext,
-    actor: &mut BuiltActor<ServerWireTransport<'_>>,
-) {
+async fn dock_actor_at_jita(ctx: &ServerContext, actor: &mut BuiltActor<ServerWireTransport<'_>>) {
     {
         let sess = &mut actor.harness.transport_mut().inner.session;
         let cur_sys = actor.solar_system_id;
         if cur_sys != JITA_SYS {
-            if sess.station_id.is_some() {
-                undock_from_station(ctx, sess, cur_sys).await;
-            }
+            if sess.station_id.is_some() { undock_from_station(ctx, sess, cur_sys).await; }
             fly_stargates_to(ctx, sess, JITA_SYS).await;
         }
         if sess.station_id != Some(JITA_STATION) {
@@ -71,19 +57,8 @@ async fn dock_actor_at_jita(
         }
     }
     let view = session_view(&actor.harness.transport().inner.session);
-    ctx.db.with_snapshot(|snap| {
-        assert_legal_fixture(
-            &actor.label,
-            snap,
-            &ctx.sde,
-            &view,
-            &LegalFixtureExpectation {
-                expected_dock_location_id: Some(JITA_STATION),
-                expect_in_space: Some(false),
-                ..actor.expectation.clone()
-            },
-        );
-    });
+    let exp = LegalFixtureExpectation { expected_dock_location_id: Some(JITA_STATION), expect_in_space: Some(false), ..actor.expectation.clone() };
+    ctx.db.with_snapshot(|snap| assert_legal_fixture(&actor.label, snap, &ctx.sde, &view, &exp));
 }
 
 fn actor_spec(label: &str, username: &str, character_name: &str, starting_isk: f64, require_omega: bool, in_space: bool, fleet: FleetSetup) -> ActorSpec {
@@ -132,6 +107,20 @@ async fn scan_signature_to_resolved(
     );
 }
 
+// parity: rpc:seasonManager.get_max_active_challenges
+// parity: rpc:seasonManager.reload_fsd_data
+// parity: rpc:seasonManager.fill_up_and_return_challenges_for_character
+// parity: rpc:seasonManager.get_challenge
+// parity: rpc:seasonManager.challenge_is_dormant
+// parity: rpc:seasonManager.get_challenge_expiration_date
+// parity: rpc:seasonManager.process_client_event
+// parity: rpc:seasonManager.claim_challenge_rewards
+// parity: rpc:seasonManager.get_season_end_time
+// parity: rpc:milestoneMgr.ProcessCharacterLogon
+// parity: rpc:milestoneMgr.ClaimRewards
+// parity: rpc:seasonalLoginCampaignManager.get_active_campaign
+// parity: rpc:seasonalLoginCampaignManager.get_claim_history
+// parity: rpc:seasonalLoginCampaignManager.claim_reward
 #[tokio::test]
 async fn test_seasons_milestones_and_seasonal_campaigns_e2e() {
     let ctx = fresh_player_ctx();
@@ -353,11 +342,11 @@ async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
     assert_eq!(dict_get(&click_rep, "containerID").and_then(|v| v.as_i64()), Some(data_can_id));
     match rpc_res(&ctx, &mut sess, "hackingMgr", "UsedUtilityElement", &[PyRep::Integer(0)]).await {
         Ok(rep) => assert!(dict_get(&rep, "containerID").is_some() || rep != PyRep::None),
-        Err(e) => assert!(matches!(e.code.as_str(), "UtilitySlotEmpty" | "TargetTileNotRevealed" | "InvalidTileIndex" | "TargetNotFound"), "unexpected UsedUtilityElement err: {e:?}"),
+        Err(e) => assert!(matches!(e.code.as_str(), "UtilitySlotEmpty" | "TargetTileNotRevealed" | "InvalidTileIndex"), "unexpected UsedUtilityElement err: {e:?}"),
     }
     match rpc_res(&ctx, &mut sess, "hackingMgr", "UsedUtilityElementOnVirus", &[PyRep::Integer(0)]).await {
         Ok(rep) => assert!(dict_get(&rep, "containerID").is_some() || rep != PyRep::None),
-        Err(e) => assert!(matches!(e.code.as_str(), "UtilitySlotEmpty" | "TargetTileNotRevealed" | "InvalidTileIndex" | "TargetNotFound"), "unexpected UsedUtilityElementOnVirus err: {e:?}"),
+        Err(e) => assert!(matches!(e.code.as_str(), "UtilitySlotEmpty" | "TargetTileNotRevealed" | "InvalidTileIndex"), "unexpected UsedUtilityElementOnVirus err: {e:?}"),
     }
 
     // 1st quit leaves container intact; 2nd failed attempt detonates standard container
@@ -383,17 +372,14 @@ async fn test_hacking_nodes_failure_outcomes_and_expeditions_e2e() {
 
     if let (Some(gsid), Some(gpos), Some(gcid)) = (ghost_site_id, ghost_pos, ghost_can_id) {
         scan_signature_to_resolved(&ctx, &mut sess, &gsid, gpos).await;
-        move_ship_to_ball(&ctx, &mut sess, LOWSEC_NOURVUKAIKEN_SYS, ship_id, "dungeon", PyRep::String(gsid)).await;
+        move_ship_to_ball(&ctx, &mut sess, LOWSEC_NOURVUKAIKEN_SYS, ship_id, "dungeon", PyRep::String(gsid.clone())).await;
         move_ship_to_ball(&ctx, &mut sess, LOWSEC_NOURVUKAIKEN_SYS, ship_id, "item", PyRep::Integer(gcid)).await;
-        match rpc_res(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(gcid)]).await {
-            Ok(rep) => assert!(matches!(dict_get(&rep, "status").and_then(|v| v.as_str()), Some("InProgress" | "GhostSiteDetonated"))),
-            Err(e) => assert!(!e.code.is_empty()),
-        }
+        let gstart = rpc_ok(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(gcid)]).await;
+        assert_eq!(dict_get(&gstart, "status").and_then(|v| v.as_str()), Some("InProgress"), "ghost hack before 180s expiry must start InProgress: {gstart:?}");
         ctx.advance_secs(180);
-        match rpc_res(&ctx, &mut sess, "hackingMgr", "QuitHackingAttempt", &[PyRep::Integer(gcid)]).await {
-            Ok(rep) => assert_eq!(rep, PyRep::Bool(true)),
-            Err(e) => assert!(!e.code.is_empty()),
-        }
+        assert_eq!(rpc_ok(&ctx, &mut sess, "hackingMgr", "QuitHackingAttempt", &[PyRep::Integer(gcid)]).await, PyRep::Bool(true));
+        let detonated = with_pve_exploration_reg(&ctx, |reg| reg.sites_by_system[&LOWSEC_NOURVUKAIKEN_SYS].iter().find(|s| s.site_id == gsid).map(|s| s.ghost_detonated).unwrap_or(false));
+        assert!(detonated, "quitting ghost site hack after 180s expiry must detonate ghost site");
     }
 
     // Clear combat anomaly -> trigger Escalation -> OnDungeonInstanceAdded + GetMyEscalatingPathDetails + expedition chain
