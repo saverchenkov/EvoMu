@@ -134,9 +134,9 @@ async fn step_passive_shield_recharge_zero_seed_and_combat_log_wrecking_miss_bra
     // emit_combat_log_and_damage_state: test "wrecking", "miss" (applied <= 0.0), and self-damage
     let victim_ship_id = 100_000_002_i64;
     let _ = ctx.drain_notifications_for_char(char_id);
-    emit_combat_log_and_damage_state(&ctx, char_id, None, ship_id, victim_ship_id, 2_905, 245.0, true, 0.8, 1.0, 1.0);
-    emit_combat_log_and_damage_state(&ctx, char_id, None, ship_id, victim_ship_id, 2_905, 0.0, false, 0.8, 1.0, 1.0);
-    emit_combat_log_and_damage_state(&ctx, char_id, Some(char_id), ship_id, ship_id, 2_905, 50.0, false, 0.9, 1.0, 1.0);
+    emit_combat_log_and_damage_state(&ctx, char_id, None, ship_id, victim_ship_id, 2_905, 245.0, true, 0.8, 1.0, 1.0, Some(sys_id));
+    emit_combat_log_and_damage_state(&ctx, char_id, None, ship_id, victim_ship_id, 2_905, 0.0, false, 0.8, 1.0, 1.0, Some(sys_id));
+    emit_combat_log_and_damage_state(&ctx, char_id, Some(char_id), ship_id, ship_id, 2_905, 50.0, false, 0.9, 1.0, 1.0, Some(sys_id));
     assert!(!ctx.drain_notifications_for_char(char_id).is_empty());
 }
 

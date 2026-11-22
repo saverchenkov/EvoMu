@@ -1147,6 +1147,7 @@ pub async fn step_system_entropic_spools(
                 sr,
                 ar,
                 hr,
+                Some(solar_system_id),
             );
 
             // Record attacker damage in assist log

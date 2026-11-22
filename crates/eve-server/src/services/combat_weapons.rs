@@ -1997,6 +1997,7 @@ async fn apply_primary_weapon_damage_and_finalize(
         sr,
         ar,
         hr,
+        Some(sys_id),
     );
 
     // Record attacker damage in 15-minute assist log

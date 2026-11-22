@@ -310,6 +310,7 @@ pub async fn step_missiles_and_breachers(
                         sr,
                         ar,
                         hr,
+                        Some(mstate.solar_system_id),
                     );
                 }
                 if destroyed {
@@ -896,6 +897,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                                     (t_cs.shield_hp / t_cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
                                     (t_cs.armor_hp / t_cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
                                     (t_cs.structure_hp / t_cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
+                                    Some(sys_id),
                                 );
                             }
                             if applied > 0.0 {
@@ -1131,6 +1133,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                                         (t_cs.shield_hp / t_cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
                                         (t_cs.armor_hp / t_cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
                                         (t_cs.structure_hp / t_cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
+                                        Some(sys_id),
                                     );
                                 }
                                 if app > 0.0 {

@@ -926,34 +926,40 @@ pub fn stream_fleet_watchlist_damage(
     if watchers.is_empty() {
         return;
     }
-    let (fleet_id, target_ship_id, valid_watchers) = ctx.db.with_snapshot(|snap| {
-        let ship_id = snap
-            .characters
-            .get(&target_char_id)
-            .map(|c| c.active_ship_id)
-            .filter(|&id| id > 0);
+    let (fleet_id, target_ship_id, target_space_sys, valid_watchers) = ctx.db.with_snapshot(|snap| {
+        let ch_opt = snap.characters.get(&target_char_id);
+        let space_sys = ch_opt.and_then(|_| ctx.space_char_sys_in_snapshot(snap, target_char_id));
+        let ship_id = ch_opt.map(|c| c.active_ship_id).filter(|&id| id > 0);
         let fid_opt = snap
             .fleets
             .values()
             .find(|f| f.members.contains(&target_char_id) || f.member_details.contains_key(&target_char_id))
             .map(|f| f.fleet_id);
-        let valid: Vec<i64> = if let Some(fid) = fid_opt {
-            if let Some(f) = snap.fleets.get(&fid) {
-                watchers
-                    .into_iter()
-                    .filter(|wid| f.members.contains(wid) || f.member_details.contains_key(wid))
-                    .collect()
+        let valid: Vec<i64> = if space_sys.is_some() {
+            if let Some(fid) = fid_opt {
+                if let Some(f) = snap.fleets.get(&fid) {
+                    watchers
+                        .into_iter()
+                        .filter(|wid| f.members.contains(wid) || f.member_details.contains_key(wid))
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             } else {
                 Vec::new()
             }
         } else {
             Vec::new()
         };
-        (fid_opt, ship_id, valid)
+        (fid_opt, ship_id, space_sys, valid)
     });
+    let Some(target_sys) = target_space_sys else {
+        return;
+    };
     if valid_watchers.is_empty() {
         return;
     }
+    let damage_scope = crate::outbound_scene_scope::space_scope(Some(target_sys), None);
     let fleet_state = build_fleet_state_keyval(
         ctx,
         fleet_id,
@@ -964,16 +970,19 @@ pub fn stream_fleet_watchlist_damage(
     );
     for watcher_id in valid_watchers {
         if let Some(ship_id) = target_ship_id {
-            let _ = ctx.notify_damage_state_change(
-                NotificationTarget::Character(watcher_id),
+            crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
+                ctx,
+                watcher_id,
                 ship_id,
                 shield_ratio,
                 armor_ratio,
                 hull_ratio,
+                damage_scope,
             );
         }
-        ctx.emit_typed(
+        ctx.emit_typed_in_scene(
             NotificationTarget::Character(watcher_id),
+            damage_scope,
             OnFleetStateChange {
                 fleet_state: fleet_state.clone(),
             },

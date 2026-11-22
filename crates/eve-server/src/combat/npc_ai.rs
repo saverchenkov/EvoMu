@@ -1948,6 +1948,7 @@ fn apply_ai_step_world_effects(
                     s_r,
                     a_r,
                     h_r,
+                    Some(sys_id),
                 );
             }
         }

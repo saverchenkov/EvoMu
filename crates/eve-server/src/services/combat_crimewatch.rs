@@ -1713,20 +1713,35 @@ pub async fn step_passive_shield_recharge(
         .await;
     if delta > 0.0 {
         if let Some(cid) = char_id_opt {
-            let _ = ctx.notify_damage_state_change(
-                NotificationTarget::Character(cid),
-                ball_id,
-                shield_ratio,
-                armor_ratio,
-                hull_ratio,
-            );
-            crate::services::fleet_social::stream_fleet_watchlist_damage(
-                ctx,
-                cid,
-                shield_ratio,
-                armor_ratio,
-                hull_ratio,
-            );
+            let (in_combat_space, hit_piloted_ship) = ctx.db.with_snapshot(|snap| {
+                let in_sys = ctx.space_char_sys_in_snapshot(snap, cid) == Some(solar_system_id);
+                let piloted = in_sys
+                    && snap
+                        .characters
+                        .get(&cid)
+                        .is_some_and(|ch| ball_id == ch.active_ship_id || ball_id == ch.character_id);
+                (in_sys, piloted)
+            });
+            if in_combat_space {
+                crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
+                    ctx,
+                    cid,
+                    ball_id,
+                    shield_ratio,
+                    armor_ratio,
+                    hull_ratio,
+                    Some(ctx.character_space_scene_scope(cid, Some(solar_system_id))),
+                );
+                if hit_piloted_ship {
+                    crate::services::fleet_social::stream_fleet_watchlist_damage(
+                        ctx,
+                        cid,
+                        shield_ratio,
+                        armor_ratio,
+                        hull_ratio,
+                    );
+                }
+            }
         }
     }
     Some((after, delta))

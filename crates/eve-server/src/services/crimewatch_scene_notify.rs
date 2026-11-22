@@ -77,6 +77,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
     shield_ratio: f64,
     armor_ratio: f64,
     hull_ratio: f64,
+    combat_sys_id: Option<u32>,
 ) {
     let hit_quality = if applied_dmg <= 0.0 {
         "miss"
@@ -105,22 +106,24 @@ pub(crate) fn emit_combat_log_and_damage_state(
         fs.get(&target_ball_id)
             .map(|sq| (!sq.is_abandoned && sq.owner_char_id > 0, sq.owner_char_id, sq.item_id))
     });
-    let combat_sys = ctx.db.with_snapshot(|snap| {
-        let item_sys = |id: i64| {
-            snap.items
-                .get(&id)
-                .and_then(|i| ctx.resolve_solar_system_location_id(i.location_id))
-        };
-        active_drone
-            .map(|(_, _, sys)| sys)
-            .or_else(|| item_sys(attacker_ship_id))
-            .or_else(|| snap.structures.get(&attacker_ship_id).map(|s| s.solar_system_id))
-            .or_else(|| ctx.space_char_sys_in_snapshot(snap, attacker_char_id))
-            .or_else(|| active_fighter.and_then(|(_, _, iid)| item_sys(iid)))
-            .or_else(|| item_sys(target_ball_id))
-            .or_else(|| snap.structures.get(&target_ball_id).map(|s| s.solar_system_id))
+    let combat_sys = combat_sys_id.filter(|&id| id != 0).or_else(|| {
+        ctx.db.with_snapshot(|snap| {
+            let item_sys = |id: i64| {
+                snap.items
+                    .get(&id)
+                    .and_then(|i| ctx.resolve_solar_system_location_id(i.location_id))
+            };
+            active_drone
+                .map(|(_, _, sys)| sys)
+                .or_else(|| item_sys(attacker_ship_id))
+                .or_else(|| snap.structures.get(&attacker_ship_id).map(|s| s.solar_system_id))
+                .or_else(|| ctx.space_char_sys_in_snapshot(snap, attacker_char_id))
+        })
     });
-    let attacker_scope = Some(ctx.character_space_scene_scope(attacker_char_id, combat_sys));
+    let attacker_scope = Some(OutboundSceneScope::space(
+        combat_sys,
+        ctx.active_session_scene_epoch_for_char(attacker_char_id),
+    ));
     let attacker_dict = build_damage_log_dict(
         attacker_char_id,
         attacker_ship_id,
@@ -151,14 +154,15 @@ pub(crate) fn emit_combat_log_and_damage_state(
         is_wrecking,
         attacker_scope,
     );
-    // Resolve active craft owner/pilot (`#1565`): abandoned drones/fighters and stale unpiloted
-    // items have no active controller; docked and out-of-system suppression is enforced downstream
-    // on the wire by outbound scene scoping (`#1190`).
+    // Resolve active craft owner/pilot (`#1565`) only when the victim is currently undocked in
+    // `combat_sys` (active structure gunners count as undocked in the structure's system).
+    // Skipping already-docked or out-of-system victims avoids cluttering `pending_notifications`;
+    // post-enqueue dock/jump transitions remain gated downstream on the outbound wire (`#1190`).
     let resolved_victim = if matches!(active_drone, Some((false, _, _)))
         || matches!(active_fighter, Some((false, _, _)))
     {
         None
-    } else {
+    } else if let Some(sys) = combat_sys {
         ctx.db.with_snapshot(|snap| {
             let cid = match (active_drone, active_fighter) {
                 (Some((true, oid, _)), _) | (_, Some((true, oid, _))) => Some(oid),
@@ -177,11 +181,19 @@ pub(crate) fn emit_combat_log_and_damage_state(
             if !active_craft && snap.items.contains_key(&target_ball_id) {
                 return None;
             }
-            Some(cid)
+            if ctx.space_char_sys_in_snapshot(snap, cid) != Some(sys) {
+                return None;
+            }
+            let hit_piloted_ship = active_drone.is_none()
+                && active_fighter.is_none()
+                && (target_ball_id == vic.character_id || target_ball_id == vic.active_ship_id);
+            Some((cid, sys, hit_piloted_ship))
         })
+    } else {
+        None
     };
-    if let Some(vic_id) = resolved_victim {
-        let victim_scope = Some(ctx.character_space_scene_scope(vic_id, combat_sys));
+    if let Some((vic_id, vic_sys, hit_piloted_ship)) = resolved_victim {
+        let victim_scope = Some(ctx.character_space_scene_scope(vic_id, Some(vic_sys)));
         if vic_id != attacker_char_id {
             emit_damage_state_change_in_scene(
                 ctx,
@@ -193,7 +205,9 @@ pub(crate) fn emit_combat_log_and_damage_state(
                 victim_scope,
             );
         }
-        stream_fleet_watchlist_damage(ctx, vic_id, shield_ratio, armor_ratio, hull_ratio);
+        if hit_piloted_ship {
+            stream_fleet_watchlist_damage(ctx, vic_id, shield_ratio, armor_ratio, hull_ratio);
+        }
         if vic_id != attacker_char_id {
             emit_combat_message_in_scene(
                 ctx,

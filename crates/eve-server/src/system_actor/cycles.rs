@@ -3037,8 +3037,14 @@ fn enqueue_target_lost_typed<N: TypedNotification>(
         return;
     }
     let uid = db_opt.and_then(|db| db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id)));
+    let bound_scope = match db_opt {
+        Some(db) => {
+            crate::outbound_scene_scope::bind_db_recipient_scene_scope(db, scene_scope, cid, uid)
+        }
+        None => scene_scope,
+    };
     let pending_notif =
-        build_pending_typed_notification_in_scene(cid, uid, id_type, now, scene_scope, notif);
+        build_pending_typed_notification_in_scene(cid, uid, id_type, now, bound_scope, notif);
     crate::router::cache_notifications::push_or_stage_pending_notification(
         Some(pending),
         notify_tx_opt,
@@ -3354,12 +3360,18 @@ fn enqueue_cycle_char_notification_with_scope<N: TypedNotification>(
     notif: N,
 ) {
     let uid = db_opt.and_then(|db| db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id)));
+    let bound_scope = match db_opt {
+        Some(db) => {
+            crate::outbound_scene_scope::bind_db_recipient_scene_scope(db, scene_scope, cid, uid)
+        }
+        None => scene_scope,
+    };
     let notif = build_pending_typed_notification_in_scene(
         cid,
         uid,
         N::DEFAULT_ID_TYPE,
         now,
-        scene_scope,
+        bound_scope,
         notif,
     );
     {

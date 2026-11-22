@@ -365,7 +365,12 @@ pub fn emit_typed_to_solar_system_in_space_core<N: TypedNotification>(
             packet,
             marshaled_packet,
             created_filetime: now_ft,
-            scene_scope: crate::outbound_scene_scope::space_scope(Some(solar_system_id), None),
+            scene_scope: crate::outbound_scene_scope::bind_db_recipient_scene_scope(
+                db,
+                crate::outbound_scene_scope::space_scope(Some(solar_system_id), None),
+                cid,
+                uid,
+            ),
         };
         push_or_stage_pending_notification(
             Some(pending_notifications),

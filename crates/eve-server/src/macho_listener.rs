@@ -1459,12 +1459,13 @@ fn is_structure_view_outside_bootstrapped(ctx: &ServerContext, session: &Session
 /// `station_structure::handle` already minted a fresh post-undock `"beyonce"` object).
 fn detach_structure_view_outside_wire_state(
     ctx: &ServerContext,
-    session_id: u64,
-    char_id: Option<i64>,
+    session: &SessionState,
     wire_state: &mut crate::outbound_sequencer::SessionWireState,
     sys_rx: &mut TickRxSlot<'_>,
     subscribed_sys_id: &mut Option<u32>,
 ) {
+    let session_id = session.session_id;
+    let char_id = session.character_id;
     sys_rx.detach();
     *subscribed_sys_id = None;
     wire_state.leave_space();
@@ -1475,6 +1476,8 @@ fn detach_structure_view_outside_wire_state(
         ctx.clear_space_ballpark_bootstrapped_for_session(session_id, cid);
         crate::services::space_destiny::reset_update_state_rate_limit(ctx, session_id, cid);
     }
+    let is_gunner = crate::outbound_scene_scope::is_active_structure_gunner(session);
+    sync_wire_scene_with_events(ctx, wire_state, session, is_gunner, false);
     ctx.flight_recorder.record_wire_state(wire_state);
 }
 
@@ -1482,21 +1485,13 @@ fn detach_structure_view_outside_wire_state(
 /// binding while still structure-docked (`Enter Hangar`, `#1448` / `#1461`).
 fn detach_structure_view_outside_on_beyonce_release(
     ctx: &ServerContext,
-    session_id: u64,
-    char_id: Option<i64>,
+    session: &SessionState,
     wire_state: &mut crate::outbound_sequencer::SessionWireState,
     sys_rx: &mut TickRxSlot<'_>,
     subscribed_sys_id: &mut Option<u32>,
 ) {
-    detach_structure_view_outside_wire_state(
-        ctx,
-        session_id,
-        char_id,
-        wire_state,
-        sys_rx,
-        subscribed_sys_id,
-    );
-    ctx.prune_bound_service_without_notify(session_id, "beyonce");
+    detach_structure_view_outside_wire_state(ctx, session, wire_state, sys_rx, subscribed_sys_id);
+    ctx.prune_bound_service_without_notify(session.session_id, "beyonce");
 }
 
 #[cfg(test)]
@@ -1764,8 +1759,7 @@ async fn execute_call_req_wire_inner(
     {
         detach_structure_view_outside_on_beyonce_release(
             ctx,
-            session.session_id,
-            session.character_id,
+            session,
             wire.wire_state,
             &mut wire.sys_rx,
             wire.subscribed_sys_id,
@@ -1880,8 +1874,7 @@ async fn execute_call_req_wire_inner(
     {
         detach_structure_view_outside_on_beyonce_release(
             ctx,
-            session.session_id,
-            session.character_id,
+            session,
             wire.wire_state,
             &mut wire.sys_rx,
             wire.subscribed_sys_id,
@@ -1915,8 +1908,7 @@ async fn execute_call_req_wire_inner(
     {
         detach_structure_view_outside_wire_state(
             ctx,
-            session.session_id,
-            session.character_id,
+            session,
             wire.wire_state,
             &mut wire.sys_rx,
             wire.subscribed_sys_id,
@@ -1951,8 +1943,9 @@ async fn execute_call_req_wire_inner(
             && prev_session.structure_id == session.structure_id
             && prev_session.solar_system_id == session.solar_system_id)
             || (is_beyonce_ballpark_rpc && rpc_res.is_ok()));
-    let is_in_space = is_undocked_space || is_structure_view_outside;
-    let is_scene_in_space = is_in_space || crate::outbound_scene_scope::is_active_structure_gunner(session);
+    let mut is_in_space = is_undocked_space || is_structure_view_outside;
+    let mut is_scene_in_space =
+        is_in_space || crate::outbound_scene_scope::is_active_structure_gunner(session);
     let is_upwell_undock = rpc_res.is_ok()
         && matches!(
             (effective_service, method),
@@ -2316,6 +2309,9 @@ async fn execute_call_req_wire_inner(
                         wire.wire_state.leave_space();
                         wire.sys_rx.detach();
                         *wire.subscribed_sys_id = None;
+                        is_in_space = false;
+                        is_scene_in_space =
+                            crate::outbound_scene_scope::is_active_structure_gunner(session);
                     } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
                         let ep = wire.wire_state.current_epoch();
                         if let Some(resynced) = resync_structure_set_state_with_sys_rx(
@@ -2465,6 +2461,9 @@ async fn execute_call_req_wire_inner(
                     wire.wire_state.leave_space();
                     wire.sys_rx.detach();
                     *wire.subscribed_sys_id = None;
+                    is_in_space = false;
+                    is_scene_in_space =
+                        crate::outbound_scene_scope::is_active_structure_gunner(session);
                 } else if !obs_evs.is_empty() {
                     post_rpc_direct_batch = build_destiny_batch(
                         ctx,
@@ -2955,6 +2954,14 @@ async fn handle_safe_logoff_to_charsel<W: AsyncWriteExt + Unpin>(
     ctx.clear_notifications_for_char(cid);
     let _ = session.drain_notifications();
 
+    let pre_charsel_epoch = ctx.session_scene_epoch(session.session_id);
+    let charsel_evs =
+        wire.wire_state
+            .sync_scene_with_ballpark(pre_charsel_epoch, None, false, false);
+    if !charsel_evs.is_empty() {
+        record_sequencer_events(ctx, session.session_id, &charsel_evs, None, false);
+    }
+    wire.wire_state.clear_held_scene_frames();
     wire.wire_state.leave_space();
     ctx.systems
         .clear_explicit_update_state_guards_for_session(session.session_id);
@@ -3306,8 +3313,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     let mut sys_rx_slot = TickRxSlot::Optional(&mut sys_rx);
                     detach_structure_view_outside_on_beyonce_release(
                         &ctx,
-                        session_id,
-                        session.character_id,
+                        &session,
                         &mut wire_state,
                         &mut sys_rx_slot,
                         &mut subscribed_sys_id,
@@ -4174,8 +4180,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     let mut sys_rx_slot = TickRxSlot::Optional(&mut sys_rx);
                     detach_structure_view_outside_on_beyonce_release(
                         &ctx,
-                        session_id,
-                        session.character_id,
+                        &session,
                         &mut wire_state,
                         &mut sys_rx_slot,
                         &mut subscribed_sys_id,

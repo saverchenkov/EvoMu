@@ -2368,3 +2368,128 @@ async fn prepare_disconnected_warp_sync_does_not_synthesize_missing_ball() {
     );
 }
 
+#[test]
+fn cycle_damage_and_target_lost_notifications_stamp_active_scene_epoch_and_drop_across_same_system_transition() {
+    use crate::outbound_sequencer::{
+        sequence_tick, DestinyBatch, GateNotificationOutcome, OutboundSceneScope, SessionWireState,
+        TypedNotification,
+    };
+
+    let sys_id = 30_000_142_u32;
+    let char_atk = 90_000_001_i64;
+    let ship_id = 881_001_i64;
+    let target_id = 881_002_i64;
+    let sess_id = 88_001_u64;
+
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let uid = db
+        .with_snapshot(|s| s.characters.get(&char_atk).map(|c| c.user_id))
+        .expect("demo char");
+    db.acquire_online_lock(uid, sess_id, Some(char_atk), true, 1_800_000_000)
+        .unwrap();
+    db.set_session_scene_epoch(sess_id, 1);
+
+    let mut bp = Ballpark::new(sys_id);
+    bp.add_ball(make_ship(ship_id, 587, DVec3::ZERO));
+    bp.ball_slim_meta.insert(
+        ship_id,
+        eve_destiny::SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: char_atk,
+            char_id: Some(char_atk),
+            corp_id: 98_000_001,
+            ..Default::default()
+        },
+    );
+    bp.add_ball(make_ship(target_id, 587, DVec3::new(1_000.0, 0.0, 0.0)));
+    bp.combat_states.insert(
+        target_id,
+        CombatState {
+            shield_hp: 400.0,
+            max_shield_hp: 500.0,
+            armor_hp: 500.0,
+            max_armor_hp: 500.0,
+            structure_hp: 500.0,
+            max_structure_hp: 500.0,
+            ..CombatState::default()
+        },
+    );
+
+    let q_p: RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>> =
+        RwLock::new(HashMap::new());
+    flush_target_lost_notifications(
+        &bp,
+        &[eve_destiny::DestinyEvent::OnTarget {
+            mode: "lost".into(),
+            source_id: ship_id,
+            target_id,
+        }],
+        Some(&db),
+        Some(&q_p),
+        None,
+    );
+    let mut actions = vec![PendingCycleAction::CycleWeaponDamage {
+        attacker_char_id: Some(char_atk),
+        attacker_ship_id: ship_id,
+        attacker_ship_type_id: 587,
+        target_id,
+        target_char_id: None,
+        module_type_id: 3634,
+        applied_dmg: 25.0,
+        notified: false,
+    }];
+    flush_pending_cycle_damage_notifications_with_ballpark(
+        &bp,
+        None,
+        Some(&db),
+        Some(&q_p),
+        None,
+        &mut actions,
+    );
+
+    let notifs = q_p.write().unwrap().remove(&char_atk).unwrap_or_default();
+    assert!(notifs.iter().any(|n| n.event == "OnTarget"));
+    assert!(notifs.iter().any(|n| n.event == "OnDamageMessage"));
+    assert!(notifs.iter().any(|n| n.event == "OnDamageStateChange"));
+    for n in &notifs {
+        assert_eq!(
+            n.scene_scope,
+            Some(OutboundSceneScope::space(Some(sys_id), Some(1))),
+            "expected stamped epoch 1 on {}",
+            n.event
+        );
+    }
+
+    // Same-system transition advances active epoch 1 -> 2; pre-transition epoch-1 cycle/target
+    // notifications must drop as stale_scene_epoch on the wire.
+    let mut wire = SessionWireState::new(sess_id, char_atk as u64).with_scene_epoch(2);
+    let ep = wire.enter_space(Some(sys_id));
+    assert!(sequence_tick(
+        &mut wire,
+        DestinyBatch::new(
+            ep,
+            10,
+            true,
+            crate::outbound_sequencer::tests::dummy_updates("SetState", 10),
+        )
+        .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_id), Some(2)))),
+    )
+    .is_some());
+    for n in notifs {
+        let gated = wire.gate_typed_notification(
+            TypedNotification::new(n.event, n.args).with_scene_scope(n.scene_scope),
+        );
+        match gated {
+            GateNotificationOutcome::Dropped(ev) => {
+                assert!(
+                    ev.reason.starts_with("stale_scene_epoch:1<2"),
+                    "expected stale_scene_epoch:1<2, got {}",
+                    ev.reason
+                );
+            }
+            other => panic!("expected stale cycle notif to drop at epoch 2, got {other:?}"),
+        }
+    }
+}
+

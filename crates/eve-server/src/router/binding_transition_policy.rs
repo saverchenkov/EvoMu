@@ -6,7 +6,7 @@
 //! `RebindToCurrentScene`, `StaleObjectGone`) into one table-driven module.
 
 use crate::router::context::{BoundObjectEntry, ServerContext, NEXT_BOUND_ID};
-use eve_db::lock_rank::RANK_LEAF;
+pub(crate) use eve_db::lock_rank::RANK_TRANSITION_GRACE;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use std::collections::HashMap;
@@ -450,7 +450,6 @@ impl Drop for ReconnectHoldGuard<'_> {
 /// callers holding `WorldRepository::inner` + `RANK_LEAF` locks (`cluster_tick` ->
 /// `combat_ephemeral`) to read `reconnect_hold_session` without same-rank inversion — and
 /// strictly below `RANK_CLOCK` (70), with zero inner locks acquired while held (`#1190`).
-pub(crate) const RANK_TRANSITION_GRACE: u16 = RANK_LEAF + 5;
 
 fn current_scene_target_object_id(session: &SessionState, service: &str) -> Option<i64> {
     match service {
@@ -675,6 +674,7 @@ impl ServerContext {
             store.scene_epochs.remove(&session_id);
             store.epoch_records.remove(&session_id);
         });
+        self.db.clear_session_scene_epoch(session_id);
     }
 
     /// Atomically advances `session_id`'s `scene_epoch`, purges or records departed locations and
@@ -745,7 +745,7 @@ impl ServerContext {
             return 0;
         }
 
-        self.with_grace_store_mut(now_ticks, |store| {
+        let entered_epoch = self.with_grace_store_mut(now_ticks, |store| {
             let departed_epoch = store.scene_epochs.get(&session_id).copied().unwrap_or(0);
             let entered_epoch = departed_epoch.saturating_add(1);
             store.scene_epochs.insert(session_id, entered_epoch);
@@ -827,7 +827,9 @@ impl ServerContext {
             }
 
             entered_epoch
-        })
+        });
+        self.db.set_session_scene_epoch(session_id, entered_epoch);
+        entered_epoch
     }
 
     pub(crate) fn record_pending_displaced_logoff(

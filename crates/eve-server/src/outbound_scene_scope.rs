@@ -225,6 +225,7 @@ impl SessionWireState {
         let mut evicted = None;
         if self.held_frames.len() >= MAX_HELD_SCENE_FRAMES {
             if let Some(oldest) = self.held_frames.pop_front() {
+                self.scene_drop_count += 1;
                 let (epoch, stamp, packet_kind) = match oldest {
                     HeldSceneFrame::Destiny(b) => {
                         (b.epoch, b.stamp, Some("DoDestinyUpdate".to_string()))
@@ -242,6 +243,10 @@ impl SessionWireState {
         }
         self.held_frames.push_back(frame);
         evicted
+    }
+
+    pub(crate) fn clear_held_scene_frames(&mut self) {
+        self.held_frames.clear();
     }
 
     /// Synchronizes authoritative session scene epoch/location onto `SessionWireState` and drops
@@ -461,6 +466,9 @@ pub(crate) fn drain_ready_held_frames_into(
                         eval_and_push_destiny_batch(state, sub_batch, out, events);
                         finalize_pending_destiny_frames(state, out, start, events);
                     }
+                    if !was_entered && state.scene_entered {
+                        break;
+                    }
                 }
                 HeldSceneFrame::Notification(notif) => {
                     if let Some(drop_ev) = state.gate_notification(&notif.event, &notif.args) {
@@ -471,13 +479,18 @@ pub(crate) fn drain_ready_held_frames_into(
                 }
             }
         }
+        let entered_now = !was_entered && state.scene_entered;
+        if entered_now {
+            still_held.extend(pending);
+            still_held.extend(std::mem::take(&mut state.held_frames));
+            state.held_frames = still_held;
+            continue;
+        }
         if !still_held.is_empty() {
             still_held.extend(std::mem::take(&mut state.held_frames));
             state.held_frames = still_held;
         }
-        if !(!was_entered && state.scene_entered) {
-            break;
-        }
+        break;
     }
 }
 
@@ -499,7 +512,7 @@ pub(crate) const fn ballpark_space_scope(solar_system_id: u32) -> Option<Outboun
     ))
 }
 
-pub(crate) fn is_active_structure_gunner(session: &SessionState) -> bool {
+pub fn is_active_structure_gunner(session: &SessionState) -> bool {
     session.character_id.is_some()
         && session.station_id.is_none()
         && session.solar_system_id.is_some()
@@ -624,6 +637,25 @@ impl ServerContext {
             scope
         })
     }
+}
+
+/// Stamps `scene_scope.scene_epoch` from `db` (`WorldRepository::active_scene_epoch_for_char_and_user`)
+/// without holding any `ServerContext` `RANK_LEAF` lock (`#1190`).
+pub(crate) fn bind_db_recipient_scene_scope(
+    db: &eve_db::WorldRepository,
+    scene_scope: Option<OutboundSceneScope>,
+    cid: i64,
+    uid: Option<u64>,
+) -> Option<OutboundSceneScope> {
+    scene_scope.map(|mut scope| {
+        if scope.scene_epoch.is_none() {
+            scope.scene_epoch = uid.and_then(|u| db.active_scene_epoch_for_char_and_user(cid, u));
+        }
+        scope
+    })
+}
+
+impl ServerContext {
 
     pub(crate) fn space_char_sys_in_snapshot(
         &self,

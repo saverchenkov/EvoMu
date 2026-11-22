@@ -40,6 +40,8 @@ pub const RANK_WAL_LOCK: u16 = 43;
 /// Rank `60`: leaf locks (`WorldRepository::auth_runtime`, `DedicatedAuthConn::conn`, `SystemHandle`
 /// caches, runtime maps, notification queues, `bound_objects`, `esi_state.*`, and Quasar meta).
 pub const RANK_LEAF: u16 = 60;
+/// Rank for session scene-epoch and transition grace ledgers (strictly above `RANK_LEAF`).
+pub const RANK_TRANSITION_GRACE: u16 = RANK_LEAF + 5;
 /// Rank `70`: terminal clock pointer lock (`WorldRepository::clock`, `ServerContext::clock`);
 /// never acquires any inner lock while held, so leaf locks may read the clock.
 pub const RANK_CLOCK: u16 = 70;

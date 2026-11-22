@@ -302,6 +302,7 @@ pub(crate) async fn step_active_breacher_dots(
                 shield_ratio,
                 armor_ratio,
                 hull_ratio,
+                Some(solar_system_id),
             );
         }
 
