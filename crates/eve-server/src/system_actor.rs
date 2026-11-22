@@ -25,10 +25,12 @@ pub mod tidi_autoscaler;
 pub use tidi_autoscaler::*;
 pub mod lifecycle;
 pub use lifecycle::{
-    ClusterTickWakeReason, SessionArrivalWakeReason, SystemActivationError,
-    SystemContentMaintenanceContext, SystemContentProvider, SystemContentProviderMetadata,
-    SystemContentSeedContext, SystemLifecycleState, SystemWakeReason,
+    ClusterTickWakeReason, LifecycleTransitionRecord, SessionArrivalWakeReason,
+    SystemActivationError, SystemContentMaintenanceContext, SystemContentProvider,
+    SystemContentProviderMetadata, SystemContentSeedContext, SystemLifecycleState,
+    SystemWakeReason,
 };
+mod lifecycle_sm;
 mod types;
 pub use types::*;
 
@@ -305,7 +307,7 @@ impl Drop for SpecialSiteBallSpawnGuard {
 }
 
 pub struct SystemRegistry {
-    pub(crate) systems: RankedRwLock<HashMap<SolarSystemId, SystemHandle>, RANK_SYSTEM_REGISTRY>,
+    pub(crate) systems: RankedRwLock<HashMap<SolarSystemId, lifecycle_sm::SystemLifecycleSlot>, RANK_SYSTEM_REGISTRY>,
     sde: Option<Arc<SdeRegistry>>,
     pub db: Option<Arc<eve_db::WorldRepository>>,
     belt_respawn_interval_secs: Arc<std::sync::atomic::AtomicU64>,
@@ -340,6 +342,12 @@ pub struct SystemRegistry {
         Arc<RankedMutex<HashMap<(u64, i64), types::ExplicitUpdateStateGuard>, RANK_LEAF>>,
     pub(crate) location_invuln_ledger: RankedMutex<types::LocationInvulnLedger, { types::RANK_INVULN_LEDGER }>,
     pub(crate) content_providers: lifecycle::LifecycleContentProviders,
+    pub(crate) next_lifecycle_generation: std::sync::atomic::AtomicU64,
+    pub(crate) lifecycle_telemetry:
+        RankedRwLock<lifecycle_sm::LifecycleTelemetryStore, RANK_LEAF>,
+    pub(crate) discarded_stale_completions: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    pub(crate) lifecycle_test_hooks: lifecycle_sm::LifecycleTestHooks,
 }
 
 /// Lock-free RAII guard releasing a system's in-flight physics-step slot upon completion or panic.
@@ -350,6 +358,8 @@ impl Drop for PhysicsStepGuard {
         self.0.store(false, std::sync::atomic::Ordering::Release);
     }
 }
+
+pub(in crate::system_actor) use lifecycle_sm::PreparedSystemActivation;
 
 impl Default for SystemRegistry {
     fn default() -> Self {
@@ -384,6 +394,11 @@ impl SystemRegistry {
             explicit_update_state_guards: Arc::new(RankedMutex::new(HashMap::new())),
             location_invuln_ledger: RankedMutex::new(types::LocationInvulnLedger::default()),
             content_providers: lifecycle::LifecycleContentProviders::default(),
+            next_lifecycle_generation: std::sync::atomic::AtomicU64::new(1),
+            lifecycle_telemetry: lifecycle_sm::new_lifecycle_telemetry(),
+            discarded_stale_completions: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            lifecycle_test_hooks: Default::default(),
         }
     }
 
@@ -465,10 +480,11 @@ impl SystemRegistry {
 
     /// Returns `true` if a live `SystemActor` for `solar_system_id` is currently loaded (`#1080`).
     pub fn is_system_loaded(&self, solar_system_id: SolarSystemId) -> bool {
-        let is_live = |guard: &HashMap<SolarSystemId, SystemHandle>| {
+        let is_live = |guard: &HashMap<SolarSystemId, lifecycle_sm::SystemLifecycleSlot>| {
             guard
                 .get(&solar_system_id)
-                .is_some_and(|h| !h.cmd_tx.is_closed())
+                .and_then(lifecycle_sm::SystemLifecycleSlot::live_handle)
+                .is_some()
         };
         if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
             let guard = self.systems.read_unranked().unwrap_or_else(|e| e.into_inner());
@@ -536,7 +552,21 @@ impl SystemRegistry {
             return Some(dest_sys_id);
         }
         let was_loaded = self.is_system_loaded(dest_sys_id);
-        let _dest_handle = self.get_or_spawn(dest_sys_id);
+        let _dest_handle = match self
+            .wake_for_session_arrival(dest_sys_id, SessionArrivalWakeReason::Jump)
+        {
+            Ok(handle) => handle,
+            Err(err) => {
+                tracing::warn!(
+                    source_sys_id,
+                    dest_sys_id,
+                    gate_id,
+                    %err,
+                    "failed to wake stargate destination system"
+                );
+                return None;
+            }
+        };
         if let Some(src_handle) = self.get_handle(source_sys_id) {
             if !was_loaded {
                 src_handle.activate_stargate_transition(
@@ -760,10 +790,18 @@ impl SystemRegistry {
     }
 
     pub fn active_systems_count(&self) -> usize {
+        let count_live = |guard: &HashMap<SolarSystemId, lifecycle_sm::SystemLifecycleSlot>| {
+            guard
+                .values()
+                .filter(|slot| slot.live_handle().is_some())
+                .count()
+        };
         if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
-            self.systems.read_unranked().unwrap_or_else(|e| e.into_inner()).len()
+            let guard = self.systems.read_unranked().unwrap_or_else(|e| e.into_inner());
+            count_live(&guard)
         } else {
-            self.systems.read().unwrap_or_else(|e| e.into_inner()).len()
+            let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+            count_live(&guard)
         }
     }
 
@@ -772,33 +810,31 @@ impl SystemRegistry {
             let guard = self.systems.read_unranked().unwrap_or_else(|e| e.into_inner());
             guard
                 .get(&solar_system_id)
-                .filter(|h| !h.cmd_tx.is_closed())
+                .and_then(lifecycle_sm::SystemLifecycleSlot::live_handle)
                 .cloned()
         } else {
             let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
             guard
                 .get(&solar_system_id)
-                .filter(|h| !h.cmd_tx.is_closed())
+                .and_then(lifecycle_sm::SystemLifecycleSlot::live_handle)
                 .cloned()
         }
     }
 
     pub fn active_system_handles(&self) -> Vec<(SolarSystemId, SystemHandle)> {
+        let collect_live = |guard: &HashMap<SolarSystemId, lifecycle_sm::SystemLifecycleSlot>| {
+            guard
+                .iter()
+                .filter_map(|(&id, slot)| slot.live_handle().map(|h| (id, h.clone())))
+                .collect::<Vec<_>>()
+        };
         let mut handles: Vec<(SolarSystemId, SystemHandle)> =
             if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
-                self.systems
-                    .read_unranked()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .iter()
-                    .map(|(&id, h)| (id, h.clone()))
-                    .collect()
+                let guard = self.systems.read_unranked().unwrap_or_else(|e| e.into_inner());
+                collect_live(&guard)
             } else {
-                self.systems
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .iter()
-                    .map(|(&id, h)| (id, h.clone()))
-                    .collect()
+                let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+                collect_live(&guard)
             };
         handles.sort_by_key(|(id, _)| *id);
         handles
@@ -903,6 +939,17 @@ impl SystemRegistry {
             .insert((solar_system_id, anomaly_id.to_string()))
     }
 
+    pub(crate) fn reclaim_transient_items_in_db(&self, solar_system_id: SolarSystemId) {
+        if let Some(ref db) = self.db {
+            if !db.is_write_locked_by_current_thread() {
+                let _ = db.tx("reclaim_transient_items", |wtx| {
+                    wtx.snap.reclaim_transient_items_in_system(solar_system_id);
+                    Ok::<_, eve_db::TxError>(())
+                });
+            }
+        }
+    }
+
     /// Synchronously flushes dirty condition checkpoints across all active systems to `self.db`
     /// (`RFC-1 E-4`, `T-2`, `T-5`, `#919`).
     pub fn flush_all_condition_checkpoints_to_db(&self) -> usize {
@@ -924,125 +971,29 @@ impl SystemRegistry {
         total
     }
 
-    /// Evicts hibernated systems that have been idle for at least `min_idle_secs` after flushing
-    /// a final condition checkpoint (`RFC-1 E-4`, `#919`, `#866`).
-    pub async fn evict_idle_systems(&self, min_idle_secs: u64) -> Vec<SolarSystemId> {
-        self.evict_idle_systems_with_min_ticks(min_idle_secs, 0).await
-    }
-
-    /// Evicts hibernated systems that have reached both `min_idle_secs` and `min_idle_ticks`,
-    /// provided no external [`SystemHandle`] clones are still held outside the registry/actor.
-    pub async fn evict_idle_systems_with_min_ticks(
-        &self,
-        min_idle_secs: u64,
-        min_idle_ticks: u64,
-    ) -> Vec<SolarSystemId> {
-        let now_unix = self
-            .db
-            .as_ref()
-            .map(|db| db.clock().now_unix_secs())
-            .unwrap_or(1);
-        let can_evict_handle = |h: &SystemHandle, max_strong: usize| -> bool {
-            if !h.is_hibernated()
-                || h.pending_destroyed_balls.is_non_empty()
-                || Arc::strong_count(&h.ballpark) > max_strong
-            {
-                return false;
-            }
-            if min_idle_ticks > 0
-                && h.idle_ticks.load(std::sync::atomic::Ordering::Relaxed) < min_idle_ticks
-            {
-                return false;
-            }
-            if min_idle_secs == 0 {
-                return true;
-            }
-            let since = h.hibernated_since_unix();
-            since > 0 && now_unix.saturating_sub(since) >= min_idle_secs
-        };
-        let candidates: Vec<(SolarSystemId, SystemHandle)> = self
-            .active_system_handles()
-            .into_iter()
-            // Refcounts during filter: `self.systems` (1) + actor task (1) + vec element (1) = 3.
-            .filter(|(_, h)| can_evict_handle(h, 3))
-            .collect();
-        let mut evicted = Vec::new();
-        for (sys_id, handle) in candidates {
-            let _ = handle.flush_condition_checkpoint().await;
-            if !handle.is_hibernated() {
-                continue;
-            }
-            let removed = {
-                let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
-                // Loop holds `handle` (1), `guard` holds (1), actor holds (1) = 3.
-                if guard.get(&sys_id).is_some_and(|h| can_evict_handle(h, 3)) {
-                    guard.remove(&sys_id).is_some()
-                } else {
-                    false
-                }
-            };
-            if removed {
-                if let Some(ref db) = self.db {
-                    if !db.is_write_locked_by_current_thread() {
-                        let _ = db.tx("reclaim_transient_items", |wtx| {
-                            wtx.snap.reclaim_transient_items_in_system(sys_id);
-                            Ok::<_, eve_db::TxError>(())
-                        });
-                    }
-                }
-                evicted.push(sys_id);
-            }
-        }
-        evicted
-    }
-
-    /// Gracefully stops an active solar system actor task and removes it from the registry (`#1541`).
-    pub async fn stop_system(&self, solar_system_id: SolarSystemId) -> bool {
-        let removed = {
-            let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
-            guard.remove(&solar_system_id)
-        };
-        let Some(handle) = removed else {
-            return false;
-        };
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if handle.cmd_sender().send(SystemCommand::ShutdownActor { reply: tx }).await.is_ok() {
-            let _ = rx.await;
-        }
-        true
-    }
-
     /// Retrieves a running Solar System Actor handle, or spawns one only when a Tokio runtime
     /// reactor is currently active (`None` on headless non-Tokio teardown/unit threads).
     pub fn get_or_spawn_if_runtime(&self, solar_system_id: SolarSystemId) -> Option<SystemHandle> {
-        self.get_handle(solar_system_id).or_else(|| {
-            tokio::runtime::Handle::try_current()
-                .ok()
-                .map(|_| self.get_or_spawn(solar_system_id))
-        })
+        self.legacy_activate_system_if_runtime(solar_system_id)
     }
 
     /// Spawns or retrieves a running Solar System Actor for `solar_system_id`.
     /// Populates static SDE celestials, stargates, and stations (`SP-1`), re-materializes persisted
     /// space objects (`SP-7`), and hibernates (`LOD 0`) with zero timer wakes until dynamic balls exist.
     pub fn get_or_spawn(&self, solar_system_id: SolarSystemId) -> SystemHandle {
-        if let Some(existing) = self.get_handle(solar_system_id) {
-            return existing;
-        }
+        self.legacy_activate_system(solar_system_id)
+    }
 
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
-        let (event_tx, _) = broadcast::channel::<TickBroadcast>(4096);
-        let event_tx_actor = event_tx.clone();
+    pub(crate) fn prepare_system_activation(
+        &self,
+        solar_system_id: SolarSystemId,
+        wake_reason: &SystemWakeReason,
+    ) -> Result<PreparedSystemActivation, SystemActivationError> {
         let sde_opt = self.sde.clone();
         let db_opt = self.db.clone();
         let belt_interval_atomic = self.belt_respawn_interval_secs.clone();
         let downtime_utc_atomic = self.downtime_utc_secs_of_day.clone();
         let mechanic_rng = self.mechanic_rng.clone();
-        let module_deactivation_hook = self.module_deactivation_hook.clone();
-        let module_deactivation_hook_actor = module_deactivation_hook.clone();
-        let target_lock_completed_hook = self.target_lock_completed_hook.clone();
-        let target_lock_completed_hook_actor = target_lock_completed_hook.clone();
-        let post_unlock_actions_actor = self.post_unlock_actions.clone();
         let mut initial_ballpark = Ballpark::new(solar_system_id);
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut initial_ballpark, solar_system_id, sde);
@@ -1065,10 +1016,8 @@ impl SystemRegistry {
             };
             initial_ballpark.init_stargate_activation_state(gate_id, state);
         }
-        let db_read_safe = db_opt.as_ref().is_some_and(|db| {
-            !db.is_write_locked_by_current_thread()
-                && !held_lock_ranks().iter().any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER)
-        });
+        let db_read_safe = db_opt.is_some()
+            && !held_lock_ranks().iter().any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER);
         if db_read_safe {
             crate::services::cluster_macho_misc_services::populate_shipcaster_balls_from_db(
                 solar_system_id,
@@ -1130,19 +1079,11 @@ impl SystemRegistry {
             Arc::new(RankedRwLock::new(HashMap::new()));
         let active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>> =
             Arc::new(RankedRwLock::new(std::collections::HashSet::new()));
-        register_committed_warp_cache(&ball_positions, &committed_warp_balls);
-        register_tethered_balls_cache(&ball_positions, &tethered_balls);
-        sync_ball_positions(&initial_ballpark, &ball_positions, &scrambled_balls);
-        let ball_positions_actor = ball_positions.clone();
-        let scrambled_balls_actor = scrambled_balls.clone();
-        let warp_stopped_at_actor = warp_stopped_at.clone();
-        let active_module_ships_actor = active_module_ships.clone();
         let hibernated = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hibernated_since_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let idle_ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let dynamic_ball_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let pending_destroyed_balls = PendingDestroyedOutbox::default();
-        let pending_destroyed_actor = pending_destroyed_balls.clone();
         let mut initial_actor_state = SystemActorState {
             asteroids: initial_asteroids,
             asteroid_templates: initial_asteroid_templates,
@@ -1178,6 +1119,27 @@ impl SystemRegistry {
                 );
             }
         }
+        {
+            let mut seed_ctx = SystemContentSeedContext {
+                solar_system_id,
+                wake_reason,
+                registry: self,
+                ballpark: &mut initial_ballpark,
+                actor_state: &mut initial_actor_state,
+                sde: self.sde.as_ref(),
+                db: self.db.as_ref(),
+                db_read_safe,
+                belt_respawn_interval_secs: belt_interval_atomic
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                downtime_utc_secs_of_day: downtime_utc_atomic
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                mechanic_rng: &mechanic_rng,
+            };
+            self.content_providers.seed_all(&mut seed_ctx)?;
+        }
+        register_committed_warp_cache(&ball_positions, &committed_warp_balls);
+        register_tethered_balls_cache(&ball_positions, &tethered_balls);
+        sync_ball_positions(&initial_ballpark, &ball_positions, &scrambled_balls);
         celestials::update_system_hibernation_flag(&initial_actor_state, &initial_ballpark, 0);
         protection::sync_all_protection_registry_in_actor(&initial_ballpark, &mut initial_actor_state);
         let initial_tidi = self.cluster_nodes.read().ok()
@@ -1195,18 +1157,81 @@ impl SystemRegistry {
         );
         let (view_tx, view_rx) = tokio::sync::watch::channel(Arc::new(initial_view));
         let view_tx = Arc::new(view_tx);
-        let view_tx_actor = Arc::clone(&view_tx);
         let tidi_factor_bits = Arc::new(std::sync::atomic::AtomicU64::new(initial_tidi.to_bits()));
-        let tidi_factor_bits_actor = tidi_factor_bits.clone();
         let ballpark_shared: Arc<BallparkHandle> = Arc::new(BallparkHandle::new(
             initial_ballpark,
             Arc::clone(&view_tx),
             Arc::clone(&tidi_factor_bits),
         ));
-        let ballpark_actor = ballpark_shared.clone();
         let actor_state_shared: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>> =
             Arc::new(RankedRwLock::new(initial_actor_state));
         ballpark_shared.attach_actor_state(&actor_state_shared);
+        Ok(PreparedSystemActivation {
+            solar_system_id,
+            lazy_gates,
+            ball_positions,
+            scrambled_balls,
+            tethered_balls,
+            committed_warp_balls,
+            warp_stopped_at,
+            active_module_ships,
+            hibernated,
+            hibernated_since_unix,
+            idle_ticks,
+            dynamic_ball_count,
+            pending_destroyed_balls,
+            broadcast_seq_gate_actor,
+            tidi_factor_bits,
+            view_tx,
+            view_rx,
+            ballpark_shared,
+            actor_state_shared,
+        })
+    }
+
+    pub(crate) fn spawn_prepared_system_actor(
+        &self,
+        rt_handle: &tokio::runtime::Handle,
+        prepared: PreparedSystemActivation,
+    ) -> (SystemHandle, bool) {
+        let PreparedSystemActivation {
+            solar_system_id,
+            lazy_gates,
+            ball_positions,
+            scrambled_balls,
+            tethered_balls,
+            committed_warp_balls,
+            warp_stopped_at,
+            active_module_ships,
+            hibernated,
+            hibernated_since_unix,
+            idle_ticks,
+            dynamic_ball_count,
+            pending_destroyed_balls,
+            broadcast_seq_gate_actor,
+            tidi_factor_bits,
+            view_tx,
+            view_rx,
+            ballpark_shared,
+            actor_state_shared,
+        } = prepared;
+        let (cmd_tx, cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
+        let (event_tx, _) = broadcast::channel::<TickBroadcast>(4096);
+        let event_tx_actor = event_tx.clone();
+        let belt_interval_atomic = self.belt_respawn_interval_secs.clone();
+        let downtime_utc_atomic = self.downtime_utc_secs_of_day.clone();
+        let mechanic_rng = self.mechanic_rng.clone();
+        let module_deactivation_hook_actor = self.module_deactivation_hook.clone();
+        let target_lock_completed_hook_actor = self.target_lock_completed_hook.clone();
+        let post_unlock_actions_actor = self.post_unlock_actions.clone();
+        let ball_positions_actor = ball_positions.clone();
+        let scrambled_balls_actor = scrambled_balls.clone();
+        let warp_stopped_at_actor = warp_stopped_at.clone();
+        let active_module_ships_actor = active_module_ships.clone();
+        let pending_destroyed_actor = pending_destroyed_balls.clone();
+        let view_tx_actor = Arc::clone(&view_tx);
+        let tidi_factor_bits_actor = tidi_factor_bits.clone();
+        let ballpark_actor = ballpark_shared.clone();
         let actor_state_actor = actor_state_shared.clone();
         let last_auto_stepped_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let sim_elapsed_secs_bits = Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits()));
@@ -1238,13 +1263,27 @@ impl SystemRegistry {
         #[cfg(test)]
         let before_step_reply_hook_actor = before_step_reply_hook_for_test.clone();
 
-        tokio::spawn(async move {
+        struct ShutdownReplyGuard(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for ShutdownReplyGuard {
+            fn drop(&mut self) {
+                if let Some(reply) = self.0.take() {
+                    let _ = reply.send(());
+                }
+            }
+        }
+
+        rt_handle.spawn(async move {
+            // Drop actor `Arc`s before closing `cmd_rx` and sending `shutdown_reply` (`#1542` R1 P2).
+            let mut shutdown_reply = ShutdownReplyGuard(None);
+            let mut cmd_rx = cmd_rx;
+            let (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor) =
+                (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
             let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
             // parity: feat:lifecycle.world-unobserved-system-sim, plan:SP-7
             while let Some(cmd) = cmd_rx.recv().await {
                 if let SystemCommand::ShutdownActor { reply } = cmd {
-                    let _ = reply.send(());
+                    shutdown_reply.0 = Some(reply);
                     break;
                 }
                 let cmd_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2233,6 +2272,14 @@ impl SystemRegistry {
                 }
                 flush_post_unlock_actions(&post_unlock_actions_actor);
             }
+            drop((
+                ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,
+                scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor,
+                pending_destroyed_actor, event_tx_actor,
+            ));
+            cmd_rx.close();
+            drop(cmd_rx);
+            drop(shutdown_reply);
         });
 
         let handle = SystemHandle {
@@ -2274,43 +2321,7 @@ impl SystemRegistry {
             system_step_hook: Arc::clone(&self.system_step_hook),
             post_unlock_actions: Arc::clone(&self.post_unlock_actions),
         };
-        if let Some(ref db) = self.db {
-            register_db_system_ballpark(db, solar_system_id, &handle);
-        }
-        let insert_handle = |guard: &mut HashMap<SolarSystemId, SystemHandle>| -> SystemHandle {
-            if let Some(existing) = guard.get(&solar_system_id) {
-                if !existing.cmd_tx.is_closed() {
-                    return existing.clone();
-                }
-                tracing::warn!(
-                    solar_system_id,
-                    "replacing terminated SystemActor handle with freshly spawned actor"
-                );
-            }
-            guard.insert(solar_system_id, handle.clone());
-            handle.clone()
-        };
-        let inserted_handle = if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
-            match self.systems.try_write_unranked() {
-                Ok(mut guard) => insert_handle(&mut guard),
-                Err(std::sync::TryLockError::Poisoned(e)) => insert_handle(&mut e.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) => handle,
-            }
-        } else {
-            let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
-            insert_handle(&mut guard)
-        };
-        if lazy_gates && !held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
-            let now_ms = self
-                .db
-                .as_ref()
-                .map(|db| {
-                    machonet_wallclock_ms(db.clock().as_ref(), &self.unrebased_clock_offset_secs)
-                })
-                .unwrap_or(0);
-            self.on_system_loaded_refresh_stargates(solar_system_id, now_ms);
-        }
-        inserted_handle
+        (handle, lazy_gates)
     }
 }
 

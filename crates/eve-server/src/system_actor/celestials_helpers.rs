@@ -47,6 +47,34 @@ pub(crate) fn register_db_system_ballpark(
     );
 }
 
+/// Clears the DB ballpark entry for `(db, solar_system_id)` only if it still points at `handle`.
+pub(crate) fn clear_db_system_ballpark_if_matching(
+    db: &Arc<eve_db::WorldRepository>,
+    solar_system_id: SolarSystemId,
+    handle: &SystemHandle,
+) {
+    let mut g = db_ballpark_map().lock().unwrap_or_else(|e| e.into_inner());
+    let key = (db.instance_id(), solar_system_id);
+    let target = Arc::downgrade(&handle.ballpark);
+    if g.get(&key)
+        .is_some_and(|entry| std::sync::Weak::ptr_eq(&entry.ballpark, &target))
+    {
+        g.remove(&key);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn db_ballpark_entry_for_test(
+    db: &Arc<eve_db::WorldRepository>,
+    solar_system_id: SolarSystemId,
+) -> Option<std::sync::Weak<BallparkHandle>> {
+    db_ballpark_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(db.instance_id(), solar_system_id))
+        .map(|entry| entry.ballpark.clone())
+}
+
 fn leaf_write_value<T>(lock: &RankedRwLock<T, RANK_LEAF>, leaf_held: bool, value: T) {
     if leaf_held {
         if let Ok(mut g) = lock.try_write_unranked() {

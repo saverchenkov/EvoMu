@@ -550,6 +550,7 @@ pub struct WorldRepository {
     pub(crate) post_commit_listeners: std::sync::Mutex<Vec<(u64, PostCommitListener)>>,
     pub(crate) next_listener_id: std::sync::atomic::AtomicU64,
     pub(crate) fault_plan: std::sync::atomic::AtomicU64,
+    pub(crate) next_system_lifecycle_generation: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(any(test, feature = "legacy-json-snapshot"))]
@@ -616,6 +617,7 @@ impl WorldRepository {
             post_commit_listeners: std::sync::Mutex::new(Vec::new()),
             next_listener_id: std::sync::atomic::AtomicU64::new(1),
             fault_plan: std::sync::atomic::AtomicU64::new(0),
+            next_system_lifecycle_generation: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -626,6 +628,12 @@ impl WorldRepository {
     /// Returns the process-unique monotonic instance ID of this [`WorldRepository`].
     pub fn instance_id(&self) -> u64 {
         self.instance_id
+    }
+
+    /// Allocates a monotonically increasing, non-zero lifecycle generation scoped to this repository.
+    pub fn allocate_system_lifecycle_generation(&self) -> u64 {
+        self.next_system_lifecycle_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns a monotonic state epoch incremented on every snapshot commit or load (`#592`).

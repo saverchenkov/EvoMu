@@ -1018,14 +1018,9 @@ async fn engine_supervision_catch_unwind_system_actor_recovery_and_backlog_cap_8
     let (closed_tx, closed_rx) = tokio::sync::mpsc::channel(1);
     drop(closed_rx);
     {
-        let mut reg = ctx
-            .systems
-            .systems
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
         let mut dead_handle = handle.clone();
         dead_handle.cmd_tx = closed_tx;
-        reg.insert(sys_id, dead_handle);
+        ctx.systems.replace_live_handle_for_test(sys_id, dead_handle);
     }
     assert!(ctx.systems.get_handle(sys_id).is_none());
     let respawned = ctx.systems.get_or_spawn(sys_id);
@@ -2449,14 +2444,9 @@ async fn physics_tick_subsec_accumulation_overrun_lateness_and_isolation_1207_12
         }
     });
     {
-        let mut reg = ctx
-            .systems
-            .systems
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
         let mut wedged = h_wh_orig.clone();
         wedged.cmd_tx = stall_tx;
-        reg.insert(sys_wh, wedged);
+        ctx.systems.replace_live_handle_for_test(sys_wh, wedged);
     }
 
     let jita_sim_0 = h_jita.sim_elapsed_secs();

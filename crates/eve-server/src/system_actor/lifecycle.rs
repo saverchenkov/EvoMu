@@ -23,13 +23,26 @@ pub enum SystemLifecycleState {
     /// The solar system actor is running at idle LOD 0 hibernation (no active subscribers,
     /// dynamic balls, or pending timers) and may be evicted back to `Cold`.
     Hibernating,
+    /// A single-flight shutdown/eviction pipeline is stopping the actor before returning the slot to `Cold`.
+    Stopping,
 }
 
 impl SystemLifecycleState {
     /// Returns `true` when the solar system is initializing or running in memory (`Loading | Live | Hibernating`).
     pub const fn is_loaded(self) -> bool {
-        !matches!(self, Self::Cold)
+        matches!(self, Self::Loading | Self::Live | Self::Hibernating)
     }
+}
+
+/// Recorded lifecycle state transition telemetry per `(solar_system_id, generation)` (`#1542`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleTransitionRecord {
+    pub solar_system_id: SolarSystemId,
+    pub generation: u64,
+    pub from: SystemLifecycleState,
+    pub to: SystemLifecycleState,
+    pub wake_reason: Option<SystemWakeReason>,
+    pub detail: &'static str,
 }
 
 /// Typed reasons a client session arrival may wake a `Cold` solar system (`#1542`).
@@ -276,6 +289,35 @@ impl LifecycleContentProviders {
             provider,
         });
         Ok(true)
+    }
+
+    pub(crate) fn seed_all(
+        &self,
+        ctx: &mut SystemContentSeedContext<'_>,
+    ) -> Result<(), SystemActivationError> {
+        let providers: Vec<(String, Arc<dyn SystemContentProvider>)> = {
+            let entries =
+                self.providers
+                    .read()
+                    .map_err(|_| SystemActivationError::PoisonedLock {
+                        solar_system_id: Some(ctx.solar_system_id),
+                        lock: "content_providers",
+                    })?;
+            entries
+                .iter()
+                .map(|entry| (entry.name.clone(), Arc::clone(&entry.provider)))
+                .collect()
+        };
+        for (name, provider) in providers {
+            if let Err(message) = provider.seed(ctx) {
+                return Err(SystemActivationError::ContentProviderFailed {
+                    solar_system_id: ctx.solar_system_id,
+                    provider: name,
+                    message,
+                });
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn metadata(
