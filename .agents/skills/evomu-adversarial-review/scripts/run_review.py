@@ -2597,6 +2597,12 @@ def snapshot_review(a, root):
     if not sha:
         print("[review] unknown commit: %s" % a.commit)
         return 3
+    if a.mode == "claims" and a.claims_file:
+        stale_head_viols = rl.check_claims_head_sha(root, os.path.abspath(a.claims_file), target_commit=sha)
+        if stale_head_viols:
+            for cat, vmsg, fpath, lno in stale_head_viols:
+                print("[review] FAST-FAIL [%s] %s (%s:%s)" % (cat, vmsg, fpath, lno), flush=True)
+            return EXIT["FAIL"]
     dirty = subprocess.run(["git", "status", "--porcelain", "--", ".", ":(exclude).agents"], cwd=root,
                            capture_output=True, text=True).stdout.strip()
     if dirty and a.commit == "HEAD":
@@ -2745,13 +2751,19 @@ def main():
     state = rl.load_state(root)
     if a.reuse_context:
         return background_gap_audit(a, root, sdir)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+    if a.mode == "claims" and a.claims_file:
+        stale_head_viols = rl.check_claims_head_sha(root, os.path.abspath(a.claims_file), target_commit=head or "HEAD")
+        if stale_head_viols:
+            for cat, vmsg, fpath, lno in stale_head_viols:
+                print("[review] FAST-FAIL [%s] %s (%s:%s)" % (cat, vmsg, fpath, lno), flush=True)
+            return EXIT["FAIL"]
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = os.path.join(sdir, ts)
     ctx = os.path.join(run_dir, "context")
     os.makedirs(ctx, exist_ok=True)
 
     tree_before = rl.worktree_fingerprint(root)
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
     base = pick_base(root, state, a.base)
     print("[review] mode=%s repo=%s head=%s base=%s tree=%s" % (a.mode, root, head[:9], base[:9], tree_before[:12]))
 

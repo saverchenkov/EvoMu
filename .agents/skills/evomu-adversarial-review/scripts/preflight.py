@@ -651,8 +651,9 @@ def run_early_gate(root, base, added, claims_path, early_only=False):
             except Exception:  # noqa: BLE001
                 violations.append(("RELEASE_GUARD", out_rg[-300:], "tools/release_guard.py", 1))
 
-    # 3. Claims citations & quotes check (if draft claims provided)
+    # 3. Claims HEAD SHA, citations & quotes check (if draft claims provided)
     if claims_path and os.path.exists(claims_path):
+        violations += rl.check_claims_head_sha(root, claims_path, target_commit="HEAD")
         claims_text = open(claims_path, errors="replace").read()
         refs = CITE_RE.findall(claims_text)
         for path, spec in refs:

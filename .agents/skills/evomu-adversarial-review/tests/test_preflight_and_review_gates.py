@@ -2149,6 +2149,127 @@ fn t() {
                 "nested esi_universe_sov_complete IT submodule dropped for head=%s: %s" % (head_ref, cmds),
             )
 
+    def test_arch_check_37_claims_head_sha_fast_fail_in_preflight_and_run_review(self):
+        import review_lib as rl  # noqa: E402
+
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        short_sha = head_sha[:9]
+        parent_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD~1"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        stale_sha = "deadbeef1234567890abcdef1234567890abcdef"
+        if stale_sha.startswith(head_sha[:7]):
+            stale_sha = "cafebabe1234567890abcdef1234567890abcdef"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 1. All real matching HEAD header formats pass (short, full, case-insensitive)
+            matching_headers = [
+                "HEAD: %s\n" % short_sha.upper(),
+                "- **Branch HEAD:** `%s`\n" % head_sha,
+                "- **Reviewed HEAD:** `%s`\n" % short_sha,
+                "- **Head Commit:** `%s` (rebased onto `origin/main` `%s`)\n" % (head_sha, parent_sha[:9]),
+                "- **Branch / Commit:** `arch/931-t3b-switch` @ `%s`\n" % head_sha,
+                "- **Branch / HEAD:** `arch/1194-t1b-corp-actor` at `%s` (`0` commits behind `origin/main` `%s`).\n" % (head_sha, parent_sha[:9]),
+                "- **Branch / Base / Commit:** `feat/x` at commit `%s`, cleanly rebased onto `origin/main` `%s`\n" % (head_sha, parent_sha),
+                "- `%s` (`HEAD`): `fix: something`\n" % head_sha,
+                "Commit `%s` (`%s`, based on `%s`) fixes the thing.\n" % (head_sha, short_sha, parent_sha[:9]),
+            ]
+            for idx, body in enumerate(matching_headers):
+                p = os.path.join(tmp, "match_%d.md" % idx)
+                _write(p, body)
+                self.assertEqual(
+                    rl.check_claims_head_sha(REPO_ROOT, p, target_commit="HEAD"),
+                    [],
+                    "Expected matching HEAD header #%d to pass: %r" % (idx, body),
+                )
+
+            # 2. Base / origin/main / historical body SHAs & no-HEAD claims MUST NOT false-positive
+            no_head_cases = [
+                "# Claims without any commit SHA\n- Changed foo and bar.\n",
+                "- **Base:** `origin/main` (`%s`)\n"
+                "- **Base commit (`origin/main`):** `%s`\n"
+                "- **Base SHA (`origin/main` pre-rebase):** `%s`\n"
+                "- **Merge-Base / Trunk:** Rebased onto `%s`; current `origin/main` is at `%s`.\n"
+                "- **Branch / Base:** `arch/1540-t4b` (branched from `%s`)\n"
+                "- **Branch:** `feat/x` (`origin/main` merged cleanly at `%s`)\n"
+                "- **Status:** `NO_CARGO_READY`\n"
+                "## Root Cause\n"
+                "- Commit `%s` updated legacy logic.\n"
+                "```\nHEAD: %s\n```\n"
+                % (
+                    stale_sha[:9],
+                    stale_sha,
+                    stale_sha,
+                    stale_sha,
+                    stale_sha,
+                    stale_sha[:9],
+                    stale_sha,
+                    stale_sha[:9],
+                    stale_sha,
+                ),
+            ]
+            for idx, body in enumerate(no_head_cases):
+                p = os.path.join(tmp, "no_head_%d.md" % idx)
+                _write(p, body)
+                self.assertEqual(
+                    rl.extract_declared_claims_head_shas(body),
+                    [],
+                    "False-positive HEAD SHA extracted from non-HEAD case #%d" % idx,
+                )
+                self.assertEqual(rl.check_claims_head_sha(REPO_ROOT, p, target_commit="HEAD"), [])
+
+            # 3. Mismatched HEAD SHA (like #931 3B-1 stale pre-rebase HEAD) fails fast in library, preflight, and run_review
+            stale_claims = os.path.join(tmp, "stale_claims.md")
+            _write(
+                stale_claims,
+                "# Claims\n"
+                "- **Branch / Commit:** `arch/931-t3b-switch` @ `%s`\n"
+                "- **Merge-Base / Trunk:** Rebased onto `%s`\n"
+                % (stale_sha, parent_sha),
+            )
+            viols = rl.check_claims_head_sha(REPO_ROOT, stale_claims, target_commit="HEAD")
+            self.assertEqual(len(viols), 1)
+            self.assertEqual(viols[0][0], "CLAIMS_STALE_HEAD_SHA")
+            self.assertIn(stale_sha, viols[0][1])
+            self.assertIn(head_sha[:12], viols[0][1])
+
+            # 3a. preflight.py --early-only --claims <stale> fails fast non-zero in < 2s (warm < 1s)
+            preflight_py = os.path.join(SCRIPTS_DIR, "preflight.py")
+            pf_proc = subprocess.run(
+                [sys.executable, preflight_py, "--early-only", "--claims", stale_claims],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(pf_proc.returncode, 0, pf_proc.stdout + pf_proc.stderr)
+            self.assertIn("CLAIMS_STALE_HEAD_SHA", pf_proc.stdout + pf_proc.stderr)
+            self.assertIn(stale_sha, pf_proc.stdout + pf_proc.stderr)
+            self.assertIn(head_sha[:12], pf_proc.stdout + pf_proc.stderr)
+
+            # 3b. run_review.py (both default snapshot mode and --in-place) fails fast in < 1s BEFORE snapshot/cargo/LLM
+            run_review_py = os.path.join(SCRIPTS_DIR, "run_review.py")
+            for extra_args in ([], ["--in-place"]):
+                t0 = time.monotonic()
+                rr_proc = subprocess.run(
+                    [sys.executable, run_review_py, "--claims-file", stale_claims] + extra_args,
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                )
+                elapsed = time.monotonic() - t0
+                self.assertEqual(rr_proc.returncode, run_review.EXIT["FAIL"], rr_proc.stdout + rr_proc.stderr)
+                self.assertIn("CLAIMS_STALE_HEAD_SHA", rr_proc.stdout + rr_proc.stderr)
+                self.assertIn(stale_sha, rr_proc.stdout + rr_proc.stderr)
+                self.assertLess(elapsed, 1.0, "run_review.py fast-fail took %.3fs (>= 1.0s)" % elapsed)
+
+            # 4. Target commit override (`--commit HEAD~1`) checks against parent_sha, not HEAD
+            parent_claims = os.path.join(tmp, "parent_claims.md")
+            _write(parent_claims, "Reviewed HEAD: `%s`\n" % parent_sha[:9])
+            self.assertEqual(rl.check_claims_head_sha(REPO_ROOT, parent_claims, target_commit=parent_sha), [])
+            self.assertEqual(len(rl.check_claims_head_sha(REPO_ROOT, parent_claims, target_commit="HEAD")), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

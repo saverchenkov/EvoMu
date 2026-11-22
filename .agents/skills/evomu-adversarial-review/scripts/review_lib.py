@@ -8,6 +8,7 @@
 """
 import json
 import os
+import re
 import subprocess
 import tempfile
 
@@ -245,6 +246,181 @@ def stale_gate(root):
     return ("this worktree's .agents/ differs from the `main` branch, so pre-flight is running older rules. Rebase "
             "onto `main` when convenient. run_review.py always reviews with main's current gate. Never edit .agents/ "
             "yourself.")
+
+
+_CLAIMS_HEAD_SCAN_MAX_LINES = 60
+_CLAIMS_SHA_PAREN_HEAD_RE = re.compile(
+    r"`?([0-9a-fA-F]{7,40})`?\s*\(\s*(?:`?[0-9a-fA-F]{7,40}`?\s*,\s*)?`?HEAD`?\s*\)"
+)
+_CLAIMS_KV_RE = re.compile(r"^[*\s]*([^:\n]{1,64}?)[*\s]*:[*\s]*(.*)$")
+_CLAIMS_SKIP_LABEL_PREFIX_RE = re.compile(
+    r"^(?:base|merge[\s-]?base|trunk|origin/main|main|parent|upstream)\b",
+    re.I,
+)
+_CLAIMS_SKIP_EXACT_LABELS = frozenset({
+    "commits",
+    "commit subject",
+    "commit message",
+    "diff",
+    "diffstat",
+    "diff size",
+    "scope",
+    "changed files",
+    "status",
+    "issue",
+    "issues",
+    "filter",
+    "filters",
+})
+_CLAIMS_PURE_HEAD_LABEL_RE = re.compile(
+    r"^(?:(?:branch|reviewed|current|target|tip|head)\s+)?"
+    r"(?:head(?:\s+(?:commit|sha))?|commit(?:\s+sha)?|tip(?:\s+commit)?|sha)$",
+    re.I,
+)
+_CLAIMS_LEADING_SHA_RE = re.compile(
+    r"^(?:commit\s+)?[`*]*([0-9a-fA-F]{7,40})[`*]*(?![0-9a-fA-F])"
+    r"(?:\s*\(\s*[`*]*([0-9a-fA-F]{7,40})[`*]*(?![0-9a-fA-F]))?",
+    re.I,
+)
+_CLAIMS_COMPOUND_CUTOFF_RE = re.compile(
+    r"(?:origin/main|merge[\s-]?base|\b(?:rebased|based\s+on|branched\s+from|merged\s+(?:cleanly|atop|with)|commits?\s+behind)\b)",
+    re.I,
+)
+_CLAIMS_COMPOUND_SHA_RES = (
+    re.compile(r"@\s*(?:commit\s+)?[`*]*([0-9a-fA-F]{7,40})[`*]*(?![0-9a-fA-F])", re.I),
+    re.compile(r"\bat\s+(?:commit\s+)?[`*]*([0-9a-fA-F]{7,40})[`*]*(?![0-9a-fA-F])", re.I),
+    re.compile(r"(?:,|\()\s*commit\s+[`*]*([0-9a-fA-F]{7,40})[`*]*(?![0-9a-fA-F])", re.I),
+)
+_CLAIMS_OPENING_COMMIT_RE = re.compile(
+    r"^Commit\s+[`*]*([0-9a-fA-F]{7,40})[`*]*(?![0-9a-fA-F])"
+)
+_CLAIMS_INLINE_HEAD_RE = re.compile(
+    r"(?<![A-Za-z0-9_/.:-])`?(?:(?:branch|reviewed|current|target|tip)\s+)?HEAD`?"
+    r"\s*(?:[:=@]|at\b|\()\s*(?:commit\s+)?[`*]*([0-9a-fA-F]{7,40})[`*]*(?![0-9a-fA-F])",
+    re.I,
+)
+_CLAIMS_BASE_BEFORE_HEAD_RE = re.compile(r"(?:origin/main|main|base|trunk|upstream)\s*`?$", re.I)
+
+
+def extract_declared_claims_head_shas(claims_text):
+    """Extract explicit reviewed-HEAD commit SHA declarations from a claims markdown header.
+
+    Matches real EvoMu claims header conventions (`HEAD: <sha>`, `Branch HEAD: <sha>`,
+    `Reviewed HEAD: <sha>`, `Head Commit: <sha>`, `Tip Commit: <sha>`, `Commit: <sha>`,
+    `Branch / Commit: <branch> @ <sha>`, `Branch / HEAD: <branch> at <sha>`,
+    `` `<sha>` (`HEAD`) ``, and opening `Commit <sha> ...`) while ignoring base/merge-base/
+    `origin/main` SHAs and historical body references.
+
+    Returns a deduplicated list of `(line_no, sha, raw_line)` tuples.
+    """
+    found = []
+    seen = set()
+    in_fence = False
+
+    def _add(lineno, sha, raw_line):
+        low = sha.lower()
+        if low not in seen:
+            seen.add(low)
+            found.append((lineno, sha, raw_line))
+
+    for lineno, raw_line in enumerate(claims_text.splitlines()[:_CLAIMS_HEAD_SCAN_MAX_LINES], 1):
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or not stripped:
+            continue
+        clean = re.sub(r"^[-*•]\s+", "", stripped)
+
+        # 1. Explicit `<sha> (HEAD)` or `<sha> (<short>, HEAD)` tag (highest specificity).
+        paren_matches = list(_CLAIMS_SHA_PAREN_HEAD_RE.finditer(clean))
+        if paren_matches:
+            for pm in paren_matches:
+                _add(lineno, pm.group(1), raw_line)
+            continue
+
+        # 2. Key: Value metadata lines.
+        m_kv = _CLAIMS_KV_RE.match(clean)
+        if m_kv:
+            label = re.sub(r"[*_`]+", "", m_kv.group(1)).strip().lower()
+            rest = m_kv.group(2).strip()
+            if _CLAIMS_SKIP_LABEL_PREFIX_RE.match(label) or label in _CLAIMS_SKIP_EXACT_LABELS:
+                continue
+            if _CLAIMS_PURE_HEAD_LABEL_RE.match(label):
+                m_sha = _CLAIMS_LEADING_SHA_RE.match(rest)
+                if m_sha:
+                    s1, s2 = m_sha.group(1), m_sha.group(2)
+                    chosen = s2 if (s2 and len(s2) > len(s1) and s2.lower().startswith(s1.lower())) else s1
+                    _add(lineno, chosen, raw_line)
+                continue
+            if "branch" in label or "worktree" in label:
+                cut = _CLAIMS_COMPOUND_CUTOFF_RE.search(rest)
+                branch_part = rest[:cut.start()] if cut else rest
+                matched_compound = False
+                for rx in _CLAIMS_COMPOUND_SHA_RES:
+                    mc = rx.search(branch_part)
+                    if mc:
+                        _add(lineno, mc.group(1), raw_line)
+                        matched_compound = True
+                        break
+                if matched_compound:
+                    continue
+
+        # 3. Un-bulleted opening prose paragraph `Commit <sha> (...)` when no header declared HEAD yet.
+        if not found and lineno <= 10 and not stripped.startswith(("-", "*", "•")):
+            m_open = _CLAIMS_OPENING_COMMIT_RE.match(re.sub(r"^\*\*|\*\*$", "", clean))
+            if m_open:
+                _add(lineno, m_open.group(1), raw_line)
+                continue
+
+        # 4. Fallback inline `HEAD: <sha>` / `HEAD (<sha>)` / `HEAD @ <sha>` (excluding `origin/main HEAD`).
+        for mi in _CLAIMS_INLINE_HEAD_RE.finditer(clean):
+            before = clean[:mi.start()]
+            if _CLAIMS_BASE_BEFORE_HEAD_RE.search(before):
+                continue
+            _add(lineno, mi.group(1), raw_line)
+
+    return found
+
+
+def check_claims_head_sha(root, claims_path, target_commit="HEAD"):
+    """Verify any HEAD commit SHA explicitly declared in `claims_path` matches `target_commit`.
+
+    Returns `[]` when `claims_path` is missing, unreadable, or declares no HEAD SHA, or when all
+    declared SHAs prefix-match `git rev-parse --verify <target_commit>^{commit}` (case-insensitive).
+    Otherwise returns `[("CLAIMS_STALE_HEAD_SHA", msg, claims_path, lineno), ...]`.
+    """
+    if not claims_path or not os.path.isfile(claims_path):
+        return []
+    proc = subprocess.run(
+        ["git", "rev-parse", "--verify", str(target_commit) + "^{commit}"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return []
+    expected = proc.stdout.strip().lower()
+    try:
+        with open(claims_path, encoding="utf-8", errors="replace") as fh:
+            claims_text = fh.read()
+    except OSError:
+        return []
+    declared = extract_declared_claims_head_shas(claims_text)
+    if not declared:
+        return []
+    violations = []
+    for lineno, decl_sha, _ in declared:
+        if not expected.startswith(decl_sha.lower()):
+            violations.append((
+                "CLAIMS_STALE_HEAD_SHA",
+                "Claims file declares reviewed HEAD `%s` (line %d), but `%s` resolves to `%s` (`%s`). "
+                "Update the claims file's HEAD SHA to match the current commit before running preflight or run_review.py."
+                % (decl_sha, lineno, target_commit, expected[:12], expected),
+                claims_path,
+                lineno,
+            ))
+    return violations
 
 
 if __name__ == "__main__":
