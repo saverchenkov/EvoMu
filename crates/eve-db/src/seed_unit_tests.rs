@@ -106,9 +106,20 @@ fn create_demo_snapshot_populates_accounts_characters_items_skills_markets_and_f
     assert_eq!(snap.system_states[&30_000_142].military_index, 2);
     assert_eq!(snap.system_states[&30_000_142].strategic_index, 3);
     assert_eq!(snap.npe_progress[&90_000_001].node_graph_id, 473);
-    assert_eq!(snap.skills[&90_000_001].len(), 15);
-    assert_eq!(snap.skills[&90_000_002].len(), 15);
-    assert_eq!(snap.skill_history[&90_000_001].len(), 15);
+    let sde = {
+        let _env_guard = crate::lock_test_env_read();
+        eve_sde::SdeRegistry::with_canonical_seed()
+    };
+    let (aura_starter, _) =
+        WorldRepository::starter_skills_for_race(snap.characters[&90_000_001].race_id, &sde);
+    let (rival_starter, _) =
+        WorldRepository::starter_skills_for_race(snap.characters[&90_000_002].race_id, &sde);
+    assert!(snap.skills[&90_000_001].len() > aura_starter.len());
+    assert!(snap.skills[&90_000_002].len() > rival_starter.len());
+    assert!(aura_starter.contains_key(&3412));
+    assert!(snap.skills[&90_000_001][&3412].level >= 1);
+    assert_eq!(snap.skill_history[&90_000_001].len(), snap.skills[&90_000_001].len());
+    assert_eq!(snap.skill_history[&90_000_002].len(), snap.skills[&90_000_002].len());
     assert_eq!(snap.skill_history[&90_000_001][0].event_type_id, 33);
     assert_eq!(snap.corporations[&98_000_001].ticker, "DEMO");
     assert_eq!(snap.corporations[&98_000_001].ceo_id, 90_000_001);
@@ -236,5 +247,96 @@ fn demo_snapshot_starter_items_system_states_corp_roles_and_partial_populate() {
     assert_eq!(partial.items.len(), 12);
     assert_eq!(partial.market_orders[&700_000_001].price, IskCents::from_isk(99));
     assert_eq!(partial.market_orders.len(), 2);
+}
+
+#[test]
+fn seeded_demo_pilots_receive_full_sde_starter_skills_matching_character_creation() {
+    let sde = {
+        let _env_guard = crate::lock_test_env_read();
+        eve_sde::SdeRegistry::with_canonical_seed()
+    };
+
+    let default_snap = WorldRepository::create_demo_snapshot();
+    let explicit_snap = WorldRepository::create_demo_snapshot_with_sde(Some(&sde));
+
+    let repo = WorldRepository::with_demo_seed();
+    let aura = &default_snap.characters[&90_000_001];
+    let created_minmatar = repo
+        .create_character(
+            2,
+            "StarterParityPilot",
+            aura.race_id,
+            aura.bloodline_id,
+            aura.ancestry_id,
+            aura.school_id,
+            &sde,
+        )
+        .expect("create Minmatar character via canonical helper");
+    let created_skills = repo.with_snapshot(|s| s.skills[&created_minmatar.character_id].clone());
+
+    assert_eq!(default_snap.skills[&90_000_001], explicit_snap.skills[&90_000_001]);
+    assert_eq!(default_snap.skills[&90_000_002], explicit_snap.skills[&90_000_002]);
+    assert_eq!(default_snap.characters[&90_000_001].skill_points, 15_000_000.0);
+    assert_eq!(default_snap.characters[&90_000_002].skill_points, 4_500_000.0);
+
+    // Every skill trained by character creation is present on seeded pilot 90_000_001 at >= starter level.
+    let aura_skills = &default_snap.skills[&90_000_001];
+    for (&skill_id, created) in &created_skills {
+        let seeded = aura_skills
+            .get(&skill_id)
+            .unwrap_or_else(|| panic!("seeded pilot 90_000_001 missing starter skill {skill_id}"));
+        assert!(
+            seeded.level >= created.level,
+            "seeded pilot 90_000_001 skill {skill_id} regressed below starter level {} (got {})",
+            created.level,
+            seeded.level
+        );
+        assert!(
+            seeded.skill_points >= created.skill_points,
+            "seeded pilot 90_000_001 skill {skill_id} SP {} < starter {}",
+            seeded.skill_points,
+            created.skill_points
+        );
+    }
+
+    // Astrometrics (3412) is granted by Minmatar starter skills so Core Probe Launcher I (17938) fits,
+    // Hull Upgrades (3394) stays at starter level 3 instead of regressing to 2, and seeded overrides stay intact.
+    assert_eq!(aura_skills[&3412].level, 3);
+    assert_eq!(aura_skills[&3412].skill_points, 24_000.0);
+    assert_eq!(aura_skills[&3394].level, 3);
+    assert_eq!(aura_skills[&3394].skill_points, 16_000.0);
+    assert_eq!(aura_skills[&3302].level, 5);
+    assert_eq!(aura_skills[&11084].level, 1);
+    assert_eq!(aura_skills[&3446].level, 4);
+    assert_eq!(aura_skills[&3452].level, 4);
+    assert_eq!(aura_skills[&16622].level, 4);
+    assert_eq!(aura_skills[&3363].level, 1);
+    assert_eq!(aura_skills[&3436].level, 5);
+
+    // Rival pilot 90_000_002 (Caldari) also receives full racial starter skills merged with demo overrides.
+    let rival_race_id = default_snap.characters[&90_000_002].race_id;
+    let (rival_starter, _) = WorldRepository::starter_skills_for_race(rival_race_id, &sde);
+    let rival_skills = &default_snap.skills[&90_000_002];
+    for (&skill_id, starter) in &rival_starter {
+        let seeded = rival_skills
+            .get(&skill_id)
+            .unwrap_or_else(|| panic!("seeded pilot 90_000_002 missing starter skill {skill_id}"));
+        assert!(seeded.level >= starter.level);
+        assert!(seeded.skill_points >= starter.skill_points);
+    }
+    assert_eq!(rival_skills[&3412].level, 3);
+
+    // Skill history stays synchronized and sorted for both seeded pilots.
+    for char_id in [90_000_001_i64, 90_000_002_i64] {
+        let hist = &default_snap.skill_history[&char_id];
+        assert_eq!(hist.len(), default_snap.skills[&char_id].len());
+        assert!(hist.windows(2).all(|w| w[0].skill_type_id < w[1].skill_type_id));
+    }
+
+    // Explicit populate_demo_snapshot_with_sde matches create_demo_snapshot_with_sde on empty snapshot.
+    let mut populated = WorldStateSnapshot::default();
+    WorldRepository::populate_demo_snapshot_with_sde(&mut populated, &sde);
+    assert_eq!(populated.skills[&90_000_001], explicit_snap.skills[&90_000_001]);
+    assert_eq!(populated.skills[&90_000_002], explicit_snap.skills[&90_000_002]);
 }
 

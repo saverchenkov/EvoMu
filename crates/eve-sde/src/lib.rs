@@ -1202,7 +1202,7 @@ pub struct SdeRegistry {
 /// Per-(path, size) slot. The outer map lock is held only to find/insert the slot; the slot's
 /// own lock is held for the whole load, so concurrent first `open` calls for the same database
 /// wait for a single load instead of each reading the SQLite file.
-pub(crate) type SdeCacheSlot = Arc<Mutex<Option<SdeRegistry>>>;
+pub(crate) type SdeCacheSlot = Arc<Mutex<Option<Arc<SdeRegistry>>>>;
 pub(crate) static SDE_CACHE: OnceLock<Mutex<HashMap<(PathBuf, u64), SdeCacheSlot>>> =
     OnceLock::new();
 

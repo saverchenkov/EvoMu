@@ -6,8 +6,69 @@ use crate::sqlite_store;
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
+/// Computes SDE starter skills using the shared cached `SdeRegistry` (`SdeRegistry::open_shared`)
+/// while honoring `EVOMU_SDE_PATH` under the test-env read lock and avoiding any extra cache static.
+fn demo_starter_skills_for_default_sde(
+    race_ids: &[u32],
+) -> Option<HashMap<u32, HashMap<TypeId, TrainedSkillRecord>>> {
+    let path = {
+        let _env_guard = crate::lock_test_env_read();
+        eve_sde::SdeRegistry::default_db_path()
+    };
+    let sde = eve_sde::SdeRegistry::open_shared(&path).ok()?;
+    Some(
+        race_ids
+            .iter()
+            .copied()
+            .map(|race_id| (race_id, WorldRepository::starter_skills_for_race(race_id, &sde).0))
+            .collect(),
+    )
+}
+
+fn merge_seeded_skills_with_starter(
+    starter: Option<&HashMap<TypeId, TrainedSkillRecord>>,
+    seeded_overrides: &HashMap<TypeId, TrainedSkillRecord>,
+) -> HashMap<TypeId, TrainedSkillRecord> {
+    let mut merged = starter.cloned().unwrap_or_default();
+    for (skill_id, seeded) in seeded_overrides {
+        merged
+            .entry(*skill_id)
+            .and_modify(|existing| {
+                // Preserve higher seeded specializations without regressing starter skills.
+                if (seeded.level, seeded.skill_points) > (existing.level, existing.skill_points) {
+                    *existing = seeded.clone();
+                }
+            })
+            .or_insert_with(|| seeded.clone());
+    }
+    merged
+}
+
+fn char_creation_skill_history(
+    skills: &HashMap<TypeId, TrainedSkillRecord>,
+) -> Vec<SkillHistoryEntry> {
+    let mut sorted: Vec<_> = skills.values().cloned().collect();
+    sorted.sort_by_key(|s| s.type_id);
+    sorted
+        .into_iter()
+        .map(|s| SkillHistoryEntry {
+            log_date_ft: 133_485_408_000_000_000, // 2024-01-01T00:00:00Z in BlueOS FILETIME ticks
+            event_type_id: 33,                   // SkillEventCharCreation (EVE_Skills.h:24)
+            skill_type_id: s.type_id,
+            skill_level: s.level,
+            absolute_points: s.skill_points,
+        })
+        .collect()
+}
+
 impl WorldRepository {
     pub fn create_demo_snapshot() -> WorldStateSnapshot {
+        Self::create_demo_snapshot_with_sde(None)
+    }
+
+    pub fn create_demo_snapshot_with_sde(
+        sde: Option<&eve_sde::SdeRegistry>,
+    ) -> WorldStateSnapshot {
         let mut accounts = HashMap::new();
         accounts.insert(
             "demo".to_string(),
@@ -311,8 +372,7 @@ impl WorldRepository {
             },
         );
 
-        let mut skills = CowMap::new();
-        let starter_skill_map = HashMap::from([
+        let seeded_skill_overrides = HashMap::from([
             (
                 3300,
                 TrainedSkillRecord {
@@ -434,24 +494,30 @@ impl WorldRepository {
                 },
             ),
         ]);
-        let mut sorted_starter_skills: Vec<_> = starter_skill_map.values().cloned().collect();
-        sorted_starter_skills.sort_by_key(|s| s.type_id);
-        let starter_history: Vec<SkillHistoryEntry> = sorted_starter_skills
+        let demo_pilot_races: Vec<(i64, u32)> = [90_000_001_i64, 90_000_002_i64]
             .into_iter()
-            .map(|s| SkillHistoryEntry {
-                log_date_ft: 133_485_408_000_000_000, // 2024-01-01T00:00:00Z in BlueOS FILETIME ticks
-                event_type_id: 33,                   // SkillEventCharCreation (EVE_Skills.h:24)
-                skill_type_id: s.type_id,
-                skill_level: s.level,
-                absolute_points: s.skill_points,
-            })
+            .filter_map(|char_id| characters.get(&char_id).map(|ch| (char_id, ch.race_id)))
             .collect();
-        let mut skill_history = HashMap::new();
-        skill_history.insert(90_000_001, starter_history.clone());
-        skill_history.insert(90_000_002, starter_history);
+        let race_ids: Vec<u32> = demo_pilot_races.iter().map(|(_, race_id)| *race_id).collect();
+        let starter_by_race = match sde {
+            Some(sde) => Some(
+                race_ids
+                    .iter()
+                    .copied()
+                    .map(|race_id| (race_id, Self::starter_skills_for_race(race_id, sde).0))
+                    .collect(),
+            ),
+            None => demo_starter_skills_for_default_sde(&race_ids),
+        };
 
-        skills.insert(90_000_001, starter_skill_map.clone());
-        skills.insert(90_000_002, starter_skill_map);
+        let mut skills = CowMap::new();
+        let mut skill_history = HashMap::new();
+        for (char_id, race_id) in demo_pilot_races {
+            let starter = starter_by_race.as_ref().and_then(|m| m.get(&race_id));
+            let char_skills = merge_seeded_skills_with_starter(starter, &seeded_skill_overrides);
+            skill_history.insert(char_id, char_creation_skill_history(&char_skills));
+            skills.insert(char_id, char_skills);
+        }
 
         let mut corporations = HashMap::new();
         corporations.insert(
@@ -547,7 +613,17 @@ impl WorldRepository {
     }
 
     pub fn populate_demo_snapshot(snap: &mut WorldStateSnapshot) {
-        let demo = Self::create_demo_snapshot();
+        Self::populate_demo_snapshot_from(snap, Self::create_demo_snapshot());
+    }
+
+    pub fn populate_demo_snapshot_with_sde(
+        snap: &mut WorldStateSnapshot,
+        sde: &eve_sde::SdeRegistry,
+    ) {
+        Self::populate_demo_snapshot_from(snap, Self::create_demo_snapshot_with_sde(Some(sde)));
+    }
+
+    fn populate_demo_snapshot_from(snap: &mut WorldStateSnapshot, demo: WorldStateSnapshot) {
         for (k, v) in demo.accounts.into_inner() {
             snap.accounts.entry(k).or_insert(v);
         }
